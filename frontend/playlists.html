@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Music Manager POC - Service Playlists</title>
+        <link
+            rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        />
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <div class="container">
+            <a
+                href="index.html"
+                style="
+                    display: inline-block;
+                    margin-bottom: 20px;
+                    color: #3b82f6;
+                    text-decoration: none;
+                "
+            >
+                <i class="fas fa-arrow-left"></i> Back to Services
+            </a>
+
+            <header>
+                <h1><i class="fas fa-music"></i> Service Playlists</h1>
+                <p class="subtitle">
+                    View and search your synced service playlists (50 per page)
+                </p>
+            </header>
+
+            <div class="error-message" id="error-message"></div>
+
+            <div
+                style="
+                    background: #1a1a2e;
+                    border-radius: 12px;
+                    padding: 20px;
+                    margin-bottom: 20px;
+                    border: 1px solid #334155;
+                "
+            >
+                <div style="display: flex; gap: 10px; margin-bottom: 15px">
+                    <input
+                        type="text"
+                        id="search-input"
+                        placeholder="Search playlist names..."
+                        style="
+                            flex: 1;
+                            padding: 12px 16px;
+                            background: #0f172a;
+                            border: 1px solid #334155;
+                            border-radius: 8px;
+                            color: white;
+                            font-size: 1rem;
+                        "
+                    />
+                    <button
+                        id="search-btn"
+                        onclick="searchPlaylists()"
+                        style="
+                            padding: 12px 24px;
+                            background: #3b82f6;
+                            color: white;
+                            border: none;
+                            border-radius: 8px;
+                            cursor: pointer;
+                            font-weight: 600;
+                        "
+                    >
+                        <i class="fas fa-search"></i> Search
+                    </button>
+                    <button class="refresh-btn" onclick="loadPlaylists()">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                </div>
+                <div
+                    style="
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                        color: #94a3b8;
+                        font-size: 0.9rem;
+                    "
+                >
+                    <div style="display: flex; gap: 20px">
+                        <span id="total-playlists">Total: Loading...</span>
+                        <span id="current-page">Page: Loading...</span>
+                        <span id="showing-playlists">Showing: Loading...</span>
+                    </div>
+                    <div>
+                        <button
+                            onclick="
+                                window.open(
+                                    'http://localhost:3000/api/services/spotify/sync/playlists',
+                                    '_blank',
+                                )
+                            "
+                            style="
+                                background: #1db954;
+                                padding: 8px 16px;
+                                border-radius: 6px;
+                                color: white;
+                                border: none;
+                                cursor: pointer;
+                            "
+                        >
+                            <i class="fas fa-sync-alt"></i> Sync Playlists
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="playlists-content">
+                <div class="loading">
+                    <div class="loading-spinner"></div>
+                    <p>Loading playlists...</p>
+                </div>
+            </div>
+
+            <div
+                style="
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    gap: 10px;
+                    margin-top: 20px;
+                    padding: 20px;
+                "
+            >
+                <button
+                    id="first-page-btn"
+                    onclick="goToPage(0)"
+                    disabled
+                    style="
+                        padding: 8px 16px;
+                        background: #0f172a;
+                        border: 1px solid #334155;
+                        color: white;
+                        border-radius: 6px;
+                        cursor: pointer;
+                    "
+                >
+                    <i class="fas fa-angle-double-left"></i>
+                </button>
+                <button
+                    id="prev-page-btn"
+                    onclick="previousPage()"
+                    disabled
+                    style="
+                        padding: 8px 16px;
+                        background: #0f172a;
+                        border: 1px solid #334155;
+                        color: white;
+                        border-radius: 6px;
+                        cursor: pointer;
+                    "
+                >
+                    <i class="fas fa-angle-left"></i> Previous
+                </button>
+                <span style="color: #94a3b8; font-size: 0.9rem" id="page-info"
+                    >Page 1 of 1</span
+                >
+                <button
+                    id="next-page-btn"
+                    onclick="nextPage()"
+                    disabled
+                    style="
+                        padding: 8px 16px;
+                        background: #0f172a;
+                        border: 1px solid #334155;
+                        color: white;
+                        border-radius: 6px;
+                        cursor: pointer;
+                    "
+                >
+                    Next <i class="fas fa-angle-right"></i>
+                </button>
+                <button
+                    id="last-page-btn"
+                    onclick="goToLastPage()"
+                    disabled
+                    style="
+                        padding: 8px 16px;
+                        background: #0f172a;
+                        border: 1px solid #334155;
+                        color: white;
+                        border-radius: 6px;
+                        cursor: pointer;
+                    "
+                >
+                    <i class="fas fa-angle-double-right"></i>
+                </button>
+            </div>
+
+            <footer>
+                <p>Backend API: <code id="api-url">http://localhost:3000/api</code></p>
+                <p>
+                    Navigate to
+                    <a href="index.html" style="color: #3b82f6">Services page</a> to
+                    configure services
+                </p>
+            </footer>
+        </div>
+
+        <script src="playlists.js"></script>
+    </body>
+</html>

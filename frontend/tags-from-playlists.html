@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Music Manager POC - Create Tags from Playlists</title>
+        <link
+            rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        />
+        <link rel="stylesheet" href="style.css" />
+        <style>
+            .wizard-card {
+                background: #1e293b;
+                border-radius: 12px;
+                padding: 24px;
+                margin-bottom: 20px;
+                border: 1px solid #334155;
+            }
+
+            .wizard-card h2 {
+                font-size: 1.3rem;
+                margin-bottom: 16px;
+                color: #e2e8f0;
+            }
+
+            .stats-box {
+                display: flex;
+                align-items: center;
+                gap: 16px;
+                padding: 20px;
+                background: #0f172a;
+                border-radius: 10px;
+                border: 1px solid #334155;
+            }
+
+            .stats-number {
+                font-size: 2.5rem;
+                font-weight: 700;
+                color: #3b82f6;
+                min-width: 60px;
+                text-align: center;
+            }
+
+            .stats-label {
+                color: #94a3b8;
+                font-size: 0.95rem;
+            }
+
+            .stats-label strong {
+                color: #e2e8f0;
+            }
+
+            .playlist-list {
+                max-height: 400px;
+                overflow-y: auto;
+                margin-top: 16px;
+                border: 1px solid #334155;
+                border-radius: 8px;
+                background: #0f172a;
+            }
+
+            .playlist-list::-webkit-scrollbar {
+                width: 8px;
+            }
+
+            .playlist-list::-webkit-scrollbar-track {
+                background: #0f172a;
+                border-radius: 4px;
+            }
+
+            .playlist-list::-webkit-scrollbar-thumb {
+                background: #475569;
+                border-radius: 4px;
+            }
+
+            .playlist-list::-webkit-scrollbar-thumb:hover {
+                background: #64748b;
+            }
+
+            .playlist-item {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 12px 16px;
+                border-bottom: 1px solid #1e293b;
+                transition: background 0.15s;
+            }
+
+            .playlist-item:last-child {
+                border-bottom: none;
+            }
+
+            .playlist-item:hover {
+                background: #1e293b;
+            }
+
+            .playlist-name {
+                font-size: 0.95rem;
+                color: #e2e8f0;
+                font-weight: 500;
+            }
+
+            .service-badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding: 4px 10px;
+                border-radius: 20px;
+                font-size: 0.8rem;
+                font-weight: 600;
+                text-transform: capitalize;
+            }
+
+            .service-badge.spotify {
+                background: rgba(29, 185, 84, 0.15);
+                color: #1db954;
+                border: 1px solid rgba(29, 185, 84, 0.3);
+            }
+
+            .service-badge.soundcloud {
+                background: rgba(255, 85, 0, 0.15);
+                color: #ff5500;
+                border: 1px solid rgba(255, 85, 0, 0.3);
+            }
+
+            .service-badge.youtube {
+                background: rgba(255, 0, 0, 0.15);
+                color: #ff4444;
+                border: 1px solid rgba(255, 0, 0, 0.3);
+            }
+
+            .action-bar {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                margin-top: 20px;
+                flex-wrap: wrap;
+            }
+
+            .btn-create {
+                padding: 12px 28px;
+                background: #3b82f6;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                cursor: pointer;
+                font-weight: 600;
+                font-size: 1rem;
+                transition: background 0.2s;
+            }
+
+            .btn-create:hover {
+                background: #2563eb;
+            }
+
+            .btn-create:disabled {
+                background: #475569;
+                cursor: not-allowed;
+                opacity: 0.6;
+            }
+
+            .btn-link {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding: 10px 18px;
+                background: #0f172a;
+                border: 1px solid #334155;
+                border-radius: 8px;
+                color: #94a3b8;
+                text-decoration: none;
+                font-size: 0.9rem;
+                transition: all 0.2s;
+            }
+
+            .btn-link:hover {
+                border-color: #3b82f6;
+                color: #e2e8f0;
+            }
+
+            .result-box {
+                margin-top: 16px;
+                padding: 16px;
+                border-radius: 8px;
+                display: none;
+                font-size: 0.95rem;
+            }
+
+            .result-box.success {
+                display: block;
+                background: rgba(16, 185, 129, 0.1);
+                border: 1px solid rgba(16, 185, 129, 0.3);
+                color: #6ee7b7;
+            }
+
+            .result-box.error {
+                display: block;
+                background: rgba(239, 68, 68, 0.1);
+                border: 1px solid rgba(239, 68, 68, 0.3);
+                color: #fca5a5;
+            }
+
+            .empty-state {
+                text-align: center;
+                padding: 60px 20px;
+                color: #94a3b8;
+            }
+
+            .empty-state i {
+                font-size: 3rem;
+                margin-bottom: 16px;
+                color: #10b981;
+            }
+
+            .empty-state h3 {
+                font-size: 1.3rem;
+                margin-bottom: 8px;
+                color: #e2e8f0;
+            }
+
+            .hidden {
+                display: none;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <a
+                href="index.html"
+                style="
+                    display: inline-block;
+                    margin-bottom: 20px;
+                    color: #3b82f6;
+                    text-decoration: none;
+                "
+            >
+                <i class="fas fa-arrow-left"></i> Back to Services
+            </a>
+
+            <header>
+                <h1><i class="fas fa-bullseye"></i> Create Tags from Playlists</h1>
+                <p class="subtitle">
+                    Find playlists without matching tags and create tags from them
+                </p>
+            </header>
+
+            <div class="error-message" id="error-message"></div>
+
+            <div id="loading-state">
+                <div class="loading">
+                    <div class="loading-spinner"></div>
+                    <p>Loading playlists...</p>
+                </div>
+            </div>
+
+            <div id="content-area" class="hidden">
+                <div class="wizard-card">
+                    <h2><i class="fas fa-chart-simple"></i> Overview</h2>
+                    <div class="stats-box">
+                        <div class="stats-number" id="playlist-count">0</div>
+                        <div class="stats-label">
+                            playlist(s) without a matching tag.<br />
+                            <strong>Tags</strong> are created from playlist names
+                            (case-insensitive match).<br />
+                            New tags will be placed in the
+                            <strong>Setlist</strong> category.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="wizard-card">
+                    <h2><i class="fas fa-list"></i> Playlists without Tags</h2>
+                    <div id="playlist-list-container">
+                        <div class="playlist-list" id="playlist-list"></div>
+                    </div>
+                    <div id="empty-state" class="empty-state hidden">
+                        <i class="fas fa-check-circle"></i>
+                        <h3>All playlists have tags</h3>
+                        <p>Every playlist name has a matching tag. No action needed.</p>
+                    </div>
+                    <div class="action-bar" id="action-bar">
+                        <button class="btn-create" id="btn-create-tags">
+                            <i class="fas fa-wand-magic-sparkles"></i> Create Tags
+                        </button>
+                        <a href="tags.html" class="btn-link">
+                            <i class="fas fa-tag"></i> View All Tags
+                        </a>
+                        <a href="tag-categories.html" class="btn-link">
+                            <i class="fas fa-layer-group"></i> Tag Categories
+                        </a>
+                    </div>
+                    <div id="result-box" class="result-box"></div>
+                </div>
+            </div>
+
+            <footer>
+                <p>Backend API: <code id="api-url">http://localhost:3000/api</code></p>
+                <p>
+                    Navigate to
+                    <a href="index.html" style="color: #3b82f6">Services page</a> to
+                    configure services
+                </p>
+            </footer>
+        </div>
+
+        <script src="tags-from-playlists.js"></script>
+    </body>
+</html>

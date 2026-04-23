@@ -1,0 +1,12 @@
+/target
+.env
+app.db*
+*.db-shm
+*.db-wal
+*.log
+*.bak
+.sqlx
+.DS_Store
+frontend/node_modules/
+frontend/dist/
+frontend/*.log
