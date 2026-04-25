@@ -20,6 +20,7 @@ CREATE TABLE tags (
     name TEXT UNIQUE NOT NULL,
     category_id INTEGER NOT NULL,
     created_at INTEGER DEFAULT (unixepoch()),
+    reviewed_at INTEGER,
     FOREIGN KEY (category_id) REFERENCES tag_categories(id)
 );
 
@@ -145,6 +146,15 @@ CREATE TABLE folders (
     updated_at INTEGER DEFAULT (unixepoch())
 );
 
+-- 9. TAG EMBEDDINGS (Cache für semantische Vektoren, 384 f32 = 1536 bytes)
+CREATE TABLE tag_embeddings (
+    tag_id INTEGER PRIMARY KEY,
+    embedding BLOB NOT NULL,
+    model_version TEXT NOT NULL DEFAULT 'all-MiniLM-L6-v2',
+    updated_at INTEGER DEFAULT (unixepoch()),
+    FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+);
+
 
 
 -- Indexes for Performance
@@ -169,6 +179,8 @@ CREATE INDEX idx_files_last_scanned ON files(last_scanned);
 
 CREATE INDEX idx_folders_folder_path ON folders(folder_path);
 CREATE INDEX idx_folders_active ON folders(active);
+
+CREATE INDEX idx_tag_embeddings_tag_id ON tag_embeddings(tag_id);
 
 -- Unified tracks view for Explorer feature only (internal use)
 CREATE VIEW unified_tracks AS

@@ -1,0 +1,417 @@
+```<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Music Manager - Auto-Categorize Tags</title>
+        <link
+            rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        />
+        <link rel="stylesheet" href="style.css" />
+        <style>
+            .wizard-card {
+                background: #1a1a2e;
+                border-radius: 16px;
+                padding: 32px;
+                border: 1px solid #334155;
+                max-width: 640px;
+                margin: 0 auto;
+            }
+
+            .progress-section {
+                margin-bottom: 28px;
+            }
+
+            .progress-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 8px;
+                color: #94a3b8;
+                font-size: 0.9rem;
+            }
+
+            .progress-bar-bg {
+                width: 100%;
+                height: 8px;
+                background: #0f172a;
+                border-radius: 4px;
+                overflow: hidden;
+            }
+
+            .progress-bar-fill {
+                height: 100%;
+                background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+                border-radius: 4px;
+                transition: width 0.3s ease;
+            }
+
+            .tag-display {
+                text-align: center;
+                padding: 32px 16px;
+                margin-bottom: 24px;
+                background: #0f172a;
+                border-radius: 12px;
+                border: 1px solid #1e293b;
+            }
+
+            .tag-name {
+                font-size: 2.2rem;
+                font-weight: 700;
+                color: #f1f5f9;
+                word-break: break-word;
+            }
+
+            .tag-count-badge {
+                display: inline-block;
+                background: #1e293b;
+                color: #94a3b8;
+                padding: 4px 12px;
+                border-radius: 20px;
+                font-size: 0.8rem;
+                margin-top: 8px;
+            }
+
+            .ai-section {
+                background: linear-gradient(135deg, #1e3a5f, #1a1a3e);
+                border-radius: 12px;
+                padding: 20px;
+                margin-bottom: 24px;
+                border: 1px solid #3b82f6;
+            }
+
+            .ai-label {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                color: #93c5fd;
+                font-size: 0.85rem;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+                margin-bottom: 12px;
+            }
+
+            .ai-label i {
+                font-size: 1rem;
+            }
+
+            .btn-ai {
+                width: 100%;
+                padding: 16px 24px;
+                border-radius: 10px;
+                border: 2px solid #3b82f6;
+                background: rgba(59, 130, 246, 0.15);
+                color: #60a5fa;
+                font-size: 1.1rem;
+                font-weight: 700;
+                cursor: pointer;
+                transition: all 0.2s;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 12px;
+            }
+
+            .btn-ai:hover {
+                background: rgba(59, 130, 246, 0.3);
+                border-color: #60a5fa;
+                transform: translateY(-1px);
+            }
+
+            .btn-ai .confidence {
+                font-size: 0.85rem;
+                font-weight: 400;
+                opacity: 0.7;
+            }
+
+            .divider-text {
+                text-align: center;
+                color: #475569;
+                font-size: 0.85rem;
+                margin-bottom: 16px;
+                position: relative;
+            }
+
+            .divider-text::before,
+            .divider-text::after {
+                content: "";
+                position: absolute;
+                top: 50%;
+                width: 35%;
+                height: 1px;
+                background: #334155;
+            }
+
+            .divider-text::before {
+                left: 0;
+            }
+
+            .divider-text::after {
+                right: 0;
+            }
+
+            .category-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+                margin-bottom: 20px;
+            }
+
+            .btn-category {
+                padding: 14px 20px;
+                border-radius: 10px;
+                border: 2px solid transparent;
+                cursor: pointer;
+                font-size: 0.95rem;
+                font-weight: 600;
+                transition: all 0.2s;
+                text-align: center;
+            }
+
+            .btn-category:hover {
+                transform: translateY(-2px);
+                filter: brightness(1.15);
+            }
+
+            .btn-category:active {
+                transform: translateY(0);
+            }
+
+            .btn-category.phase {
+                background: #8b5cf6;
+                color: white;
+                border-color: #a78bfa;
+            }
+
+            .btn-category.mood {
+                background: #ec4899;
+                color: white;
+                border-color: #f472b6;
+            }
+
+            .btn-category.vibe {
+                background: #f59e0b;
+                color: white;
+                border-color: #fbbf24;
+            }
+
+            .btn-category.merkmal {
+                background: #10b981;
+                color: white;
+                border-color: #34d399;
+            }
+
+            .btn-category.setlist {
+                background: #64748b;
+                color: white;
+                border-color: #94a3b8;
+            }
+
+            .action-row {
+                display: flex;
+                gap: 10px;
+                margin-top: 16px;
+            }
+
+            .btn-skip {
+                flex: 1;
+                padding: 12px;
+                border-radius: 8px;
+                border: 1px solid #334155;
+                background: transparent;
+                color: #94a3b8;
+                cursor: pointer;
+                font-size: 0.9rem;
+                font-weight: 500;
+                transition: all 0.2s;
+            }
+
+            .btn-skip:hover {
+                background: #1e293b;
+                color: #cbd5e1;
+            }
+
+            .btn-reset {
+                padding: 12px;
+                border-radius: 8px;
+                border: 1px solid #7f1d1d;
+                background: transparent;
+                color: #fca5a5;
+                cursor: pointer;
+                font-size: 0.9rem;
+                font-weight: 500;
+                transition: all 0.2s;
+            }
+
+            .btn-reset:hover {
+                background: #7f1d1d;
+                color: #fecaca;
+            }
+
+            .done-state {
+                text-align: center;
+                padding: 60px 20px;
+            }
+
+            .done-state .icon {
+                font-size: 4rem;
+                margin-bottom: 16px;
+            }
+
+            .done-state h2 {
+                color: #f1f5f9;
+                font-size: 1.8rem;
+                margin: 0 0 8px 0;
+            }
+
+            .done-state p {
+                color: #94a3b8;
+                font-size: 1.1rem;
+                margin: 0 0 24px 0;
+            }
+
+            .done-state .btn-back {
+                display: inline-block;
+                padding: 12px 32px;
+                background: #3b82f6;
+                color: white;
+                border-radius: 8px;
+                text-decoration: none;
+                font-weight: 600;
+                transition: background 0.2s;
+            }
+
+            .done-state .btn-back:hover {
+                background: #2563eb;
+            }
+
+            .loading-state {
+                text-align: center;
+                padding: 60px 20px;
+                color: #94a3b8;
+            }
+
+            .error-message-fixed {
+                background: #7f1d1d;
+                color: #fecaca;
+                padding: 12px 16px;
+                border-radius: 8px;
+                margin-bottom: 16px;
+                display: none;
+            }
+
+            @media (max-width: 500px) {
+                .category-grid {
+                    grid-template-columns: 1fr;
+                }
+                .tag-name {
+                    font-size: 1.6rem;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <a
+                href="tags.html"
+                style="
+                    display: inline-block;
+                    margin-bottom: 20px;
+                    color: #3b82f6;
+                    text-decoration: none;
+                "
+            >
+                <i class="fas fa-arrow-left"></i> Back to Tags
+            </a>
+
+            <header>
+                <h1><i class="fas fa-magic"></i> Auto-Categorize Tags</h1>
+                <p class="subtitle">
+                    Kategorisiere deine Tags mit AI-Unterstützung — ein Tag nach dem
+                    anderen
+                </p>
+            </header>
+
+            <div class="error-message-fixed" id="error-message"></div>
+
+            <!-- Loading State -->
+            <div id="loading-state" class="loading-state">
+                <div class="loading-spinner"></div>
+                <p>Loading tags and AI model...</p>
+            </div>
+
+            <!-- Done State -->
+            <div id="done-state" class="done-state" style="display: none">
+                <div class="icon">🎉</div>
+                <h2>Alle Tags kategorisiert!</h2>
+                <p>Du hast alle <strong id="done-total">0</strong> Tags bearbeitet.</p>
+                <a href="tags.html" class="btn-back">
+                    <i class="fas fa-tag"></i> Zurück zu Tags
+                </a>
+            </div>
+
+            <!-- Wizard Card -->
+            <div id="wizard-card" class="wizard-card" style="display: none">
+                <!-- Progress -->
+                <div class="progress-section">
+                    <div class="progress-header">
+                        <span id="progress-label">Tag 0 / 0</span>
+                        <span id="progress-pct">0%</span>
+                    </div>
+                    <div class="progress-bar-bg">
+                        <div
+                            class="progress-bar-fill"
+                            id="progress-fill"
+                            style="width: 0%"
+                        ></div>
+                    </div>
+                </div>
+
+                <!-- Tag Display -->
+                <div class="tag-display">
+                    <div class="tag-name" id="current-tag-name">—</div>
+                    <div class="tag-count-badge">
+                        <span id="current-tag-id"></span>
+                    </div>
+                </div>
+
+                <!-- AI Recommendation -->
+                <div class="ai-section" id="ai-section">
+                    <div class="ai-label">
+                        <i class="fas fa-robot"></i> AI Recommendation
+                    </div>
+                    <button class="btn-ai" id="btn-ai">
+                        <span id="ai-category-name">Lade...</span>
+                        <span class="confidence" id="ai-confidence"></span>
+                    </button>
+                </div>
+
+                <!-- Divider -->
+                <div class="divider-text">oder wähle manuell</div>
+
+                <!-- Category Buttons -->
+                <div class="category-grid" id="category-grid">
+                    <!-- Wird dynamisch befüllt -->
+                </div>
+
+                <!-- Action Row -->
+                <div class="action-row">
+                    <button class="btn-skip" id="btn-skip">
+                        <i class="fas fa-forward"></i> Skip (später)
+                    </button>
+                    <button
+                        class="btn-reset"
+                        id="btn-reset"
+                        title="Alle reviewed_at zurücksetzen"
+                    >
+                        <i class="fas fa-undo"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <script src="auto-categorize.js"></script>
+    </body>
+</html>

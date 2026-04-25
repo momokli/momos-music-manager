@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Pool;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 use crate::config::ServiceCredentials;
@@ -319,12 +319,12 @@ impl SyncManager {
 
         // Spawn background task
         let join_handle = tokio::spawn(async move {
-            info!("Background task started for Spotify sync");
+            debug!("Background task started for Spotify sync");
 
             // Create Spotify client
             let spotify_client = match SpotifyClient::from_stored_tokens(db, &credentials).await {
                 Ok(client) => {
-                    info!("Spotify client created successfully");
+                    debug!("Spotify client created successfully");
                     client
                 }
                 Err(e) => {
@@ -333,7 +333,7 @@ impl SyncManager {
                 }
             };
 
-            info!("Creating SpotifySyncWorker with sync type: {:?}", sync_type);
+            debug!("Creating SpotifySyncWorker with sync type: {:?}", sync_type);
 
             // Create and run sync worker
             let worker = SpotifySyncWorker::new(
@@ -345,7 +345,7 @@ impl SyncManager {
                 progress,
             );
 
-            info!("Running Spotify sync worker...");
+            debug!("Running Spotify sync worker...");
             match worker.run().await {
                 Ok(result) => {
                     info!(

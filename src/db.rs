@@ -1821,6 +1821,246 @@ pub async fn ensure_tag_for_playlist_name(pool: &Pool<Sqlite>, playlist_name: &s
     Ok(tag)
 }
 
+// ─── Embedding & Review Functions ─────────────────────────────────────────────
+
+/// Get all unreviewed tags (reviewed_at IS NULL), sorted by name
+pub async fn get_unreviewed_tags(pool: &Pool<Sqlite>) -> Result<Vec<Tag>> {
+    let tags =
+        sqlx::query_as::<_, Tag>("SELECT * FROM tags WHERE reviewed_at IS NULL ORDER BY name")
+            .fetch_all(pool)
+            .await?;
+    Ok(tags)
+}
+
+/// Get counts of reviewed and unreviewed tags
+pub async fn get_tag_review_counts(pool: &Pool<Sqlite>) -> Result<(usize, usize)> {
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tags")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
+    let unreviewed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE reviewed_at IS NULL")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
+    Ok((total as usize - unreviewed as usize, unreviewed as usize))
+}
+
+/// Set category_id and reviewed_at for a tag.
+/// Returns the updated Tag.
+pub async fn categorize_tag(pool: &Pool<Sqlite>, tag_id: i64, category_id: i64) -> Result<Tag> {
+    let now = chrono::Utc::now().timestamp();
+    let tag = sqlx::query_as::<_, Tag>(
+        r#"
+        UPDATE tags
+        SET category_id = ?, reviewed_at = ?
+        WHERE id = ?
+        RETURNING *
+        "#,
+    )
+    .bind(category_id)
+    .bind(now)
+    .bind(tag_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(tag)
+}
+
+/// Get a single tag embedding from the cache
+pub async fn get_tag_embedding(pool: &Pool<Sqlite>, tag_id: i64) -> Result<Option<Vec<u8>>> {
+    let row: Option<(Vec<u8>,)> =
+        sqlx::query_as("SELECT embedding FROM tag_embeddings WHERE tag_id = ?")
+            .bind(tag_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|r| r.0))
+}
+
+/// Upsert (insert or replace) a tag embedding
+pub async fn upsert_tag_embedding(
+    pool: &Pool<Sqlite>,
+    tag_id: i64,
+    embedding_blob: &[u8],
+    model_version: &str,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        r#"
+        INSERT INTO tag_embeddings (tag_id, embedding, model_version, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(tag_id) DO UPDATE SET
+            embedding = excluded.embedding,
+            model_version = excluded.model_version,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(tag_id)
+    .bind(embedding_blob)
+    .bind(model_version)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Get all tag embeddings for a given category
+pub async fn get_embeddings_by_category(
+    pool: &Pool<Sqlite>,
+    category_id: i64,
+) -> Result<Vec<(i64, Vec<u8>)>> {
+    let rows = sqlx::query_as::<_, (i64, Vec<u8>)>(
+        r#"
+        SELECT te.tag_id, te.embedding
+        FROM tag_embeddings te
+        JOIN tags t ON t.id = te.tag_id
+        WHERE t.category_id = ?
+        "#,
+    )
+    .bind(category_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Get ALL tag embeddings (tag_id → embedding blob).
+/// Returns all tags with their embedding, including tag name.
+pub async fn get_all_embeddings(
+    pool: &Pool<Sqlite>,
+) -> Result<Vec<(i64, String, Option<Vec<u8>>)>> {
+    let rows = sqlx::query_as::<_, (i64, String, Option<Vec<u8>>)>(
+        r#"
+        SELECT t.id, t.name, te.embedding
+        FROM tags t
+        LEFT JOIN tag_embeddings te ON te.tag_id = t.id
+        ORDER BY t.name
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Delete all tag embeddings (used before recompute)
+pub async fn clear_all_embeddings(pool: &Pool<Sqlite>) -> Result<()> {
+    sqlx::query("DELETE FROM tag_embeddings")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Reset reviewed_at to NULL for all tags (unreview all)
+pub async fn reset_all_reviewed_at(pool: &Pool<Sqlite>) -> Result<usize> {
+    let result = sqlx::query("UPDATE tags SET reviewed_at = NULL")
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() as usize)
+}
+
+/// Check bulk tag names against DB.
+/// Returns for each name: whether it exists, its current category_id (if any), and its current category name.
+pub async fn bulk_check_tags(
+    pool: &Pool<Sqlite>,
+    names: &[String],
+) -> Result<Vec<(String, Option<i64>, Option<String>)>> {
+    let mut results = Vec::new();
+    for name in names {
+        let tag = sqlx::query_as::<_, Tag>(
+            "SELECT t.* FROM tags t
+             WHERE t.name = ? COLLATE NOCASE",
+        )
+        .bind(name)
+        .fetch_optional(pool)
+        .await?;
+
+        match tag {
+            Some(t) => {
+                let cat_name: Option<String> = if t.category_id > 0 {
+                    let name: Option<String> =
+                        sqlx::query_scalar("SELECT name FROM tag_categories WHERE id = ?")
+                            .bind(t.category_id)
+                            .fetch_optional(pool)
+                            .await?
+                            .flatten();
+                    name
+                } else {
+                    None
+                };
+                results.push((name.clone(), Some(t.category_id), cat_name));
+            }
+            None => {
+                results.push((name.clone(), None, None));
+            }
+        }
+    }
+    Ok(results)
+}
+
+/// Bulk create tags (all assign category + mark reviewed).
+/// Returns created tags with their ids.
+pub async fn bulk_create_tags(pool: &Pool<Sqlite>, entries: &[(String, i64)]) -> Result<Vec<Tag>> {
+    let now = chrono::Utc::now().timestamp();
+    let mut created = Vec::new();
+    for (name, category_id) in entries {
+        let tag = sqlx::query_as::<_, Tag>(
+            r#"
+            INSERT INTO tags (name, category_id, created_at, reviewed_at)
+            VALUES (?, ?, ?, ?)
+            RETURNING *
+            "#,
+        )
+        .bind(name)
+        .bind(category_id)
+        .bind(now)
+        .bind(now)
+        .fetch_one(pool)
+        .await?;
+        created.push(tag);
+    }
+    Ok(created)
+}
+
+/// Bulk update tags: change category + mark reviewed.
+/// Returns updated tags.
+pub async fn bulk_update_tags(pool: &Pool<Sqlite>, entries: &[(String, i64)]) -> Result<Vec<Tag>> {
+    let now = chrono::Utc::now().timestamp();
+    let mut updated = Vec::new();
+    for (name, category_id) in entries {
+        let tag = sqlx::query_as::<_, Tag>(
+            r#"
+            UPDATE tags
+            SET category_id = ?, reviewed_at = ?
+            WHERE name = ? COLLATE NOCASE
+            RETURNING *
+            "#,
+        )
+        .bind(category_id)
+        .bind(now)
+        .bind(name)
+        .fetch_one(pool)
+        .await?;
+        updated.push(tag);
+    }
+    Ok(updated)
+}
+
+/// Mark existing tags as reviewed (no category change).
+pub async fn bulk_review_tags(pool: &Pool<Sqlite>, names: &[String]) -> Result<usize> {
+    let now = chrono::Utc::now().timestamp();
+    let mut count = 0;
+    for name in names {
+        let result = sqlx::query(
+            "UPDATE tags SET reviewed_at = ? WHERE name = ? COLLATE NOCASE AND reviewed_at IS NULL",
+        )
+        .bind(now)
+        .bind(name)
+        .execute(pool)
+        .await?;
+        count += result.rows_affected() as usize;
+    }
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

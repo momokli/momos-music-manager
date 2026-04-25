@@ -1,5 +1,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use anyhow::Result;
 use axum::{Router, response::Html, routing::get};
@@ -15,6 +16,7 @@ mod audio_extensions;
 mod comment;
 mod config;
 mod db;
+mod embeddings;
 mod spotify;
 mod sync;
 mod tasks;
@@ -55,6 +57,7 @@ struct AppState {
     db: Pool<Sqlite>,
     config: crate::config::ServiceCredentials,
     task_manager: crate::tasks::TaskManager,
+    embeddings: Mutex<Option<crate::embeddings::EmbeddingModel>>,
 }
 
 #[tokio::main]
@@ -67,42 +70,34 @@ async fn main() -> Result<()> {
         )
         .init();
     dotenvy::dotenv_override().ok();
-    eprintln!("🚀 Starting Momo's Music Manager - main()");
 
-    eprintln!("📋 Parsing CLI arguments...");
     let cli = Cli::parse();
-    eprintln!("✅ CLI parsed successfully");
 
     // Initialize database connection
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:app.db".to_string());
-    eprintln!("🗄️ Database URL: {}", database_url);
+    info!("Database: {database_url}");
     let options = SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
-    eprintln!("🔗 Connecting to database...");
     let db = SqlitePool::connect_with(options).await?;
-    eprintln!("✅ Database connected successfully");
 
     // Run migrations
-    eprintln!("📝 Running database migrations...");
     sqlx::migrate!().run(&db).await?;
-    eprintln!("✅ Database migrations completed");
+    info!("Migrations complete");
 
-    eprintln!("🎯 Executing command: {:?}", cli.command);
     match cli.command {
         Commands::Serve { host, port } => {
-            eprintln!("🌐 Starting server on {}:{}", host, port);
             serve(db, host, port).await?;
         }
         Commands::Scan { directory } => {
-            eprintln!("📁 Scanning directory: {}", directory);
+            info!("Scanning: {directory}");
             scan_directory(&db, &directory).await?;
         }
         Commands::DbStatus => {
-            eprintln!("📊 Showing database status");
+            info!("Database status");
             db_status(&db).await?;
         }
         Commands::ScanFile { path } => {
-            eprintln!("📁 Scanning single file: {}", path);
+            info!("Scan file: {path}");
             scan_single_file(&db, &path).await?;
         }
     }
@@ -111,7 +106,6 @@ async fn main() -> Result<()> {
 }
 
 async fn serve(db: Pool<Sqlite>, host: String, port: u16) -> Result<()> {
-    eprintln!("⚙️ Setting up server state...");
     let config = crate::config::ServiceCredentials::from_env();
     let task_manager = crate::tasks::TaskManager::new();
 
@@ -119,10 +113,10 @@ async fn serve(db: Pool<Sqlite>, host: String, port: u16) -> Result<()> {
         db,
         config,
         task_manager,
+        embeddings: tokio::sync::Mutex::new(None),
     });
 
     // Build our application with routes
-    eprintln!("🔗 Building router...");
     let app = Router::new()
         .without_v07_checks()
         .route("/", get(root))
@@ -131,11 +125,8 @@ async fn serve(db: Pool<Sqlite>, host: String, port: u16) -> Result<()> {
         .with_state(state);
 
     let address = format!("{}:{}", host, port);
-    eprintln!("🔌 Binding to address: {}", address);
     let listener = tokio::net::TcpListener::bind(&address).await?;
-    eprintln!("✅ Server bound to {}", address);
-    info!("Server listening on {}:{}", host, port);
-    eprintln!("🚀 Starting Axum server...");
+    info!("Serving HTTP on {host}:{port}");
     axum::serve(listener, app).await?;
 
     Ok(())
@@ -166,13 +157,13 @@ async fn scan_single_file(pool: &Pool<Sqlite>, path_str: &str) -> Result<()> {
         anyhow::bail!("File does not exist: {}", path_str);
     }
 
-    println!("🔍 Scanning single file: {}", path.display());
+    println!("Scanning single file: {}", path.display());
     println!();
 
     // Extract metadata without storing to database
     let file = db::extract_audio_metadata_from_file(path).await?;
 
-    println!("📋 Extracted Metadata:");
+    println!("Metadata:");
     println!("  Title:       {:?}", file.title);
     println!("  Artist:      {:?}", file.artist);
     println!("  Album:       {:?}", file.album);
@@ -198,13 +189,13 @@ async fn scan_single_file(pool: &Pool<Sqlite>, path_str: &str) -> Result<()> {
     println!();
 
     // Also store it to database for verification
-    println!("💾 Storing to database...");
+    println!("Storing to database...");
     match db::scan_and_store_file(pool, path).await {
         Ok(stored) => {
-            println!("✅ Stored with id={}", stored.id);
+            println!("Stored with id={}", stored.id);
         }
         Err(e) => {
-            println!("❌ Failed to store: {}", e);
+            println!("Failed to store: {}", e);
         }
     }
 

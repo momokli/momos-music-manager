@@ -295,8 +295,6 @@ Where:
 
 **Context**: Writing comments to files via exiftool can take seconds per file. A synchronous HTTP request would block the UI.
 
-**Decision**: Use the TaskManager for WriteComment operations. The API returns a `task_id` immediately (202 Accepted pattern), and the frontend polls for completion.
-
 **Consequences**:
 
 - `POST /api/files/{id}/write-comment` — returns task_id
@@ -306,6 +304,52 @@ Where:
 - Edge cases handled: already-up-to-date skip, missing file error, DB-update-after-write warning
 
 ---
+
+## ADR-025: Semantic Tag Categorization with Embeddings
+
+**Date**: 2026-06-xx  
+**Status**: Accepted (implemented)
+
+**Context**: Over 400 music tags exist in the database, all assigned to the default "Setlist" category. Manually categorizing each tag into Phase/Mood/Vibe/Merkmal is tedious. The system needed AI-assisted suggestions based on semantic similarity.
+
+**Decision**: Implement local Sentence Embeddings using `candle-core` + `all-MiniLM-L6-v2` (384-dim) for on-device, privacy-preserving tag categorization:
+
+- **Model**: `sentence-transformers/all-MiniLM-L6-v2` via HuggingFace safetensors
+- **Inference**: Pure Rust with `candle-core`, `candle-transformers`, `tokenizers` crate
+- **Lazy loading**: Model is downloaded from HuggingFace on first API call, cached in `~/.cache/huggingface/hub/`
+- **Embedding storage**: New `tag_embeddings` table (tag_id → f32 BLOB, 1536 bytes per embedding)
+- **Category embedding**: Mean of all tag embeddings in that category, computed on-the-fly
+- **Suggestion**: Cosine similarity between tag embedding and each category's mean embedding
+- **Setlist excluded**: AI never suggests the default "Setlist" category — user must choose it manually
+
+**Wizard workflow**:
+
+- New page `auto-categorize.html` processes tags one-by-one
+- Queue management: unreviewed tags sorted by name, skip rotates within local JS queue
+- `reviewed_at` column on `tags` table tracks which tags have been processed (NULL = unreviewed)
+- AI button at fixed position with confidence score + 5 manual category buttons
+- Explicit "Setlist" choice vs. default distinction via `reviewed_at` timestamp
+
+**New API endpoints**:
+
+- `GET /api/tags/unreviewed` — returns sorted queue of unreviewed tags
+- `PUT /api/tags/{id}/categorize` — sets `category_id` + `reviewed_at`
+- `GET /api/tags/{id}/suggest` — AI recommendation via cosine similarity
+- `GET /api/embeddings/status` — model load state + embedding count
+- `POST /api/embeddings/recompute` — rebuild all embeddings from scratch
+- `POST /api/embeddings/reset-review` — reset all `reviewed_at` to NULL
+
+**Consequences**:
+
+- All ML inference runs locally on CPU — no data leaves the machine
+- Embeddings are computed once and cached in SQLite (BLOB)
+- Category means update incrementally as tags are categorized
+- AI suggestions improve over time as more tags are categorized (more data points per category)
+- First API call triggers ~90MB model download from HuggingFace (~32s for 400 tags)
+- Requires `candle-core`, `candle-transformers`, `candle-nn`, `hf-hub`, `tokenizers` dependencies
+- Schema change: `tags.reviewed_at` column + `tag_embeddings` table added
+- Binary size increases by ~15MB (candle + safetensors)
+- POC phase — model version pinned to `all-MiniLM-L6-v2`, upgradeable via recompute endpoint
 
 ## Revision History
 
@@ -318,3 +362,4 @@ Where:
 | 2026-04-23 | ADR-022                               | Target comment computation                                                     |
 | 2026-04-24 | ADR-023, 024                          | TaskManager, WriteComment                                                      |
 | 2026-04-25 | —                                     | Cleanup: removed outdated ADRs (React, Docker, design.html, presets, bugfixes) |
+| 2026-06-xx | ADR-025                               | Semantic tag categorization with local embeddings (candle + all-MiniLM-L6-v2)  |

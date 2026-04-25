@@ -12,13 +12,15 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 // Re-export old sync types that SpotifySyncWorker needs (will be removed after full migration)
 pub use crate::sync::{SyncProgress, SyncType};
 
 use crate::config::ServiceCredentials;
+use crate::db::{clear_all_embeddings, get_tags, upsert_tag_embedding};
+use crate::embeddings::{EmbeddingModel, serialize_embedding};
 use crate::spotify::{client::SpotifyClient, sync_worker::SpotifySyncWorker};
 
 /// Type of task operation
@@ -28,6 +30,8 @@ pub enum TaskType {
     SpotifySync(SyncConfig),
     /// Write comment to file(s)
     WriteComment { file_ids: Vec<i64> },
+    /// Recompute embeddings for all tags
+    RecomputeEmbeddings,
 }
 
 /// Configuration for Spotify sync (generic serializable version of SyncType)
@@ -160,6 +164,7 @@ impl Task {
         let task_type_str = match &self.task_type {
             TaskType::SpotifySync(_) => "spotify_sync".to_string(),
             TaskType::WriteComment { .. } => "write_comment".to_string(),
+            TaskType::RecomputeEmbeddings => "recompute_embeddings".to_string(),
         };
 
         let status = self.status.lock().unwrap().clone();
@@ -414,7 +419,7 @@ pub async fn start_spotify_sync_task(
         let spotify_client = match SpotifyClient::from_stored_tokens(db_clone.clone(), &creds).await
         {
             Ok(client) => {
-                info!("Spotify client created successfully");
+                debug!("Spotify client created successfully");
                 client
             }
             Err(e) => {
@@ -432,7 +437,7 @@ pub async fn start_spotify_sync_task(
             }
         };
 
-        info!(
+        debug!(
             "Creating SpotifySyncWorker with sync type: {:?}",
             sync_type_clone
         );
@@ -725,6 +730,146 @@ pub async fn start_write_comment_task(
                 .await;
             tm.update_progress_text(&worker_task_id, summary).await;
         }
+
+        Ok(())
+    });
+
+    task_manager.set_join_handle(&task_id, join_handle).await;
+
+    task_id
+}
+
+/// Start a background task to recompute embeddings for all tags.
+/// Loads the ML model, iterates over all tags, computes and stores embeddings.
+/// Reports progress via the task system (visible in tasks UI).
+pub async fn start_recompute_embeddings_task(
+    task_manager: &TaskManager,
+    db: &sqlx::Pool<sqlx::Sqlite>,
+) -> String {
+    let task = Task::new(TaskType::RecomputeEmbeddings, None);
+    let task_id = task.id.clone();
+    let worker_task_id = task_id.clone();
+    let cancel_token = task.cancel_token.clone();
+
+    task_manager.start_task(task).await;
+
+    let tm = task_manager.clone();
+    let db_clone = db.clone();
+
+    let join_handle = tokio::spawn(async move {
+        tm.update_task_status(&worker_task_id, TaskStatus::Running)
+            .await;
+        tm.update_progress_text(&worker_task_id, "Loading ML model...".to_string())
+            .await;
+        tm.add_log(
+            &worker_task_id,
+            "Starting embedding recompute...".to_string(),
+        )
+        .await;
+
+        // Load embedding model
+        let model = match crate::embeddings::EmbeddingModel::new() {
+            Ok(m) => m,
+            Err(e) => {
+                let msg = format!("Failed to load model: {}", e);
+                tm.add_log(&worker_task_id, msg.clone()).await;
+                tm.update_progress_text(&worker_task_id, "Failed".to_string())
+                    .await;
+                tm.update_task_status(&worker_task_id, TaskStatus::Failed)
+                    .await;
+                return Err(anyhow::anyhow!(msg));
+            }
+        };
+
+        // Get all tags
+        let tags = match sqlx::query_as::<_, crate::db::Tag>("SELECT * FROM tags ORDER BY name")
+            .fetch_all(&db_clone)
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = format!("Failed to fetch tags: {}", e);
+                tm.add_log(&worker_task_id, msg.clone()).await;
+                tm.update_progress_text(&worker_task_id, "Failed".to_string())
+                    .await;
+                tm.update_task_status(&worker_task_id, TaskStatus::Failed)
+                    .await;
+                return Err(anyhow::anyhow!(msg));
+            }
+        };
+
+        let total = tags.len();
+        tm.add_log(
+            &worker_task_id,
+            format!("Found {} tags, computing embeddings...", total),
+        )
+        .await;
+
+        // Clear old embeddings
+        let _ = sqlx::query("DELETE FROM tag_embeddings")
+            .execute(&db_clone)
+            .await;
+
+        let mut count = 0usize;
+        for (i, tag) in tags.iter().enumerate() {
+            // Check cancellation
+            if cancel_token.is_cancelled() {
+                tm.add_log(&worker_task_id, "Task cancelled by user".to_string())
+                    .await;
+                tm.update_progress_text(&worker_task_id, "Cancelled".to_string())
+                    .await;
+                tm.update_task_status(&worker_task_id, TaskStatus::Cancelled)
+                    .await;
+                return Ok(());
+            }
+
+            match model.embed_text(&tag.name) {
+                Ok(vec) => {
+                    let blob = crate::embeddings::serialize_embedding(&vec);
+                    let now = chrono::Utc::now().timestamp();
+                    let _ = sqlx::query(
+                        r#"
+                        INSERT INTO tag_embeddings (tag_id, embedding, model_version, updated_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(tag_id) DO UPDATE SET
+                            embedding = excluded.embedding,
+                            model_version = excluded.model_version,
+                            updated_at = excluded.updated_at
+                        "#,
+                    )
+                    .bind(tag.id)
+                    .bind(&blob)
+                    .bind("all-MiniLM-L6-v2")
+                    .bind(now)
+                    .execute(&db_clone)
+                    .await;
+                    count += 1;
+                }
+                Err(e) => {
+                    tm.add_log(
+                        &worker_task_id,
+                        format!("Failed to embed tag '{}': {}", tag.name, e),
+                    )
+                    .await;
+                }
+            }
+
+            // Update progress every 10 tags
+            if i % 10 == 0 {
+                tm.update_progress_text(&worker_task_id, format!("{}/{} tags embedded", i, total))
+                    .await;
+            }
+        }
+
+        tm.add_log(
+            &worker_task_id,
+            format!("Done: {}/{} embeddings computed", count, total),
+        )
+        .await;
+        tm.update_progress_text(&worker_task_id, format!("Completed ({} embeddings)", count))
+            .await;
+        tm.update_task_status(&worker_task_id, TaskStatus::Completed)
+            .await;
 
         Ok(())
     });

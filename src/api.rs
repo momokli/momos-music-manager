@@ -21,12 +21,18 @@ use crate::AppState;
 use crate::config::ServiceCredentials;
 #[allow(unused_imports)]
 use crate::db::{
-    File, Folder, ServiceConfig, ServiceTrack, compute_target_comment, create_tag,
-    create_tag_category, create_tags_from_playlists, delete_folder, delete_tag,
-    delete_tag_category, get_folder_by_id, get_folder_file_count, get_folders as db_get_folders,
+    File, Folder, ServiceConfig, ServiceTrack, bulk_check_tags, bulk_create_tags, bulk_review_tags,
+    bulk_update_tags, categorize_tag as db_categorize_tag, clear_all_embeddings,
+    compute_target_comment, create_tag, create_tag_category, create_tags_from_playlists,
+    delete_folder, delete_tag, delete_tag_category, get_all_embeddings, get_embeddings_by_category,
+    get_folder_by_id, get_folder_file_count, get_folders as db_get_folders,
     get_playlists_without_tags, get_service_config, get_tag_categories, get_tag_category_by_id,
-    scan_folder, update_folder_active, update_folder_with_config, update_service_connection_status,
-    update_service_tokens, update_tag, update_tag_category_metadata,
+    get_tag_embedding, get_tag_review_counts, get_unreviewed_tags, scan_folder,
+    update_folder_active, update_folder_with_config, update_service_connection_status,
+    update_service_tokens, update_tag, update_tag_category_metadata, upsert_tag_embedding,
+};
+use crate::embeddings::{
+    EmbeddingModel, deserialize_embedding, mean_embedding, serialize_embedding, suggest_category,
 };
 #[allow(unused_imports)]
 use crate::tasks::{
@@ -89,7 +95,98 @@ struct UpdateTagRequest {
     category_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+// ─── Auto-Categorize Types ───────────────────────────────────────────────────────
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnreviewedTagItem {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnreviewedTagsResponse {
+    pub total_unreviewed: usize,
+    pub total_reviewed: usize,
+    pub queue: Vec<UnreviewedTagItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategorySuggestionResponse {
+    pub suggested_category_id: i64,
+    pub suggested_category_name: String,
+    pub confidence: f32,
+    pub all_categories: Vec<TagCategory>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategorizeRequest {
+    pub category_id: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingStatusResponse {
+    pub model_loaded: bool,
+    pub tags_total: usize,
+    pub tags_embedded: usize,
+    pub model_version: String,
+}
+
+// ─── Bulk Import Types ──────────────────────────────────────────────────────────
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkImportEntry {
+    pub name: String,
+    pub category_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkImportRequest {
+    pub entries: Vec<BulkImportEntry>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkImportResult {
+    pub name: String,
+    pub status: String,
+    pub tag_id: Option<i64>,
+    pub category_id: i64,
+    pub category_name: String,
+    pub current_category_id: Option<i64>,
+    pub current_category_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkResolveEntry {
+    pub name: String,
+    pub category_id: i64,
+    pub action: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkResolveRequest {
+    pub entries: Vec<BulkResolveEntry>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkResolveResult {
+    pub name: String,
+    pub status: String,
+    pub tag_id: Option<i64>,
+    pub category_id: i64,
+    pub category_name: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Track {
     pub id: i64,
@@ -563,6 +660,17 @@ pub fn router() -> Router<Arc<AppState>> {
             "/api/tags/create-from-playlists",
             post(create_tags_from_playlists_handler),
         )
+        .route("/api/tags/unreviewed", get(unreviewed_tags_handler))
+        .route("/api/tags/{id}/categorize", put(categorize_tag_handler))
+        .route("/api/tags/{id}/suggest", get(suggest_category_handler))
+        .route("/api/embeddings/status", get(embeddings_status_handler))
+        .route("/api/tags/bulk-import", post(bulk_import_handler))
+        .route("/api/tags/bulk-resolve", post(bulk_resolve_handler))
+        .route(
+            "/api/embeddings/recompute",
+            post(recompute_embeddings_handler),
+        )
+        .route("/api/embeddings/reset-review", post(reset_review_handler))
         .route(
             "/api/tag-categories",
             get(tag_categories_handler).post(create_tag_category_handler),
@@ -1297,6 +1405,631 @@ async fn get_tag_handler(
     }
 }
 
+// ─── Auto-Categorize Handlers ─────────────────────────────────────────────────
+
+/// GET /api/tags/unreviewed
+/// Returns the queue of unreviewed tags (reviewed_at IS NULL).
+async fn unreviewed_tags_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Get unreviewed tags + counts
+    let (reviewed, unreviewed) = match get_tag_review_counts(&state.db).await {
+        Ok(counts) => counts,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get review counts: {}", e),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let tags = match get_unreviewed_tags(&state.db).await {
+        Ok(tags) => tags,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get unreviewed tags: {}", e),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let queue: Vec<UnreviewedTagItem> = tags
+        .into_iter()
+        .map(|t| UnreviewedTagItem {
+            id: t.id,
+            name: t.name,
+        })
+        .collect();
+
+    Json(ApiResponse {
+        data: UnreviewedTagsResponse {
+            total_unreviewed: unreviewed,
+            total_reviewed: reviewed,
+            queue,
+        },
+    })
+    .into_response()
+}
+
+/// PUT /api/tags/{id}/categorize
+/// Setzt category_id + reviewed_at für einen Tag.
+/// Aktualisiert danach den Embedding-Cache (Category Mean).
+async fn categorize_tag_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(request): Json<CategorizeRequest>,
+) -> impl IntoResponse {
+    // 1. Hole alten Tag (für alte category_id)
+    let _old_tag = match crate::db::get_tag_by_id(&state.db, id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Tag {} not found", id),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Update category_id + reviewed_at
+    match db_categorize_tag(&state.db, id, request.category_id).await {
+        Ok(tag) => {
+            // 3. Embedding-Cache aktualisieren (falls Modell geladen)
+            let mut cache = state.embeddings.lock().await;
+            if let Some(ref model) = *cache {
+                // Hole oder berechne Embedding für den Tag
+                let embedding_blob = match get_tag_embedding(&state.db, tag.id).await {
+                    Ok(Some(blob)) => Some(blob),
+                    _ => {
+                        // Embedding berechnen und speichern
+                        match model.embed_text(&tag.name) {
+                            Ok(vec) => {
+                                let blob = serialize_embedding(&vec);
+                                let _ = upsert_tag_embedding(
+                                    &state.db,
+                                    tag.id,
+                                    &blob,
+                                    "all-MiniLM-L6-v2",
+                                )
+                                .await;
+                                Some(blob)
+                            }
+                            Err(_) => None,
+                        }
+                    }
+                };
+
+                if let Some(blob) = embedding_blob {
+                    if let Ok(_vec) = deserialize_embedding(&blob) {
+                        // Aktualisiere Cache (in-Memory Category Means)
+                        // Die Category Means werden beim nächsten suggest
+                        // automatisch aus der DB neu geladen
+                        tracing::debug!(
+                            "Updated embedding for tag '{}' -> category {}",
+                            tag.name,
+                            request.category_id
+                        );
+                    }
+                }
+            }
+
+            // API-Tag mit Category-Info zurückgeben
+            match crate::api::get_tag_with_category(&state.db, tag.id).await {
+                Ok(Some(api_tag)) => Json(ApiResponse { data: api_tag }).into_response(),
+                Ok(None) => Json(ApiResponse {
+                    data: Tag {
+                        id: tag.id,
+                        name: tag.name,
+                        category: None,
+                        category_icon: None,
+                        created_at: None,
+                    },
+                })
+                .into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Failed to fetch tag after categorize: {}", e),
+                    }),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/tags/{id}/suggest
+/// Berechnet die AI-Empfehlung für einen Tag:
+///   1. Tag-Embedding aus DB laden oder berechnen
+///   2. Category-Embeddings aus DB berechnen (Mean pro Kategorie)
+///   3. Cosine Similarity zu jeder Category (exkl. Setlist)
+///   4. Top-1 + alle Categories zurückgeben
+async fn suggest_category_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    // 1. Tag aus DB holen
+    let tag = match crate::db::get_tag_by_id(&state.db, id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Tag {} not found", id),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Embedding-Modell laden (lazy)
+    {
+        let mut cache = state.embeddings.lock().await;
+        if cache.is_none() {
+            match EmbeddingModel::new() {
+                Ok(model) => {
+                    *cache = Some(model);
+                }
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("Failed to load embedding model: {}", e),
+                        }),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
+    // 3. Tag-Embedding holen oder berechnen
+    let tag_embedding = match get_tag_embedding(&state.db, tag.id).await {
+        Ok(Some(blob)) => match deserialize_embedding(&blob) {
+            Ok(vec) => vec,
+            Err(_) => {
+                // Neu berechnen
+                let cache = state.embeddings.lock().await;
+                match cache.as_ref().unwrap().embed_text(&tag.name) {
+                    Ok(vec) => {
+                        let blob = serialize_embedding(&vec);
+                        let _ = upsert_tag_embedding(&state.db, tag.id, &blob, "all-MiniLM-L6-v2")
+                            .await;
+                        vec
+                    }
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: format!("Failed to compute embedding: {}", e),
+                            }),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        },
+        _ => {
+            // Neu berechnen
+            let cache = state.embeddings.lock().await;
+            match cache.as_ref().unwrap().embed_text(&tag.name) {
+                Ok(vec) => {
+                    let blob = serialize_embedding(&vec);
+                    let _ =
+                        upsert_tag_embedding(&state.db, tag.id, &blob, "all-MiniLM-L6-v2").await;
+                    vec
+                }
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("Failed to compute embedding: {}", e),
+                        }),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
+
+    // 4. Alle Kategorien holen (für die Buttons + AI-Suggestion)
+    let categories = match get_tag_categories(&state.db).await {
+        Ok(cats) => cats,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get categories: {}", e),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let api_categories: Vec<TagCategory> = categories
+        .iter()
+        .map(|c| TagCategory {
+            id: c.id,
+            name: c.name.clone(),
+            prefix: Some(c.prefix.clone()),
+            icon: c.icon.clone(),
+            is_default: c.is_default,
+            sort_order: c.sort_order,
+            created_at: Some(c.created_at),
+        })
+        .collect();
+
+    // 5. Category-Embeddings berechnen
+    let skip_id = categories
+        .iter()
+        .find(|c| c.is_default)
+        .map(|c| c.id)
+        .unwrap_or(-1);
+
+    let mut category_embeddings = std::collections::HashMap::new();
+    for cat in &categories {
+        if cat.id == skip_id {
+            continue; // Setlist überspringen für AI
+        }
+        let rows = match get_embeddings_by_category(&state.db, cat.id).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if rows.is_empty() {
+            continue;
+        }
+        let mut vectors = Vec::new();
+        for (_tid, blob) in &rows {
+            if let Ok(vec) = deserialize_embedding(blob) {
+                vectors.push(vec);
+            }
+        }
+        if vectors.is_empty() {
+            continue;
+        }
+        let mean = mean_embedding(&vectors);
+        category_embeddings.insert(cat.id, (cat.name.clone(), mean));
+    }
+
+    // 6. Similarity berechnen
+    let suggestion = suggest_category(&tag_embedding, &category_embeddings, skip_id);
+
+    let (sug_id, sug_name, confidence) = match suggestion {
+        Some(s) => (s.category_id, s.category_name, s.confidence),
+        None => {
+            // Fallback: erste nicht-default Kategorie
+            let fallback = categories.iter().find(|c| !c.is_default);
+            match fallback {
+                Some(c) => (c.id, c.name.clone(), 0.0),
+                None => (-1, "None".to_string(), 0.0),
+            }
+        }
+    };
+
+    Json(ApiResponse {
+        data: CategorySuggestionResponse {
+            suggested_category_id: sug_id,
+            suggested_category_name: sug_name,
+            confidence,
+            all_categories: api_categories,
+        },
+    })
+    .into_response()
+}
+
+/// POST /api/tags/bulk-import
+/// Check status of multiple tag names: matched / conflict / not_found
+/// Does NOT modify anything — just reports current state.
+async fn bulk_import_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<BulkImportRequest>,
+) -> impl IntoResponse {
+    let names: Vec<String> = request.entries.iter().map(|e| e.name.clone()).collect();
+    let category_map: std::collections::HashMap<i64, String> = {
+        let cats = match get_tag_categories(&state.db).await {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        cats.into_iter().map(|c| (c.id, c.name)).collect()
+    };
+
+    let checked = match bulk_check_tags(&state.db, &names).await {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Build a lookup: name -> (name, category_id) from request
+    let request_map: std::collections::HashMap<&str, i64> = request
+        .entries
+        .iter()
+        .map(|e| (e.name.as_str(), e.category_id))
+        .collect();
+
+    let mut results = Vec::new();
+    for (name, current_cat_id, current_cat_name) in checked {
+        let target_cat_id = request_map.get(name.as_str()).copied().unwrap_or(-1);
+        let target_cat_name = category_map
+            .get(&target_cat_id)
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        let (status, tag_id) = match (current_cat_id, &current_cat_name) {
+            (Some(cid), Some(_)) if cid == target_cat_id => ("matched".to_string(), None),
+            (Some(cid), Some(cname)) => ("conflict".to_string(), Some(cid)),
+            (Some(cid), None) => ("conflict".to_string(), Some(cid)),
+            (None, _) => ("not_found".to_string(), None),
+        };
+
+        // Get the tag ID if it exists
+        let existing_tag_id = if current_cat_id.is_some() {
+            match crate::db::get_tag_by_name(&state.db, &name).await {
+                Ok(Some(t)) => Some(t.id),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        results.push(BulkImportResult {
+            name,
+            status,
+            tag_id: existing_tag_id,
+            category_id: target_cat_id,
+            category_name: target_cat_name,
+            current_category_id: current_cat_id,
+            current_category_name: current_cat_name,
+        });
+    }
+
+    Json(ApiResponse { data: results }).into_response()
+}
+
+/// POST /api/tags/bulk-resolve
+/// Resolve individual entries: create new tags, move tags to new category, or just mark reviewed.
+/// Each entry is processed independently so partial success is possible.
+async fn bulk_resolve_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<BulkResolveRequest>,
+) -> impl IntoResponse {
+    let category_map: std::collections::HashMap<i64, String> = {
+        let cats = match get_tag_categories(&state.db).await {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        cats.into_iter().map(|c| (c.id, c.name)).collect()
+    };
+
+    let mut results = Vec::new();
+    for entry in &request.entries {
+        let cat_name = category_map
+            .get(&entry.category_id)
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        match entry.action.as_str() {
+            "create" => {
+                match bulk_create_tags(&state.db, &[(entry.name.clone(), entry.category_id)]).await
+                {
+                    Ok(tags) => {
+                        for t in tags {
+                            results.push(BulkResolveResult {
+                                name: entry.name.clone(),
+                                status: "created".to_string(),
+                                tag_id: Some(t.id),
+                                category_id: entry.category_id,
+                                category_name: cat_name.clone(),
+                                error: None,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        results.push(BulkResolveResult {
+                            name: entry.name.clone(),
+                            status: "error".to_string(),
+                            tag_id: None,
+                            category_id: entry.category_id,
+                            category_name: cat_name.clone(),
+                            error: Some(e.to_string()),
+                        });
+                    }
+                }
+            }
+            "move" => {
+                match bulk_update_tags(&state.db, &[(entry.name.clone(), entry.category_id)]).await
+                {
+                    Ok(tags) => {
+                        for t in tags {
+                            results.push(BulkResolveResult {
+                                name: entry.name.clone(),
+                                status: "moved".to_string(),
+                                tag_id: Some(t.id),
+                                category_id: entry.category_id,
+                                category_name: cat_name.clone(),
+                                error: None,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        results.push(BulkResolveResult {
+                            name: entry.name.clone(),
+                            status: "error".to_string(),
+                            tag_id: None,
+                            category_id: entry.category_id,
+                            category_name: cat_name.clone(),
+                            error: Some(e.to_string()),
+                        });
+                    }
+                }
+            }
+            "review" => {
+                match bulk_review_tags(&state.db, &[entry.name.clone()]).await {
+                    Ok(count) => {
+                        // Get tag id
+                        let tag_id = match crate::db::get_tag_by_name(&state.db, &entry.name).await
+                        {
+                            Ok(Some(t)) => Some(t.id),
+                            _ => None,
+                        };
+                        results.push(BulkResolveResult {
+                            name: entry.name.clone(),
+                            status: "reviewed".to_string(),
+                            tag_id,
+                            category_id: entry.category_id,
+                            category_name: cat_name.clone(),
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        results.push(BulkResolveResult {
+                            name: entry.name.clone(),
+                            status: "error".to_string(),
+                            tag_id: None,
+                            category_id: entry.category_id,
+                            category_name: cat_name.clone(),
+                            error: Some(e.to_string()),
+                        });
+                    }
+                }
+            }
+            _ => {
+                results.push(BulkResolveResult {
+                    name: entry.name.clone(),
+                    status: "error".to_string(),
+                    tag_id: None,
+                    category_id: entry.category_id,
+                    category_name: cat_name,
+                    error: Some(format!("Unknown action: {}", entry.action)),
+                });
+            }
+        }
+    }
+
+    Json(ApiResponse { data: results }).into_response()
+}
+
+async fn embeddings_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let model_loaded = state.embeddings.lock().await.is_some();
+
+    // Count tags with embeddings
+    let tags_embedded: i64 =
+        match sqlx::query_scalar::<_, Option<i64>>("SELECT COUNT(*) FROM tag_embeddings")
+            .fetch_one(&state.db)
+            .await
+        {
+            Ok(c) => c.unwrap_or(0),
+            Err(_) => 0,
+        };
+    let tags_total: i64 = match sqlx::query_scalar::<_, Option<i64>>("SELECT COUNT(*) FROM tags")
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(c) => c.unwrap_or(0),
+        Err(_) => 0,
+    };
+
+    Json(ApiResponse {
+        data: EmbeddingStatusResponse {
+            model_loaded,
+            tags_total: tags_total as usize,
+            tags_embedded: tags_embedded as usize,
+            model_version: "all-MiniLM-L6-v2".to_string(),
+        },
+    })
+    .into_response()
+}
+
+/// POST /api/embeddings/recompute
+/// Startet eine Hintergrund-Aufgabe zur Neuberechnung aller Embeddings.
+/// Gibt sofort eine task_id zurück — Fortschritt über /api/tasks sichtbar.
+async fn recompute_embeddings_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let task_id =
+        crate::tasks::start_recompute_embeddings_task(&state.task_manager, &state.db).await;
+
+    Json(ApiResponse {
+        data: serde_json::json!({
+            "task_id": task_id,
+            "message": "Embedding recompute started as background task",
+        }),
+    })
+    .into_response()
+}
+
+/// POST /api/embeddings/reset-review
+/// Setzt reviewed_at = NULL für alle Tags (Alle Tags werden wieder im Wizard angezeigt)
+async fn reset_review_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match crate::db::reset_all_reviewed_at(&state.db).await {
+        Ok(count) => {
+            tracing::info!("Reset reviewed_at for {} tags", count);
+            Json(ApiResponse {
+                data: serde_json::json!({ "reset": count }),
+            })
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to reset reviewed_at: {}", e),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 async fn get_playlists_without_tags_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -1450,10 +2183,9 @@ async fn service_auth_handler(
                 }
             };
 
-            // Debug logging
-            eprintln!("[DEBUG] Spotify OAuth - Client ID: {}", client_id);
-            eprintln!(
-                "[DEBUG] Spotify OAuth - Redirect URI: {}",
+            tracing::debug!("Spotify OAuth - Client ID: {}", client_id);
+            tracing::debug!(
+                "Spotify OAuth - Redirect URI: {}",
                 state.config.spotify_redirect_uri
             );
 
@@ -1668,10 +2400,9 @@ async fn service_callback_handler(
         }
     };
 
-    // Debug logging
-    eprintln!("[DEBUG] Spotify Callback - Client ID: {}", client_id);
-    eprintln!(
-        "[DEBUG] Spotify Callback - Redirect URI: {}",
+    tracing::debug!("Spotify Callback - Client ID: {}", client_id);
+    tracing::debug!(
+        "Spotify Callback - Redirect URI: {}",
         state.config.spotify_redirect_uri
     );
 
@@ -1875,10 +2606,9 @@ async fn legacy_callback_handler(
         }
     };
 
-    // Debug logging
-    eprintln!("[DEBUG] Spotify Legacy Callback - Client ID: {}", client_id);
-    eprintln!(
-        "[DEBUG] Spotify Legacy Callback - Redirect URI: {}",
+    tracing::debug!("Spotify Legacy Callback - Client ID: {}", client_id);
+    tracing::debug!(
+        "Spotify Legacy Callback - Redirect URI: {}",
         state.config.spotify_redirect_uri
     );
 

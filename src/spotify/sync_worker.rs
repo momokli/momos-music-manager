@@ -8,7 +8,7 @@ use rspotify::model::{PlayableItem, SimplifiedPlaylist, track::FullTrack};
 use sqlx::{Pool, Sqlite};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::db::{add_track_to_playlist, upsert_service_playlist, upsert_service_track};
 use crate::spotify::client::SpotifyClient;
@@ -132,10 +132,10 @@ impl SpotifySyncWorker {
             progress.status = crate::sync::SyncStatus::Running;
         }
 
-        info!("Getting user playlists from Spotify client...");
+        debug!("Getting user playlists from Spotify client...");
         let mut playlists_stream = match self.spotify_client.get_user_playlists().await {
             Ok(stream) => {
-                info!("Successfully got playlists stream");
+                debug!("Successfully got playlists stream");
                 stream
             }
             Err(e) => {
@@ -149,7 +149,7 @@ impl SpotifySyncWorker {
         while let Some(playlist_result) = playlists_stream.next().await {
             // Check for cancellation
             if self.is_cancelled() {
-                info!("Playlist sync cancelled - returning failed result");
+                debug!("Playlist sync cancelled - returning failed result");
                 return Ok(SyncResult::failed("Sync cancelled by user".to_string()));
             }
 
@@ -162,7 +162,7 @@ impl SpotifySyncWorker {
                     self.update_playlist_progress(playlist_count, None, &playlist.name)
                         .await;
 
-                    info!(
+                    debug!(
                         "Processing playlist {}/?: {}",
                         playlist_count, playlist.name
                     );
@@ -231,7 +231,7 @@ impl SpotifySyncWorker {
         while let Some(track_result) = tracks_stream.next().await {
             // Check for cancellation
             if self.is_cancelled() {
-                info!("Track sync cancelled for playlist: {}", playlist_name);
+                debug!("Track sync cancelled for playlist: {}", playlist_name);
                 return Ok(SyncResult::failed("Sync cancelled by user".to_string()));
             }
 
@@ -256,7 +256,7 @@ impl SpotifySyncWorker {
                                     .await;
                                 }
 
-                                info!(
+                                debug!(
                                     "Processing track {}/?: {} - {}",
                                     track_count, track.name, playlist_name
                                 );
@@ -321,7 +321,7 @@ impl SpotifySyncWorker {
             progress.status = crate::sync::SyncStatus::Running;
         }
 
-        info!("All tracks sync: Querying database for existing playlists...");
+        debug!("All tracks sync: Querying database for existing playlists...");
         // First, get all playlists from database
         let db_playlists = sqlx::query_as::<_, (String, String)>(
             "SELECT playlist_id, name FROM service_playlists WHERE service = 'spotify'",
@@ -331,7 +331,7 @@ impl SpotifySyncWorker {
         .context("Failed to fetch playlists from database")?;
 
         let total_playlists = db_playlists.len();
-        info!(
+        debug!(
             "All tracks sync: Found {} playlists in database",
             total_playlists
         );
@@ -342,11 +342,11 @@ impl SpotifySyncWorker {
         for (i, (playlist_id, playlist_name)) in db_playlists.into_iter().enumerate() {
             // Check for cancellation between playlists
             if self.is_cancelled() {
-                info!("All tracks sync cancelled");
+                debug!("All tracks sync cancelled");
                 return Ok(SyncResult::failed("Sync cancelled by user".to_string()));
             }
 
-            info!(
+            debug!(
                 "Syncing tracks for playlist {} of {}: {}",
                 i + 1,
                 total_playlists,

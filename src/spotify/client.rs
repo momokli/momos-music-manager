@@ -101,11 +101,10 @@ impl SpotifyClient {
                     expires_at: token_expiry.and_then(|ts| chrono::DateTime::from_timestamp(ts, 0)),
                     scopes: Default::default(),
                 });
-                info!(
-                    "Spotify token set in client: access_token={}, refresh_token={}, expires_at={:?}",
+                tracing::debug!(
+                    "Token set: access_token={}, refresh_token={}",
                     access_token.len(),
-                    refresh_token.len(),
-                    token_expiry
+                    refresh_token.len()
                 );
             } else {
                 error!("Failed to acquire token lock");
@@ -134,12 +133,12 @@ impl SpotifyClient {
 
     /// Refresh access token if needed and update database
     pub async fn refresh_token_if_needed(&self) -> Result<()> {
-        info!("Checking if Spotify token needs refresh...");
+        tracing::debug!("Checking if token needs refresh");
         let needs_refresh = {
             let token_lock = self.spotify.token.lock().await;
             if let Ok(guard) = token_lock {
                 if let Some(token) = guard.as_ref() {
-                    info!(
+                    tracing::debug!(
                         "Token exists: access_token={}, refresh_token={}",
                         token.access_token.len(),
                         token.refresh_token.as_ref().map(|t| t.len()).unwrap_or(0)
@@ -149,17 +148,19 @@ impl SpotifyClient {
                         let now = chrono::Utc::now();
                         let time_until_expiry = expires_at - now;
                         let needs = time_until_expiry < chrono::Duration::minutes(5);
-                        info!(
-                            "Token expires at {:?}, now={:?}, time_until_expiry={:?}, needs_refresh={}",
-                            expires_at, now, time_until_expiry, needs
+                        tracing::debug!(
+                            "Token expires at {:?}, time_until_expiry={:?}, needs_refresh={}",
+                            expires_at,
+                            time_until_expiry,
+                            needs
                         );
                         needs
                     } else {
-                        info!("No expiry time, assuming needs refresh");
+                        tracing::debug!("No expiry time, assuming needs refresh");
                         true // No expiry time, assume needs refresh
                     }
                 } else {
-                    info!("No token in client");
+                    tracing::debug!("No token in client");
                     true // No token
                 }
             } else {
@@ -169,10 +170,10 @@ impl SpotifyClient {
         };
 
         if needs_refresh {
-            info!("Refreshing Spotify access token");
+            tracing::debug!("Refreshing access token");
             self.refresh_token().await?;
         } else {
-            info!("Token does not need refresh");
+            tracing::debug!("Token does not need refresh");
         }
 
         Ok(())
@@ -223,17 +224,17 @@ impl SpotifyClient {
     pub async fn get_user_playlists<'a>(
         &'a self,
     ) -> Result<impl tokio_stream::Stream<Item = Result<SimplifiedPlaylist>> + 'a> {
-        info!("Getting user playlists from Spotify API...");
+        tracing::debug!("Getting user playlists");
         self.refresh_token_if_needed().await?;
-        info!("Token refresh check completed, calling current_user_playlists()");
+        tracing::debug!("Token refresh check done, calling current_user_playlists()");
 
         let stream = self.spotify.current_user_playlists();
-        info!("Got playlist stream from Spotify client");
+        tracing::debug!("Got playlist stream");
 
         // Convert the stream to our result type
         Ok(stream.map(|item| match item {
             Ok(playlist) => {
-                info!("Successfully fetched playlist: {}", playlist.name);
+                tracing::debug!("Fetched playlist: {}", playlist.name);
                 Ok(playlist)
             }
             Err(e) => {

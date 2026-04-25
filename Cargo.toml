@@ -37,5 +37,12 @@ tokio-tungstenite = "0.21"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# ML / Embeddings
+candle-core = "0.8"
+candle-transformers = "0.8"
+candle-nn = "0.8"
+hf-hub = "0.4"
+tokenizers = "0.21"
+
 [dev-dependencies]
 tokio-test = "0.4"
