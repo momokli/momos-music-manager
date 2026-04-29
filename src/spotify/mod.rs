@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod models;
+pub mod replay;
 pub mod sync_worker;
 
 // Re-export commonly used types

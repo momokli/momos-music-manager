@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::audio_extensions::AudioExtension;
+use crate::scan_cache;
 use sqlx::{FromRow, Pool, Row, Sqlite, SqliteConnection, SqlitePool};
 use tracing::{debug, info, warn};
 
@@ -15,6 +16,7 @@ use tracing::{debug, info, warn};
 // ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[serde(rename_all = "camelCase")]
 pub struct TagCategory {
     pub id: i64,
     pub name: String,
@@ -22,6 +24,7 @@ pub struct TagCategory {
     pub prefix: String,
     pub sort_order: i32,
     pub is_default: bool,
+    pub tag_count: i64,
     pub created_at: i64,
 }
 
@@ -30,6 +33,7 @@ pub struct Tag {
     pub id: i64,
     pub name: String,
     pub category_id: i64,
+    pub sort_order: i64,
     pub created_at: i64,
 }
 
@@ -293,6 +297,55 @@ fn extract_mp4_metadata_with_exiftool(
     Ok((title, artist, album, comment, bpm, key))
 }
 
+/// Extract play count and last played date using exiftool (all file types).
+/// Exiftool normalises these from iTunes `----:com.apple.iTunes:PLAY_COUNT` (M4A),
+/// `POPM` frame (MP3), and similar tags across formats.
+fn extract_playback_stats_with_exiftool(path: &Path) -> (Option<i32>, Option<i64>) {
+    use std::process::Command;
+
+    let output = match Command::new("exiftool")
+        .arg("-json")
+        .arg("-PlayCount")
+        .arg("-PlayDate")
+        .arg(path)
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return (None, None),
+    };
+
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+
+    let play_count = json[0]
+        .get("PlayCount")
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+        })
+        .map(|v| v as i32);
+
+    let last_played = json[0].get("PlayDate").and_then(|v| {
+        v.as_str().and_then(|s| {
+            // Exiftool can return PlayDate as an epoch timestamp (iTunes-style)
+            // or as "YYYY:MM:DD HH:MM:SS" — try parsing both.
+            if let Ok(ts) = s.parse::<i64>() {
+                return Some(ts);
+            }
+            // Try "YYYY:MM:DD HH:MM:SS" format (exiftool date format)
+            if let Ok(ts) = chrono::NaiveDateTime::parse_from_str(s, "%Y:%m:%d %H:%M:%S") {
+                return Some(ts.and_utc().timestamp());
+            }
+            None
+        })
+    });
+
+    (play_count, last_played)
+}
+
 pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
     // Get file metadata
     let metadata = fs::metadata(path)?;
@@ -305,6 +358,22 @@ pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
 
     // Calculate file hash
     let file_hash = calculate_file_hash(path)?;
+
+    // ── CACHE CHECK ──────────────────────────────────────────────────────────
+    // In replay mode, skip lofty/exiftool entirely and return cached metadata.
+    // The cache is invalidated when the file's mtime or hash changes.
+    let normalized_cache_path = shellexpand::full(path.to_string_lossy().as_ref())
+        .unwrap_or_else(|_| path.to_string_lossy())
+        .to_string();
+    match scan_cache::try_load(&normalized_cache_path, last_modified, &file_hash).await {
+        scan_cache::CacheResult::Hit(cached_file) => {
+            tracing::debug!("CACHE HIT for {:?}, skipping extraction", path);
+            return Ok(cached_file);
+        }
+        scan_cache::CacheResult::Miss => {
+            tracing::debug!("CACHE MISS for {:?}, extracting normally", path);
+        }
+    }
 
     // Determine file type
     let file_type = file_type_from_path(path)
@@ -355,6 +424,8 @@ pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
     let mut bpm = None;
     let mut musical_key = None;
     let mut isrc = None;
+    let mut play_count = None;
+    let mut last_played = None;
 
     if let Some(ref tag) = lofty_tag {
         // Basic metadata
@@ -395,6 +466,22 @@ pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
         // ISRC
         isrc = extract_tag_text(tag, ItemKey::Isrc);
     }
+
+    // Extract play count and last played via exiftool (handles all formats)
+    let (exif_play_count, exif_last_played) = extract_playback_stats_with_exiftool(path);
+    if exif_play_count.is_some() {
+        play_count = exif_play_count;
+    }
+    if exif_last_played.is_some() {
+        last_played = exif_last_played;
+    }
+
+    tracing::debug!(
+        "Playback stats for {:?}: play_count={:?}, last_played={:?}",
+        path,
+        play_count,
+        last_played
+    );
 
     // Try exiftool as fallback for MP4 files (when lofty fails entirely or for specific metadata)
     if (path.to_string_lossy().ends_with(".m4a") || path.to_string_lossy().ends_with(".mp4"))
@@ -473,7 +560,7 @@ pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
         .unwrap()
         .as_secs() as i64;
 
-    Ok(File {
+    let scanned_file = File {
         id: 0, // Will be set by database
         file_path: normalized_path,
         file_hash,
@@ -501,14 +588,20 @@ pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
         bpm,
         musical_key,
         rating: 0,
-        play_count: 0,
-        last_played: None,
+        play_count: play_count.unwrap_or(0),
+        last_played,
         spotify_id: None,
         soundcloud_id: None,
         youtube_id: None,
         created_at: now,
         updated_at: now,
-    })
+    };
+
+    // ── CACHE SAVE ──────────────────────────────────────────────────────────
+    // In record mode, persist the extracted metadata for future replay.
+    scan_cache::try_save(&scanned_file).await;
+
+    Ok(scanned_file)
 }
 
 pub async fn scan_and_store_file(pool: &Pool<Sqlite>, path: &Path) -> Result<File> {
@@ -737,10 +830,13 @@ pub async fn get_file_by_path(pool: &Pool<Sqlite>, file_path: &str) -> Result<Op
 }
 
 pub async fn get_tag_categories(pool: &Pool<Sqlite>) -> Result<Vec<TagCategory>> {
-    let categories =
-        sqlx::query_as::<_, TagCategory>("SELECT * FROM tag_categories ORDER BY sort_order")
-            .fetch_all(pool)
-            .await?;
+    let categories = sqlx::query_as::<_, TagCategory>(
+        r#"SELECT tc.*, (SELECT COUNT(*) FROM tags WHERE category_id = tc.id) as tag_count
+           FROM tag_categories tc
+           ORDER BY tc.sort_order"#,
+    )
+    .fetch_all(pool)
+    .await?;
     Ok(categories)
 }
 
@@ -749,18 +845,25 @@ pub async fn get_tag_category_by_id(
     pool: &Pool<Sqlite>,
     category_id: i64,
 ) -> Result<Option<TagCategory>> {
-    let category = sqlx::query_as::<_, TagCategory>("SELECT * FROM tag_categories WHERE id = ?")
-        .bind(category_id)
-        .fetch_optional(pool)
-        .await?;
+    let category = sqlx::query_as::<_, TagCategory>(
+        r#"SELECT tc.*, (SELECT COUNT(*) FROM tags WHERE category_id = tc.id) as tag_count
+           FROM tag_categories tc
+           WHERE tc.id = ?"#,
+    )
+    .bind(category_id)
+    .fetch_optional(pool)
+    .await?;
     Ok(category)
 }
 
 pub async fn get_default_tag_category(pool: &Pool<Sqlite>) -> Result<Option<TagCategory>> {
-    let category =
-        sqlx::query_as::<_, TagCategory>("SELECT * FROM tag_categories WHERE is_default = TRUE")
-            .fetch_optional(pool)
-            .await?;
+    let category = sqlx::query_as::<_, TagCategory>(
+        r#"SELECT tc.*, (SELECT COUNT(*) FROM tags WHERE category_id = tc.id) as tag_count
+           FROM tag_categories tc
+           WHERE tc.is_default = TRUE"#,
+    )
+    .fetch_optional(pool)
+    .await?;
     Ok(category)
 }
 
@@ -801,6 +904,36 @@ pub async fn get_tag_by_id(pool: &Pool<Sqlite>, tag_id: i64) -> Result<Option<Ta
         .fetch_optional(pool)
         .await?;
     Ok(tag)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceConnections {
+    pub spotify: bool,
+    pub soundcloud: bool,
+    pub youtube: bool,
+}
+
+pub async fn get_tag_service_connections(
+    pool: &Pool<Sqlite>,
+    tag_name: &str,
+) -> Result<ServiceConnections> {
+    let services = sqlx::query_scalar::<_, String>(
+        r#"SELECT DISTINCT sp.service FROM service_playlists sp WHERE LOWER(TRIM(sp.name)) = LOWER(TRIM(?))"#
+    )
+    .bind(tag_name)
+    .fetch_all(pool)
+    .await?;
+
+    let spotify = services.iter().any(|s| s == "spotify");
+    let soundcloud = services.iter().any(|s| s == "soundcloud");
+    let youtube = services.iter().any(|s| s == "youtube");
+
+    Ok(ServiceConnections {
+        spotify,
+        soundcloud,
+        youtube,
+    })
 }
 
 pub async fn update_tag(
@@ -915,11 +1048,10 @@ pub async fn create_tag_category(
     sort_order: i64,
 ) -> Result<TagCategory> {
     let now = chrono::Utc::now().timestamp();
-    let category = sqlx::query_as::<_, TagCategory>(
+    let result = sqlx::query(
         r#"
         INSERT INTO tag_categories (name, prefix, icon, is_default, sort_order, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
-        RETURNING *
         "#,
     )
     .bind(name)
@@ -928,9 +1060,13 @@ pub async fn create_tag_category(
     .bind(is_default)
     .bind(sort_order)
     .bind(now)
-    .fetch_one(pool)
+    .execute(pool)
     .await?;
-    Ok(category)
+
+    let new_id = result.last_insert_rowid();
+    get_tag_category_by_id(pool, new_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Failed to retrieve created tag category"))
 }
 
 pub async fn update_tag_category_metadata(
@@ -978,18 +1114,21 @@ pub async fn update_tag_category_metadata(
     }
 
     let query_str = format!(
-        "UPDATE tag_categories SET {} WHERE id = ? RETURNING *",
+        "UPDATE tag_categories SET {} WHERE id = ?",
         updates.join(", ")
     );
 
-    let mut db_query = sqlx::query_as::<_, TagCategory>(&query_str);
+    let mut db_query = sqlx::query(&query_str);
     for param in params {
         db_query = db_query.bind(param);
     }
     db_query = db_query.bind(category_id);
 
-    let category = db_query.fetch_one(pool).await?;
-    Ok(category)
+    db_query.execute(pool).await?;
+
+    get_tag_category_by_id(pool, category_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Tag category not found"))
 }
 
 pub async fn delete_tag_category(pool: &Pool<Sqlite>, category_id: i64) -> Result<()> {
@@ -2059,6 +2198,191 @@ pub async fn bulk_review_tags(pool: &Pool<Sqlite>, names: &[String]) -> Result<u
         count += result.rows_affected() as usize;
     }
     Ok(count)
+}
+
+// ============================================================================
+// Playlist Subscriptions
+// ============================================================================
+
+/// A subscription to a playlist for periodic syncing.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PlaylistSubscription {
+    pub id: i64,
+    pub service: String,
+    pub playlist_id: String,
+    pub service_playlist_id: Option<i64>,
+    pub subscribed_at: i64,
+    pub last_polled_at: Option<i64>,
+    pub poll_interval_secs: i64,
+    pub is_active: bool,
+    pub playlist_name: Option<String>,
+    pub track_count: i64,
+}
+
+/// Subscribe to a playlist. If already subscribed (INSERT OR IGNORE),
+/// returns the existing subscription id.
+pub async fn subscribe_to_playlist(
+    pool: &Pool<Sqlite>,
+    service: &str,
+    playlist_id: &str,
+    db_playlist_id: Option<i64>,
+) -> Result<i64> {
+    let _result = sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO playlist_subscriptions (service, playlist_id, service_playlist_id)
+        VALUES (?, ?, ?)
+        "#,
+    )
+    .bind(service)
+    .bind(playlist_id)
+    .bind(db_playlist_id)
+    .execute(pool)
+    .await?;
+
+    // Get the id of the subscription (existing or just inserted)
+    let row = sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM playlist_subscriptions WHERE service = ? AND playlist_id = ?",
+    )
+    .bind(service)
+    .bind(playlist_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row)
+}
+
+/// Unsubscribe from a playlist (delete the subscription).
+pub async fn unsubscribe_from_playlist(pool: &Pool<Sqlite>, subscription_id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM playlist_subscriptions WHERE id = ?")
+        .bind(subscription_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// List all subscriptions, joining with service_playlists to get playlist name and track count.
+pub async fn list_subscriptions(pool: &Pool<Sqlite>) -> Result<Vec<PlaylistSubscription>> {
+    let rows = sqlx::query_as::<_, PlaylistSubscription>(
+        r#"
+        SELECT
+            ps.*,
+            sp.name AS playlist_name,
+            COALESCE((SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id), 0) AS track_count
+        FROM playlist_subscriptions ps
+        LEFT JOIN service_playlists sp ON ps.service_playlist_id = sp.id
+        ORDER BY ps.subscribed_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Get subscriptions that are due for polling (is_active AND not polled recently).
+pub async fn get_due_subscriptions(pool: &Pool<Sqlite>) -> Result<Vec<PlaylistSubscription>> {
+    let rows = sqlx::query_as::<_, PlaylistSubscription>(
+        r#"
+        SELECT
+            ps.*,
+            sp.name AS playlist_name,
+            COALESCE((SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id), 0) AS track_count
+        FROM playlist_subscriptions ps
+        LEFT JOIN service_playlists sp ON ps.service_playlist_id = sp.id
+        WHERE ps.is_active = 1
+          AND (ps.last_polled_at IS NULL OR ps.last_polled_at + ps.poll_interval_secs < unixepoch())
+        ORDER BY ps.subscribed_at ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Update the last_polled_at timestamp to now.
+pub async fn update_subscription_last_polled(
+    pool: &Pool<Sqlite>,
+    subscription_id: i64,
+) -> Result<()> {
+    sqlx::query("UPDATE playlist_subscriptions SET last_polled_at = unixepoch() WHERE id = ?")
+        .bind(subscription_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Update the service_playlist_id for a subscription.
+pub async fn update_subscription_playlist_id(
+    pool: &Pool<Sqlite>,
+    subscription_id: i64,
+    service_playlist_id: i64,
+) -> Result<()> {
+    sqlx::query("UPDATE playlist_subscriptions SET service_playlist_id = ? WHERE id = ?")
+        .bind(service_playlist_id)
+        .bind(subscription_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Get all playlist associations for a given track: (playlist_name, playlist_id, service).
+pub async fn get_track_playlist_associations(
+    conn: &mut SqliteConnection,
+    track_id: i64,
+) -> Result<Vec<(String, String, String)>> {
+    let rows = sqlx::query_as::<_, (String, String, String)>(
+        r#"
+        SELECT sp.name, sp.playlist_id, sp.service
+        FROM service_playlist_tracks spt
+        JOIN service_playlists sp ON spt.playlist_id = sp.id
+        WHERE spt.track_id = ?
+        "#,
+    )
+    .bind(track_id)
+    .fetch_all(conn)
+    .await?;
+    Ok(rows)
+}
+
+/// Check if a playlist is subscribed (by service + playlist_id).
+pub async fn is_playlist_subscribed(
+    pool: &Pool<Sqlite>,
+    service: &str,
+    playlist_id: &str,
+) -> Result<Option<PlaylistSubscription>> {
+    row_by_service_and_playlist_id(pool, service, playlist_id).await
+}
+
+/// Get a subscription by service + playlist_id (more explicit name).
+pub async fn get_subscription_by_playlist_id(
+    pool: &Pool<Sqlite>,
+    service: &str,
+    playlist_id: &str,
+) -> Result<Option<PlaylistSubscription>> {
+    row_by_service_and_playlist_id(pool, service, playlist_id).await
+}
+
+/// Shared helper: fetch a subscription by service + playlist_id with JOIN.
+async fn row_by_service_and_playlist_id(
+    pool: &Pool<Sqlite>,
+    service: &str,
+    playlist_id: &str,
+) -> Result<Option<PlaylistSubscription>> {
+    let row = sqlx::query_as::<_, PlaylistSubscription>(
+        r#"
+        SELECT
+            ps.*,
+            sp.name AS playlist_name,
+            COALESCE((SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id), 0) AS track_count
+        FROM playlist_subscriptions ps
+        LEFT JOIN service_playlists sp ON ps.service_playlist_id = sp.id
+        WHERE ps.service = ? AND ps.playlist_id = ?
+        "#,
+    )
+    .bind(service)
+    .bind(playlist_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
 }
 
 #[cfg(test)]

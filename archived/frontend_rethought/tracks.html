@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Tracks — Music Manager</title>
+        <link
+            rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        />
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <nav id="main-nav"></nav>
+
+        <div class="container">
+            <div class="page-header">
+                <h1>Tracks</h1>
+                <p class="subtitle">Browse tracks synced from connected services</p>
+            </div>
+
+            <div class="error-message" id="error-message"></div>
+
+            <!-- Toolbar -->
+            <div class="toolbar">
+                <input
+                    type="text"
+                    id="search-input"
+                    class="input-text"
+                    placeholder="Search tracks..."
+                />
+                <button id="search-btn" class="btn btn-sm">
+                    <i class="fas fa-search"></i> Search
+                </button>
+                <button id="refresh-btn" class="btn btn-sm">
+                    <i class="fas fa-sync-alt"></i> Refresh
+                </button>
+                <select
+                    id="service-filter"
+                    class="input-text"
+                    style="flex: 0 0 auto; width: auto; min-width: 140px"
+                >
+                    <option value="all">All Services</option>
+                    <option value="spotify">Spotify</option>
+                    <option value="soundcloud">SoundCloud</option>
+                    <option value="youtube">YouTube</option>
+                </select>
+            </div>
+
+            <!-- Stats Row -->
+            <div class="stats-row">
+                <div class="stats-group">
+                    <span><strong id="total-tracks">0</strong> total tracks</span>
+                    <span><strong id="current-page">Page 1 of 1</strong></span>
+                    <span id="showing-tracks">Showing: 0-0</span>
+                </div>
+            </div>
+
+            <!-- Content -->
+            <div id="tracks-content">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading tracks...</p>
+                </div>
+            </div>
+
+            <!-- Pagination -->
+            <div class="pagination">
+                <button class="pagination-btn" id="first-page-btn" disabled>
+                    <i class="fas fa-angle-double-left"></i>
+                </button>
+                <button class="pagination-btn" id="prev-page-btn" disabled>
+                    <i class="fas fa-chevron-left"></i> Prev
+                </button>
+                <span class="pagination-info" id="page-info">Page 1 of 1</span>
+                <button class="pagination-btn" id="next-page-btn" disabled>
+                    Next <i class="fas fa-chevron-right"></i>
+                </button>
+                <button class="pagination-btn" id="last-page-btn" disabled>
+                    <i class="fas fa-angle-double-right"></i>
+                </button>
+            </div>
+
+            <footer>
+                <p>
+                    Backend API:
+                    <code style="color: var(--text-muted)"
+                        >http://localhost:3000/api</code
+                    >
+                </p>
+            </footer>
+        </div>
+
+        <script type="module" src="tracks.js"></script>
+    </body>
+</html>

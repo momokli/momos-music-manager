@@ -16,10 +16,15 @@ mod audio_extensions;
 mod comment;
 mod config;
 mod db;
+mod digging;
 mod embeddings;
+mod scan_cache;
 mod spotify;
-mod sync;
+
+mod dump;
+mod poller;
 mod tasks;
+mod traktor;
 mod watch;
 
 #[derive(Parser)]
@@ -50,6 +55,16 @@ enum Commands {
     ScanFile {
         #[arg(help = "Path to the file to scan")]
         path: String,
+    },
+    /// Export all database tables to dev-data/dump.json
+    Dump {
+        #[arg(long, default_value = "dev-data/dump.json")]
+        output: String,
+    },
+    /// Import all database tables from dev-data/dump.json
+    Restore {
+        #[arg(long, default_value = "dev-data/dump.json")]
+        input: String,
     },
 }
 
@@ -100,6 +115,12 @@ async fn main() -> Result<()> {
             info!("Scan file: {path}");
             scan_single_file(&db, &path).await?;
         }
+        Commands::Dump { output } => {
+            crate::dump::export_dump(&db, &output).await?;
+        }
+        Commands::Restore { input } => {
+            crate::dump::import_dump(&db, &input).await?;
+        }
     }
 
     Ok(())
@@ -109,11 +130,36 @@ async fn serve(db: Pool<Sqlite>, host: String, port: u16) -> Result<()> {
     let config = crate::config::ServiceCredentials::from_env();
     let task_manager = crate::tasks::TaskManager::new();
 
+    // Clone for subscription poller (background task needs own ownership)
+    let poller_db = db.clone();
+    let poller_config = config.clone();
+    let poller_cancel = tokio_util::sync::CancellationToken::new();
+
+    let pruner_tm = task_manager.clone();
+
     let state = Arc::new(AppState {
         db,
         config,
         task_manager,
         embeddings: tokio::sync::Mutex::new(None),
+    });
+
+    // Spawn subscription poller — polls subscribed playlists every 30s
+    let poller_handle = tokio::spawn(async move {
+        crate::poller::start_subscription_poller(poller_db, poller_config, poller_cancel).await;
+    });
+    // Keep poller alive for the lifetime of the server
+    let _poller_handle = poller_handle;
+
+    // Spawn background task pruner — removes completed/failed/cancelled tasks
+    // that are older than 5 minutes, checking every 60 seconds
+    tokio::spawn(async move {
+        let prune_age = std::time::Duration::from_secs(300); // 5 minutes
+        let check_interval = std::time::Duration::from_secs(60);
+        loop {
+            tokio::time::sleep(check_interval).await;
+            pruner_tm.prune_old_tasks(prune_age).await;
+        }
     });
 
     // Build our application with routes

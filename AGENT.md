@@ -35,6 +35,24 @@ cargo run -- scan-file /path/to/file.stem.m4a
 
 # Delete old DBs + restart
 rm -f app.db && cargo run -- serve --host 127.0.0.1 --port 3000
+
+# Record Spotify API responses for later replay
+SPOTIFY_API_CACHE=record cargo run -- serve
+
+# Replay cached responses (no API calls, seconds instead of minutes)
+SPOTIFY_API_CACHE=replay cargo run -- serve
+
+# Clear cached API responses
+rm -rf dev-data/spotify-api
+
+# Record folder scan metadata for later replay
+SCAN_CACHE=record cargo run -- serve
+
+# Replay cached folder scan (no lofty/exiftool calls, seconds instead of minutes)
+SCAN_CACHE=replay cargo run -- serve
+
+# Clear cached scan metadata (forces re-extraction next scan)
+rm -rf dev-data/scan-cache
 ```
 
 ## Important Gotchas
@@ -42,7 +60,7 @@ rm -f app.db && cargo run -- serve --host 127.0.0.1 --port 3000
 - **Before testing**: Always delete old DB files (`app.db`, `compile_check.db`, `test.db`)
 - **If you see "migration 27" errors**: DELETE ALL DB files and start fresh
 - **No SoundCloud/YouTube OAuth yet** — framework is ready, actual flow not implemented
-- **Frontend is POC** — pure HTML/JS in `frontend/`. React (`frontend_react/`) is gone.
+- **Frontend is an SPA** — modular vanilla JS with ES modules in `frontend/`. Hash-based router (`app.js`), shared modules in `shared/`, pages in `pages/`. Serve with `python3 -m http.server` (no `file://`).
 - **Docker** was removed — will be recreated later. Use `cargo run` for now.
 
 ## Tag Categories (Defaults)

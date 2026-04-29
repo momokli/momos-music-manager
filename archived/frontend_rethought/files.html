@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Music Manager - Files</title>
+        <link
+            rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        />
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <nav id="main-nav"></nav>
+
+        <div class="container">
+            <div class="page-header">
+                <h1><i class="fas fa-music"></i> Files</h1>
+                <p class="subtitle">
+                    View and search your local music files with pagination
+                </p>
+            </div>
+
+            <div class="error-message" id="error-message"></div>
+
+            <!-- Task Status Bar (hidden by default) -->
+            <div class="task-status" id="task-status">
+                <div class="task-status-inner">
+                    <div class="spinner" style="width: 20px; height: 20px; flex-shrink: 0;"></div>
+                    <div style="flex: 1; min-width: 0;">
+                        <div class="task-status-text" id="task-status-text">
+                            Writing comments...
+                        </div>
+                        <div class="task-status-progress" id="task-status-progress"></div>
+                    </div>
+                    <button id="check-task-btn" class="btn btn-sm">
+                        <i class="fas fa-redo"></i> Check
+                    </button>
+                </div>
+            </div>
+
+            <!-- Toolbar -->
+            <div class="toolbar">
+                <input
+                    type="text"
+                    id="search-input"
+                    class="input-text"
+                    placeholder="Search files by title or artist..."
+                />
+                <button id="search-btn" class="btn btn-primary">
+                    <i class="fas fa-search"></i> Search
+                </button>
+                <button id="refresh-btn" class="btn">
+                    <i class="fas fa-sync-alt"></i> Refresh
+                </button>
+                <button id="write-all-btn" class="btn btn-green" style="display: none;">
+                    <i class="fas fa-pen"></i> Write All Comments
+                </button>
+            </div>
+
+            <!-- Stats Row -->
+            <div class="stats-row">
+                <div class="stats-group">
+                    <span id="total-files">Total: —</span>
+                    <span id="current-page">Page: —</span>
+                    <span id="showing-files">Showing: —</span>
+                </div>
+            </div>
+
+            <!-- Content -->
+            <div id="files-content">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading files...</p>
+                </div>
+            </div>
+
+            <!-- Pagination -->
+            <div class="pagination">
+                <button id="first-page-btn" class="pagination-btn" disabled>
+                    <i class="fas fa-angle-double-left"></i>
+                </button>
+                <button id="prev-page-btn" class="pagination-btn" disabled>
+                    <i class="fas fa-angle-left"></i> Previous
+                </button>
+                <span class="pagination-info" id="page-info">Page 1 of 1</span>
+                <button id="next-page-btn" class="pagination-btn" disabled>
+                    Next <i class="fas fa-angle-right"></i>
+                </button>
+                <button id="last-page-btn" class="pagination-btn" disabled>
+                    <i class="fas fa-angle-double-right"></i>
+                </button>
+            </div>
+
+            <footer>
+                <p>
+                    Backend API:
+                    <code style="color: var(--text-muted)">http://localhost:3000/api</code>
+                </p>
+            </footer>
+        </div>
+
+        <script type="module" src="files.js"></script>
+    </body>
+</html>

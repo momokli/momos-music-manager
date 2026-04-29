@@ -1,4 +1,5 @@
 /target
+/dev-data/
 .env
 app.db*
 *.db-shm

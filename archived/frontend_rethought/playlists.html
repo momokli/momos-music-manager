@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Playlists - Music Manager</title>
+        <link
+            rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        />
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <nav id="main-nav"></nav>
+
+        <div class="container">
+            <div class="page-header">
+                <h1>Playlists</h1>
+                <p class="subtitle">
+                    Browse playlists synced from connected services
+                </p>
+            </div>
+
+            <div class="error-message" id="error-message"></div>
+
+            <!-- Toolbar -->
+            <div class="toolbar">
+                <input
+                    type="text"
+                    id="search-input"
+                    class="input-text"
+                    placeholder="Search playlists..."
+                />
+                <button id="search-btn" class="btn btn-sm">
+                    <i class="fas fa-search"></i> Search
+                </button>
+                <button id="refresh-btn" class="btn btn-sm">
+                    <i class="fas fa-sync-alt"></i> Refresh
+                </button>
+                <select id="service-filter" class="input-text" style="flex: 0 0 auto; width: auto; min-width: 140px;">
+                    <option value="all">All Services</option>
+                    <option value="spotify">Spotify</option>
+                    <option value="soundcloud">SoundCloud</option>
+                    <option value="youtube">YouTube</option>
+                </select>
+            </div>
+
+            <!-- Stats Row -->
+            <div class="stats-row">
+                <div class="stats-group">
+                    <span>Total: <strong id="total-playlists">0</strong></span>
+                    <span>Page: <strong id="current-page">1</strong></span>
+                    <span>Showing: <strong id="showing-playlists">0-0</strong></span>
+                </div>
+            </div>
+
+            <!-- Content -->
+            <div id="playlists-content">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading playlists...</p>
+                </div>
+            </div>
+
+            <!-- Pagination -->
+            <div class="pagination">
+                <button id="first-page-btn" class="pagination-btn" disabled>
+                    <i class="fas fa-angle-double-left"></i>
+                </button>
+                <button id="prev-page-btn" class="pagination-btn" disabled>
+                    <i class="fas fa-chevron-left"></i> Prev
+                </button>
+                <span id="page-info" class="pagination-info">Page 1 of 1</span>
+                <button id="next-page-btn" class="pagination-btn" disabled>
+                    Next <i class="fas fa-chevron-right"></i>
+                </button>
+                <button id="last-page-btn" class="pagination-btn" disabled>
+                    <i class="fas fa-angle-double-right"></i>
+                </button>
+            </div>
+
+            <footer>
+                <p>
+                    Backend API:
+                    <code style="color: var(--text-muted)"
+                        >http://localhost:3000/api</code
+                    >
+                </p>
+            </footer>
+        </div>
+
+        <script type="module" src="playlists.js"></script>
+    </body>
+</html>

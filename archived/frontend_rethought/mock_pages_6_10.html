@@ -1,0 +1,922 @@
+<!-- Page 6: Tag Categories -->
+<div id="page-6" class="hidden">
+  <div class="mb-6 flex items-center justify-between">
+    <h2 class="text-xl font-bold text-[#e2e8f0]">Tag Categories</h2>
+    <button class="rounded-lg bg-[#6366f1] px-4 py-2 text-sm font-medium text-white transition hover:bg-[#5558e6]">
+      <i class="fa-regular fa-plus mr-2"></i>New Category
+    </button>
+  </div>
+
+  <div class="overflow-hidden rounded-lg border border-[#1e293b] bg-[#14181f]">
+    <table class="w-full text-left text-sm">
+      <thead>
+        <tr class="border-b border-[#1e293b] text-[#64748b]">
+          <th class="px-4 py-3 font-medium">Name</th>
+          <th class="px-4 py-3 font-medium">Prefix</th>
+          <th class="px-4 py-3 font-medium">Icon</th>
+          <th class="px-4 py-3 font-medium text-center">Default</th>
+          <th class="px-4 py-3 font-medium text-center">Sort Order</th>
+          <th class="px-4 py-3 font-medium text-center">Tag Count</th>
+          <th class="px-4 py-3 font-medium text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-[#1e293b]">
+        <!-- Setlist -->
+        <tr class="text-[#e2e8f0] hover:bg-[#1a1f2a]">
+          <td class="px-4 py-3">Setlist</td>
+          <td class="px-4 py-3">
+            <span class="inline-block rounded bg-[#1e293b] px-2 py-0.5 text-xs text-[#64748b]">—</span>
+          </td>
+          <td class="px-4 py-3 text-[#cbd5e1]"><i class="fa-regular fa-list-music"></i></td>
+          <td class="px-4 py-3 text-center">
+            <span class="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#10b981]/20 text-[#10b981]">
+              <i class="fa-regular fa-check text-xs"></i>
+            </span>
+          </td>
+          <td class="px-4 py-3 text-center text-[#cbd5e1]">0</td>
+          <td class="px-4 py-3 text-center">
+            <span class="rounded-full bg-[#1e293b] px-2.5 py-0.5 text-xs text-[#94a3b8]">8 tags</span>
+          </td>
+          <td class="px-4 py-3 text-right">
+            <button class="rounded p-1.5 text-[#64748b] transition hover:bg-[#1e293b] hover:text-[#e2e8f0]">
+              <i class="fa-regular fa-pencil text-sm"></i>
+            </button>
+            <button class="rounded p-1.5 text-[#334155] transition cursor-not-allowed" disabled title="Cannot delete default category">
+              <i class="fa-regular fa-trash-can text-sm"></i>
+            </button>
+          </td>
+        </tr>
+        <!-- Phase -->
+        <tr class="text-[#e2e8f0] hover:bg-[#1a1f2a]">
+          <td class="px-4 py-3">Phase</td>
+          <td class="px-4 py-3">
+            <span class="inline-block rounded bg-[#8b5cf6]/20 px-2 py-0.5 text-xs font-medium text-[#8b5cf6]">P</span>
+          </td>
+          <td class="px-4 py-3 text-[#cbd5e1]"><i class="fa-regular fa-activity"></i></td>
+          <td class="px-4 py-3 text-center text-[#64748b]">—</td>
+          <td class="px-4 py-3 text-center text-[#cbd5e1]">1</td>
+          <td class="px-4 py-3 text-center">
+            <span class="rounded-full bg-[#1e293b] px-2.5 py-0.5 text-xs text-[#94a3b8]">12 tags</span>
+          </td>
+          <td class="px-4 py-3 text-right">
+            <button class="rounded p-1.5 text-[#64748b] transition hover:bg-[#1e293b] hover:text-[#e2e8f0]">
+              <i class="fa-regular fa-pencil text-sm"></i>
+            </button>
+            <button class="rounded p-1.5 text-[#64748b] transition hover:bg-[#1e293b] hover:text-[#ef4444]">
+              <i class="fa-regular fa-trash-can text-sm"></i>
+            </button>
+          </td>
+        </tr>
+        <!-- Mood -->
+        <tr class="text-[#e2e8f0] hover:bg-[#1a1f2a]">
+          <td class="px-4 py-3">Mood</td>
+          <td class="px-4 py-3">
+            <span class="inline-block rounded bg-pink-500/20 px-2 py-0.5 text-xs font-medium text-pink-400">M</span>
+          </td>
+          <td class="px-4 py-3 text-[#cbd5e1]"><i class="fa-regular fa-heart"></i></td>
+          <td class="px-4 py-3 text-center text-[#64748b]">—</td>
+          <td class="px-4 py-3 text-center text-[#cbd5e1]">2</td>
+          <td class="px-4 py-3 text-center">
+            <span class="rounded-full bg-[#1e293b] px-2.5 py-0.5 text-xs text-[#94a3b8]">10 tags</span>
+          </td>
+          <td class="px-4 py-3 text-right">
+            <button class="rounded p-1.5 text-[#64748b] transition hover:bg-[#1e293b] hover:text-[#e2e8f0]">
+              <i class="fa-regular fa-pencil text-sm"></i>
+            </button>
+            <button class="rounded p-1.5 text-[#64748b] transition hover:bg-[#1e293b] hover:text-[#ef4444]">
+              <i class="fa-regular fa-trash-can text-sm"></i>
+            </button>
+          </td>
+        </tr>
+        <!-- Vibe -->
+        <tr class="text-[#e2e8f0] hover:bg-[#1a1f2a]">
+          <td class="px-4 py-3">Vibe</td>
+          <td class="px-4 py-3">
+            <span class="inline-block rounded bg-[#f59e0b]/20 px-2 py-0.5 text-xs font-medium text-[#f59e0b]">V</span>
+          </td>
+          <td class="px-4 py-3 text-[#cbd5e1]"><i class="fa-regular fa-sparkles"></i></td>
+          <td class="px-4 py-3 text-center text-[#64748b]">—</td>
+          <td class="px-4 py-3 text-center text-[#cbd5e1]">3</td>
+          <td class="px-4 py-3 text-center">
+            <span class="rounded-full bg-[#1e293b] px-2.5 py-0.5 text-xs text-[#94a3b8]">7 tags</span>
+          </td>
+          <td class="px-4 py-3 text-right">
+            <button class="rounded p-1.5 text-[#64748b] transition hover:bg-[#1e293b] hover:text-[#e2e8f0]">
+              <i class="fa-regular fa-pencil text-sm"></i>
+            </button>
+            <button class="rounded p-1.5 text-[#64748b] transition hover:bg-[#1e293b] hover:text-[#ef4444]">
+              <i class="fa-regular fa-trash-can text-sm"></i>
+            </button>
+          </td>
+        </tr>
+        <!-- Merkmal -->
+        <tr class="text-[#e2e8f0] hover:bg-[#1a1f2a]">
+          <td class="px-4 py-3">Merkmal</td>
+          <td class="px-4 py-3">
+            <span class="inline-block rounded bg-[#1e293b] px-2 py-0.5 text-xs text-[#64748b]">—</span>
+          </td>
+          <td class="px-4 py-3 text-[#cbd5e1]"><i class="fa-regular fa-hash"></i></td>
+          <td class="px-4 py-3 text-center text-[#64748b]">—</td>
+          <td class="px-4 py-3 text-center text-[#cbd5e1]">4</td>
+          <td class="px-4 py-3 text-center">
+            <span class="rounded-full bg-[#1e293b] px-2.5 py-0.5 text-xs text-[#94a3b8]">10 tags</span>
+          </td>
+          <td class="px-4 py-3 text-right">
+            <button class="rounded p-1.5 text-[#64748b] transition hover:bg-[#1e293b] hover:text-[#e2e8f0]">
+              <i class="fa-regular fa-pencil text-sm"></i>
+            </button>
+            <button class="rounded p-1.5 text-[#64748b] transition hover:bg-[#1e293b] hover:text-[#ef4444]">
+              <i class="fa-regular fa-trash-can text-sm"></i>
+            </button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <details class="mt-6 rounded-lg border border-[#1e293b] bg-[#14181f]">
+    <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-[#cbd5e1] hover:text-[#e2e8f0]">
+      <i class="fa-regular fa-chevron-right mr-2 transition"></i> States Preview
+    </summary>
+    <div class="border-t border-[#1e293b] p-4 space-y-4">
+      <div class="flex flex-col items-center justify-center py-8 text-[#64748b]">
+        <i class="fa-regular fa-spinner-third fa-spin text-2xl mb-3"></i>
+        <p class="text-sm">Loading categories...</p>
+      </div>
+      <div class="flex flex-col items-center justify-center py-8 text-[#64748b]">
+        <i class="fa-regular fa-tags text-2xl mb-3"></i>
+        <p class="text-sm font-medium text-[#cbd5e1]">No categories yet</p>
+        <p class="mt-1 text-xs">Create your first category to start organizing tags.</p>
+      </div>
+      <div class="flex flex-col items-center justify-center py-8 text-[#64748b]">
+        <i class="fa-regular fa-circle-exclamation text-2xl mb-3 text-[#ef4444]"></i>
+        <p class="text-sm font-medium text-[#ef4444]">Failed to load categories</p>
+        <p class="mt-1 text-xs text-[#94a3b8]">Network error. Please try again.</p>
+        <button class="mt-3 rounded-lg border border-[#1e293b] bg-[#1a1f2a] px-3 py-1.5 text-xs text-[#cbd5e1] transition hover:bg-[#1e293b]">Retry</button>
+      </div>
+    </div>
+  </details>
+</div>
+
+<!-- Page 7: Services -->
+<div id="page-7" class="hidden">
+  <div class="mb-6 flex items-center justify-between">
+    <h2 class="text-xl font-bold text-[#e2e8f0]">Services</h2>
+    <div class="flex items-center gap-3">
+      <span class="text-sm text-[#94a3b8]">
+        <span class="font-medium text-[#cbd5e1]">3</span> services &middot;
+        <span class="font-medium text-[#10b981]">2</span> connected
+      </span>
+      <button class="rounded-lg border border-[#1e293b] bg-[#14181f] px-3 py-2 text-sm text-[#cbd5e1] transition hover:bg-[#1a1f2a]">
+        <i class="fa-regular fa-rotate mr-1.5"></i>Refresh
+      </button>
+    </div>
+  </div>
+
+  <div class="overflow-hidden rounded-lg border border-[#1e293b] bg-[#14181f]">
+    <table class="w-full text-left text-sm">
+      <thead>
+        <tr class="border-b border-[#1e293b] text-[#64748b]">
+          <th class="px-4 py-3 font-medium">Service</th>
+          <th class="px-4 py-3 font-medium">Status</th>
+          <th class="px-4 py-3 font-medium">Client ID</th>
+          <th class="px-4 py-3 font-medium text-center">Playlists</th>
+          <th class="px-4 py-3 font-medium text-center">Tracks</th>
+          <th class="px-4 py-3 font-medium text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-[#1e293b]">
+        <!-- Spotify -->
+        <tr class="text-[#e2e8f0] hover:bg-[#1a1f2a]">
+          <td class="px-4 py-4">
+            <div class="flex items-center gap-2.5">
+              <i class="fa-brands fa-spotify text-lg text-[#10b981]"></i>
+              <span class="font-medium">Spotify</span>
+            </div>
+          </td>
+          <td class="px-4 py-4">
+            <div class="flex flex-wrap gap-1.5">
+              <span class="inline-flex items-center gap-1 rounded-full border border-[#10b981]/30 bg-[#10b981]/10 px-2.5 py-0.5 text-xs font-medium text-[#10b981]">
+                <i class="fa-regular fa-circle-check text-[10px]"></i> Configured
+              </span>
+              <span class="inline-flex items-center gap-1 rounded-full border border-[#10b981]/30 bg-[#10b981]/10 px-2.5 py-0.5 text-xs font-medium text-[#10b981]">
+                <i class="fa-regular fa-link text-[10px]"></i> Connected
+              </span>
+              <span class="inline-flex items-center gap-1 rounded-full border border-[#6366f1]/30 bg-[#6366f1]/10 px-2.5 py-0.5 text-xs font-medium text-[#6366f1]">
+                <i class="fa-regular fa-spinner-third fa-spin text-[10px]"></i> Syncing
+              </span>
+            </div>
+          </td>
+          <td class="px-4 py-4 text-xs font-mono text-[#94a3b8]">1a2b3c...x9y0z</td>
+          <td class="px-4 py-4 text-center text-[#cbd5e1]">8</td>
+          <td class="px-4 py-4 text-center text-[#cbd5e1]">342</td>
+          <td class="px-4 py-4 text-right">
+            <div class="flex items-center justify-end gap-1.5">
+              <button class="rounded-lg border border-[#1e293b] bg-[#1a1f2a] px-2.5 py-1.5 text-xs text-[#cbd5e1] transition hover:bg-[#1e293b]">
+                <i class="fa-regular fa-plug mr-1"></i>Connect
+              </button>
+              <button class="rounded-lg border border-[#6366f1]/30 bg-[#6366f1]/10 px-2.5 py-1.5 text-xs text-[#6366f1] transition hover:bg-[#6366f1]/20">
+                <i class="fa-regular fa-arrows-spin mr-1"></i>Sync Full
+              </button>
+              <button class="rounded-lg border border-[#1e293b] bg-[#1a1f2a] px-2.5 py-1.5 text-xs text-[#cbd5e1] transition hover:bg-[#1e293b]">
+                <i class="fa-regular fa-list mr-1"></i>Sync Playlists
+              </button>
+            </div>
+          </td>
+        </tr>
+        <!-- SoundCloud -->
+        <tr class="text-[#e2e8f0] hover:bg-[#1a1f2a]">
+          <td class="px-4 py-4">
+            <div class="flex items-center gap-2.5">
+              <i class="fa-brands fa-soundcloud text-lg text-[#f59e0b]"></i>
+              <span class="font-medium">SoundCloud</span>
+            </div>
+          </td>
+          <td class="px-4 py-4">
+            <div class="flex flex-wrap gap-1.5">
+              <span class="inline-flex items-center gap-1 rounded-full border border-[#10b981]/30 bg-[#10b981]/10 px-2.5 py-0.5 text-xs font-medium text-[#10b981]">
+                <i class="fa-regular fa-circle-check text-[10px]"></i> Configured
+              </span>
+              <span class="inline-flex items-center gap-1 rounded-full border border-[#f59e0b]/30 bg-[#f59e0b]/10 px-2.5 py-0.5 text-xs font-medium text-[#f59e0b]">
+                <i class="fa-regular fa-triangle-exclamation text-[10px]"></i> Auth needed
+              </span>
+            </div>
+          </td>
+          <td class="px-4 py-4 text-xs font-mono text-[#94a3b8]">a1b2c3...d4e5f</td>
+          <td class="px-4 py-4 text-center text-[#cbd5e1]">3</td>
+          <td class="px-4 py-4 text-center text-[#cbd5e1]">87</td>
+          <td class="px-4 py-4 text-right">
+            <div class="flex items-center justify-end gap-1.5">
+              <button class="rounded-lg border border-[#1e293b] bg-[#1a1f2a] px-2.5 py-1.5 text-xs text-[#cbd5e1] transition hover:bg-[#1e293b]">
+                <i class="fa-regular fa-plug mr-1"></i>Connect
+              </button>
+              <span class="text-xs text-[#64748b] italic">Auth required to sync</span>
+            </div>
+          </td>
+        </tr>
+        <!-- YouTube -->
+        <tr class="text-[#e2e8f0] hover:bg-[#1a1f2a]">
+          <td class="px-4 py-4">
+            <div class="flex items-center gap-2.5">
+              <i class="fa-brands fa-youtube text-lg text-[#ef4444]"></i>
+              <span class="font-medium">YouTube</span>
+            </div>
+          </td>
+          <td class="px-4 py-4">
+            <span class="inline-flex items-center gap-1 rounded-full border border-[#64748b]/30 bg-[#1e293b] px-2.5 py-0.5 text-xs font-medium text-[#64748b]">
+              <i class="fa-regular fa-circle-xmark text-[10px]"></i> Not Configured
+            </span>
+          </td>
+          <td class="px-4 py-4 text-xs font-mono text-[#64748b]">—</td>
+          <td class="px-4 py-4 text-center text-[#64748b]">—</td>
+          <td class="px-4 py-4 text-center text-[#64748b]">—</td>
+          <td class="px-4 py-4 text-right">
+            <span class="text-xs text-[#64748b] italic">.env credentials needed</span>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <details class="mt-6 rounded-lg border border-[#1e293b] bg-[#14181f]">
+    <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-[#cbd5e1] hover:text-[#e2e8f0]">
+      <i class="fa-regular fa-chevron-right mr-2 transition"></i> How Service Configuration Works
+    </summary>
+    <div class="border-t border-[#1e293b] p-4">
+      <p class="mb-3 text-xs text-[#94a3b8]">Service credentials are loaded from your <code class="rounded bg-[#1e293b] px-1.5 py-0.5 font-mono text-[#f59e0b]">.env</code> file. No credentials are ever stored in the database or exposed via UI.</p>
+      <div class="overflow-x-auto">
+        <pre class="rounded-lg bg-[#0b0d12] p-4 text-xs font-mono leading-relaxed text-[#cbd5e1]"><span class="text-[#64748b]"># .env — Service Configuration</span>
+<span class="text-[#10b981]">SPOTIFY_CLIENT_ID</span>=<span class="text-[#f59e0b]">1a2b3c4d5e6f7g8h9i0j</span>
+<span class="text-[#10b981]">SPOTIFY_CLIENT_SECRET</span>=<span class="text-[#f59e0b]">secret_spotify_123</span>
+<span class="text-[#10b981]">SPOTIFY_REDIRECT_URI</span>=<span class="text-[#f59e0b]">http://localhost:3000/auth/spotify/callback</span>
+
+<span class="text-[#f59e0b]">SOUNDCLOUD_CLIENT_ID</span>=<span class="text-[#f59e0b]">a1b2c3d4e5f6g7h8i9j0</span>
+<span class="text-[#f59e0b]">SOUNDCLOUD_CLIENT_SECRET</span>=<span class="text-[#f59e0b]">secret_sc_456</span>
+<span class="text-[#f59e0b]">SOUNDCLOUD_REDIRECT_URI</span>=<span class="text-[#f59e0b]">http://localhost:3000/auth/soundcloud/callback</span>
+
+<span class="text-[#ef4444]"># YOUTUBE_CLIENT_ID</span>=<span class="text-[#ef4444]">(not set)</span>
+<span class="text-[#ef4444]"># YOUTUBE_CLIENT_SECRET</span>=<span class="text-[#ef4444]">(not set)</span>
+<span class="text-[#ef4444]"># YOUTUBE_REDIRECT_URI</span>=<span class="text-[#ef4444]">http://localhost:3000/auth/youtube/callback</span></pre>
+      </div>
+    </div>
+  </details>
+
+  <details class="mt-6 rounded-lg border border-[#1e293b] bg-[#14181f]">
+    <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-[#cbd5e1] hover:text-[#e2e8f0]">
+      <i class="fa-regular fa-chevron-right mr-2 transition"></i> States Preview
+    </summary>
+    <div class="border-t border-[#1e293b] p-4 space-y-4">
+      <div class="flex flex-col items-center justify-center py-8 text-[#64748b]">
+        <i class="fa-regular fa-spinner-third fa-spin text-2xl mb-3"></i>
+        <p class="text-sm">Loading services...</p>
+      </div>
+      <div class="flex flex-col items-center justify-center py-8 text-[#64748b]">
+        <i class="fa-regular fa-cloud text-2xl mb-3"></i>
+        <p class="text-sm font-medium text-[#cbd5e1]">No services configured</p>
+        <p class="mt-1 text-xs">Add service credentials to your .env file to get started.</p>
+      </div>
+      <div class="flex flex-col items-center justify-center py-8 text-[#64748b]">
+        <i class="fa-regular fa-circle-exclamation text-2xl mb-3 text-[#ef4444]"></i>
+        <p class="text-sm font-medium text-[#ef4444]">Failed to load services</p>
+        <p class="mt-1 text-xs text-[#94a3b8]">Could not reach the backend.</p>
+        <button class="mt-3 rounded-lg border border-[#1e293b] bg-[#1a1f2a] px-3 py-1.5 text-xs text-[#cbd5e1] transition hover:bg-[#1e293b]">Retry</button>
+      </div>
+    </div>
+  </details>
+</div>
+
+<!-- Page 8: Tasks -->
+<div id="page-8" class="hidden">
+  <div class="mb-6 flex items-center justify-between">
+    <h2 class="text-xl font-bold text-[#e2e8f0]">Tasks</h2>
+    <div class="flex items-center gap-3">
+      <select class="rounded-lg border border-[#1e293b] bg-[#14181f] px-3 py-2 text-sm text-[#cbd5e1] outline-none transition focus:border-[#6366f1]">
+        <option>All</option>
+        <option>Running</option>
+        <option>Pending</option>
+        <option>Completed</option>
+        <option>Failed</option>
+        <option>Cancelled</option>
+      </select>
+      <button class="rounded-lg border border-[#1e293b] bg-[#14181f] px-3 py-2 text-sm text-[#cbd5e1] transition hover:bg-[#1a1f2a]">
+        <i class="fa-regular fa-rotate mr-1.5"></i>Refresh
+      </button>
+    </div>
+  </div>
+
+  <div class="mb-4 flex items-center gap-2 text-sm text-[#94a3b8]">
+    <i class="fa-regular fa-chart-simple"></i>
+    <span><strong class="text-[#cbd5e1]">12</strong> tasks</span>
+  </div>
+
+  <div class="overflow-hidden rounded-lg border border-[#1e293b] bg-[#14181f]">
+    <table class="w-full text-left text-sm">
+      <thead>
+        <tr class="border-b border-[#1e293b] text-[#64748b]">
+          <th class="px-4 py-3 font-medium">Task ID</th>
+          <th class="px-4 py-3 font-medium">Type</th>
+          <th class="px-4 py-3 font-medium">Status</th>
+          <th class="px-4 py-3 font-medium">Service</th>
+          <th class="px-4 py-3 font-medium">Progress</th>
+          <th class="px-4 py-3 font-medium">Created</th>
+          <th class="px-4 py-3 font-medium text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-[#1e293b]">
+        <!-- Running -->
+        <tr class="text-[#e2e8f0] hover:bg-[#1a1f2a]">
+          <td class="px-4 py-3 font-mono text-xs text-[#94a3b8]">tsk_a1b2c3d4...</td>
+          <td class="px-4 py-3">
+            <span class="inline-block rounded bg-[#6366f1]/10 px-2 py-0.5 text-xs font-medium text-[#6366f1]">spotify_sync</span>
+          </td>
+          <td class="px-4 py-3">
+            <span class="inline-flex items-center gap-1 rounded-full bg-[#6366f1]/10 px-2.5 py-0.5 text-xs font-medium text-[#6366f1]">
+              <i class="fa-regular fa-spinner-third fa-spin text-[10px]"></i> Running
+            </span>
+          </td>
+          <td class="px-4 py-3 text-[#cbd5e1]">Spotify</td>
+          <td class="px-4 py-3">
+            <div class="flex items-center gap-2">
+              <div class="h-1.5 w-24 overflow-hidden rounded-full bg-[#1e293b]">
+                <div class="h-full w-[58%] rounded-full bg-[#6366f1]"></div>
+              </div>
+              <span class="text-xs text-[#94a3b8]">7/12</span>
+            </div>
+            <p class="mt-0.5 text-xs text-[#64748b]">Syncing playlist 7/12...</p>
+          </td>
+          <td class="px-4 py-3 text-xs text-[#64748b]">2m ago</td>
+          <td class="px-4 py-3 text-right">
+            <button class="rounded-lg border border-[#ef4444]/30 bg-[#ef4444]/10 px-2.5 py-1.5 text-xs text-[#ef4444] transition hover:bg-[#ef4444]/20">
+              <i class="fa-regular fa-ban mr-1"></i>Cancel
+            </button>
+          </td>
+        </tr>
+        <!-- Completed -->
+        <tr class="text-[#e2e8f0] hover:bg-[#1a1f2a]">
+          <td class="px-4 py-3 font-mono text-xs text-[#94a3b8]">tsk_e5f6g7h8...</td>
+          <td class="px-4 py-3">
+            <span class="inline-block rounded bg-[#10b981]/10 px-2 py-0.5 text-xs font-medium text-[#10b981]">write_comment</span>
+          </td>
+          <td class="px-4 py-3">
+            <span class="inline-flex items-center gap-1 rounded-full bg-[#10b981]/10 px-2.5 py-0.5 text-xs font-medium text-[#10b981]">
+              <i class="fa-regular fa-circle-check text-[10px]"></i> Completed
+            </span>
+          </td>
+          <td class="px-4 py-3 text-[#cbd5e1]">Local</td>
+          <td class="px-4 py-3">
+            <div class="flex items-center gap-2">
+              <div class="h-1.5 w-24 overflow-hidden rounded-full bg-[#1e293b]">
+                <div class="h-full w-full rounded-full bg-[#10b981]"></div>
+              </div>
+              <span class="text-xs text-[#10b981]">Done</span>
+            </div>
+            <p class="mt-0.5 text-xs text-[#64748b]">Wrote 47 comments</p>
+          </td>
+          <td class="px-4 py-3 text-xs text-[#64748b]">15m ago</td>
+          <td class="px-4 py-3 text-right">
+            <button class="rounded-lg border border-[#1e293b] bg-[#1a1f2a] px-2.5 py-1.5 text-xs text-[#cbd5e1] transition hover:bg-[#1e293b]">
+              <i class="fa-regular fa-file-lines mr-1"></i>Logs
+            </button>
+          </td>
+        </tr>
+        <!-- Pending -->
+        <tr class="text-[#e2e8f0] hover:bg-[#1a1f2a]">
+          <td class="px-4 py-3 font-mono text-xs text-[#94a3b8]">tsk_i9j0k1l2...</td>
+          <td class="px-4 py-3">
+            <span class="inline-block rounded bg-[#f59e0b]/10 px-2 py-0.5 text-xs font-medium text-[#f59e0b]">recompute_embeddings</span>
+          </td>
+          <td class="px-4 py-3">
+            <span class="inline-flex items-center gap-1 rounded-full bg-[#f59e0b]/10 px-2.5 py-0.5 text-xs font-medium text-[#f59e0b]">
+              <i class="fa-regular fa-clock text-[10px]"></i> Pending
+            </span>
+          </td>
+          <td class="px-4 py-3 text-[#cbd5e1]">Local</td>
+          <td class="px-4 py-3">
+            <div class="flex items-center gap-2">
+              <div class="h-1.5 w-24 overflow-hidden rounded-full bg-[#1e293b]">
+                <div class="h-full w-0 rounded-full bg-[#f59e0b]"></div>
+              </div>
+              <span class="text-xs text-[#64748b]">—</span>
+            </div>
+            <p class="mt-0.5 text-xs text-[#64748b]">Waiting...</p>
+          </td>
+          <td class="px-4 py-3 text-xs text-[#64748b]">1h ago</td>
+          <td class="px-4 py-3 text-right">
+            <button class="rounded-lg border border-[#ef4444]/30 bg-[#ef4444]/10 px-2.5 py-1.5 text-xs text-[#ef4444] transition hover:bg-[#ef4444]/20">
+              <i class="fa-regular fa-ban mr-1"></i>Cancel
+            </button>
+          </td>
+        </tr>
+        <!-- Failed -->
+        <tr class="text-[#e2e8f0] hover:bg-[#1a1f2a]">
+          <td class="px-4 py-3 font-mono text-xs text-[#94a3b8]">tsk_m3n4o5p6...</td>
+          <td class="px-4 py-3">
+            <span class="inline-block rounded bg-[#6366f1]/10 px-2 py-0.5 text-xs font-medium text-[#6366f1]">spotify_sync</span>
+          </td>
+          <td class="px-4 py-3">
+            <span class="inline-flex items-center gap-1 rounded-full bg-[#ef4444]/10 px-2.5 py-0.5 text-xs font-medium text-[#ef4444]">
+              <i class="fa-regular fa-circle-xmark text-[10px]"></i> Failed
+            </span>
+          </td>
+          <td class="px-4 py-3 text-[#cbd5e1]">Spotify</td>
+          <td class="px-4 py-3">
+            <div class="flex items-center gap-2">
+              <div class="h-1.5 w-24 overflow-hidden rounded-full bg-[#1e293b]">
+                <div class="h-full w-[34%] rounded-full bg-[#ef4444]"></div>
+              </div>
+              <span class="text-xs text-[#ef4444]">3/12</span>
+            </div>
+            <p class="mt-0.5 text-xs text-[#ef4444]">Auth token expired</p>
+          </td>
+          <td class="px-4 py-3 text-xs text-[#64748b]">2h ago</td>
+          <td class="px-4 py-3 text-right">
+            <button class="rounded-lg border border-[#f59e0b]/30 bg-[#f59e0b]/10 px-2.5 py-1.5 text-xs text-[#f59e0b] transition hover:bg-[#f59e0b]/20">
+              <i class="fa-regular fa-rotate mr-1"></i>Retry
+            </button>
+          </td>
+        </tr>
+        <!-- Cancelled -->
+        <tr class="text-[#e2e8f0] hover:bg-[#1a1f2a]">
+          <td class="px-4 py-3 font-mono text-xs text-[#94a3b8]">tsk_q7r8s9t0...</td>
+          <td class="px-4 py-3">
+            <span class="inline-block rounded bg-[#f59e0b]/10 px-2 py-0.5 text-xs font-medium text-[#f59e0b]">soundcloud_sync</span>
+          </td>
+          <td class="px-4 py-3">
+            <span class="inline-flex items-center gap-1 rounded-full bg-[#64748b]/20 px-2.5 py-0.5 text-xs font-medium text-[#64748b]">
+              <i class="fa-regular fa-ban text-[10px]"></i> Cancelled
+            </span>
+          </td>
+          <td class="px-4 py-3 text-[#cbd5e1]">SoundCloud</td>
+          <td class="px-4 py-3">
+            <div class="flex items-center gap-2">
+              <div class="h-1.5 w-24 overflow-hidden rounded-full bg-[#1e293b]">
+                <div class="h-full w-[15%] rounded-full bg-[#64748b]"></div>
+              </div>
+              <span class="text-xs text-[#64748b]">—</span>
+            </div>
+            <p class="mt-0.5 text-xs text-[#64748b]">Cancelled by user</p>
+          </td>
+          <td class="px-4 py-3 text-xs text-[#64748b]">3h ago</td>
+          <td class="px-4 py-3 text-right">
+            <span class="text-xs text-[#64748b]">—</span>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="mt-4 flex items-center justify-between">
+    <p class="text-xs text-[#64748b]">Showing 1–5 of 12 tasks</p>
+    <div class="flex items-center gap-1">
+      <button class="rounded-lg border border-[#1e293b] bg-[#14181f] px-3 py-1.5 text-sm text-[#64748b] transition hover:bg-[#1a1f2a] cursor-not-allowed" disabled>
+        <i class="fa-regular fa-chevron-left"></i>
+      </button>
+      <button class="rounded-lg border border-[#6366f1] bg-[#6366f1]/10 px-3 py-1.5 text-sm text-[#6366f1]">1</button>
+      <button class="rounded-lg border border-[#1e293b] bg-[#14181f] px-3 py-1.5 text-sm text-[#cbd5e1] transition hover:bg-[#1a1f2a]">2</button>
+      <button class="rounded-lg border border-[#1e293b] bg-[#14181f] px-3 py-1.5 text-sm text-[#cbd5e1] transition hover:bg-[#1a1f2a]">3</button>
+      <button class="rounded-lg border border-[#1e293b] bg-[#14181f] px-3 py-1.5 text-sm text-[#cbd5e1] transition hover:bg-[#1a1f2a]">
+        <i class="fa-regular fa-chevron-right"></i>
+      </button>
+    </div>
+  </div>
+
+  <details class="mt-6 rounded-lg border border-[#1e293b] bg-[#14181f]">
+    <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-[#cbd5e1] hover:text-[#e2e8f0]">
+      <i class="fa-regular fa-chevron-right mr-2 transition"></i> States Preview
+    </summary>
+    <div class="border-t border-[#1e293b] p-4 space-y-4">
+      <div class="flex flex-col items-center justify-center py-8 text-[#64748b]">
+        <i class="fa-regular fa-spinner-third fa-spin text-2xl mb-3"></i>
+        <p class="text-sm">Loading tasks...</p>
+      </div>
+      <div class="flex flex-col items-center justify-center py-8 text-[#64748b]">
+        <i class="fa-regular fa-list-check text-2xl mb-3"></i>
+        <p class="text-sm font-medium text-[#cbd5e1]">No tasks</p>
+        <p class="mt-1 text-xs">Background tasks will appear here when they are running.</p>
+      </div>
+      <div class="rounded-lg border border-[#1e293b] bg-[#0b0d12]">
+        <div class="flex items-center justify-between border-b border-[#1e293b] px-4 py-2.5">
+          <span class="text-xs font-medium text-[#cbd5e1]"><i class="fa-regular fa-file-lines mr-1.5"></i> Task Logs — tsk_e5f6g7h8</span>
+          <button class="rounded p-1 text-[#64748b] transition hover:bg-[#1e293b] hover:text-[#e2e8f0]">
+            <i class="fa-regular fa-xmark text-sm"></i>
+          </button>
+        </div>
+        <div class="p-4 font-mono text-xs leading-relaxed text-[#94a3b8] space-y-1">
+          <p><span class="text-[#64748b]">[12:34:56]</span> <span class="text-[#10b981]">INFO</span> Starting write_comment task</p>
+          <p><span class="text-[#64748b]">[12:34:57]</span> <span class="text-[#10b981]">INFO</span> Processing file 1/47: track_01.stem.m4a</p>
+          <p><span class="text-[#64748b]">[12:34:58]</span> <span class="text-[#10b981]">INFO</span> Comment written: <span class="text-[#f59e0b]">[PMV] build jazzy warehouse sp:xxx</span></p>
+          <p><span class="text-[#64748b]">[12:35:01]</span> <span class="text-[#10b981]">INFO</span> Processing file 2/47: track_02.stem.m4a</p>
+          <p><span class="text-[#64748b]">[12:35:02]</span> <span class="text-[#10b981]">INFO</span> Processing file 3/47: track_03.stem.m4a</p>
+          <p class="text-[#6366f1]">...</p>
+          <p><span class="text-[#64748b]">[12:36:15]</span> <span class="text-[#10b981]">INFO</span> All 47 comments written successfully</p>
+          <p><span class="text-[#64748b]">[12:36:15]</span> <span class="text-[#10b981]">INFO</span> Task completed</p>
+        </div>
+      </div>
+    </div>
+  </details>
+</div>
+
+<!-- Page 9: Folders -->
+<div id="page-9" class="hidden">
+  <div class="mb-6 flex items-center justify-between">
+    <h2 class="text-xl font-bold text-[#e2e8f0]">Folders</h2>
+    <button class="rounded-lg bg-[#6366f1] px-4 py-2 text-sm font-medium text-white transition hover:bg-[#5558e6]">
+      <i class="fa-regular fa-plus mr-2"></i>Add Folder
+    </button>
+  </div>
+
+  <div class="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+    <!-- Folder 1: /Music/Techno -->
+    <div class="rounded-lg border border-[#1e293b] bg-[#14181f] p-4 transition hover:border-[#334155]">
+      <div class="mb-3 flex items-start justify-between">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2">
+            <i class="fa-regular fa-folder-open text-[#6366f1]"></i>
+            <span class="truncate font-mono text-sm font-medium text-[#e2e8f0]">/Music/Techno</span>
+          </div>
+        </div>
+      </div>
+      <div class="mb-3 flex items-center gap-2 text-sm text-[#94a3b8]">
+        <i class="fa-regular fa-file-music"></i>
+        <span>128 files</span>
+      </div>
+      <div class="mb-3 flex flex-wrap gap-1.5">
+        <span class="inline-flex items-center gap-1 rounded-full bg-[#10b981]/10 px-2 py-0.5 text-xs text-[#10b981]">
+          <i class="fa-regular fa-eye text-[10px]"></i> Watch
+        </span>
+        <span class="inline-flex items-center gap-1 rounded-full bg-[#10b981]/10 px-2 py-0.5 text-xs text-[#10b981]">
+          <i class="fa-regular fa-arrow-rotate text-[10px]"></i> Recursive
+        </span>
+      </div>
+      <div class="mb-3 flex items-center gap-1.5 text-xs text-[#64748b]">
+        <i class="fa-regular fa-clock"></i>
+        <span>Last scanned 2m ago</span>
+      </div>
+      <div class="flex gap-2">
+        <button class="flex-1 rounded-lg border border-[#1e293b] bg-[#1a1f2a] px-3 py-1.5 text-xs text-[#cbd5e1] transition hover:bg-[#1e293b]">
+          <i class="fa-regular fa-magnifying-glass mr-1"></i>Scan
+        </button>
+        <button class="rounded-lg border border-[#10b981]/30 bg-[#10b981]/10 px-3 py-1.5 text-xs text-[#10b981] transition hover:bg-[#10b981]/20">
+          <i class="fa-regular fa-toggle-on mr-1"></i>Watch
+        </button>
+      </div>
+    </div>
+
+    <!-- Folder 2: /Music/House -->
+    <div class="rounded-lg border border-[#1e293b] bg-[#14181f] p-4 transition hover:border-[#334155]">
+      <div class="mb-3 flex items-start justify-between">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2">
+            <i class="fa-regular fa-folder-open text-[#6366f1]"></i>
+            <span class="truncate font-mono text-sm font-medium text-[#e2e8f0]">/Music/House</span>
+          </div>
+        </div>
+      </div>
+      <div class="mb-3 flex items-center gap-2 text-sm text-[#94a3b8]">
+        <i class="fa-regular fa-file-music"></i>
+        <span>94 files</span>
+      </div>
+      <div class="mb-3 flex flex-wrap gap-1.5">
+        <span class="inline-flex items-center gap-1 rounded-full bg-[#10b981]/10 px-2 py-0.5 text-xs text-[#10b981]">
+          <i class="fa-regular fa-eye text-[10px]"></i> Watch
+        </span>
+        <span class="inline-flex items-center gap-1 rounded-full bg-[#10b981]/10 px-2 py-0.5 text-xs text-[#10b981]">
+          <i class="fa-regular fa-arrow-rotate text-[10px]"></i> Recursive
+        </span>
+      </div>
+      <div class="mb-3 flex items-center gap-1.5 text-xs text-[#64748b]">
+        <i class="fa-regular fa-clock"></i>
+        <span>Last scanned 5m ago</span>
+      </div>
+      <div class="flex gap-2">
+        <button class="flex-1 rounded-lg border border-[#1e293b] bg-[#1a1f2a] px-3 py-1.5 text-xs text-[#cbd5e1] transition hover:bg-[#1e293b]">
+          <i class="fa-regular fa-magnifying-glass mr-1"></i>Scan
+        </button>
+        <button class="rounded-lg border border-[#10b981]/30 bg-[#10b981]/10 px-3 py-1.5 text-xs text-[#10b981] transition hover:bg-[#10b981]/20">
+          <i class="fa-regular fa-toggle-on mr-1"></i>Watch
+        </button>
+      </div>
+    </div>
+
+    <!-- Folder 3: /Music/Deep House -->
+    <div class="rounded-lg border border-[#1e293b] bg-[#14181f] p-4 transition hover:border-[#334155]">
+      <div class="mb-3 flex items-start justify-between">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2">
+            <i class="fa-regular fa-folder-open text-[#6366f1]"></i>
+            <span class="truncate font-mono text-sm font-medium text-[#e2e8f0]">/Music/Deep House</span>
+          </div>
+        </div>
+      </div>
+      <div class="mb-3 flex items-center gap-2 text-sm text-[#94a3b8]">
+        <i class="fa-regular fa-file-music"></i>
+        <span>65 files</span>
+      </div>
+      <div class="mb-3 flex flex-wrap gap-1.5">
+        <span class="inline-flex items-center gap-1 rounded-full bg-[#64748b]/20 px-2 py-0.5 text-xs text-[#64748b]">
+          <i class="fa-regular fa-eye-slash text-[10px]"></i> Watch
+        </span>
+        <span class="inline-flex items-center gap-1 rounded-full bg-[#10b981]/10 px-2 py-0.5 text-xs text-[#10b981]">
+          <i class="fa-regular fa-arrow-rotate text-[10px]"></i> Recursive
+        </span>
+      </div>
+      <div class="mb-3 flex items-center gap-1.5 text-xs text-[#64748b]">
+        <i class="fa-regular fa-clock"></i>
+        <span>Last scanned 1h ago</span>
+      </div>
+      <div class="flex gap-2">
+        <button class="flex-1 rounded-lg border border-[#1e293b] bg-[#1a1f2a] px-3 py-1.5 text-xs text-[#cbd5e1] transition hover:bg-[#1e293b]">
+          <i class="fa-regular fa-magnifying-glass mr-1"></i>Scan
+        </button>
+        <button class="rounded-lg border border-[#64748b]/30 bg-[#1e293b] px-3 py-1.5 text-xs text-[#64748b] cursor-not-allowed">
+          <i class="fa-regular fa-toggle-off mr-1"></i>Watch
+        </button>
+      </div>
+    </div>
+
+    <!-- Folder 4: /Downloads/New Tracks -->
+    <div class="rounded-lg border border-[#1e293b] bg-[#14181f] p-4 transition hover:border-[#334155]">
+      <div class="mb-3 flex items-start justify-between">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2">
+            <i class="fa-regular fa-folder-open text-[#6366f1]"></i>
+            <span class="truncate font-mono text-sm font-medium text-[#e2e8f0]">/Downloads/New Tracks</span>
+          </div>
+        </div>
+      </div>
+      <div class="mb-3 flex items-center gap-2 text-sm text-[#94a3b8]">
+        <i class="fa-regular fa-file-music"></i>
+        <span>0 files</span>
+      </div>
+      <div class="mb-3 flex flex-wrap gap-1.5">
+        <span class="inline-flex items-center gap-1 rounded-full bg-[#64748b]/20 px-2 py-0.5 text-xs text-[#64748b]">
+          <i class="fa-regular fa-eye-slash text-[10px]"></i> Watch
+        </span>
+        <span class="inline-flex items-center gap-1 rounded-full bg-[#64748b]/20 px-2 py-0.5 text-xs text-[#64748b]">
+          <i class="fa-regular fa-arrow-rotate text-[10px]"></i> Recursive
+        </span>
+      </div>
+      <div class="mb-3 flex items-center gap-1.5 text-xs text-[#64748b]">
+        <i class="fa-regular fa-clock"></i>
+        <span>Not scanned yet</span>
+      </div>
+      <div class="flex gap-2">
+        <button class="flex-1 rounded-lg border border-[#6366f1]/30 bg-[#6366f1]/10 px-3 py-1.5 text-xs text-[#6366f1] transition hover:bg-[#6366f1]/20">
+          <i class="fa-regular fa-magnifying-glass mr-1"></i>Scan
+        </button>
+        <button class="rounded-lg border border-[#64748b]/30 bg-[#1e293b] px-3 py-1.5 text-xs text-[#64748b] cursor-not-allowed">
+          <i class="fa-regular fa-toggle-off mr-1"></i>Watch
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <details class="mt-6 rounded-lg border border-[#1e293b] bg-[#14181f]">
+    <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-[#cbd5e1] hover:text-[#e2e8f0]">
+      <i class="fa-regular fa-chevron-right mr-2 transition"></i> States Preview
+    </summary>
+    <div class="border-t border-[#1e293b] p-4 space-y-4">
+      <div class="flex flex-col items-center justify-center py-8 text-[#64748b]">
+        <i class="fa-regular fa-spinner-third fa-spin text-2xl mb-3"></i>
+        <p class="text-sm">Loading folders...</p>
+      </div>
+      <div class="flex flex-col items-center justify-center py-8 text-[#64748b]">
+        <i class="fa-regular fa-folder-plus text-2xl mb-3"></i>
+        <p class="text-sm font-medium text-[#cbd5e1]">No folders added</p>
+        <p class="mt-1 text-xs">Add a music folder to start scanning your collection.</p>
+      </div>
+      <div class="flex flex-col items-center justify-center py-8 text-[#64748b]">
+        <i class="fa-regular fa-circle-exclamation text-2xl mb-3 text-[#ef4444]"></i>
+        <p class="text-sm font-medium text-[#ef4444]">Failed to load folders</p>
+        <p class="mt-1 text-xs text-[#94a3b8]">Could not read directory listing.</p>
+        <button class="mt-3 rounded-lg border border-[#1e293b] bg-[#1a1f2a] px-3 py-1.5 text-xs text-[#cbd5e1] transition hover:bg-[#1e293b]">Retry</button>
+      </div>
+      <div class="rounded-lg border border-[#1e293b] bg-[#0b0d12]">
+        <div class="flex items-center justify-between border-b border-[#1e293b] px-4 py-3">
+          <span class="text-sm font-medium text-[#e2e8f0]"><i class="fa-regular fa-folder-plus mr-2"></i>Add Folder</span>
+          <button class="rounded p-1 text-[#64748b] transition hover:bg-[#1e293b] hover:text-[#e2e8f0]">
+            <i class="fa-regular fa-xmark"></i>
+          </button>
+        </div>
+        <div class="p-4 space-y-4">
+          <div>
+            <label class="mb-1.5 block text-xs font-medium text-[#cbd5e1]">Folder Path</label>
+            <input type="text" class="w-full rounded-lg border border-[#1e293b] bg-[#14181f] px-3 py-2 text-sm text-[#e2e8f0] outline-none placeholder:text-[#64748b] transition focus:border-[#6366f1]" placeholder="/Music/My Collection">
+          </div>
+          <div class="flex items-center gap-2">
+            <input type="checkbox" id="modal-recursive" class="h-4 w-4 rounded border-[#1e293b] bg-[#14181f] text-[#6366f1] accent-[#6366f1]" checked>
+            <label for="modal-recursive" class="text-sm text-[#cbd5e1]">Scan subdirectories recursively</label>
+          </div>
+          <div class="flex items-center gap-2">
+            <input type="checkbox" id="modal-watch" class="h-4 w-4 rounded border-[#1e293b] bg-[#14181f] text-[#6366f1] accent-[#6366f1]" checked>
+            <label for="modal-watch" class="text-sm text-[#cbd5e1]">Watch for changes</label>
+          </div>
+          <div class="flex justify-end gap-2">
+            <button class="rounded-lg border border-[#1e293b] bg-[#1a1f2a] px-4 py-2 text-sm text-[#cbd5e1] transition hover:bg-[#1e293b]">Cancel</button>
+            <button class="rounded-lg bg-[#6366f1] px-4 py-2 text-sm text-white transition hover:bg-[#5558e6]">Add Folder</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </details>
+</div>
+
+<!-- Page 10: Auto-Categorize Wizard -->
+<div id="page-10" class="hidden">
+  <!-- Step Indicator -->
+  <div class="mb-8 flex items-center justify-center gap-2">
+    <div class="flex items-center gap-2">
+      <div class="flex h-8 w-8 items-center justify-center rounded-full bg-[#10b981] text-sm font-medium text-white">
+        <i class="fa-regular fa-check"></i>
+      </div>
+      <span class="text-sm text-[#10b981]">Source</span>
+    </div>
+    <div class="h-px w-12 bg-[#10b981]/50"></div>
+    <div class="flex items-center gap-2">
+      <div class="flex h-8 w-8 items-center justify-center rounded-full border-2 border-[#6366f1] bg-[#6366f1]/20 text-sm font-medium text-[#6366f1]">
+        <span>2</span>
+      </div>
+      <span class="text-sm font-medium text-[#6366f1]">Categorize</span>
+    </div>
+    <div class="h-px w-12 bg-[#1e293b]"></div>
+    <div class="flex items-center gap-2">
+      <div class="flex h-8 w-8 items-center justify-center rounded-full border border-[#334155] text-sm font-medium text-[#64748b]">
+        <span>3</span>
+      </div>
+      <span class="text-sm text-[#64748b]">Review</span>
+    </div>
+  </div>
+
+  <!-- Progress -->
+  <div class="mb-6">
+    <div class="mb-1.5 flex items-center justify-between text-xs">
+      <span class="text-[#cbd5e1]">Tag <strong>3</strong> of <strong>12</strong></span>
+      <span class="text-[#64748b]">25%</span>
+    </div>
+    <div class="h-2 overflow-hidden rounded-full bg-[#1e293b]">
+      <div class="h-full w-1/4 rounded-full bg-gradient-to-r from-[#6366f1] to-[#8b5cf6] transition-all"></div>
+    </div>
+  </div>
+
+  <!-- Tag Display -->
+  <div class="mb-8 flex flex-col items-center">
+    <div class="flex items-center gap-3">
+      <span class="text-3xl font-bold text-[#e2e8f0]">deep_house</span>
+      <span class="rounded-md bg-[#1e293b] px-2 py-1 text-xs font-mono text-[#64748b]">#42</span>
+    </div>
+  </div>
+
+  <!-- AI Recommendation -->
+  <div class="mb-6 rounded-lg border border-[#8b5cf6]/40 bg-gradient-to-r from-[#8b5cf6]/5 to-[#6366f1]/5 p-5">
+    <div class="mb-4 flex items-center gap-2 text-sm font-medium text-[#8b5cf6]">
+      <i class="fa-regular fa-robot"></i>
+      <span>AI Recommendation</span>
+    </div>
+    <button class="group w-full rounded-xl border border-[#8b5cf6]/30 bg-[#1a1f2a] p-4 text-center transition hover:border-[#8b5cf6]/60 hover:bg-[#8b5cf6]/10 hover:shadow-lg hover:shadow-[#8b5cf6]/10">
+      <div class="flex items-center justify-center gap-3">
+        <i class="fa-regular fa-wand-magic-sparkles text-lg text-[#8b5cf6]"></i>
+        <div>
+          <span class="text-xl font-bold text-[#e2e8f0] group-hover:text-[#8b5cf6] transition-colors">Mood</span>
+          <span class="ml-2 rounded-full bg-[#8b5cf6]/20 px-2.5 py-0.5 text-sm font-medium text-[#8b5cf6]">87%</span>
+        </div>
+      </div>
+      <p class="mt-1.5 text-xs text-[#64748b] group-hover:text-[#94a3b8]">Click to accept AI suggestion</p>
+    </button>
+  </div>
+
+  <!-- Divider -->
+  <div class="relative mb-6">
+    <div class="absolute inset-0 flex items-center">
+      <div class="w-full border-t border-[#1e293b]"></div>
+    </div>
+    <div class="relative flex justify-center">
+      <span class="bg-[#0b0d12] px-3 text-xs text-[#64748b]">oder wähle manuell</span>
+    </div>
+  </div>
+
+  <!-- Category Buttons Grid -->
+  <div class="mb-8 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
+    <!-- Phase -->
+    <button class="group flex flex-col items-center gap-2 rounded-xl border border-[#1e293b] bg-[#14181f] p-4 text-center transition hover:border-[#8b5cf6]/50 hover:bg-[#8b5cf6]/5">
+      <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-[#8b5cf6]/10 text-[#8b5cf6]">
+        <i class="fa-regular fa-activity"></i>
+      </div>
+      <span class="text-sm font-medium text-[#cbd5e1] group-hover:text-[#8b5cf6]">Phase</span>
+      <span class="text-xs text-[#64748b]">1</span>
+    </button>
+    <!-- Mood (selected) -->
+    <button class="group flex flex-col items-center gap-2 rounded-xl border-2 border-pink-500/50 bg-pink-500/10 p-4 text-center shadow-lg shadow-pink-500/10">
+      <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-pink-500/20 text-pink-400">
+        <i class="fa-regular fa-heart"></i>
+      </div>
+      <span class="text-sm font-medium text-pink-400">Mood</span>
+      <span class="flex items-center gap-1 text-xs text-pink-400/70">
+        <i class="fa-regular fa-check-circle"></i> 2
+      </span>
+    </button>
+    <!-- Vibe -->
+    <button class="group flex flex-col items-center gap-2 rounded-xl border border-[#1e293b] bg-[#14181f] p-4 text-center transition hover:border-[#f59e0b]/50 hover:bg-[#f59e0b]/5">
+      <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-[#f59e0b]/10 text-[#f59e0b]">
+        <i class="fa-regular fa-sparkles"></i>
+      </div>
+      <span class="text-sm font-medium text-[#cbd5e1] group-hover:text-[#f59e0b]">Vibe</span>
+      <span class="text-xs text-[#64748b]">3</span>
+    </button>
+    <!-- Merkmal -->
+    <button class="group flex flex-col items-center gap-2 rounded-xl border border-[#1e293b] bg-[#14181f] p-4 text-center transition hover:border-[#10b981]/50 hover:bg-[#10b981]/5">
+      <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-[#10b981]/10 text-[#10b981]">
+        <i class="fa-regular fa-hash"></i>
+      </div>
+      <span class="text-sm font-medium text-[#cbd5e1] group-hover:text-[#10b981]">Merkmal</span>
+      <span class="text-xs text-[#64748b]">4</span>
+    </button>
+    <!-- Setlist -->
+    <button class="group flex flex-col items-center gap-2 rounded-xl border border-[#1e293b] bg-[#14181f] p-4 text-center transition hover:border-[#94a3b8]/30 hover:bg-[#94a3b8]/5">
+      <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-[#64748b]/10 text-[#64748b]">
+        <i class="fa-regular fa-list-music"></i>
+      </div>
+      <span class="text-sm font-medium text-[#cbd5e1] group-hover:text-[#94a3b8]">Setlist</span>
+      <span class="text-xs text-[#64748b]">5</span>
+    </button>
+  </div>
+
+  <!-- Action Buttons + Keyboard Shortcuts -->
+  <div class="flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <button class="rounded-lg border border-[#1e293b] bg-[#14181f] px-5 py-2 text-sm text-[#cbd5e1] transition hover:bg-[#1a1f2a]">
+        <i class="fa-regular fa-forward mr-1.5"></i>Skip
+        <kbd class="ml-2 rounded bg-[#0b0d12] px-1.5 py-0.5 text-xs text-[#64748b]">S</kbd>
+      </button>
+      <button class="rounded-lg border border-[#1e293b] bg-[#14181f] px-4 py-2 text-sm text-[#64748b] transition hover:bg-[#1a1f2a]">
+        <i class="fa-regular fa-rotate mr-1.5"></i>Reset
+      </button>
+    </div>
+    <div class="flex items-center gap-4 text-xs text-[#64748b]">
+      <span><kbd class="rounded bg-[#1e293b] px-1.5 py-0.5 text-[#94a3b8]">1</kbd>–<kbd class="rounded bg-[#1e293b] px-1.5 py-0.5 text-[#94a3b8]">5</kbd> Category</span>
+      <span><kbd class="rounded bg-[#1e293b] px-1.5 py-0.5 text-[#94a3b8]">S</kbd> Skip</span>
+      <span><kbd class="rounded bg-[#1e293b] px-1.5 py-0.5 text-[#94a3b8]">Enter</kbd> AI</span>
+    </div>
+  </div>
+
+  <details class="mt-6 rounded-lg border border-[#1e293b] bg-[#14181f]">
+    <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-[#cbd5e1] hover:text-[#e2e8f0]">
+      <i class="fa-regular fa-chevron-right mr-2 transition"></i> States Preview
+    </summary>
+    <div class="border-t border-[#1e293b] p-4 space-y-4">
+      <div class="flex flex-col items-center justify-center py-10">
+        <div class="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-[#10b981]/20">
+          <i class="fa-regular fa-party-horn text-3xl text-[#10b981]"></i>
+        </div>
+        <h3 class="mb-1 text-lg font-bold text-[#e2e8f0]">Alle Tags kategorisiert!</h3>
+        <p class="mb-4 text-sm text-[#94a3b8]">All 12 tags have been categorized successfully.</p>
+        <button class="rounded-lg bg-[#6366f1] px-5 py-2 text-sm font-medium text-white transition hover:bg-[#5558e6]">
+          <i class="fa-regular fa-check mr-1.5"></i>Review Results
+        </button>
+      </div>
+      <div class="flex flex-col items-center justify-center py-8 text-[#64748b]">
+        <i class="fa-regular fa-spinner-third fa-spin text-2xl mb-3"></i>
+        <p class="text-sm">Loading tags...</p>
+      </div>
+    </div>
+  </details>
+</div>

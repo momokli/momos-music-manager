@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Music Manager</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <nav id="main-nav"></nav>
+  <div class="container">
+    <div class="page-header">
+      <h1>Music Manager</h1>
+      <p class="subtitle">Manage your music library, sync with services, and organize tags</p>
+    </div>
+    <div class="error-message" id="error-message"></div>
+    <div class="card" style="padding:var(--space-3) var(--space-5);">
+      <div class="flex items-center justify-between" style="flex-wrap:wrap;gap:var(--space-3);">
+        <div class="flex items-center gap-3">
+          <span id="backend-dot" style="width:10px;height:10px;border-radius:50%;background:var(--red);display:inline-block;"></span>
+          <span id="backend-status" style="font-size:0.9rem;color:var(--text-muted);">Checking backend...</span>
+        </div>
+        <div class="flex gap-2">
+          <button id="refresh-btn" class="btn btn-sm"><i class="fas fa-sync-alt"></i> Refresh</button>
+          <button id="debug-toggle-btn" class="btn btn-sm btn-purple"><i class="fas fa-bug"></i> Debug</button>
+        </div>
+      </div>
+    </div>
+    <div id="stats-container">
+      <div class="loading"><div class="spinner"></div><p>Loading stats...</p></div>
+    </div>
+    <div class="card">
+      <h3 style="font-size:1rem;margin-bottom:var(--space-4);color:var(--text-secondary);"><i class="fas fa-compass"></i> Quick Navigation</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:var(--space-3);">
+        <a href="services.html" class="btn" style="flex-direction:column;padding:var(--space-4);text-align:center;gap:var(--space-2);"><i class="fas fa-server" style="font-size:1.3rem;color:var(--accent);"></i><span style="font-size:0.85rem;">Services</span></a>
+        <a href="files.html" class="btn" style="flex-direction:column;padding:var(--space-4);text-align:center;gap:var(--space-2);"><i class="fas fa-music" style="font-size:1.3rem;color:var(--accent);"></i><span style="font-size:0.85rem;">Files</span></a>
+        <a href="tracks.html" class="btn" style="flex-direction:column;padding:var(--space-4);text-align:center;gap:var(--space-2);"><i class="fas fa-stream" style="font-size:1.3rem;color:var(--accent);"></i><span style="font-size:0.85rem;">Tracks</span></a>
+        <a href="playlists.html" class="btn" style="flex-direction:column;padding:var(--space-4);text-align:center;gap:var(--space-2);"><i class="fab fa-spotify" style="font-size:1.3rem;color:#1db954;"></i><span style="font-size:0.85rem;">Playlists</span></a>
+        <a href="folders.html" class="btn" style="flex-direction:column;padding:var(--space-4);text-align:center;gap:var(--space-2);"><i class="fas fa-folder" style="font-size:1.3rem;color:var(--accent);"></i><span style="font-size:0.85rem;">Folders</span></a>
+        <a href="tags.html" class="btn" style="flex-direction:column;padding:var(--space-4);text-align:center;gap:var(--space-2);"><i class="fas fa-tag" style="font-size:1.3rem;color:var(--accent);"></i><span style="font-size:0.85rem;">Tags</span></a>
+      </div>
+    </div>
+    <div id="sync-status" style="display:none;" class="card">
+      <div class="flex items-center gap-3">
+        <div class="spinner" style="width:20px;height:20px;flex-shrink:0;"></div>
+        <div>
+          <div id="sync-status-text" style="font-size:0.9rem;color:var(--text);">Syncing...</div>
+          <div id="sync-status-progress" style="font-size:0.8rem;color:var(--text-muted);margin-top:4px;"></div>
+        </div>
+      </div>
+    </div>
+    <div id="debug-panel" class="card" style="display:none;margin-top:var(--space-4);">
+      <div class="flex items-center justify-between" style="margin-bottom:var(--space-4);">
+        <h3 style="font-size:1.05rem;">Debug Panel</h3>
+        <button id="debug-close-btn" class="btn btn-sm btn-red"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="flex gap-3" style="flex-wrap:wrap;margin-bottom:var(--space-4);">
+        <div class="flex gap-2">
+          <button id="debug-test-localhost" class="btn btn-sm"><i class="fas fa-globe"></i> Test localhost</button>
+          <button id="debug-test-127" class="btn btn-sm"><i class="fas fa-globe"></i> Test 127.0.0.1</button>
+          <button id="debug-clear" class="btn btn-sm"><i class="fas fa-eraser"></i> Clear</button>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-3);">
+        <div>
+          <div style="font-size:0.8rem;color:var(--text-muted);margin-bottom:var(--space-2);">Connection Status</div>
+          <div style="background:rgba(0,0,0,0.2);padding:var(--space-3);border-radius:var(--radius-lg);font-family:var(--font-mono);font-size:0.8rem;color:var(--text-muted);">
+            <div id="debug-localhost">localhost:3000: Testing...</div>
+            <div id="debug-127">127.0.0.1:3000: Testing...</div>
+            <div id="debug-active">Active endpoint: None</div>
+          </div>
+        </div>
+        <div>
+          <div style="font-size:0.8rem;color:var(--text-muted);margin-bottom:var(--space-2);">Last Response</div>
+          <pre id="debug-response" style="background:rgba(0,0,0,0.2);padding:var(--space-3);border-radius:var(--radius-lg);font-family:var(--font-mono);font-size:0.8rem;color:var(--text-muted);max-height:150px;overflow:auto;margin:0;">No data yet</pre>
+        </div>
+      </div>
+      <div style="margin-top:var(--space-4);">
+        <div style="font-size:0.8rem;color:var(--text-muted);margin-bottom:var(--space-2);">Network Log</div>
+        <div id="debug-log" style="background:rgba(0,0,0,0.2);padding:var(--space-3);border-radius:var(--radius-lg);font-family:var(--font-mono);font-size:0.8rem;color:var(--text-muted);max-height:120px;overflow-y:auto;">
+          <div>Waiting for requests...</div>
+        </div>
+      </div>
+    </div>
+    <footer>
+      <p>Backend API: <code style="color:var(--text-muted);">http://localhost:3000/api</code></p>
+    </footer>
+  </div>
+  <script type="module" src="script.js"></script>
+</body>
+</html>

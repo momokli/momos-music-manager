@@ -19,6 +19,7 @@ CREATE TABLE tags (
     id INTEGER PRIMARY KEY,
     name TEXT UNIQUE NOT NULL,
     category_id INTEGER NOT NULL,
+    sort_order INTEGER DEFAULT 0,
     created_at INTEGER DEFAULT (unixepoch()),
     reviewed_at INTEGER,
     FOREIGN KEY (category_id) REFERENCES tag_categories(id)
@@ -155,7 +156,34 @@ CREATE TABLE tag_embeddings (
     FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
 );
 
+-- 10. TAG ENERGY LEVELS (Phase-Tag → Energielevel Mapping für Digging/Suggestion Engine)
+CREATE TABLE tag_energy_levels (
+    tag_id INTEGER PRIMARY KEY,
+    energy_level INTEGER NOT NULL CHECK (energy_level BETWEEN 0 AND 5),
+    created_at INTEGER DEFAULT (unixepoch()),
+    FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+);
 
+-- 11. PLAYLIST SUBSCRIPTIONS (Auto-Polling für einzelne Playlists)
+CREATE TABLE playlist_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    service TEXT NOT NULL,
+    playlist_id TEXT NOT NULL,
+    service_playlist_id INTEGER,
+    subscribed_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    last_polled_at INTEGER,
+    poll_interval_secs INTEGER NOT NULL DEFAULT 300,
+    is_active BOOLEAN NOT NULL DEFAULT 1,
+    UNIQUE(service, playlist_id),
+    FOREIGN KEY (service_playlist_id) REFERENCES service_playlists(id) ON DELETE SET NULL
+);
+
+CREATE INDEX idx_tag_energy_levels_tag_id ON tag_energy_levels(tag_id);
+
+CREATE INDEX idx_playlist_subscriptions_service_playlist_id
+    ON playlist_subscriptions(service_playlist_id);
+CREATE INDEX idx_playlist_subscriptions_is_active
+    ON playlist_subscriptions(is_active);
 
 -- Indexes for Performance
 CREATE INDEX idx_tags_name ON tags(name);
@@ -214,14 +242,30 @@ FROM service_tracks st;
 
 -- Initial data
 INSERT INTO tag_categories (name, icon, prefix, sort_order, is_default) VALUES
-    ('Setlist', 'ListMusic', 'S', 0, TRUE),
-    ('Phase', 'Layers', 'P', 1, FALSE),
-    ('Mood', 'Heart', 'M', 2, FALSE),
-    ('Vibe', 'Sparkles', 'V', 3, FALSE),
-    ('Merkmal', 'Hash', 'E', 4, FALSE);
+    ('Setlist', 'fa-solid fa-list-music', 'S', 0, TRUE),
+    ('Phase', 'fa-solid fa-layers', 'P', 1, FALSE),
+    ('Mood', 'fa-solid fa-heart', 'M', 2, FALSE),
+    ('Vibe', 'fa-solid fa-sparkles', 'V', 3, FALSE),
+    ('Merkmal', 'fa-solid fa-hashtag', 'E', 4, FALSE);
+
+INSERT INTO tags (name, category_id, created_at, reviewed_at) VALUES
+    ('start', 2, unixepoch(), unixepoch()),
+    ('build', 2, unixepoch(), unixepoch()),
+    ('peak', 2, unixepoch(), unixepoch()),
+    ('release', 2, unixepoch(), unixepoch()),
+    ('sustain', 2, unixepoch(), unixepoch()),
+    ('end', 2, unixepoch(), unixepoch());
+
+INSERT INTO tag_energy_levels (tag_id, energy_level, created_at) VALUES
+    ((SELECT id FROM tags WHERE name = 'start'), 1, unixepoch()),
+    ((SELECT id FROM tags WHERE name = 'build'), 2, unixepoch()),
+    ((SELECT id FROM tags WHERE name = 'peak'), 5, unixepoch()),
+    ((SELECT id FROM tags WHERE name = 'release'), 3, unixepoch()),
+    ((SELECT id FROM tags WHERE name = 'sustain'), 2, unixepoch()),
+    ((SELECT id FROM tags WHERE name = 'end'), 1, unixepoch());
 
 -- Verification
-SELECT 'Migration 001 applied successfully: 8-table schema created (sync fields removed from service_config)' as status;
+SELECT 'Migration 001 applied successfully: 11-table schema (added playlist_subscriptions)' as status;
 
 SELECT
     (SELECT COUNT(*) FROM tag_categories) as tag_categories_count,

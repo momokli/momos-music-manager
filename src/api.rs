@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Redirect},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use chrono::{DateTime, Duration};
 use rspotify::clients::{BaseClient, OAuthClient};
@@ -21,15 +21,20 @@ use crate::AppState;
 use crate::config::ServiceCredentials;
 #[allow(unused_imports)]
 use crate::db::{
-    File, Folder, ServiceConfig, ServiceTrack, bulk_check_tags, bulk_create_tags, bulk_review_tags,
-    bulk_update_tags, categorize_tag as db_categorize_tag, clear_all_embeddings,
-    compute_target_comment, create_tag, create_tag_category, create_tags_from_playlists,
-    delete_folder, delete_tag, delete_tag_category, get_all_embeddings, get_embeddings_by_category,
-    get_folder_by_id, get_folder_file_count, get_folders as db_get_folders,
-    get_playlists_without_tags, get_service_config, get_tag_categories, get_tag_category_by_id,
-    get_tag_embedding, get_tag_review_counts, get_unreviewed_tags, scan_folder,
-    update_folder_active, update_folder_with_config, update_service_connection_status,
-    update_service_tokens, update_tag, update_tag_category_metadata, upsert_tag_embedding,
+    File, Folder, ServiceConfig, ServiceConnections, ServiceTrack, bulk_check_tags,
+    bulk_create_tags, bulk_review_tags, bulk_update_tags, categorize_tag as db_categorize_tag,
+    clear_all_embeddings, compute_target_comment, create_tag, create_tag_category,
+    create_tags_from_playlists, delete_folder, delete_tag, delete_tag_category, get_all_embeddings,
+    get_embeddings_by_category, get_folder_by_id, get_folder_file_count,
+    get_folders as db_get_folders, get_playlists_without_tags, get_service_config,
+    get_tag_categories, get_tag_category_by_id, get_tag_embedding, get_tag_review_counts,
+    get_unreviewed_tags, list_subscriptions, scan_folder, update_folder_active,
+    update_folder_with_config, update_service_connection_status, update_service_tokens, update_tag,
+    update_tag_category_metadata, upsert_tag_embedding,
+};
+use crate::digging::{
+    TagReorderItem, delete_tag_energy_level, get_tag_energy_levels, reorder_tags_batch,
+    set_tag_energy_level,
 };
 use crate::embeddings::{
     EmbeddingModel, deserialize_embedding, mean_embedding, serialize_embedding, suggest_category,
@@ -118,6 +123,7 @@ pub struct CategorySuggestionResponse {
     pub suggested_category_name: String,
     pub confidence: f32,
     pub all_categories: Vec<TagCategory>,
+    pub service_connections: ServiceConnections,
 }
 
 #[derive(Debug, Deserialize)]
@@ -390,6 +396,38 @@ pub struct ServiceConnection {
     pub sync_log: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionStatus {
+    pub id: i64,
+    pub service: String,
+    pub playlist_id: String,
+    pub service_playlist_id: Option<i64>,
+    pub playlist_name: Option<String>,
+    pub track_count: i64,
+    pub subscribed_at: i64,
+    pub last_polled_at: Option<i64>,
+    pub poll_interval_secs: i64,
+    pub is_active: bool,
+}
+
+impl From<crate::db::PlaylistSubscription> for SubscriptionStatus {
+    fn from(s: crate::db::PlaylistSubscription) -> Self {
+        SubscriptionStatus {
+            id: s.id,
+            service: s.service,
+            playlist_id: s.playlist_id,
+            service_playlist_id: s.service_playlist_id,
+            playlist_name: s.playlist_name,
+            track_count: s.track_count,
+            subscribed_at: s.subscribed_at,
+            last_polled_at: s.last_polled_at,
+            poll_interval_secs: s.poll_interval_secs,
+            is_active: s.is_active,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderInfo {
@@ -565,6 +603,14 @@ pub struct UpdateFolderRequest {
     pub max_depth: Option<i32>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TraktorImportRequest {
+    /// Optional custom path to collection.nml.
+    /// If omitted, auto-detects from ~/Documents/Native Instruments/Traktor
+    custom_path: Option<String>,
+}
+
 fn default_file_extensions() -> String {
     String::new()
 }
@@ -635,8 +681,23 @@ pub enum WebSocketEvent {
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .without_v07_checks()
+        .route("/api/tag-energy-levels", get(tag_energy_levels_handler))
+        .route(
+            "/api/tag-energy-levels/batch",
+            put(reorder_tags_batch_handler),
+        )
+        .route(
+            "/api/tag-energy-levels/{tag_id}",
+            put(set_tag_energy_level_handler).delete(delete_tag_energy_level_handler),
+        )
         .route("/api/files", get(files_handler))
         .route("/api/files/count", get(files_count_handler))
+        .route("/api/files/latest", get(files_latest_handler))
+        .route(
+            "/api/files/needs-update-count",
+            get(files_needs_update_count_handler),
+        )
+        .route("/api/files/service-links", get(files_service_links_handler))
         .route("/api/files/{id}", get(file_handler))
         .route("/api/files/{id}/sync-comment", post(sync_comment_handler))
         .route("/api/files/{id}/write-comment", post(sync_comment_handler))
@@ -646,6 +707,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/tracks/count", get(tracks_count_handler))
         .route("/api/tracks/{id}", get(track_handler))
         .route("/api/tags", get(tags_handler).post(create_tag_handler))
+        .route(
+            "/api/tags/service-coverage",
+            get(tags_service_coverage_handler),
+        )
         .route(
             "/api/tags/{id}",
             get(get_tag_handler)
@@ -710,6 +775,18 @@ pub fn router() -> Router<Arc<AppState>> {
             get(playlist_tracks_handler).post(add_track_to_playlist_handler),
         )
         .route(
+            "/api/playlists/subscriptions",
+            get(subscriptions_list_handler).post(subscribe_handler),
+        )
+        .route(
+            "/api/playlists/subscriptions/{id}",
+            delete(unsubscribe_handler),
+        )
+        .route(
+            "/api/playlists/comment-diff-stats",
+            get(playlist_comment_diff_stats_handler),
+        )
+        .route(
             "/api/services/spotify/sync/playlists",
             post(spotify_sync_playlists_handler),
         )
@@ -748,6 +825,8 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/folders/{id}/watch", post(toggle_watch_handler))
         .route("/api/folders/{id}/scan", post(scan_folder_handler))
+        .route("/api/traktor/import", post(traktor_import_handler))
+        .route("/api/traktor/status", get(traktor_status_handler))
         .route("/callback", get(legacy_callback_handler))
         .route("/ws/spotify", get(ws_handler))
 }
@@ -882,6 +961,150 @@ async fn files_count_handler(
         )
             .into_response(),
     }
+}
+
+/// GET /api/files/latest
+/// Returns the 5 most recently added files (by created_at)
+async fn files_latest_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    let files = sqlx::query_as::<_, File>("SELECT * FROM files ORDER BY created_at DESC LIMIT 5")
+        .fetch_all(&state.db)
+        .await;
+
+    match files {
+        Ok(files) => {
+            let api_files: Vec<ApiFile> = files
+                .into_iter()
+                .map(|f| {
+                    // Minimal conversion without comment computation
+                    let mut af = ApiFile::from(f);
+                    af.matched_services = vec![];
+                    af.comment_target = String::new();
+                    af.comment_needs_update = false;
+                    af
+                })
+                .collect();
+            Json(ApiResponse { data: api_files }).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to fetch latest files: {}", e),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/files/needs-update-count
+/// Returns the count of files whose comment differs from the computed target comment
+async fn files_needs_update_count_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    // Fetch all files
+    let files = sqlx::query_as::<_, File>("SELECT * FROM files ORDER BY id")
+        .fetch_all(&state.db)
+        .await;
+
+    match files {
+        Ok(files) => {
+            let mut count = 0i64;
+            for file in &files {
+                // Compute target comment for this file
+                match compute_target_comment(&state.db, file.id).await {
+                    Ok(target_comment) => {
+                        let current_comment = file.comment.as_deref().unwrap_or("");
+                        if current_comment != target_comment {
+                            count += 1;
+                        }
+                    }
+                    Err(_) => {
+                        // Skip files where comment computation fails
+                        continue;
+                    }
+                }
+            }
+            Json(ApiResponse { data: count }).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to count files needing update: {}", e),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/files/service-links
+/// Returns counts of files linked to each service (via direct IDs or ISRC matching).
+async fn files_service_links_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    // Total file count
+    let total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM files")
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+
+    // Files linked to Spotify: direct spotify_id OR isrc matches a spotify track
+    let spotify = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(DISTINCT f.id) FROM files f
+           LEFT JOIN service_tracks st ON st.service = 'spotify' AND st.isrc = f.isrc
+           WHERE f.spotify_id IS NOT NULL AND f.spotify_id != ''
+              OR (f.isrc IS NOT NULL AND f.isrc != '' AND st.id IS NOT NULL)"#,
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+
+    // Files linked to SoundCloud: direct soundcloud_id OR isrc matches a soundcloud track
+    let soundcloud = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(DISTINCT f.id) FROM files f
+           LEFT JOIN service_tracks st ON st.service = 'soundcloud' AND st.isrc = f.isrc
+           WHERE f.soundcloud_id IS NOT NULL AND f.soundcloud_id != ''
+              OR (f.isrc IS NOT NULL AND f.isrc != '' AND st.id IS NOT NULL)"#,
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+
+    // Files linked to YouTube: direct youtube_id OR isrc matches a youtube track
+    let youtube = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(DISTINCT f.id) FROM files f
+           LEFT JOIN service_tracks st ON st.service = 'youtube' AND st.isrc = f.isrc
+           WHERE f.youtube_id IS NOT NULL AND f.youtube_id != ''
+              OR (f.isrc IS NOT NULL AND f.isrc != '' AND st.id IS NOT NULL)"#,
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+
+    // Unlinked: no direct service ID AND no isrc matches any service track
+    let unlinked = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*) FROM files f
+           WHERE (f.spotify_id IS NULL OR f.spotify_id = '')
+             AND (f.soundcloud_id IS NULL OR f.soundcloud_id = '')
+             AND (f.youtube_id IS NULL OR f.youtube_id = '')
+             AND NOT EXISTS (
+               SELECT 1 FROM service_tracks st WHERE st.isrc = f.isrc
+             )"#,
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+
+    Json(ApiResponse {
+        data: serde_json::json!({
+            "total": total,
+            "spotify": spotify,
+            "soundcloud": soundcloud,
+            "youtube": youtube,
+            "unlinked": unlinked,
+        }),
+    })
+    .into_response()
 }
 
 async fn file_handler(
@@ -1237,6 +1460,88 @@ async fn delete_tag_category_handler(
     }
 }
 
+// ─── Tag Energy Levels ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetEnergyLevelRequest {
+    energy_level: i32,
+}
+
+async fn tag_energy_levels_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match get_tag_energy_levels(&state.db).await {
+        Ok(levels) => Json(ApiResponse { data: levels }).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn set_tag_energy_level_handler(
+    State(state): State<Arc<AppState>>,
+    Path(tag_id): Path<i64>,
+    Json(request): Json<SetEnergyLevelRequest>,
+) -> impl IntoResponse {
+    match set_tag_energy_level(&state.db, tag_id, request.energy_level).await {
+        Ok(_) => Json(ApiResponse {
+            data: serde_json::json!({ "message": "Energy level updated" }),
+        })
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_tag_energy_level_handler(
+    State(state): State<Arc<AppState>>,
+    Path(tag_id): Path<i64>,
+) -> impl IntoResponse {
+    match delete_tag_energy_level(&state.db, tag_id).await {
+        Ok(_) => Json(ApiResponse { data: () }).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchReorderRequest {
+    tags: Vec<TagReorderItem>,
+}
+
+async fn reorder_tags_batch_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<BatchReorderRequest>,
+) -> impl IntoResponse {
+    match reorder_tags_batch(&state.db, &request.tags).await {
+        Ok(_) => Json(ApiResponse {
+            data: serde_json::json!({ "message": "Tags reordered" }),
+        })
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 async fn get_tag_category_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
@@ -1451,6 +1756,56 @@ async fn unreviewed_tags_handler(State(state): State<Arc<AppState>>) -> impl Int
             total_reviewed: reviewed,
             queue,
         },
+    })
+    .into_response()
+}
+
+/// GET /api/tags/service-coverage
+/// Returns count of tags that have matching playlists per service.
+async fn tags_service_coverage_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Total tag count
+    let total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tags")
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+
+    // Tags with matching Spotify playlists
+    let spotify = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(DISTINCT t.id) FROM tags t
+           INNER JOIN service_playlists sp ON LOWER(TRIM(sp.name)) = LOWER(TRIM(t.name))
+           WHERE sp.service = 'spotify'"#,
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+
+    // Tags with matching SoundCloud playlists
+    let soundcloud = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(DISTINCT t.id) FROM tags t
+           INNER JOIN service_playlists sp ON LOWER(TRIM(sp.name)) = LOWER(TRIM(t.name))
+           WHERE sp.service = 'soundcloud'"#,
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+
+    // Tags with matching YouTube playlists
+    let youtube = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(DISTINCT t.id) FROM tags t
+           INNER JOIN service_playlists sp ON LOWER(TRIM(sp.name)) = LOWER(TRIM(t.name))
+           WHERE sp.service = 'youtube'"#,
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+
+    Json(ApiResponse {
+        data: serde_json::json!({
+            "total": total,
+            "spotify": spotify,
+            "soundcloud": soundcloud,
+            "youtube": youtube,
+        }),
     })
     .into_response()
 }
@@ -1737,12 +2092,22 @@ async fn suggest_category_handler(
         }
     };
 
+    // 7. Service connections abfragen (Spotify/SoundCloud/YouTube)
+    let services = crate::db::get_tag_service_connections(&state.db, &tag.name)
+        .await
+        .unwrap_or(ServiceConnections {
+            spotify: false,
+            soundcloud: false,
+            youtube: false,
+        });
+
     Json(ApiResponse {
         data: CategorySuggestionResponse {
             suggested_category_id: sug_id,
             suggested_category_name: sug_name,
             confidence,
             all_categories: api_categories,
+            service_connections: services,
         },
     })
     .into_response()
@@ -4305,6 +4670,256 @@ async fn get_folders(pool: &Pool<Sqlite>) -> Result<Vec<FolderInfo>> {
 
 async fn handle_websocket() {
     // TODO: Implement WebSocket handling
+}
+
+/// Start a Traktor collection.nml import in the background.
+async fn traktor_import_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TraktorImportRequest>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    match crate::tasks::start_traktor_import_task(&state.task_manager, &state.db, body.custom_path)
+        .await
+    {
+        Ok(task_id) => Json(ApiResponse {
+            data: serde_json::json!({ "taskId": task_id }),
+        })
+        .into_response(),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// Check the current status of the Traktor collection.nml file.
+/// Returns the detected path and its last modification timestamp.
+async fn traktor_status_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TraktorImportRequest>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    let custom_path = query.custom_path;
+    let custom_path_ref = custom_path.as_ref().map(|s| std::path::Path::new(s));
+
+    let (path, modified_at) = match crate::traktor::get_collection_status(custom_path_ref) {
+        Ok((p, mtime)) => (
+            Some(p.to_string_lossy().to_string()),
+            Some(
+                mtime
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64,
+            ),
+        ),
+        Err(_) => (None, None),
+    };
+
+    Json(ApiResponse {
+        data: serde_json::json!({
+            "path": path,
+            "modifiedAt": modified_at,
+        }),
+    })
+    .into_response()
+}
+
+/// GET /api/playlists/subscriptions
+async fn subscriptions_list_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    let subscriptions = match crate::db::list_subscriptions(&state.db).await {
+        Ok(subs) => subs,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to list subscriptions: {}", e),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let statuses: Vec<SubscriptionStatus> = subscriptions
+        .into_iter()
+        .map(|s| SubscriptionStatus::from(s))
+        .collect();
+
+    Json(ApiResponse { data: statuses }).into_response()
+}
+
+/// POST /api/playlists/subscriptions
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubscribeRequest {
+    service: String,
+    playlist_id: String,
+}
+
+async fn subscribe_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SubscribeRequest>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    match crate::db::subscribe_to_playlist(
+        &state.db,
+        &body.service,
+        &body.playlist_id,
+        None,
+    )
+    .await
+    {
+        Ok(id) => Json(ApiResponse {
+            data: serde_json::json!({"id": id, "service": body.service, "playlistId": body.playlist_id}),
+        })
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to subscribe: {}", e),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /api/playlists/subscriptions/{id}
+async fn unsubscribe_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    match crate::db::unsubscribe_from_playlist(&state.db, id).await {
+        Ok(()) => Json(ApiResponse {
+            data: serde_json::json!({"unsubscribed": true}),
+        })
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to unsubscribe: {}", e),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/playlists/comment-diff-stats
+/// For each subscribed playlist, count of linked files needing comment updates
+async fn playlist_comment_diff_stats_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+    use std::collections::HashMap;
+
+    // 1. Get all subscribed playlists
+    let subscriptions = match crate::db::list_subscriptions(&state.db).await {
+        Ok(subs) => subs,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to list subscriptions: {}", e),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if subscriptions.is_empty() {
+        return Json(ApiResponse {
+            data: serde_json::json!({ "playlists": [], "total": 0 }),
+        })
+        .into_response();
+    }
+
+    // 2. Get all files
+    let files = sqlx::query_as::<_, File>("SELECT * FROM files")
+        .fetch_all(&state.db)
+        .await;
+
+    let files = match files {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to fetch files: {}", e),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // 3. Build map: playlist_id -> count
+    let mut playlist_counts: HashMap<i64, i64> = HashMap::new();
+
+    for file in &files {
+        let needs_update = match compute_target_comment(&state.db, file.id).await {
+            Ok(target) => file.comment.as_deref().unwrap_or("") != target,
+            Err(_) => false,
+        };
+
+        if !needs_update {
+            continue;
+        }
+
+        let playlist_rows = sqlx::query_as::<_, (i64,)>(
+            r#" SELECT DISTINCT sp.id
+            FROM service_playlists sp
+            JOIN service_playlist_tracks spt ON spt.playlist_id = sp.id
+            JOIN service_tracks st ON st.id = spt.track_id
+            WHERE st.isrc = ?
+               OR (st.service = 'spotify' AND st.service_id = ?)
+               OR (st.service = 'soundcloud' AND st.service_id = ?)
+               OR (st.service = 'youtube' AND st.service_id = ?)
+            "#,
+        )
+        .bind(&file.isrc)
+        .bind(&file.spotify_id)
+        .bind(&file.soundcloud_id)
+        .bind(&file.youtube_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+
+        for (playlist_id,) in playlist_rows {
+            *playlist_counts.entry(playlist_id).or_insert(0) += 1i64;
+        }
+    }
+
+    // 4. Build response: only subscribed playlists, with names
+    let sub_map: HashMap<i64, &crate::db::PlaylistSubscription> = subscriptions
+        .iter()
+        .filter_map(|s| s.service_playlist_id.map(|id| (id, s)))
+        .collect();
+
+    let mut result: Vec<serde_json::Value> = Vec::new();
+    for (playlist_id, count) in &playlist_counts {
+        if let Some(sub) = sub_map.get(playlist_id) {
+            result.push(serde_json::json!({"subscriptionId": sub.id, "playlistId": sub.playlist_id, "playlistName": sub.playlist_name, "service": sub.service, "filesNeedingUpdate": count}));
+        }
+    }
+
+    // Sort by count descending
+    result.sort_by(|a, b| {
+        let a_count = a["filesNeedingUpdate"].as_i64().unwrap_or(0);
+        let b_count = b["filesNeedingUpdate"].as_i64().unwrap_or(0);
+        b_count.cmp(&a_count)
+    });
+
+    Json(ApiResponse {
+        data: serde_json::json!({"playlists": result, "total": result.len()}),
+    })
+    .into_response()
 }
 
 impl Default for FilesQuery {

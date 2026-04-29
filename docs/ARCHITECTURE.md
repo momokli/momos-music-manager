@@ -104,16 +104,32 @@ GET  /api/services/{service}/sync/{task_id}
 GET/POST   /api/folders
 GET/PUT/DELETE /api/folders/{id}
 POST /api/folders/{id}/watch    # Toggle active
-POST /api/folders/{id}/scan     # Scan-Job starten
+POST /api/folders/{id}/scan     # Scan-Job → `{ "taskId": "uuid" }` (409 if already scanning)
 ```
 
 ### Tasks
 
 ```
-GET    /api/tasks (paginated)
+GET    /api/tasks (paginated)   # Returns tasks with `percent` and `subItems` for progress bars
 GET    /api/tasks/{id}
-DELETE /api/tasks/{id}
+DELETE /api/tasks/{id}          # Cancel a running task
 ```
+
+**Task Types** (in `TaskType` enum):
+
+| Type                                 | Display                  | Progress Detail                         |
+| ------------------------------------ | ------------------------ | --------------------------------------- |
+| `ServiceSync { service, operation }` | `"{service}_sync"`       | Percent + playlist/track progress items |
+| `WriteComment { file_ids }`          | `"write_comment"`        | Percent + per-file progress items       |
+| `RecomputeEmbeddings`                | `"recompute_embeddings"` | Percent (per-10-tags update)            |
+| `ScanFolder { folder_id }`           | `"scan_folder"`          | Percent + status messages               |
+
+**Conflict Prevention**: Tasks are rejected via `409 Conflict` if one of the same type is already running:
+
+- `ServiceSync` → one per service (e.g. one Spotify sync at a time)
+- `ScanFolder` → one per folder
+- `RecomputeEmbeddings` → only one
+- `WriteComment` → no constraint
 
 ### Sonstige
 
@@ -175,13 +191,17 @@ Die API liefert `comment_current`, `comment_target`, `comment_needs_update`.
 In-memory Task-Tracking, ersetzt den alten SyncManager.
 
 ```
-TaskType::SpotifySync(SyncConfig)   → 4 Sync-Arten (playlists/tracks/full)
-TaskType::WriteComment { file_ids }  → Single/Batch Write
+TaskType::ServiceSync { service, operation } → Sync für jeden Dienst (spotify/soundcloud/youtube)
+TaskType::WriteComment { file_ids }          → Single/Batch Write
+TaskType::RecomputeEmbeddings                → ML-Embeddings für alle Tags
+TaskType::ScanFolder { folder_id }           → Ordner-Scan mit Fortschritt
 ```
 
-- Tasks bleiben bis Server-Neustart im RAM
+- Tasks bleiben bis Pruning im RAM (5 Minuten nach Abschluss/Fehler)
 - API: `GET /api/tasks`, `GET /api/tasks/{id}`, `DELETE /api/tasks/{id}`
 - Frontend pollt Task-Status und zeigt Spinner/Progress
+- Unified Progress mit `percent` (0–100) + `sub_items` für Detailansicht
+- Hintergrund-Pruning: entfernt completed/failed/cancelled Tasks nach 5 Minuten
 
 ---
 
@@ -234,10 +254,8 @@ src/
 │   ├── client.rs
 │   ├── models.rs
 │   └── sync_worker.rs
-├── sync/
-│   └── mod.rs           # Sync-Typen (4 Sync-Operationen)
 └── tasks/
-    └── mod.rs           # TaskManager (generisch)
+    └── mod.rs           # TaskManager (generisch) + SyncProgress/SyncResult
 
 frontend/
 ├── index.html           # Hauptseite
