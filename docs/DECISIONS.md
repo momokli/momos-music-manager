@@ -618,6 +618,62 @@ Where:
 
 ---
 
+## ADR-031: Config.toml Migration (Config Priority)
+
+**Date**: 2026-04-30  
+**Status**: Accepted (implemented)
+
+**Context**: Initially, all service credentials (Spotify client ID/secret, SoundCloud API key, YouTube API key) lived exclusively in a `.env` file loaded via `dotenvy`. This worked for a single developer but had several drawbacks:
+
+1. The `.env` file sits in the project root — easy to accidentally commit (it's in `.gitignore` but still risky)
+2. No standard config directory that CLI tools conventionally use (`~/.config/`)
+3. Every env var must be re-exported when switching between projects or shell sessions
+4. No obvious place for future configuration options (scan intervals, UI preferences, etc.)
+
+**Decision**: Add a `config.toml` file at `~/.config/momos-music-manager/config.toml` as the primary configuration source, with environment variables as overrides.
+
+### Priority order (highest wins)
+
+1. Environment variables (`.env` file or shell exports like `SPOTIFY_CLIENT_ID=...`)
+2. `~/.config/momos-music-manager/config.toml`
+3. Built-in defaults (e.g. `redirect_uri = "http://localhost:3000/callback"`)
+
+### Config.toml format
+
+```toml
+[spotify]
+client_id     = "your_spotify_client_id"
+client_secret = "your_spotify_client_secret"
+redirect_uri  = "http://localhost:3000/callback"
+
+[soundcloud]
+api_key  = "your_soundcloud_api_key"
+user_id  = "your_soundcloud_user_id"
+
+[youtube]
+api_key      = "your_youtube_api_key"
+playlist_id  = "your_youtube_playlist_id"
+```
+
+### Implementation details
+
+1. **New dependency**: `toml` and `dirs` crates added to `Cargo.toml`
+2. **`src/config.rs` rewritten**: Added `TomlConfig` structs (deserialize-only), `ServiceCredentials::load()` method that reads TOML then applies env overrides
+3. **`ServiceCredentials::from_env()` preserved** for backward compatibility (tests, CI)
+4. **`main.rs` updated**: `ServiceCredentials::load()` called instead of `from_env()`
+5. **Dev-only env vars stay as env vars only**: `DATABASE_URL`, `SPOTIFY_API_CACHE`, `SCAN_CACHE` — these are session-specific and don't belong in a persistent config file
+6. **Backward compatible**: An existing `.env` file in the project root still works — it overrides the TOML values via environment variables
+
+**Consequences**:
+
+- Users set up their credentials once in `~/.config/momos-music-manager/config.toml` and forget about them
+- Quick dev switching via `.env` or inline env vars still works
+- Future config options (scan intervals, UI themes, default folders) can be added to the same TOML file
+- Using `dirs::config_dir()` follows XDG conventions on Linux (`~/.config/`), macOS (`~/Library/Application Support/`), and Windows
+- No changes to any other modules — `ServiceCredentials` is passed around the same way as before
+
+---
+
 ## Revision History
 
 | Date       | Decision                              | Description                                                                                        |
@@ -632,4 +688,7 @@ Where:
 | 2026-06-xx | ADR-025                               | Semantic tag categorization with local embeddings (candle + all-MiniLM-L6-v2)                      |
 | 2026-06-xx | ADR-026                               | Unified task system with progress tracking, ScanFolder, conflict keys, pruning                     |
 | 2026-06-xx | ADR-027                               | All 11 frontend pages wired to backend API with data adapters, error handling, and AbortController |
-| 2026-04-28 | ADR-028                               | Playlist subscriptions with background polling (poll_interval_secs, auto-track-discovery)          |
+| 2026-06-xx | ADR-028                               | Playlist subscriptions with background polling (poll_interval_secs, auto-track-discovery)          |
+| 2026-04-29 | ADR-029                               | Spotify API response cache for development (record/replay, dev-data/spotify-api)                   |
+| 2026-05-09 | ADR-030                               | Scan cache for development (record/replay, dev-data/scan-cache, auto-invalidation)                 |
+| 2026-04-30 | ADR-031                               | Config.toml migration — config priority (env > config.toml > defaults)                             |

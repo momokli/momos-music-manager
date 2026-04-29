@@ -127,7 +127,7 @@ async fn main() -> Result<()> {
 }
 
 async fn serve(db: Pool<Sqlite>, host: String, port: u16) -> Result<()> {
-    let config = crate::config::ServiceCredentials::from_env();
+    let config = crate::config::ServiceCredentials::load();
     let task_manager = crate::tasks::TaskManager::new();
 
     // Clone for subscription poller (background task needs own ownership)
