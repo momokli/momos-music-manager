@@ -243,6 +243,9 @@ body {
     border: 1px solid var(--border);
     border-radius: var(--radius-xl);
     padding: var(--space-5) var(--space-6);
+    width: fit-content;
+    margin: 0 auto;
+    zoom: 1.5;
 }
 
 /* ── Tag Card (Row 1) ──────────────────── */
@@ -340,6 +343,9 @@ body {
     flex: 1;
     min-width: 0;
     max-width: 220px;
+    padding: var(--space-4) var(--space-3);
+    justify-content: flex-start;
+    min-height: 150px;
 }
 
 /* ── Default Row (Row 3) ───────────────── */
@@ -350,7 +356,7 @@ body {
 
 .cat-default-row .cat-btn {
     width: 100%;
-    max-width: calc(220px * 4 + var(--space-3) * 3);
+    max-width: calc(220px * 3 + var(--space-3) * 2);
 }
 
 /* ── Base Card Button ──────────────────── */
@@ -368,6 +374,7 @@ body {
     font-family: var(--font);
     text-align: center;
     gap: var(--space-2);
+    position: relative;
 }
 
 .cat-btn:hover {
@@ -419,6 +426,15 @@ body {
     justify-content: center;
 }
 
+.cat-btn-top {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    gap: var(--space-1);
+}
+
 .cat-btn-footer kbd {
     display: inline-flex;
     align-items: center;
@@ -439,6 +455,46 @@ body {
 .cat-btn-ai {
     border-color: var(--purple);
     background: rgba(139, 92, 246, 0.04);
+}
+
+/* ── AI bottom strip (Enter / confidence) ─ */
+.cat-btn-ai-strip {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-1);
+    width: 100%;
+    padding: var(--space-2) 0 var(--space-1);
+    border-top: 1px solid color-mix(in srgb, var(--purple) 30%, transparent);
+    font-size: 0.65rem;
+    color: var(--purple);
+    min-height: 44px;
+}
+
+.cat-btn-ai-strip--empty {
+    visibility: hidden;
+    pointer-events: none;
+    border-top: 1px solid transparent;
+}
+
+.cat-btn-ai-strip .ai-pct {
+    font-weight: 600;
+}
+
+.cat-btn-ai-strip .ai-enter {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1px 8px;
+    background: color-mix(in srgb, var(--purple) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--purple) 25%, transparent);
+    border-radius: var(--radius-sm);
+    font-size: 0.6rem;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    color: var(--purple);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
 }
 
 .cat-btn-ai:hover {
@@ -1081,6 +1137,84 @@ select.input-text {
     color: var(--red);
 }
 
+/* ── Link Status Filter ─────────────────── */
+.filter-link-status {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+}
+
+/* ── Filter action buttons (Linked, Unlinked, ignore default) ─── */
+.filter-action-btn {
+    padding: 4px 14px;
+    font-family: var(--font);
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: transparent;
+    cursor: pointer;
+    transition: all var(--transition);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+}
+
+.filter-action-btn:hover {
+    background: var(--accent-bg);
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.filter-action-btn.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+}
+
+/* ── Segmented toggle group (Linked/Unlinked) ─── */
+.toggle-group {
+    display: flex;
+    gap: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+.toggle-group .toggle-btn {
+    border: none;
+    border-radius: 0;
+    padding: 4px 14px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    font-family: var(--font);
+    color: var(--text-muted);
+    background: transparent;
+    cursor: pointer;
+    transition: all var(--transition);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+}
+
+.toggle-group .toggle-btn:hover {
+    background: var(--accent-bg);
+    color: var(--accent);
+}
+
+.toggle-group .toggle-btn.active {
+    background: var(--accent);
+    color: #fff;
+}
+
+.toggle-group .toggle-btn + .toggle-btn {
+    border-left: 1px solid var(--border);
+}
+
 /* ── Stats Row ──────────────────────────── */
 .stats-row {
     display: flex;
@@ -1685,6 +1819,37 @@ select.input-text {
     font-size: 0.85rem;
     font-weight: 500;
     margin-right: var(--space-2);
+}
+
+/* ── Comment Writer Panel ──────────────── */
+.comment-writer-panel {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.cw-options {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+}
+
+.cw-checkbox {
+    font-size: 0.8rem;
+}
+
+.cw-tags {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+}
+
+.cw-tag-search {
+    width: 100%;
+}
+
+.cw-tag-search .input-search {
+    width: 100%;
 }
 
 /* ── Dashboard ──────────────────────────── */

@@ -8,6 +8,7 @@ import { escapeHtml, renderLoading, renderErrorBlock, td } from "../shared/compo
 import { formatBPM } from "../shared/format.js";
 import { fetchJSON } from "../shared/api.js";
 import { renderSearchInput, wireSearchFilter } from "../shared/search-filter.js";
+import { renderCommentWriter, wireCommentWriter } from "../shared/comment-writer.js";
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -103,7 +104,8 @@ function adaptFile(f) {
     title: f.title,
     artist: f.artist,
     bpm: f.bpm,
-    key: f.key,
+    key: f.musicalKey,
+    isrc: f.isrc,
     diffOld: diff.diffOld,
     diffNew: diff.diffNew,
     commentUnchanged: diff.unchanged,
@@ -112,6 +114,7 @@ function adaptFile(f) {
     commentTarget: f.commentTarget,
     playCount: f.playCount,
     lastPlayed: f.lastPlayed,
+    matchedServices: f.matchedServices || [],
   };
 }
 
@@ -122,6 +125,23 @@ function adaptFile(f) {
 function renderKeyBadge(key) {
   if (!key) return "";
   return `<span class="badge badge-key">${escapeHtml(key)}</span>`;
+}
+
+function renderLinkBadge(services) {
+  if (!services || services.length === 0) {
+    return '<span style="color:var(--text-muted);">—</span>';
+  }
+  const icons = {
+    spotify: '<i class="fab fa-spotify"></i>',
+    soundcloud: '<i class="fab fa-soundcloud"></i>',
+    youtube: '<i class="fab fa-youtube"></i>',
+  };
+  return services
+    .map((s) => {
+      const icon = icons[s] || s;
+      return `<span class="service-badge ${escapeHtml(s)}" title="${escapeHtml(s)}">${icon}</span>`;
+    })
+    .join(" ");
 }
 
 function renderRows(files) {
@@ -137,10 +157,13 @@ function renderRows(files) {
         <td>${escapeHtml(f.artist)}</td>
         <td>${f.bpm ? formatBPM(f.bpm) : ""}</td>
         <td>${renderKeyBadge(f.key)}</td>
+        <td>${renderLinkBadge(f.matchedServices)}</td>
+        <td>${f.isrc ? escapeHtml(f.isrc) : ""}</td>
         <td>${f.playCount ?? 0}</td>
         <td><div class="${diffClass}">${diffRow}</div></td>
         <td>
           <button class="btn btn-sm btn-icon" data-action="view" data-id="${f.id}" title="View details"><i class="fas fa-eye"></i></button>
+          <button class="btn btn-sm btn-icon" data-action="similar" data-id="${f.id}" title="Similar tracks by tag"><i class="fas fa-project-diagram"></i></button>
           <button class="btn btn-sm btn-icon" data-action="write-comment" data-id="${f.id}" title="Write comment to file" ${f.commentTarget ? "" : "disabled"}><i class="fas fa-pen"></i></button>
         </td>
       </tr>`;
@@ -171,6 +194,7 @@ async function viewFile(id) {
         <strong>Artist:</strong><span>${escapeHtml(f.artist)}</span>
         <strong>BPM:</strong><span>${f.bpm ? formatBPM(f.bpm) : "—"}</span>
         <strong>Key:</strong><span>${renderKeyBadge(f.key)}</span>
+        <strong>Linked:</strong><span>${renderLinkBadge(f.matchedServices)}</span>
         <strong>Plays:</strong><span>${f.playCount ?? 0}</span>
         <strong>Last played:</strong><span>${f.lastPlayed || "—"}</span>
         ${f.diffOld ? `<strong>Comment (current):</strong><span class="diff-line-old">${escapeHtml(f.diffOld)}</span>` : ""}
@@ -210,6 +234,101 @@ async function viewFile(id) {
     document.body.appendChild(overlay);
   } catch (err) {
     showError(`Failed to load file details: ${err.message}`);
+  }
+}
+
+async function showSimilarTracks(id) {
+  try {
+    const resp = await fetchJSON(`/api/files/${id}/similar-tracks?limit=15`);
+    const results = resp.data || [];
+
+    const overlay = document.createElement("div");
+    overlay.className = "modal open";
+    overlay.style.cssText =
+      "position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:999;display:flex;align-items:center;justify-content:center;";
+
+    const modal = document.createElement("div");
+    modal.className = "modal-content";
+    modal.style.maxWidth = "900px";
+    modal.style.maxHeight = "85vh";
+
+    let bodyHtml;
+    if (results.length === 0) {
+      bodyHtml = `<div style="padding:32px;text-align:center;color:var(--text-muted);">
+        <i class="fas fa-project-diagram" style="font-size:2rem;margin-bottom:12px;"></i>
+        <p>No similar tracks found.</p>
+        <p style="font-size:0.85rem;">Ensure tag embeddings and similarities have been computed.</p>
+      </div>`;
+    } else {
+      const rows = results
+        .map((r, i) => {
+          const [fid, title, artist, bpm, key, score, matchedTagsJson] = r;
+          let matchedTags;
+          try {
+            matchedTags = JSON.parse(matchedTagsJson);
+          } catch (e) {
+            matchedTags = [];
+          }
+          const pct = Math.round(score * 100);
+          const pctClass = pct >= 60 ? "green" : pct >= 40 ? "yellow" : "text-muted";
+          const tagsHtml = matchedTags
+            .map(
+              ([seedTag, matchTag, sim]) =>
+                `<span class="badge" style="background:var(--surface-hover);border:1px solid var(--border);font-size:0.7rem;padding:1px 6px;border-radius:4px;white-space:nowrap;" title="${escapeHtml(seedTag)} → ${escapeHtml(matchTag)} (${(sim * 100).toFixed(0)}%)">
+            ${escapeHtml(matchTag)}
+          </span>`,
+            )
+            .join(" ");
+          return `<tr>
+          <td style="padding:8px 12px;border-bottom:1px solid var(--border);">
+            <div style="font-weight:500;">${escapeHtml(title)}</div>
+            <div style="font-size:0.8rem;color:var(--text-muted);">${artist ? escapeHtml(artist) : "—"}</div>
+          </td>
+          <td style="padding:8px 12px;border-bottom:1px solid var(--border);font-family:var(--font-mono);">${bpm ? formatBPM(bpm) : "—"}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid var(--border);">${key ? renderKeyBadge(key) : "—"}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid var(--border);">
+            <div style="display:flex;gap:2px;flex-wrap:wrap;">${tagsHtml}</div>
+          </td>
+          <td style="padding:8px 12px;border-bottom:1px solid var(--border);font-family:var(--font-mono);font-weight:600;color:var(--${pctClass});">${pct}%</td>
+        </tr>`;
+        })
+        .join("");
+      bodyHtml = `<table style="width:100%;border-collapse:collapse;">
+        <thead><tr style="font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.04em;">
+          <th style="padding:8px 12px;text-align:left;border-bottom:1px solid var(--border-strong);">Track</th>
+          <th style="padding:8px 12px;text-align:left;border-bottom:1px solid var(--border-strong);">BPM</th>
+          <th style="padding:8px 12px;text-align:left;border-bottom:1px solid var(--border-strong);">Key</th>
+          <th style="padding:8px 12px;text-align:left;border-bottom:1px solid var(--border-strong);">Similar Tags</th>
+          <th style="padding:8px 12px;text-align:right;border-bottom:1px solid var(--border-strong);">Match</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    }
+
+    modal.innerHTML = `
+      <div class="modal-header">
+        <h3><i class="fas fa-project-diagram"></i> Similar Tracks by Tag</h3>
+        <button class="close-btn" id="modal-close">&times;</button>
+      </div>
+      <div style="padding:16px;overflow-y:auto;">${bodyHtml}</div>`;
+
+    const doClose = () => overlay.remove();
+    modal.querySelector("#modal-close").onclick = doClose;
+    overlay.onclick = (e) => {
+      if (e.target === overlay) doClose();
+    };
+    document.addEventListener(
+      "keydown",
+      (e) => {
+        if (e.key === "Escape") doClose();
+      },
+      { once: true },
+    );
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+  } catch (err) {
+    showError(`Failed to load similar tracks: ${err.message}`);
   }
 }
 
@@ -294,6 +413,23 @@ function renderFilterPanel(state) {
           </div>
           <div class="tag-chips" id="files-tag-chips">${chipsHtml}</div>
         </div>
+        <div class="filter-row">
+          <div class="filter-link-status toggle-group">
+            <button class="toggle-btn ${state.linkedOnly ? "active" : ""}" id="files-filter-linked" data-link-filter="linked">
+              <i class="fas fa-link"></i> Linked
+            </button>
+            <button class="toggle-btn ${state.unlinked ? "active" : ""}" id="files-filter-unlinked" data-link-filter="unlinked">
+              <i class="fas fa-unlink"></i> Unlinked
+            </button>
+          </div>
+        </div>
+        <div class="filter-row">
+          <div class="filter-link-status">
+            <button class="filter-action-btn ${state.nonDefaultOnly ? "active" : ""}" id="files-filter-non-default" data-link-filter="nonDefaultOnly">
+              <i class="fas fa-tag"></i> ignore files with only default tags
+            </button>
+          </div>
+        </div>
       </div>
     </div>`;
 }
@@ -303,20 +439,25 @@ function render(container, data, state) {
   const currentPage = state.page + 1;
 
   container.innerHTML = `
-    ${renderFilterPanel(state)}
+    <div style="display:flex;gap:var(--space-4);align-items:flex-start;">
+      <div style="flex:2;min-width:0;">${renderFilterPanel(state)}</div>
+      <div class="filter-panel" style="flex:1;min-width:260px;max-width:320px;">
+        <div class="filter-panel-header">
+          <span style="font-weight:600;font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.04em;">Write Comments</span>
+        </div>
+        <div class="filter-panel-body" style="padding:var(--space-3) var(--space-4);">
+          ${renderCommentWriter({ linkedOnly: true, tagNames: [], nonDefaultOnly: true })}
+        </div>
+      </div>
+    </div>
     <div class="stats-row">
       <div class="stats-group">
         <button class="btn btn-sm btn-icon" id="files-refresh" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
         <strong>${data._total}</strong> files
       </div>
-      <div class="stats-actions">
-        <button class="btn btn-yellow btn-sm" id="files-write-comments" title="Write all comment diffs to file metadata">
-          <i class="fas fa-pen"></i> Write Comment Diffs
-        </button>
-      </div>
     </div>
     <div class="table-wrap"><table class="data-table">
-      <thead><tr><th style="width:22%">Title</th><th style="width:7%">Artist</th><th style="width:18%">BPM</th><th style="width:3%">Key</th><th style="width:3%">Plays</th><th style="width:35%">Comment Diff</th><th style="width:12%">Actions</th></tr></thead>
+      <thead><tr><th style="width:18%">Title</th><th style="width:6%">Artist</th><th style="width:15%">BPM</th><th style="width:3%">Key</th><th style="width:3%">Linked</th><th style="width:3%">ISRC</th><th style="width:3%">Plays</th><th style="width:25%;text-align:left">Comment Diff</th><th style="width:12%">Actions</th></tr></thead>
       <tbody>${renderRows(data.files)}</tbody>
     </table></div>
     <div class="pagination">
@@ -342,6 +483,15 @@ function buildParams(state) {
   }
   if (state.selectedTags && state.selectedTags.length > 0) {
     params.set("tags", state.selectedTags.join(","));
+  }
+  if (state.linkedOnly) {
+    params.set("linkedOnly", "true");
+  }
+  if (state.unlinked) {
+    params.set("unlinked", "true");
+  }
+  if (state.nonDefaultOnly) {
+    params.set("nonDefaultOnly", "true");
   }
   return params;
 }
@@ -369,16 +519,21 @@ async function fetchAndRender(container, signal, state) {
 
     if (data.files.length === 0 && data._total === 0) {
       container.innerHTML = `
-        ${renderFilterPanel(state)}
+    <div style="display:flex;gap:var(--space-4);align-items:flex-start;">
+      <div style="flex:2;min-width:0;">${renderFilterPanel(state)}</div>
+      <div class="filter-panel" style="flex:1;min-width:260px;max-width:320px;">
+        <div class="filter-panel-header">
+          <span style="font-weight:600;font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.04em;">Write Comments</span>
+        </div>
+        <div class="filter-panel-body" style="padding:var(--space-3) var(--space-4);">
+          ${renderCommentWriter({ linkedOnly: true, tagNames: [], nonDefaultOnly: true })}
+        </div>
+      </div>
+    </div>
         <div class="stats-row">
           <div class="stats-group">
             <button class="btn btn-sm btn-icon" id="files-refresh" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
             <strong>0</strong> files
-          </div>
-          <div class="stats-actions">
-            <button class="btn btn-yellow btn-sm" id="files-write-comments" title="Write all comment diffs to file metadata">
-              <i class="fas fa-pen"></i> Write Comment Diffs
-            </button>
           </div>
         </div>
         <div class="table-wrap"><table class="data-table">
@@ -668,35 +823,39 @@ function wireEvents(container, signal, state) {
     { signal },
   );
 
-  // Write Comment Diffs button — queues a task to write all pending comment diffs
-  const writeCommentsBtn = container.querySelector("#files-write-comments");
-  if (writeCommentsBtn) {
-    writeCommentsBtn.onclick = async () => {
-      writeCommentsBtn.disabled = true;
-      const originalHtml = writeCommentsBtn.innerHTML;
-      writeCommentsBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Queuing...';
-      try {
-        const resp = await fetchJSON("/api/files/bulk-sync", {
-          method: "POST",
-          body: JSON.stringify({}),
-        });
-        const taskId = resp.data?.taskId || resp.data;
-        if (taskId) {
-          showSuccess(
-            `Comment write task #${taskId} started. Check Tasks page for progress.`,
-          );
-        } else {
-          showSuccess("All comments are up to date — nothing to write.");
-        }
-        writeCommentsBtn.disabled = false;
-        writeCommentsBtn.innerHTML = originalHtml;
-      } catch (err) {
-        showError(`Failed to queue comment writes: ${err.message}`);
-        writeCommentsBtn.disabled = false;
-        writeCommentsBtn.innerHTML = originalHtml;
+  // ── Comment writer panel (shared component with filter options) ──
+  wireCommentWriter(container, signal, async (linkedOnly, tagNames, nonDefaultOnly) => {
+    const execBtn = container.querySelector("#cw-execute");
+    if (!execBtn) return;
+    execBtn.disabled = true;
+    const originalHtml = execBtn.innerHTML;
+    execBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Queuing...';
+    try {
+      const body = {
+        linkedOnly,
+        tags: tagNames.length > 0 ? tagNames : undefined,
+        nonDefaultOnly,
+      };
+      const resp = await fetchJSON("/api/files/bulk-sync", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      const taskId = resp.data?.taskId || resp.data;
+      if (taskId) {
+        showSuccess(
+          `Comment write task #${taskId} started. Check Tasks page for progress.`,
+        );
+      } else {
+        showSuccess("All comments are up to date — nothing to write.");
       }
-    };
-  }
+      execBtn.disabled = false;
+      execBtn.innerHTML = originalHtml;
+    } catch (err) {
+      showError(`Failed to queue comment writes: ${err.message}`);
+      execBtn.disabled = false;
+      execBtn.innerHTML = originalHtml;
+    }
+  });
 
   // Pagination: wire up both top and bottom prev/next sets
   const prevBtn = container.querySelector("#files-page-prev");
@@ -717,6 +876,44 @@ function wireEvents(container, signal, state) {
     };
   }
 
+  // ── Linked/Unlinked toggle (mutually exclusive) ──
+  const linkedBtn = container.querySelector("#files-filter-linked");
+  const unlinkedBtn = container.querySelector("#files-filter-unlinked");
+  if (linkedBtn) {
+    linkedBtn.onclick = () => {
+      if (state.linkedOnly) {
+        state.linkedOnly = false;
+      } else {
+        state.linkedOnly = true;
+        state.unlinked = false;
+      }
+      state.page = 0;
+      fetchAndRender(container, signal, state);
+    };
+  }
+  if (unlinkedBtn) {
+    unlinkedBtn.onclick = () => {
+      if (state.unlinked) {
+        state.unlinked = false;
+      } else {
+        state.unlinked = true;
+        state.linkedOnly = false;
+      }
+      state.page = 0;
+      fetchAndRender(container, signal, state);
+    };
+  }
+
+  // ── Non-default tags filter toggle ──
+  const nonDefaultBtn = container.querySelector("#files-filter-non-default");
+  if (nonDefaultBtn) {
+    nonDefaultBtn.onclick = () => {
+      state.nonDefaultOnly = !state.nonDefaultOnly;
+      state.page = 0;
+      fetchAndRender(container, signal, state);
+    };
+  }
+
   // Action buttons via event delegation
   container.addEventListener(
     "click",
@@ -729,6 +926,8 @@ function wireEvents(container, signal, state) {
         writeComment(id);
       } else if (action === "view") {
         viewFile(id);
+      } else if (action === "similar") {
+        showSimilarTracks(id);
       }
     },
     { signal },
@@ -741,13 +940,20 @@ function wireEvents(container, signal, state) {
 
 export async function init(container, signal) {
   // State for pagination and filters — mutable, lives across renders
+  // Read initial params from hash query string
+  const hashParams = new URLSearchParams(window.location.hash.split("?")[1] || "");
   const state = {
     page: 0,
-    search: "",
-    bpmMin: 0,
-    bpmMax: BPM_MAX,
-    keys: [],
-    selectedTags: [],
+    search: hashParams.get("search") || "",
+    bpmMin: parseFloat(hashParams.get("bpmMin")) || 0,
+    bpmMax: parseFloat(hashParams.get("bpmMax")) || BPM_MAX,
+    keys: hashParams.get("key") ? hashParams.get("key").split(",").filter(Boolean) : [],
+    selectedTags: hashParams.get("tags")
+      ? hashParams.get("tags").split(",").filter(Boolean)
+      : [],
+    linkedOnly: hashParams.get("linkedOnly") === "true",
+    unlinked: hashParams.get("unlinked") === "true",
+    nonDefaultOnly: hashParams.get("nonDefaultOnly") === "true",
   };
 
   await fetchAndRender(container, signal, state);

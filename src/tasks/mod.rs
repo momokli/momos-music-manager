@@ -430,7 +430,7 @@ impl Task {
 
     /// Add a log message (keeps last 100 entries)
     pub fn add_log(&self, message: String) {
-        let mut logs = self.logs.lock().unwrap();
+        let mut logs = self.logs.lock().unwrap_or_else(|e| e.into_inner());
         logs.push_back(message);
         if logs.len() > 100 {
             logs.pop_front();
@@ -445,9 +445,23 @@ impl Task {
     /// Convert to serializable TaskProgress
     pub fn to_progress(&self) -> TaskProgress {
         let (task_type_str, task_details) = self.task_type_display();
-        let status = self.status.lock().unwrap().clone();
-        let progress_text = self.progress_text.lock().unwrap().clone();
-        let logs: Vec<String> = self.logs.lock().unwrap().iter().cloned().collect();
+        let status = self
+            .status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let progress_text = self
+            .progress_text
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let logs: Vec<String> = self
+            .logs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect();
 
         // Derive percent and sub_items from unified progress or sync_progress (backward compat)
         let (percent, sub_items) = if let Some(ref sp) = self.sync_progress {
@@ -584,12 +598,17 @@ impl TaskManager {
     /// See [`task_type_conflict_key`] for which task types conflict.
     pub async fn start_task_unique(&self, task: Task) -> Result<String, TaskConflictError> {
         let conflict_key = task_type_conflict_key(&task.task_type);
+        let id = task.id.clone();
+        let mut tasks = self.tasks.write().await;
         if let Some(ref key) = conflict_key {
-            let tasks = self.tasks.read().await;
             for existing in tasks.values() {
                 if let Some(existing_key) = task_type_conflict_key(&existing.task_type) {
                     if &existing_key == key {
-                        let status = existing.status.lock().unwrap().clone();
+                        let status = existing
+                            .status
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone();
                         if status == TaskStatus::Running || status == TaskStatus::Pending {
                             return Err(TaskConflictError::AlreadyRunning {
                                 conflict_key: key.clone(),
@@ -599,7 +618,8 @@ impl TaskManager {
                 }
             }
         }
-        Ok(self.start_task(task).await)
+        tasks.insert(id.clone(), task);
+        Ok(id)
     }
 
     /// Get a serializable snapshot of a task
@@ -612,7 +632,7 @@ impl TaskManager {
     pub async fn cancel_task(&self, task_id: &str) -> anyhow::Result<()> {
         let mut tasks = self.tasks.write().await;
         if let Some(task) = tasks.get_mut(task_id) {
-            *task.status.lock().unwrap() = TaskStatus::Cancelled;
+            *task.status.lock().unwrap_or_else(|e| e.into_inner()) = TaskStatus::Cancelled;
             task.add_log("Task cancelled by user".to_string());
             task.cancel_token.cancel();
             Ok(())
@@ -664,7 +684,7 @@ impl TaskManager {
     pub async fn update_task_status(&self, task_id: &str, status: TaskStatus) {
         let tasks = self.tasks.read().await;
         if let Some(task) = tasks.get(task_id) {
-            *task.status.lock().unwrap() = status;
+            *task.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
         }
     }
 
@@ -680,7 +700,7 @@ impl TaskManager {
     pub async fn update_progress_text(&self, task_id: &str, text: String) {
         let tasks = self.tasks.read().await;
         if let Some(task) = tasks.get(task_id) {
-            *task.progress_text.lock().unwrap() = text;
+            *task.progress_text.lock().unwrap_or_else(|e| e.into_inner()) = text;
         }
     }
 
@@ -740,7 +760,11 @@ impl TaskManager {
         let mut tasks = self.tasks.write().await;
         let now = Instant::now();
         tasks.retain(|_id, task| {
-            let status = task.status.lock().unwrap().clone();
+            let status = task
+                .status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let is_terminal = matches!(
                 status,
                 TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled

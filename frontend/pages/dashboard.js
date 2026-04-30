@@ -16,6 +16,7 @@ import {
 } from "../shared/components.js";
 import { formatNumber, formatDateTime } from "../shared/format.js";
 import { fetchJSON } from "../shared/api.js";
+import { renderCommentWriter, wireCommentWriter } from "../shared/comment-writer.js";
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -146,7 +147,7 @@ function renderFilesCard(filesCount, svcLinks, unlinked, needsUpdateCount) {
 
   let footer = "";
   if (unlinked > 0) {
-    footer += `<span style="color:var(--text-muted);">${formatNumber(unlinked)} unlinked</span>`;
+    footer += `<a href="#files?unlinked=true" style="color:var(--text-muted);text-decoration:underline;cursor:pointer;">${formatNumber(unlinked)} unlinked</a>`;
   }
   if (needsUpdateCount > 0) {
     if (footer) footer += " · ";
@@ -390,12 +391,7 @@ function renderCommentDiffsCard(needsUpdateCount) {
         <span class="text-muted text-sm">Files needing update:</span>
         <strong>${formatNumber(needsUpdateCount)}</strong>
       </div>
-      <button class="btn btn-sm btn-green" data-action="write-all-comments" style="width:100%;">
-        <i class="fa-solid fa-cloud-arrow-up"></i> Write All Comments
-      </button>
-      <a href="#files" class="btn btn-sm btn-primary" style="width:100%;text-align:center;">
-        <i class="fa-solid fa-file"></i> Go to Files
-      </a>
+      ${renderCommentWriter({ linkedOnly: true, tagNames: [], nonDefaultOnly: true })}
     </div>
   </div>`;
 }
@@ -504,22 +500,29 @@ function wireEvents(container, signal) {
     }
   });
 
-  // --- Write All Comments ---
-  container.addEventListener("click", async (e) => {
-    if (signal.aborted) return;
-    const btn = e.target.closest("[data-action='write-all-comments']");
-    if (!btn) return;
-
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Writing…';
+  // --- Write All Comments (via shared comment-writer) ---
+  wireCommentWriter(container, signal, async (linkedOnly, tagNames, nonDefaultOnly) => {
+    const execBtn = container.querySelector("#cw-execute");
+    if (!execBtn) return;
+    execBtn.disabled = true;
+    const originalHtml = execBtn.innerHTML;
+    execBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Writing…';
     try {
-      await fetchJSON("/api/files/write-comments", { method: "POST" });
-      showToast("All comments written successfully", "success");
+      const body = {
+        linkedOnly,
+        tags: tagNames.length > 0 ? tagNames : undefined,
+        nonDefaultOnly,
+      };
+      await fetchJSON("/api/files/write-comments", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      showToast("Comments written successfully", "success");
       setTimeout(() => reinit(container, signal), 2000);
     } catch (err) {
       showToast(`Write failed: ${err.message}`, "error");
-      btn.disabled = false;
-      btn.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i> Write All Comments';
+      execBtn.disabled = false;
+      execBtn.innerHTML = originalHtml;
     }
   });
 }

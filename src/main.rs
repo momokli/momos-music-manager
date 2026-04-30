@@ -1,12 +1,16 @@
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 use anyhow::Result;
 use axum::{Router, response::Html, routing::get};
 use clap::{Parser, Subcommand};
 use dotenvy;
-use sqlx::{Pool, Sqlite, SqlitePool, sqlite::SqliteConnectOptions};
+use sqlx::{
+    Pool, Sqlite, SqlitePool,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
+};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use tracing_subscriber;
@@ -92,7 +96,11 @@ async fn main() -> Result<()> {
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:app.db".to_string());
     info!("Database: {database_url}");
-    let options = SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
+    let options = SqliteConnectOptions::from_str(&database_url)?
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_secs(5))
+        .synchronous(SqliteSynchronous::Normal);
     let db = SqlitePool::connect_with(options).await?;
 
     // Run migrations

@@ -185,6 +185,20 @@ CREATE INDEX idx_playlist_subscriptions_service_playlist_id
 CREATE INDEX idx_playlist_subscriptions_is_active
     ON playlist_subscriptions(is_active);
 
+-- 12. TAG SIMILARITIES (Pairwise cosine similarity between tag embeddings)
+CREATE TABLE tag_similarities (
+    tag_a_id INTEGER NOT NULL,
+    tag_b_id INTEGER NOT NULL,
+    similarity REAL NOT NULL,
+    updated_at INTEGER DEFAULT (unixepoch()),
+    PRIMARY KEY (tag_a_id, tag_b_id),
+    FOREIGN KEY (tag_a_id) REFERENCES tags(id) ON DELETE CASCADE,
+    FOREIGN KEY (tag_b_id) REFERENCES tags(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_tag_similarities_tag_a_id ON tag_similarities(tag_a_id);
+CREATE INDEX idx_tag_similarities_tag_b_id ON tag_similarities(tag_b_id);
+
 -- Indexes for Performance
 CREATE INDEX idx_tags_name ON tags(name);
 CREATE INDEX idx_tags_category_id ON tags(category_id);
@@ -264,8 +278,9 @@ INSERT INTO tag_energy_levels (tag_id, energy_level, created_at) VALUES
     ((SELECT id FROM tags WHERE name = 'sustain'), 2, unixepoch()),
     ((SELECT id FROM tags WHERE name = 'end'), 1, unixepoch());
 
+
 -- Verification
-SELECT 'Migration 001 applied successfully: 11-table schema (added playlist_subscriptions)' as status;
+SELECT 'Migration 001 applied successfully: 12-table schema (added tag_similarities)' as status;
 
 SELECT
     (SELECT COUNT(*) FROM tag_categories) as tag_categories_count,

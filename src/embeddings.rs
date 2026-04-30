@@ -267,6 +267,97 @@ pub fn suggest_category(
     best
 }
 
+// ─── Tag Similarities (Batch Compute) ─────────────────────────────────────────
+
+/// Compute pairwise cosine similarity for all tag embeddings and persist to DB.
+///
+/// 1. Fetch all (tag_id, embedding_blob) from tag_embeddings
+/// 2. Deserialize all embeddings
+/// 3. Compute cosine similarity for each unique pair (i, j) where i < j
+/// 4. Batch INSERT into tag_similarities table using a transaction
+///
+/// Returns the number of similarity pairs computed.
+/// Skips tags without embeddings. Clears old similarities before computing.
+pub async fn compute_tag_similarities(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<usize> {
+    use sqlx::Row;
+
+    // Fetch all tag embeddings
+    let rows =
+        sqlx::query("SELECT te.tag_id, te.embedding FROM tag_embeddings te ORDER BY te.tag_id")
+            .fetch_all(pool)
+            .await?;
+
+    let mut tag_ids: Vec<i64> = Vec::new();
+    let mut embeddings: Vec<Vec<f32>> = Vec::new();
+
+    for row in &rows {
+        let tag_id: i64 = row.try_get("tag_id")?;
+        let blob: Vec<u8> = row.try_get("embedding")?;
+        match deserialize_embedding(&blob) {
+            Ok(vec) => {
+                tag_ids.push(tag_id);
+                embeddings.push(vec);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to deserialize embedding for tag {}: {}", tag_id, e);
+            }
+        }
+    }
+
+    let n = tag_ids.len();
+    if n < 2 {
+        tracing::info!(
+            "Need at least 2 tags with embeddings to compute similarities (found {})",
+            n
+        );
+        return Ok(0);
+    }
+
+    // Clear old similarities
+    sqlx::query("DELETE FROM tag_similarities")
+        .execute(pool)
+        .await?;
+
+    let now = chrono::Utc::now().timestamp();
+    let mut count = 0usize;
+
+    // Batch inserts in chunks of 500 per transaction to avoid holding
+    // the SQLite write lock for too long (~88k pairs for ~420 tags).
+    const BATCH_SIZE: usize = 500;
+    let mut tx = pool.begin().await?;
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let sim = cosine_similarity(&embeddings[i], &embeddings[j]);
+            // Only store pairs with similarity > 0.1 (below that is noise)
+            if sim > 0.1 {
+                sqlx::query(
+                    "INSERT INTO tag_similarities (tag_a_id, tag_b_id, similarity, updated_at) VALUES (?, ?, ?, ?)"
+                )
+                .bind(tag_ids[i])
+                .bind(tag_ids[j])
+                .bind(sim as f32)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+                count += 1;
+
+                // Commit every BATCH_SIZE inserts to limit lock duration
+                if count % BATCH_SIZE == 0 {
+                    tx.commit().await?;
+                    tx = pool.begin().await?;
+                }
+            }
+        }
+    }
+
+    // Commit the final batch (fewer than BATCH_SIZE rows, if any)
+    tx.commit().await?;
+
+    tracing::info!("Computed {} tag similarity pairs for {} tags", count, n);
+    Ok(count)
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

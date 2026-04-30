@@ -31,11 +31,29 @@ let currentPageId = null;
 let currentAbortController = null;
 
 /**
- * Parse the hash and return the normalized page id.
+ * Parse the hash and return the normalized page id (without query params).
  */
 function getPageIdFromHash() {
   const raw = window.location.hash.replace(/^#/, "").trim().toLowerCase();
-  return PAGE_MAP[raw] || "dashboard";
+  // Strip query params — e.g. "files?unlinked=true" → "files"
+  const pageKey = raw.split("?")[0];
+  return PAGE_MAP[pageKey] || "dashboard";
+}
+
+/**
+ * Parse query params from the hash fragment.
+ * e.g. "#files?unlinked=true" → { unlinked: "true" }
+ */
+function getHashParams() {
+  const raw = window.location.hash.replace(/^#/, "").trim();
+  const qIndex = raw.indexOf("?");
+  if (qIndex === -1) return {};
+  const params = new URLSearchParams(raw.slice(qIndex));
+  const obj = {};
+  for (const [key, val] of params.entries()) {
+    obj[key] = val;
+  }
+  return obj;
 }
 
 /**

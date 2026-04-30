@@ -273,11 +273,9 @@ async fn poll_subscribed_playlist(
         // Find *other* playlists that already contain this track (i.e. all
         // associations except the one we just created).
         let other_playlists = {
-            let mut tx = db.begin().await?;
-            let associations = db::get_track_playlist_associations(&mut tx, db_track_id)
+            let associations = db::get_track_playlist_associations(db, db_track_id)
                 .await
                 .context("Failed to query track playlist associations")?;
-            tx.commit().await?;
 
             associations
                 .into_iter()

@@ -8,22 +8,25 @@
  *   │  [Spotify] [SoundCloud] [YouTube]         │
  *   └────────────────────────────────────────────┘
  *   ┌── CATEGORIES ─────────────────────────────┐
- *   │  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐     │
- *   │  │Phase │ │ Mood │ │ Vibe │ │Mkml  │     │
- *   │  │ 85%  │ │      │ │      │ │      │     │
- *   │  │[Ent] │ │ [2]  │ │ [3]  │ │ [4]  │     │
- *   │  └──────┘ └──────┘ └──────┘ └──────┘     │
+ *   │   ┌──────┐  ┌──────┐  ┌──────┐           │
+ *   │   │ Vibe │  │ Mood │  │Mkml  │           │
+ *   │   │ [1]  │  │ [2]  │  │ [3]  │           │
+ *   │   └──────┘  └──────┘  └──────┘           │
  *   └────────────────────────────────────────────┘
  *   ┌── DEFAULT ────────────────────────────────┐
  *   │  Setlist                         [SPACE]   │
  *   └────────────────────────────────────────────┘
- *   [Skip]
+ *   [Skip]  (S)
  *
  * Keyboard shortcuts:
- *   1-9     Select category by grid position
- *   S       Skip tag
+ *   1-3     Select category by grid position (Vibe=1, Mood=2, Merkmal=3)
  *   Space   Select default/setlist category
  *   Enter   Select AI-recommended category
+ *   S       Skip tag
+ *
+ * Notes:
+ *   - Phase is technical/prefilled — hidden from the wizard
+ *   - AI recommends among Vibe, Mood, Merkmal only
  */
 import { renderLoading, renderErrorBlock, renderBadge } from "../shared/components.js";
 import { fetchJSON } from "../shared/api.js";
@@ -65,11 +68,6 @@ function renderPage(
     return aiCatId && String(cat.id) === aiCatId;
   }
 
-  // ── Progress bar ──
-  const progressHtml = `<div class="auto-cat-progress">
-    <div class="progress-bar"><div class="progress-bar-fill"${S(`width:${pct}%`)}></div></div>
-  </div>`;
-
   // ── Tag card ──
   const services = serviceConnections || {};
   const serviceIcons = [
@@ -107,17 +105,24 @@ function renderPage(
     .map((cat) => {
       gridNum++;
       const ai = isAi(cat);
-      const shortcut = ai ? "Enter" : String(gridNum);
       const aiClass = ai ? " cat-btn-ai" : "";
-      return `<button class="cat-btn${aiClass}${ai ? " selected" : ""}" data-category="${cat.id}"${S(`border-color:${cat.color}`)}>
-      <div class="cat-btn-header">
-        <div class="cat-btn-icon"${S(`background:${cat.color}20;color:${cat.color}`)}><i class="${cat.icon}"></i></div>
-        <span class="cat-btn-label">${cat.label}</span>
-        ${ai ? renderBadge(`${aiRecommendation.confidence}%`, "var(--purple)") : ""}
+      const aiStrip = ai
+        ? `<div class="cat-btn-ai-strip">
+        <span class="ai-pct">AI ${aiRecommendation.confidence}%</span>
+        <span class="ai-enter">Enter</span>
+      </div>`
+        : `<div class="cat-btn-ai-strip cat-btn-ai-strip--empty"></div>`;
+      return `<button class="cat-btn${aiClass}" data-category="${cat.id}"${S(`border-color:${cat.color}`)}>
+      <div class="cat-btn-top">
+        <div class="cat-btn-header">
+          <div class="cat-btn-icon"${S(`background:${cat.color}20;color:${cat.color}`)}><i class="${cat.icon}"></i></div>
+          <span class="cat-btn-label">${cat.label}</span>
+        </div>
+        <div class="cat-btn-footer">
+          <kbd>${gridNum}</kbd>
+        </div>
       </div>
-      <div class="cat-btn-footer">
-        <kbd>${shortcut}</kbd>
-      </div>
+      ${aiStrip}
     </button>`;
     })
     .join("");
@@ -129,7 +134,7 @@ function renderPage(
   // ── Default row ──
   const defaultHtml = defaultCat
     ? `<div class="cat-default-row">
-        <button class="cat-btn cat-btn-default${isAi(defaultCat) ? " cat-btn-ai selected" : ""}" data-category="${defaultCat.id}"${S(`border-color:${defaultCat.color}`)}>
+        <button class="cat-btn cat-btn-default${isAi(defaultCat) ? " cat-btn-ai" : ""}" data-category="${defaultCat.id}"${S(`border-color:${defaultCat.color}`)}>
           <div class="cat-btn-header">
             <div class="cat-btn-icon"${S(`background:${defaultCat.color}20;color:${defaultCat.color}`)}><i class="${defaultCat.icon}"></i></div>
             <span class="cat-btn-label">${defaultCat.label}</span>
@@ -145,19 +150,18 @@ function renderPage(
   // ── Assemble ──
   return `<div class="auto-categorize-page">
   <div class="auto-categorize-inner">
-    ${progressHtml}
     <div class="auto-cat-canvas">
       ${tagCardHtml}
       ${gridHtml}
       ${defaultHtml}
-    </div>
-    <div class="auto-cat-footer">
-      <button class="btn btn-sm skip-btn"><i class="fas fa-forward"></i> Skip <span class="text-xs text-muted">(S)</span></button>
-      <div class="shortcuts-hint">
-        <span><kbd>Space</kbd> Default</span>
-        <span><kbd>1-${Math.min(gridCats.length, 9)}</kbd> Cat</span>
-        <span><kbd>S</kbd> Skip</span>
-        <span><kbd>Enter</kbd> AI</span>
+      <div class="auto-cat-footer">
+        <button class="btn btn-sm skip-btn"><i class="fas fa-forward"></i> Skip <span class="text-xs text-muted">(S)</span></button>
+        <div class="shortcuts-hint">
+          <span><kbd>Space</kbd> Default</span>
+          <span><kbd>1-${Math.min(gridCats.length, 9)}</kbd> Cat</span>
+          <span><kbd>S</kbd> Skip</span>
+          <span><kbd>Enter</kbd> AI</span>
+        </div>
       </div>
     </div>
   </div>
@@ -271,7 +275,9 @@ function setupEvents(container, state, tagQueue, categories) {
 /* ── Load next tag ─────────────────────────────────────────────── */
 
 function mapCategories(apiCategories) {
-  return apiCategories.map((c) => {
+  // Preferred order for grid shortcuts: Vibe(1), Mood(2), Merkmal(3)
+  const preferredOrder = ["Vibe", "Mood", "Merkmal"];
+  const mapped = apiCategories.map((c) => {
     const color = stringToColor(c.name || c.label || "");
     return {
       id: String(c.id),
@@ -279,7 +285,14 @@ function mapCategories(apiCategories) {
       icon: c.icon || "fa-solid fa-tag",
       color,
       isDefault: !!c.isDefault,
+      sortKey: preferredOrder.indexOf(c.name),
     };
+  });
+  // Sort non-default cats by preferred order, default stays in place
+  return mapped.sort((a, b) => {
+    if (a.isDefault) return 1;
+    if (b.isDefault) return -1;
+    return a.sortKey - b.sortKey;
   });
 }
 

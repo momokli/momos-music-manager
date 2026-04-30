@@ -158,9 +158,18 @@ pub struct Folder {
 // ============================================================================
 
 pub async fn connect_db() -> Result<SqlitePool> {
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
+    use std::str::FromStr;
+    use std::time::Duration;
+
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:app.db".to_string());
-    let pool = SqlitePool::connect(&database_url).await?;
+    let options = SqliteConnectOptions::from_str(&database_url)?
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_secs(5))
+        .synchronous(SqliteSynchronous::Normal);
+    let pool = SqlitePool::connect_with(options).await?;
     Ok(pool)
 }
 
@@ -2326,7 +2335,7 @@ pub async fn update_subscription_playlist_id(
 
 /// Get all playlist associations for a given track: (playlist_name, playlist_id, service).
 pub async fn get_track_playlist_associations(
-    conn: &mut SqliteConnection,
+    pool: &Pool<Sqlite>,
     track_id: i64,
 ) -> Result<Vec<(String, String, String)>> {
     let rows = sqlx::query_as::<_, (String, String, String)>(
@@ -2338,7 +2347,7 @@ pub async fn get_track_playlist_associations(
         "#,
     )
     .bind(track_id)
-    .fetch_all(conn)
+    .fetch_all(pool)
     .await?;
     Ok(rows)
 }
@@ -2383,6 +2392,272 @@ async fn row_by_service_and_playlist_id(
     .fetch_optional(pool)
     .await?;
     Ok(row)
+}
+
+// ============================================================================
+// Tag Similarity (Semantic Tag Matching)
+// ============================================================================
+
+/// Get all tags associated with a file (via service track → playlist → tag matching)
+pub async fn get_tags_for_file(pool: &Pool<Sqlite>, file_id: i64) -> Result<Vec<Tag>> {
+    // First get the file
+    let file = sqlx::query_as::<_, File>("SELECT * FROM files WHERE id = ?")
+        .bind(file_id)
+        .fetch_one(pool)
+        .await?;
+
+    // Find matching service tracks
+    let matching_tracks_sql = r#"
+        SELECT DISTINCT st.id
+        FROM service_tracks st
+        WHERE st.isrc = ?
+           OR (st.service = 'spotify' AND st.service_id = ?)
+           OR (st.service = 'soundcloud' AND st.service_id = ?)
+           OR (st.service = 'youtube' AND st.service_id = ?)
+    "#;
+
+    let track_ids: Vec<i64> = sqlx::query_scalar::<_, i64>(matching_tracks_sql)
+        .bind(&file.isrc)
+        .bind(&file.spotify_id)
+        .bind(&file.soundcloud_id)
+        .bind(&file.youtube_id)
+        .fetch_all(pool)
+        .await?;
+
+    if track_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Find tags via playlist names
+    let placeholders: Vec<String> = track_ids.iter().map(|_| "?".to_string()).collect();
+    let tags_sql = format!(
+        r#"
+        SELECT DISTINCT t.id, t.name, t.category_id, t.sort_order, t.created_at
+        FROM tags t
+        JOIN service_playlists sp ON LOWER(TRIM(sp.name)) = LOWER(TRIM(t.name))
+        JOIN service_playlist_tracks spt ON spt.playlist_id = sp.id
+        WHERE spt.track_id IN ({})
+        ORDER BY t.name
+        "#,
+        placeholders.join(", ")
+    );
+
+    let mut tags_query = sqlx::query_as::<_, Tag>(&tags_sql);
+    for track_id in &track_ids {
+        tags_query = tags_query.bind(track_id);
+    }
+
+    let tags = tags_query.fetch_all(pool).await?;
+    Ok(tags)
+}
+
+/// Find tracks with semantically similar tags.
+///
+/// Returns Vec of (file_id, title, artist, bpm, key, similarity_score, matched_tags_json)
+/// where matched_tags_json is a JSON array of {seed_tag, matched_tag, similarity}.
+///
+/// Algorithm:
+/// 1. Get tags for the seed file
+/// 2. For each seed tag, find top-8 similar tags from tag_similarities (similarity > 0.5)
+/// 3. Find all files that have any of those similar tags
+/// 4. Score each file by aggregating similarity matches, normalized by seed tag count
+/// 5. Return top-N scored files
+pub async fn find_tag_similar_tracks(
+    pool: &Pool<Sqlite>,
+    file_id: i64,
+    limit: i64,
+) -> Result<
+    Vec<(
+        i64,
+        String,
+        Option<String>,
+        Option<f64>,
+        Option<String>,
+        f64,
+        String,
+    )>,
+> {
+    // 1. Get seed file's tags
+    let seed_tags = get_tags_for_file(pool, file_id).await?;
+    if seed_tags.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let seed_tag_ids: Vec<i64> = seed_tags.iter().map(|t| t.id).collect();
+    let seed_tag_count = seed_tag_ids.len();
+
+    // 2. For each seed tag, find similar tags (similarity > 0.15, top 10 per tag)
+    let mut similar_tag_map: std::collections::HashMap<i64, Vec<(i64, f32)>> =
+        std::collections::HashMap::new();
+
+    for &seed_tid in &seed_tag_ids {
+        let similar = sqlx::query_as::<_, (i64, f32)>(
+            r#"
+            SELECT
+                CASE WHEN tag_a_id = ? THEN tag_b_id ELSE tag_a_id END as similar_tag_id,
+                similarity
+            FROM tag_similarities
+            WHERE (tag_a_id = ? OR tag_b_id = ?)
+              AND similarity > 0.15
+            ORDER BY similarity DESC
+            LIMIT 10
+            "#,
+        )
+        .bind(seed_tid)
+        .bind(seed_tid)
+        .bind(seed_tid)
+        .fetch_all(pool)
+        .await?;
+
+        for (similar_tag_id, sim) in similar {
+            similar_tag_map
+                .entry(similar_tag_id)
+                .or_default()
+                .push((seed_tid, sim));
+        }
+    }
+
+    // Remove seed tags themselves from candidates
+    for tid in &seed_tag_ids {
+        similar_tag_map.remove(tid);
+    }
+
+    if similar_tag_map.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let candidate_tag_ids: Vec<i64> = similar_tag_map.keys().copied().collect();
+
+    // Build a map of tag_id -> tag_name for seed tags
+    let seed_tag_name_map: std::collections::HashMap<i64, &str> =
+        seed_tags.iter().map(|t| (t.id, t.name.as_str())).collect();
+
+    // Build a map of tag_id -> (tag_name, category_name) for candidate tags
+    let mut candidate_tag_info: std::collections::HashMap<i64, (String, String)> =
+        std::collections::HashMap::new();
+
+    {
+        let tag_ph: Vec<String> = candidate_tag_ids.iter().map(|_| "?".to_string()).collect();
+        let info_sql = format!(
+            "SELECT t.id, t.name, tc.name as cat FROM tags t JOIN tag_categories tc ON tc.id = t.category_id WHERE t.id IN ({})",
+            tag_ph.join(",")
+        );
+        let mut q = sqlx::query(&info_sql);
+        for tid in &candidate_tag_ids {
+            q = q.bind(tid);
+        }
+        let rows = q.fetch_all(pool).await?;
+        for row in rows {
+            let tid: i64 = row.try_get("id")?;
+            let name: String = row.try_get("name")?;
+            let cat: String = row.try_get("cat")?;
+            candidate_tag_info.insert(tid, (name, cat));
+        }
+    }
+
+    // 3. Find all files that have any of these candidate tags
+    let tag_placeholders: Vec<String> = candidate_tag_ids.iter().map(|_| "?".to_string()).collect();
+
+    let files_sql = format!(
+        r#"
+        SELECT DISTINCT f.id, f.title, f.artist, f.bpm, f.musical_key,
+               t.name as tag_name, t.id as tag_id
+        FROM files f
+        JOIN service_tracks st ON (st.isrc = f.isrc
+            OR (st.service = 'spotify' AND st.service_id = f.spotify_id)
+            OR (st.service = 'soundcloud' AND st.service_id = f.soundcloud_id)
+            OR (st.service = 'youtube' AND st.service_id = f.youtube_id))
+        JOIN service_playlist_tracks spt ON spt.track_id = st.id
+        JOIN service_playlists sp ON sp.id = spt.playlist_id
+        JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
+        WHERE t.id IN ({})
+          AND f.id != ?
+        ORDER BY f.id
+        "#,
+        tag_placeholders.join(",")
+    );
+
+    let mut file_scores: std::collections::HashMap<
+        i64,
+        (
+            String,
+            Option<String>,
+            Option<f64>,
+            Option<String>,
+            f64,
+            Vec<(String, String, f32)>,
+        ),
+    > = std::collections::HashMap::new();
+
+    let mut file_query = sqlx::query(&files_sql);
+    for tid in &candidate_tag_ids {
+        file_query = file_query.bind(tid);
+    }
+    file_query = file_query.bind(file_id);
+
+    let rows = file_query.fetch_all(pool).await?;
+
+    for row in rows {
+        let fid: i64 = row.try_get("id")?;
+        let title: String = row.try_get("title")?;
+        let artist: Option<String> = row.try_get("artist")?;
+        let bpm: Option<f64> = row.try_get("bpm")?;
+        let key: Option<String> = row.try_get("musical_key")?;
+        let tag_name: String = row.try_get("tag_name")?;
+        let tag_id: i64 = row.try_get("tag_id")?;
+
+        // Find matching seed tags and their similarities
+        if let Some(seed_matches) = similar_tag_map.get(&tag_id) {
+            let entry = file_scores
+                .entry(fid)
+                .or_insert_with(|| (title.clone(), artist.clone(), bpm, key, 0.0f64, Vec::new()));
+
+            // For each seed match, add to matched_tags if not already there
+            for (seed_tid, _sim) in seed_matches {
+                let seed_name = seed_tag_name_map.get(seed_tid).map(|s| *s).unwrap_or("?");
+
+                // Check if we already have this pair
+                let already = entry.5.iter().any(|(s, _, _)| s == seed_name);
+                if !already {
+                    // Get the best similarity for this seed->candidate pair
+                    let best_sim = seed_matches
+                        .iter()
+                        .filter(|(st, _)| st == seed_tid)
+                        .map(|(_, s)| *s)
+                        .fold(0.0f32, f32::max);
+
+                    entry
+                        .5
+                        .push((seed_name.to_string(), tag_name.clone(), best_sim));
+                    entry.4 += best_sim as f64;
+                }
+            }
+        }
+    }
+
+    // 4. Normalize scores by seed tag count and sort
+    let mut results: Vec<(
+        i64,
+        String,
+        Option<String>,
+        Option<f64>,
+        Option<String>,
+        f64,
+        String,
+    )> = Vec::new();
+
+    for (fid, (title, artist, bpm, key, raw_score, matched_tags)) in file_scores {
+        let normalized_score = raw_score / seed_tag_count as f64;
+        // Serialize matched_tags to JSON
+        let matched_json = serde_json::to_string(&matched_tags).unwrap_or_default();
+        results.push((fid, title, artist, bpm, key, normalized_score, matched_json));
+    }
+
+    // Sort by score descending (higher = more similar)
+    results.sort_by(|a, b| b.5.partial_cmp(&a.5).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(limit as usize);
+
+    Ok(results)
 }
 
 #[cfg(test)]

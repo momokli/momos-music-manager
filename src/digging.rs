@@ -155,65 +155,12 @@ pub struct TagWithEnergy {
 pub async fn get_seeds(pool: &Pool<Sqlite>, query: &DiggingSeedQuery) -> Result<Vec<File>> {
     let limit = query.limit.unwrap_or(20).min(50);
 
-    let mut sql = String::from("SELECT * FROM files WHERE 1=1");
-
-    // BPM filter
-    if let Some(bpm_min) = query.bpm_min {
-        sql.push_str(&format!(" AND bpm >= {}", bpm_min));
-    }
-    if let Some(bpm_max) = query.bpm_max {
-        sql.push_str(&format!(" AND bpm <= {}", bpm_max));
-    }
-
-    // Key filter
-    if let Some(ref key) = query.key {
-        sql.push_str(&format!(" AND musical_key = '{}'", key.replace('\'', "''")));
-    }
-
-    // Search filter (title or artist)
-    if let Some(ref search) = query.search {
-        let safe = search.replace('\'', "''");
-        sql.push_str(&format!(
-            " AND (title LIKE '%{}%' OR artist LIKE '%{}%' OR file_path LIKE '%{}%')",
-            safe, safe, safe
-        ));
-    }
-
-    // Genre filter
-    if let Some(ref genre) = query.genre {
-        let safe = genre.replace('\'', "''");
-        sql.push_str(&format!(" AND genre LIKE '%{}%'", safe));
-    }
-
-    // Play count filter
-    if let Some(max) = query.play_count_max {
-        sql.push_str(&format!(" AND play_count <= {}", max));
-    }
-    if let Some(min) = query.play_count_min {
-        sql.push_str(&format!(" AND play_count >= {}", min));
-    }
-
-    // Last played filter
-    if let Some(before) = query.last_played_before {
-        sql.push_str(&format!(
-            " AND (last_played IS NULL OR last_played < {})",
-            before
-        ));
-    }
-    if let Some(after) = query.last_played_after {
-        sql.push_str(&format!(
-            " AND (last_played IS NOT NULL AND last_played > {})",
-            after
-        ));
-    }
-
-    // Sorting
-    let sort_by = query.sort_by.as_deref().unwrap_or("play_count");
-    let sort_order = query.sort_order.as_deref().unwrap_or("asc");
-
-    // Validate sort_by to prevent SQL injection
-    let sort_column = match sort_by {
-        "play_count" => "play_count",
+    // Build SQL with ? bind parameters instead of string interpolation.
+    // Each filter uses (? IS NULL OR condition) — when the bound value is
+    // NULL (i.e. the user didn't supply that filter), the IS NULL check
+    // makes the whole clause a no-op, so we can always bind all parameters
+    // without conditional branches.
+    let sort_column = match query.sort_by.as_deref().unwrap_or("play_count") {
         "last_played" => "COALESCE(last_played, 0)",
         "bpm" => "COALESCE(bpm, 0)",
         "title" => "COALESCE(title, '')",
@@ -221,20 +168,50 @@ pub async fn get_seeds(pool: &Pool<Sqlite>, query: &DiggingSeedQuery) -> Result<
         "random" => "RANDOM()",
         _ => "play_count",
     };
-
-    // Validate sort_order
-    let order = match sort_order {
-        "asc" => "ASC",
+    let order = match query.sort_order.as_deref().unwrap_or("asc") {
         "desc" => "DESC",
         _ => "ASC",
     };
 
-    sql.push_str(&format!(
-        " ORDER BY {} {} LIMIT {}",
-        sort_column, order, limit
-    ));
+    let sql = format!(
+        "SELECT * FROM files WHERE 1=1 \
+         AND (? IS NULL OR bpm >= ?) \
+         AND (? IS NULL OR bpm <= ?) \
+         AND (? IS NULL OR musical_key = ?) \
+         AND (? IS NULL OR (title LIKE ('%' || ? || '%') OR artist LIKE ('%' || ? || '%') OR file_path LIKE ('%' || ? || '%'))) \
+         AND (? IS NULL OR genre LIKE ('%' || ? || '%')) \
+         AND (? IS NULL OR play_count <= ?) \
+         AND (? IS NULL OR play_count >= ?) \
+         AND (? IS NULL OR last_played IS NULL OR last_played < ?) \
+         AND (? IS NULL OR (last_played IS NOT NULL AND last_played > ?)) \
+         ORDER BY {} {} LIMIT ?",
+        sort_column, order,
+    );
 
-    let files = sqlx::query_as::<_, File>(&sql).fetch_all(pool).await?;
+    let files = sqlx::query_as::<_, File>(&sql)
+        .bind(query.bpm_min)
+        .bind(query.bpm_min) // bpm >=
+        .bind(query.bpm_max)
+        .bind(query.bpm_max) // bpm <=
+        .bind(&query.key)
+        .bind(&query.key) // musical_key =
+        .bind(&query.search)
+        .bind(&query.search) // search guard + title
+        .bind(&query.search)
+        .bind(&query.search) // artist + file_path
+        .bind(&query.genre)
+        .bind(&query.genre) // genre LIKE
+        .bind(query.play_count_max)
+        .bind(query.play_count_max) // play_count <=
+        .bind(query.play_count_min)
+        .bind(query.play_count_min) // play_count >=
+        .bind(query.last_played_before)
+        .bind(query.last_played_before) // last_played <
+        .bind(query.last_played_after)
+        .bind(query.last_played_after) // last_played >
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
 
     Ok(files)
 }

@@ -24,20 +24,21 @@ use crate::db::{
     File, Folder, ServiceConfig, ServiceConnections, ServiceTrack, bulk_check_tags,
     bulk_create_tags, bulk_review_tags, bulk_update_tags, categorize_tag as db_categorize_tag,
     clear_all_embeddings, compute_target_comment, create_tag, create_tag_category,
-    create_tags_from_playlists, delete_folder, delete_tag, delete_tag_category, get_all_embeddings,
-    get_embeddings_by_category, get_folder_by_id, get_folder_file_count,
-    get_folders as db_get_folders, get_playlists_without_tags, get_service_config,
-    get_tag_categories, get_tag_category_by_id, get_tag_embedding, get_tag_review_counts,
-    get_unreviewed_tags, list_subscriptions, scan_folder, update_folder_active,
-    update_folder_with_config, update_service_connection_status, update_service_tokens, update_tag,
-    update_tag_category_metadata, upsert_tag_embedding,
+    create_tags_from_playlists, delete_folder, delete_tag, delete_tag_category,
+    find_tag_similar_tracks, get_all_embeddings, get_embeddings_by_category, get_folder_by_id,
+    get_folder_file_count, get_folders as db_get_folders, get_playlists_without_tags,
+    get_service_config, get_tag_categories, get_tag_category_by_id, get_tag_embedding,
+    get_tag_review_counts, get_tags_for_file, get_unreviewed_tags, list_subscriptions, scan_folder,
+    update_folder_active, update_folder_with_config, update_service_connection_status,
+    update_service_tokens, update_tag, update_tag_category_metadata, upsert_tag_embedding,
 };
 use crate::digging::{
     TagReorderItem, delete_tag_energy_level, get_tag_energy_levels, reorder_tags_batch,
     set_tag_energy_level,
 };
 use crate::embeddings::{
-    EmbeddingModel, deserialize_embedding, mean_embedding, serialize_embedding, suggest_category,
+    EmbeddingModel, compute_tag_similarities, deserialize_embedding, mean_embedding,
+    serialize_embedding, suggest_category,
 };
 #[allow(unused_imports)]
 use crate::tasks::{
@@ -701,6 +702,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/files/{id}", get(file_handler))
         .route("/api/files/{id}/sync-comment", post(sync_comment_handler))
         .route("/api/files/{id}/write-comment", post(sync_comment_handler))
+        .route(
+            "/api/files/{id}/similar-tracks",
+            get(find_tag_similar_tracks_handler),
+        )
         .route("/api/files/bulk-sync", post(bulk_sync_handler))
         .route("/api/files/write-comments", post(bulk_sync_handler))
         .route("/api/tracks", get(tracks_handler))
@@ -736,6 +741,14 @@ pub fn router() -> Router<Arc<AppState>> {
             post(recompute_embeddings_handler),
         )
         .route("/api/embeddings/reset-review", post(reset_review_handler))
+        .route(
+            "/api/tag-similarities/recompute",
+            post(recompute_tag_similarities_handler),
+        )
+        .route(
+            "/api/tag-similarities/status",
+            get(tag_similarities_status_handler),
+        )
         .route(
             "/api/tag-categories",
             get(tag_categories_handler).post(create_tag_category_handler),
@@ -1592,12 +1605,66 @@ async fn update_tag_category_handler(
     }
 }
 
+/// After a tag is created or renamed, compute its embedding and recompute all similarity pairs.
+///
+/// Fast path (model cached in AppState): embed single tag via ML model, upsert to DB,
+/// then recompute all pairwise similarities (sub-second for current tag counts).
+///
+/// Fallback path (no cached model): dispatch a background `RecomputeEmbeddings` task
+/// that handles everything.
+async fn auto_update_tag_embedding_and_similarities(
+    state: &Arc<AppState>,
+    tag_id: i64,
+    tag_name: &str,
+) {
+    // Take the lock once — check if model is cached and use it in one shot
+    let vec = {
+        let mut cache = state.embeddings.lock().await;
+        match cache.as_mut().and_then(|m| m.embed_text(tag_name).ok()) {
+            Some(v) => v,
+            None => {
+                // Model not loaded (or embedding failed) — fallback to background task
+                drop(cache);
+                tracing::info!(
+                    "Embedding model not loaded (or failed), dispatching background recompute for tag '{}'",
+                    tag_name
+                );
+                crate::tasks::start_recompute_embeddings_task(&state.task_manager, &state.db).await;
+                return;
+            }
+        }
+    };
+
+    let blob = serialize_embedding(&vec);
+    if let Err(e) = upsert_tag_embedding(&state.db, tag_id, &blob, "all-MiniLM-L6-v2").await {
+        tracing::warn!("Failed to upsert embedding for tag '{}': {}", tag_name, e);
+        return;
+    }
+
+    // Recompute all similarities (cheap — just DB math on stored embeddings)
+    match compute_tag_similarities(&state.db).await {
+        Ok(count) => {
+            tracing::debug!(
+                "Auto-recomputed {} similarity pairs after tag '{}' mutation",
+                count,
+                tag_name
+            );
+        }
+        Err(e) => {
+            tracing::warn!("Failed to auto-recompute tag similarities: {}", e);
+        }
+    }
+}
+
 async fn create_tag_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateTagRequest>,
 ) -> impl IntoResponse {
     match create_tag(&state.db, &request.name, request.category_id).await {
         Ok(tag) => {
+            // Auto-compute embedding and similarity pairs for the new tag
+            auto_update_tag_embedding_and_similarities(&state, tag.id, &tag.name).await;
+
             // Get tag with category info using helper function
             match get_tag_with_category(&state.db, tag.id).await {
                 Ok(Some(api_tag)) => Json(ApiResponse { data: api_tag }).into_response(),
@@ -1638,6 +1705,11 @@ async fn update_tag_handler(
 ) -> impl IntoResponse {
     match update_tag(&state.db, id, request.name.as_deref(), request.category_id).await {
         Ok(tag) => {
+            // If name changed, recompute embedding and similarity pairs
+            if request.name.is_some() {
+                auto_update_tag_embedding_and_similarities(&state, tag.id, &tag.name).await;
+            }
+
             // Convert to API Tag format with category info
             match get_tag_with_category(&state.db, tag.id).await {
                 Ok(Some(api_tag)) => Json(ApiResponse { data: api_tag }).into_response(),
@@ -1845,7 +1917,7 @@ async fn categorize_tag_handler(
     match db_categorize_tag(&state.db, id, request.category_id).await {
         Ok(tag) => {
             // 3. Embedding-Cache aktualisieren (falls Modell geladen)
-            let mut cache = state.embeddings.lock().await;
+            let cache = state.embeddings.lock().await;
             if let Some(ref model) = *cache {
                 // Hole oder berechne Embedding für den Tag
                 let embedding_blob = match get_tag_embedding(&state.db, tag.id).await {
@@ -1881,6 +1953,9 @@ async fn categorize_tag_handler(
                         );
                     }
                 }
+
+                // Recompute all tag similarity pairs so the new/updated embedding is included
+                let _ = compute_tag_similarities(&state.db).await;
             }
 
             // API-Tag mit Category-Info zurückgeben
@@ -1976,7 +2051,19 @@ async fn suggest_category_handler(
             Err(_) => {
                 // Neu berechnen
                 let cache = state.embeddings.lock().await;
-                match cache.as_ref().unwrap().embed_text(&tag.name) {
+                let model = match cache.as_ref() {
+                    Some(m) => m,
+                    None => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: "Embedding model not loaded".to_string(),
+                            }),
+                        )
+                            .into_response();
+                    }
+                };
+                match model.embed_text(&tag.name) {
                     Ok(vec) => {
                         let blob = serialize_embedding(&vec);
                         let _ = upsert_tag_embedding(&state.db, tag.id, &blob, "all-MiniLM-L6-v2")
@@ -1998,7 +2085,19 @@ async fn suggest_category_handler(
         _ => {
             // Neu berechnen
             let cache = state.embeddings.lock().await;
-            match cache.as_ref().unwrap().embed_text(&tag.name) {
+            let model = match cache.as_ref() {
+                Some(m) => m,
+                None => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Embedding model not loaded".to_string(),
+                        }),
+                    )
+                        .into_response();
+                }
+            };
+            match model.embed_text(&tag.name) {
                 Ok(vec) => {
                     let blob = serialize_embedding(&vec);
                     let _ =
@@ -2032,8 +2131,12 @@ async fn suggest_category_handler(
         }
     };
 
+    // Phase is technical/prefilled — filter it out from the UI and AI suggestions
+    let phase_id = categories.iter().find(|c| c.prefix == "P").map(|c| c.id);
+
     let api_categories: Vec<TagCategory> = categories
         .iter()
+        .filter(|c| Some(c.id) != phase_id)
         .map(|c| TagCategory {
             id: c.id,
             name: c.name.clone(),
@@ -2045,17 +2148,17 @@ async fn suggest_category_handler(
         })
         .collect();
 
-    // 5. Category-Embeddings berechnen
-    let skip_id = categories
+    // 5. Category-Embeddings berechnen (skip Setlist + Phase)
+    let skip_ids: Vec<i64> = categories
         .iter()
-        .find(|c| c.is_default)
+        .filter(|c| c.is_default || Some(c.id) == phase_id)
         .map(|c| c.id)
-        .unwrap_or(-1);
+        .collect();
 
     let mut category_embeddings = std::collections::HashMap::new();
     for cat in &categories {
-        if cat.id == skip_id {
-            continue; // Setlist überspringen für AI
+        if skip_ids.contains(&cat.id) {
+            continue; // Setlist + Phase überspringen für AI
         }
         let rows = match get_embeddings_by_category(&state.db, cat.id).await {
             Ok(r) => r,
@@ -2078,13 +2181,15 @@ async fn suggest_category_handler(
     }
 
     // 6. Similarity berechnen
-    let suggestion = suggest_category(&tag_embedding, &category_embeddings, skip_id);
+    let suggestion = suggest_category(&tag_embedding, &category_embeddings, -1);
 
     let (sug_id, sug_name, confidence) = match suggestion {
         Some(s) => (s.category_id, s.category_name, s.confidence),
         None => {
-            // Fallback: erste nicht-default Kategorie
-            let fallback = categories.iter().find(|c| !c.is_default);
+            // Fallback: erste nicht-default, nicht-Phase Kategorie
+            let fallback = categories
+                .iter()
+                .find(|c| !c.is_default && Some(c.id) != phase_id);
             match fallback {
                 Some(c) => (c.id, c.name.clone(), 0.0),
                 None => (-1, "None".to_string(), 0.0),
@@ -2220,6 +2325,7 @@ async fn bulk_resolve_handler(
     };
 
     let mut results = Vec::new();
+    let mut any_created = false;
     for entry in &request.entries {
         let cat_name = category_map
             .get(&entry.category_id)
@@ -2240,6 +2346,7 @@ async fn bulk_resolve_handler(
                                 category_name: cat_name.clone(),
                                 error: None,
                             });
+                            any_created = true;
                         }
                     }
                     Err(e) => {
@@ -2324,6 +2431,11 @@ async fn bulk_resolve_handler(
         }
     }
 
+    // Auto-recompute embeddings and similarities if any tags were created
+    if any_created {
+        crate::tasks::start_recompute_embeddings_task(&state.task_manager, &state.db).await;
+    }
+
     Json(ApiResponse { data: results }).into_response()
 }
 
@@ -2395,6 +2507,61 @@ async fn reset_review_handler(State(state): State<Arc<AppState>>) -> impl IntoRe
     }
 }
 
+/// POST /api/tag-similarities/recompute
+/// Compute pairwise cosine similarity for all tag embeddings.
+/// This is a fast operation (no ML model needed, just DB math).
+async fn recompute_tag_similarities_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    match compute_tag_similarities(&state.db).await {
+        Ok(count) => Json(ApiResponse {
+            data: serde_json::json!({
+                "pairs_computed": count,
+                "message": format!("Computed {} tag similarity pairs", count)
+            }),
+        })
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to compute tag similarities: {}", e),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/tag-similarities/status
+/// Returns how many tags have embeddings vs how many similarity pairs exist.
+async fn tag_similarities_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let tags_with_embeddings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tag_embeddings")
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+
+    let similarity_pairs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tag_similarities")
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+
+    let tags_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tags")
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+
+    Json(ApiResponse {
+        data: serde_json::json!({
+            "tagsTotal": tags_total,
+            "tagsWithEmbeddings": tags_with_embeddings,
+            "similarityPairs": similarity_pairs,
+            "ready": tags_with_embeddings > 1 && similarity_pairs > 0,
+        }),
+    })
+    .into_response()
+}
+
 async fn get_playlists_without_tags_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -2438,6 +2605,10 @@ async fn create_tags_from_playlists_handler(
                 created,
                 message: format!("Created {} tags from playlists", created),
             };
+            // Auto-recompute embeddings and similarities for new tags
+            if created > 0 {
+                crate::tasks::start_recompute_embeddings_task(&state.task_manager, &state.db).await;
+            }
             Json(ApiResponse { data: response }).into_response()
         }
         Err(e) => (
@@ -4920,6 +5091,29 @@ async fn playlist_comment_diff_stats_handler(
         data: serde_json::json!({"playlists": result, "total": result.len()}),
     })
     .into_response()
+}
+
+/// GET /api/files/{id}/similar-tracks
+/// Find tracks with semantically similar tags using tag similarity embeddings.
+async fn find_tag_similar_tracks_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Query(query): Query<TracksQuery>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    let limit = query.limit.unwrap_or(20).min(100);
+
+    match crate::db::find_tag_similar_tracks(&state.db, id, limit).await {
+        Ok(results) => Json(ApiResponse { data: results }).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 impl Default for FilesQuery {
