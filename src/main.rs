@@ -170,7 +170,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("info,momos_music_manager=debug,lofty=error")
+                tracing_subscriber::EnvFilter::new("warn,momos_music_manager=info,lofty=error")
             }),
         )
         .init();
@@ -269,8 +269,7 @@ async fn serve(db: Pool<Sqlite>, host: String, port: u16) -> Result<()> {
 
     let address = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&address).await?;
-    info!("Serving HTTP on {host}:{port}");
-    info!("Frontend: http://{host}:{port}/");
+    info!("Serving HTTP on http://{host}:{port}/");
     axum::serve(listener, app).await?;
 
     Ok(())
