@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn test_serialize_roundtrip() {
-        let original = vec![1.0, -2.5, 3.14, 0.0, 1e-10];
+        let original = vec![1.0, -2.5, 42.0, 0.0, 1e-10];
         let blob = serialize_embedding(&original);
         let deserialized = deserialize_embedding(&blob).unwrap();
         assert_eq!(original.len(), deserialized.len());
