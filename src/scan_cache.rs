@@ -13,7 +13,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -264,7 +264,7 @@ pub async fn entry_count() -> usize {
         return 0;
     }
     let mut count = 0;
-    let mut readdir = tokio::fs::read_dir(&dir).await;
+    let readdir = tokio::fs::read_dir(&dir).await;
     if let Ok(mut rd) = readdir {
         while let Ok(Some(_)) = rd.next_entry().await {
             count += 1;

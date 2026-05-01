@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 use roxmltree::Document;
 use sqlx::{Pool, Sqlite};
 use std::path::{Path, PathBuf};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 // ============================================================
 // Data types

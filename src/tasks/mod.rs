@@ -12,11 +12,11 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::config::ServiceCredentials;
-use crate::embeddings::{EmbeddingModel, serialize_embedding};
+use crate::embeddings::serialize_embedding;
 use crate::spotify::{client::SpotifyClient, sync_worker::SpotifySyncWorker};
 
 // ============================================================
