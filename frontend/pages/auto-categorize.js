@@ -27,6 +27,17 @@
  * Notes:
  *   - Phase is technical/prefilled — hidden from the wizard
  *   - AI recommends among Vibe, Mood, Merkmal only
+ *
+ * Speculative Prefetch ("Fork"):
+ *   After showing a tag with its AI recommendation, the wizard
+ *   pre-emptively does two things in the background:
+ *     1. Optimistic PUT — categorizes the current tag with the
+ *        recommendation, assuming the user will press Enter.
+ *     2. Next-tag prefetch — fetches the suggestion for the next
+ *        tag so it renders instantly.
+ *   If the user picks a different category, a second PUT overwrites
+ *   the optimistic one ("throw away the fork"). The prefetch is always
+ *   correct because the queue order is linear.
  */
 import { renderLoading, renderErrorBlock, renderBadge } from "../shared/components.js";
 import { fetchJSON } from "../shared/api.js";
@@ -168,6 +179,68 @@ function renderPage(
 </div>`;
 }
 
+/* ── Speculative Prefetch ("Fork") ────────────────────────────── */
+
+/**
+ * After rendering a tag, fires off background work:
+ *
+ *   1. Optimistic PUT — pre-categorizes the current tag with the AI
+ *      recommendation (assumes the user will press Enter).
+ *   2. Next-tag prefetch — fetches the suggestion for the next tag
+ *      so it can be rendered instantly when the user moves on.
+ *
+ * If the user picks a different category, the optimistic PUT is
+ * overridden by the real choice ("throw away the fork").
+ *
+ * @param {object} state
+ * @param {Array} tagQueue
+ * @param {number} [nextIndex] — if provided, prefetch that specific index
+ */
+function startSpeculativePrefetch(state, tagQueue, nextIndex) {
+  // ── Fork 1: Optimistic pre-categorize ──
+  // Only fire once per tag (skip if we already sent it for this tag)
+  const currentTag = state.currentTag;
+  if (currentTag && state.aiRecommendation && state.aiRecommendation.categoryId) {
+    if (state.optimisticTagId !== currentTag.id) {
+      state.optimisticTagId = currentTag.id;
+      state.optimisticCatId = state.aiRecommendation.categoryId;
+
+      // Fire-and-forget: put the tag with the recommended category.
+      // If the user picks differently, a second PUT will overwrite it.
+      fetchJSON(`/api/tags/${currentTag.id}/categorize`, {
+        method: "PUT",
+        body: JSON.stringify({ categoryId: state.optimisticCatId }),
+        signal: state.signal,
+      }).catch((err) => {
+        if (err.name === "AbortError") return;
+        // Non-critical — user will send a real PUT on interaction
+        console.warn("Optimistic pre-categorize failed:", err);
+      });
+    }
+  }
+
+  // ── Fork 2: Prefetch next tag's suggestion ──
+  const idx = nextIndex != null ? nextIndex : state.currentIndex + 1;
+  if (idx < tagQueue.length) {
+    const nextTag = tagQueue[idx];
+    // Avoid duplicate in-flight requests
+    if (!state.prefetchInFlight[nextTag.id] && !state.prefetchCache[nextTag.id]) {
+      state.prefetchInFlight[nextTag.id] = true;
+
+      fetchJSON(`/api/tags/${nextTag.id}/suggest`, { signal: state.signal })
+        .then((resp) => {
+          state.prefetchCache[nextTag.id] = resp;
+          delete state.prefetchInFlight[nextTag.id];
+        })
+        .catch((err) => {
+          delete state.prefetchInFlight[nextTag.id];
+          if (err.name === "AbortError") return;
+          console.warn("Prefetch failed for tag", nextTag.id, ":", err);
+        });
+    }
+  }
+}
+
 /* ── Category helpers ──────────────────────────────────────────── */
 
 function resetAll(container) {
@@ -189,21 +262,29 @@ async function selectCategory(container, state, tagQueue, categories, btn) {
   selectBtn(btn);
 
   const catId = parseInt(btn.dataset.category);
-  if (!isNaN(catId) && state.currentTag) {
-    try {
-      await fetchJSON(`/api/tags/${state.currentTag.id}/categorize`, {
-        method: "PUT",
-        body: JSON.stringify({ categoryId: catId }),
-        signal: state.signal,
-      });
-      state.currentIndex++;
-      if (state.signal.aborted) return;
-      await loadNextTag(container, state, tagQueue, categories);
-    } catch (err) {
-      if (err.name === "AbortError") return;
-      console.error("Categorize failed:", err);
-    }
+  if (isNaN(catId) || !state.currentTag) return;
+
+  const tagId = state.currentTag.id;
+
+  // Send the authoritative PUT on every explicit user interaction.
+  // The optimistic PUT is just a background bonus — if it succeeded,
+  // this second PUT is idempotent and cheap (simple DB write).
+  // If it failed, this ensures correctness ("throw away the fork").
+  try {
+    await fetchJSON(`/api/tags/${tagId}/categorize`, {
+      method: "PUT",
+      body: JSON.stringify({ categoryId: catId }),
+      signal: state.signal,
+    });
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    console.error("Categorize failed:", err);
+    return; // Don't advance if the real PUT failed
   }
+
+  state.currentIndex++;
+  if (state.signal.aborted) return;
+  await loadNextTag(container, state, tagQueue, categories);
 }
 
 async function skipTag(container, state, tagQueue, categories) {
@@ -312,53 +393,77 @@ async function loadNextTag(container, state, tagQueue, fallbackCategories) {
 
   const currentTag = tagQueue[state.currentIndex];
   state.currentTag = currentTag;
+  // Reset optimistic state for the new tag
+  // (optimisticTagId stays set until startSpeculativePrefetch fires
+  //  for a different tag, which prevents duplicate PUTs)
 
-  try {
-    const suggestResp = await fetchJSON(`/api/tags/${currentTag.id}/suggest`, {
-      signal: state.signal,
-    });
-    if (state.signal.aborted) return;
+  let suggestResp;
 
-    const aiRec = suggestResp.data
-      ? {
-          category: suggestResp.data.suggestedCategoryName,
-          confidence: Math.round(suggestResp.data.confidence * 100),
-          categoryId: suggestResp.data.suggestedCategoryId,
-        }
-      : null;
-
-    const apiCategories = suggestResp.data?.allCategories || fallbackCategories;
-    const services = suggestResp.data?.serviceConnections || null;
-    const displayCats = mapCategories(apiCategories);
-
-    container.innerHTML = renderPage(
-      currentTag,
-      tagQueue.length,
-      state.currentIndex,
-      displayCats,
-      aiRec,
-      services,
-    );
-    container.focus();
-  } catch (err) {
-    if (err.name === "AbortError") return;
-
-    const displayCats = mapCategories(
-      fallbackCategories.length > 0
-        ? fallbackCategories
-        : [{ id: 1, name: "Setlist", icon: "fa-solid fa-list", isDefault: true }],
-    );
-
-    container.innerHTML = renderPage(
-      currentTag,
-      tagQueue.length,
-      state.currentIndex,
-      displayCats,
-      null,
-      null,
-    );
-    container.focus();
+  // ── Check prefetch cache first (the "fork" paid off) ──
+  if (state.prefetchCache[currentTag.id]) {
+    suggestResp = state.prefetchCache[currentTag.id];
+    delete state.prefetchCache[currentTag.id];
+    delete state.prefetchInFlight[currentTag.id];
+  } else {
+    // No prefetch (first tag, or prefetch failed) — do normal fetch
+    try {
+      suggestResp = await fetchJSON(`/api/tags/${currentTag.id}/suggest`, {
+        signal: state.signal,
+      });
+    } catch (err) {
+      if (err.name === "AbortError") return;
+      // Fallback rendering without AI recommendation
+      const displayCats = mapCategories(
+        fallbackCategories.length > 0
+          ? fallbackCategories
+          : [{ id: 1, name: "Setlist", icon: "fa-solid fa-list", isDefault: true }],
+      );
+      state.aiRecommendation = null;
+      container.innerHTML = renderPage(
+        currentTag,
+        tagQueue.length,
+        state.currentIndex,
+        displayCats,
+        null,
+        null,
+      );
+      container.focus();
+      // Still try to prefetch the next tag even on error
+      startSpeculativePrefetch(state, tagQueue);
+      return;
+    }
   }
+
+  if (state.signal.aborted) return;
+
+  // Build AI recommendation from response
+  const aiRec = suggestResp.data
+    ? {
+        category: suggestResp.data.suggestedCategoryName,
+        confidence: Math.round(suggestResp.data.confidence * 100),
+        categoryId: suggestResp.data.suggestedCategoryId,
+      }
+    : null;
+
+  // Store the recommendation so speculative prefetch can use it
+  state.aiRecommendation = aiRec;
+
+  const apiCategories = suggestResp.data?.allCategories || fallbackCategories;
+  const services = suggestResp.data?.serviceConnections || null;
+  const displayCats = mapCategories(apiCategories);
+
+  container.innerHTML = renderPage(
+    currentTag,
+    tagQueue.length,
+    state.currentIndex,
+    displayCats,
+    aiRec,
+    services,
+  );
+  container.focus();
+
+  // ── Kick off speculative prefetch for the NEXT tag ──
+  startSpeculativePrefetch(state, tagQueue);
 }
 
 /* ── Init ──────────────────────────────────────────────────────── */
@@ -389,6 +494,12 @@ export async function init(container, signal) {
       currentIndex: 0,
       currentTag: null,
       signal,
+      // ── Speculative prefetch state ──
+      prefetchCache: {}, // tagId → response data (resolved)
+      prefetchInFlight: {}, // tagId → true (track which are in flight)
+      optimisticTagId: null, // tagId we optimistically pre-categorized
+      optimisticCatId: null, // categoryId we optimistically set
+      aiRecommendation: null, // current tag's AI recommendation
     };
 
     await loadNextTag(container, state, queue, []);

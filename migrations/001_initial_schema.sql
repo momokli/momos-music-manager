@@ -254,6 +254,60 @@ SELECT
     '[]' as tags_json
 FROM service_tracks st;
 
+-- File ↔ Track link view (centralized matching logic)
+-- A file is linked to a service track if:
+--   1. Their ISRC matches, OR
+--   2. The file's direct service_id matches the track's (service, service_id)
+CREATE VIEW v_file_track_link AS
+SELECT f.id AS file_id, st.id AS track_id
+FROM files f
+JOIN service_tracks st ON (
+    st.isrc = f.isrc
+    OR (st.service = 'spotify' AND st.service_id = f.spotify_id)
+    OR (st.service = 'soundcloud' AND st.service_id = f.soundcloud_id)
+    OR (st.service = 'youtube' AND st.service_id = f.youtube_id)
+);
+
+-- Tag ↔ Playlist name mapping view (case-insensitive)
+CREATE VIEW v_tag_playlist AS
+SELECT t.id AS tag_id, t.name AS tag_name, t.category_id,
+       sp.id AS playlist_id, sp.name AS playlist_name, sp.service
+FROM tags t
+JOIN service_playlists sp ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name));
+
+-- File → Tags resolution view (full chain: file → track → playlist → tag)
+CREATE VIEW v_file_tags AS
+SELECT DISTINCT f.id AS file_id,
+       t.id AS tag_id, t.name AS tag_name,
+       t.sort_order, t.created_at,
+       tc.id AS category_id, tc.name AS category_name,
+       tc.is_default, tc.prefix
+FROM files f
+JOIN v_file_track_link v ON v.file_id = f.id
+JOIN service_playlist_tracks spt ON spt.track_id = v.track_id
+JOIN service_playlists sp ON sp.id = spt.playlist_id
+JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
+JOIN tag_categories tc ON tc.id = t.category_id;
+
+-- Subscription details view (playlist name + track count)
+CREATE VIEW v_subscriptions AS
+SELECT ps.*, sp.name AS playlist_name,
+  COALESCE((SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id), 0) AS track_count
+FROM playlist_subscriptions ps
+LEFT JOIN service_playlists sp ON ps.service_playlist_id = sp.id;
+
+-- Tag categories with tag count
+CREATE VIEW v_tag_categories AS
+SELECT tc.*, (SELECT COUNT(*) FROM tags WHERE category_id = tc.id) as tag_count
+FROM tag_categories tc;
+
+-- Tags with resolved category name and icon
+CREATE VIEW v_tags_with_categories AS
+SELECT t.id, t.name, t.category_id, t.sort_order, t.created_at, t.reviewed_at,
+       tc.name as category, tc.icon as category_icon
+FROM tags t
+LEFT JOIN tag_categories tc ON t.category_id = tc.id;
+
 -- Initial data
 INSERT INTO tag_categories (name, icon, prefix, sort_order, is_default) VALUES
     ('Setlist', 'fa-solid fa-list-music', 'S', 0, TRUE),

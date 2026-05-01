@@ -3,12 +3,13 @@
  *
  * Lists tracks imported from connected streaming services with
  * pagination, filtering by service, and search.
+ * Toolbar is rendered once and preserved across re-renders to
+ * keep the search input stable (no focus loss on reload).
  */
 
 import { fetchJSON } from "../shared/api.js";
 import {
   renderLoading,
-  renderEmpty,
   renderErrorBlock,
   renderTable,
   td,
@@ -63,24 +64,46 @@ function adaptTrack(t) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Render                                                             */
+/*  Render helpers (content area only, toolbar is stable)              */
 /* ------------------------------------------------------------------ */
 
-function render(container, data, state) {
+const SERVICE_OPTIONS = [
+  { value: "all", label: "All Services" },
+  { value: "spotify", label: "Spotify" },
+  { value: "soundcloud", label: "SoundCloud" },
+  { value: "youtube", label: "YouTube" },
+];
+
+const TABLE_HEADERS = [
+  { label: "Title", style: "width:25%" },
+  { label: "Artist", style: "width:20%" },
+  { label: "Service", style: "width:10%" },
+  { label: "Album", style: "width:15%" },
+  { label: "Local Files", style: "width:15%" },
+  { label: "Duration", style: "width:8%;text-align:right" },
+  { label: "ISRC", style: "width:7%" },
+];
+
+/**
+ * Render the toolbar HTML (called once on init).
+ */
+function renderToolbar(search) {
+  return `
+    <div class="toolbar">
+      ${renderSearchInput("tracks", search)}
+      ${renderFilterGroup("service", SERVICE_OPTIONS, "all")}
+    </div>`;
+}
+
+/**
+ * Render the body content (stats, table, pagination).
+ */
+function renderBody(data, state) {
   const { tracks } = data;
   const totalCount = data._total ?? tracks.length;
   const totalPages = Math.ceil(totalCount / PAGE_SIZE) || 1;
   const pageId = "tracks";
 
-  const headers = [
-    { label: "Title", style: "width:25%" },
-    { label: "Artist", style: "width:20%" },
-    { label: "Service", style: "width:10%" },
-    { label: "Album", style: "width:15%" },
-    { label: "Local Files", style: "width:15%" },
-    { label: "Duration", style: "width:8%;text-align:right" },
-    { label: "ISRC", style: "width:7%" },
-  ];
   const rowsHtml = tracks
     .map(
       (t) =>
@@ -104,31 +127,39 @@ function render(container, data, state) {
     )
     .join("");
 
-  const serviceOptions = [
-    { value: "all", label: "All Services" },
-    { value: "spotify", label: "Spotify" },
-    { value: "soundcloud", label: "SoundCloud" },
-    { value: "youtube", label: "YouTube" },
-  ];
-
-  container.innerHTML = `
-    <div class="toolbar">
-      ${renderSearchInput("tracks", state.search)}
-      ${renderFilterGroup("service", serviceOptions, state.service)}
+  const stats = `<div class="stats-row">
+    <div class="stats-group">
+      <button class="btn btn-sm btn-icon" id="tracks-refresh" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
+      <strong>${totalCount.toLocaleString()}</strong> tracks
     </div>
+  </div>`;
+
+  const table = renderTable(TABLE_HEADERS, rowsHtml);
+
+  const pagination = `<div class="pagination" id="${pageId}-pagination">
+    <button class="pagination-btn" id="${pageId}-prev" disabled><i class="fa-solid fa-chevron-left"></i></button>
+    <span class="pagination-info" id="${pageId}-info">Page ${state.page + 1} of ${totalPages}</span>
+    <button class="pagination-btn" id="${pageId}-next" ${totalPages <= 1 ? "disabled" : ""}><i class="fa-solid fa-chevron-right"></i></button>
+  </div>`;
+
+  return `${stats}\n${table}\n${pagination}`;
+}
+
+/**
+ * Render an empty-state body (no tracks at all, not just filtered to zero).
+ */
+function renderEmptyBody(search) {
+  return `
     <div class="stats-row">
       <div class="stats-group">
         <button class="btn btn-sm btn-icon" id="tracks-refresh" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
-        <strong>${totalCount.toLocaleString()}</strong> tracks
+        <strong>0</strong> tracks
       </div>
     </div>
-    ${renderTable(headers, rowsHtml)}
-    <div class="pagination" id="${pageId}-pagination">
-      <button class="pagination-btn" id="${pageId}-prev" disabled><i class="fa-solid fa-chevron-left"></i></button>
-      <span class="pagination-info" id="${pageId}-info">Page ${state.page + 1} of ${totalPages}</span>
-      <button class="pagination-btn" id="${pageId}-next" ${totalPages <= 1 ? "disabled" : ""}><i class="fa-solid fa-chevron-right"></i></button>
-    </div>
-  `;
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th style="width:25%">Title</th><th style="width:20%">Artist</th><th style="width:10%">Service</th><th style="width:15%">Album</th><th style="width:15%">Local Files</th><th style="width:8%;text-align:right">Duration</th><th style="width:7%">ISRC</th></tr></thead>
+      <tbody><tr><td colspan="7"><div class="text-center text-muted" style="padding:32px">No tracks found. Import tracks from your connected services to get started.</div></td></tr></tbody>
+    </table></div>`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -148,10 +179,19 @@ function buildParams(state) {
 }
 
 /**
+ * Replace the content area (#tracks-content) with the given HTML.
+ */
+function setContent(html) {
+  const el = document.getElementById("tracks-content");
+  if (el) el.innerHTML = html;
+}
+
+/**
  * Fetch /api/tracks and /api/tracks/count in parallel, then render.
+ * Only replaces #tracks-content — the toolbar stays untouched.
  */
 async function fetchAndRender(container, signal, state) {
-  container.innerHTML = renderLoading("Loading tracks…");
+  setContent(renderLoading("Loading tracks…"));
 
   try {
     const [tracksResp, countResp] = await Promise.all([
@@ -165,35 +205,15 @@ async function fetchAndRender(container, signal, state) {
       tracks: tracksResp.data.map(adaptTrack),
     };
 
-    // Handle empty state
+    // Empty state (no tracks in DB at all)
     if (data.tracks.length === 0 && data._total === 0) {
-      const serviceOptions = [
-        { value: "all", label: "All Services" },
-        { value: "spotify", label: "Spotify" },
-        { value: "soundcloud", label: "SoundCloud" },
-        { value: "youtube", label: "YouTube" },
-      ];
-      container.innerHTML = `
-        <div class="toolbar">
-          ${renderSearchInput("tracks", state.search)}
-          ${renderFilterGroup("service", serviceOptions, state.service)}
-        </div>
-        <div class="stats-row">
-          <div class="stats-group">
-            <button class="btn btn-sm btn-icon" id="tracks-refresh" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
-            <strong>0</strong> tracks
-          </div>
-        </div>
-        <div class="table-wrap"><table class="data-table">
-          <thead><tr><th style="width:25%">Title</th><th style="width:20%">Artist</th><th style="width:10%">Service</th><th style="width:15%">Album</th><th style="width:15%">Local Files</th><th style="width:8%;text-align:right">Duration</th><th style="width:7%">ISRC</th></tr></thead>
-          <tbody><tr><td colspan="7"><div class="text-center text-muted" style="padding:32px">No tracks found. Import tracks from your connected services to get started.</div></td></tr></tbody>
-        </table></div>`;
-      wireEvents(container, signal, state);
+      setContent(renderEmptyBody(state.search));
+      wireContentEvents(container, signal, state);
       return;
     }
 
-    render(container, data, state);
-    wireEvents(container, signal, state);
+    setContent(renderBody(data, state));
+    wireContentEvents(container, signal, state);
   } catch (err) {
     if (err.name === "AbortError") return;
     try {
@@ -201,11 +221,13 @@ async function fetchAndRender(container, signal, state) {
     } catch {
       return;
     }
-    container.innerHTML = renderErrorBlock({
-      title: "Failed to load tracks",
-      detail: err.message,
-      retryFn: "window.location.hash='#tracks'",
-    });
+    setContent(
+      renderErrorBlock({
+        title: "Failed to load tracks",
+        detail: err.message,
+        retryFn: "window.location.hash='#tracks'",
+      }),
+    );
   }
 }
 
@@ -213,13 +235,7 @@ async function fetchAndRender(container, signal, state) {
 /*  Event wiring                                                       */
 /* ------------------------------------------------------------------ */
 
-function wireEvents(container, signal, state) {
-  // Unified search + filter wiring (debounced)
-  const toolbar = container.querySelector(".toolbar");
-  if (toolbar) {
-    wireSearchFilter(toolbar, state, () => fetchAndRender(container, signal, state));
-  }
-
+function wireContentEvents(container, signal, state) {
   // Refresh button
   const refreshBtn = container.querySelector("#tracks-refresh");
   if (refreshBtn) {
@@ -256,5 +272,18 @@ export async function init(container, signal) {
   // State for pagination and filters — mutable, lives across renders
   const state = { page: 0, service: "all", search: "" };
 
+  // Render stable toolbar + content wrapper ONCE
+  container.innerHTML = `
+    ${renderToolbar(state.search)}
+    <div id="tracks-content">${renderLoading("Loading tracks…")}</div>
+  `;
+
+  // Wire search + filter once (toolbar is stable)
+  const toolbar = container.querySelector(".toolbar");
+  if (toolbar) {
+    wireSearchFilter(toolbar, state, () => fetchAndRender(container, signal, state));
+  }
+
+  // Fetch initial data
   await fetchAndRender(container, signal, state);
 }

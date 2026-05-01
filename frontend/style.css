@@ -1708,6 +1708,18 @@ select.input-text {
     accent-color: var(--accent);
 }
 
+/* Mismatch row highlighting when local ≠ remote track count */
+tr.row-mismatch {
+    border-left: 3px solid var(--yellow, #eab308);
+}
+tr.row-mismatch td {
+    background: rgba(234, 179, 8, 0.04);
+}
+.diff-badge {
+    font-weight: 700;
+    color: var(--yellow, #eab308);
+}
+
 /* ── Progress Bar ───────────────────────── */
 .progress-bar {
     width: 100%;

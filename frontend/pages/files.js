@@ -446,7 +446,7 @@ function render(container, data, state) {
           <span style="font-weight:600;font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.04em;">Write Comments</span>
         </div>
         <div class="filter-panel-body" style="padding:var(--space-3) var(--space-4);">
-          ${renderCommentWriter({ linkedOnly: true, tagNames: [], nonDefaultOnly: true })}
+          ${renderCommentWriter({ linkedOnly: state.linkedOnly || false, tagNames: state.selectedTags || [], nonDefaultOnly: state.nonDefaultOnly || false })}
         </div>
       </div>
     </div>
@@ -526,7 +526,7 @@ async function fetchAndRender(container, signal, state) {
           <span style="font-weight:600;font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.04em;">Write Comments</span>
         </div>
         <div class="filter-panel-body" style="padding:var(--space-3) var(--space-4);">
-          ${renderCommentWriter({ linkedOnly: true, tagNames: [], nonDefaultOnly: true })}
+          ${renderCommentWriter({ linkedOnly: state.linkedOnly || false, tagNames: state.selectedTags || [], nonDefaultOnly: state.nonDefaultOnly || false })}
         </div>
       </div>
     </div>

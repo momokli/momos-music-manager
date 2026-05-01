@@ -4,9 +4,17 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 use anyhow::Result;
-use axum::{Router, response::Html, routing::get};
+use axum::{
+    Router,
+    body::Body,
+    extract::Path,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use clap::{Parser, Subcommand};
 use dotenvy;
+use rust_embed::Embed;
 use sqlx::{
     Pool, Sqlite, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
@@ -21,12 +29,11 @@ mod comment;
 mod config;
 mod db;
 mod digging;
+mod dump;
 mod embeddings;
+mod poller;
 mod scan_cache;
 mod spotify;
-
-mod dump;
-mod poller;
 mod tasks;
 mod traktor;
 mod watch;
@@ -34,6 +41,7 @@ mod watch;
 #[derive(Parser)]
 #[command(name = "momos-music-manager")]
 #[command(about = "Momo's Music Manager - Multi-service library sync for DJs")]
+#[command(version = "0.1.0")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -78,6 +86,84 @@ struct AppState {
     task_manager: crate::tasks::TaskManager,
     embeddings: Mutex<Option<crate::embeddings::EmbeddingModel>>,
 }
+
+// ── Embedded Frontend Assets ───────────────────────────────────────────────
+
+#[derive(Embed)]
+#[folder = "frontend/"]
+struct FrontendAssets;
+
+/// Infer a MIME type from the file extension.
+fn mime_for_path(path: &str) -> &'static str {
+    if path.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else if path.ends_with(".js") {
+        "application/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".ico") {
+        "image/x-icon"
+    } else if path.ends_with(".woff2") {
+        "font/woff2"
+    } else if path.ends_with(".woff") {
+        "font/woff"
+    } else if path.ends_with(".ttf") {
+        "font/ttf"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+/// Catch-all handler that serves embedded frontend assets.
+///
+/// - Exact file paths (e.g. `/app.js`, `/style.css`) return the file directly.
+/// - `/` and any unknown path return `index.html` (SPA fallback for client-side
+///   routing via hash fragments).
+/// - `/api/*` paths are never routed here because the API router takes priority.
+async fn static_handler(Path(path): Path<String>) -> Response {
+    // Normalise: strip leading slash, default to index.html
+    let asset_path = if path.is_empty() || path == "/" || path.starts_with("api/") {
+        "index.html"
+    } else {
+        path.trim_start_matches('/')
+    };
+
+    match FrontendAssets::get(asset_path) {
+        Some(content) => Response::builder()
+            .header(header::CONTENT_TYPE, mime_for_path(asset_path))
+            .body(axum::body::Body::from(content.data))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        None => {
+            // SPA fallback — let the client-side router handle it
+            FrontendAssets::get("index.html")
+                .map(|_| index_html_response())
+                .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
+        }
+    }
+}
+
+/// Helper: serve the embedded index.html with the correct content type.
+fn index_html_response() -> Response {
+    FrontendAssets::get("index.html")
+        .map(|content| {
+            Response::builder()
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .body(Body::from(content.data))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        })
+        .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
+}
+
+/// Handler for the bare root path `/` — serves index.html.
+async fn root_handler() -> Response {
+    index_html_response()
+}
+
+// ── CLI entry point ────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -170,17 +256,21 @@ async fn serve(db: Pool<Sqlite>, host: String, port: u16) -> Result<()> {
         }
     });
 
-    // Build our application with routes
+    // Build our application with routes.
+    // API routes take priority; the catch-all {*path} handles everything else
+    // by serving the embedded frontend assets (with SPA fallback to index.html).
     let app = Router::new()
         .without_v07_checks()
-        .route("/", get(root))
         .merge(api::router())
+        .route("/", get(root_handler))
+        .route("/{*path}", get(static_handler))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
     let address = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&address).await?;
     info!("Serving HTTP on {host}:{port}");
+    info!("Frontend: http://{host}:{port}/");
     axum::serve(listener, app).await?;
 
     Ok(())
@@ -290,8 +380,4 @@ async fn db_status(pool: &Pool<Sqlite>) -> Result<()> {
     println!("  Tags: {}", tags_count);
 
     Ok(())
-}
-
-async fn root() -> Html<&'static str> {
-    Html(include_str!("../frontend/index.html"))
 }

@@ -5,6 +5,7 @@
  *   - Only linked files (checkbox)
  *   - Tag picker (like the filter-by-tag on the files page)
  *   - Only non-default categories (checkbox)
+ *   - Live count of files affected by the current filters
  *   - Execute button
  *
  * Exports:
@@ -50,10 +51,42 @@ export function renderCommentWriter(state) {
         </div>
         <div class="tag-chips" id="cw-tag-chips">${chipsHtml}</div>
       </div>
+      <div class="flex items-center justify-between" style="padding:var(--space-1) 0;">
+        <span class="text-muted text-sm">Files needing update:</span>
+        <strong id="cw-count">…</strong>
+      </div>
       <button class="btn btn-sm btn-green" id="cw-execute" style="width:100%;">
         <i class="fa-solid fa-cloud-arrow-up"></i> Write Comments
       </button>
     </div>`;
+}
+
+/**
+ * Build URLSearchParams from the current filter state.
+ */
+function buildFilterParams(state) {
+  const params = new URLSearchParams();
+  if (state.linkedOnly) params.set("linkedOnly", "true");
+  if (state.nonDefaultOnly) params.set("nonDefaultOnly", "true");
+  if (state.tagNames && state.tagNames.length > 0) {
+    params.set("tags", state.tagNames.join(","));
+  }
+  return params;
+}
+
+/**
+ * Fetch the filtered count from the API and update the count element.
+ */
+async function updateFilteredCount(container, state) {
+  const countEl = container.querySelector("#cw-count");
+  if (!countEl) return;
+  try {
+    const params = buildFilterParams(state);
+    const resp = await fetchJSON(`/api/files/needs-update-count?${params}`);
+    countEl.textContent = resp.data != null ? String(resp.data) : "?";
+  } catch {
+    countEl.textContent = "?";
+  }
 }
 
 /**
@@ -78,12 +111,21 @@ export function wireCommentWriter(container, signal, onExecute) {
   if (linkedCb) state.linkedOnly = linkedCb.checked;
   if (nonDefCb) state.nonDefaultOnly = nonDefCb.checked;
 
+  // Helper: refresh count display
+  function refreshCount() {
+    updateFilteredCount(container, state);
+  }
+
+  // Fetch initial filtered count
+  refreshCount();
+
   // ── Checkbox changes ──
   if (linkedCb) {
     linkedCb.addEventListener(
       "change",
       () => {
         state.linkedOnly = linkedCb.checked;
+        refreshCount();
       },
       { signal },
     );
@@ -93,6 +135,7 @@ export function wireCommentWriter(container, signal, onExecute) {
       "change",
       () => {
         state.nonDefaultOnly = nonDefCb.checked;
+        refreshCount();
       },
       { signal },
     );
@@ -123,6 +166,7 @@ export function wireCommentWriter(container, signal, onExecute) {
     if (!tag) return;
     if (!state.tagNames.includes(tag)) {
       state.tagNames.push(tag);
+      refreshCount();
     }
     tagSearch.value = "";
     tagDropdown.classList.remove("open");
@@ -192,6 +236,7 @@ export function wireCommentWriter(container, signal, onExecute) {
         if (!tag) return;
         if (!state.tagNames.includes(tag)) {
           state.tagNames.push(tag);
+          refreshCount();
         }
         tagSearch.value = "";
         tagDropdown.classList.remove("open");
@@ -249,6 +294,7 @@ export function wireCommentWriter(container, signal, onExecute) {
         if (!chip) return;
         const tag = chip.dataset.cwTag;
         state.tagNames = state.tagNames.filter((t) => t !== tag);
+        refreshCount();
         chip.remove();
       },
       { signal },

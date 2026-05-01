@@ -674,6 +674,77 @@ playlist_id  = "your_youtube_playlist_id"
 
 ---
 
+## ADR-032: Speculative Prefetch in Auto-Categorize Wizard
+
+**Date**: 2025-07-18
+**Status**: Accepted (implemented)
+
+**Context**: The auto-categorize wizard (page `#auto-categorize`) loads unreviewed tags one at a time. For each tag it calls `GET /api/tags/{id}/suggest`, which involves loading the embedding model (lazy), deserializing the tag's embedding from the DB, computing mean category embeddings, and calculating cosine similarity — a sequence of several DB queries + ML inference taking hundreds of milliseconds. The user then picks a category and the wizard advances to the next tag, blocking on another suggest API call. This sequential, wait-then-act-then-wait loop felt sluggish.
+
+**Decision**: Implement a "speculative prefetch" pattern with two parallel background forks:
+
+1. **Fork 1 — Optimistic pre-categorize**: After rendering a tag and its AI recommendation, immediately fire a `PUT /api/tags/{id}/categorize` with the recommended category. This is fire-and-forget — if it fails, the user's explicit PUT on interaction is the authoritative one. This saves ~1 DB round-trip when the user accepts the default.
+
+2. **Fork 2 — Next-tag suggestion prefetch**: After rendering a tag, immediately start `GET /api/tags/{nextId}/suggest` for the next tag in the queue. The response is stored in a `prefetchCache` map keyed by tag ID. When the user advances (via any category, Enter, Space, or Skip), `loadNextTag` checks the cache first and renders instantly if the prefetch data is available.
+
+**Consequences**:
+
+- **Positive**: The expensive suggest API call is hidden in the background. On average, the user's think time (~2-5s per tag) is longer than the request, so the next tag is almost always pre-cached. Transitions feel instant.
+- **Positive**: The optimistic PUT is idempotent and cheap — the worst case is one extra DB write if the user overrides the recommendation.
+- **Positive**: The prefetch cleanup is automatic — `AbortController.signal` aborts all in-flight requests on page navigation, and the `prefetchCache` is garbage-collected with the module state.
+- **Neutral**: If the user navigates away, the prefetch and optimistic PUT are aborted/ignored. No stale state remains.
+
+---
+
+### Implementation Details
+
+- The `state` object in `auto-categorize.js` gained: `prefetchCache`, `prefetchInFlight`, `optimisticTagId`, `optimisticCatId`, `aiRecommendation`
+- `startSpeculativePrefetch()` is called at the end of `loadNextTag()` and handles both forks
+- `selectCategory()` always sends the authoritative PUT (the optimistic one is purely a bonus for the Enter case)
+- `loadNextTag()` checks `state.prefetchCache[currentTag.id]` before falling through to the normal `fetchJSON` call
+- No backend changes — all optimization is frontend-only
+
+---
+
+## ADR-033: Single-Binary Shipping with Embedded Frontend
+
+**Date**: 2026-04-30
+**Status**: Accepted (implemented)
+
+**Context**: The project originally required two separate processes during development:
+
+1. The Rust backend on port 3000 (API + bare `index.html` via `include_str!`)
+2. A Python HTTP server on port 8000 (serving JS modules, CSS, images)
+
+Additionally, the frontend depended on Font Awesome from a CDN, making the app unusable offline. The embedding model (all-MiniLM-L6-v2) was downloaded at runtime via `hf-hub`, but that was acceptable for a single-user desktop tool.
+
+For shipping a Release Candidate, the friction of the two-process setup was the biggest barrier to "it just works."
+
+**Decision**: Bundle everything into a single binary using `rust-embed`:
+
+1. **All frontend assets embedded** — `rust-embed` with `#[folder = "frontend/"]` compiles the entire `frontend/` directory into the binary at build time
+2. **Catch-all static handler** — Axum serves exact file paths from the embedded assets, with a SPA fallback that returns `index.html` for any unrecognised route (client-side hash router handles the rest)
+3. **Font Awesome self-hosted** — Downloaded Font Awesome Free 6.4.0 during build (`css/all.min.css` + `webfonts/*.woff2`), placed in `frontend/fontawesome/`, served locally
+4. **Relative API_BASE** — Changed `frontend/shared/api.js` from hardcoded `http://localhost:3000` to `window.location.origin`, so the frontend talks to whichever origin served it
+
+**Not bundled** (left as runtime dependencies):
+
+- HuggingFace embedding model (all-MiniLM-L6-v2, ~90MB) — downloaded on first use via `hf-hub`; acceptable for single-user desktop use
+- External API credentials (Spotify, SoundCloud, YouTube) — loaded from `~/.config/momos-music-manager/config.toml` or env vars
+
+**Consequences**:
+
+- **Positive**: Single binary, single command (`cargo run -- serve`), single URL (`http://localhost:3000`). No Python, no Node, no separate dev server.
+- **Positive**: Fully offline SPA — icons, styles, and webfonts are served from the binary with no CDN dependency.
+- **Positive**: Font Awesome webfonts get the same `Cache-Control` benefits as the rest of the embedded assets (ETags via Axum).
+- **Neutral**: Binary size increased by ~2.5MB (Font Awesome CSS + webfonts). The Rust binary is still ~30MB stripped.
+- **Neutral**: Frontend changes require a recompile (`cargo build`) to be reflected — but this is fine for a compiled SPA workflow, and `cargo watch` can be used for dev iteration.
+- **Negative** (accepted): The `rust-embed` macro recompiles on any frontend file change, which adds ~5s to incremental builds. Mitigation: frontend changes are infrequent compared to backend changes.
+
+---
+
+---
+
 ## Revision History
 
 | Date       | Decision                              | Description                                                                                        |
@@ -692,3 +763,4 @@ playlist_id  = "your_youtube_playlist_id"
 | 2026-04-29 | ADR-029                               | Spotify API response cache for development (record/replay, dev-data/spotify-api)                   |
 | 2026-05-09 | ADR-030                               | Scan cache for development (record/replay, dev-data/scan-cache, auto-invalidation)                 |
 | 2026-04-30 | ADR-031                               | Config.toml migration — config priority (env > config.toml > defaults)                             |
+| 2026-04-30 | ADR-033                               | Single-binary shipping with embedded frontend + Font Awesome bundle                                |

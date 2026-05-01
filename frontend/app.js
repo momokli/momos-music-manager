@@ -60,6 +60,11 @@ function getHashParams() {
  * Load and render a page.
  */
 async function navigate(pageId) {
+  // If same page, skip (prevents aborting/restarting an ongoing page load)
+  if (currentPageId === pageId) {
+    return;
+  }
+
   // Abort any ongoing page work
   if (currentAbortController) {
     currentAbortController.abort();
@@ -69,10 +74,6 @@ async function navigate(pageId) {
   // Update nav highlight
   setActiveNav(pageId);
 
-  // If same page, skip
-  if (currentPageId === pageId) {
-    return;
-  }
   currentPageId = pageId;
 
   const container = document.getElementById("main-content");
@@ -127,12 +128,14 @@ export function init() {
   // Listen for hash changes
   window.addEventListener("hashchange", onHashChange);
 
-  // Initial navigation
+  // Set hash for first-time visitors (triggers hashchange → navigate).
+  // Always call navigate() directly in case hashchange fires before
+  // our listener is registered. The page-id guard inside navigate()
+  // prevents double-init.
   if (!window.location.hash || window.location.hash === "#") {
     window.location.hash = `#${initialPage}`;
-  } else {
-    navigate(initialPage);
   }
+  navigate(initialPage);
 }
 
 /**

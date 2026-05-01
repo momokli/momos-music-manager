@@ -71,6 +71,16 @@ export function renderFilterGroup(key, options, currentValue = "") {
 }
 
 /* ------------------------------------------------------------------ */
+/*  State tracking (module-level)                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Tracks whether the search input had focus before a re-render.
+ * Set on mousedown (before focus is lost), restored after onChange completes.
+ */
+let _sfFocusPending = false;
+
+/* ------------------------------------------------------------------ */
 /*  Event wiring                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -81,6 +91,9 @@ export function renderFilterGroup(key, options, currentValue = "") {
  * - `[data-sf-filter]` on <select> / checkbox → immediate on `change`
  * - `[data-sf-filter]` on <input> (text, number) → debounced on `input`
  * - `[data-sf-filter-group]` → click delegation on contained `.filter-btn`
+ *
+ * After ANY onChange completes, tries to restore focus to the search input
+ * if it had focus before the change.
  *
  * @param {HTMLElement} toolbarEl — the .toolbar element containing the controls
  * @param {object} state — mutable state object (mutated in-place, page reset to 0)
@@ -93,19 +106,24 @@ export function wireSearchFilter(toolbarEl, state, onChange, debounceMs = 300) {
   if (searchInput) {
     searchInput.value = state.search || "";
     let timer;
+
+    // Track focus via mousedown — fires BEFORE the browser moves focus,
+    // so we know the user intended to interact with the search input.
+    searchInput.addEventListener("mousedown", () => {
+      _sfFocusPending = true;
+    });
+
+    // Also track focus via focusin for keyboard navigation (Tab)
+    searchInput.addEventListener("focusin", () => {
+      _sfFocusPending = true;
+    });
+
     searchInput.addEventListener("input", () => {
       clearTimeout(timer);
       timer = setTimeout(() => {
         state.search = searchInput.value;
         state.page = 0;
-        // Await re-render, then refocus search input so user can keep typing
-        Promise.resolve(onChange(state)).then(() => {
-          const el = document.querySelector("[data-sf-search]");
-          if (el && el !== document.activeElement) {
-            el.focus();
-            el.setSelectionRange(el.value.length, el.value.length);
-          }
-        });
+        runAndRefocus(onChange, state);
       }, debounceMs);
     });
   }
@@ -126,7 +144,7 @@ export function wireSearchFilter(toolbarEl, state, onChange, debounceMs = 300) {
       el.addEventListener("change", () => {
         state[key] = el.type === "checkbox" ? el.checked : el.value;
         state.page = 0;
-        onChange(state);
+        runAndRefocus(onChange, state);
       });
     } else {
       // Debounced text/number inputs
@@ -136,7 +154,7 @@ export function wireSearchFilter(toolbarEl, state, onChange, debounceMs = 300) {
         timer = setTimeout(() => {
           state[key] = el.value;
           state.page = 0;
-          onChange(state);
+          runAndRefocus(onChange, state);
         }, debounceMs);
       });
     }
@@ -157,7 +175,36 @@ export function wireSearchFilter(toolbarEl, state, onChange, debounceMs = 300) {
 
       state[key] = btn.dataset.value;
       state.page = 0;
-      onChange(state);
+      runAndRefocus(onChange, state);
     });
   });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Refocus helper                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Call onChange(state), then restore focus to the search input if
+ * _sfFocusPending was set (meaning it had focus before the change).
+ *
+ * This is extracted so EVERY filter change path goes through the same
+ * refocus logic, not just the debounced text-input path.
+ */
+async function runAndRefocus(onChange, state) {
+  try {
+    await Promise.resolve(onChange(state));
+  } catch (err) {
+    console.error("search-filter onChange error:", err);
+  }
+
+  // Restore focus if the search input had focus before the change
+  if (_sfFocusPending) {
+    const el = document.querySelector("[data-sf-search]");
+    if (el && el !== document.activeElement) {
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    }
+    _sfFocusPending = false;
+  }
 }

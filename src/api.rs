@@ -193,6 +193,22 @@ pub struct BulkResolveResult {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkSyncRequest {
+    linked_only: Option<bool>,
+    tags: Option<Vec<String>>,
+    non_default_only: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NeedsUpdateCountQuery {
+    pub linked_only: Option<bool>,
+    pub tags: Option<String>,
+    pub non_default_only: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Track {
@@ -467,6 +483,9 @@ pub struct FilesQuery {
     pub key: Option<String>,
     pub tags: Option<String>,
     pub search: Option<String>,
+    pub linked_only: Option<bool>,
+    pub unlinked: Option<bool>,
+    pub non_default_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -630,6 +649,16 @@ pub struct ApiResponse<T> {
 #[serde(rename_all = "camelCase")]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+/// Helper that returns a 500 Internal Server Error JSON response from any Display error.
+fn internal_error<E: std::fmt::Display>(e: E) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: e.to_string(),
+        }),
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -950,13 +979,7 @@ async fn files_handler(
 ) -> impl IntoResponse {
     match get_files(&state.db, &query).await {
         Ok(files) => Json(ApiResponse { data: files }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -966,21 +989,13 @@ async fn files_count_handler(
 ) -> impl IntoResponse {
     match get_files_count(&state.db, &query).await {
         Ok(count) => Json(ApiResponse { data: count }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
 /// GET /api/files/latest
 /// Returns the 5 most recently added files (by created_at)
 async fn files_latest_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    use axum::http::StatusCode;
-
     let files = sqlx::query_as::<_, File>("SELECT * FROM files ORDER BY created_at DESC LIMIT 5")
         .fetch_all(&state.db)
         .await;
@@ -1000,31 +1015,60 @@ async fn files_latest_handler(State(state): State<Arc<AppState>>) -> impl IntoRe
                 .collect();
             Json(ApiResponse { data: api_files }).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to fetch latest files: {}", e),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(format!("Failed to fetch latest files: {}", e)).into_response(),
     }
 }
 
 /// GET /api/files/needs-update-count
-/// Returns the count of files whose comment differs from the computed target comment
-async fn files_needs_update_count_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    use axum::http::StatusCode;
+/// Returns the count of files whose comment differs from the computed target comment.
+/// Accepts optional filter params (linkedOnly, tags, nonDefaultOnly) to scope the count.
+async fn files_needs_update_count_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<NeedsUpdateCountQuery>,
+) -> impl IntoResponse {
+    // Build dynamic SQL with the same filter pattern as get_files/bulk_sync_handler
+    let mut sql = String::from("SELECT * FROM files WHERE 1=1");
+    let mut tag_params: Vec<String> = Vec::new();
 
-    // Fetch all files
-    let files = sqlx::query_as::<_, File>("SELECT * FROM files ORDER BY id")
-        .fetch_all(&state.db)
-        .await;
+    if query.linked_only.unwrap_or(false) {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.file_id = files.id)");
+    }
 
-    match files {
+    if let Some(ref tags_str) = query.tags {
+        if !tags_str.is_empty() {
+            let lowered: Vec<String> = tags_str
+                .split(',')
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if !lowered.is_empty() {
+                let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
+                sql.push_str(&format!(
+                    " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND LOWER(TRIM(ft.tag_name)) IN ({}))",
+                    placeholders.join(",")
+                ));
+                tag_params = lowered;
+            }
+        }
+    }
+
+    if query.non_default_only.unwrap_or(false) {
+        sql.push_str(
+            " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND ft.is_default = FALSE)",
+        );
+    }
+
+    sql.push_str(" ORDER BY id");
+
+    let mut q = sqlx::query_as::<_, File>(&sql);
+    for p in &tag_params {
+        q = q.bind(p);
+    }
+
+    match q.fetch_all(&state.db).await {
         Ok(files) => {
             let mut count = 0i64;
             for file in &files {
-                // Compute target comment for this file
                 match compute_target_comment(&state.db, file.id).await {
                     Ok(target_comment) => {
                         let current_comment = file.comment.as_deref().unwrap_or("");
@@ -1032,29 +1076,20 @@ async fn files_needs_update_count_handler(State(state): State<Arc<AppState>>) ->
                             count += 1;
                         }
                     }
-                    Err(_) => {
-                        // Skip files where comment computation fails
-                        continue;
-                    }
+                    Err(_) => continue,
                 }
             }
             Json(ApiResponse { data: count }).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to count files needing update: {}", e),
-            }),
-        )
-            .into_response(),
+        Err(e) => {
+            internal_error(format!("Failed to count files needing update: {}", e)).into_response()
+        }
     }
 }
 
 /// GET /api/files/service-links
 /// Returns counts of files linked to each service (via direct IDs or ISRC matching).
 async fn files_service_links_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    use axum::http::StatusCode;
-
     // Total file count
     let total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM files")
         .fetch_one(&state.db)
@@ -1064,9 +1099,9 @@ async fn files_service_links_handler(State(state): State<Arc<AppState>>) -> impl
     // Files linked to Spotify: direct spotify_id OR isrc matches a spotify track
     let spotify = sqlx::query_scalar::<_, i64>(
         r#"SELECT COUNT(DISTINCT f.id) FROM files f
-           LEFT JOIN service_tracks st ON st.service = 'spotify' AND st.isrc = f.isrc
-           WHERE f.spotify_id IS NOT NULL AND f.spotify_id != ''
-              OR (f.isrc IS NOT NULL AND f.isrc != '' AND st.id IS NOT NULL)"#,
+           LEFT JOIN v_file_track_link v ON v.file_id = f.id
+           LEFT JOIN service_tracks st ON st.id = v.track_id AND st.service = 'spotify'
+           WHERE st.id IS NOT NULL"#,
     )
     .fetch_one(&state.db)
     .await
@@ -1075,9 +1110,9 @@ async fn files_service_links_handler(State(state): State<Arc<AppState>>) -> impl
     // Files linked to SoundCloud: direct soundcloud_id OR isrc matches a soundcloud track
     let soundcloud = sqlx::query_scalar::<_, i64>(
         r#"SELECT COUNT(DISTINCT f.id) FROM files f
-           LEFT JOIN service_tracks st ON st.service = 'soundcloud' AND st.isrc = f.isrc
-           WHERE f.soundcloud_id IS NOT NULL AND f.soundcloud_id != ''
-              OR (f.isrc IS NOT NULL AND f.isrc != '' AND st.id IS NOT NULL)"#,
+           LEFT JOIN v_file_track_link v ON v.file_id = f.id
+           LEFT JOIN service_tracks st ON st.id = v.track_id AND st.service = 'soundcloud'
+           WHERE st.id IS NOT NULL"#,
     )
     .fetch_one(&state.db)
     .await
@@ -1086,9 +1121,9 @@ async fn files_service_links_handler(State(state): State<Arc<AppState>>) -> impl
     // Files linked to YouTube: direct youtube_id OR isrc matches a youtube track
     let youtube = sqlx::query_scalar::<_, i64>(
         r#"SELECT COUNT(DISTINCT f.id) FROM files f
-           LEFT JOIN service_tracks st ON st.service = 'youtube' AND st.isrc = f.isrc
-           WHERE f.youtube_id IS NOT NULL AND f.youtube_id != ''
-              OR (f.isrc IS NOT NULL AND f.isrc != '' AND st.id IS NOT NULL)"#,
+           LEFT JOIN v_file_track_link v ON v.file_id = f.id
+           LEFT JOIN service_tracks st ON st.id = v.track_id AND st.service = 'youtube'
+           WHERE st.id IS NOT NULL"#,
     )
     .fetch_one(&state.db)
     .await
@@ -1097,12 +1132,9 @@ async fn files_service_links_handler(State(state): State<Arc<AppState>>) -> impl
     // Unlinked: no direct service ID AND no isrc matches any service track
     let unlinked = sqlx::query_scalar::<_, i64>(
         r#"SELECT COUNT(*) FROM files f
-           WHERE (f.spotify_id IS NULL OR f.spotify_id = '')
-             AND (f.soundcloud_id IS NULL OR f.soundcloud_id = '')
-             AND (f.youtube_id IS NULL OR f.youtube_id = '')
-             AND NOT EXISTS (
-               SELECT 1 FROM service_tracks st WHERE st.isrc = f.isrc
-             )"#,
+           WHERE NOT EXISTS (
+             SELECT 1 FROM v_file_track_link v WHERE v.file_id = f.id
+           )"#,
     )
     .fetch_one(&state.db)
     .await
@@ -1142,13 +1174,7 @@ async fn tracks_handler(
 ) -> impl IntoResponse {
     match get_tracks(&state.db, &query).await {
         Ok(tracks) => Json(ApiResponse { data: tracks }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1158,13 +1184,7 @@ async fn tracks_count_handler(
 ) -> impl IntoResponse {
     match get_tracks_count(&state.db, &query).await {
         Ok(count) => Json(ApiResponse { data: count }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1196,16 +1216,51 @@ async fn sync_comment_handler(
     .into_response()
 }
 
-async fn bulk_sync_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Find all files and compute which need comment updates
-    let file_ids = match sqlx::query_as::<_, crate::db::File>("SELECT * FROM files")
-        .fetch_all(&state.db)
-        .await
-    {
+async fn bulk_sync_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BulkSyncRequest>,
+) -> impl IntoResponse {
+    // Build dynamic SQL to filter files based on request parameters
+    let mut sql = String::from("SELECT * FROM files WHERE 1=1");
+    let mut tag_params: Vec<String> = Vec::new();
+
+    if body.linked_only.unwrap_or(false) {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.file_id = files.id)");
+    }
+
+    if let Some(ref tags) = body.tags {
+        if !tags.is_empty() {
+            let lowered: Vec<String> = tags
+                .iter()
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if !lowered.is_empty() {
+                let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
+                sql.push_str(&format!(
+                    " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND LOWER(TRIM(ft.tag_name)) IN ({}))",
+                    placeholders.join(",")
+                ));
+                tag_params = lowered;
+            }
+        }
+    }
+
+    if body.non_default_only.unwrap_or(false) {
+        sql.push_str(
+            " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND ft.is_default = FALSE)",
+        );
+    }
+
+    let mut q = sqlx::query_as::<_, crate::db::File>(&sql);
+    for p in &tag_params {
+        q = q.bind(p);
+    }
+
+    let file_ids = match q.fetch_all(&state.db).await {
         Ok(all_files) => {
             let mut ids = Vec::new();
             for file in &all_files {
-                // Quick check: compute target and compare
                 match crate::db::compute_target_comment(&state.db, file.id).await {
                     Ok(target) => {
                         if file.comment.as_deref() != Some(&target) {
@@ -1214,7 +1269,6 @@ async fn bulk_sync_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
                     }
                     Err(e) => {
                         tracing::warn!("Could not compute target for file {}: {}", file.id, e);
-                        // Include file anyway — worker will log the error
                         ids.push(file.id);
                     }
                 }
@@ -1222,13 +1276,7 @@ async fn bulk_sync_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
             ids
         }
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to fetch files: {}", e),
-                }),
-            )
-                .into_response();
+            return internal_error(format!("Failed to fetch files: {}", e)).into_response();
         }
     };
 
@@ -1250,13 +1298,7 @@ async fn bulk_sync_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
 async fn explorer_seeds_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match get_explorer_seeds(&state.db).await {
         Ok(seeds) => Json(ApiResponse { data: seeds }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1273,13 +1315,7 @@ async fn add_seed_handler(
 async fn explorer_matches_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match find_similarity_matches(&state.db).await {
         Ok(matches) => Json(ApiResponse { data: matches }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1347,13 +1383,7 @@ async fn remove_seed_handler(
 ) -> impl IntoResponse {
     match remove_explorer_seed(&state.db, id).await {
         Ok(_) => Json(ApiResponse { data: "ok" }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1370,38 +1400,20 @@ async fn bulk_tag_handler(
     .await
     {
         Ok(_) => Json(ApiResponse { data: "ok" }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 async fn tags_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match get_all_tags(&state.db).await {
         Ok(tags) => Json(ApiResponse { data: tags }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
 async fn tag_categories_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match get_tag_categories(&state.db).await {
         Ok(categories) => Json(ApiResponse { data: categories }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1420,13 +1432,7 @@ async fn create_tag_category_handler(
     .await
     {
         Ok(category) => Json(ApiResponse { data: category }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1447,13 +1453,7 @@ async fn update_tag_category_metadata_handler(
     .await
     {
         Ok(category) => Json(ApiResponse { data: category }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1463,13 +1463,7 @@ async fn delete_tag_category_handler(
 ) -> impl IntoResponse {
     match delete_tag_category(&state.db, id).await {
         Ok(_) => Json(ApiResponse { data: () }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1484,13 +1478,7 @@ struct SetEnergyLevelRequest {
 async fn tag_energy_levels_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match get_tag_energy_levels(&state.db).await {
         Ok(levels) => Json(ApiResponse { data: levels }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1504,13 +1492,7 @@ async fn set_tag_energy_level_handler(
             data: serde_json::json!({ "message": "Energy level updated" }),
         })
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1520,13 +1502,7 @@ async fn delete_tag_energy_level_handler(
 ) -> impl IntoResponse {
     match delete_tag_energy_level(&state.db, tag_id).await {
         Ok(_) => Json(ApiResponse { data: () }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1545,13 +1521,7 @@ async fn reorder_tags_batch_handler(
             data: serde_json::json!({ "message": "Tags reordered" }),
         })
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1568,13 +1538,7 @@ async fn get_tag_category_handler(
             }),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1595,13 +1559,7 @@ async fn update_tag_category_handler(
     .await
     {
         Ok(category) => Json(ApiResponse { data: category }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1679,22 +1637,11 @@ async fn create_tag_handler(
                     };
                     Json(ApiResponse { data: api_tag }).into_response()
                 }
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Failed to fetch tag with category info: {}", e),
-                    }),
-                )
+                Err(e) => internal_error(format!("Failed to fetch tag with category info: {}", e))
                     .into_response(),
             }
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1724,22 +1671,11 @@ async fn update_tag_handler(
                     };
                     Json(ApiResponse { data: api_tag }).into_response()
                 }
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Failed to fetch tag with category info: {}", e),
-                    }),
-                )
+                Err(e) => internal_error(format!("Failed to fetch tag with category info: {}", e))
                     .into_response(),
             }
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1749,13 +1685,7 @@ async fn delete_tag_handler(
 ) -> impl IntoResponse {
     match delete_tag(&state.db, id).await {
         Ok(_) => Json(ApiResponse { data: () }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1772,13 +1702,7 @@ async fn get_tag_handler(
             }),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -1791,26 +1715,14 @@ async fn unreviewed_tags_handler(State(state): State<Arc<AppState>>) -> impl Int
     let (reviewed, unreviewed) = match get_tag_review_counts(&state.db).await {
         Ok(counts) => counts,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to get review counts: {}", e),
-                }),
-            )
-                .into_response();
+            return internal_error(format!("Failed to get review counts: {}", e)).into_response();
         }
     };
 
     let tags = match get_unreviewed_tags(&state.db).await {
         Ok(tags) => tags,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to get unreviewed tags: {}", e),
-                }),
-            )
-                .into_response();
+            return internal_error(format!("Failed to get unreviewed tags: {}", e)).into_response();
         }
     };
 
@@ -1843,9 +1755,7 @@ async fn tags_service_coverage_handler(State(state): State<Arc<AppState>>) -> im
 
     // Tags with matching Spotify playlists
     let spotify = sqlx::query_scalar::<_, i64>(
-        r#"SELECT COUNT(DISTINCT t.id) FROM tags t
-           INNER JOIN service_playlists sp ON LOWER(TRIM(sp.name)) = LOWER(TRIM(t.name))
-           WHERE sp.service = 'spotify'"#,
+        r#"SELECT COUNT(DISTINCT tag_id) FROM v_tag_playlist WHERE service = 'spotify'"#,
     )
     .fetch_one(&state.db)
     .await
@@ -1853,9 +1763,7 @@ async fn tags_service_coverage_handler(State(state): State<Arc<AppState>>) -> im
 
     // Tags with matching SoundCloud playlists
     let soundcloud = sqlx::query_scalar::<_, i64>(
-        r#"SELECT COUNT(DISTINCT t.id) FROM tags t
-           INNER JOIN service_playlists sp ON LOWER(TRIM(sp.name)) = LOWER(TRIM(t.name))
-           WHERE sp.service = 'soundcloud'"#,
+        r#"SELECT COUNT(DISTINCT tag_id) FROM v_tag_playlist WHERE service = 'soundcloud'"#,
     )
     .fetch_one(&state.db)
     .await
@@ -1863,9 +1771,7 @@ async fn tags_service_coverage_handler(State(state): State<Arc<AppState>>) -> im
 
     // Tags with matching YouTube playlists
     let youtube = sqlx::query_scalar::<_, i64>(
-        r#"SELECT COUNT(DISTINCT t.id) FROM tags t
-           INNER JOIN service_playlists sp ON LOWER(TRIM(sp.name)) = LOWER(TRIM(t.name))
-           WHERE sp.service = 'youtube'"#,
+        r#"SELECT COUNT(DISTINCT tag_id) FROM v_tag_playlist WHERE service = 'youtube'"#,
     )
     .fetch_one(&state.db)
     .await
@@ -1903,13 +1809,7 @@ async fn categorize_tag_handler(
                 .into_response();
         }
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-                .into_response();
+            return internal_error(e).into_response();
         }
     };
 
@@ -1971,22 +1871,11 @@ async fn categorize_tag_handler(
                     },
                 })
                 .into_response(),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Failed to fetch tag after categorize: {}", e),
-                    }),
-                )
+                Err(e) => internal_error(format!("Failed to fetch tag after categorize: {}", e))
                     .into_response(),
             }
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -2013,13 +1902,7 @@ async fn suggest_category_handler(
                 .into_response();
         }
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-                .into_response();
+            return internal_error(e).into_response();
         }
     };
 
@@ -2032,12 +1915,7 @@ async fn suggest_category_handler(
                     *cache = Some(model);
                 }
                 Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: format!("Failed to load embedding model: {}", e),
-                        }),
-                    )
+                    return internal_error(format!("Failed to load embedding model: {}", e))
                         .into_response();
                 }
             }
@@ -2054,13 +1932,7 @@ async fn suggest_category_handler(
                 let model = match cache.as_ref() {
                     Some(m) => m,
                     None => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse {
-                                error: "Embedding model not loaded".to_string(),
-                            }),
-                        )
-                            .into_response();
+                        return internal_error("Embedding model not loaded").into_response();
                     }
                 };
                 match model.embed_text(&tag.name) {
@@ -2071,12 +1943,7 @@ async fn suggest_category_handler(
                         vec
                     }
                     Err(e) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse {
-                                error: format!("Failed to compute embedding: {}", e),
-                            }),
-                        )
+                        return internal_error(format!("Failed to compute embedding: {}", e))
                             .into_response();
                     }
                 }
@@ -2088,13 +1955,7 @@ async fn suggest_category_handler(
             let model = match cache.as_ref() {
                 Some(m) => m,
                 None => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "Embedding model not loaded".to_string(),
-                        }),
-                    )
-                        .into_response();
+                    return internal_error("Embedding model not loaded").into_response();
                 }
             };
             match model.embed_text(&tag.name) {
@@ -2105,12 +1966,7 @@ async fn suggest_category_handler(
                     vec
                 }
                 Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: format!("Failed to compute embedding: {}", e),
-                        }),
-                    )
+                    return internal_error(format!("Failed to compute embedding: {}", e))
                         .into_response();
                 }
             }
@@ -2121,13 +1977,7 @@ async fn suggest_category_handler(
     let categories = match get_tag_categories(&state.db).await {
         Ok(cats) => cats,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to get categories: {}", e),
-                }),
-            )
-                .into_response();
+            return internal_error(format!("Failed to get categories: {}", e)).into_response();
         }
     };
 
@@ -2230,13 +2080,7 @@ async fn bulk_import_handler(
         let cats = match get_tag_categories(&state.db).await {
             Ok(c) => c,
             Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                    }),
-                )
-                    .into_response();
+                return internal_error(e).into_response();
             }
         };
         cats.into_iter().map(|c| (c.id, c.name)).collect()
@@ -2245,13 +2089,7 @@ async fn bulk_import_handler(
     let checked = match bulk_check_tags(&state.db, &names).await {
         Ok(c) => c,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-                .into_response();
+            return internal_error(e).into_response();
         }
     };
 
@@ -2312,13 +2150,7 @@ async fn bulk_resolve_handler(
         let cats = match get_tag_categories(&state.db).await {
             Ok(c) => c,
             Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                    }),
-                )
-                    .into_response();
+                return internal_error(e).into_response();
             }
         };
         cats.into_iter().map(|c| (c.id, c.name)).collect()
@@ -2497,13 +2329,7 @@ async fn reset_review_handler(State(state): State<Arc<AppState>>) -> impl IntoRe
             })
             .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to reset reviewed_at: {}", e),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(format!("Failed to reset reviewed_at: {}", e)).into_response(),
     }
 }
 
@@ -2513,8 +2339,6 @@ async fn reset_review_handler(State(state): State<Arc<AppState>>) -> impl IntoRe
 async fn recompute_tag_similarities_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    use axum::http::StatusCode;
-
     match compute_tag_similarities(&state.db).await {
         Ok(count) => Json(ApiResponse {
             data: serde_json::json!({
@@ -2523,13 +2347,9 @@ async fn recompute_tag_similarities_handler(
             }),
         })
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to compute tag similarities: {}", e),
-            }),
-        )
-            .into_response(),
+        Err(e) => {
+            internal_error(format!("Failed to compute tag similarities: {}", e)).into_response()
+        }
     }
 }
 
@@ -2586,13 +2406,7 @@ async fn get_playlists_without_tags_handler(
 
             Json(ApiResponse { data: response }).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -2611,26 +2425,14 @@ async fn create_tags_from_playlists_handler(
             }
             Json(ApiResponse { data: response }).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
 async fn services_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match get_service_connections(&state.db, &state.config).await {
         Ok(services) => Json(ApiResponse { data: services }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -2994,7 +2796,8 @@ async fn service_callback_handler(
                         tracing::warn!("Failed to update connection status: {}", e);
                     }
 
-                    return Redirect::to("http://localhost:8000").into_response();
+                    // TODO: dynamically redirect to the frontend URL
+                    return Redirect::to("http://localhost:3000").into_response();
                 }
             }
 
@@ -3272,13 +3075,7 @@ async fn service_config_handler(
             }),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -3641,7 +3438,7 @@ async fn playlists_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PlaylistsQuery>,
 ) -> impl IntoResponse {
-    use axum::http::StatusCode;
+    use sqlx::QueryBuilder;
 
     // Default values
     let limit = query.limit.unwrap_or(100);
@@ -3649,80 +3446,83 @@ async fn playlists_handler(
     let search_term = query.search.clone();
     let service_filter = query.service.clone();
 
-    // Build SQL query with count of tracks
-    let mut sql = String::from(
+    // Build main query with bind parameters (no string interpolation)
+    let mut main_builder = QueryBuilder::new(
         "SELECT sp.*, COUNT(spt.track_id) as track_count
          FROM service_playlists sp
          LEFT JOIN service_playlist_tracks spt ON sp.id = spt.playlist_id",
     );
 
-    let mut conditions = Vec::new();
+    let mut count_builder =
+        QueryBuilder::new("SELECT COUNT(DISTINCT sp.id) FROM service_playlists sp");
 
-    if let Some(service) = &service_filter {
-        conditions.push(format!("sp.service = '{}'", service.replace("'", "''")));
+    let mut has_where = false;
+
+    if let Some(ref service) = service_filter {
+        let clause = " WHERE sp.service = ";
+        main_builder.push(clause);
+        main_builder.push_bind(service.clone());
+        count_builder.push(clause);
+        count_builder.push_bind(service.clone());
+        has_where = true;
     }
 
-    if let Some(search) = &search_term {
+    if let Some(ref search) = search_term {
         if !search.trim().is_empty() {
-            conditions.push(format!("sp.name LIKE '%{}%'", search.replace("'", "''")));
+            let clause = if has_where {
+                " AND sp.name LIKE "
+            } else {
+                " WHERE sp.name LIKE "
+            };
+            main_builder.push(clause);
+            main_builder.push_bind(format!("%{}%", search));
+            if has_where {
+                count_builder.push(" AND sp.name LIKE ");
+            } else {
+                count_builder.push(" WHERE sp.name LIKE ");
+            }
+            count_builder.push_bind(format!("%{}%", search));
         }
     }
 
-    if !conditions.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&conditions.join(" AND "));
-    }
+    main_builder.push(" GROUP BY sp.id ORDER BY sp.name LIMIT ");
+    main_builder.push_bind(limit);
+    main_builder.push(" OFFSET ");
+    main_builder.push_bind(offset);
 
-    sql.push_str(" GROUP BY sp.id ORDER BY sp.name LIMIT ? OFFSET ?");
-
-    // Execute query
-    match sqlx::query_as::<_, Playlist>(&sql)
-        .bind(limit)
-        .bind(offset)
+    // Execute main query
+    let playlists = match main_builder
+        .build_query_as::<Playlist>()
         .fetch_all(&state.db)
         .await
     {
-        Ok(playlists) => {
-            // Get total count for pagination
-            let mut total_sql =
-                String::from("SELECT COUNT(DISTINCT sp.id) FROM service_playlists sp");
-
-            if !conditions.is_empty() {
-                total_sql.push_str(" WHERE ");
-                total_sql.push_str(&conditions.join(" AND "));
-            }
-
-            match sqlx::query_scalar::<_, i64>(&total_sql)
-                .fetch_one(&state.db)
-                .await
-            {
-                Ok(total) => Json(ApiResponse {
-                    data: serde_json::json!({
-                        "playlists": playlists,
-                        "total": total,
-                        "limit": limit,
-                        "offset": offset,
-                    }),
-                })
-                .into_response(),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Failed to get total count: {}", e),
-                    }),
-                )
-                    .into_response(),
-            }
+        Ok(p) => p,
+        Err(e) => {
+            return internal_error(format!("Failed to fetch playlists: {}", e)).into_response();
         }
+    };
 
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to fetch playlists: {}", e),
-            }),
-        )
-            .into_response(),
-    }
+    // Execute count query
+    let total = match count_builder
+        .build_query_scalar::<i64>()
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            return internal_error(format!("Failed to get total count: {}", e)).into_response();
+        }
+    };
+
+    Json(ApiResponse {
+        data: serde_json::json!({
+            "playlists": playlists,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }),
+    })
+    .into_response()
 }
 
 // Add endpoint to get sync status
@@ -3968,13 +3768,7 @@ async fn service_sync_status_handler(
 async fn folders_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match get_folders(&state.db).await {
         Ok(folders) => Json(ApiResponse { data: folders }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -4022,13 +3816,7 @@ async fn add_folder_handler(
             };
             Json(ApiResponse { data: folder_info }).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -4059,13 +3847,7 @@ async fn toggle_watch_handler(
                     };
                     Json(ApiResponse { data: folder_info }).into_response()
                 }
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                    }),
-                )
-                    .into_response(),
+                Err(e) => internal_error(e).into_response(),
             }
         }
         Ok(None) => (
@@ -4075,13 +3857,7 @@ async fn toggle_watch_handler(
             }),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -4114,13 +3890,7 @@ async fn get_folder_handler(
             }),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -4180,13 +3950,7 @@ async fn update_folder_handler(
             };
             Json(ApiResponse { data: folder_info }).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -4199,13 +3963,7 @@ async fn delete_folder_handler(
             data: format!("Folder {} deleted successfully", id),
         })
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -4244,13 +4002,7 @@ async fn scan_folder_handler(
             }),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -4291,11 +4043,88 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
 
-    let files = sqlx::query_as::<_, File>("SELECT * FROM files ORDER BY id LIMIT ? OFFSET ?")
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await?;
+    // Build dynamic SQL with WHERE clauses for filtering
+    let mut sql = String::from("SELECT * FROM files WHERE 1=1");
+
+    if let Some(ref search) = query.search {
+        if !search.is_empty() {
+            sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ?)");
+        }
+    }
+
+    if query.bpm_min.is_some() {
+        sql.push_str(" AND bpm >= ?");
+    }
+
+    if query.bpm_max.is_some() {
+        sql.push_str(" AND bpm <= ?");
+    }
+
+    if let Some(ref key_str) = query.key {
+        let keys: Vec<&str> = key_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !keys.is_empty() {
+            let placeholders: Vec<String> = keys.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(" AND musical_key IN ({})", placeholders.join(",")));
+        }
+    }
+
+    // For linkedOnly (direct service IDs OR ISRC matches any service track)
+    if query.linked_only.unwrap_or(false) {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.file_id = files.id)");
+    }
+
+    // For unlinked (no direct service IDs AND no ISRC match)
+    if query.unlinked.unwrap_or(false) {
+        sql.push_str(
+            " AND NOT EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.file_id = files.id)",
+        );
+    }
+
+    // For nonDefaultOnly (files with at least one tag from a non-default category)
+    if query.non_default_only.unwrap_or(false) {
+        sql.push_str(
+            " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND ft.is_default = FALSE)",
+        );
+    }
+
+    sql.push_str(" ORDER BY id LIMIT ? OFFSET ?");
+
+    // Build query with bind parameters
+    let mut q = sqlx::query_as::<_, File>(&sql);
+
+    if let Some(ref search) = query.search {
+        if !search.is_empty() {
+            q = q.bind(format!("%{}%", search));
+            q = q.bind(format!("%{}%", search));
+            q = q.bind(format!("%{}%", search));
+        }
+    }
+
+    if let Some(bpm_min) = query.bpm_min {
+        q = q.bind(bpm_min);
+    }
+
+    if let Some(bpm_max) = query.bpm_max {
+        q = q.bind(bpm_max);
+    }
+
+    if let Some(ref key_str) = query.key {
+        for k in key_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(k);
+        }
+    }
+
+    q = q.bind(limit).bind(offset);
+
+    let files = q.fetch_all(pool).await?;
 
     if files.is_empty() {
         return Ok(vec![]);
@@ -4308,12 +4137,8 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
     let match_sql = format!(
         "SELECT f.id, COALESCE(GROUP_CONCAT(DISTINCT st.service), '') as services
          FROM files f
-         LEFT JOIN service_tracks st ON (
-             st.isrc = f.isrc
-             OR (st.service = 'spotify' AND st.service_id = f.spotify_id)
-             OR (st.service = 'soundcloud' AND st.service_id = f.soundcloud_id)
-             OR (st.service = 'youtube' AND st.service_id = f.youtube_id)
-         )
+         LEFT JOIN v_file_track_link v ON v.file_id = f.id
+         LEFT JOIN service_tracks st ON st.id = v.track_id
          WHERE f.id IN ({})
          GROUP BY f.id",
         placeholders.join(", ")
@@ -4374,11 +4199,81 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
     Ok(api_files)
 }
 
-async fn get_files_count(pool: &Pool<Sqlite>, _query: &FilesQuery) -> Result<i64> {
-    let row = sqlx::query("SELECT COUNT(*) as count FROM files")
-        .fetch_one(pool)
-        .await?;
+async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64> {
+    // Build dynamic SQL with the same WHERE clauses as get_files
+    let mut sql = String::from("SELECT COUNT(*) as count FROM files WHERE 1=1");
 
+    if let Some(ref search) = query.search {
+        if !search.is_empty() {
+            sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ?)");
+        }
+    }
+
+    if query.bpm_min.is_some() {
+        sql.push_str(" AND bpm >= ?");
+    }
+
+    if query.bpm_max.is_some() {
+        sql.push_str(" AND bpm <= ?");
+    }
+
+    if let Some(ref key_str) = query.key {
+        let keys: Vec<&str> = key_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !keys.is_empty() {
+            let placeholders: Vec<String> = keys.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(" AND musical_key IN ({})", placeholders.join(",")));
+        }
+    }
+
+    if query.linked_only.unwrap_or(false) {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.file_id = files.id)");
+    }
+
+    if query.unlinked.unwrap_or(false) {
+        sql.push_str(
+            " AND NOT EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.file_id = files.id)",
+        );
+    }
+
+    if query.non_default_only.unwrap_or(false) {
+        sql.push_str(
+            " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND ft.is_default = FALSE)",
+        );
+    }
+
+    let mut q = sqlx::query(&sql);
+
+    if let Some(ref search) = query.search {
+        if !search.is_empty() {
+            q = q.bind(format!("%{}%", search));
+            q = q.bind(format!("%{}%", search));
+            q = q.bind(format!("%{}%", search));
+        }
+    }
+
+    if let Some(bpm_min) = query.bpm_min {
+        q = q.bind(bpm_min);
+    }
+
+    if let Some(bpm_max) = query.bpm_max {
+        q = q.bind(bpm_max);
+    }
+
+    if let Some(ref key_str) = query.key {
+        for k in key_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(k);
+        }
+    }
+
+    let row = q.fetch_one(pool).await?;
     Ok(row.try_get("count")?)
 }
 
@@ -4393,12 +4288,8 @@ async fn get_file_by_id(pool: &Pool<Sqlite>, id: i64) -> Result<ApiFile> {
     // Get matched services for this file
     let match_sql = r#"SELECT COALESCE(GROUP_CONCAT(DISTINCT st.service), '') as services
          FROM files f
-         LEFT JOIN service_tracks st ON (
-             st.isrc = f.isrc
-             OR (st.service = 'spotify' AND st.service_id = f.spotify_id)
-             OR (st.service = 'soundcloud' AND st.service_id = f.soundcloud_id)
-             OR (st.service = 'youtube' AND st.service_id = f.youtube_id)
-         )
+         LEFT JOIN v_file_track_link v ON v.file_id = f.id
+         LEFT JOIN service_tracks st ON st.id = v.track_id
          WHERE f.id = ?"#;
 
     let services_str: String = sqlx::query_scalar::<Sqlite, String>(match_sql)
@@ -4437,18 +4328,33 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
     let service_filter = query.service.clone();
+    let search_pattern = query.search.as_ref().and_then(|s| {
+        if s.is_empty() {
+            None
+        } else {
+            Some(format!("%{}%", s))
+        }
+    });
 
-    let mut sql = "SELECT * FROM service_tracks".to_string();
+    let mut sql = "SELECT * FROM service_tracks WHERE 1=1".to_string();
     let mut params: Vec<String> = Vec::new();
 
+    if search_pattern.is_some() {
+        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)");
+    }
+
     if let Some(service) = &service_filter {
-        sql.push_str(" WHERE service = ?");
+        sql.push_str(" AND service = ?");
         params.push(service.clone());
     }
 
     sql.push_str(" ORDER BY id LIMIT ? OFFSET ?");
 
     let mut query_builder = sqlx::query_as::<_, ServiceTrack>(&sql);
+
+    if let Some(ref pattern) = search_pattern {
+        query_builder = query_builder.bind(pattern).bind(pattern).bind(pattern);
+    }
 
     if let Some(service) = &service_filter {
         query_builder = query_builder.bind(service);
@@ -4471,12 +4377,8 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     let match_sql = format!(
         "SELECT st.id, COALESCE(GROUP_CONCAT(DISTINCT f.file_type), '') as file_types
          FROM service_tracks st
-         LEFT JOIN files f ON (
-             f.isrc = st.isrc
-             OR (st.service = 'spotify' AND f.spotify_id = st.service_id)
-             OR (st.service = 'soundcloud' AND f.soundcloud_id = st.service_id)
-             OR (st.service = 'youtube' AND f.youtube_id = st.service_id)
-         )
+         LEFT JOIN v_file_track_link v ON v.track_id = st.id
+         LEFT JOIN files f ON f.id = v.file_id
          WHERE st.id IN ({})
          GROUP BY st.id",
         placeholders.join(", ")
@@ -4515,14 +4417,29 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
 
 async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i64> {
     let service_filter = query.service.clone();
+    let search_pattern = query.search.as_ref().and_then(|s| {
+        if s.is_empty() {
+            None
+        } else {
+            Some(format!("%{}%", s))
+        }
+    });
 
-    let mut sql = "SELECT COUNT(*) as count FROM service_tracks".to_string();
+    let mut sql = "SELECT COUNT(*) as count FROM service_tracks WHERE 1=1".to_string();
+
+    if search_pattern.is_some() {
+        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)");
+    }
 
     if service_filter.is_some() {
-        sql.push_str(" WHERE service = ?");
+        sql.push_str(" AND service = ?");
     }
 
     let mut query_builder = sqlx::query(&sql);
+
+    if let Some(ref pattern) = search_pattern {
+        query_builder = query_builder.bind(pattern).bind(pattern).bind(pattern);
+    }
 
     if let Some(service) = service_filter.as_ref() {
         query_builder = query_builder.bind(service);
@@ -4543,12 +4460,8 @@ async fn get_track_by_id(pool: &Pool<Sqlite>, id: i64) -> Result<ApiServiceTrack
     // Get local file types for this track
     let match_sql = r#"SELECT COALESCE(GROUP_CONCAT(DISTINCT f.file_type), '') as file_types
          FROM service_tracks st
-         LEFT JOIN files f ON (
-             f.isrc = st.isrc
-             OR (st.service = 'spotify' AND f.spotify_id = st.service_id)
-             OR (st.service = 'soundcloud' AND f.soundcloud_id = st.service_id)
-             OR (st.service = 'youtube' AND f.youtube_id = st.service_id)
-         )
+         LEFT JOIN v_file_track_link v ON v.track_id = st.id
+         LEFT JOIN files f ON f.id = v.file_id
          WHERE st.id = ?"#;
 
     let file_types_str: String = sqlx::query_scalar::<Sqlite, String>(match_sql)
@@ -4680,15 +4593,9 @@ async fn apply_bulk_tags(
 }
 
 async fn get_all_tags(pool: &Pool<Sqlite>) -> Result<Vec<Tag>> {
-    // Use JOIN query since tags_with_categories view doesn't exist
-    let rows = sqlx::query(
-        "SELECT t.id, t.name, tc.name as category, tc.icon as category_icon, t.created_at
-         FROM tags t
-         LEFT JOIN tag_categories tc ON t.category_id = tc.id
-         ORDER BY t.name",
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query("SELECT * FROM v_tags_with_categories ORDER BY name")
+        .fetch_all(pool)
+        .await?;
 
     let mut tags = Vec::new();
     for row in rows {
@@ -4706,15 +4613,10 @@ async fn get_all_tags(pool: &Pool<Sqlite>) -> Result<Vec<Tag>> {
 
 /// Get a single tag with category information
 async fn get_tag_with_category(pool: &Pool<Sqlite>, tag_id: i64) -> Result<Option<Tag>> {
-    let row = sqlx::query(
-        "SELECT t.id, t.name, tc.name as category, tc.icon as category_icon, t.created_at
-         FROM tags t
-         LEFT JOIN tag_categories tc ON t.category_id = tc.id
-         WHERE t.id = ?",
-    )
-    .bind(tag_id)
-    .fetch_optional(pool)
-    .await?;
+    let row = sqlx::query("SELECT * FROM v_tags_with_categories WHERE id = ?")
+        .bind(tag_id)
+        .fetch_optional(pool)
+        .await?;
 
     if let Some(row) = row {
         Ok(Some(Tag {
@@ -4873,8 +4775,6 @@ async fn traktor_status_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TraktorImportRequest>,
 ) -> impl IntoResponse {
-    use axum::http::StatusCode;
-
     let custom_path = query.custom_path;
     let custom_path_ref = custom_path.as_ref().map(|s| std::path::Path::new(s));
 
@@ -4902,18 +4802,10 @@ async fn traktor_status_handler(
 
 /// GET /api/playlists/subscriptions
 async fn subscriptions_list_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    use axum::http::StatusCode;
-
     let subscriptions = match crate::db::list_subscriptions(&state.db).await {
         Ok(subs) => subs,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to list subscriptions: {}", e),
-                }),
-            )
-                .into_response();
+            return internal_error(format!("Failed to list subscriptions: {}", e)).into_response();
         }
     };
 
@@ -4937,8 +4829,6 @@ async fn subscribe_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SubscribeRequest>,
 ) -> impl IntoResponse {
-    use axum::http::StatusCode;
-
     match crate::db::subscribe_to_playlist(
         &state.db,
         &body.service,
@@ -4951,13 +4841,7 @@ async fn subscribe_handler(
             data: serde_json::json!({"id": id, "service": body.service, "playlistId": body.playlist_id}),
         })
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to subscribe: {}", e),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(format!("Failed to subscribe: {}", e)).into_response(),
     }
 }
 
@@ -4966,20 +4850,12 @@ async fn unsubscribe_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    use axum::http::StatusCode;
-
     match crate::db::unsubscribe_from_playlist(&state.db, id).await {
         Ok(()) => Json(ApiResponse {
             data: serde_json::json!({"unsubscribed": true}),
         })
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to unsubscribe: {}", e),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(format!("Failed to unsubscribe: {}", e)).into_response(),
     }
 }
 
@@ -4988,20 +4864,13 @@ async fn unsubscribe_handler(
 async fn playlist_comment_diff_stats_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    use axum::http::StatusCode;
     use std::collections::HashMap;
 
     // 1. Get all subscribed playlists
     let subscriptions = match crate::db::list_subscriptions(&state.db).await {
         Ok(subs) => subs,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to list subscriptions: {}", e),
-                }),
-            )
-                .into_response();
+            return internal_error(format!("Failed to list subscriptions: {}", e)).into_response();
         }
     };
 
@@ -5020,13 +4889,7 @@ async fn playlist_comment_diff_stats_handler(
     let files = match files {
         Ok(f) => f,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to fetch files: {}", e),
-                }),
-            )
-                .into_response();
+            return internal_error(format!("Failed to fetch files: {}", e)).into_response();
         }
     };
 
@@ -5044,20 +4907,13 @@ async fn playlist_comment_diff_stats_handler(
         }
 
         let playlist_rows = sqlx::query_as::<_, (i64,)>(
-            r#" SELECT DISTINCT sp.id
-            FROM service_playlists sp
-            JOIN service_playlist_tracks spt ON spt.playlist_id = sp.id
-            JOIN service_tracks st ON st.id = spt.track_id
-            WHERE st.isrc = ?
-               OR (st.service = 'spotify' AND st.service_id = ?)
-               OR (st.service = 'soundcloud' AND st.service_id = ?)
-               OR (st.service = 'youtube' AND st.service_id = ?)
-            "#,
+            r#"SELECT DISTINCT sp.id
+             FROM service_playlists sp
+             JOIN service_playlist_tracks spt ON spt.playlist_id = sp.id
+             JOIN v_file_track_link v ON v.track_id = spt.track_id
+             WHERE v.file_id = ?"#,
         )
-        .bind(&file.isrc)
-        .bind(&file.spotify_id)
-        .bind(&file.soundcloud_id)
-        .bind(&file.youtube_id)
+        .bind(file.id)
         .fetch_all(&state.db)
         .await
         .unwrap_or_default();
@@ -5100,19 +4956,11 @@ async fn find_tag_similar_tracks_handler(
     Path(id): Path<i64>,
     Query(query): Query<TracksQuery>,
 ) -> impl IntoResponse {
-    use axum::http::StatusCode;
-
     let limit = query.limit.unwrap_or(20).min(100);
 
     match crate::db::find_tag_similar_tracks(&state.db, id, limit).await {
         Ok(results) => Json(ApiResponse { data: results }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => internal_error(e).into_response(),
     }
 }
 
@@ -5126,6 +4974,9 @@ impl Default for FilesQuery {
             key: None,
             tags: None,
             search: None,
+            linked_only: None,
+            unlinked: None,
+            non_default_only: None,
         }
     }
 }

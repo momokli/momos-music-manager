@@ -69,19 +69,20 @@ function actions(r) {
 
 function rows(d) {
   return d
-    .map(
-      (r) => `<tr>
+    .map((r) => {
+      const mismatch = r.l !== r.r;
+      return `<tr class="${mismatch ? "row-mismatch" : ""}" ${mismatch ? 'title="Local vs Remote differ"' : ""}>
     <td style="width:3%"></td>
     <td><span class="font-medium">${esc(r.name)}</span></td>
     <td>${sBadge(r.svc)}</td>
     <td style="text-align:center">${subCell(r.sub)}</td>
-    <td><span>${r.l}</span></td>
-    <td><span>${r.r}</span></td>
+    <td><span class="${mismatch ? "diff-badge" : ""}">${r.l}</span></td>
+    <td><span class="${mismatch ? "diff-badge" : ""}">${r.r}</span></td>
     <td>${syncCell(r.sync)}</td>
     <td>${tagCell(r.tag)}</td>
     <td>${actions(r)}</td>
-  </tr>`,
-    )
+  </tr>`;
+    })
     .join("");
 }
 
@@ -101,6 +102,7 @@ function renderPlaylists(container, playlists, total, untaggedTotal, state, sign
   ${renderSearchInput("playlists", state.search)}
   ${renderFilterGroup("service", SVC_OPTIONS, state.service)}
   <label class="checkbox-label"><input type="checkbox" data-sf-filter="untaggedOnly" ${state.untaggedOnly ? "checked" : ""}> Untagged only</label>
+  <label class="checkbox-label"><input type="checkbox" data-sf-filter="mismatchOnly" ${state.mismatchOnly ? "checked" : ""}> Mismatch only</label>
 
   <button class="btn btn-green" id="pl-create-tags"><i class="fas fa-tag"></i> Create Tags</button>
 </div>
@@ -307,6 +309,7 @@ async function loadPlaylists(container, signal, state) {
   if (state.service && state.service !== "all") params.set("service", state.service);
   if (state.search) params.set("search", state.search);
   if (state.untaggedOnly) params.set("untagged", "true");
+  if (state.mismatchOnly) params.set("mismatch", "true");
 
   const [plResp, tagsResp, subsResp] = await Promise.all([
     fetchJSON(`/api/playlists?${params}`, { signal }),
@@ -342,8 +345,8 @@ async function loadPlaylists(container, signal, state) {
       svc: p.service,
       playlistId: p.playlistId,
       sub: subLookup[key] || null,
-      l: 0,
-      r: p.trackCount,
+      l: p.localTrackCount ?? 0,
+      r: p.remoteTrackCount ?? 0,
       sync: null,
       tag: tagLookup[p.name.toLowerCase()] || null,
     };
@@ -362,6 +365,7 @@ export async function init(container, signal) {
     service: "all",
     search: "",
     untaggedOnly: false,
+    mismatchOnly: false,
   };
 
   try {

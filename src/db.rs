@@ -839,13 +839,10 @@ pub async fn get_file_by_path(pool: &Pool<Sqlite>, file_path: &str) -> Result<Op
 }
 
 pub async fn get_tag_categories(pool: &Pool<Sqlite>) -> Result<Vec<TagCategory>> {
-    let categories = sqlx::query_as::<_, TagCategory>(
-        r#"SELECT tc.*, (SELECT COUNT(*) FROM tags WHERE category_id = tc.id) as tag_count
-           FROM tag_categories tc
-           ORDER BY tc.sort_order"#,
-    )
-    .fetch_all(pool)
-    .await?;
+    let categories =
+        sqlx::query_as::<_, TagCategory>("SELECT * FROM v_tag_categories ORDER BY sort_order")
+            .fetch_all(pool)
+            .await?;
     Ok(categories)
 }
 
@@ -854,25 +851,18 @@ pub async fn get_tag_category_by_id(
     pool: &Pool<Sqlite>,
     category_id: i64,
 ) -> Result<Option<TagCategory>> {
-    let category = sqlx::query_as::<_, TagCategory>(
-        r#"SELECT tc.*, (SELECT COUNT(*) FROM tags WHERE category_id = tc.id) as tag_count
-           FROM tag_categories tc
-           WHERE tc.id = ?"#,
-    )
-    .bind(category_id)
-    .fetch_optional(pool)
-    .await?;
+    let category = sqlx::query_as::<_, TagCategory>("SELECT * FROM v_tag_categories WHERE id = ?")
+        .bind(category_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(category)
 }
 
 pub async fn get_default_tag_category(pool: &Pool<Sqlite>) -> Result<Option<TagCategory>> {
-    let category = sqlx::query_as::<_, TagCategory>(
-        r#"SELECT tc.*, (SELECT COUNT(*) FROM tags WHERE category_id = tc.id) as tag_count
-           FROM tag_categories tc
-           WHERE tc.is_default = TRUE"#,
-    )
-    .fetch_optional(pool)
-    .await?;
+    let category =
+        sqlx::query_as::<_, TagCategory>("SELECT * FROM v_tag_categories WHERE is_default = TRUE")
+            .fetch_optional(pool)
+            .await?;
     Ok(category)
 }
 
@@ -928,7 +918,7 @@ pub async fn get_tag_service_connections(
     tag_name: &str,
 ) -> Result<ServiceConnections> {
     let services = sqlx::query_scalar::<_, String>(
-        r#"SELECT DISTINCT sp.service FROM service_playlists sp WHERE LOWER(TRIM(sp.name)) = LOWER(TRIM(?))"#
+        r#"SELECT DISTINCT vtp.service FROM v_tag_playlist vtp WHERE LOWER(TRIM(vtp.tag_name)) = LOWER(TRIM(?))"#
     )
     .bind(tag_name)
     .fetch_all(pool)
@@ -1005,8 +995,7 @@ pub async fn get_playlists_without_tags(pool: &Pool<Sqlite>) -> Result<Vec<Servi
         FROM service_playlists sp
         WHERE TRIM(sp.name) != ''
           AND NOT EXISTS (
-            SELECT 1 FROM tags t
-            WHERE LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
+            SELECT 1 FROM v_tag_playlist vtp WHERE vtp.playlist_id = sp.id
           )
         ORDER BY sp.name
         "#,
@@ -1036,8 +1025,7 @@ pub async fn create_tags_from_playlists(pool: &Pool<Sqlite>) -> Result<usize> {
         FROM service_playlists sp
         WHERE TRIM(sp.name) != ''
           AND NOT EXISTS (
-            SELECT 1 FROM tags t
-            WHERE LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
+            SELECT 1 FROM v_tag_playlist vtp WHERE vtp.playlist_id = sp.id
           )
         "#,
     )
@@ -1601,93 +1589,24 @@ pub async fn compute_target_comment(pool: &Pool<Sqlite>, file_id: i64) -> Result
         .fetch_one(pool)
         .await?;
 
-    // Step 1: Find matching service tracks
-    let matching_tracks_sql = r#"
-        SELECT st.id
-        FROM service_tracks st
-        WHERE st.isrc = ?
-           OR (st.service = 'spotify' AND st.service_id = ?)
-           OR (st.service = 'soundcloud' AND st.service_id = ?)
-           OR (st.service = 'youtube' AND st.service_id = ?)
-    "#;
+    // Get all tags for this file with category prefix via v_file_tags view
+    let tag_rows = sqlx::query(
+        "SELECT ft.tag_name, ft.prefix
+         FROM v_file_tags ft
+         WHERE ft.file_id = ?
+         ORDER BY ft.sort_order, ft.tag_name",
+    )
+    .bind(file_id)
+    .fetch_all(pool)
+    .await?;
 
-    let track_ids: Vec<i64> = sqlx::query_scalar::<_, i64>(matching_tracks_sql)
-        .bind(&file.isrc)
-        .bind(&file.spotify_id)
-        .bind(&file.soundcloud_id)
-        .bind(&file.youtube_id)
-        .fetch_all(pool)
-        .await?;
-
-    if track_ids.is_empty() {
-        // No matching tracks, just return comment with service IDs
-        return Ok(generate_target_comment(
-            '_',
-            '_',
-            '_',
-            &[],
-            file.spotify_id.as_deref(),
-            file.soundcloud_id.as_deref(),
-            file.youtube_id.as_deref(),
-        ));
-    }
-
-    // Step 2: Find playlists those tracks are in
-    let placeholders: Vec<String> = track_ids.iter().map(|_| "?".to_string()).collect();
-    let playlists_sql = format!(
-        "SELECT DISTINCT sp.name
-         FROM service_playlists sp
-         JOIN service_playlist_tracks spt ON spt.playlist_id = sp.id
-         WHERE spt.track_id IN ({})",
-        placeholders.join(", ")
-    );
-
-    let mut playlist_query = sqlx::query_scalar::<_, String>(&playlists_sql);
-    for track_id in &track_ids {
-        playlist_query = playlist_query.bind(track_id);
-    }
-
-    let playlist_names: Vec<String> = playlist_query.fetch_all(pool).await?;
-
-    if playlist_names.is_empty() {
-        // No playlists found, just return comment with service IDs
-        return Ok(generate_target_comment(
-            '_',
-            '_',
-            '_',
-            &[],
-            file.spotify_id.as_deref(),
-            file.soundcloud_id.as_deref(),
-            file.youtube_id.as_deref(),
-        ));
-    }
-
-    // Step 3: Find tags matching playlist names with categories
-    let tag_placeholders: Vec<String> = playlist_names.iter().map(|_| "?".to_string()).collect();
-    let tags_sql = format!(
-        "SELECT t.name, tc.prefix, tc.sort_order
-         FROM tags t
-         JOIN tag_categories tc ON tc.id = t.category_id
-         WHERE t.name IN ({})
-         ORDER BY tc.sort_order, t.name",
-        tag_placeholders.join(", ")
-    );
-
-    let mut tag_query = sqlx::query(&tags_sql);
-    for playlist_name in &playlist_names {
-        tag_query = tag_query.bind(playlist_name);
-    }
-
-    let tag_rows = tag_query.fetch_all(pool).await?;
-
-    // Step 4: Determine PMV characters and collect tags
     let mut phase_present = false;
     let mut mood_present = false;
     let mut vibe_present = false;
     let mut tags: Vec<String> = Vec::new();
 
     for row in tag_rows {
-        let tag_name: String = row.try_get("name")?;
+        let tag_name: String = row.try_get("tag_name")?;
         let prefix: String = row.try_get("prefix")?;
 
         match prefix.as_str() {
@@ -1700,9 +1619,6 @@ pub async fn compute_target_comment(pool: &Pool<Sqlite>, file_id: i64) -> Result
         tags.push(tag_name);
     }
 
-    // Step 5: Tags already sorted by sort_order then name from SQL query
-
-    // Step 6 & 7: Generate target comment
     let phase_char = if phase_present { 'P' } else { '_' };
     let mood_char = if mood_present { 'M' } else { '_' };
     let vibe_char = if vibe_present { 'V' } else { '_' };
@@ -1729,13 +1645,13 @@ pub async fn get_service_tracks(pool: &Pool<Sqlite>) -> Result<Vec<ServiceTrack>
 
 /// Get tags for a service track (via playlist name matching)
 pub async fn get_tags_for_service_track(pool: &Pool<Sqlite>, track_id: i64) -> Result<Vec<Tag>> {
-    // Find playlists that contain this track, then find tags with matching names
+    // Find tags linked to this track via v_tag_playlist (playlist → tag name matching)
     let tags = sqlx::query_as::<_, Tag>(
         r#"
-        SELECT DISTINCT t.*
+        SELECT DISTINCT t.id, t.name, t.category_id, t.sort_order, t.created_at
         FROM tags t
-        INNER JOIN service_playlists sp ON t.name = sp.name COLLATE NOCASE
-        INNER JOIN service_playlist_tracks spt ON sp.id = spt.playlist_id
+        JOIN v_tag_playlist vtp ON vtp.tag_id = t.id
+        JOIN service_playlist_tracks spt ON spt.playlist_id = vtp.playlist_id
         WHERE spt.track_id = ?
         ORDER BY t.name
         "#,
@@ -2272,15 +2188,7 @@ pub async fn unsubscribe_from_playlist(pool: &Pool<Sqlite>, subscription_id: i64
 /// List all subscriptions, joining with service_playlists to get playlist name and track count.
 pub async fn list_subscriptions(pool: &Pool<Sqlite>) -> Result<Vec<PlaylistSubscription>> {
     let rows = sqlx::query_as::<_, PlaylistSubscription>(
-        r#"
-        SELECT
-            ps.*,
-            sp.name AS playlist_name,
-            COALESCE((SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id), 0) AS track_count
-        FROM playlist_subscriptions ps
-        LEFT JOIN service_playlists sp ON ps.service_playlist_id = sp.id
-        ORDER BY ps.subscribed_at DESC
-        "#,
+        "SELECT * FROM v_subscriptions ORDER BY subscribed_at DESC",
     )
     .fetch_all(pool)
     .await?;
@@ -2290,17 +2198,10 @@ pub async fn list_subscriptions(pool: &Pool<Sqlite>) -> Result<Vec<PlaylistSubsc
 /// Get subscriptions that are due for polling (is_active AND not polled recently).
 pub async fn get_due_subscriptions(pool: &Pool<Sqlite>) -> Result<Vec<PlaylistSubscription>> {
     let rows = sqlx::query_as::<_, PlaylistSubscription>(
-        r#"
-        SELECT
-            ps.*,
-            sp.name AS playlist_name,
-            COALESCE((SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id), 0) AS track_count
-        FROM playlist_subscriptions ps
-        LEFT JOIN service_playlists sp ON ps.service_playlist_id = sp.id
-        WHERE ps.is_active = 1
-          AND (ps.last_polled_at IS NULL OR ps.last_polled_at + ps.poll_interval_secs < unixepoch())
-        ORDER BY ps.subscribed_at ASC
-        "#,
+        "SELECT * FROM v_subscriptions
+         WHERE is_active = 1
+           AND (last_polled_at IS NULL OR last_polled_at + poll_interval_secs < unixepoch())
+         ORDER BY subscribed_at ASC",
     )
     .fetch_all(pool)
     .await?;
@@ -2377,15 +2278,7 @@ async fn row_by_service_and_playlist_id(
     playlist_id: &str,
 ) -> Result<Option<PlaylistSubscription>> {
     let row = sqlx::query_as::<_, PlaylistSubscription>(
-        r#"
-        SELECT
-            ps.*,
-            sp.name AS playlist_name,
-            COALESCE((SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id), 0) AS track_count
-        FROM playlist_subscriptions ps
-        LEFT JOIN service_playlists sp ON ps.service_playlist_id = sp.id
-        WHERE ps.service = ? AND ps.playlist_id = ?
-        "#,
+        "SELECT * FROM v_subscriptions WHERE service = ? AND playlist_id = ?",
     )
     .bind(service)
     .bind(playlist_id)
@@ -2400,54 +2293,19 @@ async fn row_by_service_and_playlist_id(
 
 /// Get all tags associated with a file (via service track → playlist → tag matching)
 pub async fn get_tags_for_file(pool: &Pool<Sqlite>, file_id: i64) -> Result<Vec<Tag>> {
-    // First get the file
-    let file = sqlx::query_as::<_, File>("SELECT * FROM files WHERE id = ?")
-        .bind(file_id)
-        .fetch_one(pool)
-        .await?;
-
-    // Find matching service tracks
-    let matching_tracks_sql = r#"
-        SELECT DISTINCT st.id
-        FROM service_tracks st
-        WHERE st.isrc = ?
-           OR (st.service = 'spotify' AND st.service_id = ?)
-           OR (st.service = 'soundcloud' AND st.service_id = ?)
-           OR (st.service = 'youtube' AND st.service_id = ?)
-    "#;
-
-    let track_ids: Vec<i64> = sqlx::query_scalar::<_, i64>(matching_tracks_sql)
-        .bind(&file.isrc)
-        .bind(&file.spotify_id)
-        .bind(&file.soundcloud_id)
-        .bind(&file.youtube_id)
-        .fetch_all(pool)
-        .await?;
-
-    if track_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Find tags via playlist names
-    let placeholders: Vec<String> = track_ids.iter().map(|_| "?".to_string()).collect();
-    let tags_sql = format!(
+    // Get all tags for this file via v_file_tags view (resolves file→track→playlist→tag)
+    let tags = sqlx::query_as::<_, Tag>(
         r#"
-        SELECT DISTINCT t.id, t.name, t.category_id, t.sort_order, t.created_at
-        FROM tags t
-        JOIN service_playlists sp ON LOWER(TRIM(sp.name)) = LOWER(TRIM(t.name))
-        JOIN service_playlist_tracks spt ON spt.playlist_id = sp.id
-        WHERE spt.track_id IN ({})
-        ORDER BY t.name
+        SELECT DISTINCT ft.tag_id as id, ft.tag_name as name, ft.category_id, ft.sort_order, ft.created_at
+        FROM v_file_tags ft
+        WHERE ft.file_id = ?
+        ORDER BY ft.tag_name
         "#,
-        placeholders.join(", ")
-    );
+    )
+    .bind(file_id)
+    .fetch_all(pool)
+    .await?;
 
-    let mut tags_query = sqlx::query_as::<_, Tag>(&tags_sql);
-    for track_id in &track_ids {
-        tags_query = tags_query.bind(track_id);
-    }
-
-    let tags = tags_query.fetch_all(pool).await?;
     Ok(tags)
 }
 
@@ -2561,16 +2419,10 @@ pub async fn find_tag_similar_tracks(
     let files_sql = format!(
         r#"
         SELECT DISTINCT f.id, f.title, f.artist, f.bpm, f.musical_key,
-               t.name as tag_name, t.id as tag_id
+               ft.tag_name, ft.tag_id
         FROM files f
-        JOIN service_tracks st ON (st.isrc = f.isrc
-            OR (st.service = 'spotify' AND st.service_id = f.spotify_id)
-            OR (st.service = 'soundcloud' AND st.service_id = f.soundcloud_id)
-            OR (st.service = 'youtube' AND st.service_id = f.youtube_id))
-        JOIN service_playlist_tracks spt ON spt.track_id = st.id
-        JOIN service_playlists sp ON sp.id = spt.playlist_id
-        JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
-        WHERE t.id IN ({})
+        JOIN v_file_tags ft ON ft.file_id = f.id
+        WHERE ft.tag_id IN ({})
           AND f.id != ?
         ORDER BY f.id
         "#,

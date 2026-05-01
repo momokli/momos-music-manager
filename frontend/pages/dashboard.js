@@ -381,16 +381,12 @@ function renderAutoCategorizeCard(unreviewedCount) {
   </div>`;
 }
 
-function renderCommentDiffsCard(needsUpdateCount) {
+function renderCommentDiffsCard() {
   return `<div class="dash-card fade-in">
     <div class="dash-card-header">
       <span><i class="fa-solid fa-pen-to-square" style="margin-right:4px;color:var(--accent);"></i> Comment Diffs</span>
     </div>
     <div class="dash-card-body" style="display:flex;flex-direction:column;gap:var(--space-3);">
-      <div class="flex items-center justify-between">
-        <span class="text-muted text-sm">Files needing update:</span>
-        <strong>${formatNumber(needsUpdateCount)}</strong>
-      </div>
       ${renderCommentWriter({ linkedOnly: true, tagNames: [], nonDefaultOnly: true })}
     </div>
   </div>`;
@@ -578,7 +574,7 @@ export async function init(container, signal) {
     const traktorData = traktorResp.data;
     const unreviewedCount = unreviewedResp.data?.total_unreviewed ?? 0;
     const untaggedCount = untaggedResp.data?.count ?? 0;
-    const needsUpdateCount = needsUpdateResp.data ?? 0;
+    const needsUpdateTotal = needsUpdateResp.data ?? 0;
     const allSubs = subscriptionsResp.data?.subscriptions ?? [];
     const tagCoverage = tagCoverageResp.data;
 
@@ -589,7 +585,7 @@ export async function init(container, signal) {
       ${renderTagsCard(tagCoverage)}
       ${renderPlaylistsCard(svcConns)}
       ${renderTracksCard(svcConns)}
-      ${renderFilesCard(filesCount, svcLinks, unlinked, needsUpdateCount)}
+      ${renderFilesCard(filesCount, svcLinks, unlinked, needsUpdateTotal)}
     </div>`;
 
     // Row 2 – Service status (4 columns)
@@ -614,7 +610,7 @@ export async function init(container, signal) {
     const row4Html = `<div class="dashboard-three-col">
       ${renderTagsFromPlaylistsCard(untaggedCount)}
       ${renderAutoCategorizeCard(unreviewedCount)}
-      ${renderCommentDiffsCard(needsUpdateCount)}
+      ${renderCommentDiffsCard()}
     </div>`;
 
     container.innerHTML = `
