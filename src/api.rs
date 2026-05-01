@@ -11,11 +11,9 @@ use rspotify::clients::{BaseClient, OAuthClient};
 use rspotify::model::Market;
 use rspotify::{AuthCodeSpotify, Config, Credentials, OAuth, Token, scopes};
 use serde::{Deserialize, Serialize};
-use serde_json;
 use sqlx::{FromRow, Pool, Row, Sqlite};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
-use tracing;
 
 use crate::AppState;
 use crate::config::ServiceCredentials;
@@ -254,8 +252,8 @@ impl From<File> for ApiFile {
             channels: file.channels,
             bpm: file.bpm,
             musical_key: file.musical_key,
-            rating: Some(file.rating as i32),
-            play_count: Some(file.play_count as i32),
+            rating: Some(file.rating),
+            play_count: Some(file.play_count),
             last_played: file.last_played,
             spotify_id: file.spotify_id,
             soundcloud_id: file.soundcloud_id,
@@ -690,6 +688,7 @@ pub struct CallbackParams {
     pub error: Option<String>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WebSocketEvent {
@@ -1034,21 +1033,21 @@ async fn files_needs_update_count_handler(
         sql.push_str(" AND EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.file_id = files.id)");
     }
 
-    if let Some(ref tags_str) = query.tags {
-        if !tags_str.is_empty() {
-            let lowered: Vec<String> = tags_str
-                .split(',')
-                .map(|t| t.trim().to_lowercase())
-                .filter(|t| !t.is_empty())
-                .collect();
-            if !lowered.is_empty() {
-                let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
-                sql.push_str(&format!(
+    if let Some(ref tags_str) = query.tags
+        && !tags_str.is_empty()
+    {
+        let lowered: Vec<String> = tags_str
+            .split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if !lowered.is_empty() {
+            let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
                     " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND LOWER(TRIM(ft.tag_name)) IN ({}))",
                     placeholders.join(",")
                 ));
-                tag_params = lowered;
-            }
+            tag_params = lowered;
         }
     }
 
@@ -1222,21 +1221,21 @@ async fn bulk_sync_handler(
         sql.push_str(" AND EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.file_id = files.id)");
     }
 
-    if let Some(ref tags) = body.tags {
-        if !tags.is_empty() {
-            let lowered: Vec<String> = tags
-                .iter()
-                .map(|t| t.trim().to_lowercase())
-                .filter(|t| !t.is_empty())
-                .collect();
-            if !lowered.is_empty() {
-                let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
-                sql.push_str(&format!(
+    if let Some(ref tags) = body.tags
+        && !tags.is_empty()
+    {
+        let lowered: Vec<String> = tags
+            .iter()
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if !lowered.is_empty() {
+            let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
                     " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND LOWER(TRIM(ft.tag_name)) IN ({}))",
                     placeholders.join(",")
                 ));
-                tag_params = lowered;
-            }
+            tag_params = lowered;
         }
     }
 
@@ -1835,17 +1834,17 @@ async fn categorize_tag_handler(
                     }
                 };
 
-                if let Some(blob) = embedding_blob {
-                    if let Ok(_vec) = deserialize_embedding(&blob) {
-                        // Aktualisiere Cache (in-Memory Category Means)
-                        // Die Category Means werden beim nächsten suggest
-                        // automatisch aus der DB neu geladen
-                        tracing::debug!(
-                            "Updated embedding for tag '{}' -> category {}",
-                            tag.name,
-                            request.category_id
-                        );
-                    }
+                if let Some(blob) = embedding_blob
+                    && let Ok(_vec) = deserialize_embedding(&blob)
+                {
+                    // Aktualisiere Cache (in-Memory Category Means)
+                    // Die Category Means werden beim nächsten suggest
+                    // automatisch aus der DB neu geladen
+                    tracing::debug!(
+                        "Updated embedding for tag '{}' -> category {}",
+                        tag.name,
+                        request.category_id
+                    );
                 }
 
                 // Recompute all tag similarity pairs so the new/updated embedding is included
@@ -2102,9 +2101,9 @@ async fn bulk_import_handler(
             .cloned()
             .unwrap_or_else(|| "Unknown".to_string());
 
-        let (status, tag_id) = match (current_cat_id, &current_cat_name) {
+        let (status, _tag_id) = match (current_cat_id, &current_cat_name) {
             (Some(cid), Some(_)) if cid == target_cat_id => ("matched".to_string(), None),
-            (Some(cid), Some(cname)) => ("conflict".to_string(), Some(cid)),
+            (Some(cid), Some(_cname)) => ("conflict".to_string(), Some(cid)),
             (Some(cid), None) => ("conflict".to_string(), Some(cid)),
             (None, _) => ("not_found".to_string(), None),
         };
@@ -2215,8 +2214,8 @@ async fn bulk_resolve_handler(
                 }
             }
             "review" => {
-                match bulk_review_tags(&state.db, &[entry.name.clone()]).await {
-                    Ok(count) => {
+                match bulk_review_tags(&state.db, std::slice::from_ref(&entry.name)).await {
+                    Ok(_count) => {
                         // Get tag id
                         let tag_id = match crate::db::get_tag_by_name(&state.db, &entry.name).await
                         {
@@ -2757,42 +2756,40 @@ async fn service_callback_handler(
         Ok(_) => {
             // Get tokens from spotify client
             let token_lock = spotify.token.lock().await;
-            if let Ok(guard) = token_lock {
-                if let Some(token) = &*guard {
-                    // Store tokens in database
-                    let refresh_token = token.refresh_token.clone();
-                    let access_token = token.access_token.clone();
-                    let token_expiry = token.expires_at.and_then(|dt| Some(dt.timestamp()));
+            if let Ok(guard) = token_lock
+                && let Some(token) = &*guard
+            {
+                // Store tokens in database
+                let refresh_token = token.refresh_token.clone();
+                let access_token = token.access_token.clone();
+                let token_expiry = token.expires_at.map(|dt| dt.timestamp());
 
-                    if let Err(e) = crate::db::update_service_tokens(
-                        &state.db,
-                        &service,
-                        refresh_token.as_deref(),
-                        Some(&access_token),
-                        token_expiry,
+                if let Err(e) = crate::db::update_service_tokens(
+                    &state.db,
+                    &service,
+                    refresh_token.as_deref(),
+                    Some(&access_token),
+                    token_expiry,
+                )
+                .await
+                {
+                    tracing::error!("Failed to store tokens: {}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiResponse {
+                            data: format!("Failed to store tokens: {}", e),
+                        }),
                     )
-                    .await
-                    {
-                        tracing::error!("Failed to store tokens: {}", e);
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ApiResponse {
-                                data: format!("Failed to store tokens: {}", e),
-                            }),
-                        )
-                            .into_response();
-                    }
-
-                    // Update connection status
-                    if let Err(e) =
-                        update_service_connection_status(&state.db, &service, true).await
-                    {
-                        tracing::warn!("Failed to update connection status: {}", e);
-                    }
-
-                    // TODO: dynamically redirect to the frontend URL
-                    return Redirect::to("http://localhost:3000").into_response();
+                        .into_response();
                 }
+
+                // Update connection status
+                if let Err(e) = update_service_connection_status(&state.db, &service, true).await {
+                    tracing::warn!("Failed to update connection status: {}", e);
+                }
+
+                // TODO: dynamically redirect to the frontend URL
+                return Redirect::to("http://localhost:3000").into_response();
             }
 
             (
@@ -2964,41 +2961,39 @@ async fn legacy_callback_handler(
         Ok(_) => {
             // Get tokens from spotify client
             let token_lock = spotify.token.lock().await;
-            if let Ok(guard) = token_lock {
-                if let Some(token) = &*guard {
-                    // Store tokens in database
-                    let refresh_token = token.refresh_token.clone();
-                    let access_token = token.access_token.clone();
-                    let token_expiry = token.expires_at.and_then(|dt| Some(dt.timestamp()));
+            if let Ok(guard) = token_lock
+                && let Some(token) = &*guard
+            {
+                // Store tokens in database
+                let refresh_token = token.refresh_token.clone();
+                let access_token = token.access_token.clone();
+                let token_expiry = token.expires_at.map(|dt| dt.timestamp());
 
-                    if let Err(e) = crate::db::update_service_tokens(
-                        &state.db,
-                        &service,
-                        refresh_token.as_deref(),
-                        Some(&access_token),
-                        token_expiry,
+                if let Err(e) = crate::db::update_service_tokens(
+                    &state.db,
+                    &service,
+                    refresh_token.as_deref(),
+                    Some(&access_token),
+                    token_expiry,
+                )
+                .await
+                {
+                    tracing::error!("Failed to store tokens: {}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiResponse {
+                            data: format!("Failed to store tokens: {}", e),
+                        }),
                     )
-                    .await
-                    {
-                        tracing::error!("Failed to store tokens: {}", e);
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ApiResponse {
-                                data: format!("Failed to store tokens: {}", e),
-                            }),
-                        )
-                            .into_response();
-                    }
-
-                    // Update connection status
-                    if let Err(e) =
-                        update_service_connection_status(&state.db, &service, true).await
-                    {
-                        tracing::warn!("Failed to update connection status: {}", e);
-                    }
-
-                    return Redirect::to("http://localhost:8000").into_response();
+                        .into_response();
                 }
+
+                // Update connection status
+                if let Err(e) = update_service_connection_status(&state.db, &service, true).await {
+                    tracing::warn!("Failed to update connection status: {}", e);
+                }
+
+                return Redirect::to("http://localhost:8000").into_response();
             }
 
             (
@@ -3091,7 +3086,7 @@ async fn service_sync_handler(
 
     // Handle different services
     match service.as_str() {
-        "spotify" => return spotify_sync_handler(state, service).await.into_response(),
+        "spotify" => spotify_sync_handler(state, service).await.into_response(),
         "soundcloud" => (
             StatusCode::NOT_IMPLEMENTED,
             Json(ApiResponse {
@@ -3461,22 +3456,22 @@ async fn playlists_handler(
         has_where = true;
     }
 
-    if let Some(ref search) = search_term {
-        if !search.trim().is_empty() {
-            let clause = if has_where {
-                " AND sp.name LIKE "
-            } else {
-                " WHERE sp.name LIKE "
-            };
-            main_builder.push(clause);
-            main_builder.push_bind(format!("%{}%", search));
-            if has_where {
-                count_builder.push(" AND sp.name LIKE ");
-            } else {
-                count_builder.push(" WHERE sp.name LIKE ");
-            }
-            count_builder.push_bind(format!("%{}%", search));
+    if let Some(ref search) = search_term
+        && !search.trim().is_empty()
+    {
+        let clause = if has_where {
+            " AND sp.name LIKE "
+        } else {
+            " WHERE sp.name LIKE "
+        };
+        main_builder.push(clause);
+        main_builder.push_bind(format!("%{}%", search));
+        if has_where {
+            count_builder.push(" AND sp.name LIKE ");
+        } else {
+            count_builder.push(" WHERE sp.name LIKE ");
         }
+        count_builder.push_bind(format!("%{}%", search));
     }
 
     main_builder.push(" GROUP BY sp.id ORDER BY sp.name LIMIT ");
@@ -3644,7 +3639,7 @@ async fn service_fetch_counts_handler(
                 expires_in: Duration::seconds(3600), // Default
                 expires_at: config
                     .token_expiry
-                    .and_then(|ts| DateTime::from_timestamp(ts as i64, 0)),
+                    .and_then(|ts| DateTime::from_timestamp(ts, 0)),
                 scopes: Default::default(),
             });
         } else {
@@ -4040,10 +4035,10 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
     // Build dynamic SQL with WHERE clauses for filtering
     let mut sql = String::from("SELECT * FROM files WHERE 1=1");
 
-    if let Some(ref search) = query.search {
-        if !search.is_empty() {
-            sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ?)");
-        }
+    if let Some(ref search) = query.search
+        && !search.is_empty()
+    {
+        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ?)");
     }
 
     if query.bpm_min.is_some() {
@@ -4090,12 +4085,12 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
     // Build query with bind parameters
     let mut q = sqlx::query_as::<_, File>(&sql);
 
-    if let Some(ref search) = query.search {
-        if !search.is_empty() {
-            q = q.bind(format!("%{}%", search));
-            q = q.bind(format!("%{}%", search));
-            q = q.bind(format!("%{}%", search));
-        }
+    if let Some(ref search) = query.search
+        && !search.is_empty()
+    {
+        q = q.bind(format!("%{}%", search));
+        q = q.bind(format!("%{}%", search));
+        q = q.bind(format!("%{}%", search));
     }
 
     if let Some(bpm_min) = query.bpm_min {
@@ -4197,10 +4192,10 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
     // Build dynamic SQL with the same WHERE clauses as get_files
     let mut sql = String::from("SELECT COUNT(*) as count FROM files WHERE 1=1");
 
-    if let Some(ref search) = query.search {
-        if !search.is_empty() {
-            sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ?)");
-        }
+    if let Some(ref search) = query.search
+        && !search.is_empty()
+    {
+        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ?)");
     }
 
     if query.bpm_min.is_some() {
@@ -4241,12 +4236,12 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
 
     let mut q = sqlx::query(&sql);
 
-    if let Some(ref search) = query.search {
-        if !search.is_empty() {
-            q = q.bind(format!("%{}%", search));
-            q = q.bind(format!("%{}%", search));
-            q = q.bind(format!("%{}%", search));
-        }
+    if let Some(ref search) = query.search
+        && !search.is_empty()
+    {
+        q = q.bind(format!("%{}%", search));
+        q = q.bind(format!("%{}%", search));
+        q = q.bind(format!("%{}%", search));
     }
 
     if let Some(bpm_min) = query.bpm_min {
@@ -4766,11 +4761,11 @@ async fn traktor_import_handler(
 /// Check the current status of the Traktor collection.nml file.
 /// Returns the detected path and its last modification timestamp.
 async fn traktor_status_handler(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     Query(query): Query<TraktorImportRequest>,
 ) -> impl IntoResponse {
     let custom_path = query.custom_path;
-    let custom_path_ref = custom_path.as_ref().map(|s| std::path::Path::new(s));
+    let custom_path_ref = custom_path.as_ref().map(std::path::Path::new);
 
     let (path, modified_at) = match crate::traktor::get_collection_status(custom_path_ref) {
         Ok((p, mtime)) => (
@@ -4805,7 +4800,7 @@ async fn subscriptions_list_handler(State(state): State<Arc<AppState>>) -> impl 
 
     let statuses: Vec<SubscriptionStatus> = subscriptions
         .into_iter()
-        .map(|s| SubscriptionStatus::from(s))
+        .map(SubscriptionStatus::from)
         .collect();
 
     Json(ApiResponse { data: statuses }).into_response()

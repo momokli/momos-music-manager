@@ -13,7 +13,7 @@
 //! - Serialization/Deserialization support
 
 use serde::{Deserialize, Serialize};
-use std::{fmt, str::FromStr};
+use std::{cmp::Reverse, fmt, str::FromStr};
 
 /// Supported audio file extensions with case-insensitive parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -132,7 +132,7 @@ impl AudioExtension {
         }
 
         // Sort by extension string length descending
-        extensions.sort_by(|a, b| b.as_str().len().cmp(&a.as_str().len()));
+        extensions.sort_by_key(|b| Reverse(b.as_str().len()));
 
         for &ext in extensions.iter() {
             let ext_str = ext.as_str();

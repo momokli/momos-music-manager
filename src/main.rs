@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +15,6 @@ use axum::{
     routing::get,
 };
 use clap::{Parser, Subcommand};
-use dotenvy;
 use rust_embed::Embed;
 use sqlx::{
     Pool, Sqlite, SqlitePool,
@@ -21,7 +22,6 @@ use sqlx::{
 };
 use tower_http::cors::CorsLayer;
 use tracing::info;
-use tracing_subscriber;
 
 mod api;
 mod audio_extensions;

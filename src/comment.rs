@@ -38,23 +38,23 @@ pub fn parse_comment(comment: &str) -> Option<ParsedComment> {
 
     // Try to extract PMV indicators from bracket format
     let trimmed = comment.trim();
-    if let Some(bracket_end) = trimmed.find(']') {
-        if trimmed.starts_with('[') && bracket_end >= 4 {
-            let pmv_str = &trimmed[1..bracket_end];
-            if pmv_str.len() == 3 {
-                let phase = pmv_str.chars().nth(0)?;
-                let mood = pmv_str.chars().nth(1)?;
-                let vibe = pmv_str.chars().nth(2)?;
+    if let Some(bracket_end) = trimmed.find(']')
+        && trimmed.starts_with('[')
+        && bracket_end >= 4
+    {
+        let pmv_str = &trimmed[1..bracket_end];
+        if pmv_str.len() == 3 {
+            let phase = pmv_str.chars().next()?;
+            let mood = pmv_str.chars().nth(1)?;
+            let vibe = pmv_str.chars().nth(2)?;
 
-                // Validate PMV characters
-                if !is_valid_pmv_char(phase) || !is_valid_pmv_char(mood) || !is_valid_pmv_char(vibe)
-                {
-                    return None;
-                }
-
-                let after_bracket = &trimmed[bracket_end + 1..].trim();
-                return parse_tags_and_source_id(after_bracket, phase, mood, vibe);
+            // Validate PMV characters
+            if !is_valid_pmv_char(phase) || !is_valid_pmv_char(mood) || !is_valid_pmv_char(vibe) {
+                return None;
             }
+
+            let after_bracket = &trimmed[bracket_end + 1..].trim();
+            return parse_tags_and_source_id(after_bracket, phase, mood, vibe);
         }
     }
 
@@ -248,10 +248,7 @@ pub fn is_source_id(s: &str) -> bool {
     }
 
     let prefix = &s[0..3];
-    match prefix {
-        "sp:" | "sc:" | "yt:" => true,
-        _ => false,
-    }
+    matches!(prefix, "sp:" | "sc:" | "yt:")
 }
 
 /// Get service type from source ID
@@ -328,6 +325,7 @@ pub fn generate_target_comment(
 
 /// Generate a target comment preferring a specific service
 /// If the preferred service ID is available, use it; otherwise use all available
+#[allow(clippy::too_many_arguments)]
 pub fn generate_target_comment_with_preference(
     phase: char,
     mood: char,
@@ -386,10 +384,10 @@ pub fn get_service_id_from_comment(comment: &str, service: &str) -> Option<Strin
     let source_ids = extract_all_source_ids_from_comment(comment);
 
     for source_id in source_ids {
-        if let Some(svc) = get_service_from_source_id(&source_id) {
-            if svc == service {
-                return Some(source_id);
-            }
+        if let Some(svc) = get_service_from_source_id(&source_id)
+            && svc == service
+        {
+            return Some(source_id);
         }
     }
 

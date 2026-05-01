@@ -220,7 +220,7 @@ pub async fn load_playlist_tracks(playlist_id: &str) -> Result<Option<Vec<Cached
 /// Returns the list of missing playlist IDs.
 pub async fn missing_tracks_caches(playlist_ids: &[String]) -> Vec<String> {
     let root = cache_dir();
-    let dir = playlist_tracks_dir(&root);
+    let _dir = playlist_tracks_dir(&root);
     let mut missing = Vec::new();
 
     for pid in playlist_ids {

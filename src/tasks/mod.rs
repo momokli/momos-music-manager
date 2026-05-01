@@ -252,17 +252,16 @@ impl SyncProgress {
         match self.sync_type {
             SyncType::Playlists => {
                 if let (Some(current), Some(total)) = (self.current_playlist, self.total_playlists)
+                    && total > 0
                 {
-                    if total > 0 {
-                        return Some((current as f32 / total as f32) * 100.0);
-                    }
+                    return Some((current as f32 / total as f32) * 100.0);
                 }
             }
             SyncType::TracksForPlaylist(_) => {
-                if let (Some(current), Some(total)) = (self.current_track, self.total_tracks) {
-                    if total > 0 {
-                        return Some((current as f32 / total as f32) * 100.0);
-                    }
+                if let (Some(current), Some(total)) = (self.current_track, self.total_tracks)
+                    && total > 0
+                {
+                    return Some((current as f32 / total as f32) * 100.0);
                 }
             }
             SyncType::TracksAll | SyncType::Full => {
@@ -493,12 +492,10 @@ impl Task {
             }
             (pct, items)
         } else {
-            let p = self
-                .progress
+            self.progress
                 .try_read()
                 .map(|p| (p.percent, p.sub_items.clone()))
-                .unwrap_or((None, vec![]));
-            p
+                .unwrap_or((None, vec![]))
         };
 
         let created_at_secs = std::time::SystemTime::now()
@@ -602,18 +599,18 @@ impl TaskManager {
         let mut tasks = self.tasks.write().await;
         if let Some(ref key) = conflict_key {
             for existing in tasks.values() {
-                if let Some(existing_key) = task_type_conflict_key(&existing.task_type) {
-                    if &existing_key == key {
-                        let status = existing
-                            .status
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .clone();
-                        if status == TaskStatus::Running || status == TaskStatus::Pending {
-                            return Err(TaskConflictError::AlreadyRunning {
-                                conflict_key: key.clone(),
-                            });
-                        }
+                if let Some(existing_key) = task_type_conflict_key(&existing.task_type)
+                    && &existing_key == key
+                {
+                    let status = existing
+                        .status
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    if status == TaskStatus::Running || status == TaskStatus::Pending {
+                        return Err(TaskConflictError::AlreadyRunning {
+                            conflict_key: key.clone(),
+                        });
                     }
                 }
             }
@@ -722,10 +719,10 @@ impl TaskManager {
     /// Get detailed sync progress for a task (returns old SyncProgress format)
     pub async fn get_sync_progress(&self, task_id: &str) -> Option<SyncProgress> {
         let tasks = self.tasks.read().await;
-        if let Some(task) = tasks.get(task_id) {
-            if let Some(ref sync_progress) = task.sync_progress {
-                return Some(sync_progress.read().await.clone());
-            }
+        if let Some(task) = tasks.get(task_id)
+            && let Some(ref sync_progress) = task.sync_progress
+        {
+            return Some(sync_progress.read().await.clone());
         }
         None
     }
@@ -987,7 +984,7 @@ pub async fn start_write_comment_task(
     let task = Task::new(task_type, None);
     let task_id = task.id.clone();
     let worker_task_id = task_id.clone();
-    let cancel_token = task.cancel_token.clone();
+    let _cancel_token = task.cancel_token.clone();
 
     task_manager.start_task(task).await;
 
@@ -1016,21 +1013,21 @@ pub async fn start_write_comment_task(
 
         for (i, file_id) in file_ids.iter().enumerate() {
             // Check cancellation
-            if let Some(ct) = tm.get_cancel_token(&worker_task_id).await {
-                if ct.is_cancelled() {
-                    tm.add_log(&worker_task_id, "Task cancelled".to_string())
-                        .await;
-                    tm.update_task_status(&worker_task_id, TaskStatus::Cancelled)
-                        .await;
-                    tm.update_progress_text(&worker_task_id, "Cancelled".to_string())
-                        .await;
-                    tm.update_progress(&worker_task_id, |p| {
-                        p.status = TaskStatus::Cancelled;
-                        p.message = "Cancelled".to_string();
-                    })
+            if let Some(ct) = tm.get_cancel_token(&worker_task_id).await
+                && ct.is_cancelled()
+            {
+                tm.add_log(&worker_task_id, "Task cancelled".to_string())
                     .await;
-                    return Ok(());
-                }
+                tm.update_task_status(&worker_task_id, TaskStatus::Cancelled)
+                    .await;
+                tm.update_progress_text(&worker_task_id, "Cancelled".to_string())
+                    .await;
+                tm.update_progress(&worker_task_id, |p| {
+                    p.status = TaskStatus::Cancelled;
+                    p.message = "Cancelled".to_string();
+                })
+                .await;
+                return Ok(());
             }
 
             // 1. Fetch file from database
@@ -1590,7 +1587,7 @@ pub async fn start_traktor_import_task(
         }
 
         // Resolve custom path
-        let custom_path_ref = custom_path.as_ref().map(|s| std::path::Path::new(s));
+        let custom_path_ref = custom_path.as_ref().map(std::path::Path::new);
 
         tm.add_log(
             &worker_task_id,

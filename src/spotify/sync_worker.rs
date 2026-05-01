@@ -424,9 +424,9 @@ impl SpotifySyncWorker {
             match track_result {
                 Ok(item) => {
                     // Extract track from playlist item
-                    if let Some(track) = item.track {
-                        if let PlayableItem::Track(track) = track {
-                            if let Some(_track_id) = &track.id {
+                    if let Some(track) = item.track
+                        && let PlayableItem::Track(track) = track
+                            && let Some(_track_id) = &track.id {
                                 track_count += 1;
                                 position += 1;
                                 track_names.push(track.name.clone());
@@ -468,8 +468,6 @@ impl SpotifySyncWorker {
                                     });
                                 }
                             }
-                        }
-                    }
                 }
                 Err(e) => {
                     error!(

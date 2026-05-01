@@ -26,7 +26,7 @@ pub fn parse_camelot_key(s: &str) -> Option<CamelotKey> {
     }
     let num_str = &s[..s.len() - 1];
     let position: u8 = num_str.parse().ok()?;
-    if position < 1 || position > 12 {
+    if !(1..=12).contains(&position) {
         return None;
     }
     Some(CamelotKey { position, mode })

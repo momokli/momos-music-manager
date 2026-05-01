@@ -159,6 +159,7 @@ async fn save_entry(entry: &CachedFileEntry) -> Result<()> {
 // ── Public API ──────────────────────────────────────────────────────────────────
 
 /// Cached result of a metadata extraction.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum CacheResult {
     /// Cache hit — metadata was loaded from cache (no extraction needed).
@@ -235,10 +236,10 @@ pub async fn try_save(file: &File) {
 /// Remove a single file from the cache (e.g. after re-extraction in record mode).
 pub async fn invalidate(file_path: &str) {
     let path = entry_path(file_path);
-    if path.exists() {
-        if let Err(e) = tokio::fs::remove_file(&path).await {
-            warn!("Failed to invalidate cache for {}: {:?}", file_path, e);
-        }
+    if path.exists()
+        && let Err(e) = tokio::fs::remove_file(&path).await
+    {
+        warn!("Failed to invalidate cache for {}: {:?}", file_path, e);
     }
 }
 

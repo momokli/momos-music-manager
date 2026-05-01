@@ -144,9 +144,9 @@ impl From<&rspotify::model::track::FullTrack> for TrackInfo {
                 .external_ids
                 .get("isrc")
                 .map(|s| s.as_str().to_string()),
-            duration_ms: track.duration.num_milliseconds() as i64,
+            duration_ms: track.duration.num_milliseconds(),
             track_number: Some(track.track_number as i32),
-            disc_number: Some(track.disc_number as i32),
+            disc_number: Some(track.disc_number),
             explicit: track.explicit,
             popularity: Some(track.popularity as i32),
         }

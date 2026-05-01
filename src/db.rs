@@ -1,7 +1,6 @@
 use std::{fs, path::Path, time::SystemTime};
 
 use anyhow::{Result, anyhow};
-use chrono;
 use lofty::{prelude::*, read_from_path};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -232,6 +231,7 @@ fn parse_bpm(bpm_str: &str) -> Option<f64> {
 }
 
 /// Extract MP4 metadata using exiftool as fallback
+#[allow(clippy::type_complexity)]
 fn extract_mp4_metadata_with_exiftool(
     path: &Path,
 ) -> Result<(
@@ -355,6 +355,7 @@ fn extract_playback_stats_with_exiftool(path: &Path) -> (Option<i32>, Option<i64
     (play_count, last_played)
 }
 
+#[allow(clippy::type_complexity)]
 pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
     // Get file metadata
     let metadata = fs::metadata(path)?;
@@ -688,7 +689,7 @@ pub async fn scan_and_store_file(pool: &Pool<Sqlite>, path: &Path) -> Result<Fil
     .bind(&file.musical_key)
     .bind(file.rating)
     .bind(file.play_count)
-    .bind(&file.last_played)
+    .bind(file.last_played)
     .bind(&file.spotify_id)
     .bind(&file.soundcloud_id)
     .bind(&file.youtube_id)
@@ -1130,15 +1131,12 @@ pub async fn update_tag_category_metadata(
 
 pub async fn delete_tag_category(pool: &Pool<Sqlite>, category_id: i64) -> Result<()> {
     // Check if category is in use
-    let count = sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE category_id = ?")
+    let count: Option<i64> = sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE category_id = ?")
         .bind(category_id)
         .fetch_one(pool)
         .await?;
 
-    let count_val: i64 = match count {
-        Some(val) => val,
-        None => 0,
-    };
+    let count_val: i64 = count.unwrap_or_default();
 
     if count_val > 0 {
         return Err(anyhow::anyhow!(
@@ -1354,6 +1352,7 @@ pub async fn update_folder(
 }
 
 /// Update folder with full configuration
+#[allow(clippy::too_many_arguments)]
 pub async fn update_folder_with_config(
     pool: &Pool<Sqlite>,
     id: i64,
@@ -1367,11 +1366,11 @@ pub async fn update_folder_with_config(
     let now = chrono::Utc::now().timestamp();
 
     // Validate file_extensions if fixed_extensions is true and file_extensions is provided
-    if let (Some(true), Some(extensions)) = (fixed_extensions, file_extensions) {
-        if !extensions.trim().is_empty() {
-            crate::audio_extensions::AudioExtension::parse_list(extensions)
-                .map_err(|e| anyhow!("Invalid file extensions: {}", e))?;
-        }
+    if let (Some(true), Some(extensions)) = (fixed_extensions, file_extensions)
+        && !extensions.trim().is_empty()
+    {
+        crate::audio_extensions::AudioExtension::parse_list(extensions)
+            .map_err(|e| anyhow!("Invalid file extensions: {}", e))?;
     }
 
     // Build dynamic query based on what's being updated
@@ -1404,7 +1403,7 @@ pub async fn update_folder_with_config(
         .bind(id)
         .fetch_one(pool)
         .await?;
-        return Ok(folder);
+        Ok(folder)
     } else if active.is_some()
         || scan_recursive.is_some()
         || fixed_extensions.is_some()
@@ -1434,13 +1433,13 @@ pub async fn update_folder_with_config(
         .bind(id)
         .fetch_one(pool)
         .await?;
-        return Ok(folder);
+        Ok(folder)
     } else {
         // Nothing to update
         if let Some(folder) = get_folder_by_id(pool, id).await? {
-            return Ok(folder);
+            Ok(folder)
         } else {
-            return Err(anyhow!("Folder not found with id: {}", id));
+            Err(anyhow!("Folder not found with id: {}", id))
         }
     }
 }
@@ -1559,7 +1558,7 @@ pub async fn write_comment_to_file(file_path: &str, comment: &str) -> Result<()>
 
     let output = Command::new("exiftool")
         .arg("-overwrite_original")
-        .arg(&format!("-comment={}", comment))
+        .arg(format!("-comment={}", comment))
         .arg(file_path)
         .output()?;
 
@@ -1698,6 +1697,7 @@ pub async fn upsert_service_playlist(
 }
 
 /// Create or update a service track in the database
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert_service_track(
     conn: &mut SqliteConnection,
     service: &str,
@@ -2320,6 +2320,7 @@ pub async fn get_tags_for_file(pool: &Pool<Sqlite>, file_id: i64) -> Result<Vec<
 /// 3. Find all files that have any of those similar tags
 /// 4. Score each file by aggregating similarity matches, normalized by seed tag count
 /// 5. Return top-N scored files
+#[allow(clippy::type_complexity)]
 pub async fn find_tag_similar_tracks(
     pool: &Pool<Sqlite>,
     file_id: i64,
@@ -2466,7 +2467,7 @@ pub async fn find_tag_similar_tracks(
 
             // For each seed match, add to matched_tags if not already there
             for (seed_tid, _sim) in seed_matches {
-                let seed_name = seed_tag_name_map.get(seed_tid).map(|s| *s).unwrap_or("?");
+                let seed_name = seed_tag_name_map.get(seed_tid).copied().unwrap_or("?");
 
                 // Check if we already have this pair
                 let already = entry.5.iter().any(|(s, _, _)| s == seed_name);

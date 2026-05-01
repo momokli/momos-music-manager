@@ -23,7 +23,6 @@
 use anyhow::{Context, Result};
 use rspotify::model::PlayableItem;
 use rspotify::prelude::Id;
-use serde_json;
 use sqlx::{Pool, Sqlite};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;

@@ -336,7 +336,7 @@ pub async fn compute_tag_similarities(pool: &sqlx::Pool<sqlx::Sqlite>) -> Result
                 )
                 .bind(tag_ids[i])
                 .bind(tag_ids[j])
-                .bind(sim as f32)
+                .bind(sim)
                 .bind(now)
                 .execute(&mut *tx)
                 .await?;
