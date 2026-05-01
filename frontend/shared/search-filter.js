@@ -118,6 +118,11 @@ export function wireSearchFilter(toolbarEl, state, onChange, debounceMs = 300) {
       _sfFocusPending = true;
     });
 
+    // Clear flag when focus leaves the input (e.g. user clicks elsewhere)
+    searchInput.addEventListener("focusout", () => {
+      _sfFocusPending = false;
+    });
+
     searchInput.addEventListener("input", () => {
       clearTimeout(timer);
       timer = setTimeout(() => {
@@ -205,6 +210,5 @@ async function runAndRefocus(onChange, state) {
       el.focus();
       el.setSelectionRange(el.value.length, el.value.length);
     }
-    _sfFocusPending = false;
   }
 }

@@ -218,6 +218,9 @@ CREATE INDEX idx_files_bpm ON files(bpm);
 CREATE INDEX idx_files_musical_key ON files(musical_key);
 CREATE INDEX idx_files_rating ON files(rating);
 CREATE INDEX idx_files_last_scanned ON files(last_scanned);
+CREATE INDEX idx_files_spotify_id ON files(spotify_id);
+CREATE INDEX idx_files_soundcloud_id ON files(soundcloud_id);
+CREATE INDEX idx_files_youtube_id ON files(youtube_id);
 
 CREATE INDEX idx_folders_folder_path ON folders(folder_path);
 CREATE INDEX idx_folders_active ON folders(active);

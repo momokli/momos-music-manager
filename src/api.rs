@@ -1096,34 +1096,28 @@ async fn files_service_links_handler(State(state): State<Arc<AppState>>) -> impl
         .await
         .unwrap_or(0);
 
-    // Files linked to Spotify: direct spotify_id OR isrc matches a spotify track
+    // Files linked to Spotify: via v_file_track_link (ISRC + direct service_id matching)
     let spotify = sqlx::query_scalar::<_, i64>(
-        r#"SELECT COUNT(DISTINCT f.id) FROM files f
-           LEFT JOIN v_file_track_link v ON v.file_id = f.id
-           LEFT JOIN service_tracks st ON st.id = v.track_id AND st.service = 'spotify'
-           WHERE st.id IS NOT NULL"#,
+        r#"SELECT COUNT(DISTINCT v.file_id) FROM v_file_track_link v
+           JOIN service_tracks st ON st.id = v.track_id AND st.service = 'spotify'"#,
     )
     .fetch_one(&state.db)
     .await
     .unwrap_or(0);
 
-    // Files linked to SoundCloud: direct soundcloud_id OR isrc matches a soundcloud track
+    // Files linked to SoundCloud: via v_file_track_link
     let soundcloud = sqlx::query_scalar::<_, i64>(
-        r#"SELECT COUNT(DISTINCT f.id) FROM files f
-           LEFT JOIN v_file_track_link v ON v.file_id = f.id
-           LEFT JOIN service_tracks st ON st.id = v.track_id AND st.service = 'soundcloud'
-           WHERE st.id IS NOT NULL"#,
+        r#"SELECT COUNT(DISTINCT v.file_id) FROM v_file_track_link v
+           JOIN service_tracks st ON st.id = v.track_id AND st.service = 'soundcloud'"#,
     )
     .fetch_one(&state.db)
     .await
     .unwrap_or(0);
 
-    // Files linked to YouTube: direct youtube_id OR isrc matches a youtube track
+    // Files linked to YouTube: via v_file_track_link
     let youtube = sqlx::query_scalar::<_, i64>(
-        r#"SELECT COUNT(DISTINCT f.id) FROM files f
-           LEFT JOIN v_file_track_link v ON v.file_id = f.id
-           LEFT JOIN service_tracks st ON st.id = v.track_id AND st.service = 'youtube'
-           WHERE st.id IS NOT NULL"#,
+        r#"SELECT COUNT(DISTINCT v.file_id) FROM v_file_track_link v
+           JOIN service_tracks st ON st.id = v.track_id AND st.service = 'youtube'"#,
     )
     .fetch_one(&state.db)
     .await
@@ -3137,7 +3131,7 @@ async fn service_reset_handler(
     match sqlx::query(
         r#"
         UPDATE service_config
-        SET refresh_token = NULL, access_token = NULL, token_expiry = NULL,
+        SET refresh_token = NU7LL, access_token = NULL, token_expiry = NULL,
             is_connected = 0, last_checked = ?, updated_at = ?
         WHERE service = ?
         "#,
