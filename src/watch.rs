@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Folder watcher module for monitoring and scanning directories
 //!
 //! This module provides a simple polling-based folder watcher that scans

@@ -22,12 +22,14 @@ const SERVICE_META = {
   spotify: { name: "Spotify", icon: "fa-brands fa-spotify" },
   soundcloud: { name: "SoundCloud", icon: "fa-brands fa-soundcloud" },
   youtube: { name: "YouTube", icon: "fa-brands fa-youtube" },
+  deemix: { name: "Deemix", icon: "fa-solid fa-download" },
 };
 
 const SERVICE_COLORS = {
   spotify: "#1db954",
   soundcloud: "#ff7700",
   youtube: "#ff0000",
+  deemix: "#8b5cf6",
 };
 
 /* ------------------------------------------------------------------ */
@@ -279,6 +281,37 @@ async function openConfigModal(service) {
             Sync a specific playlist
           </small>
         </div>`;
+    } else if (service === "deemix") {
+      // No env status for deemix — it's configured entirely via the web UI
+      envStatus = "";
+      // Parse stored metadata JSON (API returns snake_case + metadata_json is a JSON string)
+      let currentHost = "http://localhost:6596";
+      const storedArl = currentConfig.access_token || currentConfig.accessToken || "";
+      try {
+        const meta = JSON.parse(currentConfig.metadata_json || "{}");
+        if (meta.host) currentHost = meta.host;
+      } catch {
+        /* use default */
+      }
+      configFields = `
+        <div class="form-group">
+          <label>ARL (Account Registration Link)</label>
+          <input type="password" class="input-text w-full" id="deemix-arl"
+                 value="${storedArl}"
+                 placeholder="Enter your deemix ARL...">
+          <small style="color:var(--text-muted);display:block;margin-top:4px;font-size:0.8rem;">
+            Your deemix ARL cookie value — stored securely in the database
+          </small>
+        </div>
+        <div class="form-group">
+          <label>Deemix Web API Host</label>
+          <input type="text" class="input-text w-full" id="deemix-host"
+                 value="${currentHost}"
+                 placeholder="http://localhost:6596">
+          <small style="color:var(--text-muted);display:block;margin-top:4px;font-size:0.8rem;">
+            Host where deemix-pyweb is running (default port 6596)
+          </small>
+        </div>`;
     } else {
       configFields = `<p style="color:var(--text-muted);">No additional configuration available for ${meta.name}.</p>`;
     }
@@ -336,24 +369,37 @@ async function openConfigModal(service) {
   document.getElementById("config-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
 
-    const userIdInput = document.getElementById("config-user-id");
-    const playlistIdInput = document.getElementById("config-playlist-id");
-
-    const configData = {};
-    if (userIdInput) configData.userId = userIdInput.value || null;
-    if (playlistIdInput) configData.playlistId = playlistIdInput.value || null;
-
     const saveBtn = document.getElementById("config-modal-save");
     const originalHtml = saveBtn.innerHTML;
     saveBtn.disabled = true;
     saveBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
 
     try {
-      await fetchJSON(`/api/services/${service}/config`, {
-        method: "PUT",
-        body: JSON.stringify(configData),
-      });
-      showSuccess("Configuration saved");
+      if (service === "deemix") {
+        const arlInput = document.getElementById("deemix-arl");
+        const hostInput = document.getElementById("deemix-host");
+        await fetchJSON("/api/services/deemix/auth", {
+          method: "POST",
+          body: JSON.stringify({
+            arl: arlInput?.value || "",
+            host: hostInput?.value || "http://localhost:6596",
+          }),
+        });
+        showSuccess("Deemix configured and connected!");
+      } else {
+        const userIdInput = document.getElementById("config-user-id");
+        const playlistIdInput = document.getElementById("config-playlist-id");
+
+        const configData = {};
+        if (userIdInput) configData.userId = userIdInput.value || null;
+        if (playlistIdInput) configData.playlistId = playlistIdInput.value || null;
+
+        await fetchJSON(`/api/services/${service}/config`, {
+          method: "PUT",
+          body: JSON.stringify(configData),
+        });
+        showSuccess("Configuration saved");
+      }
       doClose();
       setTimeout(() => loadServices(), 500);
     } catch (err) {
@@ -441,7 +487,18 @@ function renderServiceRow(s) {
   const color = SERVICE_COLORS[s.id] || "var(--text-muted)";
 
   let actionHtml;
-  if (s.status === "unconfigured") {
+  if (s.id === "deemix") {
+    if (s.status === "unconfigured") {
+      actionHtml = `<button class="btn btn-sm btn-green" data-action="configure" data-id="${s.id}" title="Configure Deemix"><i class="fa-solid fa-download"></i> Configure</button>`;
+    } else {
+      actionHtml = `
+      <div class="flex items-center gap-2" style="flex-wrap:nowrap">
+        <button class="btn btn-sm" data-action="configure" data-id="${s.id}" title="Reconfigure"><i class="fa-solid fa-gear"></i> Reconfigure</button>
+        <button class="btn btn-sm btn-green" data-action="test-deemix" data-id="${s.id}" title="Test connection"><i class="fa-solid fa-flask"></i> Test</button>
+        <button class="btn btn-sm btn-red" data-action="reset" data-id="${s.id}" title="Disconnect"><i class="fa-solid fa-unlink"></i> Disconnect</button>
+      </div>`;
+    }
+  } else if (s.status === "unconfigured") {
     actionHtml = `<button class="btn btn-sm btn-primary" data-action="configure" data-id="${s.id}" title="Configure service"><i class="fa-solid fa-plus"></i></button>`;
   } else if (s.status === "disconnected") {
     actionHtml = `
@@ -530,6 +587,10 @@ SOUNDCLOUD_CLIENT_SECRET=your_client_secret
 
 # YouTube
 YOUTUBE_API_KEY=your_api_key</code></pre>
+      <p style="color:var(--text-muted);margin-top:var(--space-3);font-size:0.85rem;">
+        <i class="fa-solid fa-download" style="margin-right:var(--space-1);color:var(--accent);"></i>
+        <strong>Deemix</strong> is configured entirely via the web UI — click Configure on the Deemix row above.
+      </p>
     </div>
   `;
 
@@ -567,8 +628,29 @@ function wireEvents(container) {
       case "fetch-counts":
         fetchCounts(id);
         break;
+      case "test-deemix":
+        testDeemixConnection(btn, id);
+        break;
     }
   });
+}
+
+async function testDeemixConnection(btn, id) {
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Testing…';
+  try {
+    const resp = await fetchJSON("/api/services/deemix/queue");
+    const items = resp.data || [];
+    showSuccess(
+      `Deemix connected — ${items.length} item${items.length !== 1 ? "s" : ""} in queue`,
+    );
+  } catch (err) {
+    showError(`Deemix test failed: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
 }
 
 /* ------------------------------------------------------------------ */

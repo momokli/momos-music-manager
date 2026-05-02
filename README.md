@@ -1,37 +1,161 @@
 # Momo's Music Manager
 
-Multi-service music library management for DJs — local files + streaming services (Spotify) mit harmonischem Matching, Tag-Organisation und Traktor-Integration.
-
-> **Status**: RC — Funktional, single-binary, served from one port
-> **Branch**: `momos-music-manager`
+> Multi-service music library management for DJs — local files + Spotify streaming with harmonic matching, tag organization, and Traktor integration.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Ein Prozess, ein Port
+# Start the server (frontend embedded, one binary)
 cargo run -- serve
 
-# Browser öffnen
+# Open in browser
 open http://localhost:3000
 ```
 
-### Voraussetzungen
+### Prerequisites
 
-- Rust 1.80+ (und Cargo)
+- Rust 1.80+ (and Cargo)
 - SQLite 3.x
-- Spotify Developer Account (für OAuth — optional, nur für Sync)
+- Spotify Developer Account (optional, only for sync features)
 
-**Kein Python, kein separater Dev-Server, kein Node.js nötig.**  
-Der gesamte Frontend-Code (HTML/JS/CSS/Images/Fonts) ist im Rust-Binary eingebettet.
+No Python, Node.js, or separate dev server needed. The entire frontend is embedded in the binary via `rust-embed`.
 
-### Konfiguration
+---
+
+## Configuration
+
+Configuration sources (highest priority wins):
+
+1. **Environment variables** — set directly or via `.env` file
+2. **`~/.config/momos-music-manager/config.toml`** — persistent config
+3. **Built-in defaults**
+
+### config.toml
+
+```toml
+[database]
+url = "sqlite:~/.local/share/momos-music-manager/library.db"
+
+[server]
+host = "127.0.0.1"
+port = 3000
+# public_url = "https://mmm.mydomain.de"   # optional, for OAuth behind reverse proxy
+
+[spotify]
+client_id     = "your_spotify_client_id"
+client_secret = "your_spotify_client_secret"
+redirect_uri  = "http://localhost:3000/callback"
+
+[soundcloud]
+api_key  = "your_soundcloud_api_key"
+user_id  = "your_soundcloud_user_id"
+
+[youtube]
+api_key      = "your_youtube_api_key"
+playlist_id  = "your_youtube_playlist_id"
+```
+
+### Environment variables (override config.toml)
+
+| Variable                | Description                                         |
+| ----------------------- | --------------------------------------------------- |
+| `DATABASE_URL`          | Database URL, e.g. `sqlite:~/.../library.db`        |
+| `SPOTIFY_CLIENT_ID`     | Spotify OAuth client ID                             |
+| `SPOTIFY_CLIENT_SECRET` | Spotify OAuth client secret                         |
+| `SPOTIFY_REDIRECT_URI`  | Spotify OAuth redirect URI                          |
+| `PUBLIC_URL`            | Public URL for OAuth callbacks behind reverse proxy |
+| `HOST`                  | Server bind address                                 |
+| `PORT`                  | Server port                                         |
+| `RUST_LOG`              | Log level (debug, info, warn, error)                |
+
+---
+
+## Deployment
+
+### Database path
+
+By default, the database is stored at `~/.local/share/momos-music-manager/library.db`.
+Override via `[database].url` in config.toml or the `DATABASE_URL` env var.
+
+### macOS Launch Agent (auto-start)
+
+Install a launchd agent to start the server automatically on login:
 
 ```bash
-# Optional: .env für Spotify Credentials
-cp example.env .env
-# Oder persistenter: ~/.config/momos-music-manager/config.toml
+# Install (creates plist + loads into launchd)
+cargo run -- install-launch-agent
+
+# Check status
+cargo run -- service-status
+
+# Uninstall
+cargo run -- uninstall-launch-agent
+```
+
+The agent will:
+
+- Start on login (`RunAtLoad`)
+- Restart on crash (`KeepAlive`)
+- Log to `~/Library/Logs/momos-music-manager/`
+
+### Reverse proxy (optional)
+
+When running behind a reverse proxy (nginx, Caddy, etc.), use the `--public-url` flag
+so Spotify OAuth callbacks redirect correctly:
+
+```bash
+cargo run -- serve --public-url https://mmm.mydomain.de
+```
+
+---
+
+## CLI
+
+```bash
+# Start server
+cargo run -- serve [--host 127.0.0.1] [--port 3000] [--public-url URL]
+
+# Database management
+cargo run -- db-status
+cargo run -- dump [--output FILE]
+cargo run -- restore [--input FILE]
+
+# File operations
+cargo run -- scan-file /path/to/file.stem.m4a
+cargo run -- scan /path/to/music
+
+# macOS launch agent
+cargo run -- install-launch-agent
+cargo run -- uninstall-launch-agent
+cargo run -- service-status
+
+# Version
+cargo run -- --version
+```
+
+---
+
+## Development
+
+```bash
+# Clean DB (for schema changes)
+rm -f app.db && cargo run -- serve
+
+# Spotify API caching (record/replay — no API calls during replay)
+SPOTIFY_API_CACHE=record cargo run -- serve
+SPOTIFY_API_CACHE=replay cargo run -- serve
+rm -rf dev-data/spotify-api
+
+# Folder scan caching
+SCAN_CACHE=record cargo run -- serve
+SCAN_CACHE=replay cargo run -- serve
+rm -rf dev-data/scan-cache
+
+# DB dump/restore (save state before deleting app.db)
+cargo run -- dump
+cargo run -- restore
 ```
 
 ---
@@ -46,132 +170,113 @@ flowchart LR
     Kommentiert -->|Consistency Check| Traktor
 ```
 
-### 1. Spotify → FLAC downloaden
+### 1. Spotify → FLAC download
 
-Playlist-URL von Spotify kopieren → in Download-Queue einfügen → FLACs landen in `~/Music/flacs/`
+Copy a Spotify playlist URL → add to download queue → FLACs land in `~/Music/flacs/`
 
-### 2. FLAC → STEMS konvertieren
+### 2. FLAC → STEMS convert
 
-NUO-STEMS öffnen → Ordner `~/Music/flacs` hinzufügen → "Skip duplicates?" → Start → STEM-Dateien erscheinen in `~/Music/stems/`
+Open NUO-STEMS → add `~/Music/flacs` folder → "Skip duplicates?" → Start → STEM files appear in `~/Music/stems/`
 
-### 3. Metadata taggen (Comment schreiben)
+### 3. Tag metadata (write comment)
 
-Der Server schreibt beim Sync automatisch Playlist-Informationen in den ID3-Comment:
+The server writes playlist information into the ID3 comment on sync:
 
 ```
 [{Phase}{Mood}{Vibe}] {tags} {source_id}
 ```
 
-Beispiel: `[PMV] build jazzy warehouse sp:1WSF0LJGwJkYejuMtyJVuA`
+Example: `[PMV] build jazzy warehouse sp:1WSF0LJGwJkYejuMtyJVuA`
 
-### 4. In Traktor importieren
+### 4. Import into Traktor
 
-Traktor öffnen → "Consistency Check" über alle Tracks → Comments sichtbar → Smart-Lists möglich
+Open Traktor → run "Consistency Check" over all tracks → Comments visible → Smart Lists possible
 
 ---
 
 ## SPA Pages
 
-| Route              | Beschreibung                               |
-| ------------------ | ------------------------------------------ |
-| `#dashboard`       | Stats + Services-Dashboard                 |
-| `#files`           | Lokale Dateien mit BPM/Key, Comment-Status |
-| `#tracks`          | Service-Tracks (Spotify)                   |
-| `#playlists`       | Alle Service-Playlists                     |
-| `#tags`            | Tags (paginierte Liste)                    |
-| `#tag-categories`  | Tag-Kategorien                             |
-| `#services`        | Service-Status + OAuth/Sync                |
-| `#folders`         | Überwachte Ordner verwalten                |
-| `#tasks`           | Task-Manager (Sync/Write-Comment Jobs)     |
-| `#auto-categorize` | AI Tag Categorization Wizard               |
-| `#traktor-import`  | Traktor Collection Import                  |
-| `#digging`         | Digging Curator — Chain-basierte Sessions  |
+| Route              | Module                     | Description                              |
+| ------------------ | -------------------------- | ---------------------------------------- |
+| `#dashboard`       | `pages/dashboard.js`       | Stats + Services dashboard               |
+| `#files`           | `pages/files.js`           | Local files with BPM/Key, comment status |
+| `#tracks`          | `pages/tracks.js`          | Service tracks (Spotify)                 |
+| `#playlists`       | `pages/playlists.js`       | All service playlists                    |
+| `#tags`            | `pages/tags.js`            | Tags (paginated list)                    |
+| `#tag-categories`  | `pages/tag-categories.js`  | Tag categories                           |
+| `#services`        | `pages/services.js`        | Service status + OAuth/Sync              |
+| `#folders`         | `pages/folders.js`         | Managed folder configuration             |
+| `#tasks`           | `pages/tasks.js`           | Task manager (sync/write-comment jobs)   |
+| `#auto-categorize` | `pages/auto-categorize.js` | AI tag categorization wizard             |
+| `#traktor-import`  | `pages/traktor-import.js`  | Traktor collection import                |
+| `#digging`         | `pages/digging.js`         | Digging curator — chain-based sessions   |
 
 ---
 
-## CLI
+## API Endpoints
 
-```bash
-# Server starten (embedded Frontend + API)
-cargo run -- serve --host 127.0.0.1 --port 3000
+| Group     | Base Path                               |
+| --------- | --------------------------------------- |
+| Files     | `GET/POST /api/files`                   |
+| Tracks    | `GET /api/tracks`                       |
+| Playlists | `GET /api/playlists`                    |
+| Tags      | `CRUD /api/tags`, `/api/tag-categories` |
+| Folders   | `CRUD /api/folders`                     |
+| Services  | `GET/POST /api/services/{service}/...`  |
+| Tasks     | `GET/DELETE /api/tasks`                 |
+| Digging   | `GET/POST /api/digging/...`             |
+| Health    | `GET /api/health`                       |
 
-# Version anzeigen
-cargo run -- --version
-
-# Database status
-cargo run -- db-status
-
-# Single File scannen (Debug)
-cargo run -- scan-file ~/Music/stems/example.stem.m4a
-
-# Directory scannen und importieren
-cargo run -- scan ~/Music/stems/
-
-# DB Dump/Restore (JSON)
-cargo run -- dump
-cargo run -- restore
-```
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
 
 ---
 
-## Dev Commands
+## Documentation
 
-```bash
-# Clean DB (bei Schema-Änderungen)
-rm -f app.db && cargo run -- serve
-
-# Spotify API Cache (record/replay)
-SPOTIFY_API_CACHE=record cargo run -- serve
-SPOTIFY_API_CACHE=replay cargo run -- serve
-
-# Scan Cache (record/replay)
-SCAN_CACHE=record cargo run -- serve
-SCAN_CACHE=replay cargo run -- serve
-
-# Cache löschen
-rm -rf dev-data/spotify-api
-rm -rf dev-data/scan-cache
-```
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — System design
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — Architectural Decision Records
+- [`docs/COMMENT_SYSTEM.md`](docs/COMMENT_SYSTEM.md) — Comment format specification
+- [`docs/TASK_MANAGER.md`](docs/TASK_MANAGER.md) — Task manager design
 
 ---
 
-## Projekt-Struktur
+## Project Structure
 
 ```
 momos-music-manager/
-├── src/                     # Rust Backend
-│   ├── main.rs              # CLI, Router, embedded Frontend
-│   ├── api.rs               # Alle API Endpoints
-│   ├── db.rs                # Datenbank-Queries, Scanning, Comment-Computation
-│   ├── comment.rs           # Comment-Parsing/-Generierung
-│   ├── config.rs            # Config.toml + Env-Var Loading
-│   ├── embeddings.rs        # Semantische Tag-Embeddings (candle/ML)
-│   ├── digging.rs           # Curator/Session-Builder
-│   ├── audio_extensions.rs  # AudioExtension Enum
-│   ├── scan_cache.rs        # File Scan Caching
-│   ├── dump.rs              # DB Dump/Restore (JSON)
-│   ├── poller.rs            # Playlist Subscription Poller
-│   ├── traktor.rs           # Traktor collection.nml Parser
-│   ├── watch.rs             # Folder Watcher (optional)
-│   ├── spotify/             # Spotify OAuth + Sync
+├── src/                    # Rust Backend
+│   ├── main.rs             # CLI, Router, embedded Frontend
+│   ├── api.rs              # All API endpoints
+│   ├── db.rs               # DB queries, scanning, comment computation
+│   ├── comment.rs          # Comment parsing/generation
+│   ├── config.rs           # Config.toml + env var loading
+│   ├── embeddings.rs       # Semantic tag embeddings (candle/ML)
+│   ├── digging.rs          # Curator/session-builder
+│   ├── audio_extensions.rs # AudioExtension enum
+│   ├── scan_cache.rs       # File scan caching (record/replay)
+│   ├── dump.rs             # DB dump/restore (JSON)
+│   ├── poller.rs           # Playlist subscription poller
+│   ├── traktor.rs          # Traktor collection.nml parser
+│   ├── watch.rs            # Folder watcher (optional)
+│   ├── spotify/            # Spotify OAuth + Sync
 │   │   ├── client.rs
 │   │   ├── models.rs
 │   │   ├── replay.rs
 │   │   └── sync_worker.rs
-│   └── tasks/               # TaskManager + Worker
+│   └── tasks/              # TaskManager + workers
 │       └── mod.rs
-├── frontend/                # SPA (embedded via rust-embed)
-│   ├── index.html           # Shell
-│   ├── app.js               # Hash-Router
-│   ├── style.css            # Styles
-│   ├── fontawesome/         # Local Font Awesome Bundle
-│   ├── shared/              # Wiederverwendbare Module
+├── frontend/               # SPA (embedded via rust-embed)
+│   ├── index.html          # Shell
+│   ├── app.js              # Hash router
+│   ├── style.css           # Styles
+│   ├── fontawesome/        # Local Font Awesome bundle
+│   ├── shared/             # Reusable modules
 │   │   ├── api.js
 │   │   ├── components.js
 │   │   ├── format.js
 │   │   ├── nav.js
 │   │   └── search-filter.js
-│   └── pages/               # Eine JS-Modul pro Route
+│   └── pages/              # One JS module per route
 │       ├── dashboard.js
 │       ├── files.js
 │       ├── tracks.js
@@ -185,44 +290,27 @@ momos-music-manager/
 │       ├── digging.js
 │       └── traktor-import.js
 ├── migrations/
-│   └── 001_initial_schema.sql  # Single Migration
+│   └── 001_initial_schema.sql  # Single migration
 └── docs/
-    ├── ARCHITECTURE.md      # System-Architektur
-    ├── COMMENT_SYSTEM.md    # Comment-Format Spezifikation
-    ├── DECISIONS.md         # Architectural Decision Records
-    └── TASK_MANAGER.md      # Task-Manager Design
+    ├── ARCHITECTURE.md     # System architecture
+    ├── COMMENT_SYSTEM.md   # Comment format spec
+    ├── DECISIONS.md        # Architectural Decision Records
+    └── TASK_MANAGER.md     # Task manager design
 ```
 
 ---
 
-## API Endpoints
+## Important
 
-| Gruppe    | Base Path                               |
-| --------- | --------------------------------------- |
-| Files     | `GET/POST /api/files`                   |
-| Tracks    | `GET /api/tracks`                       |
-| Playlists | `GET /api/playlists`                    |
-| Tags      | `CRUD /api/tags`, `/api/tag-categories` |
-| Folders   | `CRUD /api/folders`                     |
-| Services  | `GET/POST /api/services/{service}/...`  |
-| Tasks     | `GET/DELETE /api/tasks`                 |
-| Digging   | `GET/POST /api/digging/...`             |
-| Health    | `GET /api/health`                       |
-
-Detail siehe [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-
----
-
-## Docs
-
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — System-Design
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) — Technische Entscheidungen
-- [`docs/COMMENT_SYSTEM.md`](docs/COMMENT_SYSTEM.md) — Comment-Format
-- [`docs/TASK_MANAGER.md`](docs/TASK_MANAGER.md) — Task-Manager Architektur
+- **Delete old DB files** after schema changes: `rm -f app.db*`
+- If you see "migration 27" errors: delete all DB files and restart
+- SoundCloud and YouTube OAuth are not yet implemented
+- Playlist subscriptions poll every 30 seconds in the background
+- The digging page (`digging.html`) is a standalone page, not part of the SPA
 
 ---
 
 ## License & Repo
 
-Fork von Spotify Mirror.  
+Fork of Spotify Mirror.  
 `git@git.sr.ht:~momoy/momos-music-manager`

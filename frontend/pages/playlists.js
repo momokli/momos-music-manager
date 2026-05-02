@@ -10,11 +10,13 @@ const SVC = {
   spotify: ["fab fa-spotify", "Spotify"],
   soundcloud: ["fab fa-soundcloud", "SoundCloud"],
   youtube: ["fab fa-youtube", "YouTube"],
+  deemix: ["fa-solid fa-download", "Deemix"],
 };
 const SVC_CLS = {
   spotify: "service-badge spotify",
   soundcloud: "service-badge soundcloud",
   youtube: "service-badge youtube",
+  deemix: "service-badge deemix",
 };
 
 const SVC_OPTIONS = [
@@ -22,6 +24,7 @@ const SVC_OPTIONS = [
   { value: "spotify", label: "Spotify" },
   { value: "soundcloud", label: "SoundCloud" },
   { value: "youtube", label: "YouTube" },
+  { value: "deemix", label: "Deemix" },
 ];
 
 function sBadge(s) {
@@ -46,6 +49,35 @@ function subCell(sub) {
     return `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)" title="Subscribed — polls every ${sub.pollIntervalSecs}s"><i class="fas fa-bell"></i></span>`;
   }
   return `<span style="color:var(--text-muted)" title="Not subscribed"><i class="far fa-bell"></i></span>`;
+}
+
+function deemixCell(r) {
+  const status = r.deemixStatus;
+  // Restart button: uses retryDownload endpoint (UUID-based) when deemixId exists,
+  // falls back to re-adding the URL when only remote-queue status is known
+  const restartBtn = status
+    ? `<button class="btn btn-sm btn-icon" data-act="deemix-restart" data-deemix-id="${r.deemixId || ""}" data-name="${esc(r.name)}" data-id="${r.id}" title="Re-download via deemix"><i class="fa-solid fa-arrows-rotate"></i></button>`
+    : "";
+  const addBtn = `<button class="btn btn-sm btn-icon" data-act="deemix-add" data-id="${r.id}" data-name="${esc(r.name)}" title="Add to Deemix download queue"><i class="fa-solid fa-plus"></i></button>`;
+
+  if (!status) return addBtn;
+  if (status === "queued") {
+    return `<span class="status-badge" style="background:rgba(245,158,11,0.1);color:var(--yellow)"><i class="fa-solid fa-clock"></i> Queued</span> ${restartBtn}`;
+  }
+  if (status === "downloading") {
+    return `<span class="status-badge" style="background:rgba(59,130,246,0.1);color:var(--blue, #3b82f6)"><i class="fa-solid fa-spinner fa-spin"></i> DL</span> ${restartBtn}`;
+  }
+  if (status === "completed") {
+    return `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)"><i class="fa-solid fa-check"></i></span> ${restartBtn}`;
+  }
+  if (status === "failed" && r.deemixId) {
+    return `<button class="btn btn-sm btn-icon" data-act="deemix-retry" data-deemix-id="${r.deemixId}" data-id="${r.id}" data-name="${esc(r.name)}" title="Retry download"><i class="fa-solid fa-rotate"></i></button> ${restartBtn}`;
+  }
+  return `<span class="status-badge" style="background:rgba(245,158,11,0.1);color:var(--yellow)"><i class="fa-solid fa-clock"></i> ${esc(status)}</span> ${restartBtn}`;
+}
+
+function viewTracksCell(r) {
+  return `<a href="#tracks?playlistId=${r.id}&playlistName=${encodeURIComponent(r.name)}" class="btn btn-sm btn-icon" title="View tracks"><i class="fa-solid fa-list-music"></i></a>`;
 }
 
 function actions(r) {
@@ -80,6 +112,8 @@ function rows(d) {
     <td><span class="${mismatch ? "diff-badge" : ""}">${r.r}</span></td>
     <td>${syncCell(r.sync)}</td>
     <td>${tagCell(r.tag)}</td>
+    <td style="text-align:center">${deemixCell(r)}</td>
+    <td style="text-align:center">${viewTracksCell(r)}</td>
     <td>${actions(r)}</td>
   </tr>`;
     })
@@ -117,7 +151,7 @@ function renderPlaylists(container, playlists, total, untaggedTotal, state, sign
 </div>
 
 <div class="table-wrap"><table class="data-table" id="pl-tbl">
-  <thead><tr><th style="width:3%"></th><th style="width:22%">Name</th><th style="width:8%">Service</th><th style="width:4%;text-align:center">Sub</th><th style="width:5%">Local</th><th style="width:5%">Remote</th><th style="width:12%">Last Synced</th><th style="width:16%">Tag</th><th style="width:25%">Actions</th></tr></thead>
+  <thead><tr><th style="width:2%"></th><th style="width:20%">Name</th><th style="width:7%">Service</th><th style="width:3%;text-align:center">Sub</th><th style="width:5%">Local</th><th style="width:5%">Remote</th><th style="width:10%">Last Synced</th><th style="width:14%">Tag</th><th style="width:6%">Deemix</th><th style="width:3%">Tracks</th><th style="width:25%">Actions</th></tr></thead>
   <tbody>${rows(playlists)}</tbody>
 </table></div>
 
@@ -295,6 +329,65 @@ function renderPlaylists(container, playlists, total, untaggedTotal, state, sign
             b.disabled = false;
             b.innerHTML = '<i class="fas fa-sync"></i>';
           }
+        } else if (act === "deemix-add") {
+          const url = `https://open.spotify.com/playlist/${playlist.playlistId}`;
+          const name = b.dataset.name || playlist.name;
+          b.disabled = true;
+          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+          try {
+            await fetchJSON("/api/services/deemix/queue", {
+              method: "POST",
+              body: JSON.stringify({ url }),
+            });
+            showToast(`Added "${name}" to Deemix download queue`, "success");
+            setTimeout(() => reload(), 1500);
+          } catch (err) {
+            showToast(`Failed to add to Deemix queue: ${err.message}`, "error");
+            b.disabled = false;
+            b.innerHTML = '<i class="fa-solid fa-plus"></i>';
+          }
+        } else if (act === "deemix-restart") {
+          const deemixId = b.dataset.deemixId ? parseInt(b.dataset.deemixId, 10) : null;
+          const name = b.dataset.name || playlist.name;
+          b.disabled = true;
+          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+          try {
+            if (deemixId) {
+              // Has local DB entry — call retryDownload which tells deemix to re-download via UUID
+              await fetchJSON(`/api/services/deemix/queue/${deemixId}/retry`, {
+                method: "POST",
+              });
+            } else {
+              // Remote-only — re-add the URL so the backfill creates a local entry, then retry
+              const url = `https://open.spotify.com/playlist/${playlist.playlistId}`;
+              await fetchJSON("/api/services/deemix/queue", {
+                method: "POST",
+                body: JSON.stringify({ url }),
+              });
+            }
+            showToast(`Re-download triggered for "${name}"`, "success");
+            setTimeout(() => reload(), 1500);
+          } catch (err) {
+            showToast(`Re-download failed: ${err.message}`, "error");
+            b.disabled = false;
+            b.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i>';
+          }
+        } else if (act === "deemix-retry") {
+          const deemixId = parseInt(b.dataset.deemixId, 10);
+          const name = b.dataset.name || playlist.name;
+          b.disabled = true;
+          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+          try {
+            await fetchJSON(`/api/services/deemix/queue/${deemixId}/retry`, {
+              method: "POST",
+            });
+            showToast(`Retrying download for "${name}"`, "success");
+            setTimeout(() => reload(), 1500);
+          } catch (err) {
+            showToast(`Retry failed: ${err.message}`, "error");
+            b.disabled = false;
+            b.innerHTML = '<i class="fa-solid fa-rotate"></i>';
+          }
         }
       },
       { signal },
@@ -349,6 +442,8 @@ async function loadPlaylists(container, signal, state) {
       r: p.remoteTrackCount ?? 0,
       sync: null,
       tag: tagLookup[p.name.toLowerCase()] || null,
+      deemixStatus: p.deemixStatus || null,
+      deemixId: p.deemixId || null,
     };
   });
 

@@ -745,7 +745,88 @@ For shipping a Release Candidate, the friction of the two-process setup was the 
 
 ---
 
-## Revision History
+## ADR-034: Database Path in Config.toml
+
+**Date**: 2026-05-01
+**Status**: Accepted (implemented)
+
+**Context**: The database path was hardcoded to `sqlite:app.db` (relative to CWD). For deployment as a macOS service, the database needs a stable, standard location.
+
+**Decision**: Add `[database]` section to config.toml with `url` field. Priority: `DATABASE_URL` env var > `[database].url` in config.toml > `sqlite:~/.local/share/momos-music-manager/library.db`. The default path uses `shellexpand` for `~` resolution, and the parent directory is auto-created on startup.
+
+**Consequences**: Migrating from an existing `app.db` requires manually moving it to the new location or setting `DATABASE_URL`.
+
+---
+
+## ADR-035: macOS Launch Agent Deployment
+
+**Date**: 2026-05-01
+**Status**: Accepted (implemented)
+
+**Context**: The server needed a way to auto-start on login for daily use.
+
+**Decision**: Add CLI subcommands `install-launch-agent`, `uninstall-launch-agent`, and `service-status`. The agent uses launchd with `RunAtLoad` and `KeepAlive`. Conditionally compiled for macOS only via `#[cfg(target_os = "macos")]`.
+
+**Consequences**: Users get seamless auto-start. Non-macOS users get a clear error message. Logs go to `~/Library/Logs/momos-music-manager/`.
+
+---
+
+## ADR-036: Dynamic Redirect URI for OAuth Callbacks
+
+**Date**: 2026-05-01
+**Status**: Accepted (implemented)
+
+**Context**: The OAuth callback handlers hardcoded redirect URLs (`http://localhost:3000` and `http://localhost:8000`), which broke when deploying behind a reverse proxy.
+
+**Decision**: Add `--public-url` CLI flag to `serve` command. Store it in `AppState`. Both callback handlers redirect to `state.public_url` or fall back to `http://{server_host}:{server_port}`. Priority: CLI flag > `PUBLIC_URL` env var / `[server].public_url` in config.toml > `None`.
+
+**Consequences**: OAuth works both in dev (localhost) and production (behind reverse proxy). Users must update their Spotify app's redirect URI to match.
+
+---
+
+## ADR-037: Clean Startup Logging
+
+**Date**: 2026-05-01
+**Status**: Accepted (implemented)
+
+**Context**: The startup log had 4 separate `info!` lines that could be consolidated for readability. The poller log didn't indicate whether subscriptions existed.
+
+**Decision**: Consolidate startup logging into: database URL, migrations complete, subscription poller status (showing subscription count or "idle"), listening address, and a final startup banner. The poller now receives and logs the subscription count. The bound address is read from `listener.local_addr()` for accuracy.
+
+**Consequences**: Cleaner, more informative startup output. Easy to spot when the server is ready.
+
+---
+
+## ADR-038: Deemix Download Service Integration
+
+**Date**: 2026-05-01
+**Status**: Accepted (implemented)
+
+**Context**: Users need a way to download Spotify playlists as local audio files. Deemix-pyweb provides a web API that can download tracks from Deezer using Spotify playlist URLs. We needed to integrate it as a streaming service alongside Spotify, SoundCloud, and YouTube.
+
+**Decision**: Add deemix as a fourth streaming service with web-UI-only configuration:
+
+1. **No config.toml changes** — ARL (authentication cookie) + host URL are stored entirely in the `service_config` DB table, configured via the web UI
+2. **Cookie-based auth** — The `connect.sid` session cookie lives only in the reqwest client's in-memory cookie jar (not persisted to DB). Auto-re-auth on HTTP 401 by loading the stored ARL and calling `/api/loginArl`
+3. **New module `src/deemix/`** with:
+   - `client.rs` — HTTP client for deemix-pyweb API (`POST /api/loginArl`, `GET /api/getQueue`, `POST /api/addToQueue`, `POST /api/retryDownload`)
+   - `models.rs` — Response types for all deemix API endpoints + frontend-facing `DeemixCombinedQueueItem`
+4. **New DB table `deemix_downloads`** — tracks download queue status per Spotify playlist URL
+5. **API endpoints**: `POST /api/services/deemix/auth`, `GET/POST /api/services/deemix/queue`, `POST /api/services/deemix/queue/{id}/retry`, `DELETE /api/services/deemix/queue/{id}`
+6. **Frontend integration**:
+   - Services page: ARL + Host input fields, Test & Save button, status badges
+   - Playlists page: Deemix column showing queue status (➕ add / ⏳ downloading / ✅ completed / 🔄 retry)
+   - Tracks page: playlist context badge + playlist column + URL hash param support (`#tracks?playlistId=X&playlistName=...`)
+7. **Backend playlist_id filter**: `TracksQuery.playlist_id` for scoped track listings + `GET /api/playlists/{id}` endpoint
+
+**Consequences**:
+
+- Users configure deemix once via the web UI and don't need to edit config files
+- Default host port is 6595 (deemix-pyweb default)
+- ARL cookie auto-refreshes on expiry without user intervention
+- Playlist download status is visible directly in the playlists view
+- Tracks page supports playlist-scoped viewing with URL-based state
+- Schema was extended without breaking changes (migration delete + recreate)
 
 | Date       | Decision                              | Description                                                                                        |
 | ---------- | ------------------------------------- | -------------------------------------------------------------------------------------------------- |
@@ -764,3 +845,8 @@ For shipping a Release Candidate, the friction of the two-process setup was the 
 | 2026-05-09 | ADR-030                               | Scan cache for development (record/replay, dev-data/scan-cache, auto-invalidation)                 |
 | 2026-04-30 | ADR-031                               | Config.toml migration — config priority (env > config.toml > defaults)                             |
 | 2026-04-30 | ADR-033                               | Single-binary shipping with embedded frontend + Font Awesome bundle                                |
+| 2026-05-01 | ADR-034                               | Database path in config.toml — `[database].url` with shellexpand + env var fallback                |
+| 2026-05-01 | ADR-035                               | macOS Launch Agent — `install-launch-agent`, `uninstall-launch-agent`, `service-status`            |
+| 2026-05-01 | ADR-036                               | Dynamic redirect URI for OAuth — `--public-url` flag, fallback chain                               |
+| 2026-05-01 | ADR-037                               | Clean startup logging — consolidated banner, poller subscription count, actual bound port          |
+| 2026-05-01 | ADR-038                               | Deemix download service integration — web-UI-only config, cookie-auth, playlist download queue     |

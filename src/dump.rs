@@ -78,6 +78,7 @@ pub struct DumpServiceConfig {
     pub id: i64,
     pub service: String,
     pub refresh_token: Option<String>,
+    pub metadata_json: Option<String>,
     pub access_token: Option<String>,
     pub token_expiry: Option<i64>,
     pub user_id: Option<String>,
@@ -176,23 +177,49 @@ pub struct DumpPlaylistSubscription {
     pub is_active: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DumpDeemixDownload {
+    pub id: i64,
+    pub spotify_playlist_url: String,
+    pub playlist_name: Option<String>,
+    pub status: String,
+    pub track_count_total: i64,
+    pub track_count_downloaded: i64,
+    pub error_message: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 // ============================================================================
 // Top-level dump structure
 // ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataDump {
+    #[serde(default)]
     pub tag_categories: Vec<DumpTagCategory>,
+    #[serde(default)]
     pub tags: Vec<DumpTag>,
+    #[serde(default)]
     pub tag_embeddings: Vec<DumpTagEmbedding>,
+    #[serde(default)]
     pub tag_energy_levels: Vec<DumpTagEnergyLevel>,
+    #[serde(default)]
     pub folders: Vec<DumpFolder>,
+    #[serde(default)]
     pub service_config: Vec<DumpServiceConfig>,
+    #[serde(default)]
     pub service_tracks: Vec<DumpServiceTrack>,
+    #[serde(default)]
     pub service_playlists: Vec<DumpServicePlaylist>,
+    #[serde(default)]
     pub service_playlist_tracks: Vec<DumpServicePlaylistTrack>,
+    #[serde(default)]
     pub files: Vec<DumpFile>,
+    #[serde(default)]
     pub playlist_subscriptions: Vec<DumpPlaylistSubscription>,
+    #[serde(default)]
+    pub deemix_downloads: Vec<DumpDeemixDownload>,
     pub dumped_at: i64,
 }
 
@@ -218,6 +245,7 @@ pub async fn export_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
         service_playlist_tracks: export_service_playlist_tracks(pool).await?,
         files: export_files(pool).await?,
         playlist_subscriptions: export_playlist_subscriptions(pool).await?,
+        deemix_downloads: export_deemix_downloads(pool).await?,
         dumped_at,
     };
 
@@ -237,9 +265,10 @@ pub async fn export_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
         + dump.service_playlists.len()
         + dump.service_playlist_tracks.len()
         + dump.files.len()
-        + dump.playlist_subscriptions.len();
+        + dump.playlist_subscriptions.len()
+        + dump.deemix_downloads.len();
 
-    info!("Export complete: {total} rows across 11 tables -> {dump_path}");
+    info!("Export complete: {total} rows across 12 tables -> {dump_path}");
     Ok(())
 }
 
@@ -344,6 +373,7 @@ async fn export_service_config(pool: &Pool<Sqlite>) -> Result<Vec<DumpServiceCon
                 id: r.get("id"),
                 service: r.get("service"),
                 refresh_token: r.get("refresh_token"),
+                metadata_json: r.get("metadata_json"),
                 access_token: r.get("access_token"),
                 token_expiry: r.get("token_expiry"),
                 user_id: r.get("user_id"),
@@ -467,6 +497,27 @@ async fn export_files(pool: &Pool<Sqlite>) -> Result<Vec<DumpFile>> {
         .collect()
 }
 
+async fn export_deemix_downloads(pool: &Pool<Sqlite>) -> Result<Vec<DumpDeemixDownload>> {
+    let rows = sqlx::query("SELECT * FROM deemix_downloads ORDER BY id")
+        .fetch_all(pool)
+        .await?;
+    rows.iter()
+        .map(|r| {
+            Ok(DumpDeemixDownload {
+                id: r.get("id"),
+                spotify_playlist_url: r.get("spotify_playlist_url"),
+                playlist_name: r.get("playlist_name"),
+                status: r.get("status"),
+                track_count_total: r.get("track_count_total"),
+                track_count_downloaded: r.get("track_count_downloaded"),
+                error_message: r.get("error_message"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+        })
+        .collect()
+}
+
 async fn export_playlist_subscriptions(
     pool: &Pool<Sqlite>,
 ) -> Result<Vec<DumpPlaylistSubscription>> {
@@ -504,12 +555,14 @@ pub async fn import_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
     let dump: DataDump = serde_json::from_str(&json)
         .context("Failed to parse dump JSON - schema may have changed")?;
 
-    let mut tx = pool.begin().await?;
-
-    // Disable foreign keys temporarily for a clean reset
+    // Disable foreign keys BEFORE the transaction, because PRAGMA foreign_keys
+    // is a no-op inside a transaction in SQLite. This lets us clear tables
+    // in any order without FK constraint violations.
     sqlx::query("PRAGMA foreign_keys = OFF")
-        .execute(&mut *tx)
+        .execute(pool)
         .await?;
+
+    let mut tx = pool.begin().await?;
 
     // Delete existing data in FK-safe order (children first, parents last)
     let tables_to_clear = [
@@ -524,6 +577,7 @@ pub async fn import_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
         "tags",
         "playlist_subscriptions",
         "tag_categories",
+        "deemix_downloads",
     ];
     // Remove duplicates and reverse so children are deleted first
     let mut seen = std::collections::HashSet::new();
@@ -547,13 +601,14 @@ pub async fn import_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
     import_service_playlist_tracks(&mut tx, &dump.service_playlist_tracks).await?;
     import_files(&mut tx, &dump.files).await?;
     import_playlist_subscriptions(&mut tx, &dump.playlist_subscriptions).await?;
-
-    // Re-enable foreign keys
-    sqlx::query("PRAGMA foreign_keys = ON")
-        .execute(&mut *tx)
-        .await?;
+    import_deemix_downloads(&mut tx, &dump.deemix_downloads).await?;
 
     tx.commit().await?;
+
+    // Re-enable foreign keys AFTER the transaction completes
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(pool)
+        .await?;
 
     let total = dump.tag_categories.len()
         + dump.tags.len()
@@ -565,7 +620,8 @@ pub async fn import_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
         + dump.service_playlists.len()
         + dump.service_playlist_tracks.len()
         + dump.files.len()
-        + dump.playlist_subscriptions.len();
+        + dump.playlist_subscriptions.len()
+        + dump.deemix_downloads.len();
 
     info!("Import complete: {total} rows restored from {dump_path}");
     Ok(())
@@ -667,9 +723,10 @@ async fn import_service_config(
 ) -> Result<()> {
     for r in rows {
         sqlx::query(
-            "INSERT INTO service_config (id, service, refresh_token, access_token, token_expiry, user_id, playlist_id, is_connected, last_checked, last_synced, remote_playlists_count, remote_tracks_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO service_config (id, service, refresh_token, metadata_json, access_token, token_expiry, user_id, playlist_id, is_connected, last_checked, last_synced, remote_playlists_count, remote_tracks_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
-        .bind(r.id).bind(&r.service).bind(&r.refresh_token).bind(&r.access_token)
+        .bind(r.id).bind(&r.service).bind(&r.refresh_token).bind(&r.metadata_json)
+        .bind(&r.access_token)
         .bind(r.token_expiry).bind(&r.user_id).bind(&r.playlist_id).bind(r.is_connected)
         .bind(r.last_checked).bind(r.last_synced).bind(r.remote_playlists_count)
         .bind(r.remote_tracks_count).bind(r.created_at).bind(r.updated_at)
@@ -785,6 +842,25 @@ async fn import_files(tx: &mut sqlx::Transaction<'_, Sqlite>, rows: &[DumpFile])
     }
     if !rows.is_empty() {
         info!("  files: {} rows", rows.len());
+    }
+    Ok(())
+}
+
+async fn import_deemix_downloads(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    rows: &[DumpDeemixDownload],
+) -> Result<()> {
+    for r in rows {
+        sqlx::query(
+            "INSERT INTO deemix_downloads (id, spotify_playlist_url, playlist_name, status, track_count_total, track_count_downloaded, error_message, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(r.id).bind(&r.spotify_playlist_url).bind(&r.playlist_name)
+        .bind(&r.status).bind(r.track_count_total).bind(r.track_count_downloaded)
+        .bind(&r.error_message).bind(r.created_at).bind(r.updated_at)
+        .execute(&mut **tx).await?;
+    }
+    if !rows.is_empty() {
+        info!("  deemix_downloads: {} rows", rows.len());
     }
     Ok(())
 }

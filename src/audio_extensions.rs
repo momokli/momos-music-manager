@@ -155,6 +155,7 @@ impl AudioExtension {
     }
 
     /// Returns all supported audio extensions as a vector.
+    #[allow(dead_code)]
     pub fn all() -> Vec<Self> {
         ALL_EXTENSIONS.to_vec()
     }
@@ -190,6 +191,7 @@ impl AudioExtension {
     /// Converts a vector of AudioExtension to a comma-separated string.
     ///
     /// Uses the variant names (e.g., "Mp3,StemM4a,Wav").
+    #[allow(dead_code)]
     pub fn to_string_list(extensions: &[Self]) -> String {
         extensions
             .iter()

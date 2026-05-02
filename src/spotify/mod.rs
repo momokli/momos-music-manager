@@ -9,9 +9,7 @@ pub mod replay;
 pub mod sync_worker;
 
 // Re-export commonly used types
-#[allow(unused_imports)]
-pub use client::SpotifyClient;
-#[allow(unused_imports)]
-pub use models::*;
-#[allow(unused_imports)]
-pub use sync_worker::SpotifySyncWorker;
+// NOTE: Re-exports currently unused; add back when external consumers need them
+// pub use client::SpotifyClient;
+// pub use models::*;
+// pub use sync_worker::SpotifySyncWorker;

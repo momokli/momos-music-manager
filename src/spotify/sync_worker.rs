@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Spotify sync worker
 //!
 //! This module contains the SpotifySyncWorker which performs background sync operations
@@ -426,48 +428,45 @@ impl SpotifySyncWorker {
                     // Extract track from playlist item
                     if let Some(track) = item.track
                         && let PlayableItem::Track(track) = track
-                            && let Some(_track_id) = &track.id {
-                                track_count += 1;
-                                position += 1;
-                                track_names.push(track.name.clone());
+                        && let Some(_track_id) = &track.id
+                    {
+                        track_count += 1;
+                        position += 1;
+                        track_names.push(track.name.clone());
 
-                                // Update progress every 10 tracks
-                                if track_count % 10 == 0 || track_count == 1 {
-                                    self.update_track_progress(
-                                        track_count,
-                                        None,
-                                        &track.name,
-                                        &playlist_name,
-                                    )
-                                    .await;
-                                }
+                        // Update progress every 10 tracks
+                        if track_count % 10 == 0 || track_count == 1 {
+                            self.update_track_progress(
+                                track_count,
+                                None,
+                                &track.name,
+                                &playlist_name,
+                            )
+                            .await;
+                        }
 
-                                debug!(
-                                    "Processing track {}/?: {} - {}",
-                                    track_count, track.name, playlist_name
-                                );
+                        debug!(
+                            "Processing track {}/?: {} - {}",
+                            track_count, track.name, playlist_name
+                        );
 
-                                // Store track and add to playlist
-                                if let Err(e) = self
-                                    .store_track_and_add_to_playlist(
-                                        &track,
-                                        playlist_id,
-                                        position as i64,
-                                    )
-                                    .await
-                                {
-                                    error!("Failed to store track {}: {:?}", track.name, e);
-                                    // Continue with next track
-                                }
+                        // Store track and add to playlist
+                        if let Err(e) = self
+                            .store_track_and_add_to_playlist(&track, playlist_id, position as i64)
+                            .await
+                        {
+                            error!("Failed to store track {}: {:?}", track.name, e);
+                            // Continue with next track
+                        }
 
-                                // In record mode, also buffer for cache
-                                if self.cache_mode.should_record() {
-                                    cached_tracks.push(CachedTrackEntry {
-                                        track: TrackInfo::from(&track),
-                                        position: position as i64,
-                                    });
-                                }
-                            }
+                        // In record mode, also buffer for cache
+                        if self.cache_mode.should_record() {
+                            cached_tracks.push(CachedTrackEntry {
+                                track: TrackInfo::from(&track),
+                                position: position as i64,
+                            });
+                        }
+                    }
                 }
                 Err(e) => {
                     error!(

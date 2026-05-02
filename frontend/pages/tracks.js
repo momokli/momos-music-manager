@@ -2,9 +2,14 @@
  * tracks.js — Service tracks page.
  *
  * Lists tracks imported from connected streaming services with
- * pagination, filtering by service, and search.
+ * pagination, filtering by service, search, and optional playlist
+ * scoping. Supports playlist-context badge in the toolbar.
+ *
  * Toolbar is rendered once and preserved across re-renders to
  * keep the search input stable (no focus loss on reload).
+ *
+ * URL hash params:
+ *   #tracks?search=foo&service=spotify&page=0&playlistId=42&playlistName=Summer
  */
 
 import { fetchJSON } from "../shared/api.js";
@@ -27,6 +32,24 @@ import {
 
 const PAGE_SIZE = 10;
 
+const SERVICE_OPTIONS = [
+  { value: "all", label: "All Services" },
+  { value: "spotify", label: "Spotify" },
+  { value: "soundcloud", label: "SoundCloud" },
+  { value: "youtube", label: "YouTube" },
+];
+
+const TABLE_HEADERS = [
+  { label: "Title", style: "width:22%" },
+  { label: "Artist", style: "width:16%" },
+  { label: "Service", style: "width:8%" },
+  { label: "Album", style: "width:14%" },
+  { label: "Playlists", style: "width:18%" },
+  { label: "Local Files", style: "width:10%" },
+  { label: "Duration", style: "width:8%;text-align:right" },
+  { label: "ISRC", style: "width:4%" },
+];
+
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
@@ -47,8 +70,8 @@ function escapeHtml(str) {
 
 /**
  * Transform an API service track to the shape expected by the render function.
- * API: durationMs in milliseconds, localFiles as string[].
- * Render: duration in seconds, files as space-joined string.
+ * API: durationMs in milliseconds, localFiles as string[], playlistNames as string[].
+ * Render: duration in seconds, files as space-joined string, playlistNames as array.
  */
 function adaptTrack(t) {
   return {
@@ -60,6 +83,7 @@ function adaptTrack(t) {
     files: t.localFiles && t.localFiles.length > 0 ? t.localFiles.join(" ") : null,
     duration: t.durationMs ? Math.round(t.durationMs / 1000) : 0,
     isrc: t.isrc,
+    playlistNames: t.playlistNames || [],
   };
 }
 
@@ -67,51 +91,76 @@ function adaptTrack(t) {
 /*  Render helpers (content area only, toolbar is stable)              */
 /* ------------------------------------------------------------------ */
 
-const SERVICE_OPTIONS = [
-  { value: "all", label: "All Services" },
-  { value: "spotify", label: "Spotify" },
-  { value: "soundcloud", label: "SoundCloud" },
-  { value: "youtube", label: "YouTube" },
-];
-
-const TABLE_HEADERS = [
-  { label: "Title", style: "width:25%" },
-  { label: "Artist", style: "width:20%" },
-  { label: "Service", style: "width:10%" },
-  { label: "Album", style: "width:15%" },
-  { label: "Local Files", style: "width:15%" },
-  { label: "Duration", style: "width:8%;text-align:right" },
-  { label: "ISRC", style: "width:7%" },
-];
-
 /**
  * Render the toolbar HTML (called once on init).
+ * Includes search input, service filter group, and optional playlist
+ * context badge when scoped to a playlist.
+ *
+ * @param {string} search  — current search value
+ * @param {object} state   — current state (used for playlistName)
+ * @returns {string} HTML
  */
-function renderToolbar(search) {
+function renderToolbar(search, state) {
+  let playlistBadge = "";
+  if (state.playlistName) {
+    playlistBadge = `
+      <div class="playlist-context-badge">
+        <i class="fa-solid fa-list"></i>
+        <span>Playlist: ${escapeHtml(state.playlistName)}</span>
+        <button class="playlist-context-clear" title="Clear playlist filter">&times;</button>
+      </div>`;
+  }
+
   return `
     <div class="toolbar">
       ${renderSearchInput("tracks", search)}
-      ${renderFilterGroup("service", SERVICE_OPTIONS, "all")}
+      ${renderFilterGroup("service", SERVICE_OPTIONS, state.service)}
+      ${playlistBadge}
     </div>`;
 }
 
 /**
  * Render the body content (stats, table, pagination).
+ * When scoped to a playlist (state.playlistId is set), the Playlists
+ * column is hidden as it is redundant.
  */
 function renderBody(data, state) {
   const { tracks } = data;
   const totalCount = data._total ?? tracks.length;
   const totalPages = Math.ceil(totalCount / PAGE_SIZE) || 1;
   const pageId = "tracks";
+  const isScoped = !!state.playlistId;
+
+  // When scoped, filter out the Playlists column header
+  const headers = isScoped
+    ? TABLE_HEADERS.filter((h) => h.label !== "Playlists")
+    : TABLE_HEADERS;
 
   const rowsHtml = tracks
-    .map(
-      (t) =>
-        `<tr>
-          ${td(escapeHtml(t.title), { style: "width:25%" })}
-          ${td(escapeHtml(t.artist), { style: "width:20%" })}
-          ${td(`<span class="service-badge ${t.service}">${t.service.charAt(0).toUpperCase() + t.service.slice(1)}</span>`, { style: "width:10%" })}
-          ${td(t.album ? escapeHtml(t.album) : '<span class="text-muted">—</span>', { style: "width:15%" })}
+    .map((t) => {
+      const playlistsHtml =
+        t.playlistNames && t.playlistNames.length > 0
+          ? t.playlistNames
+              .map(
+                (n) =>
+                  `<span class="tag-badge font-mono" style="font-size:0.75rem">${escapeHtml(n)}</span>`,
+              )
+              .join(" ")
+          : '<span class="text-muted">—</span>';
+
+      return `<tr>
+          ${td(escapeHtml(t.title), { style: "width:22%" })}
+          ${td(escapeHtml(t.artist), { style: "width:16%" })}
+          ${td(
+            `<span class="service-badge ${t.service}">${t.service.charAt(0).toUpperCase() + t.service.slice(1)}</span>`,
+            { style: "width:8%" },
+          )}
+          ${td(t.album ? escapeHtml(t.album) : '<span class="text-muted">—</span>', {
+            style: "width:14%",
+          })}
+          ${td(playlistsHtml, {
+            style: `width:18%${isScoped ? ";display:none" : ""}`,
+          })}
           ${td(
             t.files
               ? t.files
@@ -119,22 +168,35 @@ function renderBody(data, state) {
                   .map((f) => `<code class="font-mono">${escapeHtml(f)}</code>`)
                   .join(" ")
               : '<span class="text-muted">—</span>',
-            { style: "width:15%" },
+            { style: "width:10%" },
           )}
-          ${td(`<span class="font-mono">${escapeHtml(formatDuration(t.duration))}</span>`, { style: "width:8%;text-align:right" })}
-          ${td(t.isrc ? `<span class="font-mono text-sm">${escapeHtml(t.isrc)}</span>` : '<span class="text-muted">—</span>', { style: "width:7%" })}
-        </tr>`,
-    )
+          ${td(
+            `<span class="font-mono">${escapeHtml(formatDuration(t.duration))}</span>`,
+            { style: "width:8%;text-align:right" },
+          )}
+          ${td(
+            t.isrc
+              ? `<span class="font-mono text-sm">${escapeHtml(t.isrc)}</span>`
+              : '<span class="text-muted">—</span>',
+            { style: "width:4%" },
+          )}
+        </tr>`;
+    })
     .join("");
 
   const stats = `<div class="stats-row">
     <div class="stats-group">
       <button class="btn btn-sm btn-icon" id="tracks-refresh" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
       <strong>${totalCount.toLocaleString()}</strong> tracks
+      ${
+        isScoped
+          ? `<span style="margin-left:8px;color:var(--text-subtle)">in playlist <strong>${escapeHtml(state.playlistName)}</strong></span>`
+          : ""
+      }
     </div>
   </div>`;
 
-  const table = renderTable(TABLE_HEADERS, rowsHtml);
+  const table = renderTable(headers, rowsHtml);
 
   const pagination = `<div class="pagination" id="${pageId}-pagination">
     <button class="pagination-btn" id="${pageId}-prev" disabled><i class="fa-solid fa-chevron-left"></i></button>
@@ -149,6 +211,21 @@ function renderBody(data, state) {
  * Render an empty-state body (no tracks at all, not just filtered to zero).
  */
 function renderEmptyBody(search) {
+  const headers = [
+    { label: "Title", style: "width:22%" },
+    { label: "Artist", style: "width:16%" },
+    { label: "Service", style: "width:8%" },
+    { label: "Album", style: "width:14%" },
+    { label: "Playlists", style: "width:18%" },
+    { label: "Local Files", style: "width:10%" },
+    { label: "Duration", style: "width:8%;text-align:right" },
+    { label: "ISRC", style: "width:4%" },
+  ];
+
+  const theadHtml = headers
+    .map((h) => `<th${h.style ? ` style="${h.style}"` : ""}>${escapeHtml(h.label)}</th>`)
+    .join("");
+
   return `
     <div class="stats-row">
       <div class="stats-group">
@@ -157,8 +234,8 @@ function renderEmptyBody(search) {
       </div>
     </div>
     <div class="table-wrap"><table class="data-table">
-      <thead><tr><th style="width:25%">Title</th><th style="width:20%">Artist</th><th style="width:10%">Service</th><th style="width:15%">Album</th><th style="width:15%">Local Files</th><th style="width:8%;text-align:right">Duration</th><th style="width:7%">ISRC</th></tr></thead>
-      <tbody><tr><td colspan="7"><div class="text-center text-muted" style="padding:32px">No tracks found. Import tracks from your connected services to get started.</div></td></tr></tbody>
+      <thead><tr>${theadHtml}</tr></thead>
+      <tbody><tr><td colspan="8"><div class="text-center text-muted" style="padding:32px">No tracks found. Import tracks from your connected services to get started.</div></td></tr></tbody>
     </table></div>`;
 }
 
@@ -168,6 +245,7 @@ function renderEmptyBody(search) {
 
 /**
  * Build query string for the tracks endpoint from the given state.
+ * Includes playlistId filter when scoped to a playlist.
  */
 function buildParams(state) {
   const params = new URLSearchParams();
@@ -175,6 +253,7 @@ function buildParams(state) {
   params.set("offset", String(state.page * PAGE_SIZE));
   if (state.service !== "all") params.set("service", state.service);
   if (state.search) params.set("search", state.search);
+  if (state.playlistId) params.set("playlistId", String(state.playlistId));
   return params;
 }
 
@@ -268,13 +347,45 @@ function wireContentEvents(container, signal, state) {
 /*  Initialisation                                                     */
 /* ------------------------------------------------------------------ */
 
-export async function init(container, signal) {
-  // State for pagination and filters — mutable, lives across renders
-  const state = { page: 0, service: "all", search: "" };
+/**
+ * Initialise the tracks page.
+ *
+ * @param {HTMLElement} container — the #main-content element
+ * @param {AbortSignal} signal    — abort signal for ongoing requests
+ * @param {object}       hashParams — parsed hash params from app.js
+ *   Supported keys:
+ *     page         — current page (0-based)
+ *     service      — service filter ("all", "spotify", "soundcloud", "youtube")
+ *     search       — search query string
+ *     playlistId   — playlist ID for scoped view
+ *     playlistName — playlist name for scoped view (optional, fetched if missing)
+ */
+export async function init(container, signal, hashParams) {
+  // Parse hash params for initial state
+  const state = {
+    page: parseInt(hashParams?.page) || 0,
+    service: hashParams?.service || "all",
+    search: hashParams?.search || "",
+    playlistId: hashParams?.playlistId ? parseInt(hashParams.playlistId) : null,
+    playlistName: hashParams?.playlistName || null,
+  };
+
+  // If playlistId is set but no playlistName provided, fetch it
+  if (state.playlistId && !state.playlistName) {
+    try {
+      const resp = await fetchJSON(`/api/playlists/${state.playlistId}`, { signal });
+      if (resp.data) {
+        state.playlistName = resp.data.name;
+      }
+    } catch (err) {
+      if (err.name === "AbortError") return;
+      console.warn("Failed to fetch playlist name:", err);
+    }
+  }
 
   // Render stable toolbar + content wrapper ONCE
   container.innerHTML = `
-    ${renderToolbar(state.search)}
+    ${renderToolbar(state.search, state)}
     <div id="tracks-content">${renderLoading("Loading tracks…")}</div>
   `;
 
@@ -282,6 +393,17 @@ export async function init(container, signal) {
   const toolbar = container.querySelector(".toolbar");
   if (toolbar) {
     wireSearchFilter(toolbar, state, () => fetchAndRender(container, signal, state));
+  }
+
+  // Wire playlist context clear button
+  const clearBtn = container.querySelector(".playlist-context-clear");
+  if (clearBtn) {
+    clearBtn.onclick = () => {
+      state.playlistId = null;
+      state.playlistName = null;
+      window.location.hash = "#tracks";
+      fetchAndRender(container, signal, state);
+    };
   }
 
   // Fetch initial data

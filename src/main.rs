@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +26,7 @@ mod audio_extensions;
 mod comment;
 mod config;
 mod db;
+mod deemix;
 mod digging;
 mod dump;
 mod embeddings;
@@ -37,6 +36,9 @@ mod spotify;
 mod tasks;
 mod traktor;
 mod watch;
+
+#[cfg(target_os = "macos")]
+mod launch_agent;
 
 #[derive(Parser)]
 #[command(name = "momos-music-manager")]
@@ -51,10 +53,12 @@ struct Cli {
 enum Commands {
     /// Start the web server
     Serve {
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-        #[arg(long, default_value = "3000")]
-        port: u16,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long)]
+        public_url: Option<String>,
     },
     /// Scan and import files from directory
     Scan {
@@ -78,6 +82,17 @@ enum Commands {
         #[arg(long, default_value = "dev-data/dump.json")]
         input: String,
     },
+    /// Install launch agent to auto-start on login (macOS only)
+    InstallLaunchAgent,
+    /// Remove the launch agent (macOS only)
+    UninstallLaunchAgent,
+    /// Show the status of the launch agent (macOS only)
+    ServiceStatus,
+    /// Deemix download queue actions
+    Deemix {
+        #[command(subcommand)]
+        command: crate::deemix::cli::DeemixCommand,
+    },
 }
 
 struct AppState {
@@ -85,6 +100,7 @@ struct AppState {
     config: crate::config::ServiceCredentials,
     task_manager: crate::tasks::TaskManager,
     embeddings: Mutex<Option<crate::embeddings::EmbeddingModel>>,
+    public_url: Option<String>,
 }
 
 // ── Embedded Frontend Assets ───────────────────────────────────────────────
@@ -178,10 +194,25 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Initialize database connection
-    let database_url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:app.db".to_string());
+    // Load config (env vars > config.toml > built-in defaults)
+    let config = crate::config::ServiceCredentials::load();
+    let database_url = config.database_url.clone();
     info!("Database: {database_url}");
+
+    // Ensure the parent directory of the database file exists
+    let db_path_str = database_url
+        .strip_prefix("sqlite:")
+        .unwrap_or(&database_url);
+    let db_path = std::path::Path::new(db_path_str);
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create database directory {}: {e}",
+                parent.display()
+            )
+        })?;
+    }
+
     let options = SqliteConnectOptions::from_str(&database_url)?
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
@@ -194,8 +225,14 @@ async fn main() -> Result<()> {
     info!("Migrations complete");
 
     match cli.command {
-        Commands::Serve { host, port } => {
-            serve(db, host, port).await?;
+        Commands::Serve {
+            host,
+            port,
+            public_url,
+        } => {
+            let host = host.unwrap_or_else(|| config.server_host.clone());
+            let port = port.unwrap_or(config.server_port);
+            serve(db, host, port, public_url).await?;
         }
         Commands::Scan { directory } => {
             info!("Scanning: {directory}");
@@ -209,20 +246,59 @@ async fn main() -> Result<()> {
             info!("Scan file: {path}");
             scan_single_file(&db, &path).await?;
         }
+        Commands::Deemix { command } => {
+            crate::deemix::cli::run(command).await?;
+        }
         Commands::Dump { output } => {
             crate::dump::export_dump(&db, &output).await?;
         }
         Commands::Restore { input } => {
             crate::dump::import_dump(&db, &input).await?;
         }
+        #[cfg(target_os = "macos")]
+        Commands::InstallLaunchAgent => {
+            crate::launch_agent::install()?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        Commands::InstallLaunchAgent => {
+            anyhow::bail!("Launch agent is only supported on macOS");
+        }
+        #[cfg(target_os = "macos")]
+        Commands::UninstallLaunchAgent => {
+            crate::launch_agent::uninstall()?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        Commands::UninstallLaunchAgent => {
+            anyhow::bail!("Launch agent is only supported on macOS");
+        }
+        #[cfg(target_os = "macos")]
+        Commands::ServiceStatus => {
+            let status = crate::launch_agent::status()?;
+            println!("{}", status);
+        }
+        #[cfg(not(target_os = "macos"))]
+        Commands::ServiceStatus => {
+            anyhow::bail!("Launch agent is only supported on macOS");
+        }
     }
 
     Ok(())
 }
 
-async fn serve(db: Pool<Sqlite>, host: String, port: u16) -> Result<()> {
+async fn serve(
+    db: Pool<Sqlite>,
+    host: String,
+    port: u16,
+    public_url: Option<String>,
+) -> Result<()> {
     let config = crate::config::ServiceCredentials::load();
+    // Note: config is reloaded here for the serve() scope;
+    // main() already loaded it, but we need an owned copy for AppState.
+    // In a future refactor, main() could pass it in directly.
     let task_manager = crate::tasks::TaskManager::new();
+
+    // CLI --public-url flag takes highest priority, then env var/config.toml
+    let public_url = public_url.or_else(|| config.server_public_url.clone());
 
     // Clone for subscription poller (background task needs own ownership)
     let poller_db = db.clone();
@@ -236,11 +312,24 @@ async fn serve(db: Pool<Sqlite>, host: String, port: u16) -> Result<()> {
         config,
         task_manager,
         embeddings: tokio::sync::Mutex::new(None),
+        public_url,
     });
+
+    // Query subscription count so the poller startup log is accurate
+    let sub_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subscriptions")
+        .fetch_one(&poller_db)
+        .await
+        .unwrap_or(0);
 
     // Spawn subscription poller — polls subscribed playlists every 30s
     let poller_handle = tokio::spawn(async move {
-        crate::poller::start_subscription_poller(poller_db, poller_config, poller_cancel).await;
+        crate::poller::start_subscription_poller(
+            poller_db,
+            poller_config,
+            poller_cancel,
+            sub_count,
+        )
+        .await;
     });
     // Keep poller alive for the lifetime of the server
     let _poller_handle = poller_handle;
@@ -269,7 +358,13 @@ async fn serve(db: Pool<Sqlite>, host: String, port: u16) -> Result<()> {
 
     let address = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&address).await?;
-    info!("Serving HTTP on http://{host}:{port}/");
+    let actual_addr = listener.local_addr()?;
+    info!("Listening on http://{addr}/", addr = actual_addr);
+
+    info!(
+        "🚀 Momo's Music Manager v{} started",
+        env!("CARGO_PKG_VERSION")
+    );
     axum::serve(listener, app).await?;
 
     Ok(())

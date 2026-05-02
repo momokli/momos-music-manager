@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Spotify API response recorder/replayer for development
 //!
 //! Controlled by `SPOTIFY_API_CACHE` env var:

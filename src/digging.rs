@@ -9,11 +9,13 @@ use crate::db::File;
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub struct CamelotKey {
     pub position: u8, // 1-12
     pub mode: char,   // 'A' or 'B'
 }
 
+#[allow(dead_code)]
 pub fn parse_camelot_key(s: &str) -> Option<CamelotKey> {
     // Parse "8A", "8B", "12A", "1B", etc.
     // At least 2 chars: number then A/B
@@ -34,6 +36,7 @@ pub fn parse_camelot_key(s: &str) -> Option<CamelotKey> {
 
 /// Check if two keys are compatible given the set of active jump types.
 /// jump_types: set of strings like "+1", "-1", "+2", "-2", "+7", "-7", "a_to_b", "same"
+#[allow(dead_code)]
 pub fn are_keys_compatible(from: CamelotKey, to: CamelotKey, active_jumps: &[String]) -> bool {
     if from == to && active_jumps.contains(&"same".to_string()) {
         return true;
@@ -151,6 +154,7 @@ pub struct TagWithEnergy {
 // Suggestion Engine
 // ============================================================================
 
+#[allow(dead_code)]
 pub async fn get_seeds(pool: &Pool<Sqlite>, query: &DiggingSeedQuery) -> Result<Vec<File>> {
     let limit = query.limit.unwrap_or(20).min(50);
 
@@ -215,6 +219,7 @@ pub async fn get_seeds(pool: &Pool<Sqlite>, query: &DiggingSeedQuery) -> Result<
     Ok(files)
 }
 
+#[allow(dead_code)]
 pub async fn get_suggestions(
     pool: &Pool<Sqlite>,
     req: &SuggestionRequest,
@@ -327,6 +332,7 @@ pub async fn get_suggestions(
     Ok(scored)
 }
 
+#[allow(dead_code)]
 pub async fn save_chain(
     pool: &Pool<Sqlite>,
     task_manager: &crate::tasks::TaskManager,

@@ -9,6 +9,14 @@
 //! # Example config.toml
 //!
 //! ```toml
+//! [database]
+//! url = "sqlite:~/.local/share/momos-music-manager/library.db"
+//!
+//! [server]
+//! host = "127.0.0.1"
+//! port = 3000
+//! public_url = "https://mmm.mydomain.de"
+//!
 //! [spotify]
 //! client_id     = "your_spotify_client_id"
 //! client_secret = "your_spotify_client_secret"
@@ -44,6 +52,22 @@ struct TomlConfig {
     spotify: Option<SpotifyToml>,
     soundcloud: Option<SoundcloudToml>,
     youtube: Option<YoutubeToml>,
+    database: Option<DatabaseToml>,
+    server: Option<ServerToml>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct DatabaseToml {
+    url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct ServerToml {
+    host: Option<String>,
+    port: Option<u16>,
+    public_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -83,11 +107,22 @@ pub struct ServiceCredentials {
 
     // SoundCloud API credentials
     pub soundcloud_api_key: Option<String>,
+    #[allow(dead_code)]
     pub soundcloud_user_id: Option<String>,
 
     // YouTube API credentials
     pub youtube_api_key: Option<String>,
+    #[allow(dead_code)]
     pub youtube_playlist_id: Option<String>,
+
+    // Database configuration
+    pub database_url: String,
+
+    // Server configuration
+    pub server_host: String,
+    pub server_port: u16,
+    #[allow(dead_code)]
+    pub server_public_url: Option<String>,
 }
 
 impl ServiceCredentials {
@@ -156,12 +191,40 @@ impl ServiceCredentials {
                     .as_ref()
                     .and_then(|s| s.playlist_id.clone()),
             ),
+
+            // Database: env var > config.toml > built-in default
+            database_url: env_or_toml(
+                "DATABASE_URL",
+                toml_config.database.as_ref().and_then(|d| d.url.clone()),
+            )
+            .unwrap_or_else(default_database_url),
+
+            // Server host: env var > config.toml > built-in default
+            server_host: env_or_toml(
+                "HOST",
+                toml_config.server.as_ref().and_then(|s| s.host.clone()),
+            )
+            .unwrap_or_else(|| "127.0.0.1".to_string()),
+
+            // Server port: env var > config.toml > built-in default
+            server_port: env_or_toml_port("PORT", toml_config.server.as_ref().and_then(|s| s.port))
+                .unwrap_or(3000),
+
+            // Server public URL: env var > config.toml > None
+            server_public_url: env_or_toml_opt(
+                "PUBLIC_URL",
+                toml_config
+                    .server
+                    .as_ref()
+                    .and_then(|s| s.public_url.clone()),
+            ),
         }
     }
 
     /// Load credentials exclusively from environment variables (legacy path).
     ///
     /// Useful for tests or scenarios where you don't want TOML file interaction.
+    #[allow(dead_code)]
     pub fn from_env() -> Self {
         Self {
             spotify_client_id: env_var_optional("SPOTIFY_CLIENT_ID"),
@@ -174,6 +237,13 @@ impl ServiceCredentials {
 
             youtube_api_key: env_var_optional("YOUTUBE_API_KEY"),
             youtube_playlist_id: env_var_optional("YOUTUBE_PLAYLIST_ID"),
+
+            database_url: env_var("DATABASE_URL").unwrap_or_else(|_| default_database_url()),
+            server_host: env_var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
+            server_port: env_var_optional("PORT")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3000),
+            server_public_url: env_var_optional("PUBLIC_URL"),
         }
     }
 
@@ -240,12 +310,14 @@ impl ServiceCredentials {
             .ok_or_else(|| anyhow::anyhow!("Spotify client secret not configured (set in config.toml or SPOTIFY_CLIENT_SECRET env var)"))
     }
 
+    #[allow(dead_code)]
     pub fn soundcloud_api_key(&self) -> anyhow::Result<&str> {
         self.soundcloud_api_key
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("SoundCloud API key not configured (set in config.toml or SOUNDCLOUD_API_KEY env var)"))
     }
 
+    #[allow(dead_code)]
     pub fn youtube_api_key(&self) -> anyhow::Result<&str> {
         self.youtube_api_key.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -258,12 +330,14 @@ impl ServiceCredentials {
 // ── Helper functions ───────────────────────────────────────────────────────
 
 /// Read a required env var.
+#[allow(dead_code)]
 fn env_var(name: &str) -> anyhow::Result<String> {
     std::env::var(name)
         .map_err(|_| anyhow::anyhow!("Missing required environment variable: {}", name))
 }
 
 /// Read an optional env var.
+#[allow(dead_code)]
 fn env_var_optional(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
@@ -284,4 +358,19 @@ fn env_or_toml_opt(name: &str, toml_value: Option<String>) -> Option<String> {
         Ok(_) => None, // explicitly emptied → clear
         Err(_) => toml_value,
     }
+}
+
+/// Return the env var (as a port number) if set, otherwise fall back to the TOML value.
+fn env_or_toml_port(name: &str, toml_value: Option<u16>) -> Option<u16> {
+    match std::env::var(name) {
+        Ok(v) if !v.is_empty() => v.parse::<u16>().ok(),
+        Ok(_) => toml_value,
+        Err(_) => toml_value,
+    }
+}
+
+/// Built-in default database URL with `~` expanded to the home directory.
+fn default_database_url() -> String {
+    let expanded = shellexpand::tilde("~/.local/share/momos-music-manager/library.db");
+    format!("sqlite:{}", expanded)
 }

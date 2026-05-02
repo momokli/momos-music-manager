@@ -5,13 +5,11 @@
 
 use anyhow::{Context, Result};
 use chrono::Duration;
-#[allow(unused_imports)]
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth, Token,
     clients::{BaseClient, OAuthClient},
     model::{
-        Id, Market, PlaylistId, SimplifiedPlaylist, TrackId, playlist::FullPlaylist,
-        track::FullTrack,
+        Market, PlaylistId, SimplifiedPlaylist, TrackId, playlist::FullPlaylist, track::FullTrack,
     },
 };
 use sqlx::Pool;
@@ -30,6 +28,7 @@ pub struct SpotifyClient {
     pub db: Pool<sqlx::Sqlite>,
 
     /// Service name (always "spotify")
+    #[allow(dead_code)]
     pub service: String,
 }
 
@@ -122,6 +121,7 @@ impl SpotifyClient {
     }
 
     /// Check if the client is authenticated and tokens are valid
+    #[allow(dead_code)]
     pub async fn is_authenticated(&self) -> bool {
         let token_lock = self.spotify.token.lock().await;
         if let Ok(guard) = token_lock {
@@ -287,6 +287,7 @@ impl SpotifyClient {
     }
 
     /// Get a track by ID
+    #[allow(dead_code)]
     pub async fn get_track(&self, track_id: &str) -> Result<FullTrack> {
         self.refresh_token_if_needed().await?;
 
@@ -300,6 +301,7 @@ impl SpotifyClient {
     }
 
     /// Get the current user's profile
+    #[allow(dead_code)]
     pub async fn get_current_user(&self) -> Result<rspotify::model::PrivateUser> {
         self.refresh_token_if_needed().await?;
 
@@ -310,6 +312,7 @@ impl SpotifyClient {
     }
 
     /// Save current tokens to database
+    #[allow(dead_code)]
     pub async fn save_tokens_to_db(&self) -> Result<()> {
         let (refresh_token, access_token, token_expiry) = {
             let token_lock = self.spotify.token.lock().await;

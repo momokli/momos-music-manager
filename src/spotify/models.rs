@@ -9,6 +9,7 @@ use rspotify::prelude::Id;
 use serde::{Deserialize, Serialize};
 
 /// Spotify-specific sync result
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SpotifySyncResult {
     /// Number of playlists synced
@@ -25,6 +26,7 @@ pub struct SpotifySyncResult {
 
 impl SpotifySyncResult {
     /// Create a successful sync result
+    #[allow(dead_code)]
     pub fn success(
         playlist_count: usize,
         track_count: usize,
@@ -41,6 +43,7 @@ impl SpotifySyncResult {
     }
 
     /// Create a failed sync result
+    #[allow(dead_code)]
     pub fn failed(error_details: String) -> Self {
         Self {
             playlist_count: 0,

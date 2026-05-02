@@ -1,6 +1,6 @@
 # Momo's Music Manager — Architecture Overview
 
-> RC1 — Rust backend (Axum/SQLx/SQLite) + modular vanilla JS SPA frontend.
+> Rust backend (Axum/SQLx/SQLite) + modular vanilla JS SPA frontend.
 
 ---
 
@@ -25,7 +25,7 @@
 - **`pages/`** — one module per route (dashboard, files, tracks, playlists, tags, tag-categories, services, folders, tasks, auto-categorize, traktor-import)
 - **`shared/`** — reusable modules (api.js, components.js, format.js, nav.js, search-filter.js)
 - **No build tool, no framework**
-- Dev server: `python3 -m http.server 8000`
+- Frontend is embedded in the Rust binary via `rust-embed`; no separate dev server needed
 - Backend communication via `fetch()` + REST API
 - **Standalone page**: `digging.html` (not part of SPA)
 
@@ -35,17 +35,34 @@
 
 **Single Migration**: `migrations/001_initial_schema.sql`
 
-| Table                     | Purpose                                | BPM/Key? |
-| ------------------------- | -------------------------------------- | -------- |
-| `tag_categories`          | Setlist, Phase, Mood, Vibe, Merkmal    | —        |
-| `tags`                    | Tag catalog, UNIQUE name               | —        |
-| `service_tracks`          | Tracks from Spotify/SoundCloud/YouTube | ❌ No    |
-| `service_playlists`       | Playlists from services                | —        |
-| `service_playlist_tracks` | Many-to-many playlist ↔ track          | —        |
-| `files`                   | **Local files** with all metadata      | ✅ Yes   |
-| `service_config`          | OAuth tokens (access, refresh, expiry) | —        |
-| `folders`                 | Watched folders with scan config       | —        |
-| `subscriptions`           | Playlist subscriptions for polling     | —        |
+### Tables (12)
+
+| Table                     | Purpose                                 | BPM/Key? |
+| ------------------------- | --------------------------------------- | -------- |
+| `tag_categories`          | Setlist, Phase, Mood, Vibe, Merkmal     | —        |
+| `tags`                    | Tag catalog, UNIQUE name                | —        |
+| `service_tracks`          | Tracks from Spotify/SoundCloud/YouTube  | ❌ No    |
+| `service_playlists`       | Playlists from services                 | —        |
+| `service_playlist_tracks` | Many-to-many playlist ↔ track           | —        |
+| `files`                   | **Local files** with all metadata       | ✅ Yes   |
+| `service_config`          | OAuth tokens (access, refresh, expiry)  | —        |
+| `folders`                 | Watched folders with scan config        | —        |
+| `subscriptions`           | Playlist subscriptions for polling      | —        |
+| `tag_embeddings`          | ML embedding vectors for tags           | —        |
+| `tag_energy_levels`       | Energy level assignments for Phase tags | —        |
+| `tag_similarities`        | Precomputed tag similarity scores       | —        |
+
+### Views (7)
+
+| View                     | Purpose                                     |
+| ------------------------ | ------------------------------------------- |
+| `unified_tracks`         | Union of service tracks and local files     |
+| `v_file_track_link`      | Links local files to matched service tracks |
+| `v_tag_playlist`         | Tags matched to playlists by name           |
+| `v_file_tags`            | Tags matched to files via playlists         |
+| `v_subscriptions`        | Active subscriptions with poll status       |
+| `v_tag_categories`       | Tag categories with tag counts              |
+| `v_tags_with_categories` | Tags joined with their category info        |
 
 ### Patterns
 
@@ -68,6 +85,19 @@
 ### Config.toml format
 
 ```toml
+[database]
+# Default: sqlite:~/.local/share/momos-music-manager/library.db
+# Override with DATABASE_URL env var
+url = "sqlite:~/.local/share/momos-music-manager/library.db"
+
+[server]
+# Override with SERVER_HOST env var
+host = "127.0.0.1"
+# Override with SERVER_PORT env var
+port = 3000
+# Override with PUBLIC_URL env var or --public-url CLI flag
+# public_url = "https://mmm.mydomain.de"
+
 [spotify]
 client_id     = "your_spotify_client_id"
 client_secret = "your_spotify_client_secret"
@@ -84,7 +114,7 @@ playlist_id  = "your_youtube_playlist_id"
 
 ### Dev-only env vars (not in config.toml)
 
-- `DATABASE_URL` — defaults to `sqlite:app.db`
+- `DATABASE_URL` — overrides `[database].url` from config.toml; defaults to `sqlite:~/.local/share/momos-music-manager/library.db`
 - `SPOTIFY_API_CACHE` — `record`/`replay` for Spotify API caching
 - `SCAN_CACHE` — `record`/`replay` for file scan caching
 
@@ -115,8 +145,10 @@ GET    /api/tracks/{id}               # Detail
 ### Playlists + Tags
 
 ```
-GET    /api/playlists                          # All playlists
+GET    /api/playlists                          # All playlists (supports service, search, untagged, mismatch filters)
 GET    /api/playlists/{id}/tracks              # Tracks in a playlist
+GET/POST /api/playlists/subscriptions          # List / create subscription
+DELETE /api/playlists/subscriptions/{id}       # Delete subscription
 
 GET/POST   /api/tags                            # List / create
 PUT/DELETE /api/tags/{id}                       # Update / delete
@@ -178,14 +210,6 @@ GET    /api/digging/energy-levels               # Tag energy levels
 POST   /api/digging/energy-levels               # Set energy level
 DELETE /api/digging/energy-levels/{id}          # Delete energy level
 POST   /api/digging/reorder-tags                # Batch reorder tags
-```
-
-### Subscriptions
-
-```
-GET    /api/subscriptions                       # List playlist subscriptions
-POST   /api/subscriptions                       # Create subscription
-DELETE /api/subscriptions/{id}                  # Delete subscription
 ```
 
 ### Health
@@ -350,11 +374,11 @@ Spotify URL → Download tool → FLACs → NUO-STEMS → STEMs → Taggen → T
 ## Dev Commands
 
 ```bash
-# Start backend
+# Start backend (also serves frontend via rust-embed)
 cargo run -- serve --host 127.0.0.1 --port 3000
 
-# Start frontend (separate terminal)
-cd frontend && python3 -m http.server 8000
+# Or with a public URL for OAuth callbacks
+cargo run -- serve --host 127.0.0.1 --port 3000 --public-url https://mmm.mydomain.de
 
 # Scan single file for metadata debugging
 cargo run -- scan-file /path/to/file.stem.m4a
@@ -362,6 +386,11 @@ cargo run -- scan-file /path/to/file.stem.m4a
 # DB dump/restore (save before deleting app.db)
 cargo run -- dump
 cargo run -- restore
+
+# Launch agent (macOS only)
+cargo run -- install-launch-agent
+cargo run -- uninstall-launch-agent
+cargo run -- service-status
 
 # Spotify API caching
 SPOTIFY_API_CACHE=record cargo run -- serve
@@ -383,7 +412,9 @@ rm -rf dev-data/scan-cache
 - Docker Compose (to be recreated later)
 - Advanced harmonic matching (relative keys, extended intervals)
 - Preset management
+- Explorer/curator preset system (endpoints defined, handlers stubbed)
+- WebSocket support for real-time task updates (endpoint stubbed)
 
 ---
 
-_Last Updated: 2026-04-30 — rc1_
+_Last Updated: 2026-05-01_

@@ -51,8 +51,16 @@ pub async fn start_subscription_poller(
     db: Pool<Sqlite>,
     credentials: ServiceCredentials,
     cancel_token: CancellationToken,
+    subscription_count: i64,
 ) {
-    info!("Subscription poller started (interval: 30s)");
+    if subscription_count == 0 {
+        info!("Subscription poller started (idle, 0 subscriptions)");
+    } else {
+        info!(
+            "Subscription poller started ({sub} subscription(s), interval: 30s)",
+            sub = subscription_count,
+        );
+    }
 
     loop {
         // Short sleep first so the outer task has a chance to register

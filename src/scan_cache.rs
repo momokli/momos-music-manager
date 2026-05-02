@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Scan cache for development — records and replays file metadata extraction
 //!
 //! Controlled by `SCAN_CACHE` env var:

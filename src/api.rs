@@ -1,3 +1,7 @@
+// API surface: struct fields used only by serde deserialization are intentionally
+// kept for future API consumers. Handler functions not yet wired are for planned routes.
+#![allow(dead_code)]
+
 use anyhow::Result;
 use axum::{
     Json, Router,
@@ -30,6 +34,9 @@ use crate::db::{
     update_folder_active, update_folder_with_config, update_service_connection_status,
     update_service_tokens, update_tag, update_tag_category_metadata, upsert_tag_embedding,
 };
+use crate::deemix::{
+    DeemixAuthRequest, DeemixClient, DeemixCombinedQueueItem, DeemixEnqueueRequest,
+};
 use crate::digging::{
     TagReorderItem, delete_tag_energy_level, get_tag_energy_levels, reorder_tags_batch,
     set_tag_energy_level,
@@ -38,10 +45,7 @@ use crate::embeddings::{
     EmbeddingModel, compute_tag_similarities, deserialize_embedding, mean_embedding,
     serialize_embedding, suggest_category,
 };
-#[allow(unused_imports)]
-use crate::tasks::{
-    SyncConfig, SyncType, TaskManager, TaskStatus, TaskType, start_write_comment_task,
-};
+use crate::tasks::{SyncType, TaskStatus};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -282,6 +286,7 @@ impl From<ServiceTrack> for ApiServiceTrack {
             imported_at: track.imported_at,
             updated_at: track.updated_at,
             local_files: vec![],
+            playlist_names: vec![],
         }
     }
 }
@@ -345,6 +350,8 @@ pub struct ApiServiceTrack {
     pub updated_at: i64,
     #[serde(default)]
     pub local_files: Vec<String>,
+    #[serde(default)]
+    pub playlist_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -493,6 +500,7 @@ pub struct TracksQuery {
     pub offset: Option<i64>,
     pub service: Option<String>,
     pub search: Option<String>,
+    pub playlist_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -811,6 +819,7 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/services/{service}/sync", post(service_sync_handler))
         .route("/api/playlists", get(playlists_handler))
+        .route("/api/playlists/{id}", get(playlist_detail_handler))
         .route(
             "/api/playlists/{id}/tracks",
             get(playlist_tracks_handler).post(add_track_to_playlist_handler),
@@ -848,6 +857,19 @@ pub fn router() -> Router<Arc<AppState>> {
             get(spotify_sync_task_handler).delete(spotify_sync_cancel_handler),
         )
         .route("/api/services/{service}/reset", post(service_reset_handler))
+        .route("/api/services/deemix/auth", post(deemix_auth_handler))
+        .route(
+            "/api/services/deemix/queue",
+            get(deemix_queue_handler).post(deemix_enqueue_handler),
+        )
+        .route(
+            "/api/services/deemix/queue/{id}/retry",
+            post(deemix_retry_handler),
+        )
+        .route(
+            "/api/services/deemix/queue/{id}",
+            delete(deemix_delete_handler),
+        )
         .route("/api/tasks", get(tasks_list_handler))
         .route(
             "/api/tasks/{id}",
@@ -1299,7 +1321,7 @@ async fn add_seed_handler(
     State(_state): State<Arc<AppState>>,
     Json(_request): Json<AddSeedRequest>,
 ) -> impl IntoResponse {
-    // TODO: Implement add seed
+    // TODO: Implement add seed — needs source type detection (file vs service track)
     Json(ApiResponse {
         data: "add_seed_handler not implemented",
     })
@@ -1316,14 +1338,14 @@ async fn explorer_matches_with_config_handler(
     State(_state): State<Arc<AppState>>,
     Json(_request): Json<ExplorerMatchesRequest>,
 ) -> impl IntoResponse {
-    // TODO: Implement matches with config
+    // TODO: Implement matches with config — apply user's filter/preset configuration to matching
     Json(ApiResponse {
         data: "explorer_matches_with_config not implemented",
     })
 }
 
 async fn explorer_presets_handler(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
-    // TODO: Implement get explorer presets
+    // TODO: Implement get explorer presets — CRUD for saved match configurations
     Json(ApiResponse {
         data: "explorer_presets not implemented",
     })
@@ -1333,7 +1355,7 @@ async fn create_explorer_preset_handler(
     State(_state): State<Arc<AppState>>,
     Json(_request): Json<CreateExplorerPresetRequest>,
 ) -> impl IntoResponse {
-    // TODO: Implement create explorer preset
+    // TODO: Implement create explorer preset — save current match config as named preset
     Json(ApiResponse {
         data: "create_explorer_preset not implemented",
     })
@@ -1344,7 +1366,7 @@ async fn update_explorer_preset_handler(
     Path(id): Path<i64>,
     Json(_request): Json<UpdateExplorerPresetRequest>,
 ) -> impl IntoResponse {
-    // TODO: Implement update explorer preset
+    // TODO: Implement update explorer preset — rename or change config of saved preset
     Json(ApiResponse {
         data: format!("update_explorer_preset not implemented for id {}", id),
     })
@@ -1354,7 +1376,7 @@ async fn delete_explorer_preset_handler(
     State(_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    // TODO: Implement delete explorer preset
+    // TODO: Implement delete explorer preset — remove saved preset by id
     Json(ApiResponse {
         data: format!("delete_explorer_preset not implemented for id {}", id),
     })
@@ -1364,7 +1386,7 @@ async fn use_explorer_preset_handler(
     State(_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    // TODO: Implement use explorer preset
+    // TODO: Implement use explorer preset — apply preset config and return matches
     Json(ApiResponse {
         data: format!("use_explorer_preset not implemented for id {}", id),
     })
@@ -2435,11 +2457,26 @@ async fn service_auth_handler(
 ) -> impl IntoResponse {
     use axum::http::StatusCode;
 
-    if service != "spotify" && service != "soundcloud" && service != "youtube" {
+    if service != "spotify"
+        && service != "soundcloud"
+        && service != "youtube"
+        && service != "deemix"
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse {
                 data: format!("Unsupported service: {}", service),
+            }),
+        )
+            .into_response();
+    }
+
+    // Deemix uses its own auth endpoint (/api/services/deemix/auth), not OAuth
+    if service == "deemix" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                data: "Deemix auth is handled via /api/services/deemix/auth".to_string(),
             }),
         )
             .into_response();
@@ -2583,11 +2620,26 @@ async fn service_callback_handler(
 ) -> impl IntoResponse {
     use axum::http::StatusCode;
 
-    if service != "spotify" && service != "soundcloud" && service != "youtube" {
+    if service != "spotify"
+        && service != "soundcloud"
+        && service != "youtube"
+        && service != "deemix"
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse {
                 data: format!("Unsupported service: {}", service),
+            }),
+        )
+            .into_response();
+    }
+
+    // Deemix does not use OAuth callbacks
+    if service == "deemix" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                data: "Deemix does not use OAuth callbacks".to_string(),
             }),
         )
             .into_response();
@@ -2788,8 +2840,13 @@ async fn service_callback_handler(
                     tracing::warn!("Failed to update connection status: {}", e);
                 }
 
-                // TODO: dynamically redirect to the frontend URL
-                return Redirect::to("http://localhost:3000").into_response();
+                let redirect_url = state.public_url.clone().unwrap_or_else(|| {
+                    format!(
+                        "http://{}:{}",
+                        state.config.server_host, state.config.server_port
+                    )
+                });
+                return Redirect::to(&redirect_url).into_response();
             }
 
             (
@@ -2993,7 +3050,13 @@ async fn legacy_callback_handler(
                     tracing::warn!("Failed to update connection status: {}", e);
                 }
 
-                return Redirect::to("http://localhost:8000").into_response();
+                let redirect_url = state.public_url.clone().unwrap_or_else(|| {
+                    format!(
+                        "http://{}:{}",
+                        state.config.server_host, state.config.server_port
+                    )
+                });
+                return Redirect::to(&redirect_url).into_response();
             }
 
             (
@@ -3074,7 +3137,11 @@ async fn service_sync_handler(
 ) -> impl IntoResponse {
     use axum::http::StatusCode;
 
-    if service != "spotify" && service != "soundcloud" && service != "youtube" {
+    if service != "spotify"
+        && service != "soundcloud"
+        && service != "youtube"
+        && service != "deemix"
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse {
@@ -3101,6 +3168,13 @@ async fn service_sync_handler(
             }),
         )
             .into_response(),
+        "deemix" => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ApiResponse {
+                data: "Deemix sync uses /api/services/deemix/queue".to_string(),
+            }),
+        )
+            .into_response(),
         _ => unreachable!(), // Already filtered above
     }
 }
@@ -3111,7 +3185,11 @@ async fn service_reset_handler(
 ) -> impl IntoResponse {
     use axum::http::StatusCode;
 
-    if service != "spotify" && service != "soundcloud" && service != "youtube" {
+    if service != "spotify"
+        && service != "soundcloud"
+        && service != "youtube"
+        && service != "deemix"
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse {
@@ -3123,20 +3201,38 @@ async fn service_reset_handler(
 
     // Clear tokens and mark as disconnected
     let now = chrono::Utc::now().timestamp();
-    match sqlx::query(
-        r#"
-        UPDATE service_config
-        SET refresh_token = NU7LL, access_token = NULL, token_expiry = NULL,
-            is_connected = 0, last_checked = ?, updated_at = ?
-        WHERE service = ?
-        "#,
-    )
-    .bind(now)
-    .bind(now)
-    .bind(&service)
-    .execute(&state.db)
-    .await
-    {
+    let result = if service == "deemix" {
+        // For deemix, clear access_token, metadata_json and mark disconnected
+        sqlx::query(
+            r#"
+            UPDATE service_config
+            SET access_token = NULL, metadata_json = NULL,
+                is_connected = 0, last_checked = ?, updated_at = ?
+            WHERE service = ?
+            "#,
+        )
+        .bind(now)
+        .bind(now)
+        .bind(&service)
+        .execute(&state.db)
+        .await
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE service_config
+            SET refresh_token = NULL, access_token = NULL, token_expiry = NULL,
+                is_connected = 0, last_checked = ?, updated_at = ?
+            WHERE service = ?
+            "#,
+        )
+        .bind(now)
+        .bind(now)
+        .bind(&service)
+        .execute(&state.db)
+        .await
+    };
+
+    match result {
         Ok(_) => Json(ApiResponse {
             data: format!("Successfully reset connection for {}", service),
         })
@@ -3152,6 +3248,431 @@ async fn service_reset_handler(
                 .into_response()
         }
     }
+}
+
+// ── Deemix handlers ───────────────────────────────────────────────────
+
+/// POST /api/services/deemix/auth
+///
+/// Validates ARL against a deemix server, then stores the config.
+/// Body: { "arl": "...", "host": "http://localhost:6595" }
+async fn deemix_auth_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<DeemixAuthRequest>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    let host = request.host.trim_end_matches('/').to_string();
+    if host.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                data: "Host is required".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    if request.arl.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                data: "ARL is required".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    // Build a temporary client to test the ARL
+    let client = DeemixClient::new(&host, state.db.clone());
+    match client.login_arl(&request.arl).await {
+        Ok(_) => {
+            // Store ARL as access_token and host in metadata_json
+            let metadata = serde_json::json!({"host": host});
+            let now = chrono::Utc::now().timestamp();
+
+            let result = sqlx::query(
+                r#"
+                INSERT INTO service_config (service, access_token, metadata_json, is_connected, last_checked, updated_at, created_at)
+                VALUES ('deemix', ?, ?, 1, ?, ?, COALESCE((SELECT created_at FROM service_config WHERE service = 'deemix'), ?))
+                ON CONFLICT(service) DO UPDATE SET
+                    access_token = excluded.access_token,
+                    metadata_json = excluded.metadata_json,
+                    is_connected = 1,
+                    last_checked = excluded.last_checked,
+                    updated_at = excluded.updated_at
+                "#,
+            )
+            .bind(&request.arl)
+            .bind(metadata.to_string())
+            .bind(now)
+            .bind(now)
+            .bind(now)
+            .execute(&state.db)
+            .await;
+
+            match result {
+                Ok(_) => {
+                    tracing::info!("Deemix configured and connected");
+                    Json(ApiResponse {
+                        data: serde_json::json!({"status": "connected"}),
+                    })
+                    .into_response()
+                }
+                Err(e) => {
+                    tracing::error!("Failed to store deemix config: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiResponse {
+                            data: format!("Failed to store config: {}", e),
+                        }),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!("Deemix auth failed: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    data: format!("Authentication failed: {}", e),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// GET /api/services/deemix/queue
+///
+/// Returns combined list of deemix queue items + local deemix_downloads entries.
+async fn deemix_queue_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Fetch local downloads from deemix_downloads table
+    let local_downloads = sqlx::query_as::<
+        _,
+        (
+            i64,
+            String,
+            Option<String>,
+            String,
+            i64,
+            i64,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+        ),
+    >(
+        r#"
+        SELECT id, spotify_playlist_url, playlist_name, status,
+               track_count_total, track_count_downloaded, error_message,
+               created_at, updated_at
+        FROM deemix_downloads
+        ORDER BY updated_at DESC
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    // Try to fetch remote queue from deemix server (if configured)
+    let remote_items = match load_deemix_client_from_db(&state.db).await {
+        Some(client) => client.get_queue().await.unwrap_or_default(),
+        None => std::collections::HashMap::new(),
+    };
+
+    // Backfill local deemix_downloads table with remote queue items not yet in DB
+    let now = chrono::Utc::now().timestamp();
+    for item in remote_items.values() {
+        let url = format!("https://open.spotify.com/playlist/{}", item.id);
+        let status = match item.status.as_str() {
+            "completed" | "withErrors" => "completed",
+            "queued" => "queued",
+            "downloading" => "downloading",
+            _ => "queued",
+        };
+        let _ = sqlx::query(
+            "INSERT OR IGNORE INTO deemix_downloads (spotify_playlist_url, playlist_name, status, track_count_total, track_count_downloaded, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&url)
+        .bind(&item.title)
+        .bind(status)
+        .bind(item.size)
+        .bind(item.downloaded)
+        .bind(now)
+        .bind(now)
+        .execute(&state.db)
+        .await;
+    }
+
+    // Build combined result
+    let mut combined: Vec<DeemixCombinedQueueItem> = Vec::new();
+
+    for (id, url, name, status, total, downloaded, error, created, updated) in local_downloads {
+        combined.push(DeemixCombinedQueueItem {
+            id: Some(id),
+            uuid: None,
+            spotify_playlist_url: Some(url),
+            playlist_name: name,
+            status,
+            track_count_total: total,
+            track_count_downloaded: downloaded,
+            error_message: error,
+            created_at: created,
+            updated_at: updated,
+            title: None,
+            artist: None,
+            progress: 0,
+        });
+    }
+
+    // Merge remote queue items (they may have richer status info)
+    for (uuid, item) in remote_items {
+        let status = match item.status.as_str() {
+            "completed" => "completed",
+            "withErrors" => "completed",
+            "queued" => "queued",
+            "downloading" => "downloading",
+            _ => "queued",
+        };
+
+        // Check if we already have this in local list by URL
+        let url = format!("https://open.spotify.com/playlist/{}", item.id);
+        let existing = combined
+            .iter_mut()
+            .find(|c| c.spotify_playlist_url.as_deref() == Some(&url));
+
+        if let Some(existing) = existing {
+            existing.uuid = Some(uuid);
+            existing.status = status.to_string();
+            existing.track_count_total = item.size;
+            existing.track_count_downloaded = item.downloaded;
+            existing.progress = item.progress;
+            existing.title = Some(item.title);
+            existing.artist = Some(item.artist);
+        } else {
+            combined.push(DeemixCombinedQueueItem {
+                id: None,
+                uuid: Some(uuid),
+                spotify_playlist_url: Some(url),
+                playlist_name: Some(item.title.clone()),
+                status: status.to_string(),
+                track_count_total: item.size,
+                track_count_downloaded: item.downloaded,
+                error_message: None,
+                created_at: None,
+                updated_at: None,
+                title: Some(item.title),
+                artist: Some(item.artist),
+                progress: item.progress,
+            });
+        }
+    }
+
+    Json(ApiResponse { data: combined }).into_response()
+}
+
+/// POST /api/services/deemix/queue
+///
+/// Add a Spotify playlist URL to the deemix download queue.
+/// Body: { "url": "https://open.spotify.com/playlist/..." }
+async fn deemix_enqueue_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<DeemixEnqueueRequest>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    if request.url.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                data: "URL is required".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    // Insert into local deemix_downloads table
+    let now = chrono::Utc::now().timestamp();
+    let insert_result = sqlx::query(
+        r#"
+        INSERT INTO deemix_downloads (spotify_playlist_url, status, created_at, updated_at)
+        VALUES (?, 'queued', ?, ?)
+        ON CONFLICT(spotify_playlist_url) DO UPDATE SET
+            status = 'queued',
+            error_message = NULL,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(&request.url)
+    .bind(now)
+    .bind(now)
+    .execute(&state.db)
+    .await;
+
+    if let Err(e) = insert_result {
+        tracing::error!("Failed to insert deemix download: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                data: format!("Failed to queue download: {}", e),
+            }),
+        )
+            .into_response();
+    }
+
+    // Forward to deemix server
+    if let Some(client) = load_deemix_client_from_db(&state.db).await
+        && let Err(e) = client.add_to_queue(&request.url).await
+    {
+        tracing::error!("Failed to forward URL to deemix server: {}", e);
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ApiResponse {
+                data: format!("Deemix server rejected the request: {}", e),
+            }),
+        )
+            .into_response();
+    }
+
+    Json(ApiResponse {
+        data: "Playlist added to download queue",
+    })
+    .into_response()
+}
+
+/// POST /api/services/deemix/queue/{id}/retry
+///
+/// Retry a failed download.
+async fn deemix_retry_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    // Get the URL from the local download
+    let url: Option<String> =
+        sqlx::query_scalar("SELECT spotify_playlist_url FROM deemix_downloads WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
+
+    let url = match url {
+        Some(u) => u,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse {
+                    data: format!("Download queue item {} not found", id),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Reset status to queued locally
+    let now = chrono::Utc::now().timestamp();
+    let _ = sqlx::query(
+        "UPDATE deemix_downloads SET status = 'queued', error_message = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(now)
+    .bind(id)
+    .execute(&state.db)
+    .await;
+
+    // Forward to deemix server (best-effort)
+    if let Some(client) = load_deemix_client_from_db(&state.db).await {
+        // We need to find the UUID — first get the queue to find it
+        match client.get_queue().await {
+            Ok(queue) => {
+                for (uuid, item) in &queue {
+                    let item_url = format!("https://open.spotify.com/playlist/{}", item.id);
+                    if item_url == url {
+                        if let Err(e) = client.retry_download(uuid).await {
+                            tracing::warn!("Failed to retry download on deemix: {}", e);
+                        }
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to get deemix queue for retry: {}", e);
+            }
+        }
+    }
+
+    Json(ApiResponse {
+        data: "Download queued for retry",
+    })
+    .into_response()
+}
+
+/// DELETE /api/services/deemix/queue/{id}
+///
+/// Remove a queue item from the local database.
+async fn deemix_delete_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    match sqlx::query("DELETE FROM deemix_downloads WHERE id = ?")
+        .bind(id)
+        .execute(&state.db)
+        .await
+    {
+        Ok(result) => {
+            if result.rows_affected() == 0 {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ApiResponse {
+                        data: format!("Download queue item {} not found", id),
+                    }),
+                )
+                    .into_response()
+            } else {
+                Json(ApiResponse {
+                    data: "Download queue item removed",
+                })
+                .into_response()
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to delete deemix download: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    data: format!("Failed to delete: {}", e),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Helper: load a DeemixClient from the database config.
+async fn load_deemix_client_from_db(db: &Pool<Sqlite>) -> Option<DeemixClient> {
+    let config = sqlx::query_as::<_, crate::db::ServiceConfig>(
+        "SELECT * FROM service_config WHERE service = 'deemix'",
+    )
+    .fetch_optional(db)
+    .await
+    .ok()??;
+
+    if !config.is_connected {
+        return None;
+    }
+
+    // Parse host from metadata_json, fall back to default
+    let host = config
+        .metadata_json
+        .as_deref()
+        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+        .and_then(|v| v.get("host").and_then(|h| h.as_str().map(String::from)))
+        .unwrap_or_else(|| "http://localhost:6595".to_string());
+
+    Some(DeemixClient::new(&host, db.clone()))
 }
 
 async fn spotify_sync_handler(state: Arc<AppState>, service: String) -> impl IntoResponse {
@@ -3503,9 +4024,102 @@ async fn playlists_handler(
         }
     };
 
+    // Get deemix status via SQL LEFT JOIN (matches playlist_id in URL)
+    let playlist_ids: Vec<String> = playlists.iter().map(|p| p.playlist_id.clone()).collect();
+    // Single query with IN clause to find all deemix matches
+    let mut deemix_statuses: std::collections::HashMap<String, (Option<String>, Option<i64>)> =
+        std::collections::HashMap::new();
+
+    // Build placeholders for IN clause
+    let placeholders: Vec<String> = playlist_ids.iter().map(|_| "?".to_string()).collect();
+    if !placeholders.is_empty() {
+        let sql = format!(
+            "SELECT sp.playlist_id, dd.status, dd.id
+             FROM service_playlists sp
+             LEFT JOIN deemix_downloads dd ON dd.spotify_playlist_url LIKE '%/' || sp.playlist_id
+             WHERE sp.playlist_id IN ({})",
+            placeholders.join(",")
+        );
+        let mut q = sqlx::query(&sql);
+        for pid in &playlist_ids {
+            q = q.bind(pid);
+        }
+        if let Ok(rows) = q.fetch_all(&state.db).await {
+            for row in rows {
+                let pid: String = row.try_get("playlist_id").unwrap_or_default();
+                let status: Option<String> = row.try_get("status").ok();
+                let dd_id: Option<i64> = row.try_get("id").ok();
+                deemix_statuses.insert(pid, (status, dd_id));
+            }
+        }
+    }
+
+    // Fallback: check live deemix queue for playlists not found in local table
+    let now = chrono::Utc::now().timestamp();
+    if let Some(client) = load_deemix_client_from_db(&state.db).await
+        && let Ok(remote_queue) = client.get_queue().await
+    {
+        for p in &playlists {
+            if deemix_statuses.contains_key(&p.playlist_id) {
+                continue;
+            }
+            for item in remote_queue.values() {
+                if item.id == p.playlist_id {
+                    let status = match item.status.as_str() {
+                        "completed" | "withErrors" => "completed",
+                        "queued" => "queued",
+                        "downloading" => "downloading",
+                        _ => "queued",
+                    };
+                    deemix_statuses.insert(p.playlist_id.clone(), (Some(status.to_string()), None));
+                    // Backfill into local table for future lookups
+                    let url = format!("https://open.spotify.com/playlist/{}", item.id);
+                    let _ = sqlx::query(
+                        "INSERT OR IGNORE INTO deemix_downloads (spotify_playlist_url, playlist_name, status, track_count_total, track_count_downloaded, created_at, updated_at)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    )
+                    .bind(&url)
+                    .bind(&item.title)
+                    .bind(status)
+                    .bind(item.size)
+                    .bind(item.downloaded)
+                    .bind(now)
+                    .bind(now)
+                    .execute(&state.db)
+                    .await;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Build enriched playlist objects with deemix status
+    let playlists_with_deemix: Vec<serde_json::Value> = playlists
+        .iter()
+        .map(|p| {
+            let (deemix_status, deemix_id) = deemix_statuses
+                .get(&p.playlist_id)
+                .cloned()
+                .unwrap_or((None, None));
+            serde_json::json!({
+                "id": p.id,
+                "service": p.service,
+                "playlistId": p.playlist_id,
+                "name": p.name,
+                "description": p.description,
+                "trackCount": p.track_count,
+                "importedAt": p.imported_at,
+                "updatedAt": p.updated_at,
+                "metadataJson": p.metadata_json,
+                "deemixStatus": deemix_status,
+                "deemixId": deemix_id,
+            })
+        })
+        .collect();
+
     Json(ApiResponse {
         data: serde_json::json!({
-            "playlists": playlists,
+            "playlists": playlists_with_deemix,
             "total": total,
             "limit": limit,
             "offset": offset,
@@ -3995,11 +4609,52 @@ async fn scan_folder_handler(
     }
 }
 
+async fn playlist_detail_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    // Query playlist by id with track count
+    let row = sqlx::query(
+        "SELECT sp.*, COUNT(spt.track_id) as track_count
+         FROM service_playlists sp
+         LEFT JOIN service_playlist_tracks spt ON spt.playlist_id = sp.id
+         WHERE sp.id = ?
+         GROUP BY sp.id",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await;
+
+    match row {
+        Ok(Some(row)) => {
+            let playlist = serde_json::json!({
+                "id": row.try_get::<i64, _>("id").unwrap_or(0),
+                "service": row.try_get::<String, _>("service").unwrap_or_default(),
+                "playlistId": row.try_get::<String, _>("playlist_id").unwrap_or_default(),
+                "name": row.try_get::<String, _>("name").unwrap_or_default(),
+                "description": row.try_get::<Option<String>, _>("description").unwrap_or(None),
+                "trackCount": row.try_get::<i64, _>("track_count").unwrap_or(0),
+                "importedAt": row.try_get::<i64, _>("imported_at").unwrap_or(0),
+                "updatedAt": row.try_get::<i64, _>("updated_at").unwrap_or(0),
+            });
+            Json(ApiResponse { data: playlist }).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse {
+                data: serde_json::json!({"error": "Playlist not found"}),
+            }),
+        )
+            .into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
 async fn playlist_tracks_handler(
     State(_state): State<Arc<AppState>>,
     Path(playlist_id): Path<i64>,
 ) -> impl IntoResponse {
-    // TODO: Implement fetching tracks for playlist
+    // TODO: Implement fetching tracks for playlist — query service_playlist_tracks for given playlist_id
     Json(ApiResponse {
         data: format!(
             "Playlist tracks endpoint not implemented for playlist_id: {}",
@@ -4013,7 +4668,7 @@ async fn add_track_to_playlist_handler(
     State(_state): State<Arc<AppState>>,
     Path(playlist_id): Path<i64>,
 ) -> impl IntoResponse {
-    // TODO: Implement adding track to playlist
+    // TODO: Implement adding track to playlist — insert into service_playlist_tracks
     Json(ApiResponse {
         data: format!(
             "Add track to playlist endpoint not implemented for playlist_id: {}",
@@ -4024,7 +4679,7 @@ async fn add_track_to_playlist_handler(
 }
 
 async fn ws_handler() -> impl IntoResponse {
-    // TODO: Implement WebSocket handler
+    // TODO: Implement WebSocket handler — for real-time task progress updates to frontend
     "WebSocket endpoint".into_response()
 }
 
@@ -4324,17 +4979,26 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
             Some(format!("%{}%", s))
         }
     });
+    let playlist_id_filter = query.playlist_id;
 
-    let mut sql = "SELECT * FROM service_tracks WHERE 1=1".to_string();
-    let mut params: Vec<String> = Vec::new();
+    // If filtering by playlist, use DISTINCT to avoid duplicates from the JOIN
+    let mut sql = if playlist_id_filter.is_some() {
+        "SELECT DISTINCT st.* FROM service_tracks st JOIN service_playlist_tracks spt ON spt.track_id = st.id WHERE 1=1"
+            .to_string()
+    } else {
+        "SELECT * FROM service_tracks WHERE 1=1".to_string()
+    };
 
     if search_pattern.is_some() {
         sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)");
     }
 
-    if let Some(service) = &service_filter {
+    if service_filter.is_some() {
         sql.push_str(" AND service = ?");
-        params.push(service.clone());
+    }
+
+    if playlist_id_filter.is_some() {
+        sql.push_str(" AND spt.playlist_id = ?");
     }
 
     sql.push_str(" ORDER BY id LIMIT ? OFFSET ?");
@@ -4347,6 +5011,10 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
 
     if let Some(service) = &service_filter {
         query_builder = query_builder.bind(service);
+    }
+
+    if let Some(pid) = playlist_id_filter {
+        query_builder = query_builder.bind(pid);
     }
 
     let tracks = query_builder
@@ -4362,6 +5030,7 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     // Get local file types for these tracks
     let track_ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
     let placeholders: Vec<String> = track_ids.iter().map(|_| "?".to_string()).collect();
+    let ids_list = placeholders.join(", ");
 
     let match_sql = format!(
         "SELECT st.id, COALESCE(GROUP_CONCAT(DISTINCT f.file_type), '') as file_types
@@ -4370,7 +5039,7 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
          LEFT JOIN files f ON f.id = v.file_id
          WHERE st.id IN ({})
          GROUP BY st.id",
-        placeholders.join(", ")
+        ids_list
     );
 
     let mut match_query = sqlx::query(&match_sql);
@@ -4392,12 +5061,44 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         files_map.insert(track_id, file_types);
     }
 
+    // Get playlist names for these tracks
+    let playlist_sql = format!(
+        "SELECT spt.track_id, COALESCE(GROUP_CONCAT(DISTINCT sp.name), '') as playlist_names
+         FROM service_playlist_tracks spt
+         JOIN service_playlists sp ON sp.id = spt.playlist_id
+         WHERE spt.track_id IN ({})
+         GROUP BY spt.track_id",
+        ids_list
+    );
+
+    let mut playlist_query = sqlx::query(&playlist_sql);
+    for id in &track_ids {
+        playlist_query = playlist_query.bind(id);
+    }
+
+    let playlist_rows = playlist_query.fetch_all(pool).await?;
+    let mut playlist_map: std::collections::HashMap<i64, Vec<String>> =
+        std::collections::HashMap::new();
+    for row in playlist_rows {
+        let track_id: i64 = row.try_get("track_id")?;
+        let names_str: String = row.try_get("playlist_names")?;
+        let names: Vec<String> = if names_str.is_empty() {
+            vec![]
+        } else {
+            names_str.split(',').map(|s| s.trim().to_string()).collect()
+        };
+        playlist_map.insert(track_id, names);
+    }
+
     Ok(tracks
         .into_iter()
         .map(|t| {
             let mut api_track = ApiServiceTrack::from(t);
             if let Some(file_types) = files_map.remove(&api_track.id) {
                 api_track.local_files = file_types;
+            }
+            if let Some(playlist_names) = playlist_map.remove(&api_track.id) {
+                api_track.playlist_names = playlist_names;
             }
             api_track
         })
@@ -4413,8 +5114,14 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
             Some(format!("%{}%", s))
         }
     });
+    let playlist_id_filter = query.playlist_id;
 
-    let mut sql = "SELECT COUNT(*) as count FROM service_tracks WHERE 1=1".to_string();
+    let mut sql = if playlist_id_filter.is_some() {
+        "SELECT COUNT(DISTINCT st.id) as count FROM service_tracks st JOIN service_playlist_tracks spt ON spt.track_id = st.id WHERE 1=1"
+            .to_string()
+    } else {
+        "SELECT COUNT(*) as count FROM service_tracks WHERE 1=1".to_string()
+    };
 
     if search_pattern.is_some() {
         sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)");
@@ -4422,6 +5129,10 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
 
     if service_filter.is_some() {
         sql.push_str(" AND service = ?");
+    }
+
+    if playlist_id_filter.is_some() {
+        sql.push_str(" AND spt.playlist_id = ?");
     }
 
     let mut query_builder = sqlx::query(&sql);
@@ -4432,6 +5143,10 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
 
     if let Some(service) = service_filter.as_ref() {
         query_builder = query_builder.bind(service);
+    }
+
+    if let Some(pid) = playlist_id_filter {
+        query_builder = query_builder.bind(pid);
     }
 
     let row = query_builder.fetch_one(pool).await?;
@@ -4506,22 +5221,8 @@ async fn get_explorer_seeds(pool: &Pool<Sqlite>) -> Result<Vec<ExplorerSeed>> {
     Ok(seeds)
 }
 
-// async fn add_explorer_seed(pool: &Pool<Sqlite>, track_id: i64) -> Result<ExplorerSeed> {
-//     // TODO: Implement proper seed addition with source type detection
-//     let row = sqlx::query("INSERT INTO explorer_seeds (source_type, source_id) VALUES ('file', ?) RETURNING id, source_type, source_id, added_at")
-//         .bind(track_id)
-//         .fetch_one(pool)
-//         .await?;
-//
-//     // Get the track details
-//     let track = get_file_by_id(pool, track_id).await?;
-//
-//     Ok(ExplorerSeed {
-//         id: row.try_get("id")?,
-//         track,
-//         added_at: row.try_get("added_at")?,
-//     })
-// }
+// NOTE: add_explorer_seed was removed — the add_seed_handler endpoint above is the intended
+// entry point and needs implementation there instead.
 
 async fn remove_explorer_seed(pool: &Pool<Sqlite>, id: i64) -> Result<()> {
     sqlx::query("DELETE FROM explorer_seeds WHERE id = ?")
@@ -4577,7 +5278,7 @@ async fn apply_bulk_tags(
     _tag_names: &[String],
     _category: Option<&str>,
 ) -> Result<()> {
-    // TODO: Implement bulk tagging
+    // TODO: Implement bulk tagging — batch assign tags to multiple tracks at once
     Ok(())
 }
 
@@ -4626,7 +5327,7 @@ async fn get_service_connections(
 ) -> Result<Vec<ServiceConnection>> {
     // Query all service configurations
     let configs = sqlx::query_as::<_, ServiceConfig>(
-        "SELECT * FROM service_config WHERE service IN ('spotify', 'soundcloud', 'youtube')",
+        "SELECT * FROM service_config WHERE service IN ('spotify', 'soundcloud', 'youtube', 'deemix')",
     )
     .fetch_all(pool)
     .await?;
@@ -4639,7 +5340,7 @@ async fn get_service_connections(
         .collect();
 
     // Expected services
-    let expected_services = ["spotify", "soundcloud", "youtube"];
+    let expected_services = ["spotify", "soundcloud", "youtube", "deemix"];
 
     let mut connections = Vec::new();
 
@@ -4648,6 +5349,8 @@ async fn get_service_connections(
             "spotify" => credentials.is_spotify_configured(),
             "soundcloud" => credentials.is_soundcloud_configured(),
             "youtube" => credentials.is_youtube_configured(),
+            // Deemix is configured via web UI (DB), not env vars
+            "deemix" => config_map.contains_key("deemix"),
             _ => false,
         };
 
@@ -4731,7 +5434,7 @@ async fn get_folders(pool: &Pool<Sqlite>) -> Result<Vec<FolderInfo>> {
 }
 
 async fn handle_websocket() {
-    // TODO: Implement WebSocket handling
+    // TODO: Implement WebSocket handling — upgrade connection, manage client set, broadcast task updates
 }
 
 /// Start a Traktor collection.nml import in the background.

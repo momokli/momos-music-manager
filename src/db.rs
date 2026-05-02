@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::{fs, path::Path, time::SystemTime};
 
 use anyhow::{Result, anyhow};
@@ -125,6 +127,7 @@ pub struct ServiceConfig {
     pub id: i64,
     pub service: String,
     pub refresh_token: Option<String>,
+    pub metadata_json: Option<String>,
     pub access_token: Option<String>,
     pub token_expiry: Option<i64>,
     pub user_id: Option<String>,

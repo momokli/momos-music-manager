@@ -24,6 +24,7 @@ pub struct EmbeddingModel {
     model: BertModel,
     tokenizer: Tokenizer,
     device: Device,
+    #[allow(dead_code)]
     pub dim: usize,
 }
 
@@ -193,6 +194,7 @@ pub fn mean_embedding(vectors: &[Vec<f32>]) -> Vec<f32> {
 }
 
 /// Normalisiert einen Vektor auf L2-Länge 1 (in-place)
+#[allow(dead_code)]
 pub fn l2_normalize(vec: &mut [f32]) {
     let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 1e-12 {

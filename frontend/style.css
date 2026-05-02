@@ -2775,6 +2775,34 @@ tr.row-mismatch td {
 .font-mono {
     font-family: var(--font-mono);
 }
+
+/* Playlist context badge in toolbar (e.g. tracks page when scoped) */
+.playlist-context-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: rgba(99, 102, 241, 0.1);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    border-radius: var(--radius-md);
+    font-size: 0.8rem;
+    color: var(--accent);
+    white-space: nowrap;
+}
+.playlist-context-badge .playlist-context-clear {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0 2px;
+    transition: color 0.15s;
+}
+.playlist-context-badge .playlist-context-clear:hover {
+    color: var(--red);
+}
+
 .font-medium {
     font-weight: 500;
 }

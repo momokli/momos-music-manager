@@ -42,6 +42,8 @@ pub enum TaskType {
         /// Optional custom path to collection.nml
         custom_path: Option<String>,
     },
+    /// Periodic poll of the deemix download queue
+    DeemixSync,
 }
 
 /// What to sync for a service
@@ -86,6 +88,7 @@ impl From<SyncType> for SyncConfig {
 
 impl SyncConfig {
     /// Convert to old SyncType for backward compat with SpotifySyncWorker
+    #[allow(dead_code)]
     pub fn to_sync_type(&self) -> SyncType {
         match self {
             SyncConfig::Playlists => SyncType::Playlists,
@@ -108,6 +111,7 @@ impl SyncConfig {
 
 impl SyncOperation {
     /// Convert to old SyncType for backward compat
+    #[allow(dead_code)]
     pub fn to_sync_type(&self) -> SyncType {
         match self {
             SyncOperation::Playlists => SyncType::Playlists,
@@ -118,6 +122,7 @@ impl SyncOperation {
     }
 
     /// Convert to old SyncConfig for backward compat
+    #[allow(dead_code)]
     pub fn to_sync_config(&self) -> SyncConfig {
         SyncConfig::from(self.clone())
     }
@@ -215,8 +220,10 @@ pub struct SyncProgress {
     pub logs: VecDeque<String>,
     // Timing (not serialized)
     #[serde(skip)]
+    #[allow(dead_code)]
     pub started_at: Instant,
     #[serde(skip)]
+    #[allow(dead_code)]
     pub estimated_remaining: Option<std::time::Duration>,
 }
 
@@ -381,6 +388,7 @@ pub fn task_type_conflict_key(task_type: &TaskType) -> Option<String> {
         TaskType::RecomputeEmbeddings => Some("embeddings".to_string()),
         TaskType::WriteComment { .. } => None,
         TaskType::TraktorImport { .. } => Some("traktor_import".to_string()),
+        TaskType::DeemixSync => None,
     }
 }
 
@@ -437,6 +445,7 @@ impl Task {
     }
 
     /// Check if task has been cancelled
+    #[allow(dead_code)]
     pub fn is_cancelled(&self) -> bool {
         self.cancel_token.is_cancelled()
     }
@@ -525,6 +534,7 @@ impl Task {
             TaskType::RecomputeEmbeddings => "recompute_embeddings".to_string(),
             TaskType::ScanFolder { .. } => "scan_folder".to_string(),
             TaskType::TraktorImport { .. } => "traktor_import".to_string(),
+            TaskType::DeemixSync => "deemix_sync".to_string(),
         };
         (task_type_str, task_details)
     }
@@ -639,6 +649,7 @@ impl TaskManager {
     }
 
     /// List all tasks (returns serializable snapshots, most recent first)
+    #[allow(dead_code)]
     pub async fn list_tasks(&self) -> Vec<TaskProgress> {
         let tasks = self.tasks.read().await;
         let mut result: Vec<TaskProgress> = tasks.values().map(|t| t.to_progress()).collect();
@@ -746,6 +757,7 @@ impl TaskManager {
     }
 
     /// Remove a task by ID
+    #[allow(dead_code)]
     pub async fn remove_task(&self, task_id: &str) {
         let mut tasks = self.tasks.write().await;
         tasks.remove(task_id);
@@ -787,6 +799,7 @@ impl Default for TaskManager {
 // ============================================================
 
 /// Derive a human-readable display label from a TaskType
+#[allow(dead_code)]
 pub fn task_type_label(task_type: &TaskType) -> String {
     match task_type {
         TaskType::ServiceSync { service, operation } => {
@@ -808,6 +821,7 @@ pub fn task_type_label(task_type: &TaskType) -> String {
         TaskType::RecomputeEmbeddings => "Recompute embeddings".to_string(),
         TaskType::ScanFolder { folder_id } => format!("Scan folder #{}", folder_id),
         TaskType::TraktorImport { custom_path: _ } => "Import from Traktor".to_string(),
+        TaskType::DeemixSync => "Deemix sync".to_string(),
     }
 }
 
@@ -1373,6 +1387,7 @@ pub async fn start_recompute_embeddings_task(
 ///
 /// Uses `start_task` (not `start_task_unique`) so duplicate scans per folder are
 /// prevented by the caller (`api.rs`) via the conflict key check.
+#[allow(dead_code)]
 pub async fn start_scan_folder_task(
     task_manager: &TaskManager,
     db: &sqlx::Pool<sqlx::Sqlite>,

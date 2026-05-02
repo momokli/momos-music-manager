@@ -23,6 +23,7 @@ tower = "0.5.2"
 hyper = "1.7.0"
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 futures = "0.3"
+reqwest = { version = "0.12", features = ["json", "cookies"] }
 dotenvy = "0.15"
 clap = { version = "4.5.50", features = ["derive"] }
 sha2 = "0.10"

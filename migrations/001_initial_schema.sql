@@ -28,7 +28,7 @@ CREATE TABLE tags (
 -- 3. SERVICE TRACKS (keine BPM/Key Spalten!)
 CREATE TABLE service_tracks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    service TEXT NOT NULL CHECK (service IN ('spotify', 'soundcloud', 'youtube')),
+    service TEXT NOT NULL CHECK (service IN ('spotify', 'soundcloud', 'youtube', 'deemix')),
     service_id TEXT NOT NULL,
     title TEXT NOT NULL,
     artist TEXT NOT NULL,
@@ -117,8 +117,9 @@ CREATE TABLE files (
 -- Sync state tracked in-memory, not in database
 CREATE TABLE service_config (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    service TEXT NOT NULL CHECK (service IN ('spotify', 'soundcloud', 'youtube')),
+    service TEXT NOT NULL CHECK (service IN ('spotify', 'soundcloud', 'youtube', 'deemix')),
     refresh_token TEXT,
+    metadata_json TEXT,
     access_token TEXT,
     token_expiry INTEGER,
     user_id TEXT,
@@ -198,6 +199,20 @@ CREATE TABLE tag_similarities (
 
 CREATE INDEX idx_tag_similarities_tag_a_id ON tag_similarities(tag_a_id);
 CREATE INDEX idx_tag_similarities_tag_b_id ON tag_similarities(tag_b_id);
+
+-- 13. DEEMIX DOWNLOADS (download queue tracking)
+CREATE TABLE deemix_downloads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    spotify_playlist_url TEXT NOT NULL,
+    playlist_name TEXT,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'downloading', 'completed', 'failed')),
+    track_count_total INTEGER DEFAULT 0,
+    track_count_downloaded INTEGER DEFAULT 0,
+    error_message TEXT,
+    created_at INTEGER DEFAULT (unixepoch()),
+    updated_at INTEGER DEFAULT (unixepoch()),
+    UNIQUE(spotify_playlist_url)
+);
 
 -- Indexes for Performance
 CREATE INDEX idx_tags_name ON tags(name);
@@ -337,7 +352,7 @@ INSERT INTO tag_energy_levels (tag_id, energy_level, created_at) VALUES
 
 
 -- Verification
-SELECT 'Migration 001 applied successfully: 12-table schema (added tag_similarities)' as status;
+SELECT 'Migration 001 applied successfully: 13-table schema (added deemix_downloads)' as status;
 
 SELECT
     (SELECT COUNT(*) FROM tag_categories) as tag_categories_count,
@@ -347,4 +362,5 @@ SELECT
     (SELECT COUNT(*) FROM service_playlist_tracks) as service_playlist_tracks_count,
     (SELECT COUNT(*) FROM files) as files_count,
     (SELECT COUNT(*) FROM service_config) as service_config_count,
-    (SELECT COUNT(*) FROM folders) as folders_count;
+    (SELECT COUNT(*) FROM folders) as folders_count,
+    (SELECT COUNT(*) FROM deemix_downloads) as deemix_downloads_count;

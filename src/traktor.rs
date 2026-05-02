@@ -40,6 +40,7 @@ pub struct TraktorEntry {
     /// Last played date in Traktor format (`LAST_PLAYED`), e.g. `"2025/12/1"`
     pub last_played_raw: Option<String>,
     /// Rating (`RANKING` attribute on `<INFO>`, 0-255 scale in Traktor)
+    #[allow(dead_code)]
     pub rating: Option<i32>,
 }
 
@@ -265,6 +266,7 @@ fn parse_last_played(date_str: &str) -> Option<i64> {
 /// - 103–153 = 3 stars
 /// - 154–204 = 4 stars
 /// - 205–255 = 5 stars
+#[allow(dead_code)]
 fn traktor_ranking_to_rating(ranking: i32) -> i32 {
     if ranking <= 0 {
         0

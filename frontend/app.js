@@ -25,6 +25,7 @@ const PAGE_MAP = {
   "auto-categorize": "auto-categorize",
   digging: "digging",
   "traktor-import": "traktor-import",
+  "deemix-queue": "deemix-queue",
 };
 
 let currentPageId = null;
@@ -87,7 +88,7 @@ async function navigate(pageId) {
     const mod = await import(`./pages/${pageId}.js`);
     if (typeof mod.init === "function") {
       container.innerHTML = ""; // Clear loading
-      mod.init(container, currentAbortController.signal);
+      mod.init(container, currentAbortController.signal, getHashParams());
     } else {
       container.innerHTML = `<div class="error-block">
         <div class="error-icon"><i class="fas fa-exclamation-triangle"></i></div>

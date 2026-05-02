@@ -26,6 +26,7 @@ const NAV_SECTIONS = [
       { id: "services", label: "Services", icon: "fa-cloud" },
       { id: "tasks", label: "Tasks", icon: "fa-list-check" },
       { id: "folders", label: "Folders", icon: "fa-folder" },
+      { id: "deemix-queue", label: "Deemix Queue", icon: "fa-download" },
       { id: "traktor-import", label: "Traktor Import", icon: "fa-compact-disc" },
     ],
   },
