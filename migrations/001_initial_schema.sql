@@ -326,6 +326,12 @@ SELECT t.id, t.name, t.category_id, t.sort_order, t.created_at, t.reviewed_at,
 FROM tags t
 LEFT JOIN tag_categories tc ON t.category_id = tc.id;
 
+-- Tag file counts (efficient view to avoid duplicate JOIN logic for file count per tag)
+CREATE VIEW v_tag_file_counts AS
+SELECT vft.tag_id, COUNT(DISTINCT vft.file_id) AS file_count
+FROM v_file_tags vft
+GROUP BY vft.tag_id;
+
 -- Initial data
 INSERT INTO tag_categories (name, icon, prefix, sort_order, is_default) VALUES
     ('Setlist', 'fa-solid fa-list-music', 'S', 0, TRUE),

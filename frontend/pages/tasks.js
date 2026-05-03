@@ -1,28 +1,54 @@
 /**
  * tasks.js — Task management page.
  *
- * Lists sync/scan tasks with status, progress, and actions:
- * cancel (running/pending), retry (failed), view logs (completed/failed).
- * Auto-polls while any task is running.
+ * CRUD page following the canonical pattern: stable toolbar + body with
+ * sortable table headers, page-size selector, hash URL state, and 5s
+ * auto-poll that only re-renders the body (not the toolbar).
+ *
+ * Actions: cancel (running/pending), retry (failed), view logs (completed/failed).
  */
 
 import {
+  escapeHtml,
   renderLoading,
   renderEmpty,
   renderErrorBlock,
-  Pagination,
+  renderTable,
   td,
+  showToast,
+  showModal,
 } from "../shared/components.js";
 import { formatDateTime } from "../shared/format.js";
 import { fetchJSON } from "../shared/api.js";
-import { renderFilterGroup, wireSearchFilter } from "../shared/search-filter.js";
+import {
+  renderSearchInput,
+  renderFilterGroup,
+  wireSearchFilter,
+} from "../shared/search-filter.js";
+import {
+  getPageSize,
+  renderPageSizeSelector,
+  wirePageSizeSelector,
+  sortableTh,
+  wireSortableHeaders,
+  updateHash,
+  parseHash,
+} from "../shared/crud.js";
+import {
+  loadColumnConfig,
+  renderColumnConfigTrigger,
+  renderColumnHeaders,
+  renderColumnCells,
+  wireColumnResize,
+  wireColumnDragReorder,
+  wireConfigTrigger,
+} from "../shared/column-config.js";
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-const PAGE_SIZE = 15;
-const POLL_INTERVAL = 2500; // ms
+const POLL_INTERVAL = 5000; // ms
 
 const STATUS_ICONS = {
   running: "fa-spinner fa-spin",
@@ -40,6 +66,7 @@ const TYPE_LABELS = {
   scan_folder: { label: "Scan Folder", svc: "folders" },
   recompute_embeddings: { label: "Recompute Embeddings", svc: "tags" },
   traktor_import: { label: "Traktor Import", svc: "files" },
+  deemix_sync: { label: "Deemix Sync", svc: "deemix" },
 };
 
 const STATUS_MAP = {
@@ -51,7 +78,7 @@ const STATUS_MAP = {
 };
 
 const STATUS_OPTIONS = [
-  { value: "", label: "All" },
+  { value: "all", label: "All" },
   { value: "running", label: "Running" },
   { value: "pending", label: "Pending" },
   { value: "completed", label: "Completed" },
@@ -60,82 +87,10 @@ const STATUS_OPTIONS = [
 ];
 
 /* ------------------------------------------------------------------ */
-/*  State                                                              */
-/* ------------------------------------------------------------------ */
-
-let state = {
-  tasks: [],
-  pollTimer: null,
-  status: "",
-  page: 0,
-};
-
-/* ------------------------------------------------------------------ */
-/*  Toast helpers                                                      */
-/* ------------------------------------------------------------------ */
-
-function showToast(message, type) {
-  const existing = document.querySelector(".toast-notification");
-  if (existing) existing.remove();
-
-  const bg =
-    type === "error"
-      ? "var(--red, #ef4444)"
-      : type === "success"
-        ? "var(--green, #22c55e)"
-        : "var(--accent, #6366f1)";
-
-  const toast = document.createElement("div");
-  toast.className = "toast-notification";
-  toast.textContent = message;
-  Object.assign(toast.style, {
-    position: "fixed",
-    bottom: "24px",
-    right: "24px",
-    background: bg,
-    color: "#fff",
-    padding: "12px 20px",
-    borderRadius: "8px",
-    fontSize: "0.9rem",
-    zIndex: "9999",
-    boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
-    transition: "opacity 0.3s ease",
-    cursor: "pointer",
-  });
-  toast.addEventListener("click", () => toast.remove());
-  document.body.appendChild(toast);
-
-  setTimeout(() => {
-    toast.style.opacity = "0";
-    setTimeout(() => toast.remove(), 300);
-  }, 4000);
-}
-
-function showError(message) {
-  showToast(message, "error");
-}
-
-function showSuccess(message) {
-  showToast(message, "success");
-}
-
-/* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-function esc(str) {
-  if (typeof str !== "string") return str;
-  const d = document.createElement("div");
-  d.textContent = str;
-  return d.innerHTML;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Adapter                                                            */
-/* ------------------------------------------------------------------ */
-
 function adaptTask(t) {
-  // Use percent field if available (0-100), fall back to parsing from progress text
   let progress = 0;
   if (t.percent != null) {
     progress = Math.round(t.percent);
@@ -149,7 +104,6 @@ function adaptTask(t) {
     svc: "tasks",
   };
 
-  // Derive error from progress text or last log entry for failed tasks
   const status = STATUS_MAP[t.status] || String(t.status || "pending").toLowerCase();
   let error = "";
   if (status === "failed") {
@@ -158,7 +112,6 @@ function adaptTask(t) {
     } else if (t.logs && t.logs.length > 0) {
       error = t.logs[t.logs.length - 1];
     }
-    // Fallback: try last log even if progress starts with a digit
     if (!error && t.logs && t.logs.length > 0) {
       const last = t.logs[t.logs.length - 1];
       if (last.toLowerCase().includes("error") || last.toLowerCase().includes("fail")) {
@@ -173,191 +126,17 @@ function adaptTask(t) {
     service: typeInfo.svc,
     status,
     progress,
-    created: t.created_at_secs
-      ? new Date(t.created_at_secs * 1000).toISOString()
-      : new Date().toISOString(),
+    created:
+      t.created_at_secs != null
+        ? new Date(t.created_at_secs * 1000).toISOString()
+        : new Date().toISOString(),
+    updated:
+      t.updated_at_secs != null ? new Date(t.updated_at_secs * 1000).toISOString() : null,
     details: t.task_details ? JSON.stringify(t.task_details) : "",
     logs: t.logs || [],
     error,
   };
 }
-
-/* ------------------------------------------------------------------ */
-/*  Action handlers                                                    */
-/* ------------------------------------------------------------------ */
-
-async function cancelTask(id) {
-  if (!confirm("Cancel this task?")) return;
-
-  try {
-    await fetchJSON(`/api/tasks/${id}`, { method: "DELETE" });
-    showSuccess("Task cancelled");
-    await loadTasks();
-  } catch (err) {
-    showError(`Failed to cancel task: ${err.message}`);
-  }
-}
-
-async function retryTask(task) {
-  // We don't have a dedicated retry endpoint, so we re-trigger
-  // based on the task type. For now, show guidance.
-  showError(
-    `Cannot retry automatically. ${task.type} tasks must be re-triggered from their source page.`,
-  );
-}
-
-async function viewLogs(task) {
-  try {
-    // Fetch full task details
-    let taskDetails = task;
-    try {
-      const resp = await fetchJSON(`/api/tasks/${task.id}`);
-      if (resp && resp.data) {
-        taskDetails = { ...task, ...adaptTask(resp.data) };
-      }
-    } catch {
-      // Fall back to what we have
-    }
-
-    const t = taskDetails;
-
-    const logsHtml = `
-      <div class="modal open" id="task-logs-modal">
-        <div class="modal-content" style="max-width:600px">
-          <div class="modal-header">
-            <h3><i class="fa-solid fa-file-lines" style="margin-right:8px;color:var(--accent)"></i> Task #${t.id} — ${esc(t.type)}</h3>
-            <button class="close-btn" id="logs-modal-close">&times;</button>
-          </div>
-          <div style="padding:var(--space-6);">
-            <div class="form-group">
-              <label>Status</label>
-              <div><span class="status-badge ${t.status}"><i class="fas ${STATUS_ICONS[t.status] || "fa-circle"}"></i> ${t.status.charAt(0).toUpperCase() + t.status.slice(1)}</span></div>
-            </div>
-            <div class="form-group">
-              <label>Progress</label>
-              <div class="progress-bar" style="width:100%">
-                <div class="progress-bar-fill" style="width:${t.progress}%;background:${t.status === "completed" ? "var(--green)" : t.status === "failed" ? "var(--red)" : "var(--accent)"}"></div>
-              </div>
-              <div style="text-align:right;font-size:0.85rem;color:var(--text-muted)">${t.progress}%</div>
-            </div>
-            ${
-              t.details
-                ? `<div class="form-group">
-                <label>Details</label>
-                <pre style="background:var(--surface);padding:var(--space-3);border-radius:var(--radius-md);font-size:0.85rem;overflow-x:auto;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;">${esc(t.details)}</pre>
-              </div>`
-                : ""
-            }
-            ${
-              t.error
-                ? `<div class="form-group">
-                <label style="color:var(--red)">Error</label>
-                <pre style="background:rgba(239,68,68,0.1);padding:var(--space-3);border-radius:var(--radius-md);font-size:0.85rem;overflow-x:auto;border:1px solid rgba(239,68,68,0.2);white-space:pre-wrap;word-break:break-word;">${esc(t.error)}</pre>
-              </div>`
-                : ""
-            }
-            ${
-              t.logs && t.logs.length > 0
-                ? `<div class="form-group">
-                <label>Logs <span style="font-weight:400;color:var(--text-muted);font-size:0.8rem">(${t.logs.length} entries)</span></label>
-                <pre style="background:var(--surface);padding:var(--space-3);border-radius:var(--radius-md);font-size:0.82rem;overflow-x:auto;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;font-family:var(--font-mono, monospace);line-height:1.5">${t.logs.map((l) => esc(l)).join("\n")}</pre>
-              </div>`
-                : ""
-            }
-            <div class="form-group">
-              <label>Created</label>
-              <div style="color:var(--text-muted);font-size:0.9rem;">${formatDateTime(t.created)}</div>
-            </div>
-          </div>
-          <div class="modal-actions">
-            <button class="btn" id="logs-modal-close-btn">Close</button>
-          </div>
-        </div>
-      </div>
-    `;
-
-    const overlay = document.createElement("div");
-    overlay.innerHTML = logsHtml;
-    document.body.appendChild(overlay.firstElementChild);
-
-    const modal = document.getElementById("task-logs-modal");
-    const doClose = () => {
-      modal?.classList.remove("open");
-      modal?.remove();
-    };
-
-    document.getElementById("logs-modal-close")?.addEventListener("click", doClose);
-    document.getElementById("logs-modal-close-btn")?.addEventListener("click", doClose);
-    modal?.addEventListener("click", (e) => {
-      if (e.target === modal) doClose();
-    });
-    document.addEventListener("keydown", function escHandler(e) {
-      if (e.key === "Escape") {
-        doClose();
-        document.removeEventListener("keydown", escHandler);
-      }
-    });
-  } catch (err) {
-    showError(`Failed to load task details: ${err.message}`);
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/*  Polling                                                            */
-/* ------------------------------------------------------------------ */
-
-function startPolling() {
-  if (state.pollTimer) return;
-  state.pollTimer = setInterval(async () => {
-    try {
-      const resp = await fetchJSON(
-        `/api/tasks?limit=${PAGE_SIZE}&offset=0&status=${state.status}`,
-      );
-      const tasks = (resp.data.tasks || resp.data).map(adaptTask);
-      const anyRunning = tasks.some(
-        (t) => t.status === "running" || t.status === "pending",
-      );
-
-      if (anyRunning) {
-        // Refresh the task list in-place
-        state.tasks = tasks;
-        // Re-render just the table body
-        updateTaskTable(tasks);
-      } else {
-        // All done — reload fully
-        stopPolling();
-        await loadTasks();
-      }
-    } catch {
-      stopPolling();
-    }
-  }, POLL_INTERVAL);
-}
-
-function stopPolling() {
-  if (state.pollTimer) {
-    clearInterval(state.pollTimer);
-    state.pollTimer = null;
-  }
-}
-
-function updateTaskTable(tasks) {
-  const tbody = document.querySelector("#tasks-tbody");
-  if (!tbody) return;
-
-  const rows = tasks.map(renderTaskRow).join("");
-  const prevHtml = tbody.innerHTML;
-  tbody.innerHTML = rows;
-
-  // Only rewire events if content actually changed
-  if (tbody.innerHTML !== prevHtml) {
-    // Events are handled via delegation on container, so no need to rewire
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/*  Render helpers                                                     */
-/* ------------------------------------------------------------------ */
 
 function statusBadge(task) {
   const icon = STATUS_ICONS[task.status] || "fa-circle";
@@ -395,9 +174,12 @@ function actionButtons(task) {
       <button class="btn btn-sm" data-action="logs" data-id="${task.id}"><i class="fa-solid fa-file-lines"></i> Logs</button>
     </div>`;
   }
-  // cancelled
   return `<span class="text-muted" style="font-size:0.85rem">—</span>`;
 }
+
+/* ------------------------------------------------------------------ */
+/*  Render helpers                                                     */
+/* ------------------------------------------------------------------ */
 
 function renderTaskRow(t) {
   const svcIcon =
@@ -407,278 +189,562 @@ function renderTaskRow(t) {
         ? "fa-brands fa-soundcloud"
         : t.service === "youtube"
           ? "fa-brands fa-youtube"
-          : t.service === "folders"
-            ? "fa-regular fa-folder-open"
-            : "fa-solid fa-tag";
+          : t.service === "deemix"
+            ? "fa-solid fa-download"
+            : t.service === "folders"
+              ? "fa-regular fa-folder-open"
+              : "fa-solid fa-tag";
+
+  const detailsHtml = `<div class="flex items-center gap-2" style="margin-bottom:2px"><i class="${svcIcon}" style="color:var(--text-muted);width:16px"></i> <strong>${escapeHtml(t.type)}</strong></div>
+    <div style="font-size:0.8rem;color:var(--text-muted)">#${t.id}${t.details ? " · " + escapeHtml(t.details.substring(0, 60)) : ""}</div>`;
+
+  const createdHtml = t.created
+    ? `<span style="color:var(--text-muted);font-size:0.85rem">${formatDateTime(t.created)}</span>`
+    : `<span class="text-muted" style="font-size:0.85rem">—</span>`;
+
+  const updatedHtml =
+    t.updated && t.updated !== t.created
+      ? `<span style="color:var(--text-muted);font-size:0.85rem">${formatDateTime(t.updated)}</span>`
+      : `<span class="text-muted" style="font-size:0.85rem">—</span>`;
 
   return `<tr>
-    ${td(`<span class="font-mono text-sm" style="color:var(--text-muted)">#${t.id}</span>`)}
-    ${td(`<div class="flex items-center gap-2"><i class="${svcIcon}" style="color:var(--text-muted);width:16px"></i> ${esc(t.type)}</div>`)}
-    ${td(statusBadge(t))}
-    ${td(progressCell(t))}
-    ${td(`<span style="color:var(--text-muted);font-size:0.85rem">${formatDateTime(t.created)}</span>`)}
-    ${td(actionButtons(t))}
+    ${td(statusBadge(t), { style: "width:8%" })}
+    ${td(detailsHtml, { style: "width:30%" })}
+    ${td(progressCell(t), { style: "width:20%" })}
+    ${td(createdHtml, { style: "width:14%" })}
+    ${td(updatedHtml, { style: "width:14%" })}
+    ${td(actionButtons(t), { style: "width:14%" })}
   </tr>`;
 }
 
 /* ------------------------------------------------------------------ */
-/*  Render                                                             */
+/*  Column model and cell renderers                                    */
 /* ------------------------------------------------------------------ */
 
-function render(container, data) {
-  const tasks = data.tasks;
+const TASKS_COLUMNS = [
+  { id: "status", label: "Status", sortable: true, sortKey: "status", defaultWidth: 8 },
+  { id: "details", label: "Details", sortable: false, defaultWidth: 30 },
+  {
+    id: "progress",
+    label: "Progress",
+    sortable: true,
+    sortKey: "progress",
+    defaultWidth: 20,
+  },
+  {
+    id: "created",
+    label: "Created",
+    sortable: true,
+    sortKey: "created_at",
+    defaultWidth: 14,
+  },
+  {
+    id: "updated",
+    label: "Updated",
+    sortable: true,
+    sortKey: "updated_at",
+    defaultWidth: 14,
+  },
+  { id: "actions", label: "Actions", sortable: false, defaultWidth: 14 },
+];
+
+const TASKS_CELL_RENDERERS = {
+  status: (t) => statusBadge(t),
+  details: (t) => {
+    const svcIcon =
+      t.service === "spotify"
+        ? "fa-brands fa-spotify"
+        : t.service === "soundcloud"
+          ? "fa-brands fa-soundcloud"
+          : t.service === "youtube"
+            ? "fa-brands fa-youtube"
+            : t.service === "deemix"
+              ? "fa-solid fa-download"
+              : t.service === "folders"
+                ? "fa-regular fa-folder-open"
+                : "fa-solid fa-tag";
+    return `<div class="flex items-center gap-2" style="margin-bottom:2px"><i class="${svcIcon}" style="color:var(--text-muted);width:16px"></i> <strong>${escapeHtml(t.type)}</strong></div>
+    <div style="font-size:0.8rem;color:var(--text-muted)">#${t.id}${t.details ? " · " + escapeHtml(t.details.substring(0, 60)) : ""}</div>`;
+  },
+  progress: (t) => progressCell(t),
+  created: (t) =>
+    t.created
+      ? `<span style="color:var(--text-muted);font-size:0.85rem">${formatDateTime(t.created)}</span>`
+      : `<span class="text-muted" style="font-size:0.85rem">—</span>`,
+  updated: (t) =>
+    t.updated && t.updated !== t.created
+      ? `<span style="color:var(--text-muted);font-size:0.85rem">${formatDateTime(t.updated)}</span>`
+      : `<span class="text-muted" style="font-size:0.85rem">—</span>`,
+  actions: (t) => actionButtons(t),
+};
+
+/* ------------------------------------------------------------------ */
+/*  Body render (re-rendered on every data change)                     */
+/* ------------------------------------------------------------------ */
+
+function renderBody(data, state) {
+  const tasks = data.tasks || [];
+  const total = data._total || tasks.length;
   const running = tasks.filter((t) => t.status === "running").length;
   const pending = tasks.filter((t) => t.status === "pending").length;
   const failed = tasks.filter((t) => t.status === "failed").length;
+  const totalPages = Math.max(1, Math.ceil(total / state.pageSize));
+  const currentPage = state.page + 1;
+  const colConfig = state._colConfig || loadColumnConfig("tasks", TASKS_COLUMNS);
 
-  const totalPages = Math.max(1, Math.ceil(data._total / PAGE_SIZE));
-  const currentPage = data._page + 1;
+  const countHtml = [
+    running
+      ? `<span class="status-badge running"><i class="fa-solid fa-spinner fa-spin"></i> ${running} running</span>`
+      : "",
+    pending
+      ? `<span class="status-badge pending"><i class="fa-regular fa-clock"></i> ${pending} pending</span>`
+      : "",
+    failed
+      ? `<span class="status-badge failed"><i class="fa-solid fa-xmark"></i> ${failed} failed</span>`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
-  container.innerHTML = `
-    <div class="toolbar">
-      ${renderFilterGroup("status", STATUS_OPTIONS, state.status)}
-      <div class="flex items-center gap-3">
-        ${
-          running > 0
-            ? `<span class="status-badge running"><i class="fa-solid fa-spinner fa-spin"></i> ${running} running</span>`
-            : ""
-        }
-        ${pending > 0 ? `<span class="status-badge pending"><i class="fa-regular fa-clock"></i> ${pending} pending</span>` : ""}
-        ${failed > 0 ? `<span class="status-badge failed"><i class="fa-solid fa-xmark"></i> ${failed} failed</span>` : ""}
-      </div>
-    </div>
+  const headers = renderColumnHeaders(colConfig, TASKS_COLUMNS, state, sortableTh);
+  const visibleCount = colConfig.filter((c) => c.visible).length;
 
+  const rows =
+    tasks.length > 0
+      ? tasks
+          .map(
+            (t) =>
+              `<tr>${renderColumnCells(colConfig, TASKS_COLUMNS, TASKS_CELL_RENDERERS, t)}</tr>`,
+          )
+          .join("")
+      : `<tr><td colspan="${visibleCount}"><div class="text-center text-muted" style="padding:32px">No tasks found</div></td></tr>`;
+
+  return `
     <div class="stats-row">
       <div class="stats-group">
         <button class="btn btn-sm btn-icon" id="tasks-refresh-btn" title="Refresh"><i class="fa-solid fa-redo"></i></button>
-        <strong>${data._total}</strong> tasks
+        <strong>${total}</strong> tasks
+        ${countHtml ? " " + countHtml : ""}
+      </div>
+      <div class="stats-group">
+        ${renderColumnConfigTrigger()}
+        ${renderPageSizeSelector(state.pageSize)}
       </div>
     </div>
 
-    <div class="table-wrap">
+    <div class="table-wrap" style="overflow-x:auto">
       <table class="data-table" id="tasks-table">
-        <thead>
-          <tr>
-            <th style="width:240px">ID</th>
-            <th style="width:160px">Type</th>
-            <th style="width:125px">Status</th>
-            <th style="width:180px">Progress</th>
-            <th style="width:140px">Created</th>
-            <th style="width:140px">Actions</th>
-          </tr>
-        </thead>
-        <tbody id="tasks-tbody">
-          ${tasks.length ? tasks.map(renderTaskRow).join("") : `<tr><td colspan="6"><div class="text-center text-muted" style="padding:32px">No tasks found</div></td></tr>`}
-        </tbody>
+        <thead><tr>${headers}</tr></thead>
+        <tbody>${rows}</tbody>
       </table>
     </div>
 
     <div class="pagination">
-      <button class="pagination-btn" id="tasks-bottom-prev" ${data._page === 0 ? "disabled" : ""}>
+      <button class="pagination-btn" id="tasks-prev" ${state.page === 0 ? "disabled" : ""}>
         <i class="fa-solid fa-chevron-left"></i>
       </button>
       <span class="pagination-info">Page ${currentPage} of ${totalPages}</span>
-      <button class="pagination-btn" id="tasks-bottom-next" ${data._page >= totalPages - 1 ? "disabled" : ""}>
+      <button class="pagination-btn" id="tasks-next" ${state.page >= totalPages - 1 ? "disabled" : ""}>
         <i class="fa-solid fa-chevron-right"></i>
       </button>
     </div>
   `;
+}
 
-  // Wire events
-  wireEvents(container, data);
+/* ------------------------------------------------------------------ */
+/*  URL params builder                                                 */
+/* ------------------------------------------------------------------ */
+
+function buildParams(state) {
+  const params = new URLSearchParams();
+  params.set("limit", String(state.pageSize));
+  params.set("offset", String(state.page * state.pageSize));
+  if (state.sort) params.set("sort", state.sort);
+  if (state.order) params.set("order", state.order);
+  if (state.search) params.set("search", state.search);
+  if (state.status && state.status !== "all") params.set("status", state.status);
+  return params;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Action handlers                                                    */
+/* ------------------------------------------------------------------ */
+
+async function cancelTask(id, onRefresh) {
+  if (!confirm("Cancel this task?")) return;
+  try {
+    await fetchJSON(`/api/tasks/${id}`, { method: "DELETE" });
+    showToast("Task cancelled", "success");
+    if (onRefresh) onRefresh();
+  } catch (err) {
+    showToast(`Failed to cancel task: ${err.message}`, "error");
+  }
+}
+
+async function retryTask(task) {
+  showToast(
+    `Cannot retry automatically. ${task.type} tasks must be re-triggered from their source page.`,
+    "error",
+  );
+}
+
+async function viewLogs(task) {
+  try {
+    let taskDetails = task;
+    try {
+      const resp = await fetchJSON(`/api/tasks/${task.id}`);
+      if (resp && resp.data) {
+        taskDetails = { ...task, ...adaptTask(resp.data) };
+      }
+    } catch {
+      // Fall back to what we have
+    }
+
+    const t = taskDetails;
+
+    const logsBody = `
+      <div class="modal-body" style="padding:var(--space-6);">
+        <div class="form-group">
+          <label>Status</label>
+          <div><span class="status-badge ${t.status}"><i class="fas ${STATUS_ICONS[t.status] || "fa-circle"}"></i> ${t.status.charAt(0).toUpperCase() + t.status.slice(1)}</span></div>
+        </div>
+        <div class="form-group">
+          <label>Progress</label>
+          <div class="progress-bar" style="width:100%">
+            <div class="progress-bar-fill" style="width:${t.progress}%;background:${t.status === "completed" ? "var(--green)" : t.status === "failed" ? "var(--red)" : "var(--accent)"}"></div>
+          </div>
+          <div style="text-align:right;font-size:0.85rem;color:var(--text-muted)">${t.progress}%</div>
+        </div>
+        ${
+          t.details
+            ? `<div class="form-group">
+          <label>Details</label>
+          <pre style="background:var(--surface);padding:var(--space-3);border-radius:var(--radius-md);font-size:0.85rem;overflow-x:auto;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;">${escapeHtml(t.details)}</pre>
+        </div>`
+            : ""
+        }
+        ${
+          t.error
+            ? `<div class="form-group">
+          <label style="color:var(--red)">Error</label>
+          <pre style="background:rgba(239,68,68,0.1);padding:var(--space-3);border-radius:var(--radius-md);font-size:0.85rem;overflow-x:auto;border:1px solid rgba(239,68,68,0.2);white-space:pre-wrap;word-break:break-word;">${escapeHtml(t.error)}</pre>
+        </div>`
+            : ""
+        }
+        ${
+          t.logs && t.logs.length > 0
+            ? `<div class="form-group">
+          <label>Logs <span style="font-weight:400;color:var(--text-muted);font-size:0.8rem">(${t.logs.length} entries)</span></label>
+          <pre style="background:var(--surface);padding:var(--space-3);border-radius:var(--radius-md);font-size:0.82rem;overflow-x:auto;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;font-family:var(--font-mono, monospace);line-height:1.5">${t.logs.map((l) => escapeHtml(l)).join("\n")}</pre>
+        </div>`
+            : ""
+        }
+        <div class="form-group">
+          <label>Created</label>
+          <div style="color:var(--text-muted);font-size:0.9rem;">${formatDateTime(t.created)}</div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" data-modal-action="close">Close</button>
+      </div>
+    `;
+
+    showModal({
+      title: `<i class="fa-solid fa-file-lines" style="margin-right:8px;color:var(--accent)"></i> Task #${t.id} — ${escapeHtml(t.type)}`,
+      bodyHtml: logsBody,
+      width: "600px",
+    });
+  } catch (err) {
+    showToast(`Failed to load task details: ${err.message}`, "error");
+  }
 }
 
 /* ------------------------------------------------------------------ */
 /*  Event wiring                                                       */
 /* ------------------------------------------------------------------ */
 
-function wireEvents(container, data) {
+function wireContentEvents(container, signal, state, onChange) {
   // Refresh button
   const refreshBtn = container.querySelector("#tasks-refresh-btn");
   if (refreshBtn) {
-    refreshBtn.addEventListener("click", () => loadTasks());
+    refreshBtn.addEventListener("click", onChange, { signal });
   }
 
-  // Status filter — wire the button group using shared search-filter
-  const toolbar = container.querySelector(".toolbar");
-  if (toolbar) {
-    wireSearchFilter(toolbar, state, () => {
-      data._page = 0;
-      loadTasks();
-    });
+  // Sortable headers
+  const table = container.querySelector("#tasks-table");
+  if (table) {
+    wireSortableHeaders(table, state, onChange);
   }
 
-  // Pagination: prev
-  const doPrev = () => {
-    if (data._page > 0) {
-      data._page--;
-      loadTasks();
-    }
-  };
-  const prevBtns = ["tasks-bottom-prev"];
-  for (const id of prevBtns) {
-    const btn = container.querySelector(`#${id}`);
-    if (btn) btn.addEventListener("click", doPrev);
-  }
+  // Page size selector
+  wirePageSizeSelector(container, state, onChange);
 
-  // Pagination: next
-  const totalPages = Math.max(1, Math.ceil(data._total / PAGE_SIZE));
-  const doNext = () => {
-    if (data._page < totalPages - 1) {
-      data._page++;
-      loadTasks();
-    }
-  };
-  const nextBtns = ["tasks-bottom-next"];
-  for (const id of nextBtns) {
-    const btn = container.querySelector(`#${id}`);
-    if (btn) btn.addEventListener("click", doNext);
+  // Pagination
+  const prevBtn = container.querySelector("#tasks-prev");
+  const nextBtn = container.querySelector("#tasks-next");
+  if (prevBtn) {
+    prevBtn.addEventListener(
+      "click",
+      () => {
+        if (state.page > 0) {
+          state.page--;
+          onChange();
+        }
+      },
+      { signal },
+    );
+  }
+  if (nextBtn) {
+    nextBtn.addEventListener(
+      "click",
+      () => {
+        const totalPages = Math.max(1, Math.ceil((state._total || 0) / state.pageSize));
+        if (state.page < totalPages - 1) {
+          state.page++;
+          onChange();
+        }
+      },
+      { signal },
+    );
   }
 
   // Action buttons (event delegation on table)
-  const table = container.querySelector("#tasks-table");
   if (table) {
-    table.addEventListener("click", (e) => {
-      const btn = e.target.closest("[data-action]");
-      if (!btn) return;
-      e.preventDefault();
+    table.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest("[data-action]");
+        if (!btn) return;
+        e.preventDefault();
 
-      const action = btn.dataset.action;
-      const id = btn.dataset.id;
+        const action = btn.dataset.action;
+        const id = btn.dataset.id;
+        const task = state.tasks.find((t) => String(t.id) === String(id));
+        if (!task) return;
 
-      const task = state.tasks.find((t) => t.id === id);
-      if (!task) return;
-
-      switch (action) {
-        case "cancel":
-          cancelTask(id);
-          break;
-        case "retry":
-          retryTask(task);
-          break;
-        case "logs":
-          viewLogs(task);
-          break;
-      }
-    });
+        switch (action) {
+          case "cancel":
+            cancelTask(id, onChange);
+            break;
+          case "retry":
+            retryTask(task);
+            break;
+          case "logs":
+            viewLogs(task);
+            break;
+        }
+      },
+      { signal },
+    );
   }
+
+  // Column config
+  const colConfig = state._colConfig || loadColumnConfig("tasks", TASKS_COLUMNS);
+  state._colConfig = colConfig;
+  wireColumnResize(container, "tasks", TASKS_COLUMNS, colConfig);
+  wireColumnDragReorder(container, "tasks", TASKS_COLUMNS, colConfig, () => {
+    fetchAndRender(container, signal, state);
+  });
+  wireConfigTrigger(container, "tasks", TASKS_COLUMNS, colConfig, () => {
+    fetchAndRender(container, signal, state);
+  });
 }
 
 /* ------------------------------------------------------------------ */
-/*  Data loading                                                       */
+/*  Polling                                                            */
 /* ------------------------------------------------------------------ */
 
-async function loadTasks() {
-  const container = document.getElementById("main-content");
-  if (!container) return;
+function startPolling(container, signal, state) {
+  if (state.pollTimer) return;
 
-  // If we have a signal from init, check it; otherwise use fresh fetch
-  const hasActiveSignal = signal && !signal.aborted;
-
-  container.innerHTML = renderLoading("Loading tasks...");
-
-  try {
-    const page = typeof data?._page === "number" ? data._page : 0;
-    let url = `/api/tasks?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}`;
-    if (state.status) {
-      url += `&status=${state.status}`;
+  state.pollTimer = setInterval(async () => {
+    if (signal.aborted) {
+      stopPolling(state);
+      return;
     }
+    try {
+      const resp = await fetchJSON(`/api/tasks?${buildParams(state)}`, { signal });
+      if (signal.aborted) return;
 
-    const opts = hasActiveSignal ? { signal } : {};
-    const resp = await fetchJSON(url, opts);
-    if (signal?.aborted) return;
+      const rawTasks = resp.data?.tasks ?? resp.data ?? [];
+      const tasks = rawTasks.map(adaptTask);
+      state.tasks = tasks;
+      state._total = resp.data?.total ?? tasks.length;
 
-    const rawTasks = resp.data.tasks || resp.data || [];
+      const contentEl = document.getElementById("tasks-content");
+      if (contentEl) {
+        contentEl.innerHTML = renderBody({ tasks, _total: state._total }, state);
+        wireContentEvents(container, signal, state, () => {
+          stopPolling(state);
+          fetchAndRender(container, signal, state);
+        });
+      }
+    } catch (err) {
+      if (err.name === "AbortError") return;
+      // Silently ignore polling errors — next tick may work
+    }
+  }, POLL_INTERVAL);
+}
+
+function stopPolling(state) {
+  if (state.pollTimer) {
+    clearInterval(state.pollTimer);
+    state.pollTimer = null;
+  }
+}
+
+function hasActiveTasks(tasks) {
+  return tasks.some((t) => t.status === "running" || t.status === "pending");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Data fetching                                                      */
+/* ------------------------------------------------------------------ */
+
+async function fetchAndRender(container, signal, state) {
+  try {
+    const resp = await fetchJSON(`/api/tasks?${buildParams(state)}`, { signal });
+    if (signal.aborted) return;
+
+    const rawTasks = resp.data?.tasks ?? resp.data ?? [];
     const tasks = rawTasks.map(adaptTask);
+    const total = resp.data?.total ?? tasks.length;
 
     state.tasks = tasks;
+    state._total = total;
 
-    const total = resp.data.total ?? tasks.length;
-    const runningCount = tasks.filter((t) => t.status === "running").length;
-    const pendingCount = tasks.filter((t) => t.status === "pending").length;
+    const contentEl = document.getElementById("tasks-content");
+    if (contentEl) {
+      contentEl.innerHTML = renderBody({ tasks, _total: total }, state);
+      wireContentEvents(container, signal, state, () => {
+        stopPolling(state);
+        fetchAndRender(container, signal, state);
+      });
+    }
 
-    render(container, {
-      tasks,
-      _total: total,
-      _page: data?._page || 0,
-    });
-
-    // Auto-poll if any tasks are running or pending
-    if (runningCount > 0 || pendingCount > 0) {
-      startPolling();
+    // Manage polling
+    if (hasActiveTasks(tasks)) {
+      startPolling(container, signal, state);
     } else {
-      stopPolling();
+      stopPolling(state);
     }
   } catch (err) {
     if (err.name === "AbortError") return;
-    container.innerHTML = renderErrorBlock({
-      title: "Failed to load tasks",
-      detail: err.message,
-      retryFn: "window.location.hash='#tasks'",
-    });
+    const contentEl = document.getElementById("tasks-content");
+    if (contentEl) {
+      contentEl.innerHTML = renderErrorBlock({
+        title: "Failed to load tasks",
+        detail: err.message,
+        retryFn: "window.location.hash='#tasks'",
+      });
+    }
   }
 }
 
-// Module-level data and signal reference for loadTasks
-let data = { _page: 0 };
-let signal = null;
+/* ------------------------------------------------------------------ */
+/*  Toolbar render (stable, rendered once)                             */
+/* ------------------------------------------------------------------ */
+
+function renderToolbar(state) {
+  return `<div class="filter-panel" id="tasks-filter-panel">
+    <div class="filter-panel-header">
+      ${renderSearchInput("tasks", state.search)}
+      ${renderFilterGroup("status", STATUS_OPTIONS, state.status)}
+      <button class="filter-panel-toggle" id="tasks-filter-toggle" title="Toggle filters">
+        <i class="fas fa-chevron-up chevron"></i>
+      </button>
+    </div>
+  </div>`;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Initialisation                                                     */
 /* ------------------------------------------------------------------ */
 
-export async function init(container, sig) {
-  signal = sig;
-  data = { _page: 0 };
-  state.tasks = [];
-  state.page = 0;
-  stopPolling();
+export async function init(container, signal, hashParams) {
+  // Parse hash params into state
+  const parsed = parseHash(hashParams, {
+    search: { type: "string", default: "" },
+    status: { type: "string", default: "all" },
+    sort: { type: "string", default: "" },
+    order: { type: "string", default: "asc" },
+    page: { type: "number", default: 0 },
+  });
 
-  container.innerHTML = renderLoading("Loading tasks...");
+  const state = {
+    page: parsed.page,
+    pageSize: getPageSize(25),
+    search: parsed.search,
+    sort: parsed.sort,
+    order: parsed.order,
+    status: parsed.status,
+    tasks: [],
+    _total: 0,
+    pollTimer: null,
+  };
 
-  try {
-    let url = `/api/tasks?limit=${PAGE_SIZE}&offset=0`;
-    if (state.status) {
-      url += `&status=${state.status}`;
-    }
+  stopPolling(state);
 
-    const resp = await fetchJSON(url, { signal });
-    if (signal.aborted) return;
+  // Render stable toolbar once
+  container.innerHTML = `
+    <div id="tasks-toolbar" class="toolbar">
+      ${renderToolbar(state)}
+    </div>
+    <div id="tasks-content">${renderLoading("Loading tasks…")}</div>
+  `;
 
-    const rawTasks = resp.data.tasks || resp.data || [];
-    const tasks = rawTasks.map(adaptTask);
-
-    state.tasks = tasks;
-
-    const total = resp.data.total ?? tasks.length;
-
-    render(container, {
-      tasks,
-      _total: total,
-      _page: 0,
-    });
-
-    const runningCount = tasks.filter((t) => t.status === "running").length;
-    if (runningCount > 0) {
-      startPolling();
-    }
-
-    // Visibility change — reload when user comes back
-    document.addEventListener(
-      "visibilitychange",
-      () => {
-        if (!document.hidden) {
-          loadTasks();
-        }
-      },
-      { signal },
-    );
-  } catch (err) {
-    if (err.name === "AbortError") return;
-    container.innerHTML = renderErrorBlock({
-      title: "Failed to load tasks",
-      detail: err.message,
-      retryFn: "window.location.hash='#tasks'",
+  // Wire toolbar events
+  const toolbarEl = container.querySelector("#tasks-toolbar");
+  if (toolbarEl) {
+    wireSearchFilter(toolbarEl, state, () => {
+      stopPolling(state);
+      updateHash("tasks", state, {
+        sort: "",
+        order: "asc",
+        search: "",
+        status: "all",
+        page: 0,
+      });
+      fetchAndRender(container, signal, state);
     });
   }
+
+  // Filter panel toggle
+  const toggleBtn = container.querySelector("#tasks-filter-toggle");
+  const filterPanel = container.querySelector("#tasks-filter-panel");
+  if (toggleBtn && filterPanel) {
+    const saved = localStorage.getItem("filterPanelCollapsed_tasks");
+    if (saved === "true") filterPanel.classList.add("collapsed");
+    toggleBtn.addEventListener("click", () => {
+      filterPanel.classList.toggle("collapsed");
+      localStorage.setItem(
+        "filterPanelCollapsed_tasks",
+        filterPanel.classList.contains("collapsed"),
+      );
+    });
+  }
+
+  // Initial data fetch
+  await fetchAndRender(container, signal, state);
+
+  // Sync hash with initial state
+  updateHash("tasks", state, {
+    sort: "",
+    order: "asc",
+    search: "",
+    status: "all",
+    page: 0,
+  });
+
+  // Visibility change — reload when user comes back
+  document.addEventListener(
+    "visibilitychange",
+    () => {
+      if (!document.hidden && !signal.aborted) {
+        stopPolling(state);
+        fetchAndRender(container, signal, state);
+      }
+    },
+    { signal },
+  );
 }

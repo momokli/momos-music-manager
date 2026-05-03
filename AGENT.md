@@ -1213,3 +1213,977 @@ Since phases have limited overlap, you can parallelize:
 
 Start with Agent A (quick wins) + Agent B (foundation) in parallel,
 then Agent C + Agent D, then Agent E.
+
+---
+
+## Phase 10: CRUD Pages Unified Pattern
+
+### 10.0 — Decisions (from rubberducking)
+
+| #   | Question           | Decision                                                                                               |
+| --- | ------------------ | ------------------------------------------------------------------------------------------------------ |
+| 1   | Sort cycle         | **none → asc → desc → none** (three-state, allows resetting to default)                                |
+| 2   | Page-size storage  | **Global via `localStorage`** — one setting across all pages, stored under key `crudPageSize`          |
+| 3   | Tag file count     | **Include it!** Add a `v_tag_file_counts` SQL view for efficient querying without duplicate JOIN logic |
+| 4   | Tasks polling      | **Keep 5s polling** — useful for watching running tasks complete                                       |
+| 5   | Folders UI         | **Keep modal-based** add/edit — too many fields for inline editing                                     |
+| 6   | FILES filter panel | **Refactor to stable toolbar** — separate filter panel from re-rendering table body to preserve focus  |
+| 7   | Hash sync          | **`history.replaceState`** (silent) — avoids scroll jumps and page re-init loops                       |
+| 8   | Approach           | **Build FILES page first as reference** — it's the richest page, serves as blueprint for all others    |
+
+---
+
+### 10.0b — Strategy: Build One Reference Page First
+
+Instead of doing backend + all frontend in one big batch, we:
+
+**Step 1 — Backend foundation**: Add `sort`/`order`/`pageSize` support, query structs, new SQL views.
+**Step 2 — Shared frontend**: Create `shared/crud.js` helpers, CSS, `localStorage` page-size.
+**Step 3 — Reference page (FILES)**: Fully retrofit FILES into the stable-toolbar + body pattern with sort, page-size, hash sync. This becomes the canonical blueprint.
+**Step 4 — Spawn agents in parallel**: Each remaining page follows the exact same pattern. Agents have disjoint write scopes so they can run simultaneously.
+
+---
+
+### 10.1 — Overview: Target State
+
+Unify ALL list/table pages under a consistent CRUD interface pattern:
+
+| Page         | Current Pattern                | Target State                                  |
+| ------------ | ------------------------------ | --------------------------------------------- |
+| Files        | Filter panel + table           | Stable toolbar + sort + page size + hash sync |
+| Tracks       | Stable toolbar + table         | Sort + page size + hash sync                  |
+| Playlists    | Inline render                  | Full retrofit                                 |
+| Tags         | Client-side filter             | Full retrofit (server-side pagination)        |
+| Deemix Queue | Stable toolbar + client filter | Sort + page size + server-side filter         |
+| Tasks        | Polling inline                 | Full retrofit (polling stays)                 |
+| Folders      | Modal-based, own pattern       | Full retrofit (modals stay)                   |
+
+**Non-targets** (special UIs that stay as-is):
+
+- Tag Categories (drag-and-drop, energy levels)
+- Services (card-based config)
+- Dashboard (stats cards)
+- Auto-categorize (wizard)
+
+---
+
+### 10.2 — Database: New SQL View for Tag File Counts
+
+Add to `migrations/001_initial_schema.sql`:
+
+```sql
+-- Tag file counts (efficient view to avoid duplicate JOIN logic)
+CREATE VIEW v_tag_file_counts AS
+SELECT vft.tag_id, COUNT(DISTINCT vft.file_id) AS file_count
+FROM v_file_tags vft
+GROUP BY vft.tag_id;
+```
+
+This view uses the existing `v_file_tags` view chain (files → tracks → playlists → tags)
+and simply counts distinct files per tag. The tags API endpoint LEFT JOINs this view
+for the `file_count` field.
+
+---
+
+### 10.3 — Backend: Unified Sort & Pagination Support
+
+#### 10.3.1 — Add `sort` + `order` + `pageSize` to all list query structs
+
+```rust
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilesQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub bpm_min: Option<f64>,
+    pub bpm_max: Option<f64>,
+    pub key: Option<String>,
+    pub tags: Option<String>,
+    pub search: Option<String>,
+    pub linked_only: Option<bool>,
+    pub unlinked: Option<bool>,
+    pub non_default_only: Option<bool>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+    pub page_size: Option<i64>,
+}
+
+// Same additions to: TracksQuery, PlaylistsQuery, TasksQuery
+// New: TagsQuery, FoldersQuery, DeemixQueueQuery
+```
+
+`pageSize` is a convenience hint (overrides `limit`). If both are absent, defaults remain.
+
+#### 10.3.2 — Shared `apply_sort` helper in `api.rs`
+
+```rust
+/// Append ORDER BY clause with whitelist validation.
+/// Only allows known column names — safe from SQL injection.
+pub fn apply_sort(
+    sql: &mut String,
+    sort: Option<&str>,
+    order: Option<&str>,
+    whitelist: &[&str],
+    default: &str,
+) {
+    let sort_col = sort
+        .filter(|s| whitelist.contains(&s))
+        .unwrap_or(default);
+    let ord = match order {
+        Some("desc") => "DESC",
+        _ => "ASC",
+    };
+    sql.push_str(&format!(" ORDER BY {} {}", sort_col, ord));
+}
+```
+
+#### 10.3.3 — Sort whitelists per endpoint
+
+| Endpoint           | Whitelist                                                                                                                           | Default      |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| `get_files`        | `title`, `artist`, `bpm`, `key`, `isrc`, `play_count`, `last_played`, `created_at`, `duration_ms`, `file_type`                      | `id`         |
+| `get_tracks`       | `title`, `artist`, `service`, `album`, `duration_ms`, `isrc`, `imported_at`                                                         | `id`         |
+| `get_playlists`    | `name`, `service`, `track_count`, `imported_at`, `updated_at`                                                                       | `name`       |
+| `get_tags`         | `name`, `category`, `created_at`, `file_count`                                                                                      | `name`       |
+| `get_deemix_queue` | `title`, `artist`, `playlist_name`, `status`, `progress`, `created_at`, `updated_at`, `track_count_total`, `track_count_downloaded` | `created_at` |
+| `get_tasks`        | `type`, `status`, `created_at`, `updated_at`, `progress`                                                                            | `created_at` |
+| `get_folders`      | `path`, `file_count`, `watch_enabled`, `scan_recursive`, `last_scanned`, `max_depth`                                                | `path`       |
+
+#### 10.3.4 — New/updated API endpoints
+
+| Method | Path                         | Change                                                                   |
+| ------ | ---------------------------- | ------------------------------------------------------------------------ |
+| `GET`  | `/api/tags`                  | Add `limit`, `offset`, `search`, `category`, `sort`, `order`, `pageSize` |
+| `GET`  | `/api/tags/count`            | Add `search`, `category` filters (existed as stub, implement fully)      |
+| `GET`  | `/api/folders`               | Add `sort`, `order`, `search`, `limit`, `offset`, `pageSize`             |
+| `GET`  | `/api/folders/count`         | NEW — total count with `search` filter                                   |
+| `GET`  | `/api/services/deemix/queue` | Add `sort`, `order`, `search`, `status`, `limit`, `offset`, `pageSize`   |
+
+---
+
+### 10.4 — Frontend: Canonical Component Structure
+
+Every CRUD page module follows this contract:
+
+```js
+// Exported entry point (called by app.js)
+export async function init(container, signal, hashParams) {
+  // 1. Parse hashParams into state
+  // 2. Render stable toolbar once (preserves focus)
+  // 3. Render content wrapper
+  // 4. Wire toolbar events (search, filters, sort headers)
+  // 5. Fetch + render initial data
+}
+```
+
+**Internal functions**:
+
+| Function                                      | Responsibility                                                   | Rendered           |
+| --------------------------------------------- | ---------------------------------------------------------------- | ------------------ |
+| `renderToolbar(state)`                        | Search input + filter controls                                   | Once (stable)      |
+| `renderBody(data, state)`                     | Stats row + table rows + pagination + page-size selector         | On data change     |
+| `buildParams(state)` → URLSearchParams        | Serialises state → API query params                              | —                  |
+| `fetchAndRender(container, signal, state)`    | Fetches data, calls renderBody                                   | —                  |
+| `wireContentEvents(container, signal, state)` | Pagination, row actions                                          | After renderBody   |
+| `updateHash(state)`                           | Syncs state to `window.location.hash` via `history.replaceState` | After state change |
+| `parseHash(hashParams)` → state               | Parses incoming hashParams                                       | On init            |
+
+**State shape** (canonical fields + page-specific extras):
+
+```js
+const state = {
+  page: 0, // 0-based
+  pageSize: 25, // from localStorage (set in init)
+  search: "",
+  sort: "", // column name, e.g. "title"
+  order: "asc", // "asc" | "desc"
+  // page-specific filters...
+};
+```
+
+---
+
+### 10.5 — Global Page Size via localStorage
+
+**Key**: `crudPageSize`
+
+**Defaults**: `25` (available options: `10`, `25`, `50`, `100`)
+
+**How it works**:
+
+```js
+// In init():
+const saved = localStorage.getItem("crudPageSize");
+const pageSize = saved ? parseInt(saved, 10) : 25;
+
+// On page size change:
+localStorage.setItem("crudPageSize", String(newSize));
+state.pageSize = newSize;
+state.page = 0;
+fetchAndRender(...);
+```
+
+Page size is NOT stored in URL hash — it's the same across all pages.
+The hash has `sort`, `order`, `search`, `page`, and page-specific filters.
+
+---
+
+### 10.6 — URL Hash State (Linkable Views)
+
+**Canonical hash format**:
+
+```
+#page?sort=bpm&order=desc&search=house&page=0&key=1m,2m
+```
+
+**Rules**:
+
+1. On INIT — read all state from `hashParams` (already provided by `app.js`)
+2. On STATE CHANGE — call `updateHash(state)` which silently updates `window.location.hash`
+3. Only meaningful values serialised: skip defaults (`page=0`, `sort=""`, `order="asc"`, `search=""`)
+4. Page size is NOT in hash (it's global via localStorage)
+
+**`updateHash(state)` helper** in `shared/crud.js`:
+
+```js
+/**
+ * Update window.location.hash from canonical CRUD state.
+ * Uses history.replaceState so no hashchange event fires.
+ * The page module handles re-fetching itself after state changes.
+ *
+ * @param {string} pageId — e.g. "files", "tracks"
+ * @param {object} state — the mutable state object
+ * @param {object} [defaults] — default values to skip (e.g. {sort: "", order: "asc"})
+ */
+export function updateHash(pageId, state, defaults = {}) {
+  const params = new URLSearchParams();
+  for (const [key, val] of Object.entries(state)) {
+    if (key === "pageSize") continue; // global, not in hash
+    if (val === defaults[key] || val === undefined || val === null) continue;
+    if (Array.isArray(val) && val.length === 0) continue;
+    params.set(key, Array.isArray(val) ? val.join(",") : String(val));
+  }
+  const qs = params.toString();
+  const hash = qs ? `#${pageId}?${qs}` : `#${pageId}`;
+  if (window.location.hash !== hash) {
+    history.replaceState(null, "", hash);
+  }
+}
+```
+
+---
+
+### 10.7 — Page Size Selector (in `shared/crud.js`)
+
+Lives in the stats row (re-renders with body, not stable toolbar):
+
+```js
+export function renderPageSizeSelector(currentSize, available = [10, 25, 50, 100]) {
+  const opts = available
+    .map(
+      (s) =>
+        `<option value="${s}"${s === currentSize ? " selected" : ""}>${s} per page</option>`,
+    )
+    .join("");
+  return `<select class="page-size-select" data-page-size="true">${opts}</select>`;
+}
+
+/**
+ * Wire page size selector changes.
+ * Storage is global (localStorage), state is per-page.
+ */
+export function wirePageSizeSelector(container, state, onChange) {
+  const sel = container.querySelector("[data-page-size]");
+  if (!sel) return;
+  sel.addEventListener("change", () => {
+    const val = parseInt(sel.value, 10);
+    localStorage.setItem("crudPageSize", String(val));
+    state.pageSize = val;
+    state.page = 0;
+    onChange();
+  });
+}
+```
+
+---
+
+### 10.8 — Sortable Column Headers
+
+**Frontend pattern**:
+
+Column `<th>` elements get click handlers. Click cycles: **none → asc → desc → none**.
+
+```html
+<th data-sort="title" class="sortable sort-asc">Title <i class="fas fa-sort-up"></i></th>
+```
+
+CSS classes:
+
+- `.sortable` — cursor pointer, hover highlight
+- `.sort-asc` / `.sort-desc` — active sort indicator
+
+**Shared helper** in `shared/crud.js`:
+
+```js
+/**
+ * Render a sortable table header.
+ * @param {string} label — display label
+ * @param {string} column — sort key sent to the API
+ * @param {object} state — current { sort, order }
+ * @param {object} [opts] — { style, width }
+ * @returns {string} HTML
+ */
+export function sortableTh(label, column, state, opts = {}) {
+  let icon = "fa-sort";
+  let cls = "sortable";
+  if (state.sort === column) {
+    cls += state.order === "asc" ? " sort-asc" : " sort-desc";
+    icon = state.order === "asc" ? "fa-sort-up" : "fa-sort-down";
+  }
+  const style = opts.style ? ` style="${opts.style}"` : "";
+  return `<th class="${cls}" data-sort="${column}"${style}>${label} <i class="fas ${icon}"></i></th>`;
+}
+
+/**
+ * Wire sortable header clicks on a table.
+ * Cycle: none → asc → desc → none (three-state).
+ * Calls onChange(newSort, newOrder) after updating state.
+ */
+export function wireSortableHeaders(tableEl, state, onChange) {
+  tableEl.querySelectorAll("th.sortable[data-sort]").forEach((th) => {
+    th.addEventListener("click", () => {
+      const col = th.dataset.sort;
+      if (state.sort === col) {
+        if (state.order === "asc") {
+          state.order = "desc";
+        } else {
+          state.sort = "";
+          state.order = "asc";
+        }
+      } else {
+        state.sort = col;
+        state.order = "asc";
+      }
+      state.page = 0;
+      onChange();
+    });
+  });
+}
+```
+
+---
+
+### 10.9 — CSS Additions (`frontend/style.css`)
+
+```css
+/* Page size selector */
+.page-size-select {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text);
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  margin-left: 8px;
+  cursor: pointer;
+}
+
+/* Sortable column headers */
+th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+th.sortable:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+th.sortable i {
+  opacity: 0.3;
+  margin-left: 4px;
+  font-size: 0.7rem;
+}
+th.sort-asc i.fa-sort-up,
+th.sort-desc i.fa-sort-down {
+  opacity: 1;
+}
+th.sort-asc i.fa-sort,
+th.sort-desc i.fa-sort,
+th:not(.sort-asc):not(.sort-desc) i.fa-sort-up,
+th:not(.sort-asc):not(.sort-desc) i.fa-sort-down {
+  display: none;
+}
+th:not(.sort-asc):not(.sort-desc) i.fa-sort {
+  display: inline;
+}
+```
+
+---
+
+### 10.10 — Reference Page: FILES (the blueprint)
+
+FILES is the richest page with the most features, making it the ideal reference implementation.
+
+#### Current issues to fix:
+
+1. **Whole-container re-render**: The filter panel, stats row, table, and pagination are all in one `innerHTML` call. Changing BPM slider re-renders EVERYTHING, losing search focus.
+2. **No sort**: Column headers are `<th>` with no click handlers.
+3. **No page size**: Hardcoded `PAGE_SIZE = 50`.
+4. **Hash read-only**: Reads hash on init but never writes it back.
+5. **Toast duplication**: Has its own `showToast` function duplicated from `components.js`.
+6. **Duplicated `escapeHtml`**: Has its own instead of importing from `components.js`.
+7. **Comment writer sidebar**: Currently rendered inline. Should be stable in the toolbar area.
+
+#### Target structure for FILES:
+
+```
+┌──────────────────────────────────────────────────────┐
+│  TOOLBAR (stable, rendered once)                      │
+│  ┌──────────────┐ ┌──────────┐ ┌───────────────────┐ │
+│  │ 🔍 Search…   │ │BPM slider│ │ Key grid + tags   │ │
+│  └──────────────┘ └──────────┘ └───────────────────┘ │
+│  Comment writer sidebar (stable)                      │
+├──────────────────────────────────────────────────────┤
+│  CONTENT (re-rendered on changes)                    │
+│  Stats: 🔄 127 files │ 25 per page ▼                 │
+│  ┌────────────────────────────────────────────────┐  │
+│  │ Title ↑ │ Artist │ BPM ↓ │ Key │ Linked │ … │  │  │
+│  ├────────────────────────────────────────────────┤  │
+│  │ row 1                                        │  │  │
+│  │ row 2                                        │  │  │
+│  └────────────────────────────────────────────────┘  │
+│  ◀ Page 1 of 6 ▶                                     │
+└──────────────────────────────────────────────────────┘
+```
+
+**Key changes**:
+
+- Filter panel (BPM, key grid, tag filter) moves INTO the toolbar (preserved across re-renders)
+- Comment writer sidebar stays in toolbar area
+- Stats row, table, pagination, page size selector → `renderBody()`
+- Sortable column headers
+- `updateHash()` after each state change
+- Import shared helpers from `shared/crud.js`
+
+**File**: `frontend/pages/files.js` — full rewrite following the canonical pattern.
+
+---
+
+### 10.11 — Per-Page Details (for agent briefs)
+
+#### 10.11.1 — TRACKS (minor additions)
+
+**Already has**: stable toolbar, playlist context badge, hash params.
+
+**Needs**:
+
+- Sortable column headers (10.8)
+- Page size selector in stats row (10.7)
+- `updateHash()` on state change (10.6)
+- `pageSize` from localStorage instead of hardcoded `PAGE_SIZE = 10`
+
+**Sortable columns**: `title`, `artist`, `service`, `album`, `duration_ms`, `isrc`, `imported_at`
+
+**File**: `frontend/pages/tracks.js`
+
+---
+
+#### 10.11.2 — PLAYLISTS (full retrofit)
+
+**Needs**:
+
+- Stable toolbar: search + service filter
+- Sortable column headers
+- `updateHash()` + init from hash
+- Stats row: refresh + count + page-size selector
+- Backend: add `sort`/`order` to `PlaylistsQuery`
+
+**Table columns**:
+
+| Column    | Width | Sortable | Notes                            |
+| --------- | ----- | -------- | -------------------------------- |
+| Name      | 22%   | ✅       |                                  |
+| Service   | 8%    | ✅       | Badge                            |
+| Tracks    | 8%    | ✅       | Numeric                          |
+| Tags      | 16%   | ❌       | Tag badges inline                |
+| Deemix    | 10%   | ❌       | Queue status + action buttons    |
+| Sync      | 8%    | ❌       | Sync status badge                |
+| Subscribe | 8%    | ❌       | Subscription toggle              |
+| View      | 6%    | ❌       | Link to #tracks?playlistId=...   |
+| Actions   | 14%   | ❌       | Edit, Delete, Create Tag buttons |
+
+**File**: `frontend/pages/playlists.js`
+
+---
+
+#### 10.11.3 — TAGS (full retrofit, server-side pagination)
+
+**Needs (backend)**:
+
+- `GET /api/tags` — add `limit`, `offset`, `search`, `category`, `sort`, `order`, `pageSize`
+- `GET /api/tags/count` — add `search`, `category` filters
+- New `TagsQuery` struct
+- SQL LEFT JOIN to `v_tag_file_counts` for file_count field
+
+**Needs (frontend)**:
+
+- Stable toolbar: search + category filter
+- Sortable column headers
+- Server-side paginated fetching
+- `updateHash()` + init from hash
+
+**Table columns**:
+
+| Column   | Width | Sortable | Notes                             |
+| -------- | ----- | -------- | --------------------------------- |
+| Tag Name | 35%   | ✅       |                                   |
+| Category | 25%   | ✅       | Badge with category icon          |
+| Files    | 15%   | ❌       | File count from v_tag_file_counts |
+| Created  | 15%   | ✅       | Formatted date                    |
+| Actions  | 10%   | ❌       | Edit, Delete                      |
+
+**File**: `frontend/pages/tags.js`
+
+---
+
+#### 10.11.4 — DEEMIX QUEUE (minor additions)
+
+**Already has**: stable toolbar, status filter, content pattern.
+
+**Needs**:
+
+- Sortable column headers
+- Page size selector
+- `updateHash()` on state change
+- Move filter + pagination to server-side
+- Backend: add `sort`/`order`/`search`/`status`/`limit`/`offset` to `GET /api/services/deemix/queue`
+
+**File**: `frontend/pages/deemix-queue.js`
+
+---
+
+#### 10.11.5 — TASKS (full retrofit)
+
+**Needs**:
+
+- Stable toolbar: search + status filter
+- Sortable column headers
+- `updateHash()` + init from hash
+- Polling stays but re-renders only body (not toolbar)
+- Backend: add `sort`/`order` to `TasksQuery`, add search support
+
+**File**: `frontend/pages/tasks.js`
+
+---
+
+#### 10.11.6 — FOLDERS (full retrofit)
+
+**Needs**:
+
+- Stable toolbar: search input
+- Table rows (not card-style render)
+- Sortable column headers
+- `updateHash()` + init from hash
+- Keep modal-based add/edit
+- Backend: add `sort`/`order`/`search`/`limit`/`offset` to `GET /api/folders`, add `GET /api/folders/count`
+
+**File**: `frontend/pages/folders.js`
+
+---
+
+### 10.12 — Shared Module: `frontend/shared/crud.js`
+
+```js
+// shared/crud.js — Shared CRUD page building blocks
+
+/**
+ * Render sortable table header with current state indicator.
+ */
+export function sortableTh(label, column, state, opts = {}) { ... }
+
+/**
+ * Render page size selector dropdown.
+ * Stored in localStorage, not in hash.
+ */
+export function renderPageSizeSelector(currentSize, available) { ... }
+
+/**
+ * Wire page size selector changes.
+ */
+export function wirePageSizeSelector(container, state, onChange) { ... }
+
+/**
+ * Wire sortable header clicks (three-state: none→asc→desc→none).
+ */
+export function wireSortableHeaders(tableEl, state, onChange) { ... }
+
+/**
+ * Update window.location.hash via history.replaceState.
+ * Skips defaults and pageSize (which is global).
+ */
+export function updateHash(pageId, state, defaults) { ... }
+
+/**
+ * Initialize pageSize from localStorage with fallback.
+ */
+export function getPageSize(fallback = 25) {
+  const saved = localStorage.getItem("crudPageSize");
+  return saved ? parseInt(saved, 10) : fallback;
+}
+```
+
+---
+
+### 10.13 — Step-by-Step Execution Order
+
+| Phase | What                                                                                  | Who                        | Dependencies  |
+| ----- | ------------------------------------------------------------------------------------- | -------------------------- | ------------- | --- |
+| **A** | Add `v_tag_file_counts` view to `001_initial_schema.sql`                              | Single agent               | None          | ✅  |
+| **B** | Backend: sort/order/pageSize in query structs + `apply_sort` helper + update handlers | Single agent               | A             | ✅  |
+| **C** | Backend: add pagination to tags + folders endpoints, TagsQuery, FoldersQuery          | Single agent               | B             | ✅  |
+| **D** | Backend: add sort/order to deemix queue endpoint                                      | Single agent               | B             | ✅  |
+| **E** | Create `shared/crud.js` with all helpers                                              | Single agent               | None          | ✅  |
+| **F** | Add CSS for sort + page size to `style.css`                                           | Single agent               | None          | ✅  |
+| **G** | **Reference page: FILES** — full retrofit                                             | **🔴 Most critical agent** | E, F, B       | ✅  |
+| **H** | Retrofits for TRACKS + DEEMIX QUEUE (minor additions)                                 | Parallel agents            | G (blueprint) | ✅  |
+| **I** | Retrofits for PLAYLISTS + TAGS + TASKS + FOLDERS (full)                               | Parallel agents            | G (blueprint) | ✅  |
+| **J** | Remove duplicated toast/notification code                                             | Single agent (future)      | H, I          | ⏳  |
+| **K** | Update ARCHITECTURE.md + DECISIONS.md                                                 | Single agent (future)      | All           | ⏳  |
+| **L** | Visual upgrade: wrap toolbars in collapsible .filter-panel on all CRUD pages          | Parallel agents            | All           | ✅  |
+
+---
+
+## Phase 11: Traktor-like Column Customization
+
+### 11.0 — Overview
+
+Add full column customization to all CRUD table pages: visibility toggles,
+drag-to-reorder, and drag-to-resize — persisted in localStorage per-page.
+
+| Feature         | How It Works                                                           |
+| --------------- | ---------------------------------------------------------------------- |
+| **Visibility**  | "Columns" button in stats row → modal with checkbox per column         |
+| **Reorder**     | Drag column headers directly in the table, OR drag in the config modal |
+| **Resize**      | Drag handle on right edge of each `<th>` — updates width in real-time  |
+| **Persistence** | Per-page config saved to `localStorage` key `columnConfig_{pageId}`    |
+| **Reset**       | "Reset to defaults" button in the config modal                         |
+
+---
+
+### 11.1 — Shared Module: `frontend/shared/column-config.js`
+
+**Exports**:
+
+```js
+/**
+ * Column config system — Traktor-like table customization.
+ *
+ * Usage in a page module:
+ *
+ *   const COLUMNS = [
+ *     { id: "title", label: "Title", sortable: true, sortKey: "title", defaultWidth: 22 },
+ *     { id: "artist", label: "Artist", sortable: true, sortKey: "artist", defaultWidth: 16 },
+ *     { id: "comment", label: "Comment Diff", sortable: false, defaultWidth: 25 },
+ *   ];
+ *
+ *   const config = loadColumnConfig("files", COLUMNS);
+ *
+ *   // In renderBody:
+ *   const headerHtml = renderColumnHeaders(config, COLUMNS, state, sortableTh);
+ *   const cellsHtml = renderColumnCells(config, COLUMNS, cellRenderers, row);
+ *
+ *   // After renderBody:
+ *   wireColumnResize(container, "files", COLUMNS, config);
+ *   wireColumnReorder(container, "files", COLUMNS, config, () => fetchAndRender(...));
+ *   wireConfigButton(container, "files", COLUMNS, config, () => fetchAndRender(...));
+ */
+```
+
+**Key functions**:
+
+- `loadColumnConfig(pageId, columns)` — load from localStorage or create defaults
+- `saveColumnConfig(pageId, config)` — save to localStorage
+- `renderColumnConfigTrigger()` — HTML for the "Columns" button
+- `renderColumnHeaders(config, columns, state, sortableTh)` — render `<th>` elements in order
+- `renderColumnCells(config, columns, cellRenderers, row)` — render `<td>` elements in order
+- `wireColumnResize(container, pageId, columns, config)` — drag handles on `<th>` edges
+- `wireColumnReorder(container, pageId, columns, config, onSave)` — drag headers to reorder
+- `wireConfigButton(container, pageId, columns, config, onSave)` — open config modal
+
+---
+
+### 11.2 — Column Config Schema
+
+```js
+// localStorage key: "columnConfig_files"
+[
+  { id: "title", visible: true, width: 22 },
+  { id: "artist", visible: true, width: 16 },
+  { id: "bpm", visible: true, width: 8 },
+  ...
+]
+```
+
+The config is a flat array. **Order in the array = display order.**
+Visibility and width are the only per-column settings.
+Sortability comes from the column model (static).
+
+---
+
+### 11.3 — Column Model (per page)
+
+Each page defines a `COLUMNS` array:
+
+```js
+const FILES_COLUMNS = [
+  { id: "title", label: "Title", sortable: true, sortKey: "title", defaultWidth: 18 },
+  { id: "artist", label: "Artist", sortable: true, sortKey: "artist", defaultWidth: 6 },
+  { id: "bpm", label: "BPM", sortable: true, sortKey: "bpm", defaultWidth: 8 },
+  { id: "key", label: "Key", sortable: true, sortKey: "key", defaultWidth: 3 },
+  { id: "linked", label: "Linked", sortable: false, defaultWidth: 2 },
+  { id: "isrc", label: "ISRC", sortable: true, sortKey: "isrc", defaultWidth: 3 },
+  { id: "plays", label: "Plays", sortable: true, sortKey: "play_count", defaultWidth: 3 },
+  {
+    id: "duration",
+    label: "Duration",
+    sortable: true,
+    sortKey: "duration_ms",
+    defaultWidth: 5,
+  },
+  { id: "album", label: "Album", sortable: false, defaultWidth: 5 },
+  {
+    id: "created",
+    label: "Created",
+    sortable: true,
+    sortKey: "created_at",
+    defaultWidth: 7,
+  },
+  {
+    id: "lastPlayed",
+    label: "Last Played",
+    sortable: true,
+    sortKey: "last_played",
+    defaultWidth: 7,
+  },
+  { id: "comment", label: "Comment Diff", sortable: false, defaultWidth: 25 },
+  { id: "actions", label: "Actions", sortable: false, defaultWidth: 12 },
+];
+```
+
+---
+
+### 11.4 — Cell Renderers (per page)
+
+Each page provides a map of `{ columnId: (rowData) => HTML string }`:
+
+```js
+const FILES_CELL_RENDERERS = {
+  title: (f) => escapeHtml(f.title),
+  artist: (f) => escapeHtml(f.artist),
+  bpm: (f) => `<span class="font-mono">${formatBPM(f.bpm)}</span>`,
+  key: (f) => renderKeyBadge(f.key),
+  linked: (f) => renderLinkBadge(f.matchedServices),
+  isrc: (f) =>
+    f.isrc ? `<code>${escapeHtml(f.isrc)}</code>` : '<span class="text-muted">—</span>',
+  plays: (f) => `<span class="font-mono text-sm">${escapeHtml(f.playCount || 0)}</span>`,
+  duration: (f) =>
+    f.duration > 0
+      ? `<span class="font-mono text-sm">${formatDuration(f.duration)}</span>`
+      : '<span class="text-muted">—</span>',
+  album: (f) => (f.album ? escapeHtml(f.album) : '<span class="text-muted">—</span>'),
+  created: (f) =>
+    f.createdAt ? formatTimestamp(f.createdAt) : '<span class="text-muted">—</span>',
+  lastPlayed: (f) =>
+    f.lastPlayed ? formatTimestamp(f.lastPlayed) : '<span class="text-muted">—</span>',
+  comment: (f) => renderCommentDiff(f),
+  actions: (f) => renderFileActions(f),
+};
+```
+
+---
+
+### 11.5 — Execution Plan
+
+| Step   | What                                        | Files                                 |
+| ------ | ------------------------------------------- | ------------------------------------- |
+| 11.5.1 | Create shared column-config.js              | `frontend/shared/column-config.js` ✨ |
+| 11.5.2 | Add CSS for resize handles + config trigger | `frontend/style.css` ✏️               |
+| 11.5.3 | Retrofit FILES page (reference)             | `frontend/pages/files.js` ✏️          |
+| 11.5.4 | Retrofit TRACKS page                        | `frontend/pages/tracks.js` ✏️         |
+| 11.5.5 | Retrofit PLAYLISTS page                     | `frontend/pages/playlists.js` ✏️      |
+| 11.5.6 | Retrofit TAGS page                          | `frontend/pages/tags.js` ✏️           |
+| 11.5.7 | Retrofit TASKS page                         | `frontend/pages/tasks.js` ✏️          |
+| 11.5.8 | Retrofit FOLDERS page                       | `frontend/pages/folders.js` ✏️        |
+| 11.5.9 | Retrofit DEEMIX QUEUE page                  | `frontend/pages/deemix-queue.js` ✏️   |
+
+---
+
+### 11.6 — CSS Additions
+
+```css
+/* ─── Column resize handles ─── */
+th {
+  position: relative;
+}
+.col-resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  z-index: 2;
+  user-select: none;
+}
+.col-resize-handle:hover,
+.col-resize-handle.resizing {
+  background: var(--accent);
+  opacity: 0.5;
+}
+
+/* ─── Column drag reorder ─── */
+th.dragging {
+  opacity: 0.5;
+  border: 1px dashed var(--accent);
+}
+th.drop-target {
+  border-left: 2px solid var(--accent);
+}
+
+/* ─── Column config trigger button ─── */
+.col-config-trigger {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+  margin-left: 8px;
+}
+.col-config-trigger:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ─── Column config modal ─── */
+.col-config-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  cursor: grab;
+}
+.col-config-item:active {
+  cursor: grabbing;
+}
+.col-config-item.dragging {
+  opacity: 0.4;
+}
+.col-config-drag-handle {
+  cursor: grab;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  padding: 0 4px;
+}
+.col-config-checkbox {
+  margin: 0;
+}
+.col-config-label {
+  flex: 1;
+  font-size: 0.85rem;
+}
+.col-config-width {
+  width: 60px;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text);
+  font-size: 0.75rem;
+  text-align: center;
+  font-family: var(--font-mono);
+}
+.col-config-reset {
+  margin-top: 12px;
+  width: 100%;
+}
+```
+
+---
+
+### 11.7 — Key Behaviours
+
+**Resize**:
+
+- Drag handle appears as a 5px vertical strip on the right edge of each `<th>`
+- On hover, the handle highlights with accent color
+- Drag left/right to change width (min 30px, max 500px)
+- Width is stored in localStorage as percentage
+- On mouseup, save to localStorage and re-render headers
+
+**Reorder (header drag)**:
+
+- Drag a `<th>` to a new position between other headers
+- Visual drop indicator shows where the column will land
+- On drop, reorder the config array and save to localStorage
+- Then re-render the table
+
+**Config modal**:
+
+- Triggered by a "Columns" button in the stats row
+- Shows all columns (visible + hidden) in current order
+- Checkbox to toggle visibility
+- Drag handle to reorder within the modal
+- Width input (number) per column
+- "Reset to defaults" button
+- "Close" button saves + re-renders
+
+---
+
+### 11.8 — Implementation Order
+
+Build shared module + reference page first, then parallel agents for the rest.
+
+| Phase | What                                        | Who             |
+| ----- | ------------------------------------------- | --------------- |
+| **A** | Create `shared/column-config.js` + CSS      | Single agent    |
+| **B** | Retrofit FILES (reference)                  | Agent           |
+| **C** | Retrofit TRACKS + DEEMIX QUEUE              | Parallel agents |
+| **D** | Retrofit PLAYLISTS + TAGS + TASKS + FOLDERS | Parallel agents |
+
+### 10.14 — Key UX/UI Details
+
+**Stable toolbar focus preservation**:
+
+- `renderToolbar()` is called ONCE in `init()` via `container.innerHTML = toolbarHtml + contentWrap`
+- Only `contentWrap` gets replaced on re-render (via `document.getElementById`)
+- `wireSearchFilter` from `search-filter.js` already handles focus restoration
+
+**Page size selector placement**:
+
+- Lives in the stats row (right-aligned), not the toolbar
+- Re-renders with the body so it reflects current state
+- Available sizes: 10, 25, 50, 100
+
+**Sort indicator priority**:
+
+- At rest: show neutral `fa-sort` icon on all sortable columns
+- Active asc: show `fa-sort-up` (filled)
+- Active desc: show `fa-sort-down` (filled)
+- Hide the inactive icon direction to keep it clean
+
+**Hash update timing**:
+
+- After any filter change (search, sort, page, BPM, key, etc.)
+- Before `fetchAndRender()` resolves — so hash is already correct when data arrives
+
+**Empty states**:
+
+- Zero results matching filters: show stats row with `0 files` + "No results match your filters" in table body
+- Zero data in DB at all: same but with suggestion to add data first time
+
+**Loading states**:
+
+- Content area shows spinner while fetching
+- Toolbar stays fully interactive (preserves search input, filters)
+- Previous data is replaced on fetch start (don't keep stale data visible)

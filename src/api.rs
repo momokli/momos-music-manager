@@ -491,6 +491,9 @@ pub struct FilesQuery {
     pub linked_only: Option<bool>,
     pub unlinked: Option<bool>,
     pub non_default_only: Option<bool>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+    pub page_size: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -501,6 +504,9 @@ pub struct TracksQuery {
     pub service: Option<String>,
     pub search: Option<String>,
     pub playlist_id: Option<i64>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+    pub page_size: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -510,6 +516,9 @@ pub struct PlaylistsQuery {
     pub offset: Option<i64>,
     pub search: Option<String>,
     pub service: Option<String>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+    pub page_size: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -518,6 +527,56 @@ pub struct TasksQuery {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub status: Option<String>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+    pub page_size: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagsQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub search: Option<String>,
+    pub category: Option<String>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+    pub page_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoldersQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub search: Option<String>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+    pub page_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeemixQueueQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub search: Option<String>,
+    pub status: Option<String>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+    pub page_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiTag {
+    pub id: i64,
+    pub name: String,
+    pub category: String,
+    pub category_icon: Option<String>,
+    pub category_id: Option<i64>,
+    pub file_count: i64,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -715,6 +774,23 @@ pub enum WebSocketEvent {
     },
 }
 
+/// Append ORDER BY clause with whitelist validation.
+/// Only allows known column names — safe from SQL injection.
+pub fn apply_sort(
+    sql: &mut String,
+    sort: Option<&str>,
+    order: Option<&str>,
+    whitelist: &[&str],
+    default: &str,
+) {
+    let sort_col = sort.filter(|s| whitelist.contains(s)).unwrap_or(default);
+    let ord = match order {
+        Some("desc") => "DESC",
+        _ => "ASC",
+    };
+    sql.push_str(format!(" ORDER BY {} {}", sort_col, ord).as_str());
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .without_v07_checks()
@@ -748,6 +824,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/tracks/count", get(tracks_count_handler))
         .route("/api/tracks/{id}", get(track_handler))
         .route("/api/tags", get(tags_handler).post(create_tag_handler))
+        .route("/api/tags/count", get(tags_count_handler))
         .route(
             "/api/tags/service-coverage",
             get(tags_service_coverage_handler),
@@ -880,6 +957,7 @@ pub fn router() -> Router<Arc<AppState>> {
             "/api/folders",
             get(folders_handler).post(add_folder_handler),
         )
+        .route("/api/folders/count", get(folders_count_handler))
         .route(
             "/api/folders/{id}",
             get(get_folder_handler)
@@ -901,7 +979,7 @@ async fn tasks_list_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TasksQuery>,
 ) -> impl IntoResponse {
-    let limit = query.limit.unwrap_or(50).min(200);
+    let limit = query.page_size.or(query.limit).unwrap_or(50).min(200);
     let offset = query.offset.unwrap_or(0);
     let status_filter = query.status.clone().and_then(|s| match s.as_str() {
         "pending" => Some(TaskStatus::Pending),
@@ -911,10 +989,12 @@ async fn tasks_list_handler(
         "cancelled" | "canceled" => Some(TaskStatus::Cancelled),
         _ => None,
     });
+    let sort = query.sort.clone();
+    let order = query.order.clone();
 
     let (tasks, total) = state
         .task_manager
-        .list_tasks_paginated(limit, offset, status_filter)
+        .list_tasks_paginated(limit, offset, status_filter, sort, order)
         .await;
 
     Json(ApiResponse {
@@ -1418,9 +1498,22 @@ async fn bulk_tag_handler(
         Err(e) => internal_error(e).into_response(),
     }
 }
-async fn tags_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match get_all_tags(&state.db).await {
+async fn tags_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TagsQuery>,
+) -> impl IntoResponse {
+    match get_all_tags(&state.db, &query).await {
         Ok(tags) => Json(ApiResponse { data: tags }).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+async fn tags_count_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TagsQuery>,
+) -> impl IntoResponse {
+    match get_tags_count(&state.db, &query).await {
+        Ok(count) => Json(ApiResponse { data: count }).into_response(),
         Err(e) => internal_error(e).into_response(),
     }
 }
@@ -3346,7 +3439,10 @@ async fn deemix_auth_handler(
 /// GET /api/services/deemix/queue
 ///
 /// Returns combined list of deemix queue items + local deemix_downloads entries.
-async fn deemix_queue_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn deemix_queue_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DeemixQueueQuery>,
+) -> impl IntoResponse {
     // Fetch local downloads from deemix_downloads table
     let local_downloads = sqlx::query_as::<
         _,
@@ -3469,7 +3565,136 @@ async fn deemix_queue_handler(State(state): State<Arc<AppState>>) -> impl IntoRe
         }
     }
 
-    Json(ApiResponse { data: combined }).into_response()
+    // Apply status filter (client-side since combined list merges local + remote)
+    let mut filtered: Vec<DeemixCombinedQueueItem> = combined;
+    if let Some(ref status_filter) = query.status
+        && !status_filter.is_empty()
+        && status_filter != "all"
+    {
+        filtered.retain(|item| item.status == *status_filter);
+    }
+
+    // Apply search filter (client-side)
+    if let Some(ref search) = query.search
+        && !search.is_empty()
+    {
+        let lower = search.to_lowercase();
+        filtered.retain(|item| {
+            item.title
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains(&lower)
+                || item
+                    .artist
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&lower)
+                || item
+                    .playlist_name
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&lower)
+                || item
+                    .spotify_playlist_url
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&lower)
+        });
+    }
+
+    // Apply sort (client-side)
+    if let Some(sort) = query.sort.as_deref() {
+        let order = query.order.as_deref().unwrap_or("asc");
+        match (sort, order) {
+            ("title", "asc") => filtered.sort_by(|a, b| {
+                a.title
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(b.title.as_deref().unwrap_or(""))
+            }),
+            ("title", "desc") => filtered.sort_by(|a, b| {
+                b.title
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(a.title.as_deref().unwrap_or(""))
+            }),
+            ("artist", "asc") => filtered.sort_by(|a, b| {
+                a.artist
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(b.artist.as_deref().unwrap_or(""))
+            }),
+            ("artist", "desc") => filtered.sort_by(|a, b| {
+                b.artist
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(a.artist.as_deref().unwrap_or(""))
+            }),
+            ("playlist_name", "asc") => filtered.sort_by(|a, b| {
+                a.playlist_name
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(b.playlist_name.as_deref().unwrap_or(""))
+            }),
+            ("playlist_name", "desc") => filtered.sort_by(|a, b| {
+                b.playlist_name
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(a.playlist_name.as_deref().unwrap_or(""))
+            }),
+            ("status", "asc") => filtered.sort_by(|a, b| a.status.cmp(&b.status)),
+            ("status", "desc") => filtered.sort_by(|a, b| b.status.cmp(&a.status)),
+            ("progress", "asc") => filtered.sort_by(|a, b| a.progress.cmp(&b.progress)),
+            ("progress", "desc") => filtered.sort_by(|a, b| b.progress.cmp(&a.progress)),
+            ("created_at", "asc") => {
+                filtered.sort_by(|a, b| a.created_at.unwrap_or(0).cmp(&b.created_at.unwrap_or(0)))
+            }
+            ("created_at", "desc") => {
+                filtered.sort_by(|a, b| b.created_at.unwrap_or(0).cmp(&a.created_at.unwrap_or(0)))
+            }
+            ("updated_at", "asc") => {
+                filtered.sort_by(|a, b| a.updated_at.unwrap_or(0).cmp(&b.updated_at.unwrap_or(0)))
+            }
+            ("updated_at", "desc") => {
+                filtered.sort_by(|a, b| b.updated_at.unwrap_or(0).cmp(&a.updated_at.unwrap_or(0)))
+            }
+            ("track_count_total", "asc") => {
+                filtered.sort_by(|a, b| a.track_count_total.cmp(&b.track_count_total))
+            }
+            ("track_count_total", "desc") => {
+                filtered.sort_by(|a, b| b.track_count_total.cmp(&a.track_count_total))
+            }
+            ("track_count_downloaded", "asc") => {
+                filtered.sort_by(|a, b| a.track_count_downloaded.cmp(&b.track_count_downloaded))
+            }
+            ("track_count_downloaded", "desc") => {
+                filtered.sort_by(|a, b| b.track_count_downloaded.cmp(&a.track_count_downloaded))
+            }
+            _ => {}
+        }
+    }
+
+    // Apply pagination (client-side)
+    let total = filtered.len() as i64;
+    let page_limit = query.page_size.or(query.limit).unwrap_or(100).min(1000) as usize;
+    let page_offset = query.offset.unwrap_or(0) as usize;
+    let paged: Vec<DeemixCombinedQueueItem> = filtered
+        .into_iter()
+        .skip(page_offset)
+        .take(page_limit)
+        .collect();
+
+    Json(ApiResponse {
+        data: serde_json::json!({
+            "items": paged,
+            "total": total,
+        }),
+    })
+    .into_response()
 }
 
 /// POST /api/services/deemix/queue
@@ -3951,7 +4176,7 @@ async fn playlists_handler(
     use sqlx::QueryBuilder;
 
     // Default values
-    let limit = query.limit.unwrap_or(100);
+    let limit = query.page_size.or(query.limit).unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
     let search_term = query.search.clone();
     let service_filter = query.service.clone();
@@ -3995,7 +4220,24 @@ async fn playlists_handler(
         count_builder.push_bind(format!("%{}%", search));
     }
 
-    main_builder.push(" GROUP BY sp.id ORDER BY sp.name LIMIT ");
+    main_builder.push(" GROUP BY sp.id");
+
+    // Dynamic sort with whitelist + column name mapping
+    let sort_col_short = query.sort.as_deref().unwrap_or("name");
+    let sort_col = match sort_col_short {
+        "track_count" => "track_count",
+        "service" => "sp.service",
+        "imported_at" => "sp.imported_at",
+        "updated_at" => "sp.updated_at",
+        _ => "sp.name", // default: sort by name
+    };
+    let ord = match query.order.as_deref() {
+        Some("desc") => "DESC",
+        _ => "ASC",
+    };
+    main_builder.push(format!(" ORDER BY {} {}", sort_col, ord).as_str());
+
+    main_builder.push(" LIMIT ");
     main_builder.push_bind(limit);
     main_builder.push(" OFFSET ");
     main_builder.push_bind(offset);
@@ -4368,9 +4610,22 @@ async fn service_sync_status_handler(
     }
 }
 
-async fn folders_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match get_folders(&state.db).await {
+async fn folders_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<FoldersQuery>,
+) -> impl IntoResponse {
+    match get_folders(&state.db, &query).await {
         Ok(folders) => Json(ApiResponse { data: folders }).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+async fn folders_count_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<FoldersQuery>,
+) -> impl IntoResponse {
+    match get_folders_count(&state.db, &query).await {
+        Ok(count) => Json(ApiResponse { data: count }).into_response(),
         Err(e) => internal_error(e).into_response(),
     }
 }
@@ -4684,7 +4939,7 @@ async fn ws_handler() -> impl IntoResponse {
 }
 
 async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFile>> {
-    let limit = query.limit.unwrap_or(100);
+    let limit = query.page_size.or(query.limit).unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
 
     // Build dynamic SQL with WHERE clauses for filtering
@@ -4735,7 +4990,25 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
         );
     }
 
-    sql.push_str(" ORDER BY id LIMIT ? OFFSET ?");
+    apply_sort(
+        &mut sql,
+        query.sort.as_deref(),
+        query.order.as_deref(),
+        &[
+            "title",
+            "artist",
+            "bpm",
+            "key",
+            "isrc",
+            "play_count",
+            "last_played",
+            "created_at",
+            "duration_ms",
+            "file_type",
+        ],
+        "id",
+    );
+    sql.push_str(" LIMIT ? OFFSET ?");
 
     // Build query with bind parameters
     let mut q = sqlx::query_as::<_, File>(&sql);
@@ -4969,7 +5242,7 @@ async fn get_file_by_id(pool: &Pool<Sqlite>, id: i64) -> Result<ApiFile> {
 }
 
 async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiServiceTrack>> {
-    let limit = query.limit.unwrap_or(100);
+    let limit = query.page_size.or(query.limit).unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
     let service_filter = query.service.clone();
     let search_pattern = query.search.as_ref().and_then(|s| {
@@ -5001,7 +5274,22 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         sql.push_str(" AND spt.playlist_id = ?");
     }
 
-    sql.push_str(" ORDER BY id LIMIT ? OFFSET ?");
+    apply_sort(
+        &mut sql,
+        query.sort.as_deref(),
+        query.order.as_deref(),
+        &[
+            "title",
+            "artist",
+            "service",
+            "album",
+            "duration_ms",
+            "isrc",
+            "imported_at",
+        ],
+        "id",
+    );
+    sql.push_str(" LIMIT ? OFFSET ?");
 
     let mut query_builder = sqlx::query_as::<_, ServiceTrack>(&sql);
 
@@ -5282,23 +5570,113 @@ async fn apply_bulk_tags(
     Ok(())
 }
 
-async fn get_all_tags(pool: &Pool<Sqlite>) -> Result<Vec<Tag>> {
-    let rows = sqlx::query("SELECT * FROM v_tags_with_categories ORDER BY name")
-        .fetch_all(pool)
-        .await?;
+async fn get_all_tags(pool: &Pool<Sqlite>, query: &TagsQuery) -> Result<Vec<ApiTag>> {
+    let limit = query.page_size.or(query.limit).unwrap_or(100);
+    let offset = query.offset.unwrap_or(0);
+    let search_pattern = query.search.as_ref().and_then(|s| {
+        if s.is_empty() {
+            None
+        } else {
+            Some(format!("%{}%", s))
+        }
+    });
+    let category_filter = query
+        .category
+        .as_ref()
+        .and_then(|c| if c.is_empty() { None } else { Some(c) });
+
+    let mut sql = String::from(
+        "SELECT t.id, t.name, t.category_id, t.sort_order, t.created_at, t.reviewed_at,
+                tc.name as category, tc.icon as category_icon,
+                COALESCE(vfc.file_count, 0) as file_count
+         FROM tags t
+         LEFT JOIN tag_categories tc ON t.category_id = tc.id
+         LEFT JOIN v_tag_file_counts vfc ON vfc.tag_id = t.id
+         WHERE 1=1",
+    );
+
+    if search_pattern.is_some() {
+        sql.push_str(" AND (t.name LIKE ? OR tc.name LIKE ?)");
+    }
+    if category_filter.is_some() {
+        sql.push_str(" AND tc.name = ?");
+    }
+
+    apply_sort(
+        &mut sql,
+        query.sort.as_deref(),
+        query.order.as_deref(),
+        &["t.name", "category", "t.created_at", "file_count"],
+        "t.name",
+    );
+
+    sql.push_str(" LIMIT ? OFFSET ?");
+
+    let mut q = sqlx::query(&sql);
+
+    if let Some(ref pattern) = search_pattern {
+        q = q.bind(pattern).bind(pattern);
+    }
+    if let Some(ref cat) = category_filter {
+        q = q.bind(cat);
+    }
+
+    q = q.bind(limit).bind(offset);
+    let rows = q.fetch_all(pool).await?;
 
     let mut tags = Vec::new();
     for row in rows {
-        tags.push(Tag {
+        tags.push(ApiTag {
             id: row.try_get("id")?,
             name: row.try_get("name")?,
-            category: row.try_get("category").ok(),
+            category: row
+                .try_get::<Option<String>, _>("category")?
+                .unwrap_or_default(),
             category_icon: row.try_get("category_icon").ok(),
-            created_at: row.try_get("created_at").ok(),
+            category_id: row.try_get("category_id").ok(),
+            file_count: row.try_get("file_count")?,
+            created_at: row.try_get::<Option<i64>, _>("created_at")?.unwrap_or(0),
         });
     }
 
     Ok(tags)
+}
+
+pub async fn get_tags_count(pool: &Pool<Sqlite>, query: &TagsQuery) -> Result<i64> {
+    let mut sql = String::from(
+        "SELECT COUNT(DISTINCT t.id) FROM tags t
+         LEFT JOIN tag_categories tc ON t.category_id = tc.id
+         WHERE 1=1",
+    );
+
+    let search_pattern = query.search.as_ref().and_then(|s| {
+        if s.is_empty() {
+            None
+        } else {
+            Some(format!("%{}%", s))
+        }
+    });
+    let category_filter = query
+        .category
+        .as_ref()
+        .and_then(|c| if c.is_empty() { None } else { Some(c) });
+
+    if search_pattern.is_some() {
+        sql.push_str(" AND (t.name LIKE ? OR tc.name LIKE ?)");
+    }
+    if category_filter.is_some() {
+        sql.push_str(" AND tc.name = ?");
+    }
+
+    let mut q = sqlx::query_scalar::<_, i64>(&sql);
+    if let Some(ref pattern) = search_pattern {
+        q = q.bind(pattern).bind(pattern);
+    }
+    if let Some(ref cat) = category_filter {
+        q = q.bind(cat);
+    }
+
+    q.fetch_one(pool).await.map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Get a single tag with category information
@@ -5410,7 +5788,10 @@ async fn get_service_connections(
     Ok(connections)
 }
 
-async fn get_folders(pool: &Pool<Sqlite>) -> Result<Vec<FolderInfo>> {
+async fn get_folders(pool: &Pool<Sqlite>, query: &FoldersQuery) -> Result<Vec<FolderInfo>> {
+    let limit = query.page_size.or(query.limit).unwrap_or(100);
+    let offset = query.offset.unwrap_or(0);
+
     let folders = db_get_folders(pool).await?;
 
     // Convert Folder to FolderInfo with file counts
@@ -5430,7 +5811,85 @@ async fn get_folders(pool: &Pool<Sqlite>) -> Result<Vec<FolderInfo>> {
         });
     }
 
-    Ok(folder_infos)
+    // Apply search filter (client-side)
+    if let Some(ref search) = query.search
+        && !search.is_empty()
+    {
+        let lower = search.to_lowercase();
+        folder_infos.retain(|f| f.path.to_lowercase().contains(&lower));
+    }
+
+    // Apply sort (client-side)
+    if let Some(sort) = query.sort.as_deref() {
+        let order = query.order.as_deref().unwrap_or("asc");
+        match (sort, order) {
+            ("path", "asc") => folder_infos.sort_by(|a, b| a.path.cmp(&b.path)),
+            ("path", "desc") => folder_infos.sort_by(|a, b| b.path.cmp(&a.path)),
+            ("file_count", "asc") => folder_infos.sort_by(|a, b| a.file_count.cmp(&b.file_count)),
+            ("file_count", "desc") => folder_infos.sort_by(|a, b| b.file_count.cmp(&a.file_count)),
+            ("watch_enabled", "asc") => {
+                folder_infos.sort_by(|a, b| a.watch_enabled.cmp(&b.watch_enabled))
+            }
+            ("watch_enabled", "desc") => {
+                folder_infos.sort_by(|a, b| b.watch_enabled.cmp(&a.watch_enabled))
+            }
+            ("scan_recursive", "asc") => {
+                folder_infos.sort_by(|a, b| a.scan_recursive.cmp(&b.scan_recursive))
+            }
+            ("scan_recursive", "desc") => {
+                folder_infos.sort_by(|a, b| b.scan_recursive.cmp(&a.scan_recursive))
+            }
+            ("last_scanned", "asc") => {
+                folder_infos.sort_by(|a, b| a.last_scanned.cmp(&b.last_scanned))
+            }
+            ("last_scanned", "desc") => {
+                folder_infos.sort_by(|a, b| b.last_scanned.cmp(&a.last_scanned))
+            }
+            ("max_depth", "asc") => folder_infos.sort_by(|a, b| a.max_depth.cmp(&b.max_depth)),
+            ("max_depth", "desc") => folder_infos.sort_by(|a, b| b.max_depth.cmp(&a.max_depth)),
+            _ => {}
+        }
+    }
+
+    // Apply pagination (client-side)
+    let paged: Vec<FolderInfo> = folder_infos
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect();
+
+    Ok(paged)
+}
+
+pub async fn get_folders_count(pool: &Pool<Sqlite>, query: &FoldersQuery) -> Result<i64> {
+    let folders = db_get_folders(pool).await?;
+
+    // Convert to FolderInfo for search filtering
+    let mut folder_infos = Vec::new();
+    for folder in folders {
+        let file_count = get_folder_file_count(pool, folder.id).await.unwrap_or(0);
+        folder_infos.push(FolderInfo {
+            id: folder.id,
+            path: folder.folder_path,
+            watch_enabled: folder.active,
+            scan_recursive: folder.scan_recursive,
+            fixed_extensions: folder.fixed_extensions,
+            file_extensions: folder.file_extensions,
+            max_depth: folder.max_depth,
+            file_count,
+            last_scanned: folder.last_scanned,
+        });
+    }
+
+    // Apply search filter (client-side)
+    if let Some(ref search) = query.search
+        && !search.is_empty()
+    {
+        let lower = search.to_lowercase();
+        folder_infos.retain(|f| f.path.to_lowercase().contains(&lower));
+    }
+
+    Ok(folder_infos.len() as i64)
 }
 
 async fn handle_websocket() {
@@ -5669,6 +6128,9 @@ impl Default for FilesQuery {
             linked_only: None,
             unlinked: None,
             non_default_only: None,
+            sort: None,
+            order: None,
+            page_size: None,
         }
     }
 }

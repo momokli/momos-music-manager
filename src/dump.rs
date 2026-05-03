@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Row, Sqlite};
-use tracing::info;
+use tracing::{info, warn};
 
 // ============================================================================
 // Dump-specific row structs (match DB columns exactly, including reviewed_at etc.)
@@ -25,168 +25,287 @@ use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpTagCategory {
+    #[serde(default)]
     pub id: i64,
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub icon: String,
+    #[serde(default)]
     pub prefix: String,
+    #[serde(default)]
     pub sort_order: i32,
+    #[serde(default)]
     pub is_default: bool,
+    #[serde(default)]
     pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpTag {
+    #[serde(default)]
     pub id: i64,
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub category_id: i64,
+    #[serde(default)]
     pub sort_order: i64,
+    #[serde(default)]
     pub created_at: i64,
+    #[serde(default)]
     pub reviewed_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpTagEmbedding {
+    #[serde(default)]
     pub tag_id: i64,
+    #[serde(default)]
     pub embedding_b64: String, // base64-encoded BLOB
+    #[serde(default)]
     pub model_version: String,
+    #[serde(default)]
     pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpTagEnergyLevel {
+    #[serde(default)]
     pub tag_id: i64,
+    #[serde(default)]
     pub energy_level: i64,
+    #[serde(default)]
     pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpFolder {
+    #[serde(default)]
     pub id: i64,
+    #[serde(default)]
     pub folder_path: String,
+    #[serde(default)]
     pub active: bool,
+    #[serde(default)]
     pub scan_recursive: bool,
+    #[serde(default)]
     pub fixed_extensions: bool,
+    #[serde(default)]
     pub file_extensions: String,
+    #[serde(default)]
     pub max_depth: i32,
+    #[serde(default)]
     pub last_scanned: Option<i64>,
+    #[serde(default)]
     pub created_at: i64,
+    #[serde(default)]
     pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpServiceConfig {
+    #[serde(default)]
     pub id: i64,
+    #[serde(default)]
     pub service: String,
+    #[serde(default)]
     pub refresh_token: Option<String>,
+    #[serde(default)]
     pub metadata_json: Option<String>,
+    #[serde(default)]
     pub access_token: Option<String>,
+    #[serde(default)]
     pub token_expiry: Option<i64>,
+    #[serde(default)]
     pub user_id: Option<String>,
+    #[serde(default)]
     pub playlist_id: Option<String>,
+    #[serde(default)]
     pub is_connected: bool,
+    #[serde(default)]
     pub last_checked: Option<i64>,
+    #[serde(default)]
     pub last_synced: Option<i64>,
+    #[serde(default)]
     pub remote_playlists_count: i64,
+    #[serde(default)]
     pub remote_tracks_count: i64,
+    #[serde(default)]
     pub created_at: i64,
+    #[serde(default)]
     pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpServiceTrack {
+    #[serde(default)]
     pub id: i64,
+    #[serde(default)]
     pub service: String,
+    #[serde(default)]
     pub service_id: String,
+    #[serde(default)]
     pub title: String,
+    #[serde(default)]
     pub artist: String,
+    #[serde(default)]
     pub album: Option<String>,
+    #[serde(default)]
     pub isrc: Option<String>,
+    #[serde(default)]
     pub duration_ms: Option<i64>,
+    #[serde(default)]
     pub metadata_json: Option<String>,
+    #[serde(default)]
     pub imported_at: i64,
+    #[serde(default)]
     pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpServicePlaylist {
+    #[serde(default)]
     pub id: i64,
+    #[serde(default)]
     pub service: String,
+    #[serde(default)]
     pub playlist_id: String,
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
     pub metadata_json: Option<String>,
+    #[serde(default)]
     pub imported_at: i64,
+    #[serde(default)]
     pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpServicePlaylistTrack {
+    #[serde(default)]
     pub playlist_id: i64,
+    #[serde(default)]
     pub track_id: i64,
+    #[serde(default)]
     pub position: Option<i32>,
+    #[serde(default)]
     pub added_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpFile {
+    #[serde(default)]
     pub id: i64,
+    #[serde(default)]
     pub file_path: String,
+    #[serde(default)]
     pub file_hash: String,
+    #[serde(default)]
     pub file_type: String,
+    #[serde(default)]
     pub file_size: i64,
+    #[serde(default)]
     pub last_modified: i64,
+    #[serde(default)]
     pub isrc: Option<String>,
+    #[serde(default)]
     pub last_scanned: i64,
+    #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
     pub artist: Option<String>,
+    #[serde(default)]
     pub album: Option<String>,
+    #[serde(default)]
     pub album_artist: Option<String>,
+    #[serde(default)]
     pub track_number: Option<i32>,
+    #[serde(default)]
     pub total_tracks: Option<i32>,
+    #[serde(default)]
     pub disc_number: Option<i32>,
+    #[serde(default)]
     pub total_discs: Option<i32>,
+    #[serde(default)]
     pub genre: Option<String>,
+    #[serde(default)]
     pub year: Option<i32>,
+    #[serde(default)]
     pub composer: Option<String>,
+    #[serde(default)]
     pub comment: Option<String>,
+    #[serde(default)]
     pub duration_ms: Option<i64>,
+    #[serde(default)]
     pub bitrate: Option<i32>,
+    #[serde(default)]
     pub sample_rate: Option<i32>,
+    #[serde(default)]
     pub channels: Option<i32>,
+    #[serde(default)]
     pub bpm: Option<f64>,
+    #[serde(default)]
     pub musical_key: Option<String>,
+    #[serde(default)]
     pub rating: i32,
+    #[serde(default)]
     pub play_count: i32,
+    #[serde(default)]
     pub last_played: Option<i64>,
+    #[serde(default)]
     pub spotify_id: Option<String>,
+    #[serde(default)]
     pub soundcloud_id: Option<String>,
+    #[serde(default)]
     pub youtube_id: Option<String>,
+    #[serde(default)]
     pub created_at: i64,
+    #[serde(default)]
     pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpPlaylistSubscription {
+    #[serde(default)]
     pub id: i64,
+    #[serde(default)]
     pub service: String,
+    #[serde(default)]
     pub playlist_id: String,
+    #[serde(default)]
     pub service_playlist_id: Option<i64>,
+    #[serde(default)]
     pub subscribed_at: i64,
+    #[serde(default)]
     pub last_polled_at: Option<i64>,
+    #[serde(default)]
     pub poll_interval_secs: i64,
+    #[serde(default)]
     pub is_active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpDeemixDownload {
+    #[serde(default)]
     pub id: i64,
+    #[serde(default)]
     pub spotify_playlist_url: String,
+    #[serde(default)]
     pub playlist_name: Option<String>,
+    #[serde(default)]
     pub status: String,
+    #[serde(default)]
     pub track_count_total: i64,
+    #[serde(default)]
     pub track_count_downloaded: i64,
+    #[serde(default)]
     pub error_message: Option<String>,
+    #[serde(default)]
     pub created_at: i64,
+    #[serde(default)]
     pub updated_at: i64,
 }
 
@@ -552,8 +671,19 @@ pub async fn import_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
     info!("Importing database dump from {dump_path}");
 
     let json = std::fs::read_to_string(dump_path).context("Failed to read dump file")?;
-    let dump: DataDump = serde_json::from_str(&json)
-        .context("Failed to parse dump JSON - schema may have changed")?;
+
+    // Try strict deserialization first (fast path for compatible schemas),
+    // fall back to Value-based parsing if schema drifted.
+    let dump: DataDump = match serde_json::from_str(&json) {
+        Ok(d) => d,
+        Err(e) => {
+            info!(
+                "Strict deserialization failed ({}), trying resilient schema-agnostic parse...",
+                e
+            );
+            parse_dump_resilient(&json)?
+        }
+    };
 
     // Disable foreign keys BEFORE the transaction, because PRAGMA foreign_keys
     // is a no-op inside a transaction in SQLite. This lets us clear tables
@@ -582,26 +712,72 @@ pub async fn import_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
     // Remove duplicates and reverse so children are deleted first
     let mut seen = std::collections::HashSet::new();
     for table in tables_to_clear.iter().rev() {
-        if seen.insert(table) {
-            sqlx::query(&format!("DELETE FROM {}", table))
+        if seen.insert(table)
+            && let Err(e) = sqlx::query(&format!("DELETE FROM {}", table))
                 .execute(&mut *tx)
-                .await?;
+                .await
+        {
+            warn!("Could not clear table {}: {e} — continuing", table);
         }
     }
 
-    // Insert data in FK-safe order (parents first, children last)
-    import_tag_categories(&mut tx, &dump.tag_categories).await?;
-    import_tags(&mut tx, &dump.tags).await?;
-    import_tag_embeddings(&mut tx, &dump.tag_embeddings).await?;
-    import_tag_energy_levels(&mut tx, &dump.tag_energy_levels).await?;
-    import_folders(&mut tx, &dump.folders).await?;
-    import_service_config(&mut tx, &dump.service_config).await?;
-    import_service_tracks(&mut tx, &dump.service_tracks).await?;
-    import_service_playlists(&mut tx, &dump.service_playlists).await?;
-    import_service_playlist_tracks(&mut tx, &dump.service_playlist_tracks).await?;
-    import_files(&mut tx, &dump.files).await?;
-    import_playlist_subscriptions(&mut tx, &dump.playlist_subscriptions).await?;
-    import_deemix_downloads(&mut tx, &dump.deemix_downloads).await?;
+    // Insert data in FK-safe order (parents first, children last).
+    // Each import is isolated — one table failing won't block the others.
+    let mut totals: Vec<(&'static str, usize)> = Vec::new();
+
+    macro_rules! try_import {
+        ($label:expr, $expr:expr) => {
+            match $expr.await {
+                Ok(n) => {
+                    if n > 0 {
+                        info!("  {}: {} rows", $label, n);
+                    }
+                    totals.push(($label, n));
+                }
+                Err(e) => warn!("  {}: SKIPPED — {}", $label, e),
+            }
+        };
+    }
+
+    try_import!(
+        "tag_categories",
+        import_tag_categories(&mut tx, &dump.tag_categories)
+    );
+    try_import!("tags", import_tags(&mut tx, &dump.tags));
+    try_import!(
+        "tag_embeddings",
+        import_tag_embeddings(&mut tx, &dump.tag_embeddings)
+    );
+    try_import!(
+        "tag_energy_levels",
+        import_tag_energy_levels(&mut tx, &dump.tag_energy_levels)
+    );
+    try_import!("folders", import_folders(&mut tx, &dump.folders));
+    try_import!(
+        "service_config",
+        import_service_config(&mut tx, &dump.service_config)
+    );
+    try_import!(
+        "service_tracks",
+        import_service_tracks(&mut tx, &dump.service_tracks)
+    );
+    try_import!(
+        "service_playlists",
+        import_service_playlists(&mut tx, &dump.service_playlists)
+    );
+    try_import!(
+        "service_playlist_tracks",
+        import_service_playlist_tracks(&mut tx, &dump.service_playlist_tracks)
+    );
+    try_import!("files", import_files(&mut tx, &dump.files));
+    try_import!(
+        "playlist_subscriptions",
+        import_playlist_subscriptions(&mut tx, &dump.playlist_subscriptions)
+    );
+    try_import!(
+        "deemix_downloads",
+        import_deemix_downloads(&mut tx, &dump.deemix_downloads)
+    );
 
     tx.commit().await?;
 
@@ -610,119 +786,192 @@ pub async fn import_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
         .execute(pool)
         .await?;
 
-    let total = dump.tag_categories.len()
-        + dump.tags.len()
-        + dump.tag_embeddings.len()
-        + dump.tag_energy_levels.len()
-        + dump.folders.len()
-        + dump.service_config.len()
-        + dump.service_tracks.len()
-        + dump.service_playlists.len()
-        + dump.service_playlist_tracks.len()
-        + dump.files.len()
-        + dump.playlist_subscriptions.len()
-        + dump.deemix_downloads.len();
-
-    info!("Import complete: {total} rows restored from {dump_path}");
+    let grand_total: usize = totals.iter().map(|(_, n)| n).sum();
+    info!("Import complete: {grand_total} rows restored from {dump_path}");
     Ok(())
+}
+
+/// Fallback: parse the dump JSON with maximum tolerance for schema drift.
+/// Uses serde_json::Value to extract what we can, filling in defaults
+/// for missing keys and skipping unknown keys.
+fn parse_dump_resilient(json: &str) -> Result<DataDump> {
+    use serde_json::Value;
+
+    let root: Value =
+        serde_json::from_str(json).context("Failed to parse dump JSON even as Value")?;
+
+    let dumped_at = root.get("dumped_at").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    let mut dump = DataDump {
+        tag_categories: Vec::new(),
+        tags: Vec::new(),
+        tag_embeddings: Vec::new(),
+        tag_energy_levels: Vec::new(),
+        folders: Vec::new(),
+        service_config: Vec::new(),
+        service_tracks: Vec::new(),
+        service_playlists: Vec::new(),
+        service_playlist_tracks: Vec::new(),
+        files: Vec::new(),
+        playlist_subscriptions: Vec::new(),
+        deemix_downloads: Vec::new(),
+        dumped_at,
+    };
+
+    macro_rules! extract_table {
+        ($field:ident, $ty:ty, $key:literal) => {
+            if let Some(arr) = root.get($key).and_then(|v| v.as_array()) {
+                for (i, item) in arr.iter().enumerate() {
+                    match serde_json::from_value::<$ty>(item.clone()) {
+                        Ok(row) => dump.$field.push(row),
+                        Err(e) => warn!("  {} row {}: skipped — {}", $key, i, e),
+                    }
+                }
+            }
+        };
+    }
+
+    extract_table!(tag_categories, DumpTagCategory, "tag_categories");
+    extract_table!(tags, DumpTag, "tags");
+    extract_table!(tag_embeddings, DumpTagEmbedding, "tag_embeddings");
+    extract_table!(tag_energy_levels, DumpTagEnergyLevel, "tag_energy_levels");
+    extract_table!(folders, DumpFolder, "folders");
+    extract_table!(service_config, DumpServiceConfig, "service_config");
+    extract_table!(service_tracks, DumpServiceTrack, "service_tracks");
+    extract_table!(service_playlists, DumpServicePlaylist, "service_playlists");
+    extract_table!(
+        service_playlist_tracks,
+        DumpServicePlaylistTrack,
+        "service_playlist_tracks"
+    );
+    extract_table!(files, DumpFile, "files");
+    extract_table!(
+        playlist_subscriptions,
+        DumpPlaylistSubscription,
+        "playlist_subscriptions"
+    );
+    extract_table!(deemix_downloads, DumpDeemixDownload, "deemix_downloads");
+
+    Ok(dump)
 }
 
 async fn import_tag_categories(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     rows: &[DumpTagCategory],
-) -> Result<()> {
+) -> Result<usize> {
+    let mut count = 0;
     for r in rows {
-        sqlx::query(
+        match sqlx::query(
             "INSERT INTO tag_categories (id, name, icon, prefix, sort_order, is_default, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(r.id).bind(&r.name).bind(&r.icon).bind(&r.prefix)
         .bind(r.sort_order).bind(r.is_default).bind(r.created_at)
-        .execute(&mut **tx).await?;
+        .execute(&mut **tx).await
+        {
+            Ok(_) => count += 1,
+            Err(e) => warn!("    tag_categories row id={}: {e}", r.id),
+        }
     }
-    if !rows.is_empty() {
-        info!("  tag_categories: {} rows", rows.len());
-    }
-    Ok(())
+    Ok(count)
 }
 
-async fn import_tags(tx: &mut sqlx::Transaction<'_, Sqlite>, rows: &[DumpTag]) -> Result<()> {
+async fn import_tags(tx: &mut sqlx::Transaction<'_, Sqlite>, rows: &[DumpTag]) -> Result<usize> {
+    let mut count = 0;
     for r in rows {
-        sqlx::query(
+        match sqlx::query(
             "INSERT INTO tags (id, name, category_id, sort_order, created_at, reviewed_at) VALUES (?, ?, ?, ?, ?, ?)"
         )
         .bind(r.id).bind(&r.name).bind(r.category_id)
         .bind(r.sort_order)
         .bind(r.created_at).bind(r.reviewed_at)
-        .execute(&mut **tx).await?;
+        .execute(&mut **tx).await
+        {
+            Ok(_) => count += 1,
+            Err(e) => warn!("    tags row id={}: {e}", r.id),
+        }
     }
-    if !rows.is_empty() {
-        info!("  tags: {} rows", rows.len());
-    }
-    Ok(())
+    Ok(count)
 }
 
 async fn import_tag_embeddings(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     rows: &[DumpTagEmbedding],
-) -> Result<()> {
+) -> Result<usize> {
+    let mut count = 0;
     for r in rows {
-        let blob = BASE64
-            .decode(&r.embedding_b64)
-            .context("Failed to decode tag_embedding base64")?;
-        sqlx::query(
+        let blob = match BASE64.decode(&r.embedding_b64) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(
+                    "    tag_embeddings tag_id={}: base64 decode failed — {e}",
+                    r.tag_id
+                );
+                continue;
+            }
+        };
+        match sqlx::query(
             "INSERT INTO tag_embeddings (tag_id, embedding, model_version, updated_at) VALUES (?, ?, ?, ?)"
         )
         .bind(r.tag_id).bind(&blob).bind(&r.model_version).bind(r.updated_at)
-        .execute(&mut **tx).await?;
+        .execute(&mut **tx).await
+        {
+            Ok(_) => count += 1,
+            Err(e) => warn!("    tag_embeddings tag_id={}: {e}", r.tag_id),
+        }
     }
-    if !rows.is_empty() {
-        info!("  tag_embeddings: {} rows", rows.len());
-    }
-    Ok(())
+    Ok(count)
 }
 
 async fn import_tag_energy_levels(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     rows: &[DumpTagEnergyLevel],
-) -> Result<()> {
+) -> Result<usize> {
+    let mut count = 0;
     for r in rows {
-        sqlx::query(
+        match sqlx::query(
             "INSERT INTO tag_energy_levels (tag_id, energy_level, created_at) VALUES (?, ?, ?)",
         )
         .bind(r.tag_id)
         .bind(r.energy_level)
         .bind(r.created_at)
         .execute(&mut **tx)
-        .await?;
+        .await
+        {
+            Ok(_) => count += 1,
+            Err(e) => warn!("    tag_energy_levels tag_id={}: {e}", r.tag_id),
+        }
     }
-    if !rows.is_empty() {
-        info!("  tag_energy_levels: {} rows", rows.len());
-    }
-    Ok(())
+    Ok(count)
 }
 
-async fn import_folders(tx: &mut sqlx::Transaction<'_, Sqlite>, rows: &[DumpFolder]) -> Result<()> {
+async fn import_folders(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    rows: &[DumpFolder],
+) -> Result<usize> {
+    let mut count = 0;
     for r in rows {
-        sqlx::query(
+        match sqlx::query(
             "INSERT INTO folders (id, folder_path, active, scan_recursive, fixed_extensions, file_extensions, max_depth, last_scanned, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(r.id).bind(&r.folder_path).bind(r.active).bind(r.scan_recursive)
         .bind(r.fixed_extensions).bind(&r.file_extensions).bind(r.max_depth)
         .bind(r.last_scanned).bind(r.created_at).bind(r.updated_at)
-        .execute(&mut **tx).await?;
+        .execute(&mut **tx).await
+        {
+            Ok(_) => count += 1,
+            Err(e) => warn!("    folders row id={}: {e}", r.id),
+        }
     }
-    if !rows.is_empty() {
-        info!("  folders: {} rows", rows.len());
-    }
-    Ok(())
+    Ok(count)
 }
 
 async fn import_service_config(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     rows: &[DumpServiceConfig],
-) -> Result<()> {
+) -> Result<usize> {
+    let mut count = 0;
     for r in rows {
-        sqlx::query(
+        match sqlx::query(
             "INSERT INTO service_config (id, service, refresh_token, metadata_json, access_token, token_expiry, user_id, playlist_id, is_connected, last_checked, last_synced, remote_playlists_count, remote_tracks_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(r.id).bind(&r.service).bind(&r.refresh_token).bind(&r.metadata_json)
@@ -730,89 +979,99 @@ async fn import_service_config(
         .bind(r.token_expiry).bind(&r.user_id).bind(&r.playlist_id).bind(r.is_connected)
         .bind(r.last_checked).bind(r.last_synced).bind(r.remote_playlists_count)
         .bind(r.remote_tracks_count).bind(r.created_at).bind(r.updated_at)
-        .execute(&mut **tx).await?;
+        .execute(&mut **tx).await
+        {
+            Ok(_) => count += 1,
+            Err(e) => warn!("    service_config row id={}: {e}", r.id),
+        }
     }
-    if !rows.is_empty() {
-        info!("  service_config: {} rows", rows.len());
-    }
-    Ok(())
+    Ok(count)
 }
 
 async fn import_service_tracks(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     rows: &[DumpServiceTrack],
-) -> Result<()> {
+) -> Result<usize> {
+    let mut count = 0;
     for r in rows {
-        sqlx::query(
+        match sqlx::query(
             "INSERT INTO service_tracks (id, service, service_id, title, artist, album, isrc, duration_ms, metadata_json, imported_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(r.id).bind(&r.service).bind(&r.service_id).bind(&r.title).bind(&r.artist)
         .bind(&r.album).bind(&r.isrc).bind(r.duration_ms).bind(&r.metadata_json)
         .bind(r.imported_at).bind(r.updated_at)
-        .execute(&mut **tx).await?;
+        .execute(&mut **tx).await
+        {
+            Ok(_) => count += 1,
+            Err(e) => warn!("    service_tracks row id={}: {e}", r.id),
+        }
     }
-    if !rows.is_empty() {
-        info!("  service_tracks: {} rows", rows.len());
-    }
-    Ok(())
+    Ok(count)
 }
 
 async fn import_service_playlists(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     rows: &[DumpServicePlaylist],
-) -> Result<()> {
+) -> Result<usize> {
+    let mut count = 0;
     for r in rows {
-        sqlx::query(
+        match sqlx::query(
             "INSERT INTO service_playlists (id, service, playlist_id, name, description, metadata_json, imported_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(r.id).bind(&r.service).bind(&r.playlist_id).bind(&r.name)
         .bind(&r.description).bind(&r.metadata_json).bind(r.imported_at).bind(r.updated_at)
-        .execute(&mut **tx).await?;
+        .execute(&mut **tx).await
+        {
+            Ok(_) => count += 1,
+            Err(e) => warn!("    service_playlists row id={}: {e}", r.id),
+        }
     }
-    if !rows.is_empty() {
-        info!("  service_playlists: {} rows", rows.len());
-    }
-    Ok(())
+    Ok(count)
 }
 
 async fn import_service_playlist_tracks(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     rows: &[DumpServicePlaylistTrack],
-) -> Result<()> {
+) -> Result<usize> {
+    let mut count = 0;
     for r in rows {
-        sqlx::query(
+        match sqlx::query(
             "INSERT INTO service_playlist_tracks (playlist_id, track_id, position, added_at) VALUES (?, ?, ?, ?)"
         )
         .bind(r.playlist_id).bind(r.track_id).bind(r.position).bind(r.added_at)
-        .execute(&mut **tx).await?;
+        .execute(&mut **tx).await
+        {
+            Ok(_) => count += 1,
+            Err(e) => warn!("    service_playlist_tracks playlist_id={} track_id={}: {e}", r.playlist_id, r.track_id),
+        }
     }
-    if !rows.is_empty() {
-        info!("  service_playlist_tracks: {} rows", rows.len());
-    }
-    Ok(())
+    Ok(count)
 }
 
 async fn import_playlist_subscriptions(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     rows: &[DumpPlaylistSubscription],
-) -> Result<()> {
+) -> Result<usize> {
+    let mut count = 0;
     for r in rows {
-        sqlx::query(
+        match sqlx::query(
             "INSERT INTO playlist_subscriptions (id, service, playlist_id, service_playlist_id, subscribed_at, last_polled_at, poll_interval_secs, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(r.id).bind(&r.service).bind(&r.playlist_id).bind(r.service_playlist_id)
         .bind(r.subscribed_at).bind(r.last_polled_at).bind(r.poll_interval_secs).bind(r.is_active)
-        .execute(&mut **tx).await?;
+        .execute(&mut **tx).await
+        {
+            Ok(_) => count += 1,
+            Err(e) => warn!("    playlist_subscriptions row id={}: {e}", r.id),
+        }
     }
-    if !rows.is_empty() {
-        info!("  playlist_subscriptions: {} rows", rows.len());
-    }
-    Ok(())
+    Ok(count)
 }
 
-async fn import_files(tx: &mut sqlx::Transaction<'_, Sqlite>, rows: &[DumpFile]) -> Result<()> {
+async fn import_files(tx: &mut sqlx::Transaction<'_, Sqlite>, rows: &[DumpFile]) -> Result<usize> {
+    let mut count = 0;
     for r in rows {
-        sqlx::query(
+        match sqlx::query(
             r#"
             INSERT INTO files (
                 id, file_path, file_hash, file_type, file_size, last_modified, isrc, last_scanned,
@@ -838,29 +1097,32 @@ async fn import_files(tx: &mut sqlx::Transaction<'_, Sqlite>, rows: &[DumpFile])
         .bind(r.bpm).bind(&r.musical_key).bind(r.rating).bind(r.play_count).bind(r.last_played)
         .bind(&r.spotify_id).bind(&r.soundcloud_id).bind(&r.youtube_id)
         .bind(r.created_at).bind(r.updated_at)
-        .execute(&mut **tx).await?;
+        .execute(&mut **tx).await
+        {
+            Ok(_) => count += 1,
+            Err(e) => warn!("    files row id={}: {e}", r.id),
+        }
     }
-    if !rows.is_empty() {
-        info!("  files: {} rows", rows.len());
-    }
-    Ok(())
+    Ok(count)
 }
 
 async fn import_deemix_downloads(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     rows: &[DumpDeemixDownload],
-) -> Result<()> {
+) -> Result<usize> {
+    let mut count = 0;
     for r in rows {
-        sqlx::query(
+        match sqlx::query(
             "INSERT INTO deemix_downloads (id, spotify_playlist_url, playlist_name, status, track_count_total, track_count_downloaded, error_message, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(r.id).bind(&r.spotify_playlist_url).bind(&r.playlist_name)
         .bind(&r.status).bind(r.track_count_total).bind(r.track_count_downloaded)
         .bind(&r.error_message).bind(r.created_at).bind(r.updated_at)
-        .execute(&mut **tx).await?;
+        .execute(&mut **tx).await
+        {
+            Ok(_) => count += 1,
+            Err(e) => warn!("    deemix_downloads row id={}: {e}", r.id),
+        }
     }
-    if !rows.is_empty() {
-        info!("  deemix_downloads: {} rows", rows.len());
-    }
-    Ok(())
+    Ok(count)
 }

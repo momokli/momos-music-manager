@@ -1,0 +1,3215 @@
+<!doctype html>
+<html lang="en" class="dark">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>CRUD Prototype — Momo's Music Manager</title>
+        <link
+            rel="stylesheet"
+            href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+        />
+        <style>
+            /* ================================================================
+       DESIGN SYSTEM
+       ================================================================ */
+
+            :root {
+                --bg: #0b0d12;
+                --surface: #14181f;
+                --surface-hover: #1a1f2a;
+                --border: #1e293b;
+                --border-strong: #334155;
+                --text: #e2e8f0;
+                --text-secondary: #cbd5e1;
+                --text-muted: #94a3b8;
+                --text-subtle: #64748b;
+                --accent: #6366f1;
+                --accent-hover: #5558e6;
+                --accent-bg: rgba(99, 102, 241, 0.1);
+                --green: #10b981;
+                --green-bg: rgba(16, 185, 129, 0.1);
+                --red: #ef4444;
+                --red-bg: rgba(239, 68, 68, 0.1);
+                --yellow: #f59e0b;
+                --yellow-bg: rgba(245, 158, 11, 0.1);
+                --purple: #8b5cf6;
+                --radius-sm: 4px;
+                --radius-md: 6px;
+                --radius-lg: 8px;
+                --radius-xl: 12px;
+                --font-sans: system-ui, -apple-system, sans-serif;
+                --font-mono: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+                --transition: 0.15s ease;
+                --space-1: 4px;
+                --space-2: 8px;
+                --space-3: 12px;
+                --space-4: 16px;
+                --space-5: 20px;
+                --space-6: 24px;
+            }
+
+            *,
+            *::before,
+            *::after {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+
+            body {
+                font-family: var(--font-sans);
+                background: var(--bg);
+                color: var(--text);
+                min-height: 100vh;
+                padding: var(--space-6);
+            }
+
+            /* ─── Layout ─── */
+
+            .app-header {
+                display: flex;
+                align-items: center;
+                gap: var(--space-4);
+                margin-bottom: var(--space-6);
+                padding-bottom: var(--space-4);
+                border-bottom: 1px solid var(--border);
+            }
+            .app-header h1 {
+                font-size: 1.25rem;
+                font-weight: 600;
+                color: var(--text);
+            }
+            .app-header h1 i {
+                color: var(--accent);
+                margin-right: var(--space-2);
+            }
+            .app-header .subtitle {
+                color: var(--text-subtle);
+                font-size: 0.8rem;
+                margin-left: auto;
+            }
+
+            /* ─── Filter Panel ─── */
+
+            .filter-panel {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: var(--radius-xl);
+                margin-bottom: var(--space-4);
+                overflow: visible;
+                transition: all var(--transition);
+            }
+            .filter-panel.collapsed {
+                max-height: 52px;
+                overflow: hidden;
+            }
+            .filter-panel-header {
+                display: flex;
+                align-items: center;
+                gap: var(--space-3);
+                padding: var(--space-3) var(--space-4);
+                border-bottom: 1px solid var(--border);
+            }
+            .filter-panel.collapsed .filter-panel-header {
+                border-bottom: none;
+            }
+            .filter-panel-header .search-wrap {
+                flex: 1;
+                max-width: 400px;
+                margin-bottom: 0;
+            }
+            .filter-panel-toggle {
+                background: transparent;
+                border: 1px solid var(--border);
+                color: var(--text-muted);
+                width: 32px;
+                height: 32px;
+                border-radius: var(--radius-md);
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                flex-shrink: 0;
+                transition: all var(--transition);
+            }
+            .filter-panel-toggle:hover {
+                background: var(--accent-bg);
+                color: var(--accent);
+                border-color: var(--accent);
+            }
+            .filter-panel-toggle .chevron {
+                transition: transform 0.2s ease;
+            }
+            .filter-panel.collapsed .filter-panel-toggle .chevron {
+                transform: rotate(-90deg);
+            }
+            .filter-panel-body {
+                padding: var(--space-3) var(--space-4);
+                display: flex;
+                flex-direction: column;
+                gap: var(--space-3);
+                overflow: visible;
+            }
+            .filter-panel.collapsed .filter-panel-body {
+                display: none;
+            }
+            .filter-row {
+                display: flex;
+                align-items: center;
+                gap: var(--space-3);
+                flex-wrap: wrap;
+            }
+            .filter-row-label {
+                font-size: 0.7rem;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+                color: var(--text-subtle);
+                min-width: 32px;
+            }
+            .filter-group {
+                display: flex;
+                gap: var(--space-1);
+                flex-wrap: wrap;
+            }
+            .filter-btn {
+                padding: 4px 10px;
+                border: 1px solid var(--border);
+                border-radius: var(--radius-md);
+                background: transparent;
+                color: var(--text-muted);
+                font-size: 0.75rem;
+                cursor: pointer;
+                transition: all var(--transition);
+                font-family: var(--font-sans);
+            }
+            .filter-btn:hover {
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            .filter-btn.active {
+                background: var(--accent-bg);
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+
+            /* ─── Dual Range Slider (BPM) ─── */
+
+            .dual-range-wrap {
+                display: flex;
+                align-items: center;
+                gap: var(--space-2);
+                min-width: 200px;
+            }
+            .dual-range {
+                position: relative;
+                width: 140px;
+                height: 24px;
+            }
+            .dual-range-track {
+                position: absolute;
+                top: 50%;
+                left: 0;
+                right: 0;
+                height: 4px;
+                background: var(--border);
+                border-radius: 2px;
+                transform: translateY(-50%);
+            }
+            .dual-range-fill {
+                position: absolute;
+                top: 50%;
+                height: 4px;
+                background: var(--accent);
+                border-radius: 2px;
+                transform: translateY(-50%);
+            }
+            .dual-range input[type="range"] {
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                -webkit-appearance: none;
+                appearance: none;
+                background: transparent;
+                pointer-events: none;
+                margin: 0;
+            }
+            .dual-range input[type="range"]::-webkit-slider-thumb {
+                -webkit-appearance: none;
+                appearance: none;
+                width: 14px;
+                height: 14px;
+                border-radius: 50%;
+                background: var(--accent);
+                border: 2px solid var(--bg);
+                cursor: pointer;
+                pointer-events: auto;
+            }
+            .dual-range-values {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+                font-size: 0.75rem;
+                font-family: var(--font-mono);
+                color: var(--text-muted);
+                min-width: 60px;
+            }
+            .dual-range-values .sep {
+                color: var(--text-subtle);
+            }
+
+            /* ─── Key Grid ─── */
+
+            .key-grid-wrap {
+                display: flex;
+                flex-direction: column;
+                gap: var(--space-1);
+            }
+            .key-grid {
+                display: flex;
+                gap: 2px;
+                flex-wrap: wrap;
+                align-items: center;
+            }
+            .key-btn {
+                width: 30px;
+                height: 24px;
+                border: 1px solid var(--border);
+                border-radius: var(--radius-sm);
+                background: transparent;
+                color: var(--text-muted);
+                font-size: 0.65rem;
+                font-family: var(--font-mono);
+                cursor: pointer;
+                transition: all var(--transition);
+            }
+            .key-btn:hover {
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            .key-btn.active {
+                background: var(--accent-bg);
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            .key-btn.minor.active {
+                background: var(--purple);
+                border-color: var(--purple);
+                color: #fff;
+            }
+            .key-btn.major.active {
+                background: var(--accent);
+                border-color: var(--accent);
+                color: #fff;
+            }
+            .key-btn.action {
+                width: auto;
+                padding: 0 6px;
+                font-size: 0.6rem;
+            }
+            .key-btn.action.active {
+                background: var(--accent-bg);
+                color: var(--accent);
+            }
+
+            /* ─── Tag Filter ─── */
+
+            .tag-chips {
+                display: flex;
+                gap: 4px;
+                flex-wrap: wrap;
+            }
+            .tag-chip {
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+                padding: 2px 8px;
+                border-radius: 12px;
+                background: var(--accent-bg);
+                color: var(--accent);
+                font-size: 0.75rem;
+                font-family: var(--font-mono);
+            }
+            .tag-chip-x {
+                cursor: pointer;
+                opacity: 0.6;
+                font-size: 0.7rem;
+            }
+            .tag-chip-x:hover {
+                opacity: 1;
+            }
+            .tag-search-wrap {
+                position: relative;
+            }
+            .tag-search-wrap .input-search {
+                padding-left: 28px !important;
+            }
+            .tag-search-wrap > i {
+                position: absolute;
+                left: 10px;
+                top: 50%;
+                transform: translateY(-50%);
+                color: var(--text-subtle);
+                font-size: 0.75rem;
+                pointer-events: none;
+            }
+
+            /* ─── Search ─── */
+
+            .search-wrap {
+                position: relative;
+            }
+            .search-wrap i {
+                position: absolute;
+                left: 10px;
+                top: 50%;
+                transform: translateY(-50%);
+                color: var(--text-subtle);
+                font-size: 0.75rem;
+                pointer-events: none;
+            }
+            .input-text {
+                padding: 6px 10px;
+                border: 1px solid var(--border);
+                border-radius: var(--radius-md);
+                background: var(--bg);
+                color: var(--text);
+                font-size: 0.8rem;
+                font-family: var(--font-sans);
+                outline: none;
+                transition: border-color var(--transition);
+                width: 100%;
+            }
+            .input-text:focus {
+                border-color: var(--accent);
+            }
+            .input-search {
+                padding-left: 28px !important;
+                width: 100%;
+            }
+
+            /* ─── Stats Row ─── */
+
+            .stats-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: var(--space-2) 0;
+            }
+            .stats-group {
+                display: flex;
+                align-items: center;
+                gap: var(--space-2);
+                flex-wrap: wrap;
+            }
+            .stats-group strong {
+                font-size: 0.9rem;
+            }
+
+            /* ─── Buttons ─── */
+
+            .btn {
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+                padding: 6px 12px;
+                border: 1px solid var(--border);
+                border-radius: var(--radius-md);
+                background: transparent;
+                color: var(--text);
+                font-size: 0.8rem;
+                cursor: pointer;
+                transition: all var(--transition);
+                font-family: var(--font-sans);
+                white-space: nowrap;
+            }
+            .btn:hover {
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            .btn:disabled {
+                opacity: 0.4;
+                cursor: not-allowed;
+            }
+            .btn-primary {
+                background: var(--accent);
+                border-color: var(--accent);
+                color: #fff;
+            }
+            .btn-primary:hover {
+                background: var(--accent-hover);
+            }
+            .btn-sm {
+                padding: 3px 8px;
+                font-size: 0.75rem;
+            }
+            .btn-icon {
+                padding: 4px 6px;
+                min-width: 28px;
+                justify-content: center;
+            }
+
+            /* ─── Page Size Selector ─── */
+
+            .page-size-select {
+                padding: 2px 6px;
+                border: 1px solid var(--border);
+                border-radius: 4px;
+                background: var(--surface);
+                color: var(--text);
+                font-size: 0.75rem;
+                font-family: var(--font-mono);
+                margin-left: 8px;
+                cursor: pointer;
+            }
+            .page-size-select:hover {
+                border-color: var(--accent);
+            }
+
+            /* ─── Column Config Trigger ─── */
+
+            .col-config-trigger {
+                padding: 2px 8px;
+                border: 1px solid var(--border);
+                border-radius: 4px;
+                background: transparent;
+                color: var(--text-muted);
+                font-size: 0.75rem;
+                cursor: pointer;
+                margin-left: 8px;
+            }
+            .col-config-trigger:hover {
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+
+            /* ─── Table ─── */
+
+            .table-wrap {
+                overflow-x: auto;
+                border: 1px solid var(--border);
+                border-radius: var(--radius-lg);
+                background: var(--surface);
+            }
+            .data-table {
+                width: auto;
+                border-collapse: collapse;
+                table-layout: fixed;
+            }
+            .data-table th {
+                position: relative;
+                padding: 8px 10px;
+                font-size: 0.7rem;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                color: var(--text-subtle);
+                text-align: left;
+                border-bottom: 1px solid var(--border);
+                background: var(--surface);
+                white-space: nowrap;
+                user-select: none;
+            }
+            .data-table th.sortable {
+                cursor: pointer;
+                user-select: none;
+            }
+            body.layout-mode .data-table th {
+                cursor: grab;
+            }
+            body.layout-mode .data-table th:active {
+                cursor: grabbing;
+            }
+            .data-table th.sortable:hover {
+                background: var(--surface-hover);
+            }
+            .data-table th.sortable i {
+                opacity: 0.3;
+                margin-left: 4px;
+                font-size: 0.7rem;
+            }
+            .data-table th.sort-asc i.fa-sort-up,
+            .data-table th.sort-desc i.fa-sort-down {
+                opacity: 1;
+            }
+            .data-table th.sort-asc i.fa-sort,
+            .data-table th.sort-desc i.fa-sort,
+            .data-table th:not(.sort-asc):not(.sort-desc) i.fa-sort-up,
+            .data-table th:not(.sort-asc):not(.sort-desc) i.fa-sort-down {
+                display: none;
+            }
+            .data-table th:not(.sort-asc):not(.sort-desc) i.fa-sort {
+                display: inline;
+            }
+            .data-table td {
+                padding: 6px 10px;
+                font-size: 0.8rem;
+                border-bottom: 1px solid var(--border);
+                color: var(--text-secondary);
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .data-table tr:last-child td {
+                border-bottom: none;
+            }
+            .data-table tr:hover td {
+                background: var(--surface-hover);
+            }
+
+            /* ─── Drag Reorder ─── */
+
+            th.dragging {
+                opacity: 0.5;
+                border: 1px dashed var(--accent);
+            }
+            th.drop-target {
+                border-left: 2px solid var(--accent);
+            }
+
+            /* ─── Column Resize Handles ─── */
+
+            .col-resize-handle {
+                display: none;
+                position: absolute;
+                right: 0;
+                top: 4px;
+                bottom: 4px;
+                width: 6px;
+                cursor: col-resize;
+                z-index: 10;
+                user-select: none;
+                background: transparent;
+                border-radius: 3px;
+                transition:
+                    background 0.15s ease,
+                    width 0.15s ease;
+            }
+            body.layout-mode .col-resize-handle {
+                display: block;
+            }
+            .col-resize-handle:hover,
+            .col-resize-handle.resizing {
+                background: var(--accent);
+                width: 8px;
+                right: -1px;
+                opacity: 0.7;
+            }
+
+            /* ─── Pagination ─── */
+
+            .pagination {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: var(--space-3);
+                padding: var(--space-3) 0;
+            }
+            .pagination-btn {
+                padding: 4px 10px;
+                border: 1px solid var(--border);
+                border-radius: var(--radius-md);
+                background: transparent;
+                color: var(--text-muted);
+                cursor: pointer;
+                transition: all var(--transition);
+                font-size: 0.8rem;
+            }
+            .pagination-btn:hover:not(:disabled) {
+                border-color: var(--accent);
+                color: var(--accent);
+            }
+            .pagination-btn:disabled {
+                opacity: 0.3;
+                cursor: not-allowed;
+            }
+            .pagination-info {
+                font-size: 0.8rem;
+                color: var(--text-muted);
+                font-family: var(--font-mono);
+            }
+
+            /* ─── Modal ─── */
+
+            .modal {
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0, 0, 0, 0.6);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                z-index: 1000;
+                opacity: 0;
+                pointer-events: none;
+                transition: opacity 0.2s ease;
+            }
+            .modal.open {
+                opacity: 1;
+                pointer-events: auto;
+            }
+            .modal-content {
+                background: var(--surface);
+                border: 1px solid var(--border-strong);
+                border-radius: var(--radius-xl);
+                min-width: 400px;
+                max-width: 90vw;
+                max-height: 80vh;
+                overflow: hidden;
+                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            }
+            .modal-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: var(--space-4) var(--space-5);
+                border-bottom: 1px solid var(--border);
+            }
+            .modal-header h3 {
+                font-size: 0.9rem;
+                font-weight: 600;
+            }
+            .close-btn {
+                background: none;
+                border: none;
+                color: var(--text-muted);
+                font-size: 1.2rem;
+                cursor: pointer;
+                padding: 4px;
+            }
+            .close-btn:hover {
+                color: var(--text);
+            }
+            .modal-actions {
+                display: flex;
+                align-items: center;
+                gap: var(--space-2);
+                padding: var(--space-4) var(--space-5);
+                border-top: 1px solid var(--border);
+            }
+
+            /* ─── Column Config Modal Items ─── */
+
+            .col-config-item {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 6px 0;
+                cursor: grab;
+            }
+            .col-config-item:active {
+                cursor: grabbing;
+            }
+            .col-config-item.dragging {
+                opacity: 0.4;
+            }
+            .col-config-drag-handle {
+                cursor: grab;
+                color: var(--text-muted);
+                font-size: 0.85rem;
+                padding: 0 4px;
+            }
+            .col-config-checkbox {
+                margin: 0;
+            }
+            .col-config-label {
+                flex: 1;
+                font-size: 0.85rem;
+            }
+            .col-config-width {
+                width: 60px;
+                padding: 2px 4px;
+                border: 1px solid var(--border);
+                border-radius: 4px;
+                background: var(--bg);
+                color: var(--text);
+                font-size: 0.75rem;
+                text-align: center;
+                font-family: var(--font-mono);
+            }
+            .col-config-reset {
+                width: 100%;
+            }
+
+            .filter-disabled {
+                pointer-events: none !important;
+                opacity: 0.4 !important;
+            }
+
+            /* ─── Comment diff ─── */
+            .diff-box {
+                font-family: var(--font-mono);
+                font-size: 0.65rem;
+                line-height: 1.4;
+            }
+            .diff-line-old {
+                color: var(--red);
+                text-decoration: line-through;
+                opacity: 0.6;
+            }
+            .diff-line-new {
+                color: var(--green);
+            }
+
+            /* ─── Helpers ─── */
+
+            .text-muted {
+                color: var(--text-muted);
+            }
+            .text-subtle {
+                color: var(--text-subtle);
+            }
+            .font-mono {
+                font-family: var(--font-mono);
+            }
+            .text-xs {
+                font-size: 0.7rem;
+            }
+            .text-sm {
+                font-size: 0.75rem;
+            }
+            .text-center {
+                text-align: center;
+            }
+            .flex {
+                display: flex;
+            }
+            .items-center {
+                align-items: center;
+            }
+            .gap-1 {
+                gap: 4px;
+            }
+            .gap-2 {
+                gap: 8px;
+            }
+            .ml-auto {
+                margin-left: auto;
+            }
+            .w-full {
+                width: 100%;
+            }
+            .mt-4 {
+                margin-top: 16px;
+            }
+
+            /* ─── Empty state ─── */
+
+            .empty-state {
+                padding: 48px 16px;
+                text-align: center;
+            }
+            .empty-state .icon {
+                font-size: 2rem;
+                color: var(--text-subtle);
+                margin-bottom: 12px;
+            }
+            .empty-state h3 {
+                font-size: 1rem;
+                color: var(--text-muted);
+                margin-bottom: 8px;
+            }
+            .empty-state p {
+                font-size: 0.85rem;
+                color: var(--text-subtle);
+            }
+
+            /* ─── Badges ─── */
+
+            .badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 3px;
+                padding: 2px 6px;
+                border-radius: 4px;
+                font-size: 0.7rem;
+                font-family: var(--font-mono);
+            }
+            .badge-key {
+                background: var(--accent-bg);
+                color: var(--accent);
+            }
+            .service-badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+                padding: 2px 8px;
+                border-radius: 4px;
+                font-size: 0.7rem;
+            }
+            .service-badge.spotify {
+                background: rgba(29, 185, 84, 0.1);
+                color: #1db954;
+            }
+            .service-badge.soundcloud {
+                background: rgba(255, 119, 0, 0.1);
+                color: #ff7700;
+            }
+            .service-badge.youtube {
+                background: rgba(255, 0, 0, 0.1);
+                color: #ff0000;
+            }
+
+            /* ─── Loading spinner ─── */
+
+            .loading {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                padding: 48px;
+            }
+            .spinner {
+                width: 32px;
+                height: 32px;
+                border: 3px solid var(--border);
+                border-top-color: var(--accent);
+                border-radius: 50%;
+                animation: spin 0.6s linear infinite;
+            }
+            @keyframes spin {
+                to {
+                    transform: rotate(360deg);
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <!-- ════════════════════════════════════════════════
+       HEADER
+       ════════════════════════════════════════════════ -->
+
+        <header class="app-header">
+            <h1><i class="fas fa-table"></i> CRUD Prototype</h1>
+            <span style="display: flex; gap: 8px; align-items: center">
+                <div class="filter-group" id="view-switcher" style="margin-left: 0">
+                    <button class="filter-btn active" data-view="files">Files</button>
+                    <button class="filter-btn" data-view="tracks">Tracks</button>
+                </div>
+                <span class="text-subtle" style="font-size: 0.75rem" id="subtitle-text"
+                    >prototype</span
+                >
+            </span>
+            <span class="subtitle">🏗️ Prototype — no backend needed</span>
+        </header>
+
+        <!-- ════════════════════════════════════════════════
+       FILTER PANEL
+       ════════════════════════════════════════════════ -->
+
+        <div class="filter-panel" id="filter-panel">
+            <div class="filter-panel-header">
+                <div class="search-wrap">
+                    <i class="fas fa-search"></i>
+                    <input
+                        type="text"
+                        class="input-text input-search"
+                        id="search-input"
+                        placeholder="Search…"
+                        autocomplete="off"
+                    />
+                </div>
+                <button
+                    class="filter-panel-toggle"
+                    id="filter-toggle"
+                    title="Toggle filters"
+                >
+                    <i class="fas fa-chevron-up chevron"></i>
+                </button>
+            </div>
+            <div class="filter-panel-body">
+                <!-- Service filter (multi-select) -->
+                <div class="filter-row">
+                    <span class="filter-row-label">Service</span>
+                    <div class="filter-group" id="service-filter" style="flex-wrap: wrap">
+                        <button
+                            class="filter-btn"
+                            data-value="spotify"
+                            title="Toggle Spotify"
+                        >
+                            <i class="fab fa-spotify"></i> Spotify
+                        </button>
+                        <button
+                            class="filter-btn"
+                            data-value="soundcloud"
+                            title="Toggle SoundCloud"
+                        >
+                            <i class="fab fa-soundcloud"></i> SoundCloud
+                        </button>
+                        <button
+                            class="filter-btn"
+                            data-value="youtube"
+                            title="Toggle YouTube"
+                        >
+                            <i class="fab fa-youtube"></i> YouTube
+                        </button>
+                    </div>
+                </div>
+                <div id="files-filters">
+                    <div class="filter-row">
+                        <span class="filter-row-label">BPM</span>
+                        <div class="dual-range-wrap">
+                            <div class="dual-range">
+                                <div class="dual-range-track"></div>
+                                <div
+                                    class="dual-range-fill"
+                                    id="bpm-fill"
+                                    style="left: 0%; width: 100%"
+                                ></div>
+                                <input
+                                    type="range"
+                                    class="dual-range-input"
+                                    id="bpm-min"
+                                    min="0"
+                                    max="200"
+                                    step="1"
+                                    value="0"
+                                />
+                                <input
+                                    type="range"
+                                    class="dual-range-input"
+                                    id="bpm-max"
+                                    min="0"
+                                    max="200"
+                                    step="1"
+                                    value="200"
+                                />
+                            </div>
+                            <div class="dual-range-values">
+                                <span id="bpm-min-val">0</span>
+                                <span class="sep">──</span>
+                                <span id="bpm-max-val">200</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="filter-row">
+                        <span class="filter-row-label">Key</span>
+                        <div class="key-grid-wrap">
+                            <div class="key-grid" id="key-grid-minor"></div>
+                            <div class="key-grid" id="key-grid-major"></div>
+                        </div>
+                    </div>
+
+                    <!-- Plays range -->
+                    <div class="filter-row">
+                        <span class="filter-row-label">Plays</span>
+                        <div class="dual-range-wrap">
+                            <div class="dual-range">
+                                <div class="dual-range-track"></div>
+                                <div
+                                    class="dual-range-fill"
+                                    id="plays-fill"
+                                    style="left: 0%; width: 100%"
+                                ></div>
+                                <input
+                                    type="range"
+                                    class="dual-range-input"
+                                    id="plays-min"
+                                    min="0"
+                                    max="200"
+                                    step="1"
+                                    value="0"
+                                />
+                                <input
+                                    type="range"
+                                    class="dual-range-input"
+                                    id="plays-max"
+                                    min="0"
+                                    max="200"
+                                    step="1"
+                                    value="200"
+                                />
+                            </div>
+                            <div class="dual-range-values">
+                                <span id="plays-min-val">0</span>
+                                <span class="sep">──</span>
+                                <span id="plays-max-val">200</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Genre chips -->
+                    <div class="filter-row">
+                        <span class="filter-row-label">Genre</span>
+                        <div class="tag-search-wrap" style="min-width: 160px">
+                            <input
+                                type="text"
+                                class="input-text input-search"
+                                id="genre-search"
+                                placeholder="Filter genre…"
+                                autocomplete="off"
+                            />
+                        </div>
+                        <div class="tag-chips" id="genre-chips"></div>
+                    </div>
+
+                    <!-- Tags chips -->
+                    <div class="filter-row">
+                        <span class="filter-row-label">Tags</span>
+                        <div class="tag-search-wrap" style="min-width: 160px">
+                            <input
+                                type="text"
+                                class="input-text input-search"
+                                id="tag-search"
+                                placeholder="Filter tag…"
+                                autocomplete="off"
+                            />
+                        </div>
+                        <div class="tag-chips" id="tag-chips"></div>
+                    </div>
+
+                    <!-- Comment status filter -->
+                    <div class="filter-row">
+                        <span class="filter-row-label">Comment</span>
+                        <div class="filter-group" id="comment-filter">
+                            <button class="filter-btn active" data-value="all">
+                                All
+                            </button>
+                            <button class="filter-btn" data-value="needs_update">
+                                Needs Update
+                            </button>
+                            <button class="filter-btn" data-value="uptodate">
+                                Up to Date
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- File Type filter -->
+                    <div
+                        class="filter-row"
+                        style="
+                            border-top: 1px solid var(--border);
+                            padding-top: var(--space-3);
+                            margin-top: var(--space-1);
+                        "
+                    >
+                        <span class="filter-row-label">Type</span>
+                        <div class="filter-group" id="filetype-filter">
+                            <button class="filter-btn active" data-value="all">
+                                All
+                            </button>
+                            <button class="filter-btn" data-value="mp3">MP3</button>
+                            <button class="filter-btn" data-value="flac">FLAC</button>
+                            <button class="filter-btn" data-value="stem.m4a">
+                                Stem.M4A
+                            </button>
+                            <button class="filter-btn" data-value="wav">WAV</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="date-filters">
+                    <!-- Date section header -->
+                    <div
+                        class="filter-row"
+                        style="
+                            border-top: 1px solid var(--border);
+                            padding-top: var(--space-3);
+                            margin-top: var(--space-1);
+                        "
+                    >
+                        <span
+                            class="filter-row-label"
+                            style="min-width: auto; color: var(--text-muted)"
+                            >Date</span
+                        >
+                    </div>
+
+                    <!-- Created -->
+                    <div class="filter-row">
+                        <span class="filter-row-label">Created</span>
+                        <select
+                            class="input-text"
+                            id="created-cond"
+                            style="width: 100px; font-size: 0.75rem; padding: 3px 4px"
+                        >
+                            <option value="last">in the last</option>
+                            <option value="more">more than</option>
+                        </select>
+                        <input
+                            type="number"
+                            class="input-text"
+                            id="created-val"
+                            value="30"
+                            min="1"
+                            max="365"
+                            style="
+                                width: 55px;
+                                font-size: 0.75rem;
+                                text-align: center;
+                                padding: 3px 4px;
+                            "
+                        />
+                        <select
+                            class="input-text"
+                            id="created-unit"
+                            style="width: 75px; font-size: 0.75rem; padding: 3px 4px"
+                        >
+                            <option value="days">days</option>
+                            <option value="weeks">weeks</option>
+                            <option value="months">months</option>
+                        </select>
+                        <input
+                            type="checkbox"
+                            id="created-check"
+                            style="margin: 0; cursor: pointer"
+                        />
+                    </div>
+
+                    <!-- Modified -->
+                    <div class="filter-row">
+                        <span class="filter-row-label">Modified</span>
+                        <select
+                            class="input-text"
+                            id="modified-cond"
+                            style="width: 100px; font-size: 0.75rem; padding: 3px 4px"
+                        >
+                            <option value="last">in the last</option>
+                            <option value="more">more than</option>
+                        </select>
+                        <input
+                            type="number"
+                            class="input-text"
+                            id="modified-val"
+                            value="30"
+                            min="1"
+                            max="365"
+                            style="
+                                width: 55px;
+                                font-size: 0.75rem;
+                                text-align: center;
+                                padding: 3px 4px;
+                            "
+                        />
+                        <select
+                            class="input-text"
+                            id="modified-unit"
+                            style="width: 75px; font-size: 0.75rem; padding: 3px 4px"
+                        >
+                            <option value="days">days</option>
+                            <option value="weeks">weeks</option>
+                            <option value="months">months</option>
+                        </select>
+                        <input
+                            type="checkbox"
+                            id="modified-check"
+                            style="margin: 0; cursor: pointer"
+                        />
+                    </div>
+
+                    <!-- Played -->
+                    <div class="filter-row">
+                        <span class="filter-row-label">Played</span>
+                        <select
+                            class="input-text"
+                            id="played-cond"
+                            style="width: 100px; font-size: 0.75rem; padding: 3px 4px"
+                        >
+                            <option value="last">in the last</option>
+                            <option value="more">more than</option>
+                        </select>
+                        <input
+                            type="number"
+                            class="input-text"
+                            id="played-val"
+                            value="14"
+                            min="1"
+                            max="365"
+                            style="
+                                width: 55px;
+                                font-size: 0.75rem;
+                                text-align: center;
+                                padding: 3px 4px;
+                            "
+                        />
+                        <select
+                            class="input-text"
+                            id="played-unit"
+                            style="width: 75px; font-size: 0.75rem; padding: 3px 4px"
+                        >
+                            <option value="days">days</option>
+                            <option value="weeks">weeks</option>
+                            <option value="months">months</option>
+                        </select>
+                        <input
+                            type="checkbox"
+                            id="played-check"
+                            style="margin: 0; cursor: pointer"
+                        />
+                    </div>
+                </div>
+
+                <!-- Tracks filter section -->
+                <div
+                    id="tracks-filters"
+                    class="filter-row"
+                    style="
+                        border-top: 1px solid var(--border);
+                        padding-top: var(--space-3);
+                        margin-top: var(--space-1);
+                    "
+                >
+                    <span
+                        class="filter-row-label"
+                        style="min-width: auto; color: var(--text-muted)"
+                        >Track Filters</span
+                    >
+                </div>
+                <div id="tracks-filters-content" class="filter-row">
+                    <span class="filter-row-label">Imported</span>
+                    <select
+                        class="input-text"
+                        id="tracks-import-cond"
+                        style="width: 100px; font-size: 0.75rem; padding: 3px 4px"
+                        disabled
+                    >
+                        <option value="last">in the last</option>
+                        <option value="more">more than</option>
+                    </select>
+                    <input
+                        type="number"
+                        class="input-text"
+                        id="tracks-import-val"
+                        value="30"
+                        min="1"
+                        max="365"
+                        style="
+                            width: 55px;
+                            font-size: 0.75rem;
+                            text-align: center;
+                            padding: 3px 4px;
+                        "
+                        disabled
+                    />
+                    <select
+                        class="input-text"
+                        id="tracks-import-unit"
+                        style="width: 75px; font-size: 0.75rem; padding: 3px 4px"
+                        disabled
+                    >
+                        <option value="days">days</option>
+                        <option value="weeks">weeks</option>
+                        <option value="months">months</option>
+                    </select>
+                    <input
+                        type="checkbox"
+                        id="tracks-import-check"
+                        style="margin: 0; cursor: pointer"
+                    />
+                </div>
+            </div>
+        </div>
+
+        <!-- ════════════════════════════════════════════════
+       CONTENT
+       ════════════════════════════════════════════════ -->
+
+        <div id="content">
+            <div class="loading">
+                <div class="spinner"></div>
+                <p
+                    style="
+                        margin-top: 12px;
+                        color: var(--text-subtle);
+                        font-size: 0.85rem;
+                    "
+                >
+                    Loading tracks…
+                </p>
+            </div>
+        </div>
+
+        <!-- ════════════════════════════════════════════════
+       COLUMN CONFIG MODAL (hidden template)
+       ════════════════════════════════════════════════ -->
+
+        <div class="modal" id="col-config-modal">
+            <div class="modal-content" style="max-width: 500px">
+                <div class="modal-header">
+                    <h3>
+                        <i class="fas fa-table-cells" style="color: var(--accent)"></i>
+                        Configure Columns
+                    </h3>
+                    <button class="close-btn" id="col-config-close">&times;</button>
+                </div>
+                <div
+                    id="col-config-body"
+                    style="padding: var(--space-4); max-height: 400px; overflow-y: auto"
+                ></div>
+                <div class="modal-actions" style="flex-wrap: wrap">
+                    <button class="btn btn-sm col-config-reset" id="col-config-reset">
+                        Reset to Defaults
+                    </button>
+                    <button class="btn btn-sm" id="col-config-select-all">
+                        Select All
+                    </button>
+                    <button class="btn btn-sm" id="col-config-deselect-all">
+                        Deselect All
+                    </button>
+                    <button
+                        class="btn btn-primary btn-sm"
+                        id="col-config-apply"
+                        style="margin-left: auto"
+                    >
+                        Apply
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ════════════════════════════════════════════════
+       JAVASCRIPT
+       ════════════════════════════════════════════════ -->
+
+        <script>
+            // ================================================================
+            // 1. MOCK DATA
+            // ================================================================
+
+            const ARTISTS = [
+                "Fred again..",
+                "Overmono",
+                "Joy Orbison",
+                "Four Tet",
+                "Jamie xx",
+                "Bicep",
+                "Ross from Friends",
+                "Bonobo",
+                "Caribou",
+                "Floating Points",
+                "Kelly Lee Owens",
+                "HAAi",
+                "TSHA",
+                "Eli & Fur",
+                "Anjunadeep",
+                "Solomun",
+                "Âme",
+                "Dixon",
+                "Ben Böhmer",
+                "Lane 8",
+            ];
+
+            const TITLES = [
+                "Rumble",
+                "So U Kno",
+                "Bronze",
+                "Looking at Your Pager",
+                "Glimpse",
+                "Opal",
+                "Epiphany",
+                "Marea",
+                "Apricots",
+                "You Can Do It",
+                "Larabar",
+                "Suzume",
+                "Turner",
+                "Moth",
+                "Blue Hour",
+                "Danielle",
+                "Claudia",
+                "Rave on U",
+                "Never Gonna Stop",
+                "Berlin",
+                "Rain Dance",
+                "Sunset",
+                "Midnight",
+                "Dawn",
+                "Echoes",
+                "Parallel",
+                "Horizon",
+                "Neon",
+                "Drift",
+                "Phase",
+            ];
+
+            const ALBUMS = [
+                "Actual Life",
+                "Digital Arpeggios",
+                "Music for Healing",
+                "Fabric Presents",
+                "In Colour",
+                "Isles",
+                "Migration",
+                "Swimmer",
+                "Love + Fear",
+                "Promises",
+            ];
+
+            const SERVICES = ["spotify", "soundcloud", "youtube"];
+
+            function random(arr) {
+                return arr[Math.floor(Math.random() * arr.length)];
+            }
+            function randBetween(min, max) {
+                return Math.floor(Math.random() * (max - min + 1)) + min;
+            }
+
+            const MINOR_KEYS = [];
+            const MAJOR_KEYS = [];
+            for (let i = 1; i <= 12; i++) {
+                MINOR_KEYS.push(i + "m");
+                MAJOR_KEYS.push(i + "d");
+            }
+
+            const ALL_KEYS = [...MINOR_KEYS, ...MAJOR_KEYS];
+
+            const TAG_NAMES = [
+                "build",
+                "peak",
+                "start",
+                "release",
+                "sustain",
+                "end",
+                "warmup",
+                "intro",
+                "breakdown",
+                "drop",
+                "groove",
+                "dark",
+                "melodic",
+                "driving",
+                "deep",
+                "tech",
+                "vocal",
+                "chill",
+                "energetic",
+                "minimal",
+            ];
+
+            const GENRES = [
+                "House",
+                "Techno",
+                "Ambient",
+                "Breaks",
+                "Drum & Bass",
+                "Electro",
+                "Downtempo",
+                "Trance",
+                "Progressive",
+                "Dub",
+                "Minimal",
+                "Acid",
+            ];
+
+            function generateMockFiles(count) {
+                const files = [];
+                for (let i = 1; i <= count; i++) {
+                    const title =
+                        TITLES[i % TITLES.length] +
+                        (i > TITLES.length
+                            ? ` (${Math.floor(i / TITLES.length) + 1})`
+                            : "");
+                    files.push({
+                        id: i,
+                        title,
+                        artist: random(ARTISTS),
+                        bpm: randBetween(70, 180),
+                        key: random(ALL_KEYS),
+                        isrc:
+                            Math.random() > 0.2
+                                ? `GBCEL${String(randBetween(1000000, 9999999)).padStart(7, "0")}`
+                                : null,
+                        album: Math.random() > 0.3 ? random(ALBUMS) : null,
+                        playCount: randBetween(0, 200),
+                        duration: randBetween(120, 480),
+                        createdAt: Date.now() - randBetween(0, 365) * 86400000,
+                        lastModified: Date.now() - randBetween(0, 180) * 86400000,
+                        lastPlayed:
+                            Math.random() > 0.3
+                                ? Date.now() - randBetween(0, 90) * 86400000
+                                : null,
+                        // Each file is linked to 1-3 services
+                        services: (() => {
+                            const numServices = randBetween(1, 3);
+                            const shuffledSvcs = [...SERVICES]
+                                .sort(() => Math.random() - 0.5)
+                                .slice(0, numServices);
+                            return shuffledSvcs;
+                        })(),
+                        fileType: (() => {
+                            const r = Math.random();
+                            if (r < 0.4) return "mp3";
+                            if (r < 0.7) return "stem.m4a";
+                            if (r < 0.9) return "flac";
+                            return "wav";
+                        })(),
+                        genre: random(GENRES),
+                        tagCount: randBetween(0, 8),
+                        tags: Array.from({ length: randBetween(0, 4) }, () =>
+                            random(TAG_NAMES),
+                        ),
+                        // Comment diff data
+                        comment: (() => {
+                            const needsUpdate = Math.random() > 0.6;
+                            const phase = [
+                                "start",
+                                "build",
+                                "peak",
+                                "release",
+                                "sustain",
+                            ][randBetween(0, 4)];
+                            const pc = {
+                                start: "S",
+                                build: "B",
+                                peak: "P",
+                                release: "R",
+                                sustain: "S",
+                            }[phase];
+                            return `[${pc}MV] ${phase} tech house`;
+                        })(),
+                        commentTarget: `[${["S", "B", "P", "R", "S"][randBetween(0, 4)]}MV] ${["start", "build", "peak", "release", "sustain"][randBetween(0, 4)]} tech house`,
+                        commentNeedsUpdate: Math.random() > 0.6,
+                    });
+                }
+                return files;
+            }
+
+            // Generate 53 mock tracks
+            let ALL_FILES = generateMockFiles(53);
+
+            // ─── Mock TRACKS data (service tracks, linked to multiple files + services) ───
+
+            const TRACK_TITLES = [
+                "Bones",
+                "Rumble",
+                "Opal",
+                "Looking at Your Pager",
+                "Danielle",
+                "Apricots",
+                "Marea",
+                "Blue Hour",
+                "Larabar",
+                "Claudia",
+                "So U Kno",
+                "Epiphany",
+                "You Can Do It",
+                "Suzume",
+                "Moth",
+                "Never Gonna Stop",
+                "Rain Dance",
+                "Sunset",
+                "Midnight",
+                "Dawn",
+                "Parallel",
+                "Horizon",
+                "Neon",
+                "Drift",
+                "Phase",
+                "Glimpse",
+                "Bronze",
+                "Turner",
+                "Echoes",
+                "Berlin",
+            ];
+
+            const TRACK_ARTISTS = [
+                "Fred again..",
+                "Overmono",
+                "Joy Orbison",
+                "Four Tet",
+                "Jamie xx",
+                "Bicep",
+                "Ross from Friends",
+                "Bonobo",
+                "Caribou",
+                "Floating Points",
+                "Kelly Lee Owens",
+                "HAAi",
+                "TSHA",
+                "Eli & Fur",
+                "Solomun",
+                "Âme",
+                "Dixon",
+                "Ben Böhmer",
+                "Lane 8",
+                "Oliver Koletzki",
+            ];
+
+            const TRACK_SERVICES = ["spotify", "soundcloud", "youtube", "deemix"];
+
+            const FILE_TYPES = ["stem.m4a", "flac", "mp3", "wav"];
+
+            function generateMockTracks(count) {
+                const tracks = [];
+                const usedArtistTrack = new Set();
+
+                for (let i = 1; i <= count; i++) {
+                    let artist, title;
+                    // Ensure unique artist + title combos
+                    do {
+                        artist = random(TRACK_ARTISTS);
+                        title = random(TRACK_TITLES);
+                    } while (usedArtistTrack.has(artist + "||" + title));
+                    usedArtistTrack.add(artist + "||" + title);
+
+                    // Each track is on 1-2 services
+                    const numServices = randBetween(1, 2);
+                    const shuffledServices = [...TRACK_SERVICES]
+                        .sort(() => Math.random() - 0.5)
+                        .slice(0, numServices);
+
+                    // Each track has 1-3 local file versions
+                    const numFiles = randBetween(1, 3);
+                    const fileVersions = [...FILE_TYPES]
+                        .sort(() => Math.random() - 0.5)
+                        .slice(0, numFiles);
+
+                    // Generate the local file paths
+                    const localFiles = fileVersions.map((ft) => {
+                        const cleanName = title.replace(/[^a-zA-Z0-9]/g, "");
+                        return `~/Music/${ft === "stem.m4a" ? "stems" : ft === "flac" ? "flacs" : "tracks"}/${artist} - ${cleanName}.${ft}`;
+                    });
+
+                    tracks.push({
+                        id: i,
+                        title: title,
+                        artist: artist,
+                        services: shuffledServices,
+                        localFiles: localFiles,
+                        album: random(ALBUMS),
+                        isrc: `GBCEL${String(randBetween(1000000, 9999999)).padStart(7, "0")}`,
+                        duration: randBetween(120, 480),
+                        importedAt: Date.now() - randBetween(0, 365) * 86400000,
+                        // For display
+                        fileTypesBadge: fileVersions,
+                        servicesBadge: shuffledServices,
+                    });
+                }
+                return tracks;
+            }
+
+            let ALL_TRACKS = generateMockTracks(30);
+
+            // ================================================================
+            // 2. STATE
+            // ================================================================
+
+            const FILES_COLUMNS = [
+                {
+                    id: "title",
+                    label: "Title",
+                    sortable: true,
+                    sortKey: "title",
+                    defaultWidth: 18,
+                },
+                {
+                    id: "artist",
+                    label: "Artist",
+                    sortable: true,
+                    sortKey: "artist",
+                    defaultWidth: 10,
+                },
+                {
+                    id: "bpm",
+                    label: "BPM",
+                    sortable: true,
+                    sortKey: "bpm",
+                    defaultWidth: 6,
+                },
+                {
+                    id: "key",
+                    label: "Key",
+                    sortable: true,
+                    sortKey: "key",
+                    defaultWidth: 4,
+                },
+                { id: "album", label: "Album", sortable: false, defaultWidth: 12 },
+                { id: "genre", label: "Genre", sortable: false, defaultWidth: 8 },
+                {
+                    id: "services",
+                    label: "Services",
+                    sortable: false,
+                    defaultWidth: 10,
+                },
+                {
+                    id: "fileType",
+                    label: "Type",
+                    sortable: true,
+                    sortKey: "fileType",
+                    defaultWidth: 7,
+                },
+                {
+                    id: "duration",
+                    label: "Duration",
+                    sortable: true,
+                    sortKey: "duration",
+                    defaultWidth: 6,
+                },
+                {
+                    id: "plays",
+                    label: "Plays",
+                    sortable: true,
+                    sortKey: "playCount",
+                    defaultWidth: 4,
+                },
+                {
+                    id: "tagCount",
+                    label: "Tags",
+                    sortable: true,
+                    sortKey: "tagCount",
+                    defaultWidth: 4,
+                },
+                {
+                    id: "isrc",
+                    label: "ISRC",
+                    sortable: true,
+                    sortKey: "isrc",
+                    defaultWidth: 6,
+                },
+                {
+                    id: "created",
+                    label: "Created",
+                    sortable: true,
+                    sortKey: "createdAt",
+                    defaultWidth: 7,
+                },
+                {
+                    id: "lastModified",
+                    label: "Modified",
+                    sortable: true,
+                    sortKey: "lastModified",
+                    defaultWidth: 7,
+                },
+                {
+                    id: "lastPlayed",
+                    label: "Last Played",
+                    sortable: true,
+                    sortKey: "lastPlayed",
+                    defaultWidth: 7,
+                },
+                {
+                    id: "comment",
+                    label: "Comment Diff",
+                    sortable: false,
+                    defaultWidth: 20,
+                },
+                { id: "actions", label: "Actions", sortable: false, defaultWidth: 10 },
+            ];
+
+            const TRACKS_COLUMNS = [
+                {
+                    id: "title",
+                    label: "Title",
+                    sortable: true,
+                    sortKey: "title",
+                    defaultWidth: 20,
+                },
+                {
+                    id: "artist",
+                    label: "Artist",
+                    sortable: true,
+                    sortKey: "artist",
+                    defaultWidth: 12,
+                },
+                {
+                    id: "services",
+                    label: "Services",
+                    sortable: false,
+                    defaultWidth: 12,
+                },
+                {
+                    id: "localFiles",
+                    label: "Local Files",
+                    sortable: false,
+                    defaultWidth: 24,
+                },
+                {
+                    id: "album",
+                    label: "Album",
+                    sortable: false,
+                    defaultWidth: 12,
+                },
+                {
+                    id: "duration",
+                    label: "Duration",
+                    sortable: true,
+                    sortKey: "duration",
+                    defaultWidth: 6,
+                },
+                {
+                    id: "isrc",
+                    label: "ISRC",
+                    sortable: true,
+                    sortKey: "isrc",
+                    defaultWidth: 6,
+                },
+                {
+                    id: "imported",
+                    label: "Imported",
+                    sortable: true,
+                    sortKey: "importedAt",
+                    defaultWidth: 8,
+                },
+            ];
+
+            // Column config from localStorage
+            function getColumnModel(view) {
+                return view === "tracks" ? TRACKS_COLUMNS : FILES_COLUMNS;
+            }
+
+            function loadColumnConfig(view) {
+                const model = getColumnModel(view);
+                const storageKey = "columnConfig_" + view;
+                const saved = localStorage.getItem(storageKey);
+                if (saved) {
+                    try {
+                        const parsed = JSON.parse(saved);
+                        // Merge with model to handle added/removed columns
+                        return model.map((col) => {
+                            const existing = parsed.find((p) => p.id === col.id);
+                            return existing
+                                ? {
+                                      id: col.id,
+                                      visible: existing.visible,
+                                      width: existing.width,
+                                  }
+                                : { id: col.id, visible: true, width: col.defaultWidth };
+                        });
+                    } catch (e) {}
+                }
+                return model.map((col) => ({
+                    id: col.id,
+                    visible: true,
+                    width: col.defaultWidth,
+                }));
+            }
+
+            function saveColumnConfig(config) {
+                const storageKey = "columnConfig_" + state.view;
+                localStorage.setItem(storageKey, JSON.stringify(config));
+            }
+
+            // Full state
+            const state = {
+                // View
+                view: localStorage.getItem("prototype_view") || "files",
+                // Pagination
+                page: 0,
+                pageSize: parseInt(localStorage.getItem("crudPageSize")) || 25,
+                // Search
+                search: "",
+                // Filters
+                selectedServices: [],
+                bpmMin: 0,
+                bpmMax: 200,
+                selectedKeys: [],
+                // Date range filters (condition + unit)
+                createdFilter: {
+                    enabled: false,
+                    condition: "last",
+                    value: 30,
+                    unit: "days",
+                },
+                modifiedFilter: {
+                    enabled: false,
+                    condition: "last",
+                    value: 30,
+                    unit: "days",
+                },
+                playedFilter: {
+                    enabled: false,
+                    condition: "last",
+                    value: 14,
+                    unit: "days",
+                },
+                // Comment status filter
+                commentStatus: "all", // "all", "needs_update", "uptodate"
+                // File type filter
+                fileType: "all",
+                // Additional filters
+                playsMin: 0,
+                playsMax: 200,
+                selectedGenres: [],
+                selectedTags: [],
+                // Layout mode
+                layoutMode: false,
+                // Sort
+                sort: "",
+                order: "asc",
+                // Column config
+                columnConfig: loadColumnConfig(
+                    localStorage.getItem("prototype_view") || "files",
+                ),
+                // Data
+                data: [],
+                total: 0,
+            };
+
+            // ================================================================
+            // 3. DATA LAYER (PURE FUNCTIONS)
+            // ================================================================
+
+            function getFilteredData(state) {
+                const isTracks = state.view === "tracks";
+                let data = [...(isTracks ? ALL_TRACKS : ALL_FILES)];
+
+                // Full-text search across string fields
+                if (state.search) {
+                    const q = state.search.toLowerCase();
+                    data = data.filter(
+                        (f) =>
+                            f.title.toLowerCase().includes(q) ||
+                            f.artist.toLowerCase().includes(q) ||
+                            (f.album && f.album.toLowerCase().includes(q)) ||
+                            (f.isrc && f.isrc.toLowerCase().includes(q)),
+                    );
+                }
+
+                // Service filter (multi-select: show files matching ANY selected service)
+                if (state.selectedServices.length > 0) {
+                    data = data.filter(
+                        (f) =>
+                            f.services &&
+                            f.services.some((s) => state.selectedServices.includes(s)),
+                    );
+                }
+
+                // ─── File-specific filters (skip for tracks) ───
+                if (!isTracks) {
+                    // BPM range
+                    data = data.filter(
+                        (f) => f.bpm >= state.bpmMin && f.bpm <= state.bpmMax,
+                    );
+
+                    // Key filter
+                    if (state.selectedKeys.length > 0) {
+                        data = data.filter((f) => state.selectedKeys.includes(f.key));
+                    }
+
+                    // Plays range
+                    data = data.filter(
+                        (f) =>
+                            f.playCount >= state.playsMin &&
+                            f.playCount <= state.playsMax,
+                    );
+
+                    // File type filter
+                    if (state.fileType !== "all") {
+                        data = data.filter((f) => f.fileType === state.fileType);
+                    }
+
+                    // Genre filter
+                    if (state.selectedGenres.length > 0) {
+                        data = data.filter((f) => state.selectedGenres.includes(f.genre));
+                    }
+
+                    // Tag filter
+                    if (state.selectedTags.length > 0) {
+                        data = data.filter(
+                            (f) =>
+                                f.tags &&
+                                f.tags.some((t) => state.selectedTags.includes(t)),
+                        );
+                    }
+
+                    // Comment status filter
+                    if (state.commentStatus === "needs_update") {
+                        data = data.filter((f) => f.commentNeedsUpdate);
+                    } else if (state.commentStatus === "uptodate") {
+                        data = data.filter((f) => !f.commentNeedsUpdate);
+                    }
+
+                    // Date filters with condition + unit
+                    function applyDateFilter(data, filter, field) {
+                        if (!filter.enabled) return data;
+                        const multiplier =
+                            filter.unit === "weeks"
+                                ? 7
+                                : filter.unit === "months"
+                                  ? 30
+                                  : 1;
+                        const daysMs = filter.value * multiplier * 86400000;
+                        const now = Date.now();
+                        return data.filter((f) => {
+                            const val = f[field];
+                            if (!val) return filter.condition === "more";
+                            if (filter.condition === "last") return val >= now - daysMs;
+                            return val < now - daysMs;
+                        });
+                    }
+                    data = applyDateFilter(data, state.createdFilter, "createdAt");
+                    data = applyDateFilter(data, state.modifiedFilter, "lastModified");
+                    data = applyDateFilter(data, state.playedFilter, "lastPlayed");
+                } else {
+                    // Tracks import date filter
+                    if (state.tracksImportFilter && state.tracksImportFilter.enabled) {
+                        const multiplier =
+                            state.tracksImportFilter.unit === "weeks"
+                                ? 7
+                                : state.tracksImportFilter.unit === "months"
+                                  ? 30
+                                  : 1;
+                        const daysMs =
+                            state.tracksImportFilter.value * multiplier * 86400000;
+                        const now = Date.now();
+                        const cutoff = now - daysMs;
+                        data = data.filter((t) => {
+                            if (!t.importedAt)
+                                return state.tracksImportFilter.condition === "more";
+                            if (state.tracksImportFilter.condition === "last")
+                                return t.importedAt >= cutoff;
+                            return t.importedAt < cutoff;
+                        });
+                    }
+                }
+
+                return data;
+            }
+
+            function getSortedData(data, state) {
+                if (!state.sort) return data;
+                return [...data].sort((a, b) => {
+                    let cmp = 0;
+                    const aVal = a[state.sort];
+                    const bVal = b[state.sort];
+                    if (typeof aVal === "string")
+                        cmp = (aVal || "").localeCompare(bVal || "");
+                    else if (typeof aVal === "number") cmp = (aVal || 0) - (bVal || 0);
+                    else if (aVal instanceof Date || typeof aVal === "number")
+                        cmp = (aVal || 0) - (bVal || 0);
+                    return state.order === "desc" ? -cmp : cmp;
+                });
+            }
+
+            function getPaginatedData(data, state) {
+                const start = state.page * state.pageSize;
+                return data.slice(start, start + state.pageSize);
+            }
+
+            // ================================================================
+            // 4. RENDER FUNCTIONS
+            // ================================================================
+
+            function formatDuration(seconds) {
+                if (!seconds || seconds <= 0) return "—";
+                const m = Math.floor(seconds / 60);
+                const s = seconds % 60;
+                return `${m}:${String(s).padStart(2, "0")}`;
+            }
+
+            function formatTimestamp(ts) {
+                if (!ts) return '<span class="text-muted">—</span>';
+                const d = new Date(ts);
+                return `<span class="font-mono text-xs">${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>`;
+            }
+
+            function renderKeyBadge(key) {
+                if (!key) return "";
+                return `<span class="badge badge-key">${key}</span>`;
+            }
+
+            function renderServiceBadge(service) {
+                const icons = {
+                    spotify: "fab fa-spotify",
+                    soundcloud: "fab fa-soundcloud",
+                    youtube: "fab fa-youtube",
+                };
+                return `<span class="service-badge ${service}"><i class="${icons[service] || "fas fa-music"}"></i> ${service.charAt(0).toUpperCase() + service.slice(1)}</span>`;
+            }
+
+            // Column renderer functions
+            const CELL_RENDERERS = {
+                title: (f) => `<strong>${f.title}</strong>`,
+                artist: (f) => f.artist,
+                bpm: (f) => `<span class="font-mono">${f.bpm}</span>`,
+                key: (f) => renderKeyBadge(f.key),
+                album: (f) => f.album || '<span class="text-muted">—</span>',
+                genre: (f) => f.genre || '<span class="text-muted">—</span>',
+                services: (f) =>
+                    f.services
+                        .map((s) => {
+                            const icons = {
+                                spotify: "fab fa-spotify",
+                                soundcloud: "fab fa-soundcloud",
+                                youtube: "fab fa-youtube",
+                                deemix: "fas fa-download",
+                            };
+                            const colors = {
+                                spotify: "#1db954",
+                                soundcloud: "#ff7700",
+                                youtube: "#ff0000",
+                                deemix: "var(--accent)",
+                            };
+                            return `<span class="service-badge" style="background:${colors[s]}15;color:${colors[s]};border:1px solid ${colors[s]}30;margin-right:2px" title="${s}"><i class="${icons[s] || "fas fa-music"}"></i></span>`;
+                        })
+                        .join("") || '<span class="text-muted">\u2014</span>',
+                duration: (f) =>
+                    `<span class="font-mono text-xs">${formatDuration(f.duration)}</span>`,
+                plays: (f) => `<span class="font-mono text-xs">${f.playCount}</span>`,
+                tagCount: (f) => `<span class="font-mono text-xs">${f.tagCount}</span>`,
+                fileType: (f) => {
+                    const colors = {
+                        mp3: "var(--accent)",
+                        flac: "var(--purple)",
+                        "stem.m4a": "var(--green)",
+                        wav: "var(--yellow)",
+                    };
+                    const color = colors[f.fileType] || "var(--text-muted)";
+                    return `<span class="badge" style="background:${color}15;color:${color};border:1px solid ${color}30">${f.fileType}</span>`;
+                },
+                isrc: (f) =>
+                    f.isrc
+                        ? `<code class="font-mono text-xs">${f.isrc}</code>`
+                        : '<span class="text-muted">—</span>',
+                created: (f) => formatTimestamp(f.createdAt),
+                lastModified: (f) => formatTimestamp(f.lastModified),
+                lastPlayed: (f) => formatTimestamp(f.lastPlayed),
+                comment: (f) => {
+                    if (!f.commentNeedsUpdate) {
+                        return `<span class="text-muted text-xs">✓ up to date</span>`;
+                    }
+                    return `<div class="diff-box" style="font-size:0.7rem;line-height:1.3">
+    <div class="diff-line-old" style="color:var(--red);text-decoration:line-through;opacity:0.7">${f.comment || ""}</div>
+    <div class="diff-line-new" style="color:var(--green)">${f.commentTarget || ""}</div>
+</div>`;
+                },
+                actions: (f) =>
+                    `<button class="btn btn-sm btn-icon" title="View"><i class="fas fa-eye"></i></button> <button class="btn btn-sm btn-icon" title="Edit"><i class="fas fa-pencil-alt"></i></button>`,
+            };
+
+            // ─── TRACKS column renderer functions ───
+            const TRACKS_CELL_RENDERERS = {
+                title: (t) => `<strong>${t.title}</strong>`,
+                artist: (t) => t.artist,
+                services: (t) =>
+                    t.services
+                        .map((s) => {
+                            const icons = {
+                                spotify: "fab fa-spotify",
+                                soundcloud: "fab fa-soundcloud",
+                                youtube: "fab fa-youtube",
+                                deemix: "fas fa-download",
+                            };
+                            const colors = {
+                                spotify: "#1db954",
+                                soundcloud: "#ff7700",
+                                youtube: "#ff0000",
+                                deemix: "var(--accent)",
+                            };
+                            return `<span class="service-badge" style="background:${colors[s]}15;color:${colors[s]};border:1px solid ${colors[s]}30;margin-right:4px"><i class="${icons[s] || "fas fa-music"}"></i></span>`;
+                        })
+                        .join(""),
+                localFiles: (t) =>
+                    t.localFiles
+                        .map((fp) => {
+                            const ext = fp.split(".").pop();
+                            const colors = {
+                                mp3: "var(--accent)",
+                                flac: "var(--purple)",
+                                "stem.m4a": "var(--green)",
+                                wav: "var(--yellow)",
+                                m4a: "var(--green)",
+                            };
+                            const color = colors[ext] || "var(--text-muted)";
+                            const label = ext === "stem.m4a" ? "stem" : ext;
+                            const shortPath = fp
+                                .replace("~/Music/", "")
+                                .replace(/^[^/]+\//, "");
+                            return `<span class="badge" style="background:${color}15;color:${color};border:1px solid ${color}30;margin:1px 2px" title="${fp}">${label}</span>`;
+                        })
+                        .join(" ") || '<span class="text-muted">—</span>',
+                album: (t) => t.album || '<span class="text-muted">—</span>',
+                duration: (t) =>
+                    `<span class="font-mono text-xs">${formatDuration(t.duration)}</span>`,
+                isrc: (t) => `<code class="font-mono text-xs">${t.isrc}</code>`,
+                imported: (t) => formatTimestamp(t.importedAt),
+            };
+
+            function renderTable(state) {
+                const filtered = getFilteredData(state);
+                const sorted = getSortedData(filtered, state);
+                const total = sorted.length;
+                const paged = getPaginatedData(sorted, state);
+                const totalPages = Math.ceil(total / state.pageSize) || 1;
+                const config = state.columnConfig;
+                const columns = state.view === "tracks" ? TRACKS_COLUMNS : FILES_COLUMNS;
+                const cellRenderers =
+                    state.view === "tracks" ? TRACKS_CELL_RENDERERS : CELL_RENDERERS;
+
+                // Build headers
+                const headersHtml = config
+                    .filter((c) => c.visible)
+                    .map((c) => {
+                        const model = columns.find((m) => m.id === c.id);
+                        if (!model) return "";
+                        let th;
+                        if (model.sortable) {
+                            let icon = "fa-sort";
+                            let cls = "sortable";
+                            if (state.sort === model.sortKey) {
+                                cls += state.order === "asc" ? " sort-asc" : " sort-desc";
+                                icon =
+                                    state.order === "asc" ? "fa-sort-up" : "fa-sort-down";
+                            }
+                            th = `<th class="${cls}" data-sort="${model.sortKey}" style="width:${c.width}px;min-width:30px;max-width:${c.width}px">${model.label} <i class="fas ${icon}"></i><div class="col-resize-handle"></div></th>`;
+                        } else {
+                            th = `<th style="width:${c.width}px;min-width:30px;max-width:${c.width}px">${model.label}<div class="col-resize-handle"></div></th>`;
+                        }
+                        return th;
+                    })
+                    .join("");
+
+                // Build rows
+                const rowsHtml =
+                    paged.length === 0
+                        ? `<tr><td colspan="${config.filter((c) => c.visible).length}" class="empty-state">
+                   <div class="empty-state">
+                     <div class="icon"><i class="fas fa-search"></i></div>
+                     <h3>No results match your filters</h3>
+                     <p>Try adjusting your search or filter criteria.</p>
+                   </div>
+                 </td></tr>`
+                        : paged
+                              .map((f) => {
+                                  const cellsHtml = config
+                                      .filter((c) => c.visible)
+                                      .map((c) => {
+                                          const renderer = cellRenderers[c.id];
+                                          const content = renderer ? renderer(f) : "";
+                                          const model = columns.find(
+                                              (m) => m.id === c.id,
+                                          );
+                                          return `<td style="width:${c.width}px;min-width:30px;max-width:${c.width}px">${content}</td>`;
+                                      })
+                                      .join("");
+                                  return `<tr>${cellsHtml}</tr>`;
+                              })
+                              .join("");
+
+                // Stats row
+                const statsHtml = `<div class="stats-row">
+              <div class="stats-group">
+                <button class="btn btn-sm btn-icon" id="refresh-btn" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
+                <strong>${total.toLocaleString()}</strong> ${state.view === "tracks" ? "tracks" : "files"}
+                <select class="page-size-select" id="page-size-select">
+                  ${[10, 25, 50, 100].map((s) => `<option value="${s}"${s === state.pageSize ? " selected" : ""}>${s} per page</option>`).join("")}
+                </select>
+                ${state.layoutMode ? '<button class="btn btn-sm btn-primary" id="layout-mode-btn" style="margin-left:8px"><i class="fas fa-check"></i> Done</button>' : '<button class="btn btn-sm" id="layout-mode-btn" style="margin-left:8px"><i class="fas fa-arrows-alt"></i> Modify Column Layout</button>'}
+                <button class="col-config-trigger" id="col-config-btn" style="margin-left:8px"><i class="fas fa-table-cells"></i> Columns</button>
+              </div>
+            </div>`;
+
+                // Pagination
+                const paginationHtml = `<div class="pagination">
+              <button class="pagination-btn" id="page-prev" ${state.page === 0 ? "disabled" : ""}><i class="fas fa-chevron-left"></i></button>
+              <span class="pagination-info">Page ${state.page + 1} of ${totalPages}</span>
+              <button class="pagination-btn" id="page-next" ${state.page >= totalPages - 1 ? "disabled" : ""}><i class="fas fa-chevron-right"></i></button>
+            </div>`;
+
+                const tableHtml = `<div class="table-wrap"><table class="data-table">
+              <thead><tr>${headersHtml}</tr></thead>
+              <tbody>${rowsHtml}</tbody>
+            </table></div>`;
+
+                return statsHtml + tableHtml + paginationHtml;
+            }
+
+            // ================================================================
+            // 5. EVENT WIRING
+            // ================================================================
+
+            // ─── Genre chip renderer (top-level, called from render()) ───
+            function renderGenreChips() {
+                const el = document.getElementById("genre-chips");
+                if (!el) return;
+                el.innerHTML = state.selectedGenres
+                    .map(
+                        (g) =>
+                            `<span class="tag-chip">${g} <span class="tag-chip-x" data-genre="${g}">&times;</span></span>`,
+                    )
+                    .join("");
+            }
+
+            // ─── Tag chip renderer (top-level, called from render()) ───
+            function renderTagChips() {
+                const el = document.getElementById("tag-chips");
+                if (!el) return;
+                el.innerHTML = state.selectedTags
+                    .map(
+                        (t) =>
+                            `<span class="tag-chip">${t} <span class="tag-chip-x" data-tag="${t}">&times;</span></span>`,
+                    )
+                    .join("");
+            }
+
+            function render() {
+                document.getElementById("content").innerHTML = renderTable(state);
+                wireContentEvents();
+                renderGenreChips();
+                renderTagChips();
+            }
+
+            function wireContentEvents() {
+                // Refresh
+                const refreshBtn = document.getElementById("refresh-btn");
+                if (refreshBtn) refreshBtn.onclick = () => render();
+
+                // Pagination
+                const prevBtn = document.getElementById("page-prev");
+                if (prevBtn)
+                    prevBtn.onclick = () => {
+                        if (state.page > 0) {
+                            state.page--;
+                            render();
+                        }
+                    };
+                const nextBtn = document.getElementById("page-next");
+                if (nextBtn)
+                    nextBtn.onclick = () => {
+                        state.page++;
+                        render();
+                    };
+
+                // Page size
+                const pageSizeSel = document.getElementById("page-size-select");
+                if (pageSizeSel) {
+                    pageSizeSel.onchange = () => {
+                        const val = parseInt(pageSizeSel.value, 10);
+                        localStorage.setItem("crudPageSize", String(val));
+                        state.pageSize = val;
+                        state.page = 0;
+                        render();
+                    };
+                }
+
+                // ─── Layout mode toggle ───
+                const layoutBtn = document.getElementById("layout-mode-btn");
+                if (layoutBtn) {
+                    layoutBtn.onclick = () => {
+                        state.layoutMode = !state.layoutMode;
+                        render();
+                    };
+                }
+
+                // ─── Visual indicator for layout mode ───
+                const thead = document.querySelector("thead");
+                if (thead) {
+                    if (state.layoutMode) {
+                        document.body.classList.add("layout-mode");
+                        thead.style.outline = "2px solid var(--accent)";
+                        thead.style.outlineOffset = "-1px";
+                        thead.style.borderRadius = "4px";
+                    } else {
+                        document.body.classList.remove("layout-mode");
+                        thead.style.outline = "none";
+                    }
+                }
+
+                // ─── Sortable headers (only when NOT in layout mode) ───
+                if (!state.layoutMode) {
+                    const table = document.querySelector(".data-table");
+                    if (table) {
+                        table.querySelectorAll("th.sortable[data-sort]").forEach((th) => {
+                            th.addEventListener("click", () => {
+                                const col = th.dataset.sort;
+                                if (state.sort === col) {
+                                    if (state.order === "asc") {
+                                        state.order = "desc";
+                                    } else {
+                                        state.sort = "";
+                                        state.order = "asc";
+                                    }
+                                } else {
+                                    state.sort = col;
+                                    state.order = "asc";
+                                }
+                                state.page = 0;
+                                render();
+                            });
+                        });
+                    }
+                }
+
+                // Layout mode features (resize + reorder)
+                if (state.layoutMode) {
+                    wireResize();
+                    wireDragReorder();
+                }
+
+                // Column config button
+                const colConfigBtn = document.getElementById("col-config-btn");
+                if (colConfigBtn) colConfigBtn.onclick = () => openColumnConfig();
+            }
+
+            // ─── Resize ───
+
+            function wireResize() {
+                const handles = document.querySelectorAll(".col-resize-handle");
+                let activeHandle = null;
+                let activeTh = null;
+                let startX = 0;
+                let startWidth = 0;
+
+                handles.forEach((handle) => {
+                    handle.addEventListener("mousedown", (e) => {
+                        if (!state.layoutMode) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        activeHandle = handle;
+                        activeTh = handle.parentElement;
+                        startX = e.clientX;
+                        startWidth = activeTh.offsetWidth;
+                        handle.classList.add("resizing");
+                        document.body.style.cursor = "col-resize";
+                        document.body.style.userSelect = "none";
+                    });
+                });
+
+                document.addEventListener("mousemove", (e) => {
+                    if (!activeTh) return;
+                    const diff = e.clientX - startX;
+                    const newWidth = Math.max(30, Math.min(500, startWidth + diff));
+
+                    const colId = findColumnIdFromTh(activeTh);
+                    if (colId) {
+                        const entry = state.columnConfig.find((c) => c.id === colId);
+                        if (entry) {
+                            entry.width = Math.max(30, Math.min(500, newWidth));
+                            const table = activeTh.closest(".data-table");
+                            const px = entry.width + "px";
+                            activeTh.style.minWidth = px;
+                            activeTh.style.maxWidth = px;
+                            activeTh.style.width = px;
+                            void activeTh.offsetHeight;
+                            if (table) {
+                                const colIndex = Array.from(
+                                    activeTh.parentElement.children,
+                                ).indexOf(activeTh);
+                                table.querySelectorAll("tbody tr").forEach((tr) => {
+                                    const cell = tr.children[colIndex];
+                                    if (cell) {
+                                        cell.style.minWidth = px;
+                                        cell.style.maxWidth = px;
+                                        cell.style.width = px;
+                                    }
+                                });
+                            }
+                        }
+                    }
+                });
+
+                document.addEventListener("mouseup", () => {
+                    if (activeHandle) {
+                        activeHandle.classList.remove("resizing");
+                    }
+                    if (activeTh) {
+                        document.body.style.cursor = "";
+                        document.body.style.userSelect = "";
+                        saveColumnConfig(state.columnConfig);
+                    }
+                    activeHandle = null;
+                    activeTh = null;
+                });
+            }
+
+            function findColumnIdFromTh(thEl) {
+                const sortKey = thEl.dataset.sort;
+                const model = getColumnModel(state.view);
+                if (sortKey) {
+                    const col = model.find((m) => m.sortKey === sortKey);
+                    if (col) return col.id;
+                }
+                const text = thEl.textContent.replace("▲", "").replace("▼", "").trim();
+                const col = model.find(
+                    (m) => m.label.toLowerCase() === text.toLowerCase(),
+                );
+                return col ? col.id : null;
+            }
+
+            // ─── Drag Reorder (manual mouse events, no HTML5 DnD) ───
+
+            let dragReorderTh = null;
+            let dragReorderStartX = 0;
+            let dragReorderActive = false;
+            let dragReorderConfigIdx = -1;
+
+            function wireDragReorder() {
+                document.addEventListener("mousedown", (e) => {
+                    if (!state.layoutMode) return;
+                    const th = e.target.closest("th");
+                    if (!th) return;
+                    // Don't start drag if clicking on resize handle
+                    if (e.target.closest(".col-resize-handle")) return;
+
+                    e.preventDefault();
+                    dragReorderTh = th;
+                    dragReorderStartX = e.clientX;
+                    dragReorderActive = false;
+                    dragReorderConfigIdx = findConfigIndexFromTh(th);
+                    document.body.style.userSelect = "none";
+                });
+
+                document.addEventListener("mousemove", (e) => {
+                    if (!state.layoutMode) return;
+                    if (!dragReorderTh) return;
+                    const moved = Math.abs(e.clientX - dragReorderStartX);
+                    // Only start drag after moving 5px to distinguish from click
+                    if (!dragReorderActive && moved > 5) {
+                        dragReorderActive = true;
+                        dragReorderTh.classList.add("dragging");
+                        document.body.style.cursor = "grabbing";
+                        document.body.style.userSelect = "none";
+                    }
+                    if (!dragReorderActive) return;
+
+                    // Show drop indicator on nearest th
+                    const thead = dragReorderTh.closest("thead");
+                    if (!thead) return;
+                    const allThs = thead.querySelectorAll("th");
+                    allThs.forEach((th) => th.classList.remove("drop-target"));
+                    let nearest = null;
+                    let nearestDist = Infinity;
+                    allThs.forEach((th) => {
+                        if (th === dragReorderTh) return;
+                        const r = th.getBoundingClientRect();
+                        const dist = Math.abs(e.clientX - (r.left + r.width / 2));
+                        if (dist < nearestDist) {
+                            nearestDist = dist;
+                            nearest = th;
+                        }
+                    });
+                    if (nearest) {
+                        const r = nearest.getBoundingClientRect();
+                        if (e.clientX < r.left + r.width / 2) {
+                            nearest.classList.add("drop-target");
+                        }
+                    }
+                });
+
+                document.addEventListener("mouseup", () => {
+                    if (!state.layoutMode) return;
+                    if (!dragReorderTh) return;
+
+                    if (dragReorderActive) {
+                        // Find where to drop
+                        const thead = dragReorderTh.closest("thead");
+                        if (thead) {
+                            const allThs = thead.querySelectorAll("th");
+                            let targetTh = null;
+                            allThs.forEach((th) => {
+                                if (th.classList.contains("drop-target")) {
+                                    targetTh = th;
+                                }
+                            });
+                            if (!targetTh) targetTh = allThs[allThs.length - 1];
+
+                            const config = state.columnConfig;
+                            const toIdx = findConfigIndexFromTh(targetTh);
+
+                            if (
+                                toIdx !== -1 &&
+                                dragReorderConfigIdx !== -1 &&
+                                toIdx !== dragReorderConfigIdx
+                            ) {
+                                const [moved] = config.splice(dragReorderConfigIdx, 1);
+                                config.splice(toIdx, 0, moved);
+                                saveColumnConfig(config);
+                                render();
+                            }
+                        }
+                    }
+
+                    // Cleanup
+                    dragReorderTh.classList.remove("dragging");
+                    if (dragReorderTh.closest("thead")) {
+                        dragReorderTh
+                            .closest("thead")
+                            .querySelectorAll("th")
+                            .forEach((th) => th.classList.remove("drop-target"));
+                    }
+                    document.body.style.cursor = "";
+                    document.body.style.userSelect = "";
+                    dragReorderTh = null;
+                    dragReorderActive = false;
+                });
+            }
+
+            function findConfigIndexFromTh(thEl) {
+                const sortKey = thEl.dataset.sort;
+                const model = getColumnModel(state.view);
+                if (sortKey) {
+                    const col = model.find((m) => m.sortKey === sortKey);
+                    if (col) return state.columnConfig.findIndex((c) => c.id === col.id);
+                }
+                const text = thEl.textContent
+                    .replace("\u25B2", "")
+                    .replace("\u25BC", "")
+                    .trim();
+                const col = model.find(
+                    (m) => m.label.toLowerCase() === text.toLowerCase(),
+                );
+                if (col) return state.columnConfig.findIndex((c) => c.id === col.id);
+                return -1;
+            }
+
+            // ─── Column Config Modal ───
+
+            function openColumnConfig() {
+                const modal = document.getElementById("col-config-modal");
+                const body = document.getElementById("col-config-body");
+                const config = state.columnConfig.map((c) => ({ ...c })); // copy
+                const model = getColumnModel(state.view);
+
+                body.innerHTML = config
+                    .map((c, i) => {
+                        const col = model.find((m) => m.id === c.id);
+                        const label = col ? col.label : c.id;
+                        return `<label class="col-config-item" style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:4px 0">
+                <input type="checkbox" class="col-config-checkbox" data-cid="${c.id}" ${c.visible ? "checked" : ""}>
+                <span class="col-config-label" style="flex:1;font-size:0.85rem">${label}</span>
+              </label>`;
+                    })
+                    .join("");
+
+                modal.classList.add("open");
+
+                // Close
+                document.getElementById("col-config-close").onclick = close;
+                modal.addEventListener("click", (e) => {
+                    if (e.target === modal) close();
+                });
+
+                function close() {
+                    modal.classList.remove("open");
+                }
+
+                // Reset
+                document.getElementById("col-config-reset").onclick = () => {
+                    const colModel = getColumnModel(state.view);
+                    const defaults = colModel.map((col) => ({
+                        id: col.id,
+                        visible: true,
+                        width: col.defaultWidth,
+                    }));
+                    saveColumnConfig(defaults);
+                    state.columnConfig = defaults;
+                    close();
+                    render();
+                };
+
+                // Select all / Deselect all
+                document.getElementById("col-config-select-all").onclick = () => {
+                    body.querySelectorAll(".col-config-checkbox").forEach(
+                        (cb) => (cb.checked = true),
+                    );
+                };
+                document.getElementById("col-config-deselect-all").onclick = () => {
+                    body.querySelectorAll(".col-config-checkbox").forEach(
+                        (cb) => (cb.checked = false),
+                    );
+                };
+
+                // Apply
+                document.getElementById("col-config-apply").onclick = () => {
+                    body.querySelectorAll(".col-config-checkbox").forEach((cb) => {
+                        const entry = config.find((c) => c.id === cb.dataset.cid);
+                        if (entry) entry.visible = cb.checked;
+                    });
+                    state.columnConfig.length = 0;
+                    state.columnConfig.push(...config);
+                    saveColumnConfig(state.columnConfig);
+                    close();
+                    render();
+                };
+
+                // Close on Escape
+                document.addEventListener("keydown", function esc(e) {
+                    if (e.key === "Escape") {
+                        close();
+                        document.removeEventListener("keydown", esc);
+                    }
+                });
+            }
+
+            // ================================================================
+            // 6. INITIALIZATION
+            // ================================================================
+
+            function init() {
+                // ─── View switcher ───
+                function setView(view) {
+                    state.view = view;
+                    state.page = 0;
+                    state.sort = "";
+                    state.order = "asc";
+                    state.search = "";
+                    state.selectedServices = [];
+                    state.bpmMin = 0;
+                    state.bpmMax = 200;
+                    state.playsMin = 0;
+                    state.playsMax = 200;
+                    state.selectedKeys = [];
+                    state.selectedGenres = [];
+                    state.selectedTags = [];
+                    state.fileType = "all";
+                    state.commentStatus = "all";
+                    state.createdFilter = {
+                        enabled: false,
+                        condition: "last",
+                        value: 30,
+                        unit: "days",
+                    };
+                    state.modifiedFilter = {
+                        enabled: false,
+                        condition: "last",
+                        value: 30,
+                        unit: "days",
+                    };
+                    state.playedFilter = {
+                        enabled: false,
+                        condition: "last",
+                        value: 14,
+                        unit: "days",
+                    };
+                    state.tracksImportFilter = {
+                        enabled: false,
+                        condition: "last",
+                        value: 30,
+                        unit: "days",
+                    };
+                    // Sync date filter DOM with reset state
+                    ["created", "modified", "played"].forEach((prefix) => {
+                        const check = document.getElementById(prefix + "-check");
+                        const cond = document.getElementById(prefix + "-cond");
+                        const val = document.getElementById(prefix + "-val");
+                        const unit = document.getElementById(prefix + "-unit");
+                        if (check) check.checked = false;
+                        [cond, val, unit].forEach((el) => {
+                            if (el) {
+                                el.classList.add("filter-disabled");
+                                if (el.tagName === "SELECT") el.value = "last";
+                                if (el.tagName === "INPUT" && el.type === "number")
+                                    el.value = "30";
+                                if (el.tagName === "SELECT" && el.id.includes("unit"))
+                                    el.value = "days";
+                            }
+                        });
+                    });
+                    state.columnConfig = loadColumnConfig(view);
+                    localStorage.setItem("prototype_view", view);
+
+                    // Update search placeholder
+                    const si = document.getElementById("search-input");
+                    if (si) {
+                        si.placeholder =
+                            view === "tracks" ? "Search tracks…" : "Search files…";
+                        si.value = "";
+                    }
+
+                    // Update subtitle
+                    const sub = document.getElementById("subtitle-text");
+                    if (sub) {
+                        const count =
+                            view === "tracks" ? ALL_TRACKS.length : ALL_FILES.length;
+                        sub.textContent = `${count} ${view === "tracks" ? "tracks" : "files"}`;
+                    }
+
+                    // Update active buttons
+                    document
+                        .querySelectorAll("#view-switcher .filter-btn")
+                        .forEach((b) => {
+                            b.classList.toggle("active", b.dataset.view === view);
+                        });
+                    // Clear service filter button active states
+                    document
+                        .querySelectorAll("#service-filter .filter-btn")
+                        .forEach((b) => b.classList.remove("active"));
+
+                    // Reset comment filter button
+                    document
+                        .querySelectorAll("#comment-filter .filter-btn")
+                        .forEach((b) => b.classList.remove("active"));
+                    const commentAll = document.querySelector(
+                        '#comment-filter .filter-btn[data-value="all"]',
+                    );
+                    if (commentAll) commentAll.classList.add("active");
+
+                    // Show/hide view-specific filter sections
+                    const filesFilters = document.getElementById("files-filters");
+                    const tracksFilters = document.getElementById("tracks-filters");
+                    const tracksFiltersContent = document.getElementById(
+                        "tracks-filters-content",
+                    );
+                    const dateFilters = document.getElementById("date-filters");
+                    if (filesFilters)
+                        filesFilters.style.display = view === "files" ? "" : "none";
+                    if (tracksFilters && tracksFiltersContent) {
+                        tracksFilters.style.display = view === "tracks" ? "" : "none";
+                        tracksFiltersContent.style.display =
+                            view === "tracks" ? "" : "none";
+                    }
+                    if (dateFilters)
+                        dateFilters.style.display = view === "files" ? "" : "none";
+
+                    render();
+                }
+
+                // Activate saved view on load
+                setView(state.view);
+
+                document
+                    .getElementById("view-switcher")
+                    .addEventListener("click", (e) => {
+                        const btn = e.target.closest(".filter-btn");
+                        if (!btn || btn.dataset.view === state.view) return;
+                        setView(btn.dataset.view);
+                    });
+
+                // Restore service filter buttons from state
+                state.selectedServices.forEach((svc) => {
+                    const btn = document.querySelector(
+                        `#service-filter .filter-btn[data-value="${svc}"]`,
+                    );
+                    if (btn) btn.classList.add("active");
+                });
+
+                // Wire filter toggle
+                const toggleBtn = document.getElementById("filter-toggle");
+                const filterPanel = document.getElementById("filter-panel");
+                if (toggleBtn && filterPanel) {
+                    const saved = localStorage.getItem("filterPanelCollapsed_prototype");
+                    if (saved === "true") filterPanel.classList.add("collapsed");
+                    toggleBtn.addEventListener("click", () => {
+                        filterPanel.classList.toggle("collapsed");
+                        localStorage.setItem(
+                            "filterPanelCollapsed_prototype",
+                            filterPanel.classList.contains("collapsed"),
+                        );
+                    });
+                }
+
+                // Wire search (debounced)
+                const searchInput = document.getElementById("search-input");
+                let searchTimer;
+                searchInput.addEventListener("input", () => {
+                    clearTimeout(searchTimer);
+                    searchTimer = setTimeout(() => {
+                        state.search = searchInput.value;
+                        state.page = 0;
+                        render();
+                    }, 250);
+                });
+
+                // ─── Multi-select service filter ───
+                document
+                    .getElementById("service-filter")
+                    .addEventListener("click", (e) => {
+                        const btn = e.target.closest(".filter-btn");
+                        if (!btn) return;
+                        const value = btn.dataset.value;
+                        const idx = state.selectedServices.indexOf(value);
+                        if (idx >= 0) {
+                            state.selectedServices.splice(idx, 1);
+                            btn.classList.remove("active");
+                        } else {
+                            state.selectedServices.push(value);
+                            btn.classList.add("active");
+                        }
+                        state.page = 0;
+                        render();
+                    });
+
+                // Wire BPM dual range
+                const bpmMin = document.getElementById("bpm-min");
+                const bpmMax = document.getElementById("bpm-max");
+                const bpmMinVal = document.getElementById("bpm-min-val");
+                const bpmMaxVal = document.getElementById("bpm-max-val");
+                const bpmFill = document.getElementById("bpm-fill");
+                let bpmTimer;
+
+                function updateBPM() {
+                    clearTimeout(bpmTimer);
+                    bpmTimer = setTimeout(() => {
+                        const min = parseInt(bpmMin.value, 10);
+                        const max = parseInt(bpmMax.value, 10);
+                        state.bpmMin = Math.min(min, max);
+                        state.bpmMax = Math.max(min, max);
+                        const pctMin = (state.bpmMin / 200) * 100;
+                        const pctMax = (state.bpmMax / 200) * 100;
+                        bpmFill.style.left = pctMin + "%";
+                        bpmFill.style.width = pctMax - pctMin + "%";
+                        bpmMinVal.textContent = state.bpmMin;
+                        bpmMaxVal.textContent = state.bpmMax;
+                        state.page = 0;
+                        render();
+                    }, 150);
+                }
+
+                bpmMin.addEventListener("input", updateBPM);
+                bpmMax.addEventListener("input", updateBPM);
+
+                // Wire key grid
+                const minorGrid = document.getElementById("key-grid-minor");
+                const majorGrid = document.getElementById("key-grid-major");
+
+                function renderKeyGrid() {
+                    const renderKey = (k) => {
+                        const isMinor = k.endsWith("m");
+                        const cls = isMinor ? "minor" : "major";
+                        return `<button class="key-btn ${cls}${state.selectedKeys.includes(k) ? " active" : ""}" data-key="${k}">${k}</button>`;
+                    };
+                    minorGrid.innerHTML =
+                        MINOR_KEYS.map(renderKey).join("") +
+                        `<button class="key-btn action" data-key-action="minor-all">ALL</button>` +
+                        `<button class="key-btn action" data-key-action="minor-none">NONE</button>`;
+                    majorGrid.innerHTML =
+                        MAJOR_KEYS.map(renderKey).join("") +
+                        `<button class="key-btn action" data-key-action="major-all">ALL</button>` +
+                        `<button class="key-btn action" data-key-action="major-none">NONE</button>`;
+                }
+                renderKeyGrid();
+
+                function handleKeyClick(e) {
+                    const btn = e.target.closest(".key-btn");
+                    if (!btn) return;
+                    const key = btn.dataset.key;
+                    const action = btn.dataset.keyAction;
+
+                    if (action === "minor-all") {
+                        state.selectedKeys = [...MINOR_KEYS];
+                    } else if (action === "minor-none") {
+                        state.selectedKeys = state.selectedKeys.filter(
+                            (k) => !k.endsWith("m"),
+                        );
+                    } else if (action === "major-all") {
+                        state.selectedKeys = [...MAJOR_KEYS];
+                    } else if (action === "major-none") {
+                        state.selectedKeys = state.selectedKeys.filter(
+                            (k) => !k.endsWith("d"),
+                        );
+                    } else if (key) {
+                        const idx = state.selectedKeys.indexOf(key);
+                        if (idx >= 0) state.selectedKeys.splice(idx, 1);
+                        else state.selectedKeys.push(key);
+                    }
+                    state.page = 0;
+                    renderKeyGrid();
+                    // Re-wire key events after re-render
+                    render();
+                }
+
+                minorGrid.addEventListener("click", handleKeyClick);
+                majorGrid.addEventListener("click", handleKeyClick);
+
+                // ─── Plays dual range ───
+                const playsMin = document.getElementById("plays-min");
+                const playsMax = document.getElementById("plays-max");
+                const playsMinVal = document.getElementById("plays-min-val");
+                const playsMaxVal = document.getElementById("plays-max-val");
+                const playsFill = document.getElementById("plays-fill");
+                let playsTimer;
+                function updatePlays() {
+                    clearTimeout(playsTimer);
+                    playsTimer = setTimeout(() => {
+                        const mn = parseInt(playsMin.value, 10);
+                        const mx = parseInt(playsMax.value, 10);
+                        state.playsMin = Math.min(mn, mx);
+                        state.playsMax = Math.max(mn, mx);
+                        const pctMin = (state.playsMin / 200) * 100;
+                        const pctMax = (state.playsMax / 200) * 100;
+                        playsFill.style.left = pctMin + "%";
+                        playsFill.style.width = pctMax - pctMin + "%";
+                        playsMinVal.textContent = state.playsMin;
+                        playsMaxVal.textContent = state.playsMax;
+                        state.page = 0;
+                        render();
+                    }, 150);
+                }
+                playsMin.addEventListener("input", updatePlays);
+                playsMax.addEventListener("input", updatePlays);
+
+                // ─── File type filter ───
+                document
+                    .getElementById("filetype-filter")
+                    .addEventListener("click", (e) => {
+                        const btn = e.target.closest(".filter-btn");
+                        if (!btn) return;
+                        document
+                            .querySelectorAll("#filetype-filter .filter-btn")
+                            .forEach((b) => b.classList.remove("active"));
+                        btn.classList.add("active");
+                        state.fileType = btn.dataset.value;
+                        state.page = 0;
+                        render();
+                    });
+
+                // ─── Comment status filter ───
+                document
+                    .getElementById("comment-filter")
+                    .addEventListener("click", (e) => {
+                        const btn = e.target.closest(".filter-btn");
+                        if (!btn) return;
+                        document
+                            .querySelectorAll("#comment-filter .filter-btn")
+                            .forEach((b) => b.classList.remove("active"));
+                        btn.classList.add("active");
+                        state.commentStatus = btn.dataset.value;
+                        state.page = 0;
+                        render();
+                    });
+
+                // ─── Date filters (generic helper for condition + unit) ───
+                function wireDateFilter(prefix, stateKey) {
+                    const check = document.getElementById(prefix + "-check");
+                    const cond = document.getElementById(prefix + "-cond");
+                    const val = document.getElementById(prefix + "-val");
+                    const unit = document.getElementById(prefix + "-unit");
+                    const filter = state[stateKey];
+
+                    function setEnabled(enabled) {
+                        // Use CSS class instead of disabled attribute
+                        [cond, val, unit].forEach((el) => {
+                            if (!enabled) {
+                                el.classList.add("filter-disabled");
+                            } else {
+                                el.classList.remove("filter-disabled");
+                            }
+                        });
+                    }
+
+                    function syncState() {
+                        filter.enabled = check.checked;
+                        filter.condition = cond.value;
+                        filter.value = parseInt(val.value, 10) || 30;
+                        filter.unit = unit.value;
+                        setEnabled(check.checked);
+                        state.page = 0;
+                        render();
+                    }
+
+                    check.addEventListener("change", syncState);
+                    cond.addEventListener("change", syncState);
+                    unit.addEventListener("change", syncState);
+                    val.addEventListener("change", syncState);
+                    val.addEventListener("input", () => {
+                        filter.value = parseInt(val.value, 10) || 30;
+                        state.page = 0;
+                        render();
+                    });
+
+                    // Initial sync (set to disabled state initially)
+                    setEnabled(false);
+                }
+
+                wireDateFilter("created", "createdFilter");
+                wireDateFilter("modified", "modifiedFilter");
+                wireDateFilter("played", "playedFilter");
+
+                // ─── Tracks import date filter ───
+                const tracksImportCheck = document.getElementById("tracks-import-check");
+                const tracksImportCond = document.getElementById("tracks-import-cond");
+                const tracksImportVal = document.getElementById("tracks-import-val");
+                const tracksImportUnit = document.getElementById("tracks-import-unit");
+
+                function syncTracksImport() {
+                    const enabled = tracksImportCheck.checked;
+                    const condition = tracksImportCond.value;
+                    const value = parseInt(tracksImportVal.value, 10) || 30;
+                    const unit = tracksImportUnit.value;
+                    tracksImportCond.disabled = !enabled;
+                    tracksImportVal.disabled = !enabled;
+                    tracksImportUnit.disabled = !enabled;
+                    // Store in a shared state or just apply directly in data layer
+                    state.tracksImportFilter = { enabled, condition, value, unit };
+                    state.page = 0;
+                    render();
+                }
+
+                tracksImportCheck.addEventListener("change", syncTracksImport);
+                tracksImportCond.addEventListener("change", syncTracksImport);
+                tracksImportUnit.addEventListener("change", syncTracksImport);
+                tracksImportVal.addEventListener("change", syncTracksImport);
+                tracksImportVal.addEventListener("input", () => {
+                    state.tracksImportFilter = {
+                        ...state.tracksImportFilter,
+                        value: parseInt(tracksImportVal.value, 10) || 30,
+                    };
+                    state.page = 0;
+                    render();
+                });
+
+                // Initialize state
+                state.tracksImportFilter = {
+                    enabled: false,
+                    condition: "last",
+                    value: 30,
+                    unit: "days",
+                };
+
+                // ─── Genre search + chips ───
+                let genreTimer;
+                const genreSearch = document.getElementById("genre-search");
+                genreSearch.addEventListener("input", () => {
+                    clearTimeout(genreTimer);
+                    genreTimer = setTimeout(() => {
+                        const q = genreSearch.value.toLowerCase().trim();
+                        if (!q) return;
+                        const match = GENRES.find(
+                            (g) =>
+                                g.toLowerCase().includes(q) &&
+                                !state.selectedGenres.includes(g),
+                        );
+                        if (match) {
+                            state.selectedGenres.push(match);
+                            state.page = 0;
+                            genreSearch.value = "";
+                            renderGenreChips();
+                            render();
+                        }
+                    }, 300);
+                });
+
+                // ─── Tag search + chips ───
+                let tagTimer;
+                const tagSearch = document.getElementById("tag-search");
+                tagSearch.addEventListener("input", () => {
+                    clearTimeout(tagTimer);
+                    tagTimer = setTimeout(() => {
+                        const q = tagSearch.value.toLowerCase().trim();
+                        if (!q) return;
+                        const match = TAG_NAMES.find(
+                            (t) =>
+                                t.toLowerCase().includes(q) &&
+                                !state.selectedTags.includes(t),
+                        );
+                        if (match) {
+                            state.selectedTags.push(match);
+                            state.page = 0;
+                            tagSearch.value = "";
+                            renderTagChips();
+                            render();
+                        }
+                    }, 300);
+                });
+
+                // ─── Delegated click for chip remove ───
+                document.addEventListener("click", (e) => {
+                    const genreX = e.target.closest("[data-genre]");
+                    if (genreX) {
+                        state.selectedGenres = state.selectedGenres.filter(
+                            (g) => g !== genreX.dataset.genre,
+                        );
+                        state.page = 0;
+                        renderGenreChips();
+                        render();
+                    }
+                    const tagX = e.target.closest("[data-tag]");
+                    if (tagX) {
+                        state.selectedTags = state.selectedTags.filter(
+                            (t) => t !== tagX.dataset.tag,
+                        );
+                        state.page = 0;
+                        renderTagChips();
+                        render();
+                    }
+                });
+            }
+
+            // Kick off
+            document.addEventListener("DOMContentLoaded", init);
+        </script>
+    </body>
+</html>

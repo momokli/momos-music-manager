@@ -1,10 +1,51 @@
-import { renderLoading, renderErrorBlock, showToast } from "../shared/components.js";
+/**
+ * playlists.js — All playlists page.
+ *
+ * Lists playlists from connected streaming services with pagination,
+ * filtering by service/search, subscription management, sync actions,
+ * Deemix download integration, and tag creation.
+ *
+ * Toolbar is rendered once and preserved across re-renders to
+ * keep the search input stable (no focus loss on reload).
+ *
+ * URL hash params:
+ *   #playlists?search=foo&service=spotify&page=0&sort=name&order=asc
+ */
+
 import { fetchJSON } from "../shared/api.js";
+import {
+  escapeHtml,
+  renderLoading,
+  renderErrorBlock,
+  showToast,
+} from "../shared/components.js";
 import {
   renderSearchInput,
   renderFilterGroup,
   wireSearchFilter,
 } from "../shared/search-filter.js";
+import {
+  getPageSize,
+  renderPageSizeSelector,
+  sortableTh,
+  wireSortableHeaders,
+  wirePageSizeSelector,
+  updateHash,
+  parseHash,
+} from "../shared/crud.js";
+import {
+  loadColumnConfig,
+  renderColumnConfigTrigger,
+  renderColumnHeaders,
+  renderColumnCells,
+  wireColumnResize,
+  wireColumnDragReorder,
+  wireConfigTrigger,
+} from "../shared/column-config.js";
+
+/* ------------------------------------------------------------------ */
+/*  Constants                                                          */
+/* ------------------------------------------------------------------ */
 
 const SVC = {
   spotify: ["fab fa-spotify", "Spotify"],
@@ -12,6 +53,7 @@ const SVC = {
   youtube: ["fab fa-youtube", "YouTube"],
   deemix: ["fa-solid fa-download", "Deemix"],
 };
+
 const SVC_CLS = {
   spotify: "service-badge spotify",
   soundcloud: "service-badge soundcloud",
@@ -19,7 +61,7 @@ const SVC_CLS = {
   deemix: "service-badge deemix",
 };
 
-const SVC_OPTIONS = [
+const SERVICE_OPTIONS = [
   { value: "all", label: "All" },
   { value: "spotify", label: "Spotify" },
   { value: "soundcloud", label: "SoundCloud" },
@@ -27,20 +69,86 @@ const SVC_OPTIONS = [
   { value: "deemix", label: "Deemix" },
 ];
 
+const HASH_DEFAULTS = {
+  sort: "",
+  order: "asc",
+  search: "",
+  service: "all",
+  page: 0,
+  untaggedOnly: false,
+  mismatchOnly: false,
+};
+
+const HASH_SCHEMA = {
+  page: { type: "number", default: 0 },
+  search: { type: "string", default: "" },
+  sort: { type: "string", default: "" },
+  order: { type: "string", default: "asc" },
+  service: { type: "string", default: "all" },
+  untaggedOnly: { type: "boolean", default: false },
+  mismatchOnly: { type: "boolean", default: false },
+};
+
+/* ------------------------------------------------------------------ */
+/*  Column model (for column-config.js)                                 */
+/* ------------------------------------------------------------------ */
+
+const PLAYLISTS_COLUMNS = [
+  { id: "name", label: "Name", sortable: true, sortKey: "name", defaultWidth: 18 },
+  {
+    id: "service",
+    label: "Service",
+    sortable: true,
+    sortKey: "service",
+    defaultWidth: 8,
+  },
+  {
+    id: "tracks",
+    label: "Tracks",
+    sortable: true,
+    sortKey: "track_count",
+    defaultWidth: 8,
+  },
+  {
+    id: "imported",
+    label: "Imported",
+    sortable: true,
+    sortKey: "imported_at",
+    defaultWidth: 8,
+  },
+  {
+    id: "updated",
+    label: "Updated",
+    sortable: true,
+    sortKey: "updated_at",
+    defaultWidth: 8,
+  },
+  { id: "tags", label: "Tags", sortable: false, defaultWidth: 14 },
+  { id: "deemix", label: "Deemix", sortable: false, defaultWidth: 10 },
+  { id: "sync", label: "Sync", sortable: false, defaultWidth: 8 },
+  { id: "subscribe", label: "Subscribe", sortable: false, defaultWidth: 8 },
+  { id: "view", label: "View", sortable: false, defaultWidth: 6 },
+  { id: "actions", label: "Actions", sortable: false, defaultWidth: 12 },
+];
+
+/* ------------------------------------------------------------------ */
+/*  Cell helpers                                                       */
+/* ------------------------------------------------------------------ */
+
 function sBadge(s) {
-  return `<span class="${SVC_CLS[s]}"><i class="${SVC[s][0]}"></i> ${SVC[s][1]}</span>`;
+  return `<span class="${SVC_CLS[s] || "service-badge"}"><i class="${(SVC[s] || ["", ""])[0]}"></i> ${(SVC[s] || [s, s])[1]}</span>`;
 }
 
 function tagCell(t) {
   if (!t)
     return `<span class="status-badge" style="background:rgba(245,158,11,0.1);color:var(--yellow)"><i class="fas fa-exclamation-triangle"></i> No tag</span>`;
-  return `<span class="tag-badge font-mono" style="background:var(--accent-bg);color:var(--accent);border:1px solid var(--border)"><i class="fas fa-check-circle" style="color:var(--green)"></i> ${t}</span>`;
+  return `<span class="tag-badge font-mono" style="background:var(--accent-bg);color:var(--accent);border:1px solid var(--border)"><i class="fas fa-check-circle" style="color:var(--green)"></i> ${escapeHtml(t)}</span>`;
 }
 
 function syncCell(v) {
   return v === null
     ? `<em style="color:var(--text-muted)">Never</em>`
-    : `<span style="color:var(--text-muted)">${v}</span>`;
+    : `<span style="color:var(--text-muted)">${escapeHtml(v)}</span>`;
 }
 
 /** Show a subscription bell icon (green = subscribed, muted = not subscribed) */
@@ -53,12 +161,10 @@ function subCell(sub) {
 
 function deemixCell(r) {
   const status = r.deemixStatus;
-  // Restart button: uses retryDownload endpoint (UUID-based) when deemixId exists,
-  // falls back to re-adding the URL when only remote-queue status is known
   const restartBtn = status
-    ? `<button class="btn btn-sm btn-icon" data-act="deemix-restart" data-deemix-id="${r.deemixId || ""}" data-name="${esc(r.name)}" data-id="${r.id}" title="Re-download via deemix"><i class="fa-solid fa-arrows-rotate"></i></button>`
+    ? `<button class="btn btn-sm btn-icon" data-act="deemix-restart" data-deemix-id="${r.deemixId || ""}" data-name="${escapeHtml(r.name)}" data-id="${r.id}" title="Re-download via deemix"><i class="fa-solid fa-arrows-rotate"></i></button>`
     : "";
-  const addBtn = `<button class="btn btn-sm btn-icon" data-act="deemix-add" data-id="${r.id}" data-name="${esc(r.name)}" title="Add to Deemix download queue"><i class="fa-solid fa-plus"></i></button>`;
+  const addBtn = `<button class="btn btn-sm btn-icon" data-act="deemix-add" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Add to Deemix download queue"><i class="fa-solid fa-plus"></i></button>`;
 
   if (!status) return addBtn;
   if (status === "queued") {
@@ -71,9 +177,9 @@ function deemixCell(r) {
     return `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)"><i class="fa-solid fa-check"></i></span> ${restartBtn}`;
   }
   if (status === "failed" && r.deemixId) {
-    return `<button class="btn btn-sm btn-icon" data-act="deemix-retry" data-deemix-id="${r.deemixId}" data-id="${r.id}" data-name="${esc(r.name)}" title="Retry download"><i class="fa-solid fa-rotate"></i></button> ${restartBtn}`;
+    return `<button class="btn btn-sm btn-icon" data-act="deemix-retry" data-deemix-id="${r.deemixId}" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Retry download"><i class="fa-solid fa-rotate"></i></button> ${restartBtn}`;
   }
-  return `<span class="status-badge" style="background:rgba(245,158,11,0.1);color:var(--yellow)"><i class="fa-solid fa-clock"></i> ${esc(status)}</span> ${restartBtn}`;
+  return `<span class="status-badge" style="background:rgba(245,158,11,0.1);color:var(--yellow)"><i class="fa-solid fa-clock"></i> ${escapeHtml(status)}</span> ${restartBtn}`;
 }
 
 function viewTracksCell(r) {
@@ -99,80 +205,530 @@ function actions(r) {
   );
 }
 
-function rows(d) {
-  return d
+/* ------------------------------------------------------------------ */
+/*  Cell renderers (for column-config.js)                               */
+/* ------------------------------------------------------------------ */
+
+const PLAYLISTS_CELL_RENDERERS = {
+  name: (r) => escapeHtml(r.name),
+  service: (r) => sBadge(r.svc),
+  tracks: (r) => {
+    const mismatch = r.l !== r.r;
+    return `<span class="${mismatch ? "diff-badge" : "font-mono"}">${r.l} / ${r.r}</span>`;
+  },
+  imported: (r) =>
+    r.importedAt
+      ? `<span class="font-mono text-xs">${new Date(r.importedAt * 1000).toLocaleDateString()}</span>`
+      : '<span class="text-muted">\u2014</span>',
+  updated: (r) =>
+    r.updatedAt
+      ? `<span class="font-mono text-xs">${new Date(r.updatedAt * 1000).toLocaleDateString()}</span>`
+      : '<span class="text-muted">\u2014</span>',
+  tags: (r) => tagCell(r.tag),
+  deemix: (r) => deemixCell(r),
+  sync: (r) => syncCell(r.sync),
+  subscribe: (r) => subCell(r.sub),
+  view: (r) => viewTracksCell(r),
+  actions: (r) => actions(r),
+};
+
+/**
+ * Render the full toolbar HTML (called once on init).
+ */
+function renderToolbar(state) {
+  return `<div class="filter-panel" id="playlists-filter-panel">
+    <div class="filter-panel-header">
+      ${renderSearchInput("playlists", state.search)}
+      ${renderFilterGroup("service", SERVICE_OPTIONS, state.service)}
+      <button class="btn btn-primary" id="playlists-create-tag">Create Tags</button>
+      <button class="filter-panel-toggle" id="playlists-filter-toggle" title="Toggle filters">
+        <i class="fas fa-chevron-up chevron"></i>
+      </button>
+    </div>
+  </div>`;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Content render (re-rendered on each fetch)                         */
+/* ------------------------------------------------------------------ */
+
+function renderBody(data, state) {
+  const { playlists } = data;
+  const totalCount = data._total ?? playlists.length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / state.pageSize));
+  const untaggedTotal = playlists.filter((p) => !p.tag).length;
+  const pageId = "playlists";
+
+  const config = loadColumnConfig("playlists", PLAYLISTS_COLUMNS);
+  const theadHtml = renderColumnHeaders(config, PLAYLISTS_COLUMNS, state, sortableTh);
+
+  const rowsHtml = playlists
     .map((r) => {
       const mismatch = r.l !== r.r;
       return `<tr class="${mismatch ? "row-mismatch" : ""}" ${mismatch ? 'title="Local vs Remote differ"' : ""}>
-    <td style="width:3%"></td>
-    <td><span class="font-medium">${esc(r.name)}</span></td>
-    <td>${sBadge(r.svc)}</td>
-    <td style="text-align:center">${subCell(r.sub)}</td>
-    <td><span class="${mismatch ? "diff-badge" : ""}">${r.l}</span></td>
-    <td><span class="${mismatch ? "diff-badge" : ""}">${r.r}</span></td>
-    <td>${syncCell(r.sync)}</td>
-    <td>${tagCell(r.tag)}</td>
-    <td style="text-align:center">${deemixCell(r)}</td>
-    <td style="text-align:center">${viewTracksCell(r)}</td>
-    <td>${actions(r)}</td>
-  </tr>`;
+        ${renderColumnCells(config, PLAYLISTS_COLUMNS, PLAYLISTS_CELL_RENDERERS, r)}
+      </tr>`;
     })
     .join("");
+
+  const visibleColCount = config.filter((c) => c.visible).length;
+
+  const stats = `<div class="stats-row">
+    <div class="stats-group">
+      <button class="btn btn-sm btn-icon" id="playlists-refresh" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
+      <strong>${totalCount.toLocaleString()}</strong> playlists
+      <span style="margin:0 6px;color:var(--text-subtle);">\u00b7</span>
+      <strong>${untaggedTotal}</strong> without tags
+      ${renderPageSizeSelector(state.pageSize)}
+      ${renderColumnConfigTrigger()}
+    </div>
+  </div>`;
+
+  const tableHtml = `<div class="table-wrap"><table class="data-table" id="pl-tbl">
+    <thead><tr>${theadHtml}</tr></thead>
+    <tbody>${rowsHtml}</tbody>
+  </table></div>`;
+
+  const pagination = `<div class="pagination" id="${pageId}-pagination">
+    <button class="pagination-btn" id="${pageId}-prev" ${state.page === 0 ? "disabled" : ""}><i class="fa-solid fa-chevron-left"></i></button>
+    <span class="pagination-info" id="${pageId}-info">Page ${state.page + 1} of ${totalPages}</span>
+    <button class="pagination-btn" id="${pageId}-next" ${state.page >= totalPages - 1 ? "disabled" : ""}><i class="fa-solid fa-chevron-right"></i></button>
+  </div>`;
+
+  return `${stats}\n${tableHtml}\n${pagination}`;
 }
 
-function esc(s) {
-  if (!s) return "";
-  const d = document.createElement("div");
-  d.textContent = s;
-  return d.innerHTML;
+function renderEmptyBody(search) {
+  const config = loadColumnConfig("playlists", PLAYLISTS_COLUMNS);
+  const theadHtml = renderColumnHeaders(
+    config,
+    PLAYLISTS_COLUMNS,
+    { sort: "", order: "asc" },
+    sortableTh,
+  );
+  const visibleColCount = config.filter((c) => c.visible).length;
+
+  return `
+    <div class="stats-row">
+      <div class="stats-group">
+        <button class="btn btn-sm btn-icon" id="playlists-refresh" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
+        <strong>0</strong> playlists
+        ${renderColumnConfigTrigger()}
+      </div>
+    </div>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr>${theadHtml}</tr></thead>
+      <tbody><tr><td colspan="${visibleColCount}"><div class="text-center text-muted" style="padding:32px">No playlists found. Import playlists from your connected services to get started.</div></td></tr></tbody>
+    </table></div>`;
 }
 
-function renderPlaylists(container, playlists, total, untaggedTotal, state, signal) {
-  const totalPages = Math.max(1, Math.ceil(total / state.pageSize));
-  const currentPage = state.page + 1;
+/* ------------------------------------------------------------------ */
+/*  Build params                                                       */
+/* ------------------------------------------------------------------ */
 
+function buildParams(state) {
+  const params = new URLSearchParams();
+  params.set("limit", String(state.pageSize));
+  params.set("offset", String(state.page * state.pageSize));
+  if (state.sort) params.set("sort", state.sort);
+  if (state.order) params.set("order", state.order);
+  if (state.service && state.service !== "all") params.set("service", state.service);
+  if (state.search) params.set("search", state.search);
+  if (state.untaggedOnly) params.set("untagged", "true");
+  if (state.mismatchOnly) params.set("mismatch", "true");
+  return params;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Fetch + Render cycle                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Replace the content area (#playlists-content) with the given HTML.
+ */
+function setContent(html) {
+  const el = document.getElementById("playlists-content");
+  if (el) el.innerHTML = html;
+}
+
+/**
+ * Fetch /api/playlists, /api/tags, /api/playlists/subscriptions in parallel,
+ * adapt the data, then render.
+ */
+async function fetchAndRender(container, signal, state) {
+  setContent(renderLoading("Loading playlists…"));
+
+  try {
+    const [plResp, tagsResp, subsResp] = await Promise.all([
+      fetchJSON(`/api/playlists?${buildParams(state)}`, { signal }),
+      fetchJSON("/api/tags", { signal }),
+      fetchJSON("/api/playlists/subscriptions", { signal }),
+    ]);
+    if (signal.aborted) return;
+
+    // Build tag lookup: tag name (lowercase) -> tag name
+    const tagLookup = {};
+    for (const t of tagsResp.data || []) {
+      tagLookup[t.name.toLowerCase()] = t.name;
+    }
+
+    // Build subscription lookup: key = "service:playlist_id" -> subscription object
+    const subLookup = {};
+    const subscriptions = subsResp.data?.subscriptions || [];
+    for (const s of subscriptions) {
+      subLookup[`${s.service}:${s.playlist_id}`] = s;
+    }
+
+    const rawPlaylists = plResp.data.playlists || [];
+    const total = plResp.data.total || rawPlaylists.length;
+
+    const adapted = rawPlaylists.map((p) => {
+      const key = `${p.service}:${p.playlistId}`;
+      return {
+        id: p.id,
+        name: p.name,
+        svc: p.service,
+        playlistId: p.playlistId,
+        sub: subLookup[key] || null,
+        l: p.localTrackCount ?? 0,
+        r: p.remoteTrackCount ?? 0,
+        sync: null,
+        tag: tagLookup[p.name.toLowerCase()] || null,
+        deemixStatus: p.deemixStatus || null,
+        deemixId: p.deemixId || null,
+        importedAt: p.importedAt || p.imported_at || null,
+        updatedAt: p.updatedAt || p.updated_at || null,
+      };
+    });
+
+    const data = {
+      _total: total,
+      playlists: adapted,
+    };
+
+    // Empty state (no playlists in DB at all)
+    if (adapted.length === 0 && total === 0) {
+      setContent(renderEmptyBody(state.search));
+      wireContentEvents(container, signal, state);
+      return;
+    }
+
+    setContent(renderBody(data, state));
+    wireContentEvents(container, signal, state);
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    try {
+      if (signal.aborted) return;
+    } catch {
+      return;
+    }
+    setContent(
+      renderErrorBlock({
+        title: "Failed to load playlists",
+        detail: err.message,
+        retryFn: "window.location.hash='#playlists'",
+      }),
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Event wiring (re-wired after each content render)                  */
+/* ------------------------------------------------------------------ */
+
+function wireContentEvents(container, signal, state) {
+  // Refresh button
+  const refreshBtn = container.querySelector("#playlists-refresh");
+  if (refreshBtn) {
+    refreshBtn.onclick = () => {
+      updateHash("playlists", state, HASH_DEFAULTS);
+      fetchAndRender(container, signal, state);
+    };
+  }
+
+  // Sortable headers
+  const tbl = container.querySelector("#pl-tbl");
+  if (tbl) {
+    wireSortableHeaders(tbl, state, () => {
+      updateHash("playlists", state, HASH_DEFAULTS);
+      fetchAndRender(container, signal, state);
+    });
+  }
+
+  // Page size selector
+  wirePageSizeSelector(container, state, () => {
+    updateHash("playlists", state, HASH_DEFAULTS);
+    fetchAndRender(container, signal, state);
+  });
+
+  // Pagination: Previous
+  const prevBtn = container.querySelector("#playlists-prev");
+  if (prevBtn) {
+    prevBtn.onclick = () => {
+      if (state.page > 0) {
+        state.page--;
+        updateHash("playlists", state, HASH_DEFAULTS);
+        fetchAndRender(container, signal, state);
+      }
+    };
+  }
+
+  // Pagination: Next
+  const nextBtn = container.querySelector("#playlists-next");
+  if (nextBtn) {
+    nextBtn.onclick = () => {
+      state.page++;
+      updateHash("playlists", state, HASH_DEFAULTS);
+      fetchAndRender(container, signal, state);
+    };
+  }
+
+  // Action buttons (delegated on table)
+  if (tbl) {
+    tbl.addEventListener(
+      "click",
+      async (e) => {
+        const b = e.target.closest("[data-act]");
+        if (!b) return;
+
+        const act = b.dataset.act;
+        const id = parseInt(b.dataset.id, 10);
+
+        // Build playlist info from the button's data attributes
+        // (playlists array isn't in closure anymore — data-attrs are always current)
+        const pl = {
+          id,
+          name: b.dataset.name || "",
+          svc: b.dataset.service || "",
+          playlistId: b.dataset.playlistId || "",
+        };
+
+        if (act === "create-tag") {
+          try {
+            const catResp = await fetchJSON("/api/tag-categories");
+            const defaultCat = catResp.data.find((c) => c.isDefault) || catResp.data[0];
+            if (!defaultCat) {
+              showToast("No tag category found", "error");
+              return;
+            }
+            await fetchJSON("/api/tags", {
+              method: "POST",
+              body: JSON.stringify({ name: pl.name, categoryId: defaultCat.id }),
+            });
+            showToast(`Tag "${pl.name}" created`, "success");
+            updateHash("playlists", state, HASH_DEFAULTS);
+            fetchAndRender(container, signal, state);
+          } catch (err) {
+            showToast(`Failed to create tag: ${err.message}`, "error");
+          }
+        } else if (act === "edit-tag") {
+          showToast("Edit tag: navigate to Tags page", "info");
+        } else if (act === "subscribe") {
+          const svc = b.dataset.service;
+          const plId = b.dataset.playlistId;
+          if (!plId) {
+            showToast("No playlist ID", "error");
+            return;
+          }
+          b.disabled = true;
+          b.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+          try {
+            await fetchJSON("/api/playlists/subscriptions", {
+              method: "POST",
+              body: JSON.stringify({ service: svc, playlistId: plId }),
+            });
+            showToast("Subscribed", "success");
+            updateHash("playlists", state, HASH_DEFAULTS);
+            fetchAndRender(container, signal, state);
+          } catch (err) {
+            showToast(`Subscribe failed: ${err.message}`, "error");
+            b.disabled = false;
+            b.innerHTML = '<i class="fas fa-bell"></i>';
+          }
+        } else if (act === "unsubscribe") {
+          const subId = parseInt(b.dataset.subId, 10);
+          if (!subId) return;
+          b.disabled = true;
+          b.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+          try {
+            await fetchJSON(`/api/playlists/subscriptions/${subId}`, {
+              method: "DELETE",
+            });
+            showToast("Unsubscribed", "success");
+            updateHash("playlists", state, HASH_DEFAULTS);
+            fetchAndRender(container, signal, state);
+          } catch (err) {
+            showToast(`Unsubscribe failed: ${err.message}`, "error");
+            b.disabled = false;
+            b.innerHTML = '<i class="fas fa-bell-slash"></i>';
+          }
+        } else if (act === "sync") {
+          const svc = b.dataset.service;
+          const plId = b.dataset.playlistId;
+          if (!plId) {
+            showToast("No playlist ID available for sync", "error");
+            return;
+          }
+          b.disabled = true;
+          b.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+          try {
+            const svcEndpoint =
+              svc === "spotify"
+                ? `/api/services/spotify/sync/playlists/${plId}/tracks`
+                : `/api/services/${svc}/sync`;
+            await fetchJSON(svcEndpoint, { method: "POST" });
+            showToast("Sync started", "success");
+            setTimeout(() => {
+              updateHash("playlists", state, HASH_DEFAULTS);
+              fetchAndRender(container, signal, state);
+            }, 2000);
+          } catch (err) {
+            showToast(`Sync failed: ${err.message}`, "error");
+            b.disabled = false;
+            b.innerHTML = '<i class="fas fa-sync"></i>';
+          }
+        } else if (act === "deemix-add") {
+          const url = `https://open.spotify.com/playlist/${b.dataset.playlistId}`;
+          const name = b.dataset.name;
+          b.disabled = true;
+          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+          try {
+            await fetchJSON("/api/services/deemix/queue", {
+              method: "POST",
+              body: JSON.stringify({ url }),
+            });
+            showToast(`Added "${name}" to Deemix download queue`, "success");
+            setTimeout(() => {
+              updateHash("playlists", state, HASH_DEFAULTS);
+              fetchAndRender(container, signal, state);
+            }, 1500);
+          } catch (err) {
+            showToast(`Failed to add to Deemix queue: ${err.message}`, "error");
+            b.disabled = false;
+            b.innerHTML = '<i class="fa-solid fa-plus"></i>';
+          }
+        } else if (act === "deemix-restart") {
+          const deemixId = b.dataset.deemixId ? parseInt(b.dataset.deemixId, 10) : null;
+          const name = b.dataset.name;
+          b.disabled = true;
+          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+          try {
+            if (deemixId) {
+              await fetchJSON(`/api/services/deemix/queue/${deemixId}/retry`, {
+                method: "POST",
+              });
+            } else {
+              const url = `https://open.spotify.com/playlist/${b.dataset.playlistId}`;
+              await fetchJSON("/api/services/deemix/queue", {
+                method: "POST",
+                body: JSON.stringify({ url }),
+              });
+            }
+            showToast(`Re-download triggered for "${name}"`, "success");
+            setTimeout(() => {
+              updateHash("playlists", state, HASH_DEFAULTS);
+              fetchAndRender(container, signal, state);
+            }, 1500);
+          } catch (err) {
+            showToast(`Re-download failed: ${err.message}`, "error");
+            b.disabled = false;
+            b.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i>';
+          }
+        } else if (act === "deemix-retry") {
+          const deemixId = parseInt(b.dataset.deemixId, 10);
+          const name = b.dataset.name;
+          b.disabled = true;
+          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+          try {
+            await fetchJSON(`/api/services/deemix/queue/${deemixId}/retry`, {
+              method: "POST",
+            });
+            showToast(`Retrying download for "${name}"`, "success");
+            setTimeout(() => {
+              updateHash("playlists", state, HASH_DEFAULTS);
+              fetchAndRender(container, signal, state);
+            }, 1500);
+          } catch (err) {
+            showToast(`Retry failed: ${err.message}`, "error");
+            b.disabled = false;
+            b.innerHTML = '<i class="fa-solid fa-rotate"></i>';
+          }
+        }
+      },
+      { signal },
+    );
+  }
+
+  // Column config: resize, reorder, visibility modal
+  const colConfig = loadColumnConfig("playlists", PLAYLISTS_COLUMNS);
+  wireColumnResize(container, "playlists", PLAYLISTS_COLUMNS, colConfig);
+  wireColumnDragReorder(container, "playlists", PLAYLISTS_COLUMNS, colConfig, () => {
+    updateHash("playlists", state, HASH_DEFAULTS);
+    fetchAndRender(container, signal, state);
+  });
+  wireConfigTrigger(container, "playlists", PLAYLISTS_COLUMNS, colConfig, () => {
+    updateHash("playlists", state, HASH_DEFAULTS);
+    fetchAndRender(container, signal, state);
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Initialisation                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Initialise the playlists page.
+ *
+ * @param {HTMLElement} container — the #main-content element
+ * @param {AbortSignal} signal    — abort signal for ongoing requests
+ * @param {object}       hashParams — parsed hash params from app.js
+ */
+export async function init(container, signal, hashParams) {
+  // Parse hash params into initial state
+  const parsed = parseHash(hashParams || {}, HASH_SCHEMA);
+  const state = {
+    page: parsed.page,
+    pageSize: getPageSize(),
+    search: parsed.search,
+    sort: parsed.sort,
+    order: parsed.order,
+    service: parsed.service,
+    untaggedOnly: parsed.untaggedOnly,
+    mismatchOnly: parsed.mismatchOnly,
+  };
+
+  // Render stable toolbar + content wrapper ONCE
   container.innerHTML = `
-<div class="toolbar">
-  ${renderSearchInput("playlists", state.search)}
-  ${renderFilterGroup("service", SVC_OPTIONS, state.service)}
-  <label class="checkbox-label"><input type="checkbox" data-sf-filter="untaggedOnly" ${state.untaggedOnly ? "checked" : ""}> Untagged only</label>
-  <label class="checkbox-label"><input type="checkbox" data-sf-filter="mismatchOnly" ${state.mismatchOnly ? "checked" : ""}> Mismatch only</label>
+    ${renderToolbar(state)}
+    <div id="playlists-content">${renderLoading("Loading playlists…")}</div>
+  `;
 
-  <button class="btn btn-green" id="pl-create-tags"><i class="fas fa-tag"></i> Create Tags</button>
-</div>
-
-<div class="stats-row">
-  <div class="stats-group">
-    <button class="btn btn-sm btn-icon" id="playlists-refresh" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
-    <strong>${total}</strong> playlists
-    <span style="margin:0 6px;color:var(--text-subtle);">·</span>
-    <strong>${untaggedTotal}</strong> without tags
-  </div>
-</div>
-
-<div class="table-wrap"><table class="data-table" id="pl-tbl">
-  <thead><tr><th style="width:2%"></th><th style="width:20%">Name</th><th style="width:7%">Service</th><th style="width:3%;text-align:center">Sub</th><th style="width:5%">Local</th><th style="width:5%">Remote</th><th style="width:10%">Last Synced</th><th style="width:14%">Tag</th><th style="width:6%">Deemix</th><th style="width:3%">Tracks</th><th style="width:25%">Actions</th></tr></thead>
-  <tbody>${rows(playlists)}</tbody>
-</table></div>
-
-<div class="pagination">
-  <button class="pagination-btn" id="pp2" ${state.page === 0 ? "disabled" : ""}><i class="fas fa-chevron-left"></i></button>
-  <span class="pagination-info">Page ${currentPage} of ${totalPages}</span>
-  <button class="pagination-btn" id="pn2" ${state.page >= totalPages - 1 ? "disabled" : ""}><i class="fas fa-chevron-right"></i></button>
-</div>`;
-
-  /* ---- Wire up events ---- */
-
-  const reload = () => loadPlaylists(container, signal, state);
-
-  // Unified search + filter wiring (debounced) — replaces manual filter/search handlers
-  const toolbar = container.querySelector(".toolbar");
+  // Wire toolbar events once (search, filters, Create Tags)
+  const toolbar = container.querySelector("#playlists-filter-panel");
   if (toolbar) {
-    wireSearchFilter(toolbar, state, () => loadPlaylists(container, signal, state));
+    wireSearchFilter(toolbar, state, () => {
+      updateHash("playlists", state, HASH_DEFAULTS);
+      fetchAndRender(container, signal, state);
+    });
+  }
+
+  // Wire filter panel collapse/expand toggle
+  const toggleBtn = container.querySelector("#playlists-filter-toggle");
+  const filterPanel = container.querySelector("#playlists-filter-panel");
+  if (toggleBtn && filterPanel) {
+    const saved = localStorage.getItem("filterPanelCollapsed_playlists");
+    if (saved === "true") filterPanel.classList.add("collapsed");
+    toggleBtn.addEventListener("click", () => {
+      filterPanel.classList.toggle("collapsed");
+      localStorage.setItem(
+        "filterPanelCollapsed_playlists",
+        filterPanel.classList.contains("collapsed"),
+      );
+    });
   }
 
   // Create Tags — creates tags for all untagged playlists in one shot
-  const createTagsBtn = container.querySelector("#pl-create-tags");
+  const createTagsBtn = container.querySelector("#playlists-create-tag");
   if (createTagsBtn) {
     createTagsBtn.addEventListener(
       "click",
@@ -192,7 +748,8 @@ function renderPlaylists(container, playlists, total, untaggedTotal, state, sign
           } else {
             showToast("All playlists already have tags", "info");
           }
-          reload();
+          updateHash("playlists", state, HASH_DEFAULTS);
+          fetchAndRender(container, signal, state);
         } catch (err) {
           showToast(`Failed to create tags: ${err.message}`, "error");
           createTagsBtn.disabled = false;
@@ -203,274 +760,6 @@ function renderPlaylists(container, playlists, total, untaggedTotal, state, sign
     );
   }
 
-  // Refresh
-  const refBtn = container.querySelector("#playlists-refresh");
-  if (refBtn) {
-    refBtn.addEventListener("click", () => reload(), { signal });
-  }
-
-  // Pagination: previous
-  const prevBtn = container.querySelector("#pp2");
-  if (prevBtn && !prevBtn.disabled) {
-    prevBtn.addEventListener(
-      "click",
-      () => {
-        if (state.page > 0) {
-          state.page--;
-          reload();
-        }
-      },
-      { signal },
-    );
-  }
-
-  // Pagination: next
-  const nextBtn = container.querySelector("#pn2");
-  if (nextBtn && !nextBtn.disabled) {
-    nextBtn.addEventListener(
-      "click",
-      () => {
-        state.page++;
-        reload();
-      },
-      { signal },
-    );
-  }
-
-  // Action buttons (delegated on table)
-  const tbl = container.querySelector("#pl-tbl");
-  if (tbl) {
-    tbl.addEventListener(
-      "click",
-      async (e) => {
-        const b = e.target.closest("[data-act]");
-        if (!b) return;
-
-        const act = b.dataset.act;
-        const id = parseInt(b.dataset.id, 10);
-        const playlist = playlists.find((p) => p.id === id);
-        if (!playlist) return;
-
-        if (act === "create-tag") {
-          try {
-            const catResp = await fetchJSON("/api/tag-categories");
-            const defaultCat = catResp.data.find((c) => c.isDefault) || catResp.data[0];
-            if (!defaultCat) {
-              showToast("No tag category found", "error");
-              return;
-            }
-            await fetchJSON("/api/tags", {
-              method: "POST",
-              body: JSON.stringify({ name: playlist.name, categoryId: defaultCat.id }),
-            });
-            showToast(`Tag "${playlist.name}" created`, "success");
-            reload();
-          } catch (err) {
-            showToast(`Failed to create tag: ${err.message}`, "error");
-          }
-        } else if (act === "edit-tag") {
-          showToast("Edit tag: navigate to Tags page", "info");
-        } else if (act === "subscribe") {
-          const svc = b.dataset.service || playlist.svc;
-          const plId = b.dataset.playlistId || playlist.playlistId;
-          if (!plId) {
-            showToast("No playlist ID", "error");
-            return;
-          }
-          b.disabled = true;
-          b.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-          try {
-            await fetchJSON("/api/playlists/subscriptions", {
-              method: "POST",
-              body: JSON.stringify({ service: svc, playlistId: plId }),
-            });
-            showToast(`Subscribed to "${playlist.name}"`, "success");
-            reload();
-          } catch (err) {
-            showToast(`Subscribe failed: ${err.message}`, "error");
-            b.disabled = false;
-            b.innerHTML = '<i class="fas fa-bell"></i>';
-          }
-        } else if (act === "unsubscribe") {
-          const subId = parseInt(b.dataset.subId, 10);
-          if (!subId) return;
-          b.disabled = true;
-          b.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-          try {
-            await fetchJSON(`/api/playlists/subscriptions/${subId}`, {
-              method: "DELETE",
-            });
-            showToast(`Unsubscribed from "${playlist.name}"`, "success");
-            reload();
-          } catch (err) {
-            showToast(`Unsubscribe failed: ${err.message}`, "error");
-            b.disabled = false;
-            b.innerHTML = '<i class="fas fa-bell-slash"></i>';
-          }
-        } else if (act === "sync") {
-          const svc = b.dataset.service || playlist.svc;
-          const plId = b.dataset.playlistId || playlist.playlistId;
-          if (!plId) {
-            showToast("No playlist ID available for sync", "error");
-            return;
-          }
-          b.disabled = true;
-          b.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-          try {
-            const svcEndpoint =
-              svc === "spotify"
-                ? `/api/services/spotify/sync/playlists/${plId}/tracks`
-                : `/api/services/${svc}/sync`;
-            await fetchJSON(svcEndpoint, { method: "POST" });
-            showToast(`Sync started for "${playlist.name}"`, "success");
-            setTimeout(() => reload(), 2000);
-          } catch (err) {
-            showToast(`Sync failed: ${err.message}`, "error");
-            b.disabled = false;
-            b.innerHTML = '<i class="fas fa-sync"></i>';
-          }
-        } else if (act === "deemix-add") {
-          const url = `https://open.spotify.com/playlist/${playlist.playlistId}`;
-          const name = b.dataset.name || playlist.name;
-          b.disabled = true;
-          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
-          try {
-            await fetchJSON("/api/services/deemix/queue", {
-              method: "POST",
-              body: JSON.stringify({ url }),
-            });
-            showToast(`Added "${name}" to Deemix download queue`, "success");
-            setTimeout(() => reload(), 1500);
-          } catch (err) {
-            showToast(`Failed to add to Deemix queue: ${err.message}`, "error");
-            b.disabled = false;
-            b.innerHTML = '<i class="fa-solid fa-plus"></i>';
-          }
-        } else if (act === "deemix-restart") {
-          const deemixId = b.dataset.deemixId ? parseInt(b.dataset.deemixId, 10) : null;
-          const name = b.dataset.name || playlist.name;
-          b.disabled = true;
-          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
-          try {
-            if (deemixId) {
-              // Has local DB entry — call retryDownload which tells deemix to re-download via UUID
-              await fetchJSON(`/api/services/deemix/queue/${deemixId}/retry`, {
-                method: "POST",
-              });
-            } else {
-              // Remote-only — re-add the URL so the backfill creates a local entry, then retry
-              const url = `https://open.spotify.com/playlist/${playlist.playlistId}`;
-              await fetchJSON("/api/services/deemix/queue", {
-                method: "POST",
-                body: JSON.stringify({ url }),
-              });
-            }
-            showToast(`Re-download triggered for "${name}"`, "success");
-            setTimeout(() => reload(), 1500);
-          } catch (err) {
-            showToast(`Re-download failed: ${err.message}`, "error");
-            b.disabled = false;
-            b.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i>';
-          }
-        } else if (act === "deemix-retry") {
-          const deemixId = parseInt(b.dataset.deemixId, 10);
-          const name = b.dataset.name || playlist.name;
-          b.disabled = true;
-          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
-          try {
-            await fetchJSON(`/api/services/deemix/queue/${deemixId}/retry`, {
-              method: "POST",
-            });
-            showToast(`Retrying download for "${name}"`, "success");
-            setTimeout(() => reload(), 1500);
-          } catch (err) {
-            showToast(`Retry failed: ${err.message}`, "error");
-            b.disabled = false;
-            b.innerHTML = '<i class="fa-solid fa-rotate"></i>';
-          }
-        }
-      },
-      { signal },
-    );
-  }
-}
-
-async function loadPlaylists(container, signal, state) {
-  const params = new URLSearchParams();
-  params.set("limit", String(state.pageSize));
-  params.set("offset", String(state.page * state.pageSize));
-  if (state.service && state.service !== "all") params.set("service", state.service);
-  if (state.search) params.set("search", state.search);
-  if (state.untaggedOnly) params.set("untagged", "true");
-  if (state.mismatchOnly) params.set("mismatch", "true");
-
-  const [plResp, tagsResp, subsResp] = await Promise.all([
-    fetchJSON(`/api/playlists?${params}`, { signal }),
-    fetchJSON("/api/tags", { signal }),
-    fetchJSON("/api/playlists/subscriptions", { signal }),
-  ]);
-  if (signal.aborted) return;
-
-  // Build tag lookup: tag name (lowercase) -> tag name
-  const tagLookup = {};
-  for (const t of tagsResp.data) {
-    tagLookup[t.name.toLowerCase()] = t.name;
-  }
-
-  // Build subscription lookup: key = "service:playlist_id" -> subscription object
-  const subLookup = {};
-  const subscriptions = subsResp.data?.subscriptions || [];
-  for (const s of subscriptions) {
-    subLookup[`${s.service}:${s.playlist_id}`] = s;
-  }
-
-  const playlists = plResp.data.playlists || [];
-  const total = plResp.data.total || playlists.length;
-
-  // Untagged count for current result set
-  const untaggedTotal = playlists.filter((p) => !tagLookup[p.name.toLowerCase()]).length;
-
-  const adapted = playlists.map((p) => {
-    const key = `${p.service}:${p.playlistId}`;
-    return {
-      id: p.id,
-      name: p.name,
-      svc: p.service,
-      playlistId: p.playlistId,
-      sub: subLookup[key] || null,
-      l: p.localTrackCount ?? 0,
-      r: p.remoteTrackCount ?? 0,
-      sync: null,
-      tag: tagLookup[p.name.toLowerCase()] || null,
-      deemixStatus: p.deemixStatus || null,
-      deemixId: p.deemixId || null,
-    };
-  });
-
-  renderPlaylists(container, adapted, total, untaggedTotal, state, signal);
-}
-
-export async function init(container, signal) {
-  container.innerHTML = renderLoading("Loading playlists…");
-
-  // Single state object — mutable, lives across renders
-  const state = {
-    page: 0,
-    pageSize: 10,
-    service: "all",
-    search: "",
-    untaggedOnly: false,
-    mismatchOnly: false,
-  };
-
-  try {
-    await loadPlaylists(container, signal, state);
-  } catch (err) {
-    if (err.name === "AbortError" || signal.aborted) return;
-    container.innerHTML = renderErrorBlock({
-      title: "Failed to load playlists",
-      detail: err.message,
-      retryFn: "location.reload()",
-    });
-  }
+  // Fetch initial data
+  await fetchAndRender(container, signal, state);
 }

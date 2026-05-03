@@ -13,24 +13,34 @@
  */
 
 import { fetchJSON } from "../shared/api.js";
-import {
-  renderLoading,
-  renderErrorBlock,
-  renderTable,
-  td,
-} from "../shared/components.js";
+import { escapeHtml, renderLoading, renderErrorBlock } from "../shared/components.js";
 import { formatDuration } from "../shared/format.js";
 import {
   renderSearchInput,
   renderFilterGroup,
   wireSearchFilter,
 } from "../shared/search-filter.js";
+import {
+  getPageSize,
+  renderPageSizeSelector,
+  sortableTh,
+  wireSortableHeaders,
+  wirePageSizeSelector,
+  updateHash,
+} from "../shared/crud.js";
+import {
+  loadColumnConfig,
+  renderColumnConfigTrigger,
+  renderColumnHeaders,
+  renderColumnCells,
+  wireColumnResize,
+  wireColumnDragReorder,
+  wireConfigTrigger,
+} from "../shared/column-config.js";
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
-
-const PAGE_SIZE = 10;
 
 const SERVICE_OPTIONS = [
   { value: "all", label: "All Services" },
@@ -39,29 +49,101 @@ const SERVICE_OPTIONS = [
   { value: "youtube", label: "YouTube" },
 ];
 
-const TABLE_HEADERS = [
-  { label: "Title", style: "width:22%" },
-  { label: "Artist", style: "width:16%" },
-  { label: "Service", style: "width:8%" },
-  { label: "Album", style: "width:14%" },
-  { label: "Playlists", style: "width:18%" },
-  { label: "Local Files", style: "width:10%" },
-  { label: "Duration", style: "width:8%;text-align:right" },
-  { label: "ISRC", style: "width:4%" },
+/**
+ * Column model for the tracks page.
+ * Each entry: { id, label, sortable?, sortKey?, defaultWidth }.
+ * User customisations (visibility, width, order) are stored per-page in localStorage.
+ */
+const TRACKS_COLUMNS = [
+  { id: "title", label: "Title", sortable: true, sortKey: "title", defaultWidth: 22 },
+  { id: "artist", label: "Artist", sortable: true, sortKey: "artist", defaultWidth: 16 },
+  {
+    id: "service",
+    label: "Service",
+    sortable: true,
+    sortKey: "service",
+    defaultWidth: 8,
+  },
+  { id: "album", label: "Album", sortable: true, sortKey: "album", defaultWidth: 14 },
+  { id: "playlists", label: "Playlists", sortable: false, defaultWidth: 18 },
+  { id: "localFiles", label: "Local Files", sortable: false, defaultWidth: 10 },
+  {
+    id: "duration",
+    label: "Duration",
+    sortable: true,
+    sortKey: "duration_ms",
+    defaultWidth: 8,
+  },
+  { id: "isrc", label: "ISRC", sortable: true, sortKey: "isrc", defaultWidth: 4 },
+  {
+    id: "imported",
+    label: "Imported",
+    sortable: true,
+    sortKey: "imported_at",
+    defaultWidth: 7,
+  },
 ];
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-function escapeHtml(str) {
-  if (typeof str !== "string") return str;
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+function formatTimestamp(ts) {
+  if (!ts) return '<span class="text-muted">—</span>';
+  const d = new Date(ts * 1000);
+  return `<span class="font-mono text-xs">${d.toLocaleDateString()}</span>`;
+}
+
+/**
+ * Cell renderer map for columns.
+ * Each function receives a track object and returns HTML for the <td>.
+ */
+const TRACKS_CELL_RENDERERS = {
+  title: (t) => escapeHtml(t.title),
+  artist: (t) => escapeHtml(t.artist),
+  service: (t) =>
+    `<span class="service-badge ${t.service}">${t.service.charAt(0).toUpperCase() + t.service.slice(1)}</span>`,
+  album: (t) => (t.album ? escapeHtml(t.album) : '<span class="text-muted">—</span>'),
+  playlists: (t) => renderPlaylistBadges(t),
+  localFiles: (t) => renderLocalFiles(t),
+  duration: (t) =>
+    `<span class="font-mono">${escapeHtml(formatDuration(t.duration))}</span>`,
+  isrc: (t) =>
+    t.isrc
+      ? `<span class="font-mono text-sm">${escapeHtml(t.isrc)}</span>`
+      : '<span class="text-muted">—</span>',
+  imported: (t) =>
+    t.importedAt ? formatTimestamp(t.importedAt) : '<span class="text-muted">—</span>',
+};
+
+/**
+ * Render playlist name badges for a track.
+ * @param {object} t — adapted track object with playlistNames array
+ * @returns {string} HTML
+ */
+function renderPlaylistBadges(t) {
+  if (!t.playlistNames || t.playlistNames.length === 0) {
+    return '<span class="text-muted">—</span>';
+  }
+  return t.playlistNames
+    .map(
+      (n) =>
+        `<span class="tag-badge font-mono" style="font-size:0.75rem">${escapeHtml(n)}</span>`,
+    )
+    .join(" ");
+}
+
+/**
+ * Render local file code badges for a track.
+ * @param {object} t — adapted track object with files string (space-joined)
+ * @returns {string} HTML
+ */
+function renderLocalFiles(t) {
+  if (!t.files) return '<span class="text-muted">—</span>';
+  return t.files
+    .split(" ")
+    .map((f) => `<code class="font-mono">${escapeHtml(f)}</code>`)
+    .join(" ");
 }
 
 /* ------------------------------------------------------------------ */
@@ -83,6 +165,7 @@ function adaptTrack(t) {
     files: t.localFiles && t.localFiles.length > 0 ? t.localFiles.join(" ") : null,
     duration: t.durationMs ? Math.round(t.durationMs / 1000) : 0,
     isrc: t.isrc,
+    importedAt: t.importedAt || null,
     playlistNames: t.playlistNames || [],
   };
 }
@@ -111,12 +194,16 @@ function renderToolbar(search, state) {
       </div>`;
   }
 
-  return `
-    <div class="toolbar">
+  return `<div class="filter-panel" id="tracks-filter-panel">
+    <div class="filter-panel-header">
       ${renderSearchInput("tracks", search)}
       ${renderFilterGroup("service", SERVICE_OPTIONS, state.service)}
       ${playlistBadge}
-    </div>`;
+      <button class="filter-panel-toggle" id="tracks-filter-toggle" title="Toggle filters">
+        <i class="fas fa-chevron-up chevron"></i>
+      </button>
+    </div>
+  </div>`;
 }
 
 /**
@@ -127,67 +214,32 @@ function renderToolbar(search, state) {
 function renderBody(data, state) {
   const { tracks } = data;
   const totalCount = data._total ?? tracks.length;
-  const totalPages = Math.ceil(totalCount / PAGE_SIZE) || 1;
+  const totalPages = Math.ceil(totalCount / state.pageSize) || 1;
   const pageId = "tracks";
   const isScoped = !!state.playlistId;
 
-  // When scoped, filter out the Playlists column header
-  const headers = isScoped
-    ? TABLE_HEADERS.filter((h) => h.label !== "Playlists")
-    : TABLE_HEADERS;
+  // Load column config, hide Playlists when scoped to a playlist
+  const config = loadColumnConfig("tracks", TRACKS_COLUMNS);
+  if (isScoped) {
+    const plEntry = config.find((c) => c.id === "playlists");
+    if (plEntry) plEntry.visible = false;
+  }
+
+  const headers = renderColumnHeaders(config, TRACKS_COLUMNS, state, sortableTh);
 
   const rowsHtml = tracks
-    .map((t) => {
-      const playlistsHtml =
-        t.playlistNames && t.playlistNames.length > 0
-          ? t.playlistNames
-              .map(
-                (n) =>
-                  `<span class="tag-badge font-mono" style="font-size:0.75rem">${escapeHtml(n)}</span>`,
-              )
-              .join(" ")
-          : '<span class="text-muted">—</span>';
-
-      return `<tr>
-          ${td(escapeHtml(t.title), { style: "width:22%" })}
-          ${td(escapeHtml(t.artist), { style: "width:16%" })}
-          ${td(
-            `<span class="service-badge ${t.service}">${t.service.charAt(0).toUpperCase() + t.service.slice(1)}</span>`,
-            { style: "width:8%" },
-          )}
-          ${td(t.album ? escapeHtml(t.album) : '<span class="text-muted">—</span>', {
-            style: "width:14%",
-          })}
-          ${td(playlistsHtml, {
-            style: `width:18%${isScoped ? ";display:none" : ""}`,
-          })}
-          ${td(
-            t.files
-              ? t.files
-                  .split(" ")
-                  .map((f) => `<code class="font-mono">${escapeHtml(f)}</code>`)
-                  .join(" ")
-              : '<span class="text-muted">—</span>',
-            { style: "width:10%" },
-          )}
-          ${td(
-            `<span class="font-mono">${escapeHtml(formatDuration(t.duration))}</span>`,
-            { style: "width:8%;text-align:right" },
-          )}
-          ${td(
-            t.isrc
-              ? `<span class="font-mono text-sm">${escapeHtml(t.isrc)}</span>`
-              : '<span class="text-muted">—</span>',
-            { style: "width:4%" },
-          )}
-        </tr>`;
-    })
+    .map(
+      (t) =>
+        `<tr>${renderColumnCells(config, TRACKS_COLUMNS, TRACKS_CELL_RENDERERS, t)}</tr>`,
+    )
     .join("");
 
   const stats = `<div class="stats-row">
     <div class="stats-group">
       <button class="btn btn-sm btn-icon" id="tracks-refresh" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
       <strong>${totalCount.toLocaleString()}</strong> tracks
+      ${renderPageSizeSelector(state.pageSize)}
+      ${renderColumnConfigTrigger()}
       ${
         isScoped
           ? `<span style="margin-left:8px;color:var(--text-subtle)">in playlist <strong>${escapeHtml(state.playlistName)}</strong></span>`
@@ -196,7 +248,7 @@ function renderBody(data, state) {
     </div>
   </div>`;
 
-  const table = renderTable(headers, rowsHtml);
+  const table = `<div class="table-wrap"><table class="data-table"><thead><tr>${headers}</tr></thead><tbody>${rowsHtml}</tbody></table></div>`;
 
   const pagination = `<div class="pagination" id="${pageId}-pagination">
     <button class="pagination-btn" id="${pageId}-prev" disabled><i class="fa-solid fa-chevron-left"></i></button>
@@ -210,32 +262,32 @@ function renderBody(data, state) {
 /**
  * Render an empty-state body (no tracks at all, not just filtered to zero).
  */
-function renderEmptyBody(search) {
-  const headers = [
-    { label: "Title", style: "width:22%" },
-    { label: "Artist", style: "width:16%" },
-    { label: "Service", style: "width:8%" },
-    { label: "Album", style: "width:14%" },
-    { label: "Playlists", style: "width:18%" },
-    { label: "Local Files", style: "width:10%" },
-    { label: "Duration", style: "width:8%;text-align:right" },
-    { label: "ISRC", style: "width:4%" },
-  ];
-
-  const theadHtml = headers
-    .map((h) => `<th${h.style ? ` style="${h.style}"` : ""}>${escapeHtml(h.label)}</th>`)
-    .join("");
+function renderEmptyBody(state) {
+  const config = loadColumnConfig("tracks", TRACKS_COLUMNS);
+  const isScoped = !!state.playlistId;
+  if (isScoped) {
+    const plEntry = config.find((c) => c.id === "playlists");
+    if (plEntry) plEntry.visible = false;
+  }
+  const headers = renderColumnHeaders(
+    config,
+    TRACKS_COLUMNS,
+    { sort: "", order: "" },
+    sortableTh,
+  );
+  const visibleCount = config.filter((c) => c.visible).length;
 
   return `
     <div class="stats-row">
       <div class="stats-group">
         <button class="btn btn-sm btn-icon" id="tracks-refresh" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
         <strong>0</strong> tracks
+        ${renderColumnConfigTrigger()}
       </div>
     </div>
     <div class="table-wrap"><table class="data-table">
-      <thead><tr>${theadHtml}</tr></thead>
-      <tbody><tr><td colspan="8"><div class="text-center text-muted" style="padding:32px">No tracks found. Import tracks from your connected services to get started.</div></td></tr></tbody>
+      <thead><tr>${headers}</tr></thead>
+      <tbody><tr><td colspan="${visibleCount}"><div class="text-center text-muted" style="padding:32px">No tracks found. Import tracks from your connected services to get started.</div></td></tr></tbody>
     </table></div>`;
 }
 
@@ -249,8 +301,10 @@ function renderEmptyBody(search) {
  */
 function buildParams(state) {
   const params = new URLSearchParams();
-  params.set("limit", String(PAGE_SIZE));
-  params.set("offset", String(state.page * PAGE_SIZE));
+  params.set("limit", String(state.pageSize));
+  params.set("offset", String(state.page * state.pageSize));
+  if (state.sort) params.set("sort", state.sort);
+  if (state.order) params.set("order", state.order);
   if (state.service !== "all") params.set("service", state.service);
   if (state.search) params.set("search", state.search);
   if (state.playlistId) params.set("playlistId", String(state.playlistId));
@@ -270,6 +324,14 @@ function setContent(html) {
  * Only replaces #tracks-content — the toolbar stays untouched.
  */
 async function fetchAndRender(container, signal, state) {
+  // Sync hash before fetching so URL reflects current state
+  updateHash("tracks", state, {
+    sort: "",
+    order: "asc",
+    search: "",
+    service: "all",
+    page: 0,
+  });
   setContent(renderLoading("Loading tracks…"));
 
   try {
@@ -286,7 +348,7 @@ async function fetchAndRender(container, signal, state) {
 
     // Empty state (no tracks in DB at all)
     if (data.tracks.length === 0 && data._total === 0) {
-      setContent(renderEmptyBody(state.search));
+      setContent(renderEmptyBody(state));
       wireContentEvents(container, signal, state);
       return;
     }
@@ -341,6 +403,29 @@ function wireContentEvents(container, signal, state) {
       fetchAndRender(container, signal, state);
     };
   }
+
+  // Sortable column headers (three-state cycle)
+  const tableEl = container.querySelector(".data-table");
+  if (tableEl) {
+    wireSortableHeaders(tableEl, state, () => {
+      fetchAndRender(container, signal, state);
+    });
+  }
+
+  // Page size selector (global via localStorage)
+  wirePageSizeSelector(container, state, () => {
+    fetchAndRender(container, signal, state);
+  });
+
+  // Column resize, reorder, config modal
+  const colConfig = loadColumnConfig("tracks", TRACKS_COLUMNS);
+  wireColumnResize(container, "tracks", TRACKS_COLUMNS, colConfig);
+  wireColumnDragReorder(container, "tracks", TRACKS_COLUMNS, colConfig, () => {
+    fetchAndRender(container, signal, state);
+  });
+  wireConfigTrigger(container, "tracks", TRACKS_COLUMNS, colConfig, () => {
+    fetchAndRender(container, signal, state);
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -364,8 +449,11 @@ export async function init(container, signal, hashParams) {
   // Parse hash params for initial state
   const state = {
     page: parseInt(hashParams?.page) || 0,
-    service: hashParams?.service || "all",
+    pageSize: getPageSize(),
     search: hashParams?.search || "",
+    sort: hashParams?.sort || "",
+    order: hashParams?.order || "asc",
+    service: hashParams?.service || "all",
     playlistId: hashParams?.playlistId ? parseInt(hashParams.playlistId) : null,
     playlistName: hashParams?.playlistName || null,
   };
@@ -390,9 +478,9 @@ export async function init(container, signal, hashParams) {
   `;
 
   // Wire search + filter once (toolbar is stable)
-  const toolbar = container.querySelector(".toolbar");
-  if (toolbar) {
-    wireSearchFilter(toolbar, state, () => fetchAndRender(container, signal, state));
+  const filterPanel = container.querySelector("#tracks-filter-panel");
+  if (filterPanel) {
+    wireSearchFilter(filterPanel, state, () => fetchAndRender(container, signal, state));
   }
 
   // Wire playlist context clear button
@@ -404,6 +492,22 @@ export async function init(container, signal, hashParams) {
       window.location.hash = "#tracks";
       fetchAndRender(container, signal, state);
     };
+  }
+
+  // Wire filter panel toggle
+  const toggleBtn = container.querySelector("#tracks-filter-toggle");
+  if (toggleBtn && filterPanel) {
+    // Restore saved state from localStorage
+    const saved = localStorage.getItem("filterPanelCollapsed_tracks");
+    if (saved === "true") filterPanel.classList.add("collapsed");
+
+    toggleBtn.addEventListener("click", () => {
+      filterPanel.classList.toggle("collapsed");
+      localStorage.setItem(
+        "filterPanelCollapsed_tracks",
+        filterPanel.classList.contains("collapsed"),
+      );
+    });
   }
 
   // Fetch initial data

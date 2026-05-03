@@ -1,111 +1,65 @@
 /**
  * folders.js — Folder management page.
  *
- * Manages watched folders for music file scanning with CRUD modals,
- * client-side search/filter, and pagination.
+ * Stable toolbar + server-side pagination/sort + modal-based CRUD.
+ * Follows the canonical CRUD blueprint pattern.
  */
 
 import { fetchJSON } from "../shared/api.js";
 import {
+  escapeHtml,
   renderLoading,
-  renderEmpty,
   renderErrorBlock,
-  Pagination,
+  showToast,
 } from "../shared/components.js";
 import { renderSearchInput, wireSearchFilter } from "../shared/search-filter.js";
-
-/* ------------------------------------------------------------------ */
-/*  Constants                                                          */
-/* ------------------------------------------------------------------ */
-
-const PAGE_SIZE = 10;
+import {
+  getPageSize,
+  renderPageSizeSelector,
+  sortableTh,
+  wireSortableHeaders,
+  updateHash,
+  parseHash,
+} from "../shared/crud.js";
+import {
+  loadColumnConfig,
+  renderColumnConfigTrigger,
+  renderColumnHeaders,
+  renderColumnCells,
+  wireColumnResize,
+  wireColumnDragReorder,
+  wireConfigTrigger,
+} from "../shared/column-config.js";
 
 /* ------------------------------------------------------------------ */
 /*  State                                                              */
 /* ------------------------------------------------------------------ */
 
-let state = { folders: [], editingFolder: null, search: "", page: 0 };
+/** @type {{ page: number, pageSize: number, search: string, sort: string, order: string }} */
+let state = {
+  page: 0,
+  pageSize: 25,
+  search: "",
+  sort: "",
+  order: "asc",
+};
+
 let _delegationWired = false;
+let _container = null;
+let _signal = null;
 
 /* ------------------------------------------------------------------ */
-/*  Adapter                                                            */
+/*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-function adaptFolder(f) {
-  return {
-    id: f.id,
-    path: f.path,
-    files: f.fileCount ?? f.file_count ?? 0,
-    watch: f.watchEnabled ?? f.watch_enabled ?? false,
-    recursive: f.scanRecursive ?? f.scan_recursive ?? false,
-    fixedExtensions: f.fixedExtensions ?? f.fixed_extensions ?? false,
-    fileExtensions: f.fileExtensions ?? f.file_extensions ?? "",
-    maxDepth: f.maxDepth ?? f.max_depth ?? 1,
-    last_scanned: f.lastScanned ?? f.last_scanned ?? null,
-    status: "",
-  };
-}
+const HASH_DEFAULTS = { sort: "", order: "asc", search: "", page: 0 };
 
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                            */
-/* ------------------------------------------------------------------ */
-
-function escapeHtml(str) {
-  if (typeof str !== "string") return str;
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
-function showToast(message, type) {
-  const existing = document.querySelector(".toast");
-  if (existing) existing.remove();
-
-  const bg =
-    type === "error"
-      ? "var(--red)"
-      : type === "success"
-        ? "var(--green)"
-        : "var(--accent)";
-
-  const toast = document.createElement("div");
-  toast.className = "toast";
-  Object.assign(toast.style, {
-    position: "fixed",
-    bottom: "20px",
-    right: "20px",
-    background: bg,
-    color: "#fff",
-    padding: "10px 18px",
-    borderRadius: "8px",
-    fontSize: "0.85rem",
-    zIndex: "999",
-    boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
-    transition: "opacity 0.3s",
-    cursor: "pointer",
-  });
-  toast.textContent = message;
-  toast.onclick = () => toast.remove();
-  document.body.appendChild(toast);
-  setTimeout(() => {
-    toast.style.opacity = "0";
-    setTimeout(() => toast.remove(), 300);
-  }, 4000);
-}
-
-function showError(msg) {
-  showToast(msg, "error");
-}
-function showSuccess(msg) {
-  showToast(msg, "success");
-}
-
-/* ------------------------------------------------------------------ */
-/*  Modal helpers                                                      */
-/* ------------------------------------------------------------------ */
+const HASH_SCHEMA = {
+  sort: { type: "string", default: "" },
+  order: { type: "string", default: "asc" },
+  search: { type: "string", default: "" },
+  page: { type: "number", default: 0 },
+};
 
 const ALL_EXTENSIONS = [
   "mp3",
@@ -122,6 +76,121 @@ const ALL_EXTENSIONS = [
   "stem.m4a",
   "stem.mp3",
 ];
+
+/* ------------------------------------------------------------------ */
+/*  Column model                                                       */
+/* ------------------------------------------------------------------ */
+
+const FOLDERS_COLUMNS = [
+  { id: "path", label: "Path", sortable: true, sortKey: "path", defaultWidth: 25 },
+  { id: "files", label: "Files", sortable: true, sortKey: "file_count", defaultWidth: 8 },
+  {
+    id: "watch",
+    label: "Watch",
+    sortable: true,
+    sortKey: "watch_enabled",
+    defaultWidth: 6,
+  },
+  {
+    id: "recursive",
+    label: "Recursive",
+    sortable: true,
+    sortKey: "scan_recursive",
+    defaultWidth: 6,
+  },
+  { id: "extensions", label: "Extensions", sortable: false, defaultWidth: 12 },
+  {
+    id: "maxDepth",
+    label: "Max Depth",
+    sortable: true,
+    sortKey: "max_depth",
+    defaultWidth: 6,
+  },
+  {
+    id: "scanned",
+    label: "Scanned",
+    sortable: true,
+    sortKey: "last_scanned",
+    defaultWidth: 12,
+  },
+  { id: "actions", label: "Actions", sortable: false, defaultWidth: 25 },
+];
+
+/* ------------------------------------------------------------------ */
+/*  Cell renderers                                                     */
+/* ------------------------------------------------------------------ */
+
+const FOLDERS_CELL_RENDERERS = {
+  path: (f) =>
+    `<code class="font-mono" style="font-size:0.8rem">${escapeHtml(f.path)}</code>`,
+  files: (f) => `<strong style="font-size:0.9rem">${f.files}</strong>`,
+  watch: (f) =>
+    f.watch
+      ? '<span class="status-badge connected"><i class="fas fa-eye"></i></span>'
+      : '<span class="status-badge disconnected"><i class="fas fa-eye-slash"></i></span>',
+  recursive: (f) =>
+    f.recursive
+      ? '<span class="status-badge connected"><i class="fas fa-folder-tree"></i></span>'
+      : '<span class="status-badge disconnected"><i class="fas fa-folder"></i></span>',
+  extensions: (f) => {
+    if (f.fixedExtensions && f.fileExtensions) {
+      const exts = f.fileExtensions
+        .split(",")
+        .filter(Boolean)
+        .map((ext) => {
+          const extClean = ext.trim();
+          const badgeClass = extClean.includes("stem") ? "badge-stem" : "badge-standard";
+          return `<span class="badge ${badgeClass}" style="font-size:0.7rem;padding:1px 5px;margin:1px">${escapeHtml(extClean)}</span>`;
+        });
+      return exts.length
+        ? exts.join(" ")
+        : '<span class="text-muted" style="font-size:0.75rem">All</span>';
+    }
+    return '<span class="text-muted" style="font-size:0.75rem">All</span>';
+  },
+  maxDepth: (f) =>
+    f.maxDepth === 0
+      ? '<span class="text-muted" style="font-size:0.75rem">No limit</span>'
+      : `<span style="font-size:0.8rem">${f.maxDepth}</span>`,
+  scanned: (f) =>
+    f.lastScanned
+      ? `<span style="color:var(--text-muted);font-size:0.75rem">${new Date(f.lastScanned * 1000).toLocaleString()}</span>`
+      : '<span class="status-badge pending">Never</span>',
+  actions: (f) => `
+    <div style="display:flex;gap:4px;flex-wrap:nowrap">
+      <button class="btn btn-sm btn-primary" data-folder-action="edit" data-id="${f.id}" title="Edit folder"><i class="fas fa-pen"></i></button>
+      <button class="btn btn-sm" data-folder-action="rescan" data-id="${f.id}" title="Rescan folder"><i class="fas fa-sync"></i></button>
+      <button class="btn btn-sm ${f.watch ? "btn-yellow" : ""}" data-folder-action="toggle-watch" data-id="${f.id}" title="${f.watch ? "Pause watching" : "Start watching"}">
+        <i class="fas ${f.watch ? "fa-pause" : "fa-play"}"></i>
+      </button>
+      <button class="btn btn-sm btn-red" data-folder-action="remove" data-id="${f.id}" title="Remove folder">
+        <i class="fas fa-trash"></i>
+      </button>
+    </div>
+  `,
+};
+
+/* ------------------------------------------------------------------ */
+/*  Adapter                                                            */
+/* ------------------------------------------------------------------ */
+
+function adaptFolder(f) {
+  return {
+    id: f.id,
+    path: f.path,
+    files: f.fileCount ?? f.file_count ?? 0,
+    watch: f.watchEnabled ?? f.watch_enabled ?? false,
+    recursive: f.scanRecursive ?? f.scan_recursive ?? false,
+    fixedExtensions: f.fixedExtensions ?? f.fixed_extensions ?? false,
+    fileExtensions: f.fileExtensions ?? f.file_extensions ?? "",
+    maxDepth: f.maxDepth ?? f.max_depth ?? 1,
+    lastScanned: f.lastScanned ?? f.last_scanned ?? null,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Modal helpers                                                      */
+/* ------------------------------------------------------------------ */
 
 function renderExtensionCheckboxes(selected) {
   const sel = new Set(
@@ -211,7 +280,6 @@ function renderFolderModal(folder) {
 }
 
 function openAddModal() {
-  // Remove any leftover modal from a previous session
   closeModal();
   const overlay = document.createElement("div");
   overlay.innerHTML = renderFolderModal(null);
@@ -220,7 +288,6 @@ function openAddModal() {
 }
 
 function openEditModal(folder) {
-  // Remove any leftover modal from a previous session
   closeModal();
   const overlay = document.createElement("div");
   overlay.innerHTML = renderFolderModal(folder);
@@ -229,7 +296,6 @@ function openEditModal(folder) {
 }
 
 function closeModal() {
-  // Remove ALL leftover modals to prevent duplicate ID accumulation
   document.querySelectorAll("#folder-modal").forEach((el) => el.remove());
 }
 
@@ -299,7 +365,7 @@ function wireModalEvents(folderId) {
       const data = collectFormData();
 
       if (!data.path) {
-        showError("Folder path is required");
+        showToast("Folder path is required", "error");
         return;
       }
 
@@ -314,18 +380,18 @@ function wireModalEvents(folderId) {
             method: "PUT",
             body: JSON.stringify(data),
           });
-          showSuccess("Folder updated successfully");
+          showToast("Folder updated successfully", "success");
         } else {
           await fetchJSON("/api/folders", {
             method: "POST",
             body: JSON.stringify(data),
           });
-          showSuccess("Folder added successfully");
+          showToast("Folder added successfully", "success");
         }
         doClose();
-        loadFolders();
+        fetchAndRender();
       } catch (err) {
-        showError(`Failed to save folder: ${err.message}`);
+        showToast(`Failed to save folder: ${err.message}`, "error");
         saveBtn.disabled = false;
         saveBtn.innerHTML = originalHtml;
       }
@@ -334,46 +400,59 @@ function wireModalEvents(folderId) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  API helpers                                                        */
+/*  Action helpers                                                     */
 /* ------------------------------------------------------------------ */
 
 async function deleteFolder(id, path) {
   if (!confirm(`Remove folder "${path}"?`)) return;
   try {
     await fetchJSON(`/api/folders/${id}`, { method: "DELETE" });
-    showSuccess("Folder removed");
-    loadFolders();
+    showToast("Folder removed", "success");
+    fetchAndRender();
   } catch (err) {
-    showError(`Failed to delete: ${err.message}`);
+    showToast(`Failed to delete: ${err.message}`, "error");
   }
 }
 
-async function scanFolder(id) {
-  const btn = document.querySelector(`[data-id="${id}"][data-action="rescan"]`);
-  if (btn) {
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+async function scanFolder(id, btnEl) {
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
   }
   try {
     await fetchJSON(`/api/folders/${id}/scan`, { method: "POST" });
-    showSuccess("Scan started");
+    showToast("Scan started", "success");
   } catch (err) {
-    showError(`Scan failed: ${err.message}`);
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = '<i class="fas fa-sync"></i> Scan';
+    showToast(`Scan failed: ${err.message}`, "error");
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = '<i class="fas fa-sync"></i>';
     }
   }
 }
 
-async function toggleWatch(id, currentWatch) {
+async function toggleWatch(id) {
   try {
     await fetchJSON(`/api/folders/${id}/watch`, { method: "POST" });
-    showSuccess(currentWatch ? "Watch disabled" : "Watch enabled");
-    loadFolders();
+    showToast("Watch toggled", "success");
+    fetchAndRender();
   } catch (err) {
-    showError(`Failed to toggle watch: ${err.message}`);
+    showToast(`Failed to toggle watch: ${err.message}`, "error");
   }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Build params                                                       */
+/* ------------------------------------------------------------------ */
+
+function buildParams(s) {
+  const params = new URLSearchParams();
+  params.set("limit", String(s.pageSize));
+  params.set("offset", String(s.page * s.pageSize));
+  if (s.sort) params.set("sort", s.sort);
+  if (s.order) params.set("order", s.order);
+  if (s.search) params.set("search", s.search);
+  return params;
 }
 
 /* ------------------------------------------------------------------ */
@@ -381,238 +460,393 @@ async function toggleWatch(id, currentWatch) {
 /* ------------------------------------------------------------------ */
 
 function renderFolderRow(f) {
+  // Watch status
   const watchHtml = f.watch
-    ? '<span class="status-badge connected"><i class="fas fa-eye"></i> Watching</span>'
-    : '<span class="status-badge disconnected"><i class="fas fa-eye-slash"></i> Paused</span>';
+    ? '<span class="status-badge connected"><i class="fas fa-eye"></i></span>'
+    : '<span class="status-badge disconnected"><i class="fas fa-eye-slash"></i></span>';
 
+  // Recursive indicator
   const recursiveHtml = f.recursive
-    ? '<span class="status-badge connected"><i class="fas fa-folder-tree"></i> Yes</span>'
-    : '<span class="status-badge disconnected"><i class="fas fa-folder"></i> No</span>';
+    ? '<span class="status-badge connected"><i class="fas fa-folder-tree"></i></span>'
+    : '<span class="status-badge disconnected"><i class="fas fa-folder"></i></span>';
 
-  const scannedHtml = f.last_scanned
-    ? `<span style="color:var(--text-muted);font-size:0.8rem;">${new Date(f.last_scanned * 1000).toLocaleString()}</span>`
+  // Extensions display
+  let extHtml = "";
+  if (f.fixedExtensions && f.fileExtensions) {
+    const exts = f.fileExtensions
+      .split(",")
+      .filter(Boolean)
+      .map((ext) => {
+        const extClean = ext.trim();
+        const badgeClass = extClean.includes("stem") ? "badge-stem" : "badge-standard";
+        return `<span class="badge ${badgeClass}" style="font-size:0.7rem;padding:1px 5px;margin:1px">${escapeHtml(extClean)}</span>`;
+      });
+    extHtml = exts.length
+      ? exts.join(" ")
+      : `<span class="text-muted" style="font-size:0.75rem">All</span>`;
+  } else {
+    extHtml = `<span class="text-muted" style="font-size:0.75rem">All</span>`;
+  }
+
+  // Max depth
+  const depthHtml =
+    f.maxDepth === 0
+      ? `<span class="text-muted" style="font-size:0.75rem">No limit</span>`
+      : `<span style="font-size:0.8rem">${f.maxDepth}</span>`;
+
+  // Last scanned
+  const scannedHtml = f.lastScanned
+    ? `<span style="color:var(--text-muted);font-size:0.75rem">${new Date(f.lastScanned * 1000).toLocaleString()}</span>`
     : '<span class="status-badge pending">Never</span>';
 
+  // Actions
   const actionsHtml = `
     <div style="display:flex;gap:4px;flex-wrap:nowrap">
-      <button class="btn btn-sm btn-primary" data-action="edit" data-id="${f.id}" title="Edit folder"><i class="fas fa-pen"></i></button>
-      <button class="btn btn-sm" data-action="rescan" data-id="${f.id}" title="Rescan folder"><i class="fas fa-sync"></i></button>
-      <button class="btn btn-sm ${f.watch ? "btn-yellow" : ""}" data-action="toggle-watch" data-id="${f.id}" title="${f.watch ? "Pause watching" : "Start watching"}">
+      <button class="btn btn-sm btn-primary" data-folder-action="edit" data-id="${f.id}" title="Edit folder"><i class="fas fa-pen"></i></button>
+      <button class="btn btn-sm" data-folder-action="rescan" data-id="${f.id}" title="Rescan folder"><i class="fas fa-sync"></i></button>
+      <button class="btn btn-sm ${f.watch ? "btn-yellow" : ""}" data-folder-action="toggle-watch" data-id="${f.id}" title="${f.watch ? "Pause watching" : "Start watching"}">
         <i class="fas ${f.watch ? "fa-pause" : "fa-play"}"></i>
       </button>
-      <button class="btn btn-sm btn-red" data-action="remove" data-id="${f.id}" title="Remove folder"
-              onclick="return confirm('Remove this folder?')">
+      <button class="btn btn-sm btn-red" data-folder-action="remove" data-id="${f.id}" title="Remove folder">
         <i class="fas fa-trash"></i>
       </button>
     </div>
   `;
 
   return `<tr>
-    <td style="width:22%"><code class="font-mono" style="font-size:0.8rem">${escapeHtml(f.path)}</code></td>
-    <td style="width:8%;text-align:center">${f.files}</td>
-    <td style="width:20%">${watchHtml}</td>
-    <td style="width:9%">${recursiveHtml}</td>
-    <td style="width:18%">${scannedHtml}</td>
-    <td style="width:23%">${actionsHtml}</td>
+    ${td(`<code class="font-mono" style="font-size:0.8rem">${escapeHtml(f.path)}</code>`, { style: "width:25%" })}
+    ${td(`<strong>${f.files}</strong>`, { style: "width:8%;text-align:center" })}
+    ${td(watchHtml, { style: "width:6%;text-align:center" })}
+    ${td(recursiveHtml, { style: "width:6%;text-align:center" })}
+    ${td(extHtml, { style: "width:12%" })}
+    ${td(depthHtml, { style: "width:6%;text-align:center" })}
+    ${td(scannedHtml, { style: "width:12%" })}
+    ${td(actionsHtml, { style: "width:25%" })}
   </tr>`;
 }
 
-/**
- * Render the page with client-side search and pagination.
- * @param {HTMLElement} container
- * @param {Array} folders - all folders (unfiltered)
- * @param {number} [page] - current page (defaults to state.page)
- */
-function renderPage(container, folders, page) {
-  // Client-side search filter
-  let filtered = folders;
-  if (state.search) {
-    const q = state.search.toLowerCase();
-    filtered = folders.filter((f) => f.path.toLowerCase().includes(q));
-  }
+function renderBody(data, totalCount, colConfig) {
+  const { page, pageSize, sort, order, search } = state;
+  const totalPages = Math.ceil(totalCount / pageSize) || 1;
 
-  const currentPage = page ?? state.page ?? 0;
-  const offset = currentPage * PAGE_SIZE;
-  const rows = filtered.slice(offset, offset + PAGE_SIZE);
+  const visibleCount = colConfig.filter((c) => c.visible).length;
 
-  container.innerHTML = `
-    <div class="toolbar">
-      ${renderSearchInput("folders", state.search)}
-      <button class="btn btn-primary" id="add-folder-btn" data-action="add-folder">
-        <i class="fa-solid fa-plus"></i> Add Folder
-      </button>
-    </div>
+  const rowsHtml = data.length
+    ? data
+        .map(
+          (f) =>
+            `<tr>${renderColumnCells(colConfig, FOLDERS_COLUMNS, FOLDERS_CELL_RENDERERS, f)}</tr>`,
+        )
+        .join("")
+    : `<tr><td colspan="${visibleCount}"><div class="text-center text-muted" style="padding:24px">${
+        search
+          ? "No folders match your filters"
+          : "No folders configured yet. Click <strong>Add Folder</strong> to get started."
+      }</div></td></tr>`;
 
+  const prevDisabled = page <= 0;
+  const nextDisabled = page >= totalPages - 1;
+
+  return `
     <div class="stats-row">
       <div class="stats-group">
         <button class="btn btn-sm btn-icon" id="folders-refresh" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
-        <strong>${filtered.length}</strong> folders
+        <strong>${totalCount}</strong> folders
+        ${renderColumnConfigTrigger()}
+      </div>
+      <div class="stats-group">
+        ${renderPageSizeSelector(pageSize)}
       </div>
     </div>
 
     <div class="table-wrap">
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th style="width:22%">Path</th>
-            <th style="width:8%">Files</th>
-            <th style="width:20%">Watch</th>
-            <th style="width:9%">Recursive</th>
-            <th style="width:18%">Last Scanned</th>
-            <th style="width:23%">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${
-            rows.length
-              ? rows.map(renderFolderRow).join("")
-              : `<tr><td colspan="6"><div class="text-center text-muted" style="padding:24px">${state.search ? "No folders match your search" : "No folders configured yet"}</div></td></tr>`
-          }
-        </tbody>
+      <table class="data-table sortable-table" id="folders-table">
+        <thead><tr>${renderColumnHeaders(colConfig, FOLDERS_COLUMNS, { sort, order }, sortableTh)}</tr></thead>
+        <tbody>${rowsHtml}</tbody>
       </table>
     </div>
 
     <div class="pagination">
-      <button class="pagination-btn" id="p-prev"><i class="fa-solid fa-chevron-left"></i></button>
-      <span class="pagination-info" id="p-info">Page 1 of 1</span>
-      <button class="pagination-btn" id="p-next"><i class="fa-solid fa-chevron-right"></i></button>
+      <button class="pagination-btn" data-pagination="prev" data-total-count="${totalCount}"${prevDisabled ? " disabled" : ""}>
+        <i class="fa-solid fa-chevron-left"></i> Prev
+      </button>
+      <span class="pagination-info">Page ${page + 1} of ${totalPages}</span>
+      <button class="pagination-btn" data-pagination="next" data-total-count="${totalCount}"${nextDisabled ? " disabled" : ""}>
+        Next <i class="fa-solid fa-chevron-right"></i>
+      </button>
     </div>
   `;
-
-  // Wire unified search/filter (client-side filtering)
-  const toolbar = container.querySelector(".toolbar");
-  if (toolbar) {
-    wireSearchFilter(toolbar, state, () => loadFolders());
-  }
-
-  // Wire pagination
-  const pag = new Pagination({
-    itemsPerPage: PAGE_SIZE,
-    totalItems: filtered.length,
-    initialPage: currentPage,
-    bindings: { prev: "p-prev", next: "p-next", info: "p-info" },
-    onPageChange: (newPage) => {
-      state.page = newPage;
-      renderPage(container, folders, newPage);
-    },
-  });
-  pag.update(filtered.length, rows.length);
-
-  // Wire events
-  wireEvents(container);
 }
 
 /* ------------------------------------------------------------------ */
-/*  Event wiring                                                       */
+/*  Fetch + Render loop                                                */
 /* ------------------------------------------------------------------ */
 
-function wireEvents(container) {
-  // Add Folder button (direct handler – re-wired each render)
-  const addBtn = container.querySelector("#add-folder-btn");
-  if (addBtn) {
-    addBtn.addEventListener("click", openAddModal);
+async function fetchAndRender() {
+  if (!_container) return;
+
+  // Show loading state in content area (toolbar stays stable)
+  const contentEl = _container.querySelector("#folders-content");
+  if (contentEl) {
+    contentEl.innerHTML = renderLoading("Loading folders…");
   }
-
-  // Refresh button (direct handler – re-wired each render)
-  const refreshBtn = container.querySelector("#folders-refresh");
-  if (refreshBtn) {
-    refreshBtn.addEventListener("click", loadFolders);
-  }
-
-  // Row action buttons (event delegation – wired once)
-  if (!_delegationWired) {
-    _delegationWired = true;
-    container.addEventListener("click", (e) => {
-      const btn = e.target.closest("[data-action]");
-      if (!btn) return;
-      e.preventDefault();
-
-      const action = btn.dataset.action;
-      const id = parseInt(btn.dataset.id, 10);
-
-      if (action === "add-folder") {
-        openAddModal();
-        return;
-      }
-
-      const folder = state.folders.find((f) => f.id === id);
-      if (!folder) return;
-
-      switch (action) {
-        case "edit":
-          openEditModal(folder);
-          break;
-        case "remove":
-          deleteFolder(id, folder.path);
-          break;
-        case "rescan":
-          scanFolder(id);
-          break;
-        case "toggle-watch":
-          toggleWatch(id, folder.watch);
-          break;
-      }
-    });
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/*  Data loading                                                       */
-/* ------------------------------------------------------------------ */
-
-async function loadFolders() {
-  const container = document.getElementById("main-content");
-  if (!container) return;
 
   try {
-    const resp = await fetchJSON("/api/folders");
-    const allFolders = resp.data.map(adaptFolder);
-    state.folders = allFolders;
-    // Reset to page 0 on re-fetch (e.g. after search/filter change via wireSearchFilter)
-    state.page = 0;
-    renderPage(container, state.folders, 0);
+    const colConfig = loadColumnConfig("folders", FOLDERS_COLUMNS);
+    const params = buildParams(state);
+    const [foldersResp, countResp] = await Promise.all([
+      fetchJSON(`/api/folders?${params.toString()}`, { signal: _signal }),
+      fetchJSON(`/api/folders/count?search=${encodeURIComponent(state.search)}`, {
+        signal: _signal,
+      }),
+    ]);
+
+    if (_signal?.aborted) return;
+
+    const folders = (foldersResp.data || []).map(adaptFolder);
+    const totalCount = countResp.data ?? 0;
+
+    // Update content
+    if (contentEl) {
+      contentEl.innerHTML = renderBody(folders, totalCount, colConfig);
+
+      // Wire sortable headers (inside the re-rendered content)
+      const tableEl = contentEl.querySelector("#folders-table");
+      if (tableEl) {
+        wireSortableHeaders(tableEl, state, () => {
+          updateHash("folders", state, HASH_DEFAULTS);
+          fetchAndRender();
+        });
+      }
+
+      // Wire column resize/drag/config
+      wireColumnResize(contentEl, "folders", FOLDERS_COLUMNS, colConfig);
+      wireColumnDragReorder(contentEl, "folders", FOLDERS_COLUMNS, colConfig, () => {
+        fetchAndRender();
+      });
+      wireConfigTrigger(contentEl, "folders", FOLDERS_COLUMNS, colConfig, () => {
+        fetchAndRender();
+      });
+
+      // Stash folder data on action buttons for delegation
+      stashFolderData(contentEl, folders);
+
+      // Wire page size selector
+      wirePageSizeSelectorLocal(contentEl);
+    }
   } catch (err) {
-    container.innerHTML = renderErrorBlock({
-      title: "Failed to load folders",
-      detail: err.message,
-      retryFn: "window.location.hash='#folders'",
-    });
+    if (err.name === "AbortError") return;
+    if (contentEl) {
+      contentEl.innerHTML = renderErrorBlock({
+        title: "Failed to load folders",
+        detail: err.message,
+        retryFn: "void(0)",
+      });
+    }
+    showToast(`Failed to load folders: ${err.message}`, "error");
+  }
+}
+
+function wirePageSizeSelectorLocal(contentEl) {
+  const sel = contentEl.querySelector("[data-page-size]");
+  if (!sel) return;
+  sel.addEventListener("change", () => {
+    const val = parseInt(sel.value, 10);
+    localStorage.setItem("crudPageSize", String(val));
+    state.pageSize = val;
+    state.page = 0;
+    updateHash("folders", state, HASH_DEFAULTS);
+    fetchAndRender();
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Toolbar rendering (once)                                           */
+/* ------------------------------------------------------------------ */
+
+function renderToolbar() {
+  return `
+    <div class="filter-panel" id="folders-filter-panel">
+      <div class="filter-panel-header">
+        ${renderSearchInput("folders", state.search)}
+        <button class="btn btn-primary" id="folders-add-btn"><i class="fa-solid fa-plus"></i> Add Folder</button>
+        <button class="filter-panel-toggle" id="folders-filter-toggle" title="Toggle filters">
+          <i class="fa-solid fa-chevron-up chevron"></i>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function wireToolbar() {
+  const toolbar = document.getElementById("folders-toolbar");
+  if (!toolbar) return;
+
+  // Wire search filter
+  wireSearchFilter(toolbar, state, () => {
+    state.page = 0;
+    updateHash("folders", state, HASH_DEFAULTS);
+    fetchAndRender();
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Event delegation (persistent)                                      */
+/* ------------------------------------------------------------------ */
+
+function wireDelegation() {
+  if (_delegationWired || !_container) return;
+  _delegationWired = true;
+
+  _container.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-folder-action]");
+    if (btn) {
+      const action = btn.dataset.folderAction;
+      const id = parseInt(btn.dataset.id, 10);
+
+      switch (action) {
+        case "add-folder":
+        case "add":
+          // handled by wireToolbar for #folders-add-btn, but catch delegation too
+          openAddModal();
+          break;
+        case "edit":
+          openEditModal({
+            id,
+            path: btn.dataset.path || "",
+            watch: btn.dataset.watch === "true",
+            recursive: btn.dataset.recursive === "true",
+            fixedExtensions: btn.dataset.fixedExt === "true",
+            fileExtensions: btn.dataset.fileExt || "",
+            maxDepth: parseInt(btn.dataset.maxDepth, 10) || 1,
+            lastScanned: parseInt(btn.dataset.lastScanned, 10) || null,
+            files: parseInt(btn.dataset.files, 10) || 0,
+          });
+          break;
+        case "remove": {
+          const path = btn.dataset.path || "this folder";
+          deleteFolder(id, path);
+          break;
+        }
+        case "rescan":
+          scanFolder(id, btn);
+          break;
+        case "toggle-watch":
+          toggleWatch(id);
+          break;
+      }
+      return;
+    }
+
+    // Refresh button
+    if (e.target.closest("#folders-refresh")) {
+      e.preventDefault();
+      fetchAndRender();
+      return;
+    }
+
+    // Add folder button
+    if (e.target.closest("#folders-add-btn")) {
+      e.preventDefault();
+      openAddModal();
+      return;
+    }
+
+    // Pagination
+    const pagBtn = e.target.closest("[data-pagination]");
+    if (pagBtn && !pagBtn.disabled) {
+      e.preventDefault();
+      const dir = pagBtn.dataset.pagination;
+      const totalItems = pagBtn.dataset.totalCount
+        ? parseInt(pagBtn.dataset.totalCount, 10)
+        : 0;
+      const totalPages = Math.ceil(totalItems / state.pageSize) || 1;
+
+      if (dir === "prev" && state.page > 0) {
+        state.page--;
+      } else if (dir === "next" && state.page < totalPages - 1) {
+        state.page++;
+      } else {
+        return;
+      }
+      updateHash("folders", state, HASH_DEFAULTS);
+      fetchAndRender();
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Stash folder data on action buttons for delegation                  */
+/* ------------------------------------------------------------------ */
+
+function stashFolderData(contentEl, folders) {
+  // Attach folder metadata to action buttons as data attributes
+  // so the delegation handler can access it without a global ref
+  for (const f of folders) {
+    contentEl
+      .querySelectorAll(`[data-folder-action][data-id="${f.id}"]`)
+      .forEach((btn) => {
+        btn.dataset.path = f.path;
+        btn.dataset.watch = String(f.watch);
+        btn.dataset.recursive = String(f.recursive);
+        btn.dataset.fixedExt = String(f.fixedExtensions);
+        btn.dataset.fileExt = f.fileExtensions;
+        btn.dataset.maxDepth = String(f.maxDepth);
+        btn.dataset.lastScanned = String(f.lastScanned ?? "");
+        btn.dataset.files = String(f.files);
+      });
   }
 }
 
 /* ------------------------------------------------------------------ */
-/*  Initialisation                                                     */
+/*  Init                                                               */
 /* ------------------------------------------------------------------ */
 
-export async function init(container, signal) {
-  container.innerHTML = renderLoading("Loading folders...");
+export async function init(container, signal, hashParams) {
+  _container = container;
+  _signal = signal;
+  _delegationWired = false;
 
   // Clean up any leftover modal overlay from a previous page visit
   closeModal();
 
-  // Reset state
-  state = { folders: [], editingFolder: null, search: "", page: 0 };
+  // Parse hash params into state
+  const parsed = parseHash(hashParams, HASH_SCHEMA);
+  state = {
+    page: parsed.page,
+    pageSize: getPageSize(25),
+    search: parsed.search,
+    sort: parsed.sort,
+    order: parsed.order,
+  };
 
-  try {
-    const resp = await fetchJSON("/api/folders", { signal });
-    if (signal.aborted) return;
+  // Render stable toolbar + content wrapper
+  container.innerHTML = `
+    ${renderToolbar()}
+    <div id="folders-content">${renderLoading("Loading folders…")}</div>
+  `;
 
-    const visibilityHandler = () => {
-      if (!document.hidden) {
-        loadFolders();
-      }
-    };
-    document.addEventListener("visibilitychange", visibilityHandler, { signal });
+  // Wire toolbar (search input — stable, wired once)
+  wireToolbar();
 
-    const allFolders = resp.data.map(adaptFolder);
-    state.folders = allFolders;
-    renderPage(container, state.folders, 0);
-  } catch (err) {
-    if (err.name === "AbortError") return;
-    container.innerHTML = renderErrorBlock({
-      title: "Failed to load folders",
-      detail: err.message,
-      retryFn: "window.location.hash='#folders'",
+  // Wire filter panel collapse toggle
+  const toggleBtn = container.querySelector("#folders-filter-toggle");
+  const filterPanel = container.querySelector("#folders-filter-panel");
+  if (toggleBtn && filterPanel) {
+    const saved = localStorage.getItem("filterPanelCollapsed_folders");
+    if (saved === "true") filterPanel.classList.add("collapsed");
+    toggleBtn.addEventListener("click", () => {
+      filterPanel.classList.toggle("collapsed");
+      localStorage.setItem(
+        "filterPanelCollapsed_folders",
+        filterPanel.classList.contains("collapsed"),
+      );
     });
   }
+
+  // Wire persistent event delegation (covers all row actions + pagination + refresh)
+  wireDelegation();
+
+  // Fetch initial data
+  await fetchAndRender();
 }

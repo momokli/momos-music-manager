@@ -661,19 +661,45 @@ impl TaskManager {
         result
     }
 
-    /// List tasks with pagination and optional status filter
+    /// List tasks with pagination, optional status filter, and optional sort
     pub async fn list_tasks_paginated(
         &self,
         limit: usize,
         offset: usize,
         status_filter: Option<TaskStatus>,
+        sort: Option<String>,
+        order: Option<String>,
     ) -> (Vec<TaskProgress>, usize) {
         let tasks = self.tasks.read().await;
         let mut all: Vec<TaskProgress> = tasks.values().map(|t| t.to_progress()).collect();
+
+        // Apply sort
+        let sort_col = sort.as_deref().unwrap_or("created_at");
+        let is_desc = matches!(order.as_deref(), Some("desc"));
         all.sort_by(|a, b| {
-            b.created_at_secs
-                .partial_cmp(&a.created_at_secs)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            let cmp = match sort_col {
+                "type" => a.task_type.cmp(&b.task_type),
+                "status" => {
+                    let sa = format!("{:?}", a.status);
+                    let sb = format!("{:?}", b.status);
+                    sa.cmp(&sb)
+                }
+                "progress" => a
+                    .percent
+                    .unwrap_or(0f32)
+                    .partial_cmp(&b.percent.unwrap_or(0f32))
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                "created_at" => a
+                    .created_at_secs
+                    .partial_cmp(&b.created_at_secs)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                // "updated_at" — tasks don't have an updated_at field, fall through to default
+                _ => b
+                    .created_at_secs
+                    .partial_cmp(&a.created_at_secs)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            };
+            if is_desc { cmp.reverse() } else { cmp }
         });
 
         let filtered: Vec<TaskProgress> = if let Some(ref filter) = status_filter {
