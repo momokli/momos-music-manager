@@ -328,6 +328,7 @@
                 height: 100%;
                 -webkit-appearance: none;
                 appearance: none;
+                -moz-appearance: none;
                 background: transparent;
                 pointer-events: none;
                 margin: 0;
@@ -342,6 +343,21 @@
                 border: 2px solid var(--bg);
                 cursor: pointer;
                 pointer-events: auto;
+            }
+            .dual-range input[type="range"]::-moz-range-thumb {
+                -moz-appearance: none;
+                appearance: none;
+                width: 14px;
+                height: 14px;
+                border-radius: 50%;
+                background: var(--accent);
+                border: 2px solid var(--bg);
+                cursor: pointer;
+                pointer-events: auto;
+            }
+            .dual-range input[type="range"]::-moz-range-track {
+                background: transparent;
+                border: none;
             }
             .dual-range-values {
                 display: flex;
@@ -1336,6 +1352,69 @@
                                 <div class="filter-row">
                                     <span
                                         class="filter-row-label toggleable"
+                                        data-filter="tagcat"
+                                        >Category</span
+                                    >
+                                    <div
+                                        class="filter-group"
+                                        id="tagcat-filter"
+                                        style="flex-wrap: wrap"
+                                    >
+                                        <button class="filter-btn" data-value="Phase">
+                                            Phase
+                                        </button>
+                                        <button class="filter-btn" data-value="Mood">
+                                            Mood
+                                        </button>
+                                        <button class="filter-btn" data-value="Vibe">
+                                            Vibe
+                                        </button>
+                                        <button class="filter-btn" data-value="Merkmal">
+                                            Merkmal
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label"
+                                        style="
+                                            font-size: 0.62rem;
+                                            color: var(--text-subtle);
+                                            font-family: var(--font-mono);
+                                            font-weight: 700;
+                                        "
+                                        >PMV</span
+                                    >
+                                    <div class="filter-group">
+                                        <button
+                                            class="filter-btn"
+                                            id="pmv-partial"
+                                            data-value="partial"
+                                            title="At least one tag across Phase, Mood, or Vibe"
+                                        >
+                                            Partial
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            id="pmv-none"
+                                            data-value="none"
+                                            title="No tags in Phase, Mood, or Vibe"
+                                        >
+                                            None
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            id="pmv-full"
+                                            data-value="full"
+                                            title="Tags in ALL of Phase, Mood, and Vibe"
+                                        >
+                                            Full
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
                                         data-filter="comment"
                                         >Comment</span
                                     >
@@ -1776,28 +1855,58 @@
 
             const ALL_KEYS = [...MINOR_KEYS, ...MAJOR_KEYS];
 
-            const TAG_NAMES = [
-                "build",
-                "peak",
-                "start",
-                "release",
-                "sustain",
-                "end",
-                "warmup",
-                "intro",
-                "breakdown",
-                "drop",
-                "groove",
-                "dark",
-                "melodic",
-                "driving",
-                "deep",
-                "tech",
-                "vocal",
-                "chill",
-                "energetic",
-                "minimal",
-            ];
+            const TAG_CATEGORIES = {
+                Phase: [
+                    "build",
+                    "peak",
+                    "start",
+                    "release",
+                    "sustain",
+                    "end",
+                    "warmup",
+                    "intro",
+                    "breakdown",
+                    "drop",
+                ],
+                Mood: [
+                    "groove",
+                    "dark",
+                    "melodic",
+                    "driving",
+                    "deep",
+                    "tech",
+                    "vocal",
+                    "chill",
+                    "energetic",
+                    "minimal",
+                ],
+                Vibe: [
+                    "sunny",
+                    "dark",
+                    "uplifting",
+                    "mellow",
+                    "aggressive",
+                    "soulful",
+                    "raw",
+                    "smooth",
+                    "trippy",
+                    "dreamy",
+                ],
+                Merkmal: [
+                    "edit",
+                    "intro",
+                    "outro",
+                    "loop",
+                    "acapella",
+                    "dub",
+                    "remix",
+                    "live",
+                    "radio",
+                    "bonus",
+                ],
+            };
+            const TAG_CATEGORY_NAMES = Object.keys(TAG_CATEGORIES);
+            const ALL_TAG_NAMES = Object.values(TAG_CATEGORIES).flat();
 
             const GENRES = [
                 "House",
@@ -1859,9 +1968,18 @@
                         })(),
                         genre: random(GENRES),
                         tagCount: randBetween(0, 8),
-                        tags: Array.from({ length: randBetween(0, 4) }, () =>
-                            random(TAG_NAMES),
-                        ),
+                        tags: (() => {
+                            const count = randBetween(0, 5);
+                            const selected = [];
+                            const cats = [...TAG_CATEGORY_NAMES]
+                                .sort(() => Math.random() - 0.5)
+                                .slice(0, randBetween(0, 3));
+                            cats.forEach((cat) => {
+                                const pool = TAG_CATEGORIES[cat];
+                                selected.push(pool[randBetween(0, pool.length - 1)]);
+                            });
+                            return selected;
+                        })(),
                         // Comment diff data
                         comment: (() => {
                             const needsUpdate = Math.random() > 0.6;
@@ -2254,6 +2372,8 @@
                 ratingMax: 5,
                 selectedGenres: [],
                 selectedTags: [],
+                selectedTagCats: [],
+                pmvFilter: "", // "", "partial", "none", "full"
                 // Layout mode
                 layoutMode: false,
                 // Sort
@@ -2342,6 +2462,39 @@
                                 f.tags &&
                                 f.tags.some((t) => state.selectedTags.includes(t)),
                         );
+                    }
+
+                    // Tag category filter (AND logic: must have tags in ALL selected categories)
+                    if (state.selectedTagCats.length > 0) {
+                        data = data.filter((f) => {
+                            const fileTags = f.tags || [];
+                            return state.selectedTagCats.every((cat) => {
+                                const catTags = TAG_CATEGORIES[cat] || [];
+                                return fileTags.some((t) => catTags.includes(t));
+                            });
+                        });
+                    }
+
+                    // PMV filter
+                    if (state.pmvFilter) {
+                        data = data.filter((f) => {
+                            const fileTags = f.tags || [];
+                            const hasPhase = fileTags.some((t) =>
+                                (TAG_CATEGORIES.Phase || []).includes(t),
+                            );
+                            const hasMood = fileTags.some((t) =>
+                                (TAG_CATEGORIES.Mood || []).includes(t),
+                            );
+                            const hasVibe = fileTags.some((t) =>
+                                (TAG_CATEGORIES.Vibe || []).includes(t),
+                            );
+                            const hasAny = hasPhase || hasMood || hasVibe;
+                            const hasAll = hasPhase && hasMood && hasVibe;
+                            if (state.pmvFilter === "partial") return hasAny;
+                            if (state.pmvFilter === "none") return !hasAny;
+                            if (state.pmvFilter === "full") return hasAll;
+                            return true;
+                        });
                     }
 
                     // Comment status filter (multi-select)
@@ -3422,6 +3575,8 @@
                     state.selectedKeys = [];
                     state.selectedGenres = [];
                     state.selectedTags = [];
+                    state.selectedTagCats = [];
+                    state.pmvFilter = "";
                     state.fileTypes = [];
                     state.commentStatuses = [];
                     state.createdFilter = {
@@ -3765,6 +3920,25 @@
                     render();
                 });
 
+                // ─── Multi-select tag category filter ───
+                document
+                    .getElementById("tagcat-filter")
+                    ?.addEventListener("click", (e) => {
+                        const btn = e.target.closest(".filter-btn");
+                        if (!btn) return;
+                        const value = btn.dataset.value;
+                        const idx = state.selectedTagCats.indexOf(value);
+                        if (idx >= 0) {
+                            state.selectedTagCats.splice(idx, 1);
+                            btn.classList.remove("active");
+                        } else {
+                            state.selectedTagCats.push(value);
+                            btn.classList.add("active");
+                        }
+                        state.page = 0;
+                        render();
+                    });
+
                 // ─── Date filters (generic helper for condition + unit) ───
                 function wireDateFilter(prefix, stateKey) {
                     const cond = document.getElementById(prefix + "-cond");
@@ -3888,6 +4062,28 @@
                     });
                 }
 
+                // ─── PMV filter buttons ───
+                ["partial", "none", "full"].forEach((val) => {
+                    document
+                        .getElementById("pmv-" + val)
+                        ?.addEventListener("click", () => {
+                            const btn = document.getElementById("pmv-" + val);
+                            if (state.pmvFilter === val) {
+                                state.pmvFilter = "";
+                                btn.classList.remove("active");
+                            } else {
+                                // Deactivate all PMV buttons first
+                                document
+                                    .querySelectorAll("[id^='pmv-']")
+                                    .forEach((b) => b.classList.remove("active"));
+                                state.pmvFilter = val;
+                                btn.classList.add("active");
+                            }
+                            state.page = 0;
+                            render();
+                        });
+                });
+
                 // Initialize state
                 state.tracksImportFilter = {
                     enabled: false,
@@ -3915,7 +4111,7 @@
                 setupTypeahead(
                     "tag-search",
                     "tag-dropdown",
-                    TAG_NAMES,
+                    ALL_TAG_NAMES,
                     state.selectedTags,
                     (value) => {
                         if (!state.selectedTags.includes(value)) {
