@@ -167,6 +167,66 @@
                 color: var(--text-subtle);
                 min-width: 32px;
             }
+            /* ─── Filter section headers ─── */
+            .filter-section-header {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                padding: 6px 0 3px 0;
+                margin-top: 6px;
+                border-top: 1px solid var(--border);
+                font-size: 0.62rem;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+                color: var(--text-subtle);
+            }
+            .filter-section-header i {
+                font-size: 0.55rem;
+                opacity: 0.6;
+            }
+
+            /* ─── Actions panel ─── */
+            .actions-panel {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: var(--radius-xl);
+                padding: var(--space-3) var(--space-4);
+            }
+            .actions-panel-header {
+                font-size: 0.65rem;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+                color: var(--text-subtle);
+                margin-bottom: var(--space-3);
+                display: flex;
+                align-items: center;
+                gap: 6px;
+            }
+            .actions-panel-header i {
+                font-size: 0.6rem;
+                opacity: 0.6;
+            }
+            .actions-panel .btn {
+                width: 100%;
+                justify-content: center;
+                margin-bottom: var(--space-2);
+            }
+            .actions-panel .btn-green {
+                background: var(--green);
+                border-color: var(--green);
+                color: #fff;
+            }
+            .actions-panel .btn-green:hover {
+                opacity: 0.9;
+            }
+            .actions-panel .action-section {
+                margin-bottom: var(--space-3);
+                padding-bottom: var(--space-3);
+                border-bottom: 1px solid var(--border);
+            }
+
             .filter-group {
                 display: flex;
                 gap: var(--space-1);
@@ -900,405 +960,485 @@
        FILTER PANEL
        ════════════════════════════════════════════════ -->
 
-        <div class="filter-panel" id="filter-panel">
-            <div class="filter-panel-header">
-                <div class="search-wrap">
-                    <i class="fas fa-search"></i>
-                    <input
-                        type="text"
-                        class="input-text input-search"
-                        id="search-input"
-                        placeholder="Search…"
-                        autocomplete="off"
-                    />
+        <div style="display: flex; gap: var(--space-4); align-items: stretch">
+            <div class="filter-panel" id="filter-panel" style="flex: 4">
+                <div class="filter-panel-header">
+                    <div class="search-wrap">
+                        <i class="fas fa-search"></i>
+                        <input
+                            type="text"
+                            class="input-text input-search"
+                            id="search-input"
+                            placeholder="Search…"
+                            autocomplete="off"
+                        />
+                    </div>
+                    <button
+                        class="filter-panel-toggle"
+                        id="filter-toggle"
+                        title="Toggle filters"
+                    >
+                        <i class="fas fa-chevron-up chevron"></i>
+                    </button>
                 </div>
-                <button
-                    class="filter-panel-toggle"
-                    id="filter-toggle"
-                    title="Toggle filters"
-                >
-                    <i class="fas fa-chevron-up chevron"></i>
-                </button>
+                <div class="filter-panel-body">
+                    <!-- Two-column grid -->
+                    <div
+                        style="
+                            display: grid;
+                            grid-template-columns: 1fr 1fr;
+                            gap: var(--space-2) var(--space-4);
+                        "
+                    >
+                        <!-- LEFT COLUMN: Track Info -->
+                        <div>
+                            <div class="filter-section-header">
+                                <i class="fas fa-music"></i> Track Info
+                            </div>
+                            <div id="files-filters-left">
+                                <!-- BPM -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="bpm"
+                                        >BPM</span
+                                    >
+                                    <div class="dual-range-wrap">
+                                        <div class="dual-range">
+                                            <div class="dual-range-track"></div>
+                                            <div
+                                                class="dual-range-fill"
+                                                id="bpm-fill"
+                                                style="left: 0%; width: 100%"
+                                            ></div>
+                                            <input
+                                                type="range"
+                                                class="dual-range-input"
+                                                id="bpm-min"
+                                                min="0"
+                                                max="200"
+                                                step="1"
+                                                value="0"
+                                            />
+                                            <input
+                                                type="range"
+                                                class="dual-range-input"
+                                                id="bpm-max"
+                                                min="0"
+                                                max="200"
+                                                step="1"
+                                                value="200"
+                                            />
+                                        </div>
+                                        <div class="dual-range-values">
+                                            <span id="bpm-min-val">0</span
+                                            ><span class="sep">——</span
+                                            ><span id="bpm-max-val">200</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- KEY -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="key"
+                                        >Key</span
+                                    >
+                                    <div class="key-grid-wrap">
+                                        <div class="key-grid" id="key-grid-minor"></div>
+                                        <div class="key-grid" id="key-grid-major"></div>
+                                    </div>
+                                </div>
+
+                                <!-- PLAYS -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="plays"
+                                        >Plays</span
+                                    >
+                                    <div class="dual-range-wrap">
+                                        <div class="dual-range">
+                                            <div class="dual-range-track"></div>
+                                            <div
+                                                class="dual-range-fill"
+                                                id="plays-fill"
+                                                style="left: 0%; width: 100%"
+                                            ></div>
+                                            <input
+                                                type="range"
+                                                class="dual-range-input"
+                                                id="plays-min"
+                                                min="0"
+                                                max="200"
+                                                step="1"
+                                                value="0"
+                                            />
+                                            <input
+                                                type="range"
+                                                class="dual-range-input"
+                                                id="plays-max"
+                                                min="0"
+                                                max="200"
+                                                step="1"
+                                                value="200"
+                                            />
+                                        </div>
+                                        <div class="dual-range-values">
+                                            <span id="plays-min-val">0</span
+                                            ><span class="sep">——</span
+                                            ><span id="plays-max-val">200</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- GENRE -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="genre"
+                                        >Genre</span
+                                    >
+                                    <div class="typeahead-wrap">
+                                        <div class="search-wrap" style="flex: 1">
+                                            <i class="fas fa-search"></i>
+                                            <input
+                                                type="text"
+                                                class="input-text input-search"
+                                                id="genre-search"
+                                                placeholder="Genre…"
+                                                autocomplete="off"
+                                            />
+                                        </div>
+                                        <div
+                                            class="typeahead-dropdown"
+                                            id="genre-dropdown"
+                                        ></div>
+                                    </div>
+                                    <div class="tag-chips" id="genre-chips"></div>
+                                </div>
+
+                                <!-- TAGS -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="tags"
+                                        >Tags</span
+                                    >
+                                    <div class="typeahead-wrap">
+                                        <div class="search-wrap" style="flex: 1">
+                                            <i class="fas fa-search"></i>
+                                            <input
+                                                type="text"
+                                                class="input-text input-search"
+                                                id="tag-search"
+                                                placeholder="Tag…"
+                                                autocomplete="off"
+                                            />
+                                        </div>
+                                        <div
+                                            class="typeahead-dropdown"
+                                            id="tag-dropdown"
+                                        ></div>
+                                    </div>
+                                    <div class="tag-chips" id="tag-chips"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- RIGHT COLUMN: Service, Classification, Date -->
+                        <div id="files-right-content">
+                            <!-- SERVICE -->
+                            <div class="filter-section-header" style="margin-top: 0">
+                                <i class="fas fa-link"></i> Service
+                            </div>
+                            <div class="filter-row">
+                                <span
+                                    class="filter-row-label toggleable"
+                                    data-filter="service"
+                                    >Service</span
+                                >
+                                <div
+                                    class="filter-group"
+                                    id="service-filter"
+                                    style="flex-wrap: wrap"
+                                >
+                                    <button
+                                        class="filter-btn"
+                                        data-value="spotify"
+                                        title="Spotify"
+                                    >
+                                        <i class="fab fa-spotify"></i>
+                                    </button>
+                                    <button
+                                        class="filter-btn"
+                                        data-value="soundcloud"
+                                        title="SoundCloud"
+                                    >
+                                        <i class="fab fa-soundcloud"></i>
+                                    </button>
+                                    <button
+                                        class="filter-btn"
+                                        data-value="youtube"
+                                        title="YouTube"
+                                    >
+                                        <i class="fab fa-youtube"></i>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- CLASSIFICATION -->
+                            <div class="filter-section-header">
+                                <i class="fas fa-tag"></i> Classification
+                            </div>
+                            <div id="files-filters-right">
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="comment"
+                                        >Comment</span
+                                    >
+                                    <div class="filter-group" id="comment-filter">
+                                        <button
+                                            class="filter-btn active"
+                                            data-value="all"
+                                        >
+                                            All
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            data-value="needs_update"
+                                        >
+                                            Needs Update
+                                        </button>
+                                        <button class="filter-btn" data-value="uptodate">
+                                            Up to Date
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="fileType"
+                                        >Type</span
+                                    >
+                                    <div class="filter-group" id="filetype-filter">
+                                        <button
+                                            class="filter-btn active"
+                                            data-value="all"
+                                        >
+                                            All
+                                        </button>
+                                        <button class="filter-btn" data-value="mp3">
+                                            MP3
+                                        </button>
+                                        <button class="filter-btn" data-value="flac">
+                                            FLAC
+                                        </button>
+                                        <button class="filter-btn" data-value="stem.m4a">
+                                            Stem
+                                        </button>
+                                        <button class="filter-btn" data-value="wav">
+                                            WAV
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- DATE -->
+                            <div class="filter-section-header">
+                                <i class="fas fa-calendar"></i> Date
+                            </div>
+                            <div id="date-filters">
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="created"
+                                        >Created</span
+                                    >
+                                    <select
+                                        class="input-text"
+                                        id="created-cond"
+                                        style="width: 90px; font-size: 0.72rem"
+                                    >
+                                        <option value="last">in the last</option>
+                                        <option value="more">more than</option>
+                                    </select>
+                                    <input
+                                        type="number"
+                                        id="created-val"
+                                        value="30"
+                                        min="1"
+                                        max="365"
+                                        style="
+                                            width: 50px;
+                                            font-size: 0.72rem;
+                                            text-align: center;
+                                        "
+                                    />
+                                    <select
+                                        id="created-unit"
+                                        style="width: 60px; font-size: 0.72rem"
+                                    >
+                                        <option value="days">days</option>
+                                        <option value="weeks">wks</option>
+                                        <option value="months">mo</option>
+                                    </select>
+                                </div>
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="modified"
+                                        >Modified</span
+                                    >
+                                    <select
+                                        class="input-text"
+                                        id="modified-cond"
+                                        style="width: 90px; font-size: 0.72rem"
+                                    >
+                                        <option value="last">in the last</option>
+                                        <option value="more">more than</option>
+                                    </select>
+                                    <input
+                                        type="number"
+                                        id="modified-val"
+                                        value="30"
+                                        min="1"
+                                        max="365"
+                                        style="
+                                            width: 50px;
+                                            font-size: 0.72rem;
+                                            text-align: center;
+                                        "
+                                    />
+                                    <select
+                                        id="modified-unit"
+                                        style="width: 60px; font-size: 0.72rem"
+                                    >
+                                        <option value="days">days</option>
+                                        <option value="weeks">wks</option>
+                                        <option value="months">mo</option>
+                                    </select>
+                                </div>
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="played"
+                                        >Played</span
+                                    >
+                                    <select
+                                        class="input-text"
+                                        id="played-cond"
+                                        style="width: 90px; font-size: 0.72rem"
+                                    >
+                                        <option value="last">in the last</option>
+                                        <option value="more">more than</option>
+                                    </select>
+                                    <input
+                                        type="number"
+                                        id="played-val"
+                                        value="14"
+                                        min="1"
+                                        max="365"
+                                        style="
+                                            width: 50px;
+                                            font-size: 0.72rem;
+                                            text-align: center;
+                                        "
+                                    />
+                                    <select
+                                        id="played-unit"
+                                        style="width: 60px; font-size: 0.72rem"
+                                    >
+                                        <option value="days">days</option>
+                                        <option value="weeks">wks</option>
+                                        <option value="months">mo</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <!-- Track Filters (tracks view, hidden by default) -->
+                            <div id="tracks-filters-section" style="display: none">
+                                <div class="filter-section-header">
+                                    <i class="fas fa-cloud"></i> Track Filters
+                                </div>
+                                <div id="tracks-filters-content">
+                                    <div class="filter-row">
+                                        <span
+                                            class="filter-row-label toggleable"
+                                            data-filter="tracksImport"
+                                            >Imported</span
+                                        >
+                                        <select
+                                            class="input-text"
+                                            id="tracks-import-cond"
+                                            style="width: 90px; font-size: 0.72rem"
+                                        >
+                                            <option value="last">in the last</option>
+                                            <option value="more">more than</option>
+                                        </select>
+                                        <input
+                                            type="number"
+                                            id="tracks-import-val"
+                                            value="30"
+                                            min="1"
+                                            max="365"
+                                            style="
+                                                width: 50px;
+                                                font-size: 0.72rem;
+                                                text-align: center;
+                                            "
+                                        />
+                                        <select
+                                            id="tracks-import-unit"
+                                            style="width: 60px; font-size: 0.72rem"
+                                        >
+                                            <option value="days">days</option>
+                                            <option value="weeks">wks</option>
+                                            <option value="months">mo</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
-            <div class="filter-panel-body">
-                <!-- Service filter (multi-select) -->
-                <div class="filter-row">
-                    <span class="filter-row-label">Service</span>
-                    <div class="filter-group" id="service-filter" style="flex-wrap: wrap">
-                        <button
-                            class="filter-btn"
-                            data-value="spotify"
-                            title="Toggle Spotify"
-                        >
-                            <i class="fab fa-spotify"></i> Spotify
-                        </button>
-                        <button
-                            class="filter-btn"
-                            data-value="soundcloud"
-                            title="Toggle SoundCloud"
-                        >
-                            <i class="fab fa-soundcloud"></i> SoundCloud
-                        </button>
-                        <button
-                            class="filter-btn"
-                            data-value="youtube"
-                            title="Toggle YouTube"
-                        >
-                            <i class="fab fa-youtube"></i> YouTube
-                        </button>
-                    </div>
+
+            <div
+                class="actions-panel"
+                style="flex: 1; min-width: 160px; max-width: 200px"
+            >
+                <div class="actions-panel-header">
+                    <i class="fas fa-bolt"></i> Actions
                 </div>
-                <div id="files-filters">
-                    <div class="filter-row">
-                        <span class="filter-row-label">BPM</span>
-                        <div class="dual-range-wrap">
-                            <div class="dual-range">
-                                <div class="dual-range-track"></div>
-                                <div
-                                    class="dual-range-fill"
-                                    id="bpm-fill"
-                                    style="left: 0%; width: 100%"
-                                ></div>
-                                <input
-                                    type="range"
-                                    class="dual-range-input"
-                                    id="bpm-min"
-                                    min="0"
-                                    max="200"
-                                    step="1"
-                                    value="0"
-                                />
-                                <input
-                                    type="range"
-                                    class="dual-range-input"
-                                    id="bpm-max"
-                                    min="0"
-                                    max="200"
-                                    step="1"
-                                    value="200"
-                                />
-                            </div>
-                            <div class="dual-range-values">
-                                <span id="bpm-min-val">0</span>
-                                <span class="sep">──</span>
-                                <span id="bpm-max-val">200</span>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="filter-row">
-                        <span class="filter-row-label">Key</span>
-                        <div class="key-grid-wrap">
-                            <div class="key-grid" id="key-grid-minor"></div>
-                            <div class="key-grid" id="key-grid-major"></div>
-                        </div>
-                    </div>
-
-                    <!-- Plays range -->
-                    <div class="filter-row">
-                        <span class="filter-row-label">Plays</span>
-                        <div class="dual-range-wrap">
-                            <div class="dual-range">
-                                <div class="dual-range-track"></div>
-                                <div
-                                    class="dual-range-fill"
-                                    id="plays-fill"
-                                    style="left: 0%; width: 100%"
-                                ></div>
-                                <input
-                                    type="range"
-                                    class="dual-range-input"
-                                    id="plays-min"
-                                    min="0"
-                                    max="200"
-                                    step="1"
-                                    value="0"
-                                />
-                                <input
-                                    type="range"
-                                    class="dual-range-input"
-                                    id="plays-max"
-                                    min="0"
-                                    max="200"
-                                    step="1"
-                                    value="200"
-                                />
-                            </div>
-                            <div class="dual-range-values">
-                                <span id="plays-min-val">0</span>
-                                <span class="sep">──</span>
-                                <span id="plays-max-val">200</span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Genre chips -->
-                    <div class="filter-row">
-                        <span class="filter-row-label">Genre</span>
-                        <div class="tag-search-wrap" style="min-width: 160px">
-                            <input
-                                type="text"
-                                class="input-text input-search"
-                                id="genre-search"
-                                placeholder="Filter genre…"
-                                autocomplete="off"
-                            />
-                        </div>
-                        <div class="tag-chips" id="genre-chips"></div>
-                    </div>
-
-                    <!-- Tags chips -->
-                    <div class="filter-row">
-                        <span class="filter-row-label">Tags</span>
-                        <div class="tag-search-wrap" style="min-width: 160px">
-                            <input
-                                type="text"
-                                class="input-text input-search"
-                                id="tag-search"
-                                placeholder="Filter tag…"
-                                autocomplete="off"
-                            />
-                        </div>
-                        <div class="tag-chips" id="tag-chips"></div>
-                    </div>
-
-                    <!-- Comment status filter -->
-                    <div class="filter-row">
-                        <span class="filter-row-label">Comment</span>
-                        <div class="filter-group" id="comment-filter">
-                            <button class="filter-btn active" data-value="all">
-                                All
-                            </button>
-                            <button class="filter-btn" data-value="needs_update">
-                                Needs Update
-                            </button>
-                            <button class="filter-btn" data-value="uptodate">
-                                Up to Date
-                            </button>
-                        </div>
-                    </div>
-
-                    <!-- File Type filter -->
-                    <div
-                        class="filter-row"
-                        style="
-                            border-top: 1px solid var(--border);
-                            padding-top: var(--space-3);
-                            margin-top: var(--space-1);
-                        "
+                <div class="action-section">
+                    <button
+                        class="btn btn-sm"
+                        id="actions-refresh"
+                        style="width: 100%; justify-content: center"
                     >
-                        <span class="filter-row-label">Type</span>
-                        <div class="filter-group" id="filetype-filter">
-                            <button class="filter-btn active" data-value="all">
-                                All
-                            </button>
-                            <button class="filter-btn" data-value="mp3">MP3</button>
-                            <button class="filter-btn" data-value="flac">FLAC</button>
-                            <button class="filter-btn" data-value="stem.m4a">
-                                Stem.M4A
-                            </button>
-                            <button class="filter-btn" data-value="wav">WAV</button>
-                        </div>
-                    </div>
+                        <i class="fas fa-rotate"></i> Refresh Data
+                    </button>
                 </div>
-
-                <div id="date-filters">
-                    <!-- Date section header -->
-                    <div
-                        class="filter-row"
-                        style="
-                            border-top: 1px solid var(--border);
-                            padding-top: var(--space-3);
-                            margin-top: var(--space-1);
-                        "
-                    >
-                        <span
-                            class="filter-row-label"
-                            style="min-width: auto; color: var(--text-muted)"
-                            >Date</span
-                        >
-                    </div>
-
-                    <!-- Created -->
-                    <div class="filter-row">
-                        <span class="filter-row-label">Created</span>
-                        <select
-                            class="input-text"
-                            id="created-cond"
-                            style="width: 100px; font-size: 0.75rem; padding: 3px 4px"
-                        >
-                            <option value="last">in the last</option>
-                            <option value="more">more than</option>
-                        </select>
-                        <input
-                            type="number"
-                            class="input-text"
-                            id="created-val"
-                            value="30"
-                            min="1"
-                            max="365"
-                            style="
-                                width: 55px;
-                                font-size: 0.75rem;
-                                text-align: center;
-                                padding: 3px 4px;
-                            "
-                        />
-                        <select
-                            class="input-text"
-                            id="created-unit"
-                            style="width: 75px; font-size: 0.75rem; padding: 3px 4px"
-                        >
-                            <option value="days">days</option>
-                            <option value="weeks">weeks</option>
-                            <option value="months">months</option>
-                        </select>
-                        <input
-                            type="checkbox"
-                            id="created-check"
-                            style="margin: 0; cursor: pointer"
-                        />
-                    </div>
-
-                    <!-- Modified -->
-                    <div class="filter-row">
-                        <span class="filter-row-label">Modified</span>
-                        <select
-                            class="input-text"
-                            id="modified-cond"
-                            style="width: 100px; font-size: 0.75rem; padding: 3px 4px"
-                        >
-                            <option value="last">in the last</option>
-                            <option value="more">more than</option>
-                        </select>
-                        <input
-                            type="number"
-                            class="input-text"
-                            id="modified-val"
-                            value="30"
-                            min="1"
-                            max="365"
-                            style="
-                                width: 55px;
-                                font-size: 0.75rem;
-                                text-align: center;
-                                padding: 3px 4px;
-                            "
-                        />
-                        <select
-                            class="input-text"
-                            id="modified-unit"
-                            style="width: 75px; font-size: 0.75rem; padding: 3px 4px"
-                        >
-                            <option value="days">days</option>
-                            <option value="weeks">weeks</option>
-                            <option value="months">months</option>
-                        </select>
-                        <input
-                            type="checkbox"
-                            id="modified-check"
-                            style="margin: 0; cursor: pointer"
-                        />
-                    </div>
-
-                    <!-- Played -->
-                    <div class="filter-row">
-                        <span class="filter-row-label">Played</span>
-                        <select
-                            class="input-text"
-                            id="played-cond"
-                            style="width: 100px; font-size: 0.75rem; padding: 3px 4px"
-                        >
-                            <option value="last">in the last</option>
-                            <option value="more">more than</option>
-                        </select>
-                        <input
-                            type="number"
-                            class="input-text"
-                            id="played-val"
-                            value="14"
-                            min="1"
-                            max="365"
-                            style="
-                                width: 55px;
-                                font-size: 0.75rem;
-                                text-align: center;
-                                padding: 3px 4px;
-                            "
-                        />
-                        <select
-                            class="input-text"
-                            id="played-unit"
-                            style="width: 75px; font-size: 0.75rem; padding: 3px 4px"
-                        >
-                            <option value="days">days</option>
-                            <option value="weeks">weeks</option>
-                            <option value="months">months</option>
-                        </select>
-                        <input
-                            type="checkbox"
-                            id="played-check"
-                            style="margin: 0; cursor: pointer"
-                        />
-                    </div>
-                </div>
-
-                <!-- Tracks filter section -->
                 <div
-                    id="tracks-filters"
-                    class="filter-row"
-                    style="
-                        border-top: 1px solid var(--border);
-                        padding-top: var(--space-3);
-                        margin-top: var(--space-1);
-                    "
+                    class="action-section"
+                    style="border-bottom: none; margin-bottom: 0; padding-bottom: 0"
                 >
-                    <span
-                        class="filter-row-label"
-                        style="min-width: auto; color: var(--text-muted)"
-                        >Track Filters</span
+                    <div
+                        class="actions-panel-header"
+                        style="font-size: 0.7rem; margin-bottom: var(--space-2)"
                     >
-                </div>
-                <div id="tracks-filters-content" class="filter-row">
-                    <span class="filter-row-label">Imported</span>
-                    <select
-                        class="input-text"
-                        id="tracks-import-cond"
-                        style="width: 100px; font-size: 0.75rem; padding: 3px 4px"
-                        disabled
+                        <i class="fas fa-pen"></i> Write Comments
+                    </div>
+                    <button
+                        class="btn btn-sm btn-green"
+                        id="actions-write-comments"
+                        style="width: 100%; justify-content: center"
                     >
-                        <option value="last">in the last</option>
-                        <option value="more">more than</option>
-                    </select>
-                    <input
-                        type="number"
-                        class="input-text"
-                        id="tracks-import-val"
-                        value="30"
-                        min="1"
-                        max="365"
-                        style="
-                            width: 55px;
-                            font-size: 0.75rem;
-                            text-align: center;
-                            padding: 3px 4px;
-                        "
-                        disabled
-                    />
-                    <select
-                        class="input-text"
-                        id="tracks-import-unit"
-                        style="width: 75px; font-size: 0.75rem; padding: 3px 4px"
-                        disabled
-                    >
-                        <option value="days">days</option>
-                        <option value="weeks">weeks</option>
-                        <option value="months">months</option>
-                    </select>
-                    <input
-                        type="checkbox"
-                        id="tracks-import-check"
-                        style="margin: 0; cursor: pointer"
-                    />
+                        <i class="fas fa-check"></i> Write Comments
+                    </button>
                 </div>
             </div>
         </div>
@@ -2432,6 +2572,57 @@
                 // Column config button
                 const colConfigBtn = document.getElementById("col-config-btn");
                 if (colConfigBtn) colConfigBtn.onclick = () => openColumnConfig();
+
+                // ─── Actions panel buttons ───
+                document
+                    .getElementById("actions-refresh")
+                    ?.addEventListener("click", function () {
+                        this.innerHTML =
+                            '<i class="fas fa-spinner fa-spin"></i> Refreshing…';
+                        setTimeout(() => {
+                            render();
+                            showToast("Data refreshed", "success");
+                        }, 300);
+                    });
+                document
+                    .getElementById("actions-write-comments")
+                    ?.addEventListener("click", function () {
+                        const total = state.total || 0;
+                        if (total === 0) {
+                            showToast("No files to process", "error");
+                            return;
+                        }
+                        this.disabled = true;
+                        this.innerHTML =
+                            '<i class="fas fa-spinner fa-spin"></i> Writing…';
+                        setTimeout(() => {
+                            this.disabled = false;
+                            this.innerHTML =
+                                '<i class="fas fa-check"></i> Write Comments';
+                            showToast(
+                                "Comments written to " + total + " files",
+                                "success",
+                            );
+                        }, 1000);
+                    });
+            }
+
+            // ─── Toast notification helper ───
+            function showToast(message, type) {
+                const existing = document.querySelector(".toast");
+                if (existing) existing.remove();
+                const toast = document.createElement("div");
+                toast.className = "toast";
+                toast.style.cssText =
+                    "position:fixed;bottom:24px;right:24px;padding:10px 20px;border-radius:8px;font-size:0.8rem;z-index:9999;transition:opacity 0.3s;max-width:400px;word-break:break-word;box-shadow:0 4px 20px rgba(0,0,0,0.4)";
+                toast.style.background = type === "error" ? "var(--red)" : "var(--green)";
+                toast.style.color = "#fff";
+                toast.textContent = message;
+                document.body.appendChild(toast);
+                setTimeout(() => {
+                    toast.style.opacity = "0";
+                    setTimeout(() => toast.remove(), 300);
+                }, 2500);
             }
 
             // ─── Resize ───
@@ -2828,19 +3019,21 @@
                     if (commentAll) commentAll.classList.add("active");
 
                     // Show/hide view-specific filter sections
-                    const filesFilters = document.getElementById("files-filters");
-                    const tracksFilters = document.getElementById("tracks-filters");
-                    const tracksFiltersContent = document.getElementById(
-                        "tracks-filters-content",
+                    const filesFiltersLeft =
+                        document.getElementById("files-filters-left");
+                    const filesRightContent =
+                        document.getElementById("files-right-content");
+                    const tracksFiltersSection = document.getElementById(
+                        "tracks-filters-section",
                     );
                     const dateFilters = document.getElementById("date-filters");
-                    if (filesFilters)
-                        filesFilters.style.display = view === "files" ? "" : "none";
-                    if (tracksFilters && tracksFiltersContent) {
-                        tracksFilters.style.display = view === "tracks" ? "" : "none";
-                        tracksFiltersContent.style.display =
+                    if (filesFiltersLeft)
+                        filesFiltersLeft.style.display = view === "files" ? "" : "none";
+                    if (filesRightContent)
+                        filesRightContent.style.display = view === "files" ? "" : "none";
+                    if (tracksFiltersSection)
+                        tracksFiltersSection.style.display =
                             view === "tracks" ? "" : "none";
-                    }
                     if (dateFilters)
                         dateFilters.style.display = view === "files" ? "" : "none";
 
@@ -3105,31 +3298,37 @@
                 const tracksImportUnit = document.getElementById("tracks-import-unit");
 
                 function syncTracksImport() {
-                    const enabled = tracksImportCheck.checked;
-                    const condition = tracksImportCond.value;
-                    const value = parseInt(tracksImportVal.value, 10) || 30;
-                    const unit = tracksImportUnit.value;
-                    tracksImportCond.disabled = !enabled;
-                    tracksImportVal.disabled = !enabled;
-                    tracksImportUnit.disabled = !enabled;
-                    // Store in a shared state or just apply directly in data layer
+                    const enabled = tracksImportCheck ? tracksImportCheck.checked : false;
+                    const condition = tracksImportCond ? tracksImportCond.value : "last";
+                    const value =
+                        parseInt(tracksImportVal ? tracksImportVal.value : "30", 10) ||
+                        30;
+                    const unit = tracksImportUnit ? tracksImportUnit.value : "days";
+                    if (tracksImportCond) tracksImportCond.disabled = !enabled;
+                    if (tracksImportVal) tracksImportVal.disabled = !enabled;
+                    if (tracksImportUnit) tracksImportUnit.disabled = !enabled;
                     state.tracksImportFilter = { enabled, condition, value, unit };
                     state.page = 0;
                     render();
                 }
 
-                tracksImportCheck.addEventListener("change", syncTracksImport);
-                tracksImportCond.addEventListener("change", syncTracksImport);
-                tracksImportUnit.addEventListener("change", syncTracksImport);
-                tracksImportVal.addEventListener("change", syncTracksImport);
-                tracksImportVal.addEventListener("input", () => {
-                    state.tracksImportFilter = {
-                        ...state.tracksImportFilter,
-                        value: parseInt(tracksImportVal.value, 10) || 30,
-                    };
-                    state.page = 0;
-                    render();
-                });
+                if (tracksImportCheck)
+                    tracksImportCheck.addEventListener("change", syncTracksImport);
+                if (tracksImportCond)
+                    tracksImportCond.addEventListener("change", syncTracksImport);
+                if (tracksImportUnit)
+                    tracksImportUnit.addEventListener("change", syncTracksImport);
+                if (tracksImportVal) {
+                    tracksImportVal.addEventListener("change", syncTracksImport);
+                    tracksImportVal.addEventListener("input", () => {
+                        state.tracksImportFilter = {
+                            ...state.tracksImportFilter,
+                            value: parseInt(tracksImportVal.value, 10) || 30,
+                        };
+                        state.page = 0;
+                        render();
+                    });
+                }
 
                 // Initialize state
                 state.tracksImportFilter = {
