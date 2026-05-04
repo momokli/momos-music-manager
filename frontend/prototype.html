@@ -160,12 +160,42 @@
                 flex-wrap: wrap;
             }
             .filter-row-label {
-                font-size: 0.7rem;
+                font-size: 0.68rem;
                 font-weight: 600;
                 text-transform: uppercase;
-                letter-spacing: 0.05em;
+                letter-spacing: 0.04em;
                 color: var(--text-subtle);
                 min-width: 32px;
+                flex-shrink: 0;
+            }
+            .filter-row-label.toggleable {
+                cursor: pointer;
+                user-select: none;
+                padding: 3px 8px;
+                border-radius: 5px;
+                transition: all 0.15s ease;
+                width: 80px;
+                flex-shrink: 0;
+                text-align: center;
+                display: inline-block;
+                font-size: 0.68rem;
+                font-weight: 600;
+                border: 1px solid transparent;
+                background: transparent;
+                color: var(--text-subtle);
+            }
+            .filter-row-label.toggleable:hover {
+                background: var(--accent-bg);
+                color: var(--accent);
+            }
+            .filter-row-label.toggleable.active {
+                background: var(--accent-bg);
+                color: var(--accent);
+                border-color: var(--accent);
+            }
+            .filter-row-label.toggleable.off {
+                opacity: 0.55;
+                color: var(--text-muted);
             }
             /* ─── Filter section headers ─── */
             .filter-section-header {
@@ -192,6 +222,7 @@
                 border: 1px solid var(--border);
                 border-radius: var(--radius-xl);
                 padding: var(--space-3) var(--space-4);
+                height: 100%;
             }
             .actions-panel-header {
                 font-size: 0.65rem;
@@ -225,6 +256,11 @@
                 margin-bottom: var(--space-3);
                 padding-bottom: var(--space-3);
                 border-bottom: 1px solid var(--border);
+            }
+            .actions-panel .action-section:last-child {
+                border-bottom: none;
+                margin-bottom: 0;
+                padding-bottom: 0;
             }
 
             .filter-group {
@@ -414,6 +450,52 @@
                 color: var(--text-subtle);
                 font-size: 0.75rem;
                 pointer-events: none;
+            }
+
+            /* ─── Typeahead dropdown ─── */
+            .typeahead-wrap {
+                position: relative;
+                min-width: 140px;
+            }
+            .typeahead-dropdown {
+                position: absolute;
+                top: 100%;
+                left: 0;
+                right: 0;
+                z-index: 50;
+                background: var(--surface);
+                border: 1px solid var(--border-strong);
+                border-radius: var(--radius-md);
+                max-height: 180px;
+                overflow-y: auto;
+                display: none;
+                margin-top: 2px;
+                box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+            }
+            .typeahead-dropdown.open {
+                display: block;
+            }
+            .typeahead-item {
+                padding: 5px 10px;
+                font-size: 0.78rem;
+                color: var(--text-secondary);
+                cursor: pointer;
+                transition: background 0.1s ease;
+            }
+            .typeahead-item:hover,
+            .typeahead-item.highlighted {
+                background: var(--accent-bg);
+                color: var(--accent);
+            }
+            .typeahead-item .match {
+                font-weight: 600;
+                color: var(--accent);
+            }
+            .typeahead-empty {
+                padding: 8px 10px;
+                font-size: 0.75rem;
+                color: var(--text-subtle);
+                text-align: center;
             }
 
             /* ─── Search ─── */
@@ -796,7 +878,6 @@
             }
 
             .filter-disabled {
-                pointer-events: none !important;
                 opacity: 0.4 !important;
             }
 
@@ -934,6 +1015,23 @@
                 to {
                     transform: rotate(360deg);
                 }
+            }
+
+            /* ─── Row selection ─── */
+            .selection-cb {
+                width: 36px !important;
+                min-width: 36px !important;
+                max-width: 36px !important;
+                text-align: center !important;
+                padding: 4px 0 !important;
+            }
+            .selection-cb input[type="checkbox"] {
+                margin: 0;
+                cursor: pointer;
+                accent-color: var(--accent);
+            }
+            tr.selected td {
+                background: var(--accent-bg) !important;
             }
         </style>
     </head>
@@ -1093,6 +1191,48 @@
                                     </div>
                                 </div>
 
+                                <!-- RATING -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="rating"
+                                        >Rating</span
+                                    >
+                                    <div class="dual-range-wrap">
+                                        <div class="dual-range">
+                                            <div class="dual-range-track"></div>
+                                            <div
+                                                class="dual-range-fill"
+                                                id="rating-fill"
+                                                style="left: 0%; width: 100%"
+                                            ></div>
+                                            <input
+                                                type="range"
+                                                class="dual-range-input"
+                                                id="rating-min"
+                                                min="0"
+                                                max="5"
+                                                step="1"
+                                                value="0"
+                                            />
+                                            <input
+                                                type="range"
+                                                class="dual-range-input"
+                                                id="rating-max"
+                                                min="0"
+                                                max="5"
+                                                step="1"
+                                                value="5"
+                                            />
+                                        </div>
+                                        <div class="dual-range-values">
+                                            <span id="rating-min-val">0</span
+                                            ><span class="sep">★</span
+                                            ><span id="rating-max-val">5</span>
+                                        </div>
+                                    </div>
+                                </div>
+
                                 <!-- GENRE -->
                                 <div class="filter-row">
                                     <span
@@ -1199,13 +1339,7 @@
                                         data-filter="comment"
                                         >Comment</span
                                     >
-                                    <div class="filter-group" id="comment-filter">
-                                        <button
-                                            class="filter-btn active"
-                                            data-value="all"
-                                        >
-                                            All
-                                        </button>
+                                    <div class="filter-group" id="comment-btns">
                                         <button
                                             class="filter-btn"
                                             data-value="needs_update"
@@ -1224,12 +1358,6 @@
                                         >Type</span
                                     >
                                     <div class="filter-group" id="filetype-filter">
-                                        <button
-                                            class="filter-btn active"
-                                            data-value="all"
-                                        >
-                                            All
-                                        </button>
                                         <button class="filter-btn" data-value="mp3">
                                             MP3
                                         </button>
@@ -1257,14 +1385,17 @@
                                         data-filter="created"
                                         >Created</span
                                     >
-                                    <select
-                                        class="input-text"
-                                        id="created-cond"
-                                        style="width: 90px; font-size: 0.72rem"
-                                    >
-                                        <option value="last">in the last</option>
-                                        <option value="more">more than</option>
-                                    </select>
+                                    <div class="filter-group" id="created-cond">
+                                        <button
+                                            class="filter-btn active"
+                                            data-value="last"
+                                        >
+                                            last
+                                        </button>
+                                        <button class="filter-btn" data-value="more">
+                                            more
+                                        </button>
+                                    </div>
                                     <input
                                         type="number"
                                         id="created-val"
@@ -1272,19 +1403,26 @@
                                         min="1"
                                         max="365"
                                         style="
-                                            width: 50px;
+                                            width: 45px;
                                             font-size: 0.72rem;
                                             text-align: center;
+                                            padding: 3px 4px;
                                         "
                                     />
-                                    <select
-                                        id="created-unit"
-                                        style="width: 60px; font-size: 0.72rem"
-                                    >
-                                        <option value="days">days</option>
-                                        <option value="weeks">wks</option>
-                                        <option value="months">mo</option>
-                                    </select>
+                                    <div class="filter-group" id="created-unit">
+                                        <button
+                                            class="filter-btn active"
+                                            data-value="days"
+                                        >
+                                            days
+                                        </button>
+                                        <button class="filter-btn" data-value="weeks">
+                                            wks
+                                        </button>
+                                        <button class="filter-btn" data-value="months">
+                                            mo
+                                        </button>
+                                    </div>
                                 </div>
                                 <div class="filter-row">
                                     <span
@@ -1292,14 +1430,17 @@
                                         data-filter="modified"
                                         >Modified</span
                                     >
-                                    <select
-                                        class="input-text"
-                                        id="modified-cond"
-                                        style="width: 90px; font-size: 0.72rem"
-                                    >
-                                        <option value="last">in the last</option>
-                                        <option value="more">more than</option>
-                                    </select>
+                                    <div class="filter-group" id="modified-cond">
+                                        <button
+                                            class="filter-btn active"
+                                            data-value="last"
+                                        >
+                                            last
+                                        </button>
+                                        <button class="filter-btn" data-value="more">
+                                            more
+                                        </button>
+                                    </div>
                                     <input
                                         type="number"
                                         id="modified-val"
@@ -1307,19 +1448,26 @@
                                         min="1"
                                         max="365"
                                         style="
-                                            width: 50px;
+                                            width: 45px;
                                             font-size: 0.72rem;
                                             text-align: center;
+                                            padding: 3px 4px;
                                         "
                                     />
-                                    <select
-                                        id="modified-unit"
-                                        style="width: 60px; font-size: 0.72rem"
-                                    >
-                                        <option value="days">days</option>
-                                        <option value="weeks">wks</option>
-                                        <option value="months">mo</option>
-                                    </select>
+                                    <div class="filter-group" id="modified-unit">
+                                        <button
+                                            class="filter-btn active"
+                                            data-value="days"
+                                        >
+                                            days
+                                        </button>
+                                        <button class="filter-btn" data-value="weeks">
+                                            wks
+                                        </button>
+                                        <button class="filter-btn" data-value="months">
+                                            mo
+                                        </button>
+                                    </div>
                                 </div>
                                 <div class="filter-row">
                                     <span
@@ -1327,14 +1475,17 @@
                                         data-filter="played"
                                         >Played</span
                                     >
-                                    <select
-                                        class="input-text"
-                                        id="played-cond"
-                                        style="width: 90px; font-size: 0.72rem"
-                                    >
-                                        <option value="last">in the last</option>
-                                        <option value="more">more than</option>
-                                    </select>
+                                    <div class="filter-group" id="played-cond">
+                                        <button
+                                            class="filter-btn active"
+                                            data-value="last"
+                                        >
+                                            last
+                                        </button>
+                                        <button class="filter-btn" data-value="more">
+                                            more
+                                        </button>
+                                    </div>
                                     <input
                                         type="number"
                                         id="played-val"
@@ -1342,19 +1493,26 @@
                                         min="1"
                                         max="365"
                                         style="
-                                            width: 50px;
+                                            width: 45px;
                                             font-size: 0.72rem;
                                             text-align: center;
+                                            padding: 3px 4px;
                                         "
                                     />
-                                    <select
-                                        id="played-unit"
-                                        style="width: 60px; font-size: 0.72rem"
-                                    >
-                                        <option value="days">days</option>
-                                        <option value="weeks">wks</option>
-                                        <option value="months">mo</option>
-                                    </select>
+                                    <div class="filter-group" id="played-unit">
+                                        <button
+                                            class="filter-btn active"
+                                            data-value="days"
+                                        >
+                                            days
+                                        </button>
+                                        <button class="filter-btn" data-value="weeks">
+                                            wks
+                                        </button>
+                                        <button class="filter-btn" data-value="months">
+                                            mo
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
 
@@ -1370,14 +1528,17 @@
                                             data-filter="tracksImport"
                                             >Imported</span
                                         >
-                                        <select
-                                            class="input-text"
-                                            id="tracks-import-cond"
-                                            style="width: 90px; font-size: 0.72rem"
-                                        >
-                                            <option value="last">in the last</option>
-                                            <option value="more">more than</option>
-                                        </select>
+                                        <div class="filter-group" id="tracks-import-cond">
+                                            <button
+                                                class="filter-btn active"
+                                                data-value="last"
+                                            >
+                                                last
+                                            </button>
+                                            <button class="filter-btn" data-value="more">
+                                                more
+                                            </button>
+                                        </div>
                                         <input
                                             type="number"
                                             id="tracks-import-val"
@@ -1385,19 +1546,29 @@
                                             min="1"
                                             max="365"
                                             style="
-                                                width: 50px;
+                                                width: 45px;
                                                 font-size: 0.72rem;
                                                 text-align: center;
+                                                padding: 3px 4px;
                                             "
                                         />
-                                        <select
-                                            id="tracks-import-unit"
-                                            style="width: 60px; font-size: 0.72rem"
-                                        >
-                                            <option value="days">days</option>
-                                            <option value="weeks">wks</option>
-                                            <option value="months">mo</option>
-                                        </select>
+                                        <div class="filter-group" id="tracks-import-unit">
+                                            <button
+                                                class="filter-btn active"
+                                                data-value="days"
+                                            >
+                                                days
+                                            </button>
+                                            <button class="filter-btn" data-value="weeks">
+                                                wks
+                                            </button>
+                                            <button
+                                                class="filter-btn"
+                                                data-value="months"
+                                            >
+                                                mo
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -1410,28 +1581,37 @@
                 class="actions-panel"
                 style="flex: 1; min-width: 160px; max-width: 200px"
             >
-                <div class="actions-panel-header">
-                    <i class="fas fa-bolt"></i> Actions
+                <div
+                    class="actions-panel-header"
+                    style="
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                        width: 100%;
+                    "
+                >
+                    <span><i class="fas fa-bolt"></i> Actions</span>
+                    <span
+                        id="actions-sel-context"
+                        style="font-size: 0.7rem; color: var(--text-muted)"
+                        >0</span
+                    >
                 </div>
-                <div class="action-section">
+                <div
+                    style="
+                        display: flex;
+                        flex-direction: column;
+                        gap: 8px;
+                        margin-top: 12px;
+                    "
+                >
                     <button
                         class="btn btn-sm"
                         id="actions-refresh"
                         style="width: 100%; justify-content: center"
                     >
-                        <i class="fas fa-rotate"></i> Refresh Data
+                        <i class="fas fa-rotate"></i> Refresh Metadata
                     </button>
-                </div>
-                <div
-                    class="action-section"
-                    style="border-bottom: none; margin-bottom: 0; padding-bottom: 0"
-                >
-                    <div
-                        class="actions-panel-header"
-                        style="font-size: 0.7rem; margin-bottom: var(--space-2)"
-                    >
-                        <i class="fas fa-pen"></i> Write Comments
-                    </div>
                     <button
                         class="btn btn-sm btn-green"
                         id="actions-write-comments"
@@ -1654,6 +1834,7 @@
                                 : null,
                         album: Math.random() > 0.3 ? random(ALBUMS) : null,
                         playCount: randBetween(0, 200),
+                        rating: randBetween(0, 5),
                         duration: randBetween(120, 480),
                         createdAt: Date.now() - randBetween(0, 365) * 86400000,
                         lastModified: Date.now() - randBetween(0, 180) * 86400000,
@@ -1886,6 +2067,13 @@
                     defaultWidth: 4,
                 },
                 {
+                    id: "rating",
+                    label: "Rating",
+                    sortable: true,
+                    sortKey: "rating",
+                    defaultWidth: 80,
+                },
+                {
                     id: "tagCount",
                     label: "Tags",
                     sortable: true,
@@ -2055,13 +2243,15 @@
                     value: 14,
                     unit: "days",
                 },
-                // Comment status filter
-                commentStatus: "all", // "all", "needs_update", "uptodate"
-                // File type filter
-                fileType: "all",
+                // Comment status filter (multi-select)
+                commentStatuses: [],
+                // File type filter (multi-select)
+                fileTypes: [],
                 // Additional filters
                 playsMin: 0,
                 playsMax: 200,
+                ratingMin: 0,
+                ratingMax: 5,
                 selectedGenres: [],
                 selectedTags: [],
                 // Layout mode
@@ -2076,6 +2266,8 @@
                 // Data
                 data: [],
                 total: 0,
+                // Row selection
+                selectedIds: [],
             };
 
             // ================================================================
@@ -2126,9 +2318,16 @@
                             f.playCount <= state.playsMax,
                     );
 
-                    // File type filter
-                    if (state.fileType !== "all") {
-                        data = data.filter((f) => f.fileType === state.fileType);
+                    // Rating range
+                    data = data.filter(
+                        (f) =>
+                            (f.rating || 0) >= (state.ratingMin || 0) &&
+                            (f.rating || 0) <= (state.ratingMax || 5),
+                    );
+
+                    // File type filter (multi-select)
+                    if (state.fileTypes && state.fileTypes.length > 0) {
+                        data = data.filter((f) => state.fileTypes.includes(f.fileType));
                     }
 
                     // Genre filter
@@ -2145,11 +2344,22 @@
                         );
                     }
 
-                    // Comment status filter
-                    if (state.commentStatus === "needs_update") {
-                        data = data.filter((f) => f.commentNeedsUpdate);
-                    } else if (state.commentStatus === "uptodate") {
-                        data = data.filter((f) => !f.commentNeedsUpdate);
+                    // Comment status filter (multi-select)
+                    if (state.commentStatuses && state.commentStatuses.length > 0) {
+                        data = data.filter((f) => {
+                            const needsUpdate = f.commentNeedsUpdate;
+                            if (
+                                state.commentStatuses.includes("needs_update") &&
+                                needsUpdate
+                            )
+                                return true;
+                            if (
+                                state.commentStatuses.includes("uptodate") &&
+                                !needsUpdate
+                            )
+                                return true;
+                            return false;
+                        });
                     }
 
                     // Date filters with condition + unit
@@ -2279,6 +2489,19 @@
                 duration: (f) =>
                     `<span class="font-mono text-xs">${formatDuration(f.duration)}</span>`,
                 plays: (f) => `<span class="font-mono text-xs">${f.playCount}</span>`,
+                rating: (f) => {
+                    const r = f.rating || 0;
+                    let stars = "";
+                    for (let i = 1; i <= 5; i++) {
+                        if (i <= r)
+                            stars +=
+                                '<i class="fas fa-star" style="color:var(--yellow);font-size:0.65rem;margin-right:1px"></i>';
+                        else
+                            stars +=
+                                '<i class="far fa-star" style="color:var(--text-subtle);font-size:0.65rem;margin-right:1px"></i>';
+                    }
+                    return stars;
+                },
                 tagCount: (f) => `<span class="font-mono text-xs">${f.tagCount}</span>`,
                 fileType: (f) => {
                     const colors = {
@@ -2370,7 +2593,9 @@
                     state.view === "tracks" ? TRACKS_CELL_RENDERERS : CELL_RENDERERS;
 
                 // Build headers
-                const headersHtml = config
+                let headersHtml =
+                    '<th class="selection-cb"><input type="checkbox" id="select-all-cb" title="Select all on this page"></th>';
+                headersHtml += config
                     .filter((c) => c.visible)
                     .map((c) => {
                         const model = columns.find((m) => m.id === c.id);
@@ -2395,7 +2620,7 @@
                 // Build rows
                 const rowsHtml =
                     paged.length === 0
-                        ? `<tr><td colspan="${config.filter((c) => c.visible).length}" class="empty-state">
+                        ? `<tr><td colspan="${config.filter((c) => c.visible).length + 1}" class="empty-state">
                    <div class="empty-state">
                      <div class="icon"><i class="fas fa-search"></i></div>
                      <h3>No results match your filters</h3>
@@ -2404,7 +2629,14 @@
                  </td></tr>`
                         : paged
                               .map((f) => {
-                                  const cellsHtml = config
+                                  const sel = state.selectedIds.includes(f.id);
+                                  let cellsHtml =
+                                      '<td class="selection-cb"><input type="checkbox" class="row-cb" data-id="' +
+                                      f.id +
+                                      '" ' +
+                                      (sel ? "checked" : "") +
+                                      "></td>";
+                                  cellsHtml += config
                                       .filter((c) => c.visible)
                                       .map((c) => {
                                           const renderer = cellRenderers[c.id];
@@ -2415,7 +2647,7 @@
                                           return `<td style="width:${c.width}px;min-width:30px;max-width:${c.width}px">${content}</td>`;
                                       })
                                       .join("");
-                                  return `<tr>${cellsHtml}</tr>`;
+                                  return `<tr${sel ? ' class="selected"' : ""}>${cellsHtml}</tr>`;
                               })
                               .join("");
 
@@ -2429,6 +2661,9 @@
                 </select>
                 ${state.layoutMode ? '<button class="btn btn-sm btn-primary" id="layout-mode-btn" style="margin-left:8px"><i class="fas fa-check"></i> Done</button>' : '<button class="btn btn-sm" id="layout-mode-btn" style="margin-left:8px"><i class="fas fa-arrows-alt"></i> Modify Column Layout</button>'}
                 <button class="col-config-trigger" id="col-config-btn" style="margin-left:8px"><i class="fas fa-table-cells"></i> Columns</button>
+                <span id="sel-count" style="font-size:0.75rem;color:var(--text-muted);margin-left:8px;min-width:90px;display:inline-block"></span>
+                <button class="btn btn-sm btn-icon" id="sel-all-btn" title="Select ALL files"><i class="fas fa-check"></i> All</button>
+                <button class="btn btn-sm btn-icon" id="sel-none-btn" title="Deselect all"><i class="fas fa-square"></i> None</button>
               </div>
             </div>`;
 
@@ -2577,18 +2812,37 @@
                 document
                     .getElementById("actions-refresh")
                     ?.addEventListener("click", function () {
+                        const n =
+                            state.selectedIds.length > 0
+                                ? state.selectedIds.length
+                                : state.total || 0;
+                        this.disabled = true;
                         this.innerHTML =
-                            '<i class="fas fa-spinner fa-spin"></i> Refreshing…';
+                            '<i class="fas fa-spinner fa-spin"></i> Scanning…';
                         setTimeout(() => {
-                            render();
-                            showToast("Data refreshed", "success");
-                        }, 300);
+                            this.disabled = false;
+                            this.innerHTML =
+                                '<i class="fas fa-rotate"></i> Refresh Metadata';
+                            showToast(
+                                "Re-read " +
+                                    n +
+                                    " file" +
+                                    (n !== 1 ? "s" : "") +
+                                    " — " +
+                                    n +
+                                    " found, metadata updated",
+                                "success",
+                            );
+                        }, 1200);
                     });
                 document
                     .getElementById("actions-write-comments")
                     ?.addEventListener("click", function () {
-                        const total = state.total || 0;
-                        if (total === 0) {
+                        const n =
+                            state.selectedIds.length > 0
+                                ? state.selectedIds.length
+                                : state.total || 0;
+                        if (n === 0) {
                             showToast("No files to process", "error");
                             return;
                         }
@@ -2600,11 +2854,124 @@
                             this.innerHTML =
                                 '<i class="fas fa-check"></i> Write Comments';
                             showToast(
-                                "Comments written to " + total + " files",
+                                "Comments written to " +
+                                    n +
+                                    " file" +
+                                    (n !== 1 ? "s" : ""),
                                 "success",
                             );
                         }, 1000);
                     });
+
+                // ─── Row selection ───
+                function updateSelCount() {
+                    const el = document.getElementById("sel-count");
+                    if (el) {
+                        const n = state.selectedIds.length;
+                        el.textContent = n > 0 ? n + " selected" : "";
+                    }
+                    const ctx = document.getElementById("actions-sel-context");
+                    if (ctx) {
+                        const n = state.selectedIds.length;
+                        ctx.textContent = n > 0 ? String(n) : "0";
+                    }
+                }
+
+                const selectAllCb = document.getElementById("select-all-cb");
+                if (selectAllCb) {
+                    selectAllCb.addEventListener("change", () => {
+                        const cbs = document.querySelectorAll(".row-cb");
+                        if (selectAllCb.checked) {
+                            cbs.forEach((cb) => {
+                                cb.checked = true;
+                                const id = parseInt(cb.dataset.id, 10);
+                                if (!state.selectedIds.includes(id))
+                                    state.selectedIds.push(id);
+                                cb.closest("tr")?.classList.add("selected");
+                            });
+                        } else {
+                            const visibleIds = new Set();
+                            cbs.forEach((cb) =>
+                                visibleIds.add(parseInt(cb.dataset.id, 10)),
+                            );
+                            state.selectedIds = state.selectedIds.filter(
+                                (id) => !visibleIds.has(id),
+                            );
+                            cbs.forEach((cb) => {
+                                cb.checked = false;
+                                cb.closest("tr")?.classList.remove("selected");
+                            });
+                        }
+                        updateSelCount();
+                    });
+                }
+
+                let lastIdx = -1;
+                document.querySelectorAll(".row-cb").forEach((cb, idx) => {
+                    cb.addEventListener("click", (e) => {
+                        const id = parseInt(cb.dataset.id, 10);
+                        const allCbs = document.querySelectorAll(".row-cb");
+                        if (e.shiftKey && lastIdx >= 0) {
+                            const start = Math.min(lastIdx, idx);
+                            const end = Math.max(lastIdx, idx);
+                            const checked = cb.checked;
+                            for (let i = start; i <= end; i++) {
+                                const oc = allCbs[i];
+                                oc.checked = checked;
+                                const oid = parseInt(oc.dataset.id, 10);
+                                if (checked) {
+                                    if (!state.selectedIds.includes(oid))
+                                        state.selectedIds.push(oid);
+                                } else {
+                                    state.selectedIds = state.selectedIds.filter(
+                                        (s) => s !== oid,
+                                    );
+                                }
+                                oc.closest("tr")?.classList.toggle("selected", checked);
+                            }
+                        } else {
+                            if (cb.checked) {
+                                if (!state.selectedIds.includes(id))
+                                    state.selectedIds.push(id);
+                            } else {
+                                state.selectedIds = state.selectedIds.filter(
+                                    (s) => s !== id,
+                                );
+                            }
+                            cb.closest("tr")?.classList.toggle("selected", cb.checked);
+                        }
+                        lastIdx = idx;
+                        updateSelCount();
+                    });
+                });
+
+                // Select ALL files (across all pages)
+                document.getElementById("sel-all-btn")?.addEventListener("click", () => {
+                    const allData = state.view === "tracks" ? ALL_TRACKS : ALL_FILES;
+                    state.selectedIds = allData.map((f) => f.id);
+                    document.querySelectorAll(".row-cb").forEach((cb) => {
+                        cb.checked = true;
+                        cb.closest("tr")?.classList.add("selected");
+                    });
+                    const sacb = document.getElementById("select-all-cb");
+                    if (sacb) sacb.checked = true;
+                    updateSelCount();
+                });
+
+                // Deselect all
+                document.getElementById("sel-none-btn")?.addEventListener("click", () => {
+                    state.selectedIds = [];
+                    document.querySelectorAll(".row-cb").forEach((cb) => {
+                        cb.checked = false;
+                        cb.closest("tr")?.classList.remove("selected");
+                    });
+                    const sacb = document.getElementById("select-all-cb");
+                    if (sacb) sacb.checked = false;
+                    updateSelCount();
+                });
+
+                // Initial count
+                updateSelCount();
             }
 
             // ─── Toast notification helper ───
@@ -2915,6 +3282,123 @@
                 });
             }
 
+            // ─── Typeahead helper ───
+            function setupTypeahead(
+                inputId,
+                dropdownId,
+                source,
+                selectedItems,
+                onSelect,
+            ) {
+                const input = document.getElementById(inputId);
+                const dropdown = document.getElementById(dropdownId);
+                let selectedIndex = -1;
+                let currentItems = [];
+
+                function highlight(text) {
+                    return (match) => {
+                        const idx = match.toLowerCase().indexOf(text.toLowerCase());
+                        if (idx === -1) return match;
+                        return (
+                            match.slice(0, idx) +
+                            '<span class="match">' +
+                            match.slice(idx, idx + text.length) +
+                            "</span>" +
+                            match.slice(idx + text.length)
+                        );
+                    };
+                }
+
+                function renderDropdown() {
+                    const q = input.value.toLowerCase().trim();
+                    if (!q) {
+                        dropdown.classList.remove("open");
+                        return;
+                    }
+                    currentItems = source.filter(
+                        (s) => s.toLowerCase().includes(q) && !selectedItems.includes(s),
+                    );
+                    if (currentItems.length === 0) {
+                        dropdown.innerHTML =
+                            '<div class="typeahead-empty">No matches</div>';
+                        dropdown.classList.add("open");
+                        selectedIndex = -1;
+                        return;
+                    }
+                    dropdown.innerHTML = currentItems
+                        .map(
+                            (item, i) =>
+                                '<div class="typeahead-item' +
+                                (i === selectedIndex ? " highlighted" : "") +
+                                '" data-index="' +
+                                i +
+                                '">' +
+                                highlight(q)(item) +
+                                "</div>",
+                        )
+                        .join("");
+                    dropdown.classList.add("open");
+                }
+
+                input.addEventListener("input", () => {
+                    selectedIndex = -1;
+                    renderDropdown();
+                });
+
+                input.addEventListener("keydown", (e) => {
+                    if (!dropdown.classList.contains("open")) return;
+                    if (e.key === "ArrowDown") {
+                        e.preventDefault();
+                        selectedIndex = Math.min(
+                            selectedIndex + 1,
+                            currentItems.length - 1,
+                        );
+                        renderDropdown();
+                        const el = dropdown.querySelector(
+                            '[data-index="' + selectedIndex + '"]',
+                        );
+                        if (el) el.scrollIntoView({ block: "nearest" });
+                    } else if (e.key === "ArrowUp") {
+                        e.preventDefault();
+                        selectedIndex = Math.max(selectedIndex - 1, 0);
+                        renderDropdown();
+                        const el = dropdown.querySelector(
+                            '[data-index="' + selectedIndex + '"]',
+                        );
+                        if (el) el.scrollIntoView({ block: "nearest" });
+                    } else if (e.key === "Enter") {
+                        e.preventDefault();
+                        if (selectedIndex >= 0 && selectedIndex < currentItems.length) {
+                            onSelect(currentItems[selectedIndex]);
+                            input.value = "";
+                            selectedIndex = -1;
+                            dropdown.classList.remove("open");
+                        }
+                    } else if (e.key === "Escape") {
+                        dropdown.classList.remove("open");
+                        selectedIndex = -1;
+                    }
+                });
+
+                dropdown.addEventListener("mousedown", (e) => {
+                    const item = e.target.closest(".typeahead-item");
+                    if (!item) return;
+                    const idx = parseInt(item.dataset.index, 10);
+                    if (idx >= 0 && idx < currentItems.length) {
+                        onSelect(currentItems[idx]);
+                        input.value = "";
+                        selectedIndex = -1;
+                        dropdown.classList.remove("open");
+                    }
+                });
+
+                document.addEventListener("mousedown", (e) => {
+                    if (!e.target.closest(".typeahead-wrap")) {
+                        dropdown.classList.remove("open");
+                    }
+                });
+            }
+
             // ================================================================
             // 6. INITIALIZATION
             // ================================================================
@@ -2923,6 +3407,7 @@
                 // ─── View switcher ───
                 function setView(view) {
                     state.view = view;
+                    state.selectedIds = [];
                     state.page = 0;
                     state.sort = "";
                     state.order = "asc";
@@ -2932,11 +3417,13 @@
                     state.bpmMax = 200;
                     state.playsMin = 0;
                     state.playsMax = 200;
+                    state.ratingMin = 0;
+                    state.ratingMax = 5;
                     state.selectedKeys = [];
                     state.selectedGenres = [];
                     state.selectedTags = [];
-                    state.fileType = "all";
-                    state.commentStatus = "all";
+                    state.fileTypes = [];
+                    state.commentStatuses = [];
                     state.createdFilter = {
                         enabled: false,
                         condition: "last",
@@ -2963,21 +3450,25 @@
                     };
                     // Sync date filter DOM with reset state
                     ["created", "modified", "played"].forEach((prefix) => {
-                        const check = document.getElementById(prefix + "-check");
                         const cond = document.getElementById(prefix + "-cond");
                         const val = document.getElementById(prefix + "-val");
                         const unit = document.getElementById(prefix + "-unit");
-                        if (check) check.checked = false;
-                        [cond, val, unit].forEach((el) => {
-                            if (el) {
-                                el.classList.add("filter-disabled");
-                                if (el.tagName === "SELECT") el.value = "last";
-                                if (el.tagName === "INPUT" && el.type === "number")
-                                    el.value = "30";
-                                if (el.tagName === "SELECT" && el.id.includes("unit"))
-                                    el.value = "days";
-                            }
-                        });
+                        // Reset cond button group to "last"
+                        if (cond) {
+                            cond.querySelectorAll(".filter-btn").forEach((b) =>
+                                b.classList.toggle("active", b.dataset.value === "last"),
+                            );
+                        }
+                        // Reset value
+                        if (val) {
+                            val.value = "30";
+                        }
+                        // Reset unit button group to "days"
+                        if (unit) {
+                            unit.querySelectorAll(".filter-btn").forEach((b) =>
+                                b.classList.toggle("active", b.dataset.value === "days"),
+                            );
+                        }
                     });
                     state.columnConfig = loadColumnConfig(view);
                     localStorage.setItem("prototype_view", view);
@@ -3008,15 +3499,6 @@
                     document
                         .querySelectorAll("#service-filter .filter-btn")
                         .forEach((b) => b.classList.remove("active"));
-
-                    // Reset comment filter button
-                    document
-                        .querySelectorAll("#comment-filter .filter-btn")
-                        .forEach((b) => b.classList.remove("active"));
-                    const commentAll = document.querySelector(
-                        '#comment-filter .filter-btn[data-value="all"]',
-                    );
-                    if (commentAll) commentAll.classList.add("active");
 
                     // Show/hide view-specific filter sections
                     const filesFiltersLeft =
@@ -3162,13 +3644,19 @@
                     const action = btn.dataset.keyAction;
 
                     if (action === "minor-all") {
-                        state.selectedKeys = [...MINOR_KEYS];
+                        MINOR_KEYS.forEach((k) => {
+                            if (!state.selectedKeys.includes(k))
+                                state.selectedKeys.push(k);
+                        });
                     } else if (action === "minor-none") {
                         state.selectedKeys = state.selectedKeys.filter(
                             (k) => !k.endsWith("m"),
                         );
                     } else if (action === "major-all") {
-                        state.selectedKeys = [...MAJOR_KEYS];
+                        MAJOR_KEYS.forEach((k) => {
+                            if (!state.selectedKeys.includes(k))
+                                state.selectedKeys.push(k);
+                        });
                     } else if (action === "major-none") {
                         state.selectedKeys = state.selectedKeys.filter(
                             (k) => !k.endsWith("d"),
@@ -3214,77 +3702,114 @@
                 playsMin.addEventListener("input", updatePlays);
                 playsMax.addEventListener("input", updatePlays);
 
-                // ─── File type filter ───
+                // ─── Rating dual range ───
+                const ratingMin = document.getElementById("rating-min");
+                const ratingMax = document.getElementById("rating-max");
+                const ratingMinVal = document.getElementById("rating-min-val");
+                const ratingMaxVal = document.getElementById("rating-max-val");
+                const ratingFill = document.getElementById("rating-fill");
+                let ratingTimer;
+                function updateRating() {
+                    clearTimeout(ratingTimer);
+                    ratingTimer = setTimeout(() => {
+                        const mn = parseInt(ratingMin.value, 10);
+                        const mx = parseInt(ratingMax.value, 10);
+                        state.ratingMin = Math.min(mn, mx);
+                        state.ratingMax = Math.max(mn, mx);
+                        const pctMin = (state.ratingMin / 5) * 100;
+                        const pctMax = (state.ratingMax / 5) * 100;
+                        ratingFill.style.left = pctMin + "%";
+                        ratingFill.style.width = pctMax - pctMin + "%";
+                        ratingMinVal.textContent = state.ratingMin;
+                        ratingMaxVal.textContent = state.ratingMax;
+                        state.page = 0;
+                        render();
+                    }, 150);
+                }
+                ratingMin.addEventListener("input", updateRating);
+                ratingMax.addEventListener("input", updateRating);
+
+                // ─── Multi-select file type filter ───
                 document
                     .getElementById("filetype-filter")
                     .addEventListener("click", (e) => {
                         const btn = e.target.closest(".filter-btn");
                         if (!btn) return;
-                        document
-                            .querySelectorAll("#filetype-filter .filter-btn")
-                            .forEach((b) => b.classList.remove("active"));
-                        btn.classList.add("active");
-                        state.fileType = btn.dataset.value;
+                        const value = btn.dataset.value;
+                        const idx = state.fileTypes.indexOf(value);
+                        if (idx >= 0) {
+                            state.fileTypes.splice(idx, 1);
+                            btn.classList.remove("active");
+                        } else {
+                            state.fileTypes.push(value);
+                            btn.classList.add("active");
+                        }
                         state.page = 0;
                         render();
                     });
 
-                // ─── Comment status filter ───
-                document
-                    .getElementById("comment-filter")
-                    .addEventListener("click", (e) => {
-                        const btn = e.target.closest(".filter-btn");
-                        if (!btn) return;
-                        document
-                            .querySelectorAll("#comment-filter .filter-btn")
-                            .forEach((b) => b.classList.remove("active"));
+                // ─── Multi-select comment filter ───
+                document.getElementById("comment-btns").addEventListener("click", (e) => {
+                    const btn = e.target.closest(".filter-btn");
+                    if (!btn) return;
+                    const value = btn.dataset.value;
+                    const idx = state.commentStatuses.indexOf(value);
+                    if (idx >= 0) {
+                        state.commentStatuses.splice(idx, 1);
+                        btn.classList.remove("active");
+                    } else {
+                        state.commentStatuses.push(value);
                         btn.classList.add("active");
-                        state.commentStatus = btn.dataset.value;
-                        state.page = 0;
-                        render();
-                    });
+                    }
+                    state.page = 0;
+                    render();
+                });
 
                 // ─── Date filters (generic helper for condition + unit) ───
                 function wireDateFilter(prefix, stateKey) {
-                    const check = document.getElementById(prefix + "-check");
                     const cond = document.getElementById(prefix + "-cond");
-                    const val = document.getElementById(prefix + "-val");
                     const unit = document.getElementById(prefix + "-unit");
+                    const val = document.getElementById(prefix + "-val");
                     const filter = state[stateKey];
 
-                    function setEnabled(enabled) {
-                        // Use CSS class instead of disabled attribute
-                        [cond, val, unit].forEach((el) => {
-                            if (!enabled) {
-                                el.classList.add("filter-disabled");
-                            } else {
-                                el.classList.remove("filter-disabled");
-                            }
-                        });
-                    }
-
-                    function syncState() {
-                        filter.enabled = check.checked;
-                        filter.condition = cond.value;
-                        filter.value = parseInt(val.value, 10) || 30;
-                        filter.unit = unit.value;
-                        setEnabled(check.checked);
+                    function sync() {
+                        filter.condition =
+                            cond?.querySelector(".filter-btn.active")?.dataset?.value ||
+                            "last";
+                        filter.unit =
+                            unit?.querySelector(".filter-btn.active")?.dataset?.value ||
+                            "days";
+                        filter.value = parseInt(val?.value, 10) || 30;
                         state.page = 0;
                         render();
                     }
 
-                    check.addEventListener("change", syncState);
-                    cond.addEventListener("change", syncState);
-                    unit.addEventListener("change", syncState);
-                    val.addEventListener("change", syncState);
-                    val.addEventListener("input", () => {
+                    cond?.addEventListener("click", (e) => {
+                        const btn = e.target.closest(".filter-btn");
+                        if (!btn) return;
+                        cond.querySelectorAll(".filter-btn").forEach((b) =>
+                            b.classList.remove("active"),
+                        );
+                        btn.classList.add("active");
+                        sync();
+                    });
+
+                    unit?.addEventListener("click", (e) => {
+                        const btn = e.target.closest(".filter-btn");
+                        if (!btn) return;
+                        unit.querySelectorAll(".filter-btn").forEach((b) =>
+                            b.classList.remove("active"),
+                        );
+                        btn.classList.add("active");
+                        sync();
+                    });
+
+                    val?.addEventListener("change", sync);
+                    val?.addEventListener("input", () => {
                         filter.value = parseInt(val.value, 10) || 30;
                         state.page = 0;
                         render();
                     });
-
-                    // Initial sync (set to disabled state initially)
-                    setEnabled(false);
                 }
 
                 wireDateFilter("created", "createdFilter");
@@ -3292,32 +3817,65 @@
                 wireDateFilter("played", "playedFilter");
 
                 // ─── Tracks import date filter ───
-                const tracksImportCheck = document.getElementById("tracks-import-check");
                 const tracksImportCond = document.getElementById("tracks-import-cond");
                 const tracksImportVal = document.getElementById("tracks-import-val");
                 const tracksImportUnit = document.getElementById("tracks-import-unit");
 
                 function syncTracksImport() {
-                    const enabled = tracksImportCheck ? tracksImportCheck.checked : false;
-                    const condition = tracksImportCond ? tracksImportCond.value : "last";
+                    const condition =
+                        tracksImportCond?.querySelector(".filter-btn.active")?.dataset
+                            ?.value || "last";
                     const value =
                         parseInt(tracksImportVal ? tracksImportVal.value : "30", 10) ||
                         30;
-                    const unit = tracksImportUnit ? tracksImportUnit.value : "days";
-                    if (tracksImportCond) tracksImportCond.disabled = !enabled;
-                    if (tracksImportVal) tracksImportVal.disabled = !enabled;
-                    if (tracksImportUnit) tracksImportUnit.disabled = !enabled;
-                    state.tracksImportFilter = { enabled, condition, value, unit };
+                    const unit =
+                        tracksImportUnit?.querySelector(".filter-btn.active")?.dataset
+                            ?.value || "days";
+                    if (tracksImportCond) {
+                        tracksImportCond
+                            .querySelectorAll(".filter-btn")
+                            .forEach((b) => b.classList.remove("active"));
+                        const btn = tracksImportCond.querySelector(
+                            `[data-value="${condition}"]`,
+                        );
+                        if (btn) btn.classList.add("active");
+                    }
+                    if (tracksImportUnit) {
+                        tracksImportUnit
+                            .querySelectorAll(".filter-btn")
+                            .forEach((b) => b.classList.remove("active"));
+                        const btn = tracksImportUnit.querySelector(
+                            `[data-value="${unit}"]`,
+                        );
+                        if (btn) btn.classList.add("active");
+                    }
+                    state.tracksImportFilter = { condition, value, unit };
                     state.page = 0;
                     render();
                 }
 
-                if (tracksImportCheck)
-                    tracksImportCheck.addEventListener("change", syncTracksImport);
-                if (tracksImportCond)
-                    tracksImportCond.addEventListener("change", syncTracksImport);
-                if (tracksImportUnit)
-                    tracksImportUnit.addEventListener("change", syncTracksImport);
+                if (tracksImportCond) {
+                    tracksImportCond.addEventListener("click", (e) => {
+                        const btn = e.target.closest(".filter-btn");
+                        if (!btn) return;
+                        tracksImportCond
+                            .querySelectorAll(".filter-btn")
+                            .forEach((b) => b.classList.remove("active"));
+                        btn.classList.add("active");
+                        syncTracksImport();
+                    });
+                }
+                if (tracksImportUnit) {
+                    tracksImportUnit.addEventListener("click", (e) => {
+                        const btn = e.target.closest(".filter-btn");
+                        if (!btn) return;
+                        tracksImportUnit
+                            .querySelectorAll(".filter-btn")
+                            .forEach((b) => b.classList.remove("active"));
+                        btn.classList.add("active");
+                        syncTracksImport();
+                    });
+                }
                 if (tracksImportVal) {
                     tracksImportVal.addEventListener("change", syncTracksImport);
                     tracksImportVal.addEventListener("input", () => {
@@ -3338,51 +3896,35 @@
                     unit: "days",
                 };
 
-                // ─── Genre search + chips ───
-                let genreTimer;
-                const genreSearch = document.getElementById("genre-search");
-                genreSearch.addEventListener("input", () => {
-                    clearTimeout(genreTimer);
-                    genreTimer = setTimeout(() => {
-                        const q = genreSearch.value.toLowerCase().trim();
-                        if (!q) return;
-                        const match = GENRES.find(
-                            (g) =>
-                                g.toLowerCase().includes(q) &&
-                                !state.selectedGenres.includes(g),
-                        );
-                        if (match) {
-                            state.selectedGenres.push(match);
+                // ─── Genre typeahead ───
+                setupTypeahead(
+                    "genre-search",
+                    "genre-dropdown",
+                    GENRES,
+                    state.selectedGenres,
+                    (value) => {
+                        if (!state.selectedGenres.includes(value)) {
+                            state.selectedGenres.push(value);
                             state.page = 0;
-                            genreSearch.value = "";
-                            renderGenreChips();
                             render();
                         }
-                    }, 300);
-                });
+                    },
+                );
 
-                // ─── Tag search + chips ───
-                let tagTimer;
-                const tagSearch = document.getElementById("tag-search");
-                tagSearch.addEventListener("input", () => {
-                    clearTimeout(tagTimer);
-                    tagTimer = setTimeout(() => {
-                        const q = tagSearch.value.toLowerCase().trim();
-                        if (!q) return;
-                        const match = TAG_NAMES.find(
-                            (t) =>
-                                t.toLowerCase().includes(q) &&
-                                !state.selectedTags.includes(t),
-                        );
-                        if (match) {
-                            state.selectedTags.push(match);
+                // ─── Tag typeahead ───
+                setupTypeahead(
+                    "tag-search",
+                    "tag-dropdown",
+                    TAG_NAMES,
+                    state.selectedTags,
+                    (value) => {
+                        if (!state.selectedTags.includes(value)) {
+                            state.selectedTags.push(value);
                             state.page = 0;
-                            tagSearch.value = "";
-                            renderTagChips();
                             render();
                         }
-                    }, 300);
-                });
+                    },
+                );
 
                 // ─── Delegated click for chip remove ───
                 document.addEventListener("click", (e) => {
@@ -3404,6 +3946,83 @@
                         renderTagChips();
                         render();
                     }
+                });
+
+                // ─── Generic filter toggle (labels with data-filter) ───
+                document.querySelectorAll("[data-filter]").forEach((label) => {
+                    function updateFilterUI() {
+                        const filterKey = label.dataset.filter + "Filter";
+                        let isActive;
+                        if (state[filterKey]) {
+                            isActive = state[filterKey].enabled;
+                        } else {
+                            const key = label.dataset.filter + "Enabled";
+                            isActive = state[key] !== false;
+                        }
+                        label.classList.toggle("active", isActive);
+                        label.classList.toggle("off", !isActive);
+                        const row = label.closest(".filter-row");
+                        if (row) {
+                            const inputs = row.querySelectorAll(
+                                "select, input, button, .filter-group, .tag-chips, .dual-range-wrap, .key-grid-wrap, .typeahead-wrap",
+                            );
+                            inputs.forEach((el) =>
+                                el.classList.toggle("filter-disabled", !isActive),
+                            );
+                        }
+                    }
+
+                    label.addEventListener("click", () => {
+                        const filterKey = label.dataset.filter + "Filter";
+                        if (state[filterKey]) {
+                            state[filterKey].enabled = !state[filterKey].enabled;
+                        } else {
+                            const key = label.dataset.filter + "Enabled";
+                            state[key] = state[key] === false ? true : false;
+                        }
+                        state.page = 0;
+                        updateFilterUI();
+                        render();
+                    });
+
+                    // Set initial state
+                    updateFilterUI();
+                });
+
+                // ─── Auto-enable disabled filter sections on click ───
+                document.addEventListener("click", (e) => {
+                    // Find if the clicked element is inside a disabled filter row
+                    const row = e.target.closest(".filter-row");
+                    if (!row) return;
+                    const label = row.querySelector("[data-filter]");
+                    if (!label) return;
+                    const filterKey = label.dataset.filter + "Filter";
+                    let isEnabled;
+                    if (state[filterKey]) {
+                        isEnabled = state[filterKey].enabled;
+                    } else {
+                        const key = label.dataset.filter + "Enabled";
+                        isEnabled = state[key] !== false;
+                    }
+                    if (isEnabled) return; // already enabled, nothing to do
+                    // Don't auto-enable if clicking the label itself (label handles its own toggle)
+                    if (e.target.closest("[data-filter]")) return;
+
+                    // Enable the section
+                    if (state[filterKey]) {
+                        state[filterKey].enabled = true;
+                    } else {
+                        const key = label.dataset.filter + "Enabled";
+                        state[key] = true;
+                    }
+                    state.page = 0;
+                    // Visual update without full render
+                    label.classList.add("active");
+                    label.classList.remove("off");
+                    row.querySelectorAll(
+                        "select, input, button, .filter-group, .tag-chips, .dual-range-wrap, .key-grid-wrap, .typeahead-wrap",
+                    ).forEach((el) => el.classList.remove("filter-disabled"));
+                    render();
                 });
             }
 
