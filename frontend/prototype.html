@@ -1074,8 +1074,8 @@
        FILTER PANEL
        ════════════════════════════════════════════════ -->
 
-        <div style="display: flex; gap: var(--space-4); align-items: stretch">
-            <div class="filter-panel" id="filter-panel" style="flex: 4">
+        <div style="display: grid; grid-template-columns: 4fr 1fr; gap: var(--space-4)">
+            <div class="filter-panel" id="filter-panel">
                 <div class="filter-panel-header">
                     <div class="search-wrap">
                         <i class="fas fa-search"></i>
@@ -1106,10 +1106,10 @@
                     >
                         <!-- LEFT COLUMN: Track Info -->
                         <div>
-                            <div class="filter-section-header">
-                                <i class="fas fa-music"></i> Track Info
-                            </div>
                             <div id="files-filters-left">
+                                <div class="filter-section-header">
+                                    <i class="fas fa-music"></i> File Info
+                                </div>
                                 <!-- BPM -->
                                 <div class="filter-row">
                                     <span
@@ -1316,8 +1316,7 @@
                                     >Service</span
                                 >
                                 <div
-                                    class="filter-group"
-                                    id="service-filter"
+                                    class="filter-group service-filter-group"
                                     style="flex-wrap: wrap"
                                 >
                                     <button
@@ -1351,31 +1350,6 @@
                             <div id="files-filters-right">
                                 <div class="filter-row">
                                     <span
-                                        class="filter-row-label toggleable"
-                                        data-filter="tagcat"
-                                        >Category</span
-                                    >
-                                    <div
-                                        class="filter-group"
-                                        id="tagcat-filter"
-                                        style="flex-wrap: wrap"
-                                    >
-                                        <button class="filter-btn" data-value="Phase">
-                                            Phase
-                                        </button>
-                                        <button class="filter-btn" data-value="Mood">
-                                            Mood
-                                        </button>
-                                        <button class="filter-btn" data-value="Vibe">
-                                            Vibe
-                                        </button>
-                                        <button class="filter-btn" data-value="Merkmal">
-                                            Merkmal
-                                        </button>
-                                    </div>
-                                </div>
-                                <div class="filter-row">
-                                    <span
                                         class="filter-row-label"
                                         style="
                                             font-size: 0.62rem;
@@ -1385,30 +1359,52 @@
                                         "
                                         >PMV</span
                                     >
-                                    <div class="filter-group">
+                                    <div
+                                        class="filter-group"
+                                        id="pmv-btns"
+                                        style="flex-wrap: wrap"
+                                    >
                                         <button
                                             class="filter-btn"
-                                            id="pmv-partial"
+                                            data-value="p"
+                                            title="Has Phase tags"
+                                        >
+                                            P
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            data-value="m"
+                                            title="Has Mood tags"
+                                        >
+                                            M
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            data-value="v"
+                                            title="Has Vibe tags"
+                                        >
+                                            V
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            data-value="full"
+                                            title="Has all three categories"
+                                        >
+                                            Full
+                                        </button>
+                                        <button
+                                            class="filter-btn"
                                             data-value="partial"
-                                            title="At least one tag across Phase, Mood, or Vibe"
+                                            title="Has at least one category"
                                         >
                                             Partial
                                         </button>
                                         <button
                                             class="filter-btn"
-                                            id="pmv-none"
                                             data-value="none"
-                                            title="No tags in Phase, Mood, or Vibe"
+                                            title="Has no PMV categories"
                                         >
                                             None
-                                        </button>
-                                        <button
-                                            class="filter-btn"
-                                            id="pmv-full"
-                                            data-value="full"
-                                            title="Tags in ALL of Phase, Mood, and Vibe"
-                                        >
-                                            Full
                                         </button>
                                     </div>
                                 </div>
@@ -1594,60 +1590,372 @@
                                     </div>
                                 </div>
                             </div>
-
-                            <!-- Track Filters (tracks view, hidden by default) -->
-                            <div id="tracks-filters-section" style="display: none">
-                                <div class="filter-section-header">
-                                    <i class="fas fa-cloud"></i> Track Filters
+                        </div>
+                    </div>
+                    <!-- Track Filters (tracks view, hidden by default) -->
+                    <div id="tracks-filters-section" style="display: none">
+                        <div
+                            style="
+                                display: grid;
+                                grid-template-columns: 1fr 1fr;
+                                gap: var(--space-2) var(--space-4);
+                            "
+                        >
+                            <!-- LEFT COLUMN -->
+                            <div>
+                                <div class="filter-section-header" style="margin-top: 0">
+                                    <i class="fas fa-music"></i> Track Info
                                 </div>
-                                <div id="tracks-filters-content">
-                                    <div class="filter-row">
-                                        <span
-                                            class="filter-row-label toggleable"
-                                            data-filter="tracksImport"
-                                            >Imported</span
+
+                                <!-- Duration -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="tduration"
+                                        >Duration</span
+                                    >
+                                    <div class="dual-range-wrap">
+                                        <div class="dual-range">
+                                            <div class="dual-range-track"></div>
+                                            <div
+                                                class="dual-range-fill"
+                                                id="tdur-fill"
+                                                style="left: 0%; width: 100%"
+                                            ></div>
+                                            <input
+                                                type="range"
+                                                class="dual-range-input"
+                                                id="tdur-min"
+                                                min="0"
+                                                max="600"
+                                                step="10"
+                                                value="0"
+                                            />
+                                            <input
+                                                type="range"
+                                                class="dual-range-input"
+                                                id="tdur-max"
+                                                min="0"
+                                                max="600"
+                                                step="10"
+                                                value="600"
+                                            />
+                                        </div>
+                                        <div class="dual-range-values">
+                                            <span id="tdur-min-val">0</span
+                                            ><span class="sep">──</span
+                                            ><span id="tdur-max-val">600</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- File Count -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="tfiles"
+                                        >Files</span
+                                    >
+                                    <div class="dual-range-wrap">
+                                        <div class="dual-range">
+                                            <div class="dual-range-track"></div>
+                                            <div
+                                                class="dual-range-fill"
+                                                id="tfiles-fill"
+                                                style="left: 0%; width: 100%"
+                                            ></div>
+                                            <input
+                                                type="range"
+                                                class="dual-range-input"
+                                                id="tfiles-min"
+                                                min="0"
+                                                max="5"
+                                                step="1"
+                                                value="0"
+                                            />
+                                            <input
+                                                type="range"
+                                                class="dual-range-input"
+                                                id="tfiles-max"
+                                                min="0"
+                                                max="5"
+                                                step="1"
+                                                value="5"
+                                            />
+                                        </div>
+                                        <div class="dual-range-values">
+                                            <span id="tfiles-min-val">0</span
+                                            ><span class="sep">──</span
+                                            ><span id="tfiles-max-val">5</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Services Count -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="tsvcs"
+                                        >Services</span
+                                    >
+                                    <div class="dual-range-wrap">
+                                        <div class="dual-range">
+                                            <div class="dual-range-track"></div>
+                                            <div
+                                                class="dual-range-fill"
+                                                id="tsvcs-fill"
+                                                style="left: 0%; width: 100%"
+                                            ></div>
+                                            <input
+                                                type="range"
+                                                class="dual-range-input"
+                                                id="tsvcs-min"
+                                                min="0"
+                                                max="4"
+                                                step="1"
+                                                value="0"
+                                            />
+                                            <input
+                                                type="range"
+                                                class="dual-range-input"
+                                                id="tsvcs-max"
+                                                min="0"
+                                                max="4"
+                                                step="1"
+                                                value="4"
+                                            />
+                                        </div>
+                                        <div class="dual-range-values">
+                                            <span id="tsvcs-min-val">0</span
+                                            ><span class="sep">──</span
+                                            ><span id="tsvcs-max-val">4</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- RIGHT COLUMN -->
+                            <div>
+                                <div class="filter-section-header" style="margin-top: 0">
+                                    <i class="fas fa-calendar"></i> Date
+                                </div>
+
+                                <!-- Imported -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="tracksImport"
+                                        >Imported</span
+                                    >
+                                    <div class="filter-group" id="tracks-import-cond">
+                                        <button
+                                            class="filter-btn active"
+                                            data-value="last"
                                         >
-                                        <div class="filter-group" id="tracks-import-cond">
-                                            <button
-                                                class="filter-btn active"
-                                                data-value="last"
-                                            >
-                                                last
-                                            </button>
-                                            <button class="filter-btn" data-value="more">
-                                                more
-                                            </button>
+                                            last
+                                        </button>
+                                        <button class="filter-btn" data-value="more">
+                                            more
+                                        </button>
+                                    </div>
+                                    <input
+                                        type="number"
+                                        id="tracks-import-val"
+                                        value="30"
+                                        min="1"
+                                        max="365"
+                                        style="
+                                            width: 45px;
+                                            font-size: 0.72rem;
+                                            text-align: center;
+                                            padding: 3px 4px;
+                                        "
+                                    />
+                                    <div class="filter-group" id="tracks-import-unit">
+                                        <button
+                                            class="filter-btn active"
+                                            data-value="days"
+                                        >
+                                            days
+                                        </button>
+                                        <button class="filter-btn" data-value="weeks">
+                                            wks
+                                        </button>
+                                        <button class="filter-btn" data-value="months">
+                                            mo
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div class="filter-section-header">
+                                    <i class="fas fa-tag"></i> Classification
+                                </div>
+
+                                <!-- Service -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="service"
+                                        >Service</span
+                                    >
+                                    <div
+                                        class="filter-group service-filter-group"
+                                        style="flex-wrap: wrap"
+                                    >
+                                        <button class="filter-btn" data-value="spotify">
+                                            <i class="fab fa-spotify"></i>
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            data-value="soundcloud"
+                                        >
+                                            <i class="fab fa-soundcloud"></i>
+                                        </button>
+                                        <button class="filter-btn" data-value="youtube">
+                                            <i class="fab fa-youtube"></i>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <!-- PMV -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label"
+                                        style="
+                                            font-size: 0.62rem;
+                                            color: var(--text-subtle);
+                                            font-family: var(--font-mono);
+                                            font-weight: 700;
+                                        "
+                                        >PMV</span
+                                    >
+                                    <div
+                                        class="filter-group"
+                                        id="track-pmv-btns"
+                                        style="flex-wrap: wrap"
+                                    >
+                                        <button
+                                            class="filter-btn"
+                                            data-value="p"
+                                            title="Has Phase tags"
+                                        >
+                                            P
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            data-value="m"
+                                            title="Has Mood tags"
+                                        >
+                                            M
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            data-value="v"
+                                            title="Has Vibe tags"
+                                        >
+                                            V
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            data-value="full"
+                                            title="Has all three categories"
+                                        >
+                                            Full
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            data-value="partial"
+                                            title="Has at least one category"
+                                        >
+                                            Partial
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            data-value="none"
+                                            title="Has no PMV categories"
+                                        >
+                                            None
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <!-- Tags search -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="tags"
+                                        >Tags</span
+                                    >
+                                    <div class="typeahead-wrap">
+                                        <div class="search-wrap" style="flex: 1">
+                                            <i class="fas fa-search"></i>
+                                            <input
+                                                type="text"
+                                                class="input-text input-search"
+                                                id="track-tag-search"
+                                                placeholder="Tag…"
+                                                autocomplete="off"
+                                            />
                                         </div>
-                                        <input
-                                            type="number"
-                                            id="tracks-import-val"
-                                            value="30"
-                                            min="1"
-                                            max="365"
-                                            style="
-                                                width: 45px;
-                                                font-size: 0.72rem;
-                                                text-align: center;
-                                                padding: 3px 4px;
-                                            "
-                                        />
-                                        <div class="filter-group" id="tracks-import-unit">
-                                            <button
-                                                class="filter-btn active"
-                                                data-value="days"
-                                            >
-                                                days
-                                            </button>
-                                            <button class="filter-btn" data-value="weeks">
-                                                wks
-                                            </button>
-                                            <button
-                                                class="filter-btn"
-                                                data-value="months"
-                                            >
-                                                mo
-                                            </button>
-                                        </div>
+                                        <div
+                                            class="typeahead-dropdown"
+                                            id="track-tag-dropdown"
+                                        ></div>
+                                    </div>
+                                    <div class="tag-chips" id="track-tag-chips"></div>
+                                </div>
+
+                                <div class="filter-section-header">
+                                    <i class="fas fa-check-circle"></i> Status
+                                </div>
+
+                                <!-- Has Local Files -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="thasfiles"
+                                        >Files?</span
+                                    >
+                                    <div class="filter-group">
+                                        <button
+                                            class="filter-btn"
+                                            id="thasfiles-yes"
+                                            data-value="yes"
+                                        >
+                                            Yes
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            id="thasfiles-no"
+                                            data-value="no"
+                                        >
+                                            No
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <!-- Has ISRC -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="thisrc"
+                                        >ISRC?</span
+                                    >
+                                    <div class="filter-group">
+                                        <button
+                                            class="filter-btn"
+                                            id="thisrc-yes"
+                                            data-value="yes"
+                                        >
+                                            Yes
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            id="thisrc-no"
+                                            data-value="no"
+                                        >
+                                            No
+                                        </button>
                                     </div>
                                 </div>
                             </div>
@@ -1656,10 +1964,7 @@
                 </div>
             </div>
 
-            <div
-                class="actions-panel"
-                style="flex: 1; min-width: 160px; max-width: 200px"
-            >
+            <div class="actions-panel" style="">
                 <div
                     class="actions-panel-header"
                     style="
@@ -1908,6 +2213,15 @@
             const TAG_CATEGORY_NAMES = Object.keys(TAG_CATEGORIES);
             const ALL_TAG_NAMES = Object.values(TAG_CATEGORIES).flat();
 
+            // Generate a random PMV bracket reflecting which categories have tags
+            // P = Phase, M = Mood, V = Vibe; underscore if category has no tags
+            function randomPmvBracket() {
+                const hasP = Math.random() > 0.3;
+                const hasM = Math.random() > 0.3;
+                const hasV = Math.random() > 0.3;
+                return `[${hasP ? "P" : "_"}${hasM ? "M" : "_"}${hasV ? "V" : "_"}]`;
+            }
+
             const GENRES = [
                 "House",
                 "Techno",
@@ -1982,7 +2296,6 @@
                         })(),
                         // Comment diff data
                         comment: (() => {
-                            const needsUpdate = Math.random() > 0.6;
                             const phase = [
                                 "start",
                                 "build",
@@ -1990,16 +2303,9 @@
                                 "release",
                                 "sustain",
                             ][randBetween(0, 4)];
-                            const pc = {
-                                start: "S",
-                                build: "B",
-                                peak: "P",
-                                release: "R",
-                                sustain: "S",
-                            }[phase];
-                            return `[${pc}MV] ${phase} tech house`;
+                            return `${randomPmvBracket()} ${phase} tech house`;
                         })(),
-                        commentTarget: `[${["S", "B", "P", "R", "S"][randBetween(0, 4)]}MV] ${["start", "build", "peak", "release", "sustain"][randBetween(0, 4)]} tech house`,
+                        commentTarget: `${randomPmvBracket()} ${["start", "build", "peak", "release", "sustain"][randBetween(0, 4)]} tech house`,
                         commentNeedsUpdate: Math.random() > 0.6,
                     });
                 }
@@ -2108,6 +2414,19 @@
                         artist: artist,
                         services: shuffledServices,
                         localFiles: localFiles,
+                        playlistCount: randBetween(0, 6),
+                        comment: (() => {
+                            const phase = [
+                                "start",
+                                "build",
+                                "peak",
+                                "release",
+                                "sustain",
+                            ][randBetween(0, 4)];
+                            return `${randomPmvBracket()} ${phase} tech house`;
+                        })(),
+                        commentTarget: `${randomPmvBracket()} ${["start", "build", "peak", "release", "sustain"][randBetween(0, 4)]} tech house`,
+                        commentNeedsUpdate: Math.random() > 0.6,
                         album: random(ALBUMS),
                         isrc: `GBCEL${String(randBetween(1000000, 9999999)).padStart(7, "0")}`,
                         duration: randBetween(120, 480),
@@ -2260,7 +2579,20 @@
                     id: "localFiles",
                     label: "Local Files",
                     sortable: false,
-                    defaultWidth: 24,
+                    defaultWidth: 20,
+                },
+                {
+                    id: "playlists",
+                    label: "Playlists",
+                    sortable: true,
+                    sortKey: "playlistCount",
+                    defaultWidth: 6,
+                },
+                {
+                    id: "comment",
+                    label: "Comment Diff",
+                    sortable: false,
+                    defaultWidth: 22,
                 },
                 {
                     id: "album",
@@ -2372,8 +2704,7 @@
                 ratingMax: 5,
                 selectedGenres: [],
                 selectedTags: [],
-                selectedTagCats: [],
-                pmvFilter: "", // "", "partial", "none", "full"
+                pmvFilter: "", // "", "p", "m", "v", "partial", "none", "full"
                 // Layout mode
                 layoutMode: false,
                 // Sort
@@ -2463,76 +2794,72 @@
                                 f.tags.some((t) => state.selectedTags.includes(t)),
                         );
                     }
+                }
 
-                    // Tag category filter (AND logic: must have tags in ALL selected categories)
-                    if (state.selectedTagCats.length > 0) {
-                        data = data.filter((f) => {
-                            const fileTags = f.tags || [];
-                            return state.selectedTagCats.every((cat) => {
-                                const catTags = TAG_CATEGORIES[cat] || [];
-                                return fileTags.some((t) => catTags.includes(t));
-                            });
-                        });
-                    }
+                // PMV filter (based on comment bracket: [P_V], [PMV], etc.) — applies to both views
+                function pmvFromComment(comment) {
+                    if (!comment) return { p: false, m: false, v: false };
+                    const m = comment.match(/^\[([P_MV_]+)\]/);
+                    if (!m) return { p: false, m: false, v: false };
+                    return {
+                        p: m[1].includes("P"),
+                        m: m[1].includes("M"),
+                        v: m[1].includes("V"),
+                    };
+                }
 
-                    // PMV filter
-                    if (state.pmvFilter) {
-                        data = data.filter((f) => {
-                            const fileTags = f.tags || [];
-                            const hasPhase = fileTags.some((t) =>
-                                (TAG_CATEGORIES.Phase || []).includes(t),
-                            );
-                            const hasMood = fileTags.some((t) =>
-                                (TAG_CATEGORIES.Mood || []).includes(t),
-                            );
-                            const hasVibe = fileTags.some((t) =>
-                                (TAG_CATEGORIES.Vibe || []).includes(t),
-                            );
-                            const hasAny = hasPhase || hasMood || hasVibe;
-                            const hasAll = hasPhase && hasMood && hasVibe;
-                            if (state.pmvFilter === "partial") return hasAny;
-                            if (state.pmvFilter === "none") return !hasAny;
-                            if (state.pmvFilter === "full") return hasAll;
+                if (state.pmvFilter) {
+                    data = data.filter((f) => {
+                        const comment = f.comment || f.commentTarget || "";
+                        const pmv = pmvFromComment(comment);
+                        const hasAny = pmv.p || pmv.m || pmv.v;
+                        const hasAll = pmv.p && pmv.m && pmv.v;
+                        switch (state.pmvFilter) {
+                            case "p":
+                                return pmv.p;
+                            case "m":
+                                return pmv.m;
+                            case "v":
+                                return pmv.v;
+                            case "partial":
+                                return hasAny;
+                            case "none":
+                                return !hasAny;
+                            case "full":
+                                return hasAll;
+                            default:
+                                return true;
+                        }
+                    });
+                }
+
+                // Comment status filter (multi-select)
+                if (state.commentStatuses && state.commentStatuses.length > 0) {
+                    data = data.filter((f) => {
+                        const needsUpdate = f.commentNeedsUpdate;
+                        if (state.commentStatuses.includes("needs_update") && needsUpdate)
                             return true;
-                        });
-                    }
+                        if (state.commentStatuses.includes("uptodate") && !needsUpdate)
+                            return true;
+                        return false;
+                    });
+                }
 
-                    // Comment status filter (multi-select)
-                    if (state.commentStatuses && state.commentStatuses.length > 0) {
-                        data = data.filter((f) => {
-                            const needsUpdate = f.commentNeedsUpdate;
-                            if (
-                                state.commentStatuses.includes("needs_update") &&
-                                needsUpdate
-                            )
-                                return true;
-                            if (
-                                state.commentStatuses.includes("uptodate") &&
-                                !needsUpdate
-                            )
-                                return true;
-                            return false;
-                        });
-                    }
-
-                    // Date filters with condition + unit
-                    function applyDateFilter(data, filter, field) {
-                        if (!filter.enabled) return data;
-                        const multiplier =
-                            filter.unit === "weeks"
-                                ? 7
-                                : filter.unit === "months"
-                                  ? 30
-                                  : 1;
-                        const daysMs = filter.value * multiplier * 86400000;
-                        const now = Date.now();
-                        return data.filter((f) => {
-                            const val = f[field];
-                            if (!val) return filter.condition === "more";
-                            if (filter.condition === "last") return val >= now - daysMs;
-                            return val < now - daysMs;
-                        });
-                    }
+                // Date filters with condition + unit
+                function applyDateFilter(data, filter, field) {
+                    if (!filter.enabled) return data;
+                    const multiplier =
+                        filter.unit === "weeks" ? 7 : filter.unit === "months" ? 30 : 1;
+                    const daysMs = filter.value * multiplier * 86400000;
+                    const now = Date.now();
+                    return data.filter((f) => {
+                        const val = f[field];
+                        if (!val) return filter.condition === "more";
+                        if (filter.condition === "last") return val >= now - daysMs;
+                        return val < now - daysMs;
+                    });
+                }
+                if (!isTracks) {
                     data = applyDateFilter(data, state.createdFilter, "createdAt");
                     data = applyDateFilter(data, state.modifiedFilter, "lastModified");
                     data = applyDateFilter(data, state.playedFilter, "lastPlayed");
@@ -2678,9 +3005,9 @@
                         return `<span class="text-muted text-xs">✓ up to date</span>`;
                     }
                     return `<div class="diff-box" style="font-size:0.7rem;line-height:1.3">
-    <div class="diff-line-old" style="color:var(--red);text-decoration:line-through;opacity:0.7">${f.comment || ""}</div>
-    <div class="diff-line-new" style="color:var(--green)">${f.commentTarget || ""}</div>
-</div>`;
+                <div class="diff-line-old" style="color:var(--red);text-decoration:line-through;opacity:0.7">${f.comment || ""}</div>
+                <div class="diff-line-new" style="color:var(--green)">${f.commentTarget || ""}</div>
+            </div>`;
                 },
                 actions: (f) =>
                     `<button class="btn btn-sm btn-icon" title="View"><i class="fas fa-eye"></i></button> <button class="btn btn-sm btn-icon" title="Edit"><i class="fas fa-pencil-alt"></i></button>`,
@@ -2728,6 +3055,20 @@
                         })
                         .join(" ") || '<span class="text-muted">—</span>',
                 album: (t) => t.album || '<span class="text-muted">—</span>',
+                playlists: (t) => {
+                    const count = t.playlistCount || 0;
+                    if (count === 0) return '<span class="text-muted">—</span>';
+                    return `<span class="badge font-mono" style="font-size:0.75rem">${count}</span>`;
+                },
+                comment: (t) => {
+                    if (!t.commentNeedsUpdate) {
+                        return `<span class="text-muted text-xs">✓ up to date</span>`;
+                    }
+                    return `<div class="diff-box" style="font-size:0.7rem;line-height:1.3">
+                <div class="diff-line-old" style="color:var(--red);text-decoration:line-through;opacity:0.7">${t.comment || ""}</div>
+                <div class="diff-line-new" style="color:var(--green)">${t.commentTarget || ""}</div>
+            </div>`;
+                },
                 duration: (t) =>
                     `<span class="font-mono text-xs">${formatDuration(t.duration)}</span>`,
                 isrc: (t) => `<code class="font-mono text-xs">${t.isrc}</code>`,
@@ -2774,12 +3115,12 @@
                 const rowsHtml =
                     paged.length === 0
                         ? `<tr><td colspan="${config.filter((c) => c.visible).length + 1}" class="empty-state">
-                   <div class="empty-state">
-                     <div class="icon"><i class="fas fa-search"></i></div>
-                     <h3>No results match your filters</h3>
-                     <p>Try adjusting your search or filter criteria.</p>
-                   </div>
-                 </td></tr>`
+                               <div class="empty-state">
+                                 <div class="icon"><i class="fas fa-search"></i></div>
+                                 <h3>No results match your filters</h3>
+                                 <p>Try adjusting your search or filter criteria.</p>
+                               </div>
+                             </td></tr>`
                         : paged
                               .map((f) => {
                                   const sel = state.selectedIds.includes(f.id);
@@ -2806,31 +3147,31 @@
 
                 // Stats row
                 const statsHtml = `<div class="stats-row">
-              <div class="stats-group">
-                <button class="btn btn-sm btn-icon" id="refresh-btn" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
-                <strong>${total.toLocaleString()}</strong> ${state.view === "tracks" ? "tracks" : "files"}
-                <select class="page-size-select" id="page-size-select">
-                  ${[10, 25, 50, 100].map((s) => `<option value="${s}"${s === state.pageSize ? " selected" : ""}>${s} per page</option>`).join("")}
-                </select>
-                ${state.layoutMode ? '<button class="btn btn-sm btn-primary" id="layout-mode-btn" style="margin-left:8px"><i class="fas fa-check"></i> Done</button>' : '<button class="btn btn-sm" id="layout-mode-btn" style="margin-left:8px"><i class="fas fa-arrows-alt"></i> Modify Column Layout</button>'}
-                <button class="col-config-trigger" id="col-config-btn" style="margin-left:8px"><i class="fas fa-table-cells"></i> Columns</button>
-                <span id="sel-count" style="font-size:0.75rem;color:var(--text-muted);margin-left:8px;min-width:90px;display:inline-block"></span>
-                <button class="btn btn-sm btn-icon" id="sel-all-btn" title="Select ALL files"><i class="fas fa-check"></i> All</button>
-                <button class="btn btn-sm btn-icon" id="sel-none-btn" title="Deselect all"><i class="fas fa-square"></i> None</button>
-              </div>
-            </div>`;
+                          <div class="stats-group">
+                            <button class="btn btn-sm btn-icon" id="refresh-btn" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
+                            <strong>${total.toLocaleString()}</strong> ${state.view === "tracks" ? "tracks" : "files"}
+                            <select class="page-size-select" id="page-size-select">
+                              ${[10, 25, 50, 100].map((s) => `<option value="${s}"${s === state.pageSize ? " selected" : ""}>${s} per page</option>`).join("")}
+                            </select>
+                            ${state.layoutMode ? '<button class="btn btn-sm btn-primary" id="layout-mode-btn" style="margin-left:8px"><i class="fas fa-check"></i> Done</button>' : '<button class="btn btn-sm" id="layout-mode-btn" style="margin-left:8px"><i class="fas fa-arrows-alt"></i> Modify Column Layout</button>'}
+                            <button class="col-config-trigger" id="col-config-btn" style="margin-left:8px"><i class="fas fa-table-cells"></i> Columns</button>
+                            <span id="sel-count" style="font-size:0.75rem;color:var(--text-muted);margin-left:8px;min-width:90px;display:inline-block"></span>
+                            <button class="btn btn-sm btn-icon" id="sel-all-btn" title="Select ALL files"><i class="fas fa-check"></i> All</button>
+                            <button class="btn btn-sm btn-icon" id="sel-none-btn" title="Deselect all"><i class="fas fa-square"></i> None</button>
+                          </div>
+                        </div>`;
 
                 // Pagination
                 const paginationHtml = `<div class="pagination">
-              <button class="pagination-btn" id="page-prev" ${state.page === 0 ? "disabled" : ""}><i class="fas fa-chevron-left"></i></button>
-              <span class="pagination-info">Page ${state.page + 1} of ${totalPages}</span>
-              <button class="pagination-btn" id="page-next" ${state.page >= totalPages - 1 ? "disabled" : ""}><i class="fas fa-chevron-right"></i></button>
-            </div>`;
+                          <button class="pagination-btn" id="page-prev" ${state.page === 0 ? "disabled" : ""}><i class="fas fa-chevron-left"></i></button>
+                          <span class="pagination-info">Page ${state.page + 1} of ${totalPages}</span>
+                          <button class="pagination-btn" id="page-next" ${state.page >= totalPages - 1 ? "disabled" : ""}><i class="fas fa-chevron-right"></i></button>
+                        </div>`;
 
                 const tableHtml = `<div class="table-wrap"><table class="data-table">
-              <thead><tr>${headersHtml}</tr></thead>
-              <tbody>${rowsHtml}</tbody>
-            </table></div>`;
+                          <thead><tr>${headersHtml}</tr></thead>
+                          <tbody>${rowsHtml}</tbody>
+                        </table></div>`;
 
                 return statsHtml + tableHtml + paginationHtml;
             }
@@ -3369,9 +3710,9 @@
                         const col = model.find((m) => m.id === c.id);
                         const label = col ? col.label : c.id;
                         return `<label class="col-config-item" style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:4px 0">
-                <input type="checkbox" class="col-config-checkbox" data-cid="${c.id}" ${c.visible ? "checked" : ""}>
-                <span class="col-config-label" style="flex:1;font-size:0.85rem">${label}</span>
-              </label>`;
+                            <input type="checkbox" class="col-config-checkbox" data-cid="${c.id}" ${c.visible ? "checked" : ""}>
+                            <span class="col-config-label" style="flex:1;font-size:0.85rem">${label}</span>
+                          </label>`;
                     })
                     .join("");
 
@@ -3575,7 +3916,6 @@
                     state.selectedKeys = [];
                     state.selectedGenres = [];
                     state.selectedTags = [];
-                    state.selectedTagCats = [];
                     state.pmvFilter = "";
                     state.fileTypes = [];
                     state.commentStatuses = [];
@@ -3690,10 +4030,14 @@
 
                 // Restore service filter buttons from state
                 state.selectedServices.forEach((svc) => {
-                    const btn = document.querySelector(
-                        `#service-filter .filter-btn[data-value="${svc}"]`,
-                    );
-                    if (btn) btn.classList.add("active");
+                    document
+                        .querySelectorAll(".service-filter-group")
+                        .forEach((group) => {
+                            const btn = group.querySelector(
+                                `.filter-btn[data-value="${svc}"]`,
+                            );
+                            if (btn) btn.classList.add("active");
+                        });
                 });
 
                 // Wire filter toggle
@@ -3724,9 +4068,8 @@
                 });
 
                 // ─── Multi-select service filter ───
-                document
-                    .getElementById("service-filter")
-                    .addEventListener("click", (e) => {
+                document.querySelectorAll(".service-filter-group").forEach((el) => {
+                    el.addEventListener("click", (e) => {
                         const btn = e.target.closest(".filter-btn");
                         if (!btn) return;
                         const value = btn.dataset.value;
@@ -3741,6 +4084,7 @@
                         state.page = 0;
                         render();
                     });
+                });
 
                 // Wire BPM dual range
                 const bpmMin = document.getElementById("bpm-min");
@@ -3920,24 +4264,30 @@
                     render();
                 });
 
-                // ─── Multi-select tag category filter ───
-                document
-                    .getElementById("tagcat-filter")
-                    ?.addEventListener("click", (e) => {
+                // ─── PMV filter (files + tracks view) ───
+                function wirePmvButtons(containerId) {
+                    const container = document.getElementById(containerId);
+                    if (!container) return;
+                    container.addEventListener("click", (e) => {
                         const btn = e.target.closest(".filter-btn");
                         if (!btn) return;
-                        const value = btn.dataset.value;
-                        const idx = state.selectedTagCats.indexOf(value);
-                        if (idx >= 0) {
-                            state.selectedTagCats.splice(idx, 1);
+                        const val = btn.dataset.value;
+                        if (state.pmvFilter === val) {
+                            state.pmvFilter = "";
                             btn.classList.remove("active");
                         } else {
-                            state.selectedTagCats.push(value);
+                            container
+                                .querySelectorAll(".filter-btn")
+                                .forEach((b) => b.classList.remove("active"));
+                            state.pmvFilter = val;
                             btn.classList.add("active");
                         }
                         state.page = 0;
                         render();
                     });
+                }
+                wirePmvButtons("pmv-btns");
+                wirePmvButtons("track-pmv-btns");
 
                 // ─── Date filters (generic helper for condition + unit) ───
                 function wireDateFilter(prefix, stateKey) {
@@ -4062,27 +4412,20 @@
                     });
                 }
 
-                // ─── PMV filter buttons ───
-                ["partial", "none", "full"].forEach((val) => {
-                    document
-                        .getElementById("pmv-" + val)
-                        ?.addEventListener("click", () => {
-                            const btn = document.getElementById("pmv-" + val);
-                            if (state.pmvFilter === val) {
-                                state.pmvFilter = "";
-                                btn.classList.remove("active");
-                            } else {
-                                // Deactivate all PMV buttons first
-                                document
-                                    .querySelectorAll("[id^='pmv-']")
-                                    .forEach((b) => b.classList.remove("active"));
-                                state.pmvFilter = val;
-                                btn.classList.add("active");
-                            }
+                // ─── Track view tag typeahead ───
+                setupTypeahead(
+                    "track-tag-search",
+                    "track-tag-dropdown",
+                    ALL_TAG_NAMES,
+                    state.selectedTags,
+                    (value) => {
+                        if (!state.selectedTags.includes(value)) {
+                            state.selectedTags.push(value);
                             state.page = 0;
                             render();
-                        });
-                });
+                        }
+                    },
+                );
 
                 // Initialize state
                 state.tracksImportFilter = {
