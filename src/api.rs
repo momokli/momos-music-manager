@@ -5,8 +5,8 @@
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{Multipart, Path, Query, State},
+    http::{StatusCode, header},
     response::{IntoResponse, Redirect},
     routing::{delete, get, post, put},
 };
@@ -16,8 +16,10 @@ use rspotify::model::Market;
 use rspotify::{AuthCodeSpotify, Config, Credentials, OAuth, Token, scopes};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Pool, Row, Sqlite};
+use std::io::Write;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
+use uuid::Uuid;
 
 use crate::AppState;
 use crate::config::ServiceCredentials;
@@ -285,8 +287,10 @@ impl From<ServiceTrack> for ApiServiceTrack {
             metadata_json: track.metadata_json,
             imported_at: track.imported_at,
             updated_at: track.updated_at,
+            max_added_at: None,
             local_files: vec![],
             playlist_names: vec![],
+            playlist_tags: vec![],
         }
     }
 }
@@ -336,6 +340,16 @@ pub struct ApiFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PlaylistTagInfo {
+    pub playlist_name: String,
+    pub tag_name: String,
+    pub category: String,
+    pub prefix: String,
+    pub icon: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApiServiceTrack {
     pub id: i64,
     pub service: String,
@@ -348,10 +362,16 @@ pub struct ApiServiceTrack {
     pub metadata_json: Option<String>,
     pub imported_at: i64,
     pub updated_at: i64,
+    /// Latest `added_at` across all playlist memberships (MAX of service_playlist_tracks.added_at).
+    /// Unix timestamp, None if the track appears in no playlists.
+    #[serde(default)]
+    pub max_added_at: Option<i64>,
     #[serde(default)]
     pub local_files: Vec<String>,
     #[serde(default)]
     pub playlist_names: Vec<String>,
+    #[serde(default)]
+    pub playlist_tags: Vec<PlaylistTagInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -953,6 +973,8 @@ pub fn router() -> Router<Arc<AppState>> {
             get(task_handler).delete(task_cancel_handler),
         )
         .route("/api/health", get(health_check_handler))
+        .route("/api/dump", get(dump_handler))
+        .route("/api/restore", post(restore_handler))
         .route(
             "/api/folders",
             get(folders_handler).post(add_folder_handler),
@@ -1071,6 +1093,121 @@ async fn health_check_handler(State(state): State<Arc<AppState>>) -> impl IntoRe
             })),
         )
             .into_response(),
+    }
+}
+
+/// GET /api/dump — Export database as JSON file download
+async fn dump_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    use serde_json::json;
+
+    match crate::dump::export_dump_json(&state.db).await {
+        Ok(bytes) => {
+            let filename = format!(
+                "momos-dump-{}.json",
+                chrono::Utc::now().format("%Y%m%d-%H%M%S")
+            );
+            let headers = [
+                (header::CONTENT_TYPE, "application/json"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    &format!("attachment; filename=\"{}\"", filename),
+                ),
+            ];
+            (StatusCode::OK, headers, bytes).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to export dump: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to export dump: {e}")})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /api/restore?confirm=true — Import database from uploaded JSON file
+async fn restore_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    use serde_json::json;
+
+    // Safety guard: require ?confirm=true
+    let confirmed = params.get("confirm").map(|s| s == "true").unwrap_or(false);
+    if !confirmed {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "confirm=true query param is required (this operation wipes all existing data)"
+            })),
+        )
+            .into_response();
+    }
+
+    // Extract the uploaded file from multipart
+    let mut file_bytes: Option<Vec<u8>> = None;
+    while let Some(field) = multipart.next_field().await.unwrap_or(None) {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" {
+            let data = field.bytes().await.unwrap_or_default().to_vec();
+            if !data.is_empty() {
+                file_bytes = Some(data);
+            }
+            break;
+        }
+    }
+
+    let data = match file_bytes {
+        Some(d) if !d.is_empty() => d,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "No file uploaded. Send a multipart form with a 'file' field."})),
+            )
+                .into_response();
+        }
+    };
+
+    // Write the uploaded data to a temp file
+    let temp_dir = std::env::temp_dir();
+    let temp_path = temp_dir.join(format!("momos-restore-{}.json", Uuid::new_v4()));
+    let display_path = temp_path.display().to_string();
+
+    if let Err(e) = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&temp_path)?;
+        f.write_all(&data)?;
+        Ok(())
+    })() {
+        tracing::error!("Failed to write uploaded file: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to write uploaded file: {e}")})),
+        )
+            .into_response();
+    }
+
+    // Import the dump
+    match crate::dump::import_dump(&state.db, &display_path).await {
+        Ok(()) => {
+            // Clean up temp file
+            let _ = std::fs::remove_file(&temp_path);
+            Json(json!({
+                "success": true,
+                "message": "Database restored successfully"
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_path);
+            tracing::error!("Failed to restore dump: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to restore dump: {e}")})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -1962,8 +2099,8 @@ async fn categorize_tag_handler(
                     );
                 }
 
-                // Recompute all tag similarity pairs so the new/updated embedding is included
-                let _ = compute_tag_similarities(&state.db).await;
+                // Invalidate category means cache so the next suggest recomputes
+                *state.category_means.lock().await = None;
             }
 
             // API-Tag mit Category-Info zurückgeben
@@ -2107,36 +2244,46 @@ async fn suggest_category_handler(
         .collect();
 
     // 5. Category-Embeddings berechnen (skip Setlist + Phase)
+    //     Use the in-memory cache if available
     let skip_ids: Vec<i64> = categories
         .iter()
         .filter(|c| c.is_default || Some(c.id) == phase_id)
         .map(|c| c.id)
         .collect();
 
-    let mut category_embeddings = std::collections::HashMap::new();
-    for cat in &categories {
-        if skip_ids.contains(&cat.id) {
-            continue; // Setlist + Phase überspringen für AI
-        }
-        let rows = match get_embeddings_by_category(&state.db, cat.id).await {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        if rows.is_empty() {
-            continue;
-        }
-        let mut vectors = Vec::new();
-        for (_tid, blob) in &rows {
-            if let Ok(vec) = deserialize_embedding(blob) {
-                vectors.push(vec);
+    let category_embeddings = {
+        let mut cache = state.category_means.lock().await;
+        if let Some(ref cached) = *cache {
+            cached.clone()
+        } else {
+            let mut means = std::collections::HashMap::new();
+            for cat in &categories {
+                if skip_ids.contains(&cat.id) {
+                    continue;
+                }
+                let rows = match get_embeddings_by_category(&state.db, cat.id).await {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                if rows.is_empty() {
+                    continue;
+                }
+                let mut vectors = Vec::new();
+                for (_tid, blob) in &rows {
+                    if let Ok(vec) = deserialize_embedding(blob) {
+                        vectors.push(vec);
+                    }
+                }
+                if vectors.is_empty() {
+                    continue;
+                }
+                let mean = mean_embedding(&vectors);
+                means.insert(cat.id, (cat.name.clone(), mean));
             }
+            *cache = Some(means.clone());
+            means
         }
-        if vectors.is_empty() {
-            continue;
-        }
-        let mean = mean_embedding(&vectors);
-        category_embeddings.insert(cat.id, (cat.name.clone(), mean));
-    }
+    };
 
     // 6. Similarity berechnen
     let suggestion = suggest_category(&tag_embedding, &category_embeddings, -1);
@@ -5286,6 +5433,7 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
             "duration_ms",
             "isrc",
             "imported_at",
+            "max_added_at",
         ],
         "id",
     );
@@ -5349,9 +5497,11 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         files_map.insert(track_id, file_types);
     }
 
-    // Get playlist names for these tracks
+    // Get playlist names + max added_at for these tracks
     let playlist_sql = format!(
-        "SELECT spt.track_id, COALESCE(GROUP_CONCAT(DISTINCT sp.name), '') as playlist_names
+        "SELECT spt.track_id,
+                COALESCE(GROUP_CONCAT(DISTINCT sp.name), '') as playlist_names,
+                MAX(spt.added_at) as max_added_at
          FROM service_playlist_tracks spt
          JOIN service_playlists sp ON sp.id = spt.playlist_id
          WHERE spt.track_id IN ({})
@@ -5367,6 +5517,8 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     let playlist_rows = playlist_query.fetch_all(pool).await?;
     let mut playlist_map: std::collections::HashMap<i64, Vec<String>> =
         std::collections::HashMap::new();
+    let mut max_added_at_map: std::collections::HashMap<i64, i64> =
+        std::collections::HashMap::new();
     for row in playlist_rows {
         let track_id: i64 = row.try_get("track_id")?;
         let names_str: String = row.try_get("playlist_names")?;
@@ -5376,6 +5528,48 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
             names_str.split(',').map(|s| s.trim().to_string()).collect()
         };
         playlist_map.insert(track_id, names);
+        // max_added_at may be NULL if no rows matched (shouldn't happen due to JOIN)
+        if let Ok(ts) = row.try_get::<i64, _>("max_added_at") {
+            max_added_at_map.insert(track_id, ts);
+        }
+    }
+
+    // Get playlist tag info (with category/prefix/icon) for these tracks
+    let tag_sql = format!(
+        concat!(
+            "SELECT spt.track_id, sp.name as playlist_name, t.name as tag_name, ",
+            "tc.name as category, tc.prefix, tc.icon ",
+            "FROM service_playlist_tracks spt ",
+            "JOIN service_playlists sp ON sp.id = spt.playlist_id ",
+            "LEFT JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name)) ",
+            "LEFT JOIN tag_categories tc ON tc.id = t.category_id ",
+            "WHERE spt.track_id IN ({}) AND t.id IS NOT NULL",
+        ),
+        ids_list
+    );
+
+    let mut tag_query = sqlx::query(&tag_sql);
+    for id in &track_ids {
+        tag_query = tag_query.bind(id);
+    }
+
+    let tag_rows = tag_query.fetch_all(pool).await?;
+    let mut tag_map: std::collections::HashMap<i64, Vec<PlaylistTagInfo>> =
+        std::collections::HashMap::new();
+    for row in tag_rows {
+        let track_id: i64 = row.try_get("track_id")?;
+        let playlist_name: String = row.try_get("playlist_name")?;
+        let tag_name: String = row.try_get("tag_name")?;
+        let category: String = row.try_get("category")?;
+        let prefix: String = row.try_get("prefix")?;
+        let icon: String = row.try_get("icon")?;
+        tag_map.entry(track_id).or_default().push(PlaylistTagInfo {
+            playlist_name,
+            tag_name,
+            category,
+            prefix,
+            icon,
+        });
     }
 
     Ok(tracks
@@ -5388,6 +5582,10 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
             if let Some(playlist_names) = playlist_map.remove(&api_track.id) {
                 api_track.playlist_names = playlist_names;
             }
+            if let Some(playlist_tags) = tag_map.remove(&api_track.id) {
+                api_track.playlist_tags = playlist_tags;
+            }
+            api_track.max_added_at = max_added_at_map.remove(&api_track.id);
             api_track
         })
         .collect())
@@ -5464,6 +5662,43 @@ async fn get_track_by_id(pool: &Pool<Sqlite>, id: i64) -> Result<ApiServiceTrack
     if !file_types_str.is_empty() {
         api_track.local_files = file_types_str.split(',').map(|s| s.to_string()).collect();
     }
+
+    // Get playlist tags for this track
+    let tag_sql = r"SELECT sp.name as playlist_name, t.name as tag_name,
+            tc.name as category, tc.prefix, tc.icon
+     FROM service_playlist_tracks spt
+     JOIN service_playlists sp ON sp.id = spt.playlist_id
+     LEFT JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
+     LEFT JOIN tag_categories tc ON tc.id = t.category_id
+     WHERE spt.track_id = ? AND t.id IS NOT NULL";
+
+    let tag_rows = sqlx::query(tag_sql)
+        .bind(api_track.id)
+        .fetch_all(pool)
+        .await?;
+
+    for row in tag_rows {
+        let playlist_name: String = row.try_get("playlist_name")?;
+        let tag_name: String = row.try_get("tag_name")?;
+        let category: String = row.try_get("category")?;
+        let prefix: String = row.try_get("prefix")?;
+        let icon: String = row.try_get("icon")?;
+        api_track.playlist_tags.push(PlaylistTagInfo {
+            playlist_name,
+            tag_name,
+            category,
+            prefix,
+            icon,
+        });
+    }
+
+    // Get max added_at for this track
+    let max_added_at: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(added_at) FROM service_playlist_tracks WHERE track_id = ?")
+            .bind(api_track.id)
+            .fetch_one(pool)
+            .await?;
+    api_track.max_added_at = max_added_at;
 
     Ok(api_track)
 }

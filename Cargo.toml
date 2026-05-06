@@ -16,7 +16,7 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = {version = "0.3", features = ["env-filter", "fmt"]}
 rspotify = "0.15.1"
-axum = { version = "0.8.6", features = ["ws"] }
+axum = { version = "0.8.6", features = ["ws", "multipart"] }
 askama = "0.14"
 
 tower = "0.5.2"

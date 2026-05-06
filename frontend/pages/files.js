@@ -72,6 +72,11 @@ const HASH_SCHEMA = {
   linkedOnly: { type: "boolean", default: false },
   unlinked: { type: "boolean", default: false },
   nonDefaultOnly: { type: "boolean", default: false },
+  selectedServices: { type: "array", default: [] },
+  pmvCategories: { type: "array", default: [] },
+  pmvAggregate: { type: "string", default: "" },
+  commentStatuses: { type: "array", default: [] },
+  fileTypes: { type: "array", default: [] },
 };
 
 /**
@@ -88,6 +93,11 @@ const HASH_DEFAULTS = {
   linkedOnly: false,
   unlinked: false,
   nonDefaultOnly: false,
+  selectedServices: [],
+  pmvCategories: [],
+  pmvAggregate: "",
+  commentStatuses: [],
+  fileTypes: [],
 };
 
 /* ------------------------------------------------------------------ */
@@ -95,37 +105,43 @@ const HASH_DEFAULTS = {
 /* ------------------------------------------------------------------ */
 
 const FILES_COLUMNS = [
-  { id: "title", label: "Title", sortable: true, sortKey: "title", defaultWidth: 18 },
-  { id: "artist", label: "Artist", sortable: true, sortKey: "artist", defaultWidth: 6 },
-  { id: "bpm", label: "BPM", sortable: true, sortKey: "bpm", defaultWidth: 8 },
-  { id: "key", label: "Key", sortable: true, sortKey: "key", defaultWidth: 3 },
-  { id: "linked", label: "Linked", sortable: false, defaultWidth: 2 },
-  { id: "isrc", label: "ISRC", sortable: true, sortKey: "isrc", defaultWidth: 3 },
-  { id: "plays", label: "Plays", sortable: true, sortKey: "play_count", defaultWidth: 3 },
+  { id: "title", label: "Title", sortable: true, sortKey: "title", defaultWidth: 180 },
+  { id: "artist", label: "Artist", sortable: true, sortKey: "artist", defaultWidth: 80 },
+  { id: "bpm", label: "BPM", sortable: true, sortKey: "bpm", defaultWidth: 80 },
+  { id: "key", label: "Key", sortable: true, sortKey: "key", defaultWidth: 50 },
+  { id: "linked", label: "Linked", sortable: false, defaultWidth: 50 },
+  { id: "isrc", label: "ISRC", sortable: true, sortKey: "isrc", defaultWidth: 50 },
+  {
+    id: "plays",
+    label: "Plays",
+    sortable: true,
+    sortKey: "play_count",
+    defaultWidth: 50,
+  },
   {
     id: "duration",
     label: "Duration",
     sortable: true,
     sortKey: "duration_ms",
-    defaultWidth: 5,
+    defaultWidth: 60,
   },
-  { id: "album", label: "Album", sortable: false, defaultWidth: 5 },
+  { id: "album", label: "Album", sortable: false, defaultWidth: 60 },
   {
     id: "created",
     label: "Created",
     sortable: true,
     sortKey: "created_at",
-    defaultWidth: 7,
+    defaultWidth: 80,
   },
   {
     id: "lastPlayed",
     label: "Last Played",
     sortable: true,
     sortKey: "last_played",
-    defaultWidth: 7,
+    defaultWidth: 80,
   },
-  { id: "comment", label: "Comment Diff", sortable: false, defaultWidth: 25 },
-  { id: "actions", label: "Actions", sortable: false, defaultWidth: 12 },
+  { id: "comment", label: "Comment Diff", sortable: false, defaultWidth: 250 },
+  { id: "actions", label: "Actions", sortable: false, defaultWidth: 120 },
 ];
 
 /* ------------------------------------------------------------------ */
@@ -199,6 +215,7 @@ function adaptFile(f) {
     album: f.album || null,
     duration: f.durationMs ? Math.round(f.durationMs / 1000) : 0,
     createdAt: f.createdAt || null,
+    fileType: f.fileType || null,
   };
 }
 
@@ -423,50 +440,97 @@ function renderToolbar(state) {
         </button>
       </div>
       <div class="filter-panel-body">
-        <div class="filter-panel-scroll">
-          <div class="filter-row">
-            <span class="filter-row-label">BPM</span>
-            <div class="dual-range-wrap">
-              <div class="dual-range">
-                <div class="dual-range-track">
-                  <div class="dual-range-fill" style="left:${pctMin}%;width:${pctMax - pctMin}%"></div>
+        <div class="filter-panel-scroll" style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-2) var(--space-4);">
+          <div>
+            <div class="filter-section-header" style="margin-top:0"><i class="fas fa-music"></i> File Info</div>
+            <div class="filter-row">
+              <span class="filter-row-label toggleable" data-filter="bpm">BPM</span>
+              <div class="dual-range-wrap">
+                <div class="dual-range">
+                  <div class="dual-range-track">
+                    <div class="dual-range-fill" style="left:${pctMin}%;width:${pctMax - pctMin}%"></div>
+                  </div>
+                  <input type="range" class="dual-range-input" data-sf-filter="bpmMin"
+                         min="0" max="${BPM_MAX}" step="1" value="${bpmMin}">
+                  <input type="range" class="dual-range-input" data-sf-filter="bpmMax"
+                         min="0" max="${BPM_MAX}" step="1" value="${bpmMax}">
                 </div>
-                <input type="range" class="dual-range-input" data-sf-filter="bpmMin"
-                       min="0" max="${BPM_MAX}" step="1" value="${bpmMin}">
-                <input type="range" class="dual-range-input" data-sf-filter="bpmMax"
-                       min="0" max="${BPM_MAX}" step="1" value="${bpmMax}">
-              </div>
-              <div class="dual-range-values">
-                <span class="dual-range-min-val">${bpmMin}</span>
-                <span class="sep">──</span>
-                <span class="dual-range-max-val">${bpmMax}</span>
+                <div class="dual-range-values">
+                  <span class="dual-range-min-val">${bpmMin}</span>
+                  <span class="sep">——</span>
+                  <span class="dual-range-max-val">${bpmMax}</span>
+                </div>
               </div>
             </div>
-          </div>
-          <div class="filter-row">
-            <span class="filter-row-label">Key</span>
-            <div class="key-grid-wrap">
-              <div class="key-grid" data-key-row="minor">${minorRow}
-                ${actionBtn("ALL m", "minor-all")}
-                ${actionBtn("NONE m", "minor-none")}
+            <div class="filter-row">
+              <span class="filter-row-label toggleable" data-filter="key">Key</span>
+              <div class="key-grid-wrap">
+                <div class="key-grid" data-key-row="minor">${minorRow}
+                  ${actionBtn("ALL m", "minor-all")}
+                  ${actionBtn("NONE m", "minor-none")}
+                </div>
+                <div class="key-grid" data-key-row="major">${majorRow}
+                  ${actionBtn("ALL d", "major-all")}
+                  ${actionBtn("NONE d", "major-none")}
+                </div>
               </div>
-              <div class="key-grid" data-key-row="major">${majorRow}
-                ${actionBtn("ALL d", "major-all")}
-                ${actionBtn("NONE d", "major-none")}
+            </div>
+            <div class="filter-row">
+              <span class="filter-row-label toggleable" data-filter="tag">Tags</span>
+              <div class="typeahead-wrap" style="flex:1">
+                <div class="tag-search-wrap">
+                  <i class="fas fa-tag"></i>
+                  <input type="text" class="input-text input-search" id="files-tag-search"
+                         placeholder="filter by TAG" autocomplete="off">
+                  <div class="tag-dropdown" id="files-tag-dropdown"></div>
+                </div>
+              </div>
+              <div class="tag-chips" id="files-tag-chips">${chipsHtml}</div>
+            </div>
+          </div>
+          <div>
+            <div class="filter-section-header" style="margin-top:0"><i class="fas fa-tag"></i> Classification</div>
+            <div class="filter-row">
+              <span class="filter-row-label toggleable" data-filter="service">Service</span>
+              <div class="filter-group service-filter-group">
+                <button class="filter-btn${(state.selectedServices || []).includes("spotify") ? " active" : ""}" data-value="spotify" title="Spotify"><i class="fab fa-spotify"></i></button>
+                <button class="filter-btn${(state.selectedServices || []).includes("soundcloud") ? " active" : ""}" data-value="soundcloud" title="SoundCloud"><i class="fab fa-soundcloud"></i></button>
+                <button class="filter-btn${(state.selectedServices || []).includes("youtube") ? " active" : ""}" data-value="youtube" title="YouTube"><i class="fab fa-youtube"></i></button>
+              </div>
+            </div>
+            <div class="filter-row">
+              <span class="filter-row-label toggleable" data-filter="pmv">PMV</span>
+              <div class="filter-group" id="pmv-cat-btns" style="flex-wrap:wrap">
+                <button class="filter-btn${(state.pmvCategories || []).includes("p") ? " active" : ""}" data-value="p" title="Has Phase tags">P</button>
+                <button class="filter-btn${(state.pmvCategories || []).includes("m") ? " active" : ""}" data-value="m" title="Has Mood tags">M</button>
+                <button class="filter-btn${(state.pmvCategories || []).includes("v") ? " active" : ""}" data-value="v" title="Has Vibe tags">V</button>
+              </div>
+              <span class="pmv-sep">|</span>
+              <div class="filter-group" id="pmv-agg-btns" style="flex-wrap:wrap">
+                <button class="filter-btn${state.pmvAggregate === "full" ? " active" : ""}" data-value="full" title="Has all three categories">Full</button>
+                <button class="filter-btn${state.pmvAggregate === "partial" ? " active" : ""}" data-value="partial" title="Has at least one category">Partial</button>
+                <button class="filter-btn${state.pmvAggregate === "none" ? " active" : ""}" data-value="none" title="Has no PMV categories">None</button>
+              </div>
+            </div>
+            <div class="filter-row">
+              <span class="filter-row-label toggleable" data-filter="comment">Comment</span>
+              <div class="filter-group" id="files-comment-btns">
+                <button class="filter-btn${(state.commentStatuses || []).includes("needs_update") ? " active" : ""}" data-value="needs_update">Needs Update</button>
+                <button class="filter-btn${(state.commentStatuses || []).includes("uptodate") ? " active" : ""}" data-value="uptodate">Up to Date</button>
+              </div>
+            </div>
+            <div class="filter-row">
+              <span class="filter-row-label toggleable" data-filter="fileType">Type</span>
+              <div class="filter-group" id="files-filetype-filter">
+                <button class="filter-btn${(state.fileTypes || []).includes("mp3") ? " active" : ""}" data-value="mp3">MP3</button>
+                <button class="filter-btn${(state.fileTypes || []).includes("flac") ? " active" : ""}" data-value="flac">FLAC</button>
+                <button class="filter-btn${(state.fileTypes || []).includes("stem.m4a") ? " active" : ""}" data-value="stem.m4a">Stem</button>
+                <button class="filter-btn${(state.fileTypes || []).includes("wav") ? " active" : ""}" data-value="wav">WAV</button>
               </div>
             </div>
           </div>
         </div>
-        <div class="filter-tag-area">
-          <div class="tag-search-wrap">
-            <i class="fas fa-tag"></i>
-            <input type="text" class="input-text input-search" id="files-tag-search"
-                   placeholder="filter by TAG" autocomplete="off">
-            <div class="tag-dropdown" id="files-tag-dropdown"></div>
-          </div>
-          <div class="tag-chips" id="files-tag-chips">${chipsHtml}</div>
-        </div>
-        <div class="filter-row">
+        <div class="filter-row" style="margin-top:var(--space-2)">
           <div class="filter-link-status toggle-group">
             <button class="toggle-btn ${state.linkedOnly ? "active" : ""}" id="files-filter-linked" data-link-filter="linked">
               <i class="fas fa-link"></i> Linked
@@ -483,8 +547,8 @@ function renderToolbar(state) {
             </button>
           </div>
         </div>
-      </div>
-    </div>`;
+    </div>
+</div>`;
 
   const commentWriterHtml = `
     <div class="filter-panel" style="flex:1;min-width:260px;max-width:320px;">
@@ -500,11 +564,7 @@ function renderToolbar(state) {
       </div>
     </div>`;
 
-  return `
-    <div style="display:flex;gap:var(--space-4);align-items:flex-start;">
-      <div style="flex:2;min-width:0;">${toolbarHtml}</div>
-      ${commentWriterHtml}
-    </div>`;
+  return toolbarHtml;
 }
 
 /* ------------------------------------------------------------------ */
@@ -555,6 +615,11 @@ function renderBody(data, state) {
         <strong>${data._total}</strong> files
         ${renderPageSizeSelector(state.pageSize)}
         ${renderColumnConfigTrigger()}
+        ${
+          state.layoutMode
+            ? '<button class="btn btn-sm btn-primary" id="files-layout-btn" style="margin-left:8px"><i class="fas fa-check"></i> Done</button>'
+            : '<button class="btn btn-sm" id="files-layout-btn" style="margin-left:8px"><i class="fas fa-arrows-alt"></i> Modify Column Layout</button>'
+        }
       </div>
     </div>
     <div class="table-wrap"><table class="data-table">
@@ -597,32 +662,117 @@ function buildParams(state) {
 /*  Fetch + Render cycle                                               */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Extract PMV categories present in a file's comment bracket.
+ * Returns { p: bool, m: bool, v: bool }.
+ */
+function pmvFromComment(comment) {
+  if (!comment) return { p: false, m: false, v: false };
+  const m = comment.match(/^\[([PMV_]+)\]/);
+  if (!m) return { p: false, m: false, v: false };
+  return {
+    p: m[1].includes("P"),
+    m: m[1].includes("M"),
+    v: m[1].includes("V"),
+  };
+}
+
+/**
+ * Apply client-side filters to a file list.
+ * These filters operate on fields computed only on the client
+ * (PMV categories from comment brackets, comment status, file type, services).
+ */
+function applyClientFilters(files, state) {
+  let result = files;
+
+  // Service filter (multi-select OR)
+  if (state.selectedServices && state.selectedServices.length > 0) {
+    result = result.filter(
+      (f) =>
+        f.matchedServices &&
+        f.matchedServices.some((s) => state.selectedServices.includes(s)),
+    );
+  }
+
+  // PMV filter
+  if (state.pmvCategories && state.pmvCategories.length > 0) {
+    result = result.filter((f) => {
+      const pmv = pmvFromComment(f.commentTarget || f.comment || "");
+      return state.pmvCategories.some((c) => pmv[c]);
+    });
+  } else if (state.pmvAggregate) {
+    result = result.filter((f) => {
+      const pmv = pmvFromComment(f.commentTarget || f.comment || "");
+      const hasAny = pmv.p || pmv.m || pmv.v;
+      const hasAll = pmv.p && pmv.m && pmv.v;
+      switch (state.pmvAggregate) {
+        case "full":
+          return hasAll;
+        case "partial":
+          return hasAny;
+        case "none":
+          return !hasAny;
+        default:
+          return true;
+      }
+    });
+  }
+
+  // Comment status filter
+  if (state.commentStatuses && state.commentStatuses.length > 0) {
+    result = result.filter((f) => {
+      const needsUpdate = f.needsUpdate;
+      if (state.commentStatuses.includes("needs_update") && needsUpdate) return true;
+      if (state.commentStatuses.includes("uptodate") && !needsUpdate) return true;
+      return false;
+    });
+  }
+
+  // File type filter (multi-select OR)
+  if (state.fileTypes && state.fileTypes.length > 0) {
+    result = result.filter((f) => {
+      // f.fileType comes from adaptFile — match against the extension/type
+      const ft = (f.fileType || "").toLowerCase();
+      return state.fileTypes.some((t) => ft === t.toLowerCase());
+    });
+  }
+
+  return result;
+}
+
 async function fetchAndRender(signal, state) {
   const contentEl = document.getElementById("files-content");
   if (!contentEl) return;
   contentEl.innerHTML = renderLoading("Loading files…");
 
   try {
+    // Build server-side params (search, bpm, key, tags, linked/unlinked, nonDefaultOnly)
     const params = buildParams(state);
-    const countParams = new URLSearchParams(params);
-    countParams.delete("limit");
-    countParams.delete("offset");
 
-    const [filesResp, countResp] = await Promise.all([
-      fetchJSON(`/api/files?${params}`, { signal }),
-      fetchJSON(`/api/files/count?${countParams}`, { signal }),
-    ]);
+    // Remove pagination — we paginate client-side after applying client filters
+    const fetchParams = new URLSearchParams(params);
+    fetchParams.delete("limit");
+    fetchParams.delete("offset");
+
+    const resp = await fetchJSON(`/api/files?${fetchParams}`, { signal });
     if (signal.aborted) return;
 
-    const data = {
-      _total: countResp.data,
-      files: filesResp.data.map(adaptFile),
-    };
+    let files = (resp.data || []).map(adaptFile);
 
-    if (data.files.length === 0 && data._total === 0) {
+    // Apply client-side filters (services, PMV, comment, fileType)
+    files = applyClientFilters(files, state);
+
+    // Client-side pagination
+    const total = files.length;
+    const paged = files.slice(
+      state.page * state.pageSize,
+      (state.page + 1) * state.pageSize,
+    );
+
+    if (paged.length === 0 && total === 0) {
       contentEl.innerHTML = renderEmptyBody();
     } else {
-      contentEl.innerHTML = renderBody(data, state);
+      contentEl.innerHTML = renderBody({ _total: total, files: paged }, state);
     }
 
     wireContentEvents(signal, state);
@@ -1014,6 +1164,178 @@ function wireToolbarEvents(container, signal, state) {
       execBtn.innerHTML = originalHtml;
     }
   });
+
+  // ── Multi-select service filter ──
+  const serviceGroup = container.querySelector(".service-filter-group");
+  if (serviceGroup) {
+    serviceGroup.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn");
+        if (!btn) return;
+        const value = btn.dataset.value;
+        const idx = state.selectedServices.indexOf(value);
+        if (idx >= 0) {
+          state.selectedServices.splice(idx, 1);
+        } else {
+          state.selectedServices.push(value);
+        }
+        state.page = 0;
+        updateHash("files", state, HASH_DEFAULTS);
+        fetchAndRender(signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // ── PMV category buttons (multi-select: P, M, V) ──
+  const pmvCatBtns = container.querySelector("#pmv-cat-btns");
+  if (pmvCatBtns) {
+    pmvCatBtns.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn");
+        if (!btn) return;
+        const val = btn.dataset.value;
+        const idx = state.pmvCategories.indexOf(val);
+        if (idx >= 0) {
+          state.pmvCategories.splice(idx, 1);
+        } else {
+          // Clear aggregate group when picking categories
+          state.pmvAggregate = "";
+          container
+            .querySelectorAll("#pmv-agg-btns .filter-btn")
+            .forEach((b) => b.classList.remove("active"));
+          state.pmvCategories.push(val);
+        }
+        state.page = 0;
+        updateHash("files", state, HASH_DEFAULTS);
+        fetchAndRender(signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // ── PMV aggregate buttons (single-select: Full, Partial, None) ──
+  const pmvAggBtns = container.querySelector("#pmv-agg-btns");
+  if (pmvAggBtns) {
+    pmvAggBtns.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn");
+        if (!btn) return;
+        const val = btn.dataset.value;
+        if (state.pmvAggregate === val) {
+          state.pmvAggregate = "";
+        } else {
+          // Clear category group when picking aggregate
+          state.pmvCategories = [];
+          container
+            .querySelectorAll("#pmv-cat-btns .filter-btn")
+            .forEach((b) => b.classList.remove("active"));
+          state.pmvAggregate = val;
+        }
+        state.page = 0;
+        updateHash("files", state, HASH_DEFAULTS);
+        fetchAndRender(signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // ── Multi-select comment status filter ──
+  const commentBtns = container.querySelector("#files-comment-btns");
+  if (commentBtns) {
+    commentBtns.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn");
+        if (!btn) return;
+        const value = btn.dataset.value;
+        const idx = state.commentStatuses.indexOf(value);
+        if (idx >= 0) {
+          state.commentStatuses.splice(idx, 1);
+        } else {
+          state.commentStatuses.push(value);
+        }
+        state.page = 0;
+        updateHash("files", state, HASH_DEFAULTS);
+        fetchAndRender(signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // ── Multi-select file type filter ──
+  const filetypeBtns = container.querySelector("#files-filetype-filter");
+  if (filetypeBtns) {
+    filetypeBtns.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn");
+        if (!btn) return;
+        const value = btn.dataset.value;
+        const idx = state.fileTypes.indexOf(value);
+        if (idx >= 0) {
+          state.fileTypes.splice(idx, 1);
+        } else {
+          state.fileTypes.push(value);
+        }
+        state.page = 0;
+        updateHash("files", state, HASH_DEFAULTS);
+        fetchAndRender(signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // ── Generic toggle for data-filter labels ──
+  filterPanel?.querySelectorAll("[data-filter]").forEach((label) => {
+    function updateFilterUI() {
+      const key = label.dataset.filter + "Enabled";
+      const isActive = state[key] !== false;
+      label.classList.toggle("active", isActive);
+      label.classList.toggle("off", !isActive);
+      const row = label.closest(".filter-row");
+      if (row) {
+        const inputs = row.querySelectorAll(
+          "select, input, button, .filter-group, .tag-chips, .dual-range-wrap, .key-grid-wrap, .typeahead-wrap",
+        );
+        inputs.forEach((el) => el.classList.toggle("filter-disabled", !isActive));
+      }
+    }
+    label.addEventListener("click", () => {
+      const key = label.dataset.filter + "Enabled";
+      state[key] = state[key] === false ? true : false;
+      state.page = 0;
+      updateFilterUI();
+      updateHash("files", state, HASH_DEFAULTS);
+      fetchAndRender(signal, state);
+    });
+    updateFilterUI();
+  });
+
+  // ── Auto-enable disabled filter sections on click ──
+  filterPanel?.addEventListener("click", (e) => {
+    const row = e.target.closest(".filter-row");
+    if (!row) return;
+    const label = row.querySelector("[data-filter]");
+    if (!label) return;
+    const key = label.dataset.filter + "Enabled";
+    if (state[key] !== false) return;
+    if (e.target.closest("[data-filter]")) return;
+    state[key] = true;
+    state.page = 0;
+    label.classList.add("active");
+    label.classList.remove("off");
+    row
+      .querySelectorAll(
+        "select, input, button, .filter-group, .tag-chips, .dual-range-wrap, .key-grid-wrap, .typeahead-wrap",
+      )
+      .forEach((el) => el.classList.remove("filter-disabled"));
+    updateHash("files", state, HASH_DEFAULTS);
+    fetchAndRender(signal, state);
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -1113,13 +1435,30 @@ function wireContentEvents(signal, state) {
 
   // ── Column resize, reorder, config modal ──
   const colConfig = loadColumnConfig("files", FILES_COLUMNS);
-  wireColumnResize(contentEl, "files", FILES_COLUMNS, colConfig);
-  wireColumnDragReorder(contentEl, "files", FILES_COLUMNS, colConfig, () => {
-    fetchAndRender(signal, state);
-  });
+  if (state.layoutMode) {
+    wireColumnResize(contentEl, "files", FILES_COLUMNS, colConfig);
+    wireColumnDragReorder(contentEl, "files", FILES_COLUMNS, colConfig, () => {
+      fetchAndRender(signal, state);
+    });
+  }
   wireConfigTrigger(contentEl, "files", FILES_COLUMNS, colConfig, () => {
     fetchAndRender(signal, state);
   });
+
+  // ── Layout mode toggle ──
+  const layoutBtn = contentEl.querySelector("#files-layout-btn");
+  if (layoutBtn) {
+    layoutBtn.addEventListener(
+      "click",
+      () => {
+        state.layoutMode = !state.layoutMode;
+        document.body.classList.toggle("layout-mode", state.layoutMode);
+        updateHash("files", state, HASH_DEFAULTS);
+        fetchAndRender(signal, state);
+      },
+      { signal },
+    );
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1149,15 +1488,51 @@ export async function init(container, signal, hashParams) {
     linkedOnly: parsed.linkedOnly,
     unlinked: parsed.unlinked,
     nonDefaultOnly: parsed.nonDefaultOnly,
+    selectedServices: parsed.selectedServices,
+    pmvCategories: parsed.pmvCategories,
+    pmvAggregate: parsed.pmvAggregate,
+    commentStatuses: parsed.commentStatuses,
+    fileTypes: parsed.fileTypes,
+    // Filter section enable/disable flags
+    bpmEnabled: true,
+    keyEnabled: true,
+    tagEnabled: true,
+    serviceEnabled: true,
+    pmvEnabled: true,
+    commentEnabled: true,
+    fileTypeEnabled: true,
+    layoutMode: false,
   };
+
+  // Reset layout mode on page entry
+  document.body.classList.remove("layout-mode");
 
   // Render toolbar ONCE (stable, preserves focus)
   container.innerHTML = `
-    <div id="files-toolbar">${renderToolbar(state)}</div>
-    <div id="files-content"></div>`;
+    <div style="display:flex;flex-direction:column;gap:var(--space-4);">
+      <div style="display:flex;gap:var(--space-4);align-items:flex-start;">
+        <div style="flex:4">${renderToolbar(state)}</div>
+        <div class="actions-panel" style="flex:1;min-width:180px;max-width:220px;">
+          <div class="actions-panel-header">
+            <span><i class="fas fa-bolt"></i> Actions</span>
+            <span class="actions-sel-count" id="files-sel-count">0</span>
+          </div>
+          <button class="btn btn-sm" id="files-actions-refresh"><i class="fas fa-rotate"></i> Refresh</button>
+        </div>
+      </div>
+      <div id="files-content"></div>
+    </div>`;
 
   // Wire toolbar events (runs once)
   wireToolbarEvents(container, signal, state);
+
+  // Wire actions panel
+  import("../shared/actions-panel.js").then(({ wireActionsRefresh }) => {
+    wireActionsRefresh(container, "files", () => {
+      state.page = 0;
+      return fetchAndRender(signal, state);
+    });
+  });
 
   // Initial fetch + render
   await fetchAndRender(signal, state);

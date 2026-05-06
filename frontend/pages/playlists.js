@@ -19,11 +19,7 @@ import {
   renderErrorBlock,
   showToast,
 } from "../shared/components.js";
-import {
-  renderSearchInput,
-  renderFilterGroup,
-  wireSearchFilter,
-} from "../shared/search-filter.js";
+import { renderSearchInput, wireSearchFilter } from "../shared/search-filter.js";
 import {
   getPageSize,
   renderPageSizeSelector,
@@ -42,6 +38,7 @@ import {
   wireColumnDragReorder,
   wireConfigTrigger,
 } from "../shared/column-config.js";
+import { renderActionsPanel } from "../shared/actions-panel.js";
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -77,6 +74,9 @@ const HASH_DEFAULTS = {
   page: 0,
   untaggedOnly: false,
   mismatchOnly: false,
+  selectedServices: [],
+  pmvCategories: [],
+  pmvAggregate: "",
 };
 
 const HASH_SCHEMA = {
@@ -87,6 +87,9 @@ const HASH_SCHEMA = {
   service: { type: "string", default: "all" },
   untaggedOnly: { type: "boolean", default: false },
   mismatchOnly: { type: "boolean", default: false },
+  selectedServices: { type: "array", default: [] },
+  pmvCategories: { type: "array", default: [] },
+  pmvAggregate: { type: "string", default: "" },
 };
 
 /* ------------------------------------------------------------------ */
@@ -94,41 +97,41 @@ const HASH_SCHEMA = {
 /* ------------------------------------------------------------------ */
 
 const PLAYLISTS_COLUMNS = [
-  { id: "name", label: "Name", sortable: true, sortKey: "name", defaultWidth: 18 },
+  { id: "name", label: "Name", sortable: true, sortKey: "name", defaultWidth: 180 },
   {
     id: "service",
     label: "Service",
     sortable: true,
     sortKey: "service",
-    defaultWidth: 8,
+    defaultWidth: 80,
   },
   {
     id: "tracks",
     label: "Tracks",
     sortable: true,
     sortKey: "track_count",
-    defaultWidth: 8,
+    defaultWidth: 80,
   },
   {
     id: "imported",
     label: "Imported",
     sortable: true,
     sortKey: "imported_at",
-    defaultWidth: 8,
+    defaultWidth: 80,
   },
   {
     id: "updated",
     label: "Updated",
     sortable: true,
     sortKey: "updated_at",
-    defaultWidth: 8,
+    defaultWidth: 80,
   },
-  { id: "tags", label: "Tags", sortable: false, defaultWidth: 14 },
-  { id: "deemix", label: "Deemix", sortable: false, defaultWidth: 10 },
-  { id: "sync", label: "Sync", sortable: false, defaultWidth: 8 },
-  { id: "subscribe", label: "Subscribe", sortable: false, defaultWidth: 8 },
-  { id: "view", label: "View", sortable: false, defaultWidth: 6 },
-  { id: "actions", label: "Actions", sortable: false, defaultWidth: 12 },
+  { id: "tags", label: "Tags", sortable: false, defaultWidth: 140 },
+  { id: "deemix", label: "Deemix", sortable: false, defaultWidth: 100 },
+  { id: "sync", label: "Sync", sortable: false, defaultWidth: 80 },
+  { id: "subscribe", label: "Subscribe", sortable: false, defaultWidth: 80 },
+  { id: "view", label: "View", sortable: false, defaultWidth: 60 },
+  { id: "actions", label: "Actions", sortable: false, defaultWidth: 120 },
 ];
 
 /* ------------------------------------------------------------------ */
@@ -239,11 +242,43 @@ function renderToolbar(state) {
   return `<div class="filter-panel" id="playlists-filter-panel">
     <div class="filter-panel-header">
       ${renderSearchInput("playlists", state.search)}
-      ${renderFilterGroup("service", SERVICE_OPTIONS, state.service)}
-      <button class="btn btn-primary" id="playlists-create-tag">Create Tags</button>
+      <button class="btn btn-primary" id="playlists-create-tag"><i class="fas fa-tag"></i> Create Tags</button>
       <button class="filter-panel-toggle" id="playlists-filter-toggle" title="Toggle filters">
         <i class="fas fa-chevron-up chevron"></i>
       </button>
+    </div>
+    <div class="filter-panel-body">
+      <div class="filter-panel-scroll" style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-2) var(--space-4);">
+        <div>
+          <div class="filter-section-header" style="margin-top:0"><i class="fas fa-music"></i> Playlist Info</div>
+        </div>
+        <div>
+          <div class="filter-section-header" style="margin-top:0"><i class="fas fa-tag"></i> Classification</div>
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="service">Service</span>
+            <div class="filter-group service-filter-group">
+              <button class="filter-btn${(state.selectedServices || []).includes("spotify") ? " active" : ""}" data-value="spotify"><i class="fab fa-spotify"></i></button>
+              <button class="filter-btn${(state.selectedServices || []).includes("soundcloud") ? " active" : ""}" data-value="soundcloud"><i class="fab fa-soundcloud"></i></button>
+              <button class="filter-btn${(state.selectedServices || []).includes("youtube") ? " active" : ""}" data-value="youtube"><i class="fab fa-youtube"></i></button>
+              <button class="filter-btn${(state.selectedServices || []).includes("deemix") ? " active" : ""}" data-value="deemix"><i class="fas fa-download"></i></button>
+            </div>
+          </div>
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="pmv">PMV</span>
+            <div class="filter-group" id="playlists-pmv-cat-btns" style="flex-wrap:wrap">
+              <button class="filter-btn${(state.pmvCategories || []).includes("p") ? " active" : ""}" data-value="p" title="Has Phase tags">P</button>
+              <button class="filter-btn${(state.pmvCategories || []).includes("m") ? " active" : ""}" data-value="m" title="Has Mood tags">M</button>
+              <button class="filter-btn${(state.pmvCategories || []).includes("v") ? " active" : ""}" data-value="v" title="Has Vibe tags">V</button>
+            </div>
+            <span class="pmv-sep">|</span>
+            <div class="filter-group" id="playlists-pmv-agg-btns" style="flex-wrap:wrap">
+              <button class="filter-btn${state.pmvAggregate === "full" ? " active" : ""}" data-value="full" title="Has all three categories">Full</button>
+              <button class="filter-btn${state.pmvAggregate === "partial" ? " active" : ""}" data-value="partial" title="Has at least one category">Partial</button>
+              <button class="filter-btn${state.pmvAggregate === "none" ? " active" : ""}" data-value="none" title="Has no PMV categories">None</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>`;
 }
@@ -280,9 +315,14 @@ function renderBody(data, state) {
       <span style="margin:0 6px;color:var(--text-subtle);">\u00b7</span>
       <strong>${untaggedTotal}</strong> without tags
       ${renderPageSizeSelector(state.pageSize)}
-      ${renderColumnConfigTrigger()}
-    </div>
-  </div>`;
+    ${renderColumnConfigTrigger()}
+    ${
+      state.layoutMode
+        ? '<button class="btn btn-sm btn-primary" id="playlists-layout-btn" style="margin-left:8px"><i class="fas fa-check"></i> Done</button>'
+        : '<button class="btn btn-sm" id="playlists-layout-btn" style="margin-left:8px"><i class="fas fa-arrows-alt"></i> Modify Column Layout</button>'
+    }
+  </div>
+</div>`;
 
   const tableHtml = `<div class="table-wrap"><table class="data-table" id="pl-tbl">
     <thead><tr>${theadHtml}</tr></thead>
@@ -340,6 +380,66 @@ function buildParams(state) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Client-side filter helpers                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Extract PMV categories present in a playlist's comment bracket.
+ * Returns { p: bool, m: bool, v: bool }.
+ * Playlists currently don't have comment data, so this always returns
+ * all-false until the backend provides comment/PMV info.
+ */
+function pmvFromComment(comment) {
+  if (!comment) return { p: false, m: false, v: false };
+  const m = comment.match(/^\[([PMV_]+)\]/);
+  if (!m) return { p: false, m: false, v: false };
+  return {
+    p: m[1].includes("P"),
+    m: m[1].includes("M"),
+    v: m[1].includes("V"),
+  };
+}
+
+/**
+ * Apply client-side filters to a playlist list.
+ * Filters: service (multi-select OR), PMV categories/aggregate.
+ */
+function applyClientFilters(playlists, state) {
+  let result = playlists;
+
+  // Service filter (multi-select OR)
+  if (state.selectedServices && state.selectedServices.length > 0) {
+    result = result.filter((p) => state.selectedServices.includes(p.svc));
+  }
+
+  // PMV filter — reads comment bracket if available
+  if (state.pmvCategories && state.pmvCategories.length > 0) {
+    result = result.filter((p) => {
+      const pmv = pmvFromComment(p.comment || "");
+      return state.pmvCategories.some((c) => pmv[c]);
+    });
+  } else if (state.pmvAggregate) {
+    result = result.filter((p) => {
+      const pmv = pmvFromComment(p.comment || "");
+      const hasAny = pmv.p || pmv.m || pmv.v;
+      const hasAll = pmv.p && pmv.m && pmv.v;
+      switch (state.pmvAggregate) {
+        case "full":
+          return hasAll;
+        case "partial":
+          return hasAny;
+        case "none":
+          return !hasAny;
+        default:
+          return true;
+      }
+    });
+  }
+
+  return result;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Fetch + Render cycle                                               */
 /* ------------------------------------------------------------------ */
 
@@ -359,8 +459,15 @@ async function fetchAndRender(container, signal, state) {
   setContent(renderLoading("Loading playlists…"));
 
   try {
+    // Build server-side params, then remove pagination — we paginate
+    // client-side after applying client-side filters (service, PMV).
+    const params = buildParams(state);
+    const fetchParams = new URLSearchParams(params);
+    fetchParams.delete("limit");
+    fetchParams.delete("offset");
+
     const [plResp, tagsResp, subsResp] = await Promise.all([
-      fetchJSON(`/api/playlists?${buildParams(state)}`, { signal }),
+      fetchJSON(`/api/playlists?${fetchParams}`, { signal }),
       fetchJSON("/api/tags", { signal }),
       fetchJSON("/api/playlists/subscriptions", { signal }),
     ]);
@@ -379,10 +486,9 @@ async function fetchAndRender(container, signal, state) {
       subLookup[`${s.service}:${s.playlist_id}`] = s;
     }
 
-    const rawPlaylists = plResp.data.playlists || [];
-    const total = plResp.data.total || rawPlaylists.length;
+    let rawPlaylists = plResp.data.playlists || plResp.data || [];
 
-    const adapted = rawPlaylists.map((p) => {
+    let adapted = rawPlaylists.map((p) => {
       const key = `${p.service}:${p.playlistId}`;
       return {
         id: p.id,
@@ -401,13 +507,23 @@ async function fetchAndRender(container, signal, state) {
       };
     });
 
+    // Apply client-side filters (service multi-select, PMV)
+    adapted = applyClientFilters(adapted, state);
+
+    // Client-side pagination
+    const total = adapted.length;
+    const paged = adapted.slice(
+      state.page * state.pageSize,
+      (state.page + 1) * state.pageSize,
+    );
+
     const data = {
       _total: total,
-      playlists: adapted,
+      playlists: paged,
     };
 
     // Empty state (no playlists in DB at all)
-    if (adapted.length === 0 && total === 0) {
+    if (paged.length === 0 && total === 0) {
       setContent(renderEmptyBody(state.search));
       wireContentEvents(container, signal, state);
       return;
@@ -430,6 +546,139 @@ async function fetchAndRender(container, signal, state) {
       }),
     );
   }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Toolbar event wiring (called once on init)                         */
+/* ------------------------------------------------------------------ */
+
+function wireToolbarEvents(container, signal, state) {
+  const filterPanel = container.querySelector("#playlists-filter-panel");
+
+  // Unified search + filter wiring (debounced)
+  if (filterPanel) {
+    wireSearchFilter(filterPanel, state, () => {
+      updateHash("playlists", state, HASH_DEFAULTS);
+      fetchAndRender(container, signal, state);
+    });
+  }
+
+  // Multi-select service filter
+  const svcGroup = container.querySelector(".service-filter-group");
+  if (svcGroup) {
+    svcGroup.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn");
+        if (!btn) return;
+        const v = btn.dataset.value;
+        const i = state.selectedServices.indexOf(v);
+        if (i >= 0) state.selectedServices.splice(i, 1);
+        else state.selectedServices.push(v);
+        state.page = 0;
+        updateHash("playlists", state, HASH_DEFAULTS);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // PMV category buttons (multi-select: P, M, V)
+  const pmvCat = container.querySelector("#playlists-pmv-cat-btns");
+  if (pmvCat) {
+    pmvCat.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn");
+        if (!btn) return;
+        const v = btn.dataset.value;
+        const i = state.pmvCategories.indexOf(v);
+        if (i >= 0) state.pmvCategories.splice(i, 1);
+        else {
+          state.pmvAggregate = "";
+          state.pmvCategories.push(v);
+          const aggBtns = container.querySelectorAll(
+            "#playlists-pmv-agg-btns .filter-btn",
+          );
+          for (const b of aggBtns) b.classList.remove("active");
+        }
+        state.page = 0;
+        updateHash("playlists", state, HASH_DEFAULTS);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // PMV aggregate buttons (single-select: Full, Partial, None)
+  const pmvAgg = container.querySelector("#playlists-pmv-agg-btns");
+  if (pmvAgg) {
+    pmvAgg.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn");
+        if (!btn) return;
+        const v = btn.dataset.value;
+        if (state.pmvAggregate === v) state.pmvAggregate = "";
+        else {
+          state.pmvCategories = [];
+          state.pmvAggregate = v;
+          const catBtns = container.querySelectorAll(
+            "#playlists-pmv-cat-btns .filter-btn",
+          );
+          for (const b of catBtns) b.classList.remove("active");
+        }
+        state.page = 0;
+        updateHash("playlists", state, HASH_DEFAULTS);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // Generic toggle for data-filter labels
+  const labels = filterPanel.querySelectorAll("[data-filter]");
+  for (const label of labels) {
+    const updateUI = () => {
+      const key = label.dataset.filter + "Enabled";
+      const active = state[key] !== false;
+      label.classList.toggle("active", active);
+      label.classList.toggle("off", !active);
+      const row = label.closest(".filter-row");
+      if (row) {
+        const inputs = row.querySelectorAll("select, input, button, .filter-group");
+        for (const el of inputs) el.classList.toggle("filter-disabled", !active);
+      }
+    };
+    label.addEventListener("click", () => {
+      const key = label.dataset.filter + "Enabled";
+      if (state[key] === false) state[key] = true;
+      else state[key] = false;
+      state.page = 0;
+      updateUI();
+      updateHash("playlists", state, HASH_DEFAULTS);
+      fetchAndRender(container, signal, state);
+    });
+    updateUI();
+  }
+
+  filterPanel.addEventListener("click", (e) => {
+    const row = e.target.closest(".filter-row");
+    if (!row) return;
+    const label = row.querySelector("[data-filter]");
+    if (!label) return;
+    const key = label.dataset.filter + "Enabled";
+    if (state[key] !== false) return;
+    if (e.target.closest("[data-filter]")) return;
+    state[key] = true;
+    label.classList.add("active");
+    label.classList.remove("off");
+    const inputs = row.querySelectorAll("select, input, button, .filter-group");
+    for (const el of inputs) el.classList.remove("filter-disabled");
+    state.page = 0;
+    updateHash("playlists", state, HASH_DEFAULTS);
+    fetchAndRender(container, signal, state);
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -661,15 +910,28 @@ function wireContentEvents(container, signal, state) {
 
   // Column config: resize, reorder, visibility modal
   const colConfig = loadColumnConfig("playlists", PLAYLISTS_COLUMNS);
-  wireColumnResize(container, "playlists", PLAYLISTS_COLUMNS, colConfig);
-  wireColumnDragReorder(container, "playlists", PLAYLISTS_COLUMNS, colConfig, () => {
-    updateHash("playlists", state, HASH_DEFAULTS);
-    fetchAndRender(container, signal, state);
-  });
+  if (state.layoutMode) {
+    wireColumnResize(container, "playlists", PLAYLISTS_COLUMNS, colConfig);
+    wireColumnDragReorder(container, "playlists", PLAYLISTS_COLUMNS, colConfig, () => {
+      updateHash("playlists", state, HASH_DEFAULTS);
+      fetchAndRender(container, signal, state);
+    });
+  }
   wireConfigTrigger(container, "playlists", PLAYLISTS_COLUMNS, colConfig, () => {
     updateHash("playlists", state, HASH_DEFAULTS);
     fetchAndRender(container, signal, state);
   });
+
+  // Layout mode toggle
+  const layoutBtn = container.querySelector("#playlists-layout-btn");
+  if (layoutBtn) {
+    layoutBtn.onclick = () => {
+      state.layoutMode = !state.layoutMode;
+      document.body.classList.toggle("layout-mode", state.layoutMode);
+      updateHash("playlists", state, HASH_DEFAULTS);
+      fetchAndRender(container, signal, state);
+    };
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -695,22 +957,35 @@ export async function init(container, signal, hashParams) {
     service: parsed.service,
     untaggedOnly: parsed.untaggedOnly,
     mismatchOnly: parsed.mismatchOnly,
+    selectedServices: parsed.selectedServices || [],
+    pmvCategories: parsed.pmvCategories || [],
+    pmvAggregate: parsed.pmvAggregate || "",
+    serviceEnabled: true,
+    pmvEnabled: true,
+    layoutMode: false,
   };
 
-  // Render stable toolbar + content wrapper ONCE
-  container.innerHTML = `
-    ${renderToolbar(state)}
-    <div id="playlists-content">${renderLoading("Loading playlists…")}</div>
-  `;
+  // Reset layout mode on page entry
+  document.body.classList.remove("layout-mode");
 
-  // Wire toolbar events once (search, filters, Create Tags)
-  const toolbar = container.querySelector("#playlists-filter-panel");
-  if (toolbar) {
-    wireSearchFilter(toolbar, state, () => {
-      updateHash("playlists", state, HASH_DEFAULTS);
-      fetchAndRender(container, signal, state);
-    });
-  }
+  // Render stable toolbar + actions panel + content wrapper ONCE
+  container.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:var(--space-4);">
+      <div style="display:flex;gap:var(--space-4);align-items:flex-start;">
+        <div style="flex:4;min-width:0;">${renderToolbar(state)}</div>
+        <div class="actions-panel" style="flex:1;min-width:180px;max-width:220px;">
+          <div class="actions-panel-header">
+            <span><i class="fas fa-bolt"></i> Actions</span>
+            <span class="actions-sel-count" id="playlists-sel-count">0</span>
+          </div>
+          <button class="btn btn-sm" id="playlists-actions-refresh"><i class="fas fa-rotate"></i> Refresh</button>
+        </div>
+      </div>
+      <div id="playlists-content" style="min-height:200px;">${renderLoading("Loading playlists…")}</div>
+    </div>`;
+
+  // Wire toolbar events once (search, service filter, PMV, toggles)
+  wireToolbarEvents(container, signal, state);
 
   // Wire filter panel collapse/expand toggle
   const toggleBtn = container.querySelector("#playlists-filter-toggle");
@@ -726,6 +1001,14 @@ export async function init(container, signal, hashParams) {
       );
     });
   }
+
+  // Wire actions panel refresh
+  import("../shared/actions-panel.js").then(({ wireActionsRefresh }) => {
+    wireActionsRefresh(container, "playlists", () => {
+      state.page = 0;
+      return fetchAndRender(container, signal, state);
+    });
+  });
 
   // Create Tags — creates tags for all untagged playlists in one shot
   const createTagsBtn = container.querySelector("#playlists-create-tag");

@@ -38,18 +38,21 @@ import { escapeHtml, showModal } from "./components.js";
  * @returns {Array<{id:string, visible:boolean, width:number}>}
  */
 export function loadColumnConfig(pageId, columns) {
-  const key = `columnConfig_${pageId}`;
+  const key = `columnConfig_v2_${pageId}`;
   const saved = localStorage.getItem(key);
   if (saved) {
     try {
       const parsed = JSON.parse(saved);
-      // Validate: ensure all model columns exist in config, add missing ones
+      // Preserve the saved ORDER — iterate parsed, match against model
       const existingIds = new Set(parsed.map((c) => c.id));
-      const merged = columns.map((col) => {
-        const existing = parsed.find((p) => p.id === col.id);
-        return existing
-          ? { id: col.id, visible: existing.visible, width: existing.width }
-          : { id: col.id, visible: true, width: col.defaultWidth };
+      const merged = parsed.map((p) => {
+        return { id: p.id, visible: p.visible, width: p.width };
+      });
+      // Add any model columns not in the saved config (newly added columns)
+      columns.forEach((col) => {
+        if (!existingIds.has(col.id)) {
+          merged.push({ id: col.id, visible: true, width: col.defaultWidth });
+        }
       });
       return merged;
     } catch {
@@ -69,7 +72,7 @@ export function loadColumnConfig(pageId, columns) {
  * @param {Array} config
  */
 export function saveColumnConfig(pageId, config) {
-  localStorage.setItem(`columnConfig_${pageId}`, JSON.stringify(config));
+  localStorage.setItem(`columnConfig_v2_${pageId}`, JSON.stringify(config));
 }
 
 /**
@@ -120,12 +123,12 @@ export function renderColumnHeaders(config, columns, state, sortableTh) {
       if (!model) return "";
       if (model.sortable) {
         const th = sortableTh(model.label, model.sortKey, state, {
-          style: `width:${c.width}%`,
+          style: `width:${c.width}px;min-width:30px;max-width:${c.width}px`,
         });
         // Inject resize handle before closing </th>
         return th.replace("</th>", `${addResizeHandle()}</th>`);
       }
-      return `<th style="width:${c.width}%">${escapeHtml(model.label)}${addResizeHandle()}</th>`;
+      return `<th style="width:${c.width}px;min-width:30px;max-width:${c.width}px">${escapeHtml(model.label)}${addResizeHandle()}</th>`;
     })
     .join("");
 }
@@ -148,7 +151,7 @@ export function renderColumnCells(config, columns, cellRenderers, row) {
       const renderer = cellRenderers[c.id];
       if (!renderer) return "<td></td>";
       const content = renderer(row);
-      return `<td style="width:${c.width}%">${content}</td>`;
+      return `<td style="width:${c.width}px;min-width:30px;max-width:${c.width}px">${content}</td>`;
     })
     .join("");
 }
@@ -193,30 +196,30 @@ export function wireColumnResize(container, pageId, columns, config) {
   document.addEventListener("mousemove", (e) => {
     if (!activeHandle || !thEl) return;
     const diff = e.clientX - startX;
-    let newWidth = startWidth + diff;
-    newWidth = Math.max(30, Math.min(500, newWidth));
 
-    // Convert to percentage of parent table
-    const table = thEl.closest(".data-table");
-    if (!table) return;
-    const tableWidth = table.offsetWidth;
-    if (tableWidth === 0) return;
-    const pct = Math.round((newWidth / tableWidth) * 100);
-
-    // Find the config entry and update
     const colId = findColumnIdFromTh(thEl, columns);
     if (colId) {
       const entry = config.find((c) => c.id === colId);
       if (entry) {
-        entry.width = Math.max(1, Math.min(100, pct));
-        // Update style directly for smooth resize
-        thEl.style.width = `${pct}%`;
-        // Also update all cells in this column
+        // Pixel-based sizing — no feedback loop from % recalc
+        const newWidth = Math.max(30, Math.min(500, startWidth + diff));
+        entry.width = Math.max(30, Math.min(500, newWidth));
+        const px = entry.width + "px";
+        thEl.style.minWidth = px;
+        thEl.style.maxWidth = px;
+        thEl.style.width = px;
         const colIndex = Array.from(thEl.parentElement.children).indexOf(thEl);
-        table.querySelectorAll("tbody tr").forEach((tr) => {
-          const cell = tr.children[colIndex];
-          if (cell) cell.style.width = `${pct}%`;
-        });
+        const tbl = thEl.closest(".data-table");
+        if (tbl) {
+          tbl.querySelectorAll("tbody tr").forEach((tr) => {
+            const cell = tr.children[colIndex];
+            if (cell) {
+              cell.style.minWidth = px;
+              cell.style.maxWidth = px;
+              cell.style.width = px;
+            }
+          });
+        }
       }
     }
   });
@@ -265,11 +268,19 @@ function findColumnIdFromTh(thEl, columns) {
  * @param {Function} onSave — called after reorder + save
  */
 export function wireColumnDragReorder(container, pageId, columns, config, onSave) {
+  // Only active when body has .layout-mode
+  if (!document.body.classList.contains("layout-mode")) return;
+
   const table = container.querySelector(".data-table");
   if (!table) return;
 
   const thead = table.querySelector("thead");
   if (!thead) return;
+
+  // Make headers draggable
+  thead.querySelectorAll("th").forEach((th) => {
+    th.setAttribute("draggable", "true");
+  });
 
   let dragTh = null;
   let dragConfigIndex = -1;

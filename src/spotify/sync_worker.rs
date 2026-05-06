@@ -12,7 +12,7 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::db::{add_track_to_playlist, upsert_service_playlist, upsert_service_track};
+use crate::db::{upsert_service_playlist, upsert_service_track};
 use crate::spotify::client::SpotifyClient;
 use crate::spotify::models::{PlaylistInfo, TrackInfo};
 use crate::spotify::replay::{self, CacheMode, CachedTrackEntry};
@@ -352,7 +352,12 @@ impl SpotifySyncWorker {
                 );
 
                 if let Err(e) = self
-                    .store_track_core(&entry.track, playlist_id, entry.position)
+                    .store_track_core_with_added_at(
+                        &entry.track,
+                        playlist_id,
+                        entry.position,
+                        entry.added_at,
+                    )
                     .await
                 {
                     error!(
@@ -450,9 +455,17 @@ impl SpotifySyncWorker {
                             track_count, track.name, playlist_name
                         );
 
+                        // Extract added_at from Spotify's playlist item
+                        let added_at: Option<i64> = item.added_at.map(|dt| dt.timestamp());
+
                         // Store track and add to playlist
                         if let Err(e) = self
-                            .store_track_and_add_to_playlist(&track, playlist_id, position as i64)
+                            .store_track_and_add_to_playlist_with_added_at(
+                                &track,
+                                playlist_id,
+                                position as i64,
+                                added_at,
+                            )
                             .await
                         {
                             error!("Failed to store track {}: {:?}", track.name, e);
@@ -464,6 +477,7 @@ impl SpotifySyncWorker {
                             cached_tracks.push(CachedTrackEntry {
                                 track: TrackInfo::from(&track),
                                 position: position as i64,
+                                added_at,
                             });
                         }
                     }
@@ -794,6 +808,18 @@ impl SpotifySyncWorker {
         playlist_id: &str,
         position: i64,
     ) -> Result<()> {
+        self.store_track_core_with_added_at(info, playlist_id, position, None)
+            .await
+    }
+
+    /// Store a track with an explicit `added_at` timestamp.
+    async fn store_track_core_with_added_at(
+        &self,
+        info: &TrackInfo,
+        playlist_id: &str,
+        position: i64,
+        added_at: Option<i64>,
+    ) -> Result<()> {
         // Skip if no track ID
         if info.id.is_empty() {
             warn!("Track has no ID, skipping: {}", info.name);
@@ -829,9 +855,15 @@ impl SpotifySyncWorker {
         .context("Failed to find playlist in database")?;
 
         // Add track to playlist
-        add_track_to_playlist(&mut tx, db_playlist.0, db_track.id, Some(position as i32))
-            .await
-            .context("Failed to add track to playlist")?;
+        crate::db::add_track_to_playlist_with_added_at(
+            &mut tx,
+            db_playlist.0,
+            db_track.id,
+            Some(position as i32),
+            added_at,
+        )
+        .await
+        .context("Failed to add track to playlist")?;
 
         tx.commit().await?;
 
@@ -845,7 +877,20 @@ impl SpotifySyncWorker {
         playlist_id: &str,
         position: i64,
     ) -> Result<()> {
+        self.store_track_and_add_to_playlist_with_added_at(track, playlist_id, position, None)
+            .await
+    }
+
+    /// Store a track with an explicit `added_at` timestamp.
+    async fn store_track_and_add_to_playlist_with_added_at(
+        &self,
+        track: &FullTrack,
+        playlist_id: &str,
+        position: i64,
+        added_at: Option<i64>,
+    ) -> Result<()> {
         let info = TrackInfo::from(track);
-        self.store_track_core(&info, playlist_id, position).await
+        self.store_track_core_with_added_at(&info, playlist_id, position, added_at)
+            .await
     }
 }

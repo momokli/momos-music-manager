@@ -264,10 +264,16 @@ async fn poll_subscribed_playlist(
         }
 
         // -- New track – store and link ------------------------------------
-        let db_track_id =
-            store_track_and_add_to_playlist_simple(db, &track, &subscription.playlist_id, position)
-                .await
-                .context("Failed to store track and add to playlist")?;
+        let added_at: Option<i64> = item.added_at.map(|dt| dt.timestamp());
+        let db_track_id = store_track_and_add_to_playlist_simple_with_added_at(
+            db,
+            &track,
+            &subscription.playlist_id,
+            position,
+            added_at,
+        )
+        .await
+        .context("Failed to store track and add to playlist")?;
 
         // Build artist string for logging.
         let artists: String = track
@@ -319,11 +325,24 @@ async fn poll_subscribed_playlist(
 /// 5. Links the track to the playlist via `service_playlist_tracks`.
 /// 6. Commits the transaction.
 /// 7. Returns the DB-internal `id` of the track.
+#[allow(dead_code)]
 async fn store_track_and_add_to_playlist_simple(
     db: &Pool<Sqlite>,
     track: &rspotify::model::track::FullTrack,
     playlist_id: &str,
     position: i64,
+) -> Result<i64> {
+    store_track_and_add_to_playlist_simple_with_added_at(db, track, playlist_id, position, None)
+        .await
+}
+
+/// Same as `store_track_and_add_to_playlist_simple` but with an explicit `added_at` timestamp.
+async fn store_track_and_add_to_playlist_simple_with_added_at(
+    db: &Pool<Sqlite>,
+    track: &rspotify::model::track::FullTrack,
+    playlist_id: &str,
+    position: i64,
+    added_at: Option<i64>,
 ) -> Result<i64> {
     let track_info = TrackInfo::from(track);
     let metadata_json =
@@ -356,9 +375,15 @@ async fn store_track_and_add_to_playlist_simple(
     .context("Failed to find playlist in database")?;
 
     // Link the track to the playlist.
-    db::add_track_to_playlist(&mut tx, db_playlist.0, db_track.id, Some(position as i32))
-        .await
-        .context("Failed to add track to playlist")?;
+    db::add_track_to_playlist_with_added_at(
+        &mut tx,
+        db_playlist.0,
+        db_track.id,
+        Some(position as i32),
+        added_at,
+    )
+    .await
+    .context("Failed to add track to playlist")?;
 
     tx.commit().await.context("Failed to commit transaction")?;
 

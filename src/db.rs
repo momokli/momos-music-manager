@@ -1752,8 +1752,20 @@ pub async fn add_track_to_playlist(
     track_id: i64,
     position: Option<i32>,
 ) -> Result<()> {
+    add_track_to_playlist_with_added_at(conn, playlist_id, track_id, position, None).await
+}
+
+/// Add a track to a playlist with an explicit `added_at` timestamp.
+/// When `added_at` is `None`, defaults to the current time.
+pub async fn add_track_to_playlist_with_added_at(
+    conn: &mut SqliteConnection,
+    playlist_id: i64,
+    track_id: i64,
+    position: Option<i32>,
+    added_at: Option<i64>,
+) -> Result<()> {
     let pos = position.unwrap_or(0);
-    let added_at = chrono::Utc::now().timestamp();
+    let added_at = added_at.unwrap_or_else(|| chrono::Utc::now().timestamp());
 
     sqlx::query(
         r#"

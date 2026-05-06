@@ -391,6 +391,30 @@ pub async fn export_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Export all database tables to a JSON byte vector (in-memory, no file I/O).
+/// Useful for the API endpoint that streams the dump as a download.
+pub async fn export_dump_json(pool: &Pool<Sqlite>) -> Result<Vec<u8>> {
+    let dumped_at = chrono::Utc::now().timestamp();
+
+    let dump = DataDump {
+        tag_categories: export_tag_categories(pool).await?,
+        tags: export_tags(pool).await?,
+        tag_embeddings: export_tag_embeddings(pool).await?,
+        tag_energy_levels: export_tag_energy_levels(pool).await?,
+        folders: export_folders(pool).await?,
+        service_config: export_service_config(pool).await?,
+        service_tracks: export_service_tracks(pool).await?,
+        service_playlists: export_service_playlists(pool).await?,
+        service_playlist_tracks: export_service_playlist_tracks(pool).await?,
+        files: export_files(pool).await?,
+        playlist_subscriptions: export_playlist_subscriptions(pool).await?,
+        deemix_downloads: export_deemix_downloads(pool).await?,
+        dumped_at,
+    };
+
+    serde_json::to_vec_pretty(&dump).context("Failed to serialize dump")
+}
+
 async fn export_tag_categories(pool: &Pool<Sqlite>) -> Result<Vec<DumpTagCategory>> {
     let rows = sqlx::query("SELECT * FROM tag_categories ORDER BY id")
         .fetch_all(pool)

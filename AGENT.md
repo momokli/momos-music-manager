@@ -357,4 +357,224 @@ Apply same pattern to folders, tasks, deemix-queue, services pages following the
 
 Phases 2–4 can run in parallel after Phase 1 completes (disjoint write scopes).
 
-### 0.1 — Tracks search ✅ (resolved)
+---
+
+## Phase 8: Filter UI Parity + Modifier Column Layout
+
+**Context**: Files and Tracks now have a 2-column filter box (File Info | Classification) with
+section headers, toggleable rows, PMV filter, and service icons. Playlists and Tags still use
+a flat toolbar with inline filter buttons right of the search bar. All pages are also missing
+the \"Modify Column Layout\" button from the prototype.
+
+### 8.1 — Playlists filter box retrofit
+
+**File**: `frontend/pages/playlists.js`
+
+Replace the current flat toolbar header with a collapsible filter-panel (same structure as tracks).
+Inside the filter-panel-body, add a 2-column grid:
+
+- **Left**: Search placeholder / no playlists-specific numeric filters needed
+- **Right**: Classification — Service icon buttons + PMV filter row (P/M/V | Full/Partial/None)
+
+**Tasks**:
+
+- [ ] Wrap `renderToolbar` in `.filter-panel` with header (search + toggle) + body (2-col grid)
+- [ ] Add service filter icon buttons (spotify/soundcloud/youtube)
+- [ ] Add PMV filter row with multi-select cats + single-select agg
+- [ ] Keep Create Tags button
+- [ ] Add toggleable `data-filter` labels with generic toggle handler
+
+### 8.2 — Tags filter box retrofit
+
+**File**: `frontend/pages/tags.js`
+
+Same pattern — replace flat toolbar with filter-panel + 2-col grid.
+
+- [ ] Left column: Category filter (as dropdown or filter-group buttons)
+- [ ] Right column: PMV could be added if tags have comment data; otherwise just Search placeholder
+- [ ] Keep New Tag button
+- [ ] Add toggleable label for category filter
+
+### 8.3 — Modifier Column Layout button
+
+By default, all CRUD pages display the table in normal read mode. The prototype has a
+\"Modify Column Layout\" button in the stats row that toggles `state.layoutMode`. When active:
+
+- Column headers become draggable (reorder)
+- Column resize handles appear (drag to resize)
+- A \"Done\" button replaces it to exit layout mode
+
+**Tasks**:
+
+- [ ] Add `layoutMode` to state in all CRUD pages (files, tracks, playlists, tags)
+- [ ] Add the toggle button HTML in each page's `renderBody` / stats row
+- [ ] Wire the toggle: `state.layoutMode = !state.layoutMode` → re-render
+- [ ] CSS: `.layout-mode` class on `<body>` shows resize handles, enables drag
+- [ ] `wireColumnResize` and `wireColumnDragReorder` already exist in `column-config.js`
+
+The shared modules (`column-config.js`) already have all the wiring functions — just need
+the toggle button added to each page's body render and the state flag.
+
+### 8.4 — Implementation Order
+
+| Sub | What                 | Pages                       | Effort |
+| --- | -------------------- | --------------------------- | ------ |
+| 8.1 | Playlists filter box | playlists.js                | Medium |
+| 8.2 | Tags filter box      | tags.js                     | Small  |
+| 8.3 | Column layout button | files/tracks/playlists/tags | Small  |
+
+8.1 and 8.2 can run in parallel (disjoint files). 8.3 can also run in parallel
+with both (different sections of the same files, but non-overlapping edits).
+
+---
+
+## Phase 8.5: Column Resize & Drag Bugfix
+
+**Context**: `shared/column-config.js` uses percentage-based sizing (3-60%), but the
+prototype uses pixel-based sizing (30-500px). Percentage causes a feedback loop —
+changing a column's % width changes the table's total width, which changes the other
+columns' % calculations mid-drag. Plus min/max constraints aren't set on cells.
+
+**Fix**: Switch to pixel-based sizing like the prototype `wireResize()`:
+
+- `renderColumnHeaders()` — render `width:XXpx;min-width:30px;max-width:XXpx`
+- `wireColumnResize()` — pixel math, clamping 30-500px, set minWidth/maxWidth/width on th AND td
+- `loadColumnConfig()` — use new localStorage key `columnConfig_v2_{page}` to avoid old % data
+- `defaultWidth` values — multiply by 10 to convert % to px (e.g. 18% → 180px)
+
+**Files**: `frontend/shared/column-config.js`, `frontend/style.css`
+
+**Implementation Order**:
+| Sub | What | Effort |
+|------|------------------------------------------|--------|
+| 8.5a | Rewrite wireColumnResize to pixel space | Small |
+| 8.5b | Rewrite renderColumnHeaders to pixel | Small |
+| 8.5c | localStorage key migration (v2 prefix) | Small |
+| 8.5d | Scale defaultWidth values for pixel | Small |
+
+---
+
+## Phase 9: Import/Export UI (GUI Wrapper for CLI dump/restore)
+
+**Context**: The CLI already has `cargo run -- dump` and `cargo run -- restore`
+that serialize/deserialize the entire DB to/from a JSON file. This phase adds
+a web UI page (`#data`) that wraps these operations — download a dump as JSON,
+or upload a JSON file to restore.
+
+### 9.1 — Backend: API Endpoints
+
+**File**: `src/api.rs` + new handler functions
+
+Two new endpoints, reusing the existing `dump.rs` functions directly:
+
+#### `GET /api/dump` — Export database as JSON download
+
+- Calls `crate::dump::export_dump(pool, &temp_path)` to a temp file
+- Returns the JSON with `Content-Type: application/json` and
+  `Content-Disposition: attachment; filename="momos-dump-{timestamp}.json"`
+- Cleans up the temp file after streaming (or use an in-memory approach —
+  serialize directly to a `Vec<u8>` and return as response body)
+- **Prefer in-memory**: Skip the temp file entirely — build the `DataDump`,
+  serialize to `Vec<u8>` with `serde_json::to_vec_pretty`, return as
+  `axum::response::Response` with proper headers
+
+#### `POST /api/restore` — Import database from uploaded JSON
+
+- Accepts `multipart/form-data` with a single file field (e.g. `"file"`)
+- Reads the uploaded bytes into a temp file
+- Calls `crate::dump::import_dump(pool, &temp_path)`
+- Returns `{ success: true, rows_imported: N, tables: { ... } }`
+- **⚠️ Destructive**: This wipes all existing data. Add a `?confirm=true`
+  query param as a safety guard — reject with 400 if not set.
+- Handler must extract `axum::extract::Multipart` and write the uploaded
+  file to a temp path (e.g. `std::env::temp_dir() / "momos-restore-{uuid}.json"`)
+
+**Dependencies**: `axum` already has multipart support via `axum-extra` or
+we can use `axum::extract::Multipart` (built-in). Add `uuid` crate for temp
+file names if not already present.
+
+**Router additions** (in `api::router()`):
+
+```rust
+.route("/api/dump", get(dump_handler))
+.route("/api/restore", post(restore_handler))
+```
+
+### 9.2 — Frontend: New `#data` Page
+
+**File**: `frontend/pages/data.js` (new)
+
+Follows the canonical page pattern from Phase 1 but simpler — no table, no
+pagination. Just two sections:
+
+#### Export Section
+
+- Card with description: "Download a complete backup of your music manager
+  database as a JSON file."
+- "Export Database" button → `fetchJSON('/api/dump')` then trigger browser
+  download (create blob URL + click `<a download>`)
+- Show timestamp of last export (from the fetched JSON metadata)
+- Loading spinner while fetching
+
+#### Import Section
+
+- Card with description + **warning** banner: "⚠️ This will replace ALL
+  existing data. Make sure you have a backup."
+- File input (styled drop zone or simple `<input type="file" accept=".json">`)
+- After file selection: show a preview card with:
+  - File name + size
+  - Summary of contents (parse JSON client-side, show row counts per table)
+  - `dumped_at` timestamp from the JSON
+- "Restore from Backup" button (red/destructive styling):
+  - Sends `POST /api/restore?confirm=true` with the file as multipart
+  - Shows progress/loading state
+  - On success: toast + redirect to dashboard
+  - On error: show error message
+
+#### State
+
+```js
+let state = {
+  exportLoading: false,
+  importFile: null, // File object from input
+  importPreview: null, // parsed JSON summary
+  importLoading: false,
+};
+```
+
+#### Page Registration
+
+- Add `"data": "data"` to `PAGE_MAP` in `frontend/app.js`
+- Add nav entry in `frontend/shared/nav.js` under TOOLS_ITEMS:
+  `{ id: "data", label: "Import/Export", icon: "fa-database" }`
+
+### 9.3 — UX Details
+
+- Export button should trigger a browser download (not open in tab)
+- Import should have a two-step flow: select file → review → confirm
+- After successful import, the page should redirect to `#dashboard` after 2s
+  (since all data changed, the current page state is stale)
+- Import preview parses the JSON client-side to show row counts — this is
+  read-only and just for user confidence before hitting the destructive button
+- Empty state: if no file selected yet, the import card just shows the
+  drop zone / file input
+
+### 9.4 — Security Considerations
+
+- The restore endpoint is **destructive** — it wipes the entire DB
+- Frontend should make the danger clear (red button, warning text, confirm step)
+- Backend requires `?confirm=true` as a basic guard against accidental calls
+- No auth yet (single-user app), so this is acceptable for now
+
+### 9.5 — Implementation Order
+
+| Step | What              | Where               | Effort |
+| ---- | ----------------- | ------------------- | ------ |
+| 9.1a | GET /api/dump     | api.rs              | Small  |
+| 9.1b | POST /api/restore | api.rs              | Medium |
+| 9.2a | Page module       | pages/data.js (new) | Medium |
+| 9.2b | Router + nav reg  | app.js + nav.js     | Small  |
+| 9.3  | Polish + test     | —                   | Small  |
+
+Backend (9.1a + 9.1b) and frontend (9.2a) can run in parallel — only the
+registration step (9.2b) depends on the page module existing.

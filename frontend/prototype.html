@@ -197,6 +197,13 @@
                 opacity: 0.55;
                 color: var(--text-muted);
             }
+            .pmv-sep {
+                color: var(--border);
+                font-size: 0.85rem;
+                font-weight: 300;
+                margin: 0 2px;
+                user-select: none;
+            }
             /* ─── Filter section headers ─── */
             .filter-section-header {
                 display: flex;
@@ -1062,6 +1069,7 @@
                 <div class="filter-group" id="view-switcher" style="margin-left: 0">
                     <button class="filter-btn active" data-view="files">Files</button>
                     <button class="filter-btn" data-view="tracks">Tracks</button>
+                    <button class="filter-btn" data-view="playlists">Playlists</button>
                 </div>
                 <span class="text-subtle" style="font-size: 0.75rem" id="subtitle-text"
                     >prototype</span
@@ -1095,9 +1103,10 @@
                         <i class="fas fa-chevron-up chevron"></i>
                     </button>
                 </div>
-                <div class="filter-panel-body">
+                <div class="filter-panel-body" id="filter-panel-body">
                     <!-- Two-column grid -->
                     <div
+                        id="files-filter-grid"
                         style="
                             display: grid;
                             grid-template-columns: 1fr 1fr;
@@ -1107,7 +1116,7 @@
                         <!-- LEFT COLUMN: Track Info -->
                         <div>
                             <div id="files-filters-left">
-                                <div class="filter-section-header">
+                                <div class="filter-section-header" style="margin-top: 0">
                                     <i class="fas fa-music"></i> File Info
                                 </div>
                                 <!-- BPM -->
@@ -1303,65 +1312,56 @@
                             </div>
                         </div>
 
-                        <!-- RIGHT COLUMN: Service, Classification, Date -->
+                        <!-- RIGHT COLUMN: Classification, Date -->
                         <div id="files-right-content">
-                            <!-- SERVICE -->
-                            <div class="filter-section-header" style="margin-top: 0">
-                                <i class="fas fa-link"></i> Service
-                            </div>
-                            <div class="filter-row">
-                                <span
-                                    class="filter-row-label toggleable"
-                                    data-filter="service"
-                                    >Service</span
-                                >
-                                <div
-                                    class="filter-group service-filter-group"
-                                    style="flex-wrap: wrap"
-                                >
-                                    <button
-                                        class="filter-btn"
-                                        data-value="spotify"
-                                        title="Spotify"
-                                    >
-                                        <i class="fab fa-spotify"></i>
-                                    </button>
-                                    <button
-                                        class="filter-btn"
-                                        data-value="soundcloud"
-                                        title="SoundCloud"
-                                    >
-                                        <i class="fab fa-soundcloud"></i>
-                                    </button>
-                                    <button
-                                        class="filter-btn"
-                                        data-value="youtube"
-                                        title="YouTube"
-                                    >
-                                        <i class="fab fa-youtube"></i>
-                                    </button>
-                                </div>
-                            </div>
-
                             <!-- CLASSIFICATION -->
-                            <div class="filter-section-header">
+                            <div class="filter-section-header" style="margin-top: 0">
                                 <i class="fas fa-tag"></i> Classification
                             </div>
                             <div id="files-filters-right">
+                                <!-- Service -->
                                 <div class="filter-row">
                                     <span
-                                        class="filter-row-label"
-                                        style="
-                                            font-size: 0.62rem;
-                                            color: var(--text-subtle);
-                                            font-family: var(--font-mono);
-                                            font-weight: 700;
-                                        "
+                                        class="filter-row-label toggleable"
+                                        data-filter="service"
+                                        >Service</span
+                                    >
+                                    <div
+                                        class="filter-group service-filter-group"
+                                        style="flex-wrap: wrap"
+                                    >
+                                        <button
+                                            class="filter-btn"
+                                            data-value="spotify"
+                                            title="Spotify"
+                                        >
+                                            <i class="fab fa-spotify"></i>
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            data-value="soundcloud"
+                                            title="SoundCloud"
+                                        >
+                                            <i class="fab fa-soundcloud"></i>
+                                        </button>
+                                        <button
+                                            class="filter-btn"
+                                            data-value="youtube"
+                                            title="YouTube"
+                                        >
+                                            <i class="fab fa-youtube"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="pmv"
                                         >PMV</span
                                     >
                                     <div
                                         class="filter-group"
-                                        id="pmv-btns"
+                                        id="pmv-cat-btns"
                                         style="flex-wrap: wrap"
                                     >
                                         <button
@@ -1385,6 +1385,13 @@
                                         >
                                             V
                                         </button>
+                                    </div>
+                                    <span class="pmv-sep">|</span>
+                                    <div
+                                        class="filter-group"
+                                        id="pmv-agg-btns"
+                                        style="flex-wrap: wrap"
+                                    >
                                         <button
                                             class="filter-btn"
                                             data-value="full"
@@ -1737,57 +1744,6 @@
                             <!-- RIGHT COLUMN -->
                             <div>
                                 <div class="filter-section-header" style="margin-top: 0">
-                                    <i class="fas fa-calendar"></i> Date
-                                </div>
-
-                                <!-- Imported -->
-                                <div class="filter-row">
-                                    <span
-                                        class="filter-row-label toggleable"
-                                        data-filter="tracksImport"
-                                        >Imported</span
-                                    >
-                                    <div class="filter-group" id="tracks-import-cond">
-                                        <button
-                                            class="filter-btn active"
-                                            data-value="last"
-                                        >
-                                            last
-                                        </button>
-                                        <button class="filter-btn" data-value="more">
-                                            more
-                                        </button>
-                                    </div>
-                                    <input
-                                        type="number"
-                                        id="tracks-import-val"
-                                        value="30"
-                                        min="1"
-                                        max="365"
-                                        style="
-                                            width: 45px;
-                                            font-size: 0.72rem;
-                                            text-align: center;
-                                            padding: 3px 4px;
-                                        "
-                                    />
-                                    <div class="filter-group" id="tracks-import-unit">
-                                        <button
-                                            class="filter-btn active"
-                                            data-value="days"
-                                        >
-                                            days
-                                        </button>
-                                        <button class="filter-btn" data-value="weeks">
-                                            wks
-                                        </button>
-                                        <button class="filter-btn" data-value="months">
-                                            mo
-                                        </button>
-                                    </div>
-                                </div>
-
-                                <div class="filter-section-header">
                                     <i class="fas fa-tag"></i> Classification
                                 </div>
 
@@ -1820,18 +1776,13 @@
                                 <!-- PMV -->
                                 <div class="filter-row">
                                     <span
-                                        class="filter-row-label"
-                                        style="
-                                            font-size: 0.62rem;
-                                            color: var(--text-subtle);
-                                            font-family: var(--font-mono);
-                                            font-weight: 700;
-                                        "
+                                        class="filter-row-label toggleable"
+                                        data-filter="pmv"
                                         >PMV</span
                                     >
                                     <div
                                         class="filter-group"
-                                        id="track-pmv-btns"
+                                        id="track-pmv-cat-btns"
                                         style="flex-wrap: wrap"
                                     >
                                         <button
@@ -1855,6 +1806,13 @@
                                         >
                                             V
                                         </button>
+                                    </div>
+                                    <span class="pmv-sep">|</span>
+                                    <div
+                                        class="filter-group"
+                                        id="track-pmv-agg-btns"
+                                        style="flex-wrap: wrap"
+                                    >
                                         <button
                                             class="filter-btn"
                                             data-value="full"
@@ -1903,6 +1861,57 @@
                                         ></div>
                                     </div>
                                     <div class="tag-chips" id="track-tag-chips"></div>
+                                </div>
+
+                                <div class="filter-section-header">
+                                    <i class="fas fa-calendar"></i> Date
+                                </div>
+
+                                <!-- Imported -->
+                                <div class="filter-row">
+                                    <span
+                                        class="filter-row-label toggleable"
+                                        data-filter="tracksImport"
+                                        >Imported</span
+                                    >
+                                    <div class="filter-group" id="tracks-import-cond">
+                                        <button
+                                            class="filter-btn active"
+                                            data-value="last"
+                                        >
+                                            last
+                                        </button>
+                                        <button class="filter-btn" data-value="more">
+                                            more
+                                        </button>
+                                    </div>
+                                    <input
+                                        type="number"
+                                        id="tracks-import-val"
+                                        value="30"
+                                        min="1"
+                                        max="365"
+                                        style="
+                                            width: 45px;
+                                            font-size: 0.72rem;
+                                            text-align: center;
+                                            padding: 3px 4px;
+                                        "
+                                    />
+                                    <div class="filter-group" id="tracks-import-unit">
+                                        <button
+                                            class="filter-btn active"
+                                            data-value="days"
+                                        >
+                                            days
+                                        </button>
+                                        <button class="filter-btn" data-value="weeks">
+                                            wks
+                                        </button>
+                                        <button class="filter-btn" data-value="months">
+                                            mo
+                                        </button>
+                                    </div>
                                 </div>
 
                                 <div class="filter-section-header">
@@ -2441,6 +2450,75 @@
 
             let ALL_TRACKS = generateMockTracks(30);
 
+            // ─── Mock PLAYLISTS data ───
+
+            const PLAYLIST_NAMES = [
+                "Weekend Bangers",
+                "Deep House Vibes",
+                "Morning Warmup",
+                "Peak Time",
+                "Afterparty",
+                "Chill Sunset",
+                "Tech House Tools",
+                "Open Format",
+                "Underground",
+                "Mainstage",
+                "Vinyl Only",
+                "B2B Special",
+                "Warmup Set",
+                "Late Night",
+                "Summer Sessions",
+                "Classics",
+                "New Finds",
+                "Festival Ready",
+                "Back to Back",
+                "Studio Session",
+            ];
+
+            const PLAYLIST_SERVICES = ["spotify", "soundcloud", "youtube", "deemix"];
+
+            function generateMockPlaylists(count) {
+                const playlists = [];
+                const usedNames = new Set();
+                for (let i = 1; i <= count; i++) {
+                    let name;
+                    do {
+                        name = random(PLAYLIST_NAMES);
+                    } while (usedNames.has(name));
+                    usedNames.add(name);
+
+                    const svc = random(PLAYLIST_SERVICES);
+                    const trackCount = randBetween(5, 120);
+                    const hasTag = Math.random() > 0.25;
+                    const tagCategories = ["Phase", "Mood", "Vibe", "Merkmal"];
+
+                    playlists.push({
+                        id: i,
+                        name: name,
+                        svc: svc,
+                        svcId: svc + "_playlist_" + i,
+                        trackCount: trackCount,
+                        localCount: randBetween(0, Math.min(trackCount, 40)),
+                        importedAt: Date.now() - randBetween(0, 365) * 86400000,
+                        updatedAt: Date.now() - randBetween(0, 30) * 86400000,
+                        tag: hasTag ? name.toLowerCase().replace(/\s+/g, "-") : null,
+                        tagCategory: hasTag ? random(tagCategories) : null,
+                        subscribed: Math.random() > 0.7,
+                        deemixStatus:
+                            Math.random() > 0.8
+                                ? random(["queued", "downloading", "completed", "failed"])
+                                : null,
+                        lastSynced:
+                            Math.random() > 0.4
+                                ? Date.now() - randBetween(0, 14) * 86400000
+                                : null,
+                    });
+                }
+                return playlists;
+            }
+
+            let ALL_PLAYLISTS = generateMockPlaylists(25);
+
             // ================================================================
             // 2. STATE
             // ================================================================
@@ -2623,9 +2701,79 @@
                 },
             ];
 
+            const PLAYLISTS_COLUMNS = [
+                {
+                    id: "name",
+                    label: "Name",
+                    sortable: true,
+                    sortKey: "name",
+                    defaultWidth: 20,
+                },
+                {
+                    id: "service",
+                    label: "Service",
+                    sortable: true,
+                    sortKey: "svc",
+                    defaultWidth: 8,
+                },
+                {
+                    id: "tracks",
+                    label: "Tracks",
+                    sortable: true,
+                    sortKey: "trackCount",
+                    defaultWidth: 8,
+                },
+                {
+                    id: "tags",
+                    label: "Tags",
+                    sortable: false,
+                    defaultWidth: 16,
+                },
+                {
+                    id: "deemix",
+                    label: "Deemix",
+                    sortable: false,
+                    defaultWidth: 10,
+                },
+                {
+                    id: "sync",
+                    label: "Sync",
+                    sortable: false,
+                    defaultWidth: 10,
+                },
+                {
+                    id: "imported",
+                    label: "Imported",
+                    sortable: true,
+                    sortKey: "importedAt",
+                    defaultWidth: 8,
+                },
+                {
+                    id: "updated",
+                    label: "Updated",
+                    sortable: true,
+                    sortKey: "updatedAt",
+                    defaultWidth: 8,
+                },
+                {
+                    id: "subscribe",
+                    label: "Subscribe",
+                    sortable: false,
+                    defaultWidth: 8,
+                },
+                {
+                    id: "view",
+                    label: "View",
+                    sortable: false,
+                    defaultWidth: 6,
+                },
+            ];
+
             // Column config from localStorage
             function getColumnModel(view) {
-                return view === "tracks" ? TRACKS_COLUMNS : FILES_COLUMNS;
+                if (view === "tracks") return TRACKS_COLUMNS;
+                if (view === "playlists") return PLAYLISTS_COLUMNS;
+                return FILES_COLUMNS;
             }
 
             function loadColumnConfig(view) {
@@ -2704,7 +2852,7 @@
                 ratingMax: 5,
                 selectedGenres: [],
                 selectedTags: [],
-                pmvFilter: "", // "", "p", "m", "v", "partial", "none", "full"
+                pmvFilter: { value: "", enabled: true }, // value: "", "p", "m", "v", "partial", "none", "full"
                 // Layout mode
                 layoutMode: false,
                 // Sort
@@ -2727,31 +2875,48 @@
 
             function getFilteredData(state) {
                 const isTracks = state.view === "tracks";
-                let data = [...(isTracks ? ALL_TRACKS : ALL_FILES)];
+                const isPlaylists = state.view === "playlists";
+                let data = isPlaylists
+                    ? [...ALL_PLAYLISTS]
+                    : [...(isTracks ? ALL_TRACKS : ALL_FILES)];
 
                 // Full-text search across string fields
                 if (state.search) {
                     const q = state.search.toLowerCase();
-                    data = data.filter(
-                        (f) =>
-                            f.title.toLowerCase().includes(q) ||
-                            f.artist.toLowerCase().includes(q) ||
-                            (f.album && f.album.toLowerCase().includes(q)) ||
-                            (f.isrc && f.isrc.toLowerCase().includes(q)),
-                    );
+                    if (isPlaylists) {
+                        data = data.filter(
+                            (p) => p.name && p.name.toLowerCase().includes(q),
+                        );
+                    } else {
+                        data = data.filter(
+                            (f) =>
+                                f.title.toLowerCase().includes(q) ||
+                                f.artist.toLowerCase().includes(q) ||
+                                (f.album && f.album.toLowerCase().includes(q)) ||
+                                (f.isrc && f.isrc.toLowerCase().includes(q)),
+                        );
+                    }
                 }
 
-                // Service filter (multi-select: show files matching ANY selected service)
+                // Service filter (multi-select: show items matching ANY selected service)
                 if (state.selectedServices.length > 0) {
-                    data = data.filter(
-                        (f) =>
-                            f.services &&
-                            f.services.some((s) => state.selectedServices.includes(s)),
-                    );
+                    if (isPlaylists) {
+                        data = data.filter(
+                            (p) => p.svc && state.selectedServices.includes(p.svc),
+                        );
+                    } else {
+                        data = data.filter(
+                            (f) =>
+                                f.services &&
+                                f.services.some((s) =>
+                                    state.selectedServices.includes(s),
+                                ),
+                        );
+                    }
                 }
 
-                // ─── File-specific filters (skip for tracks) ───
-                if (!isTracks) {
+                // ─── File-specific filters (files only) ───
+                if (state.view === "files") {
                     // BPM range
                     data = data.filter(
                         (f) => f.bpm >= state.bpmMin && f.bpm <= state.bpmMax,
@@ -2796,7 +2961,7 @@
                     }
                 }
 
-                // PMV filter (based on comment bracket: [P_V], [PMV], etc.) — applies to both views
+                // ─── Filters that only apply to files and tracks (not playlists) ───
                 function pmvFromComment(comment) {
                     if (!comment) return { p: false, m: false, v: false };
                     const m = comment.match(/^\[([P_MV_]+)\]/);
@@ -2807,45 +2972,6 @@
                         v: m[1].includes("V"),
                     };
                 }
-
-                if (state.pmvFilter) {
-                    data = data.filter((f) => {
-                        const comment = f.comment || f.commentTarget || "";
-                        const pmv = pmvFromComment(comment);
-                        const hasAny = pmv.p || pmv.m || pmv.v;
-                        const hasAll = pmv.p && pmv.m && pmv.v;
-                        switch (state.pmvFilter) {
-                            case "p":
-                                return pmv.p;
-                            case "m":
-                                return pmv.m;
-                            case "v":
-                                return pmv.v;
-                            case "partial":
-                                return hasAny;
-                            case "none":
-                                return !hasAny;
-                            case "full":
-                                return hasAll;
-                            default:
-                                return true;
-                        }
-                    });
-                }
-
-                // Comment status filter (multi-select)
-                if (state.commentStatuses && state.commentStatuses.length > 0) {
-                    data = data.filter((f) => {
-                        const needsUpdate = f.commentNeedsUpdate;
-                        if (state.commentStatuses.includes("needs_update") && needsUpdate)
-                            return true;
-                        if (state.commentStatuses.includes("uptodate") && !needsUpdate)
-                            return true;
-                        return false;
-                    });
-                }
-
-                // Date filters with condition + unit
                 function applyDateFilter(data, filter, field) {
                     if (!filter.enabled) return data;
                     const multiplier =
@@ -2859,12 +2985,62 @@
                         return val < now - daysMs;
                     });
                 }
+                if (state.view !== "playlists") {
+                    // PMV filter
+                    if (state.pmvFilter.enabled) {
+                        if (state.pmvFilter.categories.length > 0) {
+                            data = data.filter((f) => {
+                                const pmv = pmvFromComment(
+                                    f.comment || f.commentTarget || "",
+                                );
+                                return state.pmvFilter.categories.some((c) => pmv[c]);
+                            });
+                        } else if (state.pmvFilter.aggregate) {
+                            data = data.filter((f) => {
+                                const pmv = pmvFromComment(
+                                    f.comment || f.commentTarget || "",
+                                );
+                                const hasAny = pmv.p || pmv.m || pmv.v;
+                                const hasAll = pmv.p && pmv.m && pmv.v;
+                                switch (state.pmvFilter.aggregate) {
+                                    case "partial":
+                                        return hasAny;
+                                    case "none":
+                                        return !hasAny;
+                                    case "full":
+                                        return hasAll;
+                                    default:
+                                        return true;
+                                }
+                            });
+                        }
+                    }
+
+                    // Comment status filter
+                    if (state.commentStatuses && state.commentStatuses.length > 0) {
+                        data = data.filter((f) => {
+                            const needsUpdate = f.commentNeedsUpdate;
+                            if (
+                                state.commentStatuses.includes("needs_update") &&
+                                needsUpdate
+                            )
+                                return true;
+                            if (
+                                state.commentStatuses.includes("uptodate") &&
+                                !needsUpdate
+                            )
+                                return true;
+                            return false;
+                        });
+                    }
+                } // end non-playlist filters
+
+                // Date filters (files vs tracks)
                 if (!isTracks) {
                     data = applyDateFilter(data, state.createdFilter, "createdAt");
                     data = applyDateFilter(data, state.modifiedFilter, "lastModified");
                     data = applyDateFilter(data, state.playedFilter, "lastPlayed");
                 } else {
-                    // Tracks import date filter
                     if (state.tracksImportFilter && state.tracksImportFilter.enabled) {
                         const multiplier =
                             state.tracksImportFilter.unit === "weeks"
@@ -3002,7 +3178,7 @@
                 lastPlayed: (f) => formatTimestamp(f.lastPlayed),
                 comment: (f) => {
                     if (!f.commentNeedsUpdate) {
-                        return `<span class="text-muted text-xs">✓ up to date</span>`;
+                        return `<span class="text-xs" style="color:var(--green)">✓</span> <span class="font-mono text-xs">${f.comment || ""}</span>`;
                     }
                     return `<div class="diff-box" style="font-size:0.7rem;line-height:1.3">
                 <div class="diff-line-old" style="color:var(--red);text-decoration:line-through;opacity:0.7">${f.comment || ""}</div>
@@ -3062,7 +3238,7 @@
                 },
                 comment: (t) => {
                     if (!t.commentNeedsUpdate) {
-                        return `<span class="text-muted text-xs">✓ up to date</span>`;
+                        return `<span class="text-xs" style="color:var(--green)">✓</span> <span class="font-mono text-xs">${t.comment || ""}</span>`;
                     }
                     return `<div class="diff-box" style="font-size:0.7rem;line-height:1.3">
                 <div class="diff-line-old" style="color:var(--red);text-decoration:line-through;opacity:0.7">${t.comment || ""}</div>
@@ -3075,6 +3251,55 @@
                 imported: (t) => formatTimestamp(t.importedAt),
             };
 
+            // ─── PLAYLISTS column renderer functions ───
+            const PLAYLISTS_CELL_RENDERERS = {
+                name: (p) => `<strong>${p.name}</strong>`,
+                service: (p) => {
+                    const icons = {
+                        spotify: "fab fa-spotify",
+                        soundcloud: "fab fa-soundcloud",
+                        youtube: "fab fa-youtube",
+                        deemix: "fas fa-download",
+                    };
+                    const colors = {
+                        spotify: "#1db954",
+                        soundcloud: "#ff7700",
+                        youtube: "#ff0000",
+                        deemix: "var(--accent)",
+                    };
+                    const color = colors[p.svc] || "var(--text-muted)";
+                    return `<span class="service-badge" style="background:${color}15;color:${color};border:1px solid ${color}30"><i class="${icons[p.svc] || "fas fa-music"}"></i> ${p.svc.charAt(0).toUpperCase() + p.svc.slice(1)}</span>`;
+                },
+                tracks: (p) =>
+                    `<span class="font-mono text-xs">${p.trackCount} <span class="text-muted">(± ${p.localCount})</span></span>`,
+                tags: (p) =>
+                    p.tag
+                        ? `<span class="tag-badge font-mono" style="font-size:0.75rem;background:var(--accent-bg);color:var(--accent);border:1px solid var(--border)"><i class="fas fa-tag" style="font-size:0.6rem;margin-right:3px"></i>${p.tag}</span>`
+                        : '<span class="text-muted">—</span>',
+                deemix: (p) => {
+                    if (!p.deemixStatus) return '<span class="text-muted">—</span>';
+                    const badges = {
+                        queued: `<span class="status-badge" style="background:rgba(245,158,11,0.1);color:var(--yellow)"><i class="fa-solid fa-clock"></i> Queued</span>`,
+                        downloading: `<span class="status-badge" style="background:rgba(59,130,246,0.1);color:#3b82f6"><i class="fa-solid fa-spinner fa-spin"></i> DL</span>`,
+                        completed: `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)"><i class="fa-solid fa-check"></i></span>`,
+                        failed: `<span class="status-badge" style="background:rgba(239,68,68,0.1);color:var(--red)"><i class="fa-solid fa-exclamation-triangle"></i> Failed</span>`,
+                    };
+                    return badges[p.deemixStatus] || p.deemixStatus;
+                },
+                sync: (p) =>
+                    p.lastSynced
+                        ? `<span class="text-muted text-xs">${new Date(p.lastSynced).toLocaleDateString()}</span>`
+                        : '<em class="text-muted" style="font-size:0.75rem">Never</em>',
+                imported: (p) => formatTimestamp(p.importedAt),
+                updated: (p) => formatTimestamp(p.updatedAt),
+                subscribe: (p) =>
+                    p.subscribed
+                        ? `<span class="badge" style="background:rgba(34,197,94,0.1);color:var(--green);border-color:rgba(34,197,94,0.2)" title="Subscribed"><i class="fas fa-bell"></i></span>`
+                        : `<span style="color:var(--text-muted)" title="Not subscribed"><i class="far fa-bell"></i></span>`,
+                view: (p) =>
+                    `<a href="#tracks?playlistId=${p.id}&playlistName=${encodeURIComponent(p.name)}" class="btn btn-sm btn-icon" title="View tracks"><i class="fa-solid fa-list-music"></i></a>`,
+            };
+
             function renderTable(state) {
                 const filtered = getFilteredData(state);
                 const sorted = getSortedData(filtered, state);
@@ -3082,9 +3307,18 @@
                 const paged = getPaginatedData(sorted, state);
                 const totalPages = Math.ceil(total / state.pageSize) || 1;
                 const config = state.columnConfig;
-                const columns = state.view === "tracks" ? TRACKS_COLUMNS : FILES_COLUMNS;
+                const columns =
+                    state.view === "tracks"
+                        ? TRACKS_COLUMNS
+                        : state.view === "playlists"
+                          ? PLAYLISTS_COLUMNS
+                          : FILES_COLUMNS;
                 const cellRenderers =
-                    state.view === "tracks" ? TRACKS_CELL_RENDERERS : CELL_RENDERERS;
+                    state.view === "tracks"
+                        ? TRACKS_CELL_RENDERERS
+                        : state.view === "playlists"
+                          ? PLAYLISTS_CELL_RENDERERS
+                          : CELL_RENDERERS;
 
                 // Build headers
                 let headersHtml =
@@ -3149,7 +3383,7 @@
                 const statsHtml = `<div class="stats-row">
                           <div class="stats-group">
                             <button class="btn btn-sm btn-icon" id="refresh-btn" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
-                            <strong>${total.toLocaleString()}</strong> ${state.view === "tracks" ? "tracks" : "files"}
+                            <strong>${total.toLocaleString()}</strong> ${state.view === "tracks" ? "tracks" : state.view === "playlists" ? "playlists" : "files"}
                             <select class="page-size-select" id="page-size-select">
                               ${[10, 25, 50, 100].map((s) => `<option value="${s}"${s === state.pageSize ? " selected" : ""}>${s} per page</option>`).join("")}
                             </select>
@@ -3916,7 +4150,7 @@
                     state.selectedKeys = [];
                     state.selectedGenres = [];
                     state.selectedTags = [];
-                    state.pmvFilter = "";
+                    state.pmvFilter = { enabled: true, categories: [], aggregate: "" };
                     state.fileTypes = [];
                     state.commentStatuses = [];
                     state.createdFilter = {
@@ -3971,17 +4205,29 @@
                     // Update search placeholder
                     const si = document.getElementById("search-input");
                     if (si) {
-                        si.placeholder =
-                            view === "tracks" ? "Search tracks…" : "Search files…";
+                        const placeholders = {
+                            tracks: "Search tracks…",
+                            playlists: "Search playlists…",
+                            files: "Search files…",
+                        };
+                        si.placeholder = placeholders[view] || "Search…";
                         si.value = "";
                     }
 
                     // Update subtitle
                     const sub = document.getElementById("subtitle-text");
                     if (sub) {
-                        const count =
-                            view === "tracks" ? ALL_TRACKS.length : ALL_FILES.length;
-                        sub.textContent = `${count} ${view === "tracks" ? "tracks" : "files"}`;
+                        const counts = {
+                            tracks: ALL_TRACKS.length,
+                            playlists: ALL_PLAYLISTS.length,
+                            files: ALL_FILES.length,
+                        };
+                        const labels = {
+                            tracks: "tracks",
+                            playlists: "playlists",
+                            files: "files",
+                        };
+                        sub.textContent = `${counts[view] || 0} ${labels[view] || "items"}`;
                     }
 
                     // Update active buttons
@@ -4000,17 +4246,26 @@
                         document.getElementById("files-filters-left");
                     const filesRightContent =
                         document.getElementById("files-right-content");
+                    const filesFilterGrid = document.getElementById("files-filter-grid");
                     const tracksFiltersSection = document.getElementById(
                         "tracks-filters-section",
                     );
                     const dateFilters = document.getElementById("date-filters");
+                    const filterPanelBody = document.getElementById("filter-panel-body");
                     if (filesFiltersLeft)
                         filesFiltersLeft.style.display = view === "files" ? "" : "none";
                     if (filesRightContent)
                         filesRightContent.style.display = view === "files" ? "" : "none";
+                    if (filesFilterGrid)
+                        filesFilterGrid.style.display =
+                            view === "files" ? "grid" : "none";
                     if (tracksFiltersSection)
                         tracksFiltersSection.style.display =
                             view === "tracks" ? "" : "none";
+                    if (filterPanelBody)
+                        filterPanelBody.style.display =
+                            view === "playlists" ? "none" : "";
+                    // Hide all filter-panel-body content in playlists view — only search bar
                     if (dateFilters)
                         dateFilters.style.display = view === "files" ? "" : "none";
 
@@ -4264,30 +4519,67 @@
                     render();
                 });
 
-                // ─── PMV filter (files + tracks view) ───
-                function wirePmvButtons(containerId) {
+                // ─── PMV category buttons (multi-select: P, M, V) ───
+                function wirePmvCatButtons(containerId) {
                     const container = document.getElementById(containerId);
                     if (!container) return;
                     container.addEventListener("click", (e) => {
                         const btn = e.target.closest(".filter-btn");
                         if (!btn) return;
                         const val = btn.dataset.value;
-                        if (state.pmvFilter === val) {
-                            state.pmvFilter = "";
+                        const idx = state.pmvFilter.categories.indexOf(val);
+                        if (idx >= 0) {
+                            state.pmvFilter.categories.splice(idx, 1);
                             btn.classList.remove("active");
                         } else {
-                            container
-                                .querySelectorAll(".filter-btn")
+                            // Clear aggregate group when picking categories
+                            state.pmvFilter.aggregate = "";
+                            document
+                                .querySelectorAll(
+                                    "#pmv-agg-btns .filter-btn, #track-pmv-agg-btns .filter-btn",
+                                )
                                 .forEach((b) => b.classList.remove("active"));
-                            state.pmvFilter = val;
+                            state.pmvFilter.categories.push(val);
                             btn.classList.add("active");
                         }
                         state.page = 0;
                         render();
                     });
                 }
-                wirePmvButtons("pmv-btns");
-                wirePmvButtons("track-pmv-btns");
+                wirePmvCatButtons("pmv-cat-btns");
+                wirePmvCatButtons("track-pmv-cat-btns");
+
+                // ─── PMV aggregate buttons (single-select: Full, Partial, None) ───
+                function wirePmvAggButtons(containerId) {
+                    const container = document.getElementById(containerId);
+                    if (!container) return;
+                    container.addEventListener("click", (e) => {
+                        const btn = e.target.closest(".filter-btn");
+                        if (!btn) return;
+                        const val = btn.dataset.value;
+                        if (state.pmvFilter.aggregate === val) {
+                            state.pmvFilter.aggregate = "";
+                            btn.classList.remove("active");
+                        } else {
+                            // Clear category group when picking aggregate
+                            state.pmvFilter.categories = [];
+                            document
+                                .querySelectorAll(
+                                    "#pmv-cat-btns .filter-btn, #track-pmv-cat-btns .filter-btn",
+                                )
+                                .forEach((b) => b.classList.remove("active"));
+                            container
+                                .querySelectorAll(".filter-btn")
+                                .forEach((b) => b.classList.remove("active"));
+                            state.pmvFilter.aggregate = val;
+                            btn.classList.add("active");
+                        }
+                        state.page = 0;
+                        render();
+                    });
+                }
+                wirePmvAggButtons("pmv-agg-btns");
+                wirePmvAggButtons("track-pmv-agg-btns");
 
                 // ─── Date filters (generic helper for condition + unit) ───
                 function wireDateFilter(prefix, stateKey) {

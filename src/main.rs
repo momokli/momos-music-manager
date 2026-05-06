@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -100,6 +101,7 @@ struct AppState {
     config: crate::config::ServiceCredentials,
     task_manager: crate::tasks::TaskManager,
     embeddings: Mutex<Option<crate::embeddings::EmbeddingModel>>,
+    category_means: tokio::sync::Mutex<Option<HashMap<i64, (String, Vec<f32>)>>>,
     public_url: Option<String>,
 }
 
@@ -312,6 +314,7 @@ async fn serve(
         config,
         task_manager,
         embeddings: tokio::sync::Mutex::new(None),
+        category_means: tokio::sync::Mutex::new(None),
         public_url,
     });
 

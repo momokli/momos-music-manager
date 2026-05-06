@@ -108,6 +108,9 @@ pub struct CachedPlaylists {
 pub struct CachedTrackEntry {
     pub track: TrackInfo,
     pub position: i64,
+    /// When the track was added to the playlist (Spotify `added_at`, Unix timestamp).
+    #[serde(default)]
+    pub added_at: Option<i64>,
 }
 
 /// Tracks belonging to one playlist.

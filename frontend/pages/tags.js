@@ -21,11 +21,7 @@ import {
   showModal,
 } from "../shared/components.js";
 import { fetchJSON } from "../shared/api.js";
-import {
-  renderSearchInput,
-  renderFilterGroup,
-  wireSearchFilter,
-} from "../shared/search-filter.js";
+import { renderSearchInput, wireSearchFilter } from "../shared/search-filter.js";
 import {
   getPageSize,
   renderPageSizeSelector,
@@ -44,6 +40,7 @@ import {
   wireColumnDragReorder,
   wireConfigTrigger,
 } from "../shared/column-config.js";
+import { renderActionsPanel } from "../shared/actions-panel.js";
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                         */
@@ -63,29 +60,29 @@ const CATEGORY_OPTIONS = [
 ];
 
 const TAGS_COLUMNS = [
-  { id: "name", label: "Tag", sortable: true, sortKey: "name", defaultWidth: 35 },
+  { id: "name", label: "Tag", sortable: true, sortKey: "name", defaultWidth: 350 },
   {
     id: "category",
     label: "Category",
     sortable: true,
     sortKey: "category",
-    defaultWidth: 25,
+    defaultWidth: 250,
   },
   {
     id: "files",
     label: "Files",
     sortable: true,
     sortKey: "file_count",
-    defaultWidth: 15,
+    defaultWidth: 150,
   },
   {
     id: "created",
     label: "Created",
     sortable: true,
     sortKey: "created_at",
-    defaultWidth: 15,
+    defaultWidth: 150,
   },
-  { id: "actions", label: "Actions", sortable: false, defaultWidth: 10 },
+  { id: "actions", label: "Actions", sortable: false, defaultWidth: 100 },
 ];
 
 const TAGS_CELL_RENDERERS = {
@@ -112,7 +109,7 @@ const HASH_DEFAULTS = {
   sort: "",
   order: "asc",
   search: "",
-  category: "",
+  selectedCategories: "",
   page: 0,
 };
 
@@ -120,7 +117,7 @@ const HASH_SCHEMA = {
   sort: { type: "string", default: "" },
   order: { type: "string", default: "asc" },
   search: { type: "string", default: "" },
-  category: { type: "string", default: "" },
+  selectedCategories: { type: "string", default: "" },
   page: { type: "number", default: 0 },
 };
 
@@ -150,7 +147,9 @@ function buildParams(state) {
   if (state.sort) params.set("sort", state.sort);
   if (state.order) params.set("order", state.order);
   if (state.search) params.set("search", state.search);
-  if (state.category) params.set("category", state.category);
+  if (state.selectedCategories && state.selectedCategories.length > 0) {
+    params.set("category", state.selectedCategories.join(","));
+  }
   return params;
 }
 
@@ -159,14 +158,36 @@ function buildParams(state) {
 /* ------------------------------------------------------------------ */
 
 function renderToolbar(state) {
+  const selected = state.selectedCategories || [];
+  const categoryBtns = CATEGORY_OPTIONS.map(
+    (cat) =>
+      `<button class="filter-btn${selected.includes(cat.value) ? " active" : ""}" data-value="${escapeHtml(cat.value)}">${escapeHtml(cat.label)}</button>`,
+  ).join("");
+
   return `<div class="filter-panel" id="tags-filter-panel">
     <div class="filter-panel-header">
       ${renderSearchInput("tags", state.search)}
-      ${renderFilterGroup("category", CATEGORY_OPTIONS, state.category)}
       <button class="btn btn-primary" id="tags-new-btn"><i class="fas fa-plus"></i> New Tag</button>
       <button class="filter-panel-toggle" id="tags-filter-toggle" title="Toggle filters">
         <i class="fas fa-chevron-up chevron"></i>
       </button>
+    </div>
+    <div class="filter-panel-body">
+      <div class="filter-panel-scroll" style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-2) var(--space-4);">
+        <div>
+          <div class="filter-section-header" style="margin-top:0"><i class="fas fa-music"></i> Tag Info</div>
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="category">Category</span>
+            <div class="filter-group" id="tags-category-filter" style="flex-wrap:wrap">
+              ${categoryBtns}
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="filter-section-header" style="margin-top:0"><i class="fas fa-tag"></i> Filter</div>
+          <!-- Additional filters can be added here -->
+        </div>
+      </div>
     </div>
   </div>`;
 }
@@ -200,6 +221,11 @@ function renderBody(data, state, totalCount) {
         <strong>${Object.keys(CATEGORY_INFO).length}</strong> categories
         ${renderPageSizeSelector(state.pageSize)}
         ${renderColumnConfigTrigger()}
+        ${
+          state.layoutMode
+            ? '<button class="btn btn-sm btn-primary" id="tags-layout-btn" style="margin-left:8px"><i class="fas fa-check"></i> Done</button>'
+            : '<button class="btn btn-sm" id="tags-layout-btn" style="margin-left:8px"><i class="fas fa-arrows-alt"></i> Modify Column Layout</button>'
+        }
       </div>
     </div>
     <div class="table-wrap">
@@ -280,13 +306,26 @@ function wireContentEvents(container, signal, state) {
 
   // Column config (resize, drag-reorder, config trigger)
   const colConfig = loadColumnConfig("tags", TAGS_COLUMNS);
-  wireColumnResize(container, "tags", TAGS_COLUMNS, colConfig);
-  wireColumnDragReorder(container, "tags", TAGS_COLUMNS, colConfig, () => {
-    fetchAndRender(container, signal, state);
-  });
+  if (state.layoutMode) {
+    wireColumnResize(container, "tags", TAGS_COLUMNS, colConfig);
+    wireColumnDragReorder(container, "tags", TAGS_COLUMNS, colConfig, () => {
+      fetchAndRender(container, signal, state);
+    });
+  }
   wireConfigTrigger(container, "tags", TAGS_COLUMNS, colConfig, () => {
     fetchAndRender(container, signal, state);
   });
+
+  // Layout mode toggle
+  const layoutBtn = container.querySelector("#tags-layout-btn");
+  if (layoutBtn) {
+    layoutBtn.addEventListener("click", () => {
+      state.layoutMode = !state.layoutMode;
+      document.body.classList.toggle("layout-mode", state.layoutMode);
+      updateHash("tags", state, HASH_DEFAULTS);
+      fetchAndRender(container, signal, state);
+    });
+  }
 
   // Pagination prev/next
   const prevBtn = container.querySelector("#tags-prev");
@@ -442,15 +481,28 @@ async function deleteTag(tagId, tagName, reloadFn) {
 
 export async function init(container, signal, hashParams) {
   // Build state from hash params + global page size
+  const parsed = parseHash(hashParams, HASH_SCHEMA);
+  const hashCats = parsed.selectedCategories
+    ? parsed.selectedCategories.split(",").filter(Boolean)
+    : [];
   const state = {
     page: 0,
     pageSize: getPageSize(),
     search: "",
     sort: "",
     order: "asc",
-    category: "",
-    ...parseHash(hashParams, HASH_SCHEMA),
+    selectedCategories: hashCats,
+    categoryEnabled: true,
+    ...parsed,
   };
+  // Ensure selectedCategories is always an array
+  if (!Array.isArray(state.selectedCategories)) {
+    state.selectedCategories = [];
+  }
+  state.layoutMode = false;
+
+  // Reset layout mode on page entry
+  document.body.classList.remove("layout-mode");
 
   // Fetch categories once (they rarely change)
   let categories = [];
@@ -462,16 +514,101 @@ export async function init(container, signal, hashParams) {
     if (err.name === "AbortError") return;
   }
 
-  // Render stable toolbar + content wrapper (once)
+  // Render stable toolbar + actions panel + content wrapper (once)
   container.innerHTML = `
-    ${renderToolbar(state)}
-    <div id="tags-content">${renderLoading("Loading tags…")}</div>
-  `;
+    <div style="display:flex;flex-direction:column;gap:var(--space-4);">
+      <div style="display:flex;gap:var(--space-4);align-items:flex-start;">
+        <div style="flex:4;min-width:0;">${renderToolbar(state)}</div>
+        <div class="actions-panel" style="flex:1;min-width:180px;max-width:220px;">
+          <div class="actions-panel-header">
+            <span><i class="fas fa-bolt"></i> Actions</span>
+            <span class="actions-sel-count" id="tags-sel-count">0</span>
+          </div>
+          <button class="btn btn-sm" id="tags-actions-refresh"><i class="fas fa-rotate"></i> Refresh</button>
+        </div>
+      </div>
+      <div id="tags-content" style="min-height:200px;">${renderLoading("Loading tags…")}</div>
+    </div>`;
 
-  // Wire toolbar events (search + category filter)
+  // Wire toolbar events (search + filter)
   const toolbar = container.querySelector("#tags-filter-panel");
   if (toolbar) {
     wireSearchFilter(toolbar, state, () => {
+      updateHash("tags", state, HASH_DEFAULTS);
+      fetchAndRender(container, signal, state);
+    });
+
+    // ── Category multi-select toggle ──
+    const catFilter = toolbar.querySelector("#tags-category-filter");
+    if (catFilter) {
+      catFilter.addEventListener("click", (e) => {
+        const btn = e.target.closest(".filter-btn[data-value]");
+        if (!btn) return;
+        const val = btn.dataset.value;
+        const idx = state.selectedCategories.indexOf(val);
+        if (idx >= 0) {
+          state.selectedCategories.splice(idx, 1);
+        } else {
+          if (val === "") {
+            // "All Categories" — clear selection
+            state.selectedCategories = [];
+          } else {
+            // Remove "" if it's in the array (All Categories deselected)
+            const allIdx = state.selectedCategories.indexOf("");
+            if (allIdx >= 0) state.selectedCategories.splice(allIdx, 1);
+            state.selectedCategories.push(val);
+          }
+        }
+        state.page = 0;
+        updateHash("tags", state, HASH_DEFAULTS);
+        fetchAndRender(container, signal, state);
+      });
+    }
+
+    // ── Generic toggle for [data-filter] labels ──
+    toolbar.querySelectorAll("[data-filter]").forEach((label) => {
+      function updateFilterUI() {
+        const key = label.dataset.filter + "Enabled";
+        const isActive = state[key] !== false;
+        label.classList.toggle("active", isActive);
+        label.classList.toggle("off", !isActive);
+        const row = label.closest(".filter-row");
+        if (row) {
+          const inputs = row.querySelectorAll(
+            "select, input, button, .filter-group, .tag-chips, .dual-range-wrap, .key-grid-wrap, .typeahead-wrap",
+          );
+          inputs.forEach((el) => el.classList.toggle("filter-disabled", !isActive));
+        }
+      }
+      label.addEventListener("click", () => {
+        const key = label.dataset.filter + "Enabled";
+        state[key] = state[key] === false ? true : false;
+        state.page = 0;
+        updateFilterUI();
+        updateHash("tags", state, HASH_DEFAULTS);
+        fetchAndRender(container, signal, state);
+      });
+      updateFilterUI();
+    });
+
+    // ── Auto-enable disabled filter sections on click ──
+    toolbar.addEventListener("click", (e) => {
+      const row = e.target.closest(".filter-row");
+      if (!row) return;
+      const label = row.querySelector("[data-filter]");
+      if (!label) return;
+      const key = label.dataset.filter + "Enabled";
+      if (state[key] !== false) return;
+      if (e.target.closest("[data-filter]")) return;
+      state[key] = true;
+      state.page = 0;
+      label.classList.add("active");
+      label.classList.remove("off");
+      row
+        .querySelectorAll(
+          "select, input, button, .filter-group, .tag-chips, .dual-range-wrap, .key-grid-wrap, .typeahead-wrap",
+        )
+        .forEach((el) => el.classList.remove("filter-disabled"));
       updateHash("tags", state, HASH_DEFAULTS);
       fetchAndRender(container, signal, state);
     });
@@ -491,6 +628,14 @@ export async function init(container, signal, hashParams) {
       );
     });
   }
+
+  // Wire actions panel refresh
+  import("../shared/actions-panel.js").then(({ wireActionsRefresh }) => {
+    wireActionsRefresh(container, "tags", () => {
+      state.page = 0;
+      return fetchAndRender(container, signal, state);
+    });
+  });
 
   // Wire global toolbar actions via event delegation
   container.addEventListener("click", (e) => {

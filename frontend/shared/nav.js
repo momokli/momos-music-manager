@@ -1,5 +1,5 @@
 /**
- * nav.js — Sidebar navigation component.
+ * nav.js — Top navigation bar component.
  *
  * Renders brand + nav links into <nav id="main-nav">.
  * Call renderNav(currentPageId) at app.js level.
@@ -35,10 +35,11 @@ const NAV_SECTIONS = [
 const TOOLS_ITEMS = [
   { id: "auto-categorize", label: "Auto-Categorize", icon: "fa-brain" },
   { id: "digging", label: "Digging Curator", icon: "fa-bullseye" },
+  { id: "data", label: "Import/Export", icon: "fa-database" },
 ];
 
 /**
- * Render the full sidebar (brand + nav links) into #main-nav.
+ * Render the top navigation bar (brand + nav links) into #main-nav.
  * @param {string} currentPageId
  */
 export function renderNav(currentPageId) {
@@ -46,35 +47,23 @@ export function renderNav(currentPageId) {
   if (!navEl) return;
 
   const linkHtml = (item) => `
-    <a href="#${item.id}" class="sidebar-link${item.id === currentPageId ? " active" : ""}" data-page="${item.id}">
+    <a href="#${item.id}" class="topnav-link${item.id === currentPageId ? " active" : ""}" data-page="${item.id}">
       <i class="fa-solid ${item.icon}"></i>
       <span>${item.label}</span>
     </a>`;
 
-  const sectionsHtml = NAV_SECTIONS.map(
-    (section) => `
-    <div class="sidebar-section">
-      <div class="sidebar-section-title">${section.label}</div>
-      ${section.items.map(linkHtml).join("")}
-    </div>`,
-  ).join("");
-
-  const toolsHtml = `
-    <div class="sidebar-section">
-      <div class="sidebar-section-title">Tools</div>
-      ${TOOLS_ITEMS.map(linkHtml).join("")}
-    </div>`;
+  const navLinksHtml = NAV_SECTIONS.flatMap((section) => section.items)
+    .concat(TOOLS_ITEMS)
+    .map(linkHtml)
+    .join("");
 
   navEl.innerHTML = `
-    <div class="sidebar-brand">
-      <div class="sidebar-brand-logos">
-        <img src="logo_cutted_out.png" alt="" class="brand-logo-icon" />
-        <img src="logo-text-only.png" alt="momo's music manager" class="brand-logo-text" />
-      </div>
+    <div class="topnav-brand">
+      <img src="logo_cutted_out.png" alt="" class="brand-logo-icon" />
+      <img src="logo-text-only.png" alt="momo\'s music manager" class="brand-logo-text" />
     </div>
-    <div class="sidebar-nav">
-      ${sectionsHtml}
-      ${toolsHtml}
+    <div class="topnav-links">
+      ${navLinksHtml}
     </div>
   `;
 }
@@ -84,7 +73,7 @@ export function renderNav(currentPageId) {
  * @param {string} pageId
  */
 export function setActiveNav(pageId) {
-  document.querySelectorAll(".sidebar-link").forEach((link) => {
+  document.querySelectorAll(".topnav-link").forEach((link) => {
     link.classList.toggle("active", link.dataset.page === pageId);
   });
 }

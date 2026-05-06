@@ -26,6 +26,7 @@ const PAGE_MAP = {
   digging: "digging",
   "traktor-import": "traktor-import",
   "deemix-queue": "deemix-queue",
+  data: "data",
 };
 
 let currentPageId = null;

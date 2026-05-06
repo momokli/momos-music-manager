@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Layout Test</title>
+  <link rel="stylesheet" href="fontawesome/css/all.min.css" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    body { margin: 0; padding: 0; }
+    /* Quick test colours */
+    .topnav { background: #1a1a2e; }
+    .filter-area { background: #16213e; }
+    .actions-area { background: #0f3460; }
+    .table-area { background: #1a1a2e; }
+
+    .box {
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      padding: 16px;
+      min-height: 40px;
+    }
+
+    /* Option A: Grid layout */
+    .layout-a {
+      display: grid;
+      grid-template-columns: 4fr 1fr;
+      grid-template-rows: auto 1fr;
+      gap: 16px;
+      padding: 16px;
+      min-height: calc(100vh - 56px);
+    }
+    .layout-a .filter { grid-column: 1; grid-row: 1; }
+    .layout-a .actions { grid-column: 2; grid-row: 1; }
+    .layout-a .table { grid-column: 1 / -1; grid-row: 2; }
+
+    /* Option B: Flex layout */
+    .layout-b {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding: 16px;
+      min-height: calc(100vh - 56px);
+    }
+    .layout-b .top-row {
+      display: flex;
+      gap: 16px;
+    }
+    .layout-b .filter { flex: 4; }
+    .layout-b .actions { flex: 1; min-width: 180px; max-width: 220px; }
+
+    /* Option C: Two separate rows, no column split for table */
+    .layout-c {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding: 16px;
+      min-height: calc(100vh - 56px);
+    }
+    .layout-c .top-row {
+      display: grid;
+      grid-template-columns: 4fr 1fr;
+      gap: 16px;
+    }
+    .layout-c .table {
+      flex: 1;
+    }
+  </style>
+</head>
+<body>
+  <nav class="topnav" style="display:flex;align-items:center;gap:16px;padding:0 24px;height:56px;">
+    <div style="color:#fff;font-weight:700;">momo's music manager</div>
+    <div style="display:flex;gap:8px;">
+      <a href="#" style="color:rgba(255,255,255,0.7);text-decoration:none;padding:4px 12px;border-radius:4px;">Files</a>
+      <a href="#" style="color:rgba(255,255,255,0.7);text-decoration:none;padding:4px 12px;border-radius:4px;">Tracks</a>
+      <a href="#" style="color:rgba(255,255,255,0.7);text-decoration:none;padding:4px 12px;border-radius:4px;">Playlists</a>
+    </div>
+  </nav>
+
+  <div style="display:flex;flex-direction:column;gap:16px;padding:16px;">
+    <h2 style="color:var(--text);margin:0 0 8px 0;">Layout Options — pick one:</h2>
+
+    <!-- === OPTION A (current approach) === -->
+    <div class="layout-a">
+      <div class="filter box">
+        <div style="font-weight:600;margin-bottom:8px;color:var(--accent);">🔍 FILTER PANEL (4fr col 1, row 1)</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <div class="box" style="min-height:120px;">
+            <div style="font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;">File Info</div>
+            <div style="margin-top:8px;">BPM slider</div>
+            <div>Key grid</div>
+            <div>Tags</div>
+          </div>
+          <div class="box" style="min-height:120px;">
+            <div style="font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;">Classification</div>
+            <div style="margin-top:8px;">Service buttons</div>
+            <div>PMV filter</div>
+            <div>Comment, Type</div>
+          </div>
+        </div>
+      </div>
+      <div class="actions box" style="display:flex;flex-direction:column;gap:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <span style="font-size:0.65rem;text-transform:uppercase;color:var(--text-muted);">⚡ Actions</span>
+          <span style="font-size:0.75rem;color:var(--text-muted);">0</span>
+        </div>
+        <button class="btn btn-sm" disabled style="width:100%;justify-content:center;">Refresh</button>
+      </div>
+      <div class="table box">
+        <div style="font-weight:600;margin-bottom:8px;color:var(--accent);">📋 TABLE (col 1/-1, row 2)</div>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:8px;min-height:200px;">
+          <div style="font-size:0.85rem;color:var(--text-muted);">Stats row: 127 files | 25 per page ▼</div>
+          <div style="margin-top:8px;display:grid;grid-template-columns:repeat(6,1fr);gap:4px;font-size:0.75rem;color:var(--text-subtle);">
+            <div>Title</div><div>Artist</div><div>BPM</div><div>Key</div><div>Duration</div><div>Actions</div>
+          </div>
+          <div style="margin-top:4px;border-top:1px solid var(--border);padding-top:8px;min-height:160px;"></div>
+        </div>
+      </div>
+    </div>
+    <div style="text-align:center;color:var(--text-muted);font-size:0.8rem;">← OPTION A: CSS Grid with 4fr 1fr + explicit row/col placement</div>
+
+    <hr style="border-color:var(--border);margin:16px 0;">
+
+    <!-- === OPTION B === -->
+    <div class="layout-b">
+      <div class="top-row">
+        <div class="filter box" style="flex:4;">
+          <div style="font-weight:600;margin-bottom:8px;color:var(--accent);">🔍 FILTER PANEL (flex: 4)</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+            <div class="box" style="min-height:100px;">File Info</div>
+            <div class="box" style="min-height:100px;">Classification</div>
+          </div>
+        </div>
+        <div class="actions box" style="flex:1;min-width:180px;max-width:220px;display:flex;flex-direction:column;gap:8px;">
+          <div style="display:flex;justify-content:space-between;">
+            <span style="font-size:0.65rem;text-transform:uppercase;color:var(--text-muted);">⚡ Actions</span>
+            <span style="font-size:0.75rem;color:var(--text-muted);">0</span>
+          </div>
+          <button class="btn btn-sm" disabled style="width:100%;">Refresh</button>
+        </div>
+      </div>
+      <div class="table box" style="flex:1;">
+        <div style="font-weight:600;margin-bottom:8px;color:var(--accent);">📋 TABLE (flex: 1)</div>
+        <div style="min-height:200px;">...</div>
+      </div>
+    </div>
+    <div style="text-align:center;color:var(--text-muted);font-size:0.8rem;">← OPTION B: Flex top-row (filter:4, actions:1+max-width) + table below</div>
+
+    <hr style="border-color:var(--border);margin:16px 0;">
+
+    <!-- === OPTION C === -->
+    <div class="layout-c">
+      <div class="top-row">
+        <div class="filter box">
+          <div style="font-weight:600;margin-bottom:8px;color:var(--accent);">🔍 FILTER PANEL (grid col 1)</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+            <div class="box" style="min-height:100px;">File Info</div>
+            <div class="box" style="min-height:100px;">Classification</div>
+          </div>
+        </div>
+        <div class="actions box" style="display:flex;flex-direction:column;gap:8px;">
+          <div style="display:flex;justify-content:space-between;">
+            <span style="font-size:0.65rem;text-transform:uppercase;color:var(--text-muted);">⚡ Actions</span>
+            <span style="font-size:0.75rem;color:var(--text-muted);">0</span>
+          </div>
+          <button class="btn btn-sm" disabled style="width:100%;">Refresh</button>
+        </div>
+      </div>
+      <div class="table box" style="flex:1;">
+        <div style="font-weight:600;margin-bottom:8px;color:var(--accent);">📋 TABLE (flex: 1, below grid)</div>
+        <div style="min-height:200px;">...</div>
+      </div>
+    </div>
+    <div style="text-align:center;color:var(--text-muted);font-size:0.8rem;">← OPTION C: Grid top-row (4fr 1fr) + flex table below</div>
+  </div>
+</body>
+</html>
