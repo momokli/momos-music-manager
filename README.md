@@ -143,16 +143,6 @@ cargo run -- --version
 # Clean DB (for schema changes)
 rm -f app.db && cargo run -- serve
 
-# Spotify API caching (record/replay — no API calls during replay)
-SPOTIFY_API_CACHE=record cargo run -- serve
-SPOTIFY_API_CACHE=replay cargo run -- serve
-rm -rf dev-data/spotify-api
-
-# Folder scan caching
-SCAN_CACHE=record cargo run -- serve
-SCAN_CACHE=replay cargo run -- serve
-rm -rf dev-data/scan-cache
-
 # DB dump/restore (save state before deleting app.db)
 cargo run -- dump
 cargo run -- restore
@@ -253,7 +243,6 @@ momos-music-manager/
 │   ├── embeddings.rs       # Semantic tag embeddings (candle/ML)
 │   ├── digging.rs          # Curator/session-builder
 │   ├── audio_extensions.rs # AudioExtension enum
-│   ├── scan_cache.rs       # File scan caching (record/replay)
 │   ├── dump.rs             # DB dump/restore (JSON)
 │   ├── poller.rs           # Playlist subscription poller
 │   ├── traktor.rs          # Traktor collection.nml parser
@@ -261,7 +250,6 @@ momos-music-manager/
 │   ├── spotify/            # Spotify OAuth + Sync
 │   │   ├── client.rs
 │   │   ├── models.rs
-│   │   ├── replay.rs
 │   │   └── sync_worker.rs
 │   └── tasks/              # TaskManager + workers
 │       └── mod.rs

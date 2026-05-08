@@ -115,8 +115,6 @@ playlist_id  = "your_youtube_playlist_id"
 ### Dev-only env vars (not in config.toml)
 
 - `DATABASE_URL` — overrides `[database].url` from config.toml; defaults to `sqlite:~/.local/share/momos-music-manager/library.db`
-- `SPOTIFY_API_CACHE` — `record`/`replay` for Spotify API caching
-- `SCAN_CACHE` — `record`/`replay` for file scan caching
 
 ---
 
@@ -341,12 +339,10 @@ src/
 ├── dump.rs              # DB dump/restore (JSON)
 ├── embeddings.rs        # Semantic tag embeddings (candle/ML)
 ├── poller.rs            # Playlist subscription background poller
-├── scan_cache.rs        # File scan caching (record/replay)
 ├── spotify/
 │   ├── mod.rs
 │   ├── client.rs        # Spotify OAuth client
 │   ├── models.rs        # PlaylistInfo, TrackInfo
-│   ├── replay.rs        # API response cache (record/replay)
 │   └── sync_worker.rs   # Background sync worker
 ├── tasks/
 │   └── mod.rs           # TaskManager (generic) + task workers
@@ -392,15 +388,6 @@ cargo run -- install-launch-agent
 cargo run -- uninstall-launch-agent
 cargo run -- service-status
 
-# Spotify API caching
-SPOTIFY_API_CACHE=record cargo run -- serve
-SPOTIFY_API_CACHE=replay cargo run -- serve
-rm -rf dev-data/spotify-api
-
-# Scan caching
-SCAN_CACHE=record cargo run -- serve
-SCAN_CACHE=replay cargo run -- serve
-rm -rf dev-data/scan-cache
 ```
 
 ---

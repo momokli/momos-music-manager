@@ -95,18 +95,16 @@ function renderPage(
     .join("");
 
   const tagCardHtml = `<div class="tag-card">
-    <div class="tag-card-main">
-      <div class="tag-card-left">
-        <span class="tag-card-name">${tag.name}</span>
-        <span class="tag-card-id">#${tag.id}</span>
-      </div>
-      <div class="tag-card-meta">
-        <span class="tag-card-pos">${currentIndex + 1} of ${totalTags}</span>
-        <span class="tag-card-pct">${pct}%</span>
-      </div>
+    <div class="tag-card-name-row">
+      <span class="tag-card-name">${tag.name}</span>
     </div>
     <div class="tag-card-services">
+      <span class="tag-card-id">#${tag.id}</span>
       ${serviceHtml}
+      <span class="tag-card-meta">
+        <span class="tag-card-pos">${currentIndex + 1} of ${totalTags}</span>
+        <span class="tag-card-pct">${pct}%</span>
+      </span>
     </div>
   </div>`;
 

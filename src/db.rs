@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::audio_extensions::AudioExtension;
-use crate::scan_cache;
 use sqlx::{FromRow, Pool, Row, Sqlite, SqliteConnection, SqlitePool};
 use tracing::{debug, info, warn};
 
@@ -61,6 +60,7 @@ pub struct ServicePlaylist {
     pub name: String,
     pub description: Option<String>,
     pub metadata_json: Option<String>,
+    pub remote_track_count: i64,
     pub imported_at: i64,
     pub updated_at: i64,
 }
@@ -372,22 +372,6 @@ pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
     // Calculate file hash
     let file_hash = calculate_file_hash(path)?;
 
-    // ── CACHE CHECK ──────────────────────────────────────────────────────────
-    // In replay mode, skip lofty/exiftool entirely and return cached metadata.
-    // The cache is invalidated when the file's mtime or hash changes.
-    let normalized_cache_path = shellexpand::full(path.to_string_lossy().as_ref())
-        .unwrap_or_else(|_| path.to_string_lossy())
-        .to_string();
-    match scan_cache::try_load(&normalized_cache_path, last_modified, &file_hash).await {
-        scan_cache::CacheResult::Hit(cached_file) => {
-            tracing::debug!("CACHE HIT for {:?}, skipping extraction", path);
-            return Ok(cached_file);
-        }
-        scan_cache::CacheResult::Miss => {
-            tracing::debug!("CACHE MISS for {:?}, extracting normally", path);
-        }
-    }
-
     // Determine file type
     let file_type = file_type_from_path(path)
         .ok_or_else(|| anyhow!("Unsupported file type: {:?}", path.extension()))?
@@ -609,10 +593,6 @@ pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
         created_at: now,
         updated_at: now,
     };
-
-    // ── CACHE SAVE ──────────────────────────────────────────────────────────
-    // In record mode, persist the extracted metadata for future replay.
-    scan_cache::try_save(&scanned_file).await;
 
     Ok(scanned_file)
 }
@@ -1673,16 +1653,18 @@ pub async fn upsert_service_playlist(
     name: &str,
     description: Option<&str>,
     metadata_json: Option<&str>,
+    remote_track_count: i64,
 ) -> Result<ServicePlaylist> {
     let now = chrono::Utc::now().timestamp();
     let row = sqlx::query_as::<_, ServicePlaylist>(
         r#"
-        INSERT INTO service_playlists (service, playlist_id, name, description, metadata_json, imported_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO service_playlists (service, playlist_id, name, description, metadata_json, remote_track_count, imported_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(service, playlist_id) DO UPDATE SET
             name = excluded.name,
             description = excluded.description,
             metadata_json = excluded.metadata_json,
+            remote_track_count = excluded.remote_track_count,
             updated_at = excluded.updated_at
         RETURNING *
         "#,
@@ -1692,6 +1674,7 @@ pub async fn upsert_service_playlist(
     .bind(name)
     .bind(description)
     .bind(metadata_json)
+    .bind(remote_track_count)
     .bind(now)
     .bind(now)
     .fetch_one(conn)

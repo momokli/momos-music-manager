@@ -17,12 +17,9 @@ import {
   wireColumnResize,
   wireColumnDragReorder,
   wireConfigTrigger,
+  reorderTableColumns,
 } from "../shared/column-config.js";
-import {
-  renderSearchInput,
-  renderFilterGroup,
-  wireSearchFilter,
-} from "../shared/search-filter.js";
+import { renderSearchInput, wireSearchFilter } from "../shared/search-filter.js";
 import {
   getPageSize,
   renderPageSizeSelector,
@@ -211,13 +208,24 @@ function adaptItem(item) {
 }
 
 function renderToolbar(search, state) {
+  const selStatus = state.statusFilter || "all";
   return `<div class="filter-panel" id="dq-filter-panel">
     <div class="filter-panel-header">
       ${renderSearchInput("deemix-queue", search)}
-      ${renderFilterGroup("status", STATUS_OPTIONS, state.statusFilter)}
       <button class="filter-panel-toggle" id="dq-filter-toggle" title="Toggle filters">
         <i class="fas fa-chevron-up chevron"></i>
       </button>
+    </div>
+    <div class="filter-panel-body">
+      <div class="filter-row">
+        <span class="filter-row-label toggleable" data-filter="status">Status</span>
+        <div class="filter-group" id="dq-status-btns" style="flex-wrap:wrap">
+          ${STATUS_OPTIONS.map(
+            (opt) =>
+              `<button class="filter-btn${selStatus === opt.value ? " active" : ""}" data-value="${opt.value}">${opt.label}</button>`,
+          ).join("")}
+        </div>
+      </div>
     </div>
   </div>`;
 }
@@ -241,8 +249,13 @@ function renderBody(data, state) {
   const stats = `<div class="stats-row"><div class="stats-group">
     <button class="btn btn-sm btn-icon" id="dq-refresh" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
     <strong>${totalCount.toLocaleString()}</strong> queue item${totalCount !== 1 ? "s" : ""}
-    ${renderColumnConfigTrigger()}
     ${renderPageSizeSelector(state.pageSize)}
+    ${renderColumnConfigTrigger()}
+    ${
+      state.layoutMode
+        ? '<button class="btn btn-sm btn-primary" id="dq-layout-btn" style="margin-left:8px"><i class="fas fa-check"></i> Done</button>'
+        : '<button class="btn btn-sm" id="dq-layout-btn" style="margin-left:8px"><i class="fas fa-arrows-alt"></i> Modify Column Layout</button>'
+    }
   </div></div>`;
 
   const pagination = `<div class="pagination" id="${pageId}-pagination">
@@ -257,12 +270,15 @@ function renderBody(data, state) {
 function renderEmptyBody(state) {
   const colConfig = loadColumnConfig("deemix-queue", DEEMIX_COLUMNS);
   const thHtml = renderColumnHeaders(colConfig, DEEMIX_COLUMNS, state, sortableTh);
+  const visibleCount = colConfig.filter((c) => c.visible).length;
   return `<div class="stats-row"><div class="stats-group">
     <button class="btn btn-sm btn-icon" id="dq-refresh" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
     <strong>0</strong> queue items
+    ${renderPageSizeSelector(state.pageSize)}
+    ${renderColumnConfigTrigger()}
   </div></div>
   <div class="table-wrap"><table class="data-table"><thead><tr>${thHtml}</tr></thead>
-    <tbody><tr><td colspan="12" class="text-center text-muted" style="padding:32px">No queue items found.</td></tr></tbody>
+    <tbody><tr><td colspan="${visibleCount}" class="text-center text-muted" style="padding:32px">No queue items found. Add a playlist URL to get started.</td></tr></tbody>
   </table></div>`;
 }
 
@@ -283,20 +299,28 @@ function setContent(html) {
 }
 
 async function fetchAndRender(container, signal, state) {
+  updateHash("deemix-queue", state, {
+    sort: "",
+    order: "asc",
+    search: "",
+    status: "all",
+    page: 0,
+  });
   setContent(renderLoading("Loading queue…"));
   try {
     const resp = await fetchJSON(`/api/services/deemix/queue?${buildParams(state)}`, {
       signal,
     });
     if (signal.aborted) return;
-    const items = (resp.data || []).map(adaptItem);
-    const totalCount = resp._total ?? items.length;
+    const data = resp.data || {};
+    const items = (data.items || []).map(adaptItem);
+    const totalCount = data.total ?? items.length;
     if (items.length === 0 && totalCount === 0) {
       setContent(renderEmptyBody(state));
       wireContentEvents(container, signal, state);
       return;
     }
-    setContent(renderBody({ _total: totalCount, items }, state));
+    setContent(renderBody({ _total: totalCount, items: items }, state));
     wireContentEvents(container, signal, state);
   } catch (err) {
     if (err.name === "AbortError") return;
@@ -313,6 +337,74 @@ async function fetchAndRender(container, signal, state) {
       }),
     );
   }
+}
+
+function wireToolbarEvents(container, signal, state) {
+  // ── Status filter buttons (single-select) ──
+  const statusGroup = container.querySelector("#dq-status-btns");
+  if (statusGroup) {
+    statusGroup.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn");
+        if (!btn) return;
+        const val = btn.dataset.value;
+        state.statusFilter = state.statusFilter === val ? "all" : val;
+        state.page = 0;
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // ── Generic toggle for data-filter labels ──
+  const filterPanel = container.querySelector("#dq-filter-panel");
+  filterPanel?.querySelectorAll("[data-filter]").forEach((label) => {
+    function updateFilterUI() {
+      const key = label.dataset.filter + "Enabled";
+      const isActive = state[key] !== false;
+      label.classList.toggle("active", isActive);
+      label.classList.toggle("off", !isActive);
+      const row = label.closest(".filter-row");
+      if (row) {
+        const inputs = row.querySelectorAll("select, input, button, .filter-group");
+        inputs.forEach((el) => el.classList.toggle("filter-disabled", !isActive));
+      }
+    }
+    label.addEventListener("click", () => {
+      const key = label.dataset.filter + "Enabled";
+      state[key] = state[key] === false ? true : false;
+      state.page = 0;
+      updateFilterUI();
+      updateHash("deemix-queue", state, {
+        sort: "",
+        order: "asc",
+        search: "",
+        status: "all",
+        page: 0,
+      });
+      fetchAndRender(container, signal, state);
+    });
+    updateFilterUI();
+  });
+
+  // ── Auto-enable disabled filter sections on click ──
+  filterPanel?.addEventListener("click", (e) => {
+    const row = e.target.closest(".filter-row");
+    if (!row) return;
+    const label = row.querySelector("[data-filter]");
+    if (!label) return;
+    const key = label.dataset.filter + "Enabled";
+    if (state[key] !== false) return;
+    if (e.target.closest("[data-filter]")) return;
+    state[key] = true;
+    state.page = 0;
+    label.classList.add("active");
+    label.classList.remove("off");
+    const inputs = row.querySelectorAll("select, input, button, .filter-group");
+    inputs.forEach((el) => el.classList.remove("filter-disabled"));
+    fetchAndRender(container, signal, state);
+  });
 }
 
 function wireContentEvents(container, signal, state) {
@@ -386,12 +478,10 @@ function wireContentEvents(container, signal, state) {
           btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
           try {
             if (localId) {
-              // Has local DB entry — call retryDownload (UUID-based)
               await fetchJSON(`/api/services/deemix/queue/${localId}/retry`, {
                 method: "POST",
               });
             } else {
-              // Remote-only — re-add the URL
               await fetchJSON("/api/services/deemix/queue", {
                 method: "POST",
                 body: JSON.stringify({ url }),
@@ -424,13 +514,25 @@ function wireContentEvents(container, signal, state) {
 
   // Column customization wiring
   const colConfig = loadColumnConfig("deemix-queue", DEEMIX_COLUMNS);
-  wireColumnResize(container, "deemix-queue", DEEMIX_COLUMNS, colConfig);
-  wireColumnDragReorder(container, "deemix-queue", DEEMIX_COLUMNS, colConfig, () => {
-    fetchAndRender(container, signal, state);
-  });
+  if (state.layoutMode) {
+    wireColumnResize(container, "deemix-queue", DEEMIX_COLUMNS, colConfig);
+    wireColumnDragReorder(container, "deemix-queue", DEEMIX_COLUMNS, colConfig, () => {
+      reorderTableColumns(container, colConfig);
+    });
+  }
   wireConfigTrigger(container, "deemix-queue", DEEMIX_COLUMNS, colConfig, () => {
     fetchAndRender(container, signal, state);
   });
+
+  // Layout mode toggle
+  const layoutBtn = container.querySelector("#dq-layout-btn");
+  if (layoutBtn) {
+    layoutBtn.onclick = () => {
+      state.layoutMode = !state.layoutMode;
+      document.body.classList.toggle("layout-mode", state.layoutMode);
+      fetchAndRender(container, signal, state);
+    };
+  }
 }
 
 export async function init(container, signal, hashParams) {
@@ -441,8 +543,30 @@ export async function init(container, signal, hashParams) {
     sort: hashParams?.sort || "",
     order: hashParams?.order || "asc",
     statusFilter: hashParams?.status || "all",
+    statusEnabled: true,
+    layoutMode: false,
   };
-  container.innerHTML = `${renderToolbar(state.search, state)}\n<div id="dq-content">${renderLoading("Loading queue…")}</div>`;
+
+  // Reset layout mode on page entry
+  document.body.classList.remove("layout-mode");
+
+  // Render stable toolbar + actions panel + content wrapper ONCE
+  container.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:var(--space-4);">
+      <div style="display:flex;gap:var(--space-4);align-items:flex-start;">
+        <div style="flex:4;min-width:0;">${renderToolbar(state.search, state)}</div>
+        <div class="actions-panel" style="flex:1;min-width:180px;max-width:220px;">
+          <div class="actions-panel-header">
+            <span><i class="fas fa-bolt"></i> Actions</span>
+            <span class="actions-sel-count" id="dq-sel-count">0</span>
+          </div>
+          <button class="btn btn-sm" id="dq-actions-refresh"><i class="fas fa-rotate"></i> Refresh</button>
+        </div>
+      </div>
+      <div id="dq-content" style="min-height:200px;">${renderLoading("Loading queue…")}</div>
+    </div>`;
+
+  // Wire filter panel toggle
   const toggleBtn = container.querySelector("#dq-filter-toggle");
   const filterPanel = container.querySelector("#dq-filter-panel");
   if (toggleBtn && filterPanel) {
@@ -456,17 +580,23 @@ export async function init(container, signal, hashParams) {
       );
     });
   }
+
+  // Wire search + filter once (toolbar is stable)
   const toolbar = container.querySelector(".filter-panel");
   if (toolbar)
-    wireSearchFilter(toolbar, state, () => {
-      updateHash("deemix-queue", state, {
-        sort: "",
-        order: "asc",
-        search: "",
-        status: "all",
-        page: 0,
-      });
-      fetchAndRender(container, signal, state);
+    wireSearchFilter(toolbar, state, () => fetchAndRender(container, signal, state));
+
+  // Wire toolbar filter events (status buttons)
+  wireToolbarEvents(container, signal, state);
+
+  // Wire actions panel refresh
+  import("../shared/actions-panel.js").then(({ wireActionsRefresh }) => {
+    wireActionsRefresh(container, "dq", () => {
+      state.page = 0;
+      return fetchAndRender(container, signal, state);
     });
+  });
+
+  // Fetch initial data
   await fetchAndRender(container, signal, state);
 }

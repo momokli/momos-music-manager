@@ -42,6 +42,7 @@ import {
   wireColumnResize,
   wireColumnDragReorder,
   wireConfigTrigger,
+  reorderTableColumns,
 } from "../shared/column-config.js";
 
 /* ------------------------------------------------------------------ */
@@ -543,7 +544,7 @@ function wireContentEvents(container, signal, state, onChange) {
   state._colConfig = colConfig;
   wireColumnResize(container, "tasks", TASKS_COLUMNS, colConfig);
   wireColumnDragReorder(container, "tasks", TASKS_COLUMNS, colConfig, () => {
-    fetchAndRender(container, signal, state);
+    reorderTableColumns(container, colConfig);
   });
   wireConfigTrigger(container, "tasks", TASKS_COLUMNS, colConfig, () => {
     fetchAndRender(container, signal, state);

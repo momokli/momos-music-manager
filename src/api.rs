@@ -493,6 +493,7 @@ pub struct Playlist {
     pub name: String,
     pub description: Option<String>,
     pub track_count: i64,
+    pub remote_track_count: i64,
     pub imported_at: i64,
     pub updated_at: i64,
     pub metadata_json: Option<String>,
@@ -511,6 +512,8 @@ pub struct FilesQuery {
     pub linked_only: Option<bool>,
     pub unlinked: Option<bool>,
     pub non_default_only: Option<bool>,
+    pub file_types: Option<String>,
+    pub services: Option<String>,
     pub sort: Option<String>,
     pub order: Option<String>,
     pub page_size: Option<i64>,
@@ -521,9 +524,18 @@ pub struct FilesQuery {
 pub struct TracksQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
-    pub service: Option<String>,
+    /// Comma-separated service names to filter by. Tracks matching ANY of the services are returned.
+    pub services: Option<String>,
     pub search: Option<String>,
     pub playlist_id: Option<i64>,
+    /// Comma-separated tag names to filter by. Tracks matching ANY of the tags are returned.
+    pub tags: Option<String>,
+    /// Comma-separated playlist names to filter by. Tracks matching ANY of the playlists are returned.
+    pub playlist_names: Option<String>,
+    /// Comma-separated file types to filter by. Tracks matching ANY of the file types are returned.
+    pub file_types: Option<String>,
+    /// Aggregate file type filter: "any", "none", or empty.
+    pub file_type_agg: Option<String>,
     pub sort: Option<String>,
     pub order: Option<String>,
     pub page_size: Option<i64>,
@@ -539,6 +551,8 @@ pub struct PlaylistsQuery {
     pub sort: Option<String>,
     pub order: Option<String>,
     pub page_size: Option<i64>,
+    /// If true, only return playlists that have an active subscription.
+    pub subscribed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3618,37 +3632,18 @@ async fn deemix_queue_handler(
     .unwrap_or_default();
 
     // Try to fetch remote queue from deemix server (if configured)
-    let remote_items = match load_deemix_client_from_db(&state.db).await {
-        Some(client) => client.get_queue().await.unwrap_or_default(),
-        None => std::collections::HashMap::new(),
+    // Track whether fetch succeeded so we can later clean up stale local entries.
+    let (remote_items, remote_fetched) = match load_deemix_client_from_db(&state.db).await {
+        Some(client) => match client.get_queue().await {
+            Ok(items) => (items, true),
+            Err(_) => (std::collections::HashMap::new(), false),
+        },
+        None => (std::collections::HashMap::new(), false),
     };
 
-    // Backfill local deemix_downloads table with remote queue items not yet in DB
-    let now = chrono::Utc::now().timestamp();
-    for item in remote_items.values() {
-        let url = format!("https://open.spotify.com/playlist/{}", item.id);
-        let status = match item.status.as_str() {
-            "completed" | "withErrors" => "completed",
-            "queued" => "queued",
-            "downloading" => "downloading",
-            _ => "queued",
-        };
-        let _ = sqlx::query(
-            "INSERT OR IGNORE INTO deemix_downloads (spotify_playlist_url, playlist_name, status, track_count_total, track_count_downloaded, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&url)
-        .bind(&item.title)
-        .bind(status)
-        .bind(item.size)
-        .bind(item.downloaded)
-        .bind(now)
-        .bind(now)
-        .execute(&state.db)
-        .await;
-    }
-
-    // Build combined result
+    // Build combined result — only items the user explicitly queued via our API.
+    // Remote queue items are only used to enrich existing local entries, never
+    // imported automatically (avoids showing deemix-suggested content).
     let mut combined: Vec<DeemixCombinedQueueItem> = Vec::new();
 
     for (id, url, name, status, total, downloaded, error, created, updated) in local_downloads {
@@ -3669,8 +3664,15 @@ async fn deemix_queue_handler(
         });
     }
 
-    // Merge remote queue items (they may have richer status info)
-    for (uuid, item) in remote_items {
+    // Collect remote URLs for staleness check
+    let remote_urls: std::collections::HashSet<String> = remote_items
+        .values()
+        .map(|item| format!("https://open.spotify.com/playlist/{}", item.id))
+        .collect();
+
+    // Enrich existing local items with remote queue status (do NOT add
+    // remote-only items — only show what the user explicitly queued).
+    for (uuid, item) in &remote_items {
         let status = match item.status.as_str() {
             "completed" => "completed",
             "withErrors" => "completed",
@@ -3679,36 +3681,42 @@ async fn deemix_queue_handler(
             _ => "queued",
         };
 
-        // Check if we already have this in local list by URL
         let url = format!("https://open.spotify.com/playlist/{}", item.id);
-        let existing = combined
+        if let Some(existing) = combined
             .iter_mut()
-            .find(|c| c.spotify_playlist_url.as_deref() == Some(&url));
-
-        if let Some(existing) = existing {
-            existing.uuid = Some(uuid);
+            .find(|c| c.spotify_playlist_url.as_deref() == Some(&url))
+        {
+            existing.uuid = Some(uuid.clone());
             existing.status = status.to_string();
             existing.track_count_total = item.size;
             existing.track_count_downloaded = item.downloaded;
             existing.progress = item.progress;
-            existing.title = Some(item.title);
-            existing.artist = Some(item.artist);
-        } else {
-            combined.push(DeemixCombinedQueueItem {
-                id: None,
-                uuid: Some(uuid),
-                spotify_playlist_url: Some(url),
-                playlist_name: Some(item.title.clone()),
-                status: status.to_string(),
-                track_count_total: item.size,
-                track_count_downloaded: item.downloaded,
-                error_message: None,
-                created_at: None,
-                updated_at: None,
-                title: Some(item.title),
-                artist: Some(item.artist),
-                progress: item.progress,
-            });
+            existing.title = Some(item.title.clone());
+            existing.artist = Some(item.artist.clone());
+        }
+    }
+
+    // Clean up stale local statuses. When the remote queue was fetched
+    // successfully, any local item with status "queued" or "downloading"
+    // that is NOT in the remote queue has already been processed (completed)
+    // by the deemix server.
+    if remote_fetched {
+        let now = chrono::Utc::now().timestamp();
+        for item in &mut combined {
+            if let Some(local_id) = item.id {
+                if (item.status == "queued" || item.status == "downloading")
+                    && !remote_urls.contains(item.spotify_playlist_url.as_deref().unwrap_or(""))
+                {
+                    item.status = "completed".to_string();
+                    let _ = sqlx::query(
+                        "UPDATE deemix_downloads SET status = 'completed', updated_at = ? WHERE id = ?",
+                    )
+                    .bind(now)
+                    .bind(local_id)
+                    .execute(&state.db)
+                    .await;
+                }
+            }
         }
     }
 
@@ -4327,6 +4335,7 @@ async fn playlists_handler(
     let offset = query.offset.unwrap_or(0);
     let search_term = query.search.clone();
     let service_filter = query.service.clone();
+    let subscribed_filter = query.subscribed.unwrap_or(false);
 
     // Build main query with bind parameters (no string interpolation)
     let mut main_builder = QueryBuilder::new(
@@ -4346,6 +4355,18 @@ async fn playlists_handler(
         main_builder.push_bind(service.clone());
         count_builder.push(clause);
         count_builder.push_bind(service.clone());
+        has_where = true;
+    }
+
+    // Subscribed filter: only show playlists with an active subscription
+    if subscribed_filter {
+        let sub_clause = if has_where {
+            " AND EXISTS (SELECT 1 FROM playlist_subscriptions ps WHERE ps.service = sp.service AND ps.playlist_id = sp.playlist_id AND ps.is_active = 1)"
+        } else {
+            " WHERE EXISTS (SELECT 1 FROM playlist_subscriptions ps WHERE ps.service = sp.service AND ps.playlist_id = sp.playlist_id AND ps.is_active = 1)"
+        };
+        main_builder.push(sub_clause);
+        count_builder.push(sub_clause);
         has_where = true;
     }
 
@@ -4482,7 +4503,58 @@ async fn playlists_handler(
         }
     }
 
-    // Build enriched playlist objects with deemix status
+    // Get matching tag names via v_tag_playlist (case-insensitive name match)
+    let mut tag_names: std::collections::HashMap<i64, Option<String>> =
+        std::collections::HashMap::new();
+    let playlist_db_ids: Vec<i64> = playlists.iter().map(|p| p.id).collect();
+    if !playlist_db_ids.is_empty() {
+        let tag_placeholders: Vec<String> =
+            playlist_db_ids.iter().map(|_| "?".to_string()).collect();
+        let tag_sql = format!(
+            "SELECT vtp.playlist_id, vtp.tag_name FROM v_tag_playlist vtp WHERE vtp.playlist_id IN ({})",
+            tag_placeholders.join(",")
+        );
+        let mut tag_q = sqlx::query(&tag_sql);
+        for id in &playlist_db_ids {
+            tag_q = tag_q.bind(id);
+        }
+        if let Ok(tag_rows) = tag_q.fetch_all(&state.db).await {
+            for row in tag_rows {
+                let pid: i64 = row.try_get("playlist_id").unwrap_or_default();
+                let tn: String = row.try_get("tag_name").unwrap_or_default();
+                tag_names.insert(pid, Some(tn));
+            }
+        }
+    }
+
+    // Get local file counts per playlist (unique files on disk linked via service_playlist_tracks -> v_file_track_link -> files)
+    let mut local_counts: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    if !playlist_db_ids.is_empty() {
+        let lc_placeholders: Vec<String> =
+            playlist_db_ids.iter().map(|_| "?".to_string()).collect();
+        let lc_sql = format!(
+            "SELECT spt.playlist_id, COUNT(DISTINCT f.id) AS local_track_count
+             FROM service_playlist_tracks spt
+             JOIN v_file_track_link v ON spt.track_id = v.track_id
+             JOIN files f ON v.file_id = f.id
+             WHERE spt.playlist_id IN ({})
+             GROUP BY spt.playlist_id",
+            lc_placeholders.join(",")
+        );
+        let mut lc_q = sqlx::query(&lc_sql);
+        for id in &playlist_db_ids {
+            lc_q = lc_q.bind(id);
+        }
+        if let Ok(lc_rows) = lc_q.fetch_all(&state.db).await {
+            for row in lc_rows {
+                let pid: i64 = row.try_get("playlist_id").unwrap_or_default();
+                let lc: i64 = row.try_get("local_track_count").unwrap_or(0);
+                local_counts.insert(pid, lc);
+            }
+        }
+    }
+
+    // Build enriched playlist objects with deemix status and tag name
     let playlists_with_deemix: Vec<serde_json::Value> = playlists
         .iter()
         .map(|p| {
@@ -4490,6 +4562,7 @@ async fn playlists_handler(
                 .get(&p.playlist_id)
                 .cloned()
                 .unwrap_or((None, None));
+            let tag_name = tag_names.get(&p.id).cloned().unwrap_or(None);
             serde_json::json!({
                 "id": p.id,
                 "service": p.service,
@@ -4497,11 +4570,14 @@ async fn playlists_handler(
                 "name": p.name,
                 "description": p.description,
                 "trackCount": p.track_count,
+                "localTrackCount": local_counts.get(&p.id).copied().unwrap_or(0),
+                "remoteTrackCount": if p.remote_track_count > 0 { p.remote_track_count } else { p.track_count },
                 "importedAt": p.imported_at,
                 "updatedAt": p.updated_at,
                 "metadataJson": p.metadata_json,
                 "deemixStatus": deemix_status,
                 "deemixId": deemix_id,
+                "tagName": tag_name,
             })
         })
         .collect();
@@ -5137,6 +5213,62 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
         );
     }
 
+    // Tag filter (comma-separated, case-insensitive via v_file_tags)
+    if let Some(ref tags_str) = query.tags
+        && !tags_str.is_empty()
+    {
+        let lowered: Vec<String> = tags_str
+            .split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if !lowered.is_empty() {
+            let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND LOWER(TRIM(ft.tag_name)) IN ({})",
+                placeholders.join(",")
+            ));
+        }
+    }
+
+    // File type filter (comma-separated)
+    if let Some(ref ft_str) = query.file_types
+        && !ft_str.is_empty()
+    {
+        let types: Vec<String> = ft_str
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !types.is_empty() {
+            let placeholders: Vec<String> = types.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND LOWER(files.file_type) IN ({})",
+                placeholders.join(",")
+            ));
+        }
+    }
+
+    // Service filter (comma-separated, joins via v_file_track_link)
+    if let Some(ref svc_str) = query.services
+        && !svc_str.is_empty()
+    {
+        let svcs: Vec<String> = svc_str
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !svcs.is_empty() {
+            let placeholders: Vec<String> = svcs.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM v_file_track_link vftl
+                   JOIN service_tracks st2 ON st2.id = vftl.track_id
+                   WHERE vftl.file_id = files.id AND LOWER(st2.service) IN ({}))",
+                placeholders.join(",")
+            ));
+        }
+    }
+
     apply_sort(
         &mut sql,
         query.sort.as_deref(),
@@ -5183,6 +5315,45 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
             .filter(|s| !s.is_empty())
         {
             q = q.bind(k);
+        }
+    }
+
+    // Bind tag params
+    if let Some(ref tags_str) = query.tags
+        && !tags_str.is_empty()
+    {
+        for t in tags_str
+            .split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+        {
+            q = q.bind(t);
+        }
+    }
+
+    // Bind file type params
+    if let Some(ref ft_str) = query.file_types
+        && !ft_str.is_empty()
+    {
+        for ft in ft_str
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(ft);
+        }
+    }
+
+    // Bind service params
+    if let Some(ref svc_str) = query.services
+        && !svc_str.is_empty()
+    {
+        for svc in svc_str
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(svc);
         }
     }
 
@@ -5309,6 +5480,62 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
         );
     }
 
+    // Tag filter (comma-separated, case-insensitive via v_file_tags)
+    if let Some(ref tags_str) = query.tags
+        && !tags_str.is_empty()
+    {
+        let lowered: Vec<String> = tags_str
+            .split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if !lowered.is_empty() {
+            let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND LOWER(TRIM(ft.tag_name)) IN ({})",
+                placeholders.join(",")
+            ));
+        }
+    }
+
+    // File type filter (comma-separated)
+    if let Some(ref ft_str) = query.file_types
+        && !ft_str.is_empty()
+    {
+        let types: Vec<String> = ft_str
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !types.is_empty() {
+            let placeholders: Vec<String> = types.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND LOWER(files.file_type) IN ({})",
+                placeholders.join(",")
+            ));
+        }
+    }
+
+    // Service filter (comma-separated, joins via v_file_track_link)
+    if let Some(ref svc_str) = query.services
+        && !svc_str.is_empty()
+    {
+        let svcs: Vec<String> = svc_str
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !svcs.is_empty() {
+            let placeholders: Vec<String> = svcs.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM v_file_track_link vftl
+                   JOIN service_tracks st2 ON st2.id = vftl.track_id
+                   WHERE vftl.file_id = files.id AND LOWER(st2.service) IN ({}))",
+                placeholders.join(",")
+            ));
+        }
+    }
+
     let mut q = sqlx::query(&sql);
 
     if let Some(ref search) = query.search
@@ -5334,6 +5561,45 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
             .filter(|s| !s.is_empty())
         {
             q = q.bind(k);
+        }
+    }
+
+    // Bind tag params
+    if let Some(ref tags_str) = query.tags
+        && !tags_str.is_empty()
+    {
+        for t in tags_str
+            .split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+        {
+            q = q.bind(t);
+        }
+    }
+
+    // Bind file type params
+    if let Some(ref ft_str) = query.file_types
+        && !ft_str.is_empty()
+    {
+        for ft in ft_str
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(ft);
+        }
+    }
+
+    // Bind service params
+    if let Some(ref svc_str) = query.services
+        && !svc_str.is_empty()
+    {
+        for svc in svc_str
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(svc);
         }
     }
 
@@ -5391,7 +5657,6 @@ async fn get_file_by_id(pool: &Pool<Sqlite>, id: i64) -> Result<ApiFile> {
 async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiServiceTrack>> {
     let limit = query.page_size.or(query.limit).unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
-    let service_filter = query.service.clone();
     let search_pattern = query.search.as_ref().and_then(|s| {
         if s.is_empty() {
             None
@@ -5401,24 +5666,125 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     });
     let playlist_id_filter = query.playlist_id;
 
-    // If filtering by playlist, use DISTINCT to avoid duplicates from the JOIN
-    let mut sql = if playlist_id_filter.is_some() {
+    // Parse multi-value filters
+    let services_filter: Vec<String> = query
+        .services
+        .as_ref()
+        .map(|s| {
+            s.split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let tag_names: Vec<String> = query
+        .tags
+        .as_ref()
+        .map(|t| {
+            t.split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let playlist_names_filter: Vec<String> = query
+        .playlist_names
+        .as_ref()
+        .map(|p| {
+            p.split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let file_types_filter: Vec<String> = query
+        .file_types
+        .as_ref()
+        .map(|f| {
+            f.split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let file_type_agg = query.file_type_agg.as_deref().unwrap_or("").to_lowercase();
+
+    let needs_join_tracks =
+        playlist_id_filter.is_some() || !tag_names.is_empty() || !playlist_names_filter.is_empty();
+
+    // Always alias the table so subqueries can reference st.id reliably
+    let mut sql = if needs_join_tracks {
         "SELECT DISTINCT st.* FROM service_tracks st JOIN service_playlist_tracks spt ON spt.track_id = st.id WHERE 1=1"
             .to_string()
     } else {
-        "SELECT * FROM service_tracks WHERE 1=1".to_string()
+        "SELECT st.* FROM service_tracks st WHERE 1=1".to_string()
     };
 
     if search_pattern.is_some() {
         sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)");
     }
 
-    if service_filter.is_some() {
-        sql.push_str(" AND service = ?");
+    // Multi-service filter: LOWER(st.service) IN (?,?,...)
+    if !services_filter.is_empty() {
+        let placeholders: Vec<String> = services_filter.iter().map(|_| "?".to_string()).collect();
+        sql.push_str(&format!(
+            " AND LOWER(st.service) IN ({})",
+            placeholders.join(",")
+        ));
     }
 
     if playlist_id_filter.is_some() {
         sql.push_str(" AND spt.playlist_id = ?");
+    }
+
+    // Tag name filter: EXISTS subquery joining tracks → playlists → tags
+    if !tag_names.is_empty() {
+        let placeholders: Vec<String> = tag_names.iter().map(|_| "?".to_string()).collect();
+        let sub = format!(
+            " AND EXISTS (SELECT 1 FROM service_playlist_tracks spt2 \
+             JOIN service_playlists sp ON sp.id = spt2.playlist_id \
+             JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name)) \
+             WHERE spt2.track_id = st.id AND LOWER(TRIM(t.name)) IN ({}))",
+            placeholders.join(",")
+        );
+        sql.push_str(&sub);
+    }
+
+    // Playlist name filter
+    if !playlist_names_filter.is_empty() {
+        let placeholders: Vec<String> = playlist_names_filter
+            .iter()
+            .map(|_| "?".to_string())
+            .collect();
+        let sub = format!(
+            " AND EXISTS (SELECT 1 FROM service_playlist_tracks spt3 \
+             JOIN service_playlists sp2 ON sp2.id = spt3.playlist_id \
+             WHERE spt3.track_id = st.id AND LOWER(TRIM(sp2.name)) IN ({}))",
+            placeholders.join(",")
+        );
+        sql.push_str(&sub);
+    }
+
+    // File type filter: specific types via EXISTS subquery
+    if !file_types_filter.is_empty() {
+        let placeholders: Vec<String> = file_types_filter.iter().map(|_| "?".to_string()).collect();
+        let sub = format!(
+            " AND EXISTS (SELECT 1 FROM v_file_track_link v \
+             LEFT JOIN files f ON f.id = v.file_id \
+             WHERE v.track_id = st.id AND LOWER(f.file_type) IN ({}))",
+            placeholders.join(",")
+        );
+        sql.push_str(&sub);
+    } else if file_type_agg == "any" {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.track_id = st.id)");
+    } else if file_type_agg == "none" {
+        sql.push_str(
+            " AND NOT EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.track_id = st.id)",
+        );
     }
 
     apply_sort(
@@ -5445,12 +5811,28 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         query_builder = query_builder.bind(pattern).bind(pattern).bind(pattern);
     }
 
-    if let Some(service) = &service_filter {
-        query_builder = query_builder.bind(service);
+    // Bind multi-service filter params
+    for svc in &services_filter {
+        query_builder = query_builder.bind(svc);
     }
 
     if let Some(pid) = playlist_id_filter {
         query_builder = query_builder.bind(pid);
+    }
+
+    // Bind tag name params
+    for tag in &tag_names {
+        query_builder = query_builder.bind(tag);
+    }
+
+    // Bind playlist name params
+    for pl_name in &playlist_names_filter {
+        query_builder = query_builder.bind(pl_name);
+    }
+
+    // Bind file type params
+    for ft in &file_types_filter {
+        query_builder = query_builder.bind(ft);
     }
 
     let tracks = query_builder
@@ -5592,7 +5974,6 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
 }
 
 async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i64> {
-    let service_filter = query.service.clone();
     let search_pattern = query.search.as_ref().and_then(|s| {
         if s.is_empty() {
             None
@@ -5602,23 +5983,125 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
     });
     let playlist_id_filter = query.playlist_id;
 
-    let mut sql = if playlist_id_filter.is_some() {
+    // Parse multi-value filters
+    let services_filter: Vec<String> = query
+        .services
+        .as_ref()
+        .map(|s| {
+            s.split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let tag_names: Vec<String> = query
+        .tags
+        .as_ref()
+        .map(|t| {
+            t.split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let playlist_names_filter: Vec<String> = query
+        .playlist_names
+        .as_ref()
+        .map(|p| {
+            p.split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let file_types_filter: Vec<String> = query
+        .file_types
+        .as_ref()
+        .map(|f| {
+            f.split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let file_type_agg = query.file_type_agg.as_deref().unwrap_or("").to_lowercase();
+
+    let needs_join_tracks =
+        playlist_id_filter.is_some() || !tag_names.is_empty() || !playlist_names_filter.is_empty();
+
+    // Always alias the table so subqueries can reference st.id reliably
+    let mut sql = if needs_join_tracks {
         "SELECT COUNT(DISTINCT st.id) as count FROM service_tracks st JOIN service_playlist_tracks spt ON spt.track_id = st.id WHERE 1=1"
             .to_string()
     } else {
-        "SELECT COUNT(*) as count FROM service_tracks WHERE 1=1".to_string()
+        "SELECT COUNT(*) as count FROM service_tracks st WHERE 1=1".to_string()
     };
 
     if search_pattern.is_some() {
         sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)");
     }
 
-    if service_filter.is_some() {
-        sql.push_str(" AND service = ?");
+    // Multi-service filter: LOWER(st.service) IN (?,?,...)
+    if !services_filter.is_empty() {
+        let placeholders: Vec<String> = services_filter.iter().map(|_| "?".to_string()).collect();
+        sql.push_str(&format!(
+            " AND LOWER(st.service) IN ({})",
+            placeholders.join(",")
+        ));
     }
 
     if playlist_id_filter.is_some() {
         sql.push_str(" AND spt.playlist_id = ?");
+    }
+
+    // Tag name filter
+    if !tag_names.is_empty() {
+        let placeholders: Vec<String> = tag_names.iter().map(|_| "?".to_string()).collect();
+        let sub = format!(
+            " AND EXISTS (SELECT 1 FROM service_playlist_tracks spt2 \
+             JOIN service_playlists sp ON sp.id = spt2.playlist_id \
+             JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name)) \
+             WHERE spt2.track_id = st.id AND LOWER(TRIM(t.name)) IN ({}))",
+            placeholders.join(",")
+        );
+        sql.push_str(&sub);
+    }
+
+    // Playlist name filter
+    if !playlist_names_filter.is_empty() {
+        let placeholders: Vec<String> = playlist_names_filter
+            .iter()
+            .map(|_| "?".to_string())
+            .collect();
+        let sub = format!(
+            " AND EXISTS (SELECT 1 FROM service_playlist_tracks spt3 \
+             JOIN service_playlists sp2 ON sp2.id = spt3.playlist_id \
+             WHERE spt3.track_id = st.id AND LOWER(TRIM(sp2.name)) IN ({}))",
+            placeholders.join(",")
+        );
+        sql.push_str(&sub);
+    }
+
+    // File type filter: specific types via EXISTS subquery
+    if !file_types_filter.is_empty() {
+        let placeholders: Vec<String> = file_types_filter.iter().map(|_| "?".to_string()).collect();
+        let sub = format!(
+            " AND EXISTS (SELECT 1 FROM v_file_track_link v \
+             LEFT JOIN files f ON f.id = v.file_id \
+             WHERE v.track_id = st.id AND LOWER(f.file_type) IN ({}))",
+            placeholders.join(",")
+        );
+        sql.push_str(&sub);
+    } else if file_type_agg == "any" {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.track_id = st.id)");
+    } else if file_type_agg == "none" {
+        sql.push_str(
+            " AND NOT EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.track_id = st.id)",
+        );
     }
 
     let mut query_builder = sqlx::query(&sql);
@@ -5627,12 +6110,28 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
         query_builder = query_builder.bind(pattern).bind(pattern).bind(pattern);
     }
 
-    if let Some(service) = service_filter.as_ref() {
-        query_builder = query_builder.bind(service);
+    // Bind multi-service filter params
+    for svc in &services_filter {
+        query_builder = query_builder.bind(svc);
     }
 
     if let Some(pid) = playlist_id_filter {
         query_builder = query_builder.bind(pid);
+    }
+
+    // Bind tag name params
+    for tag in &tag_names {
+        query_builder = query_builder.bind(tag);
+    }
+
+    // Bind playlist name params
+    for pl_name in &playlist_names_filter {
+        query_builder = query_builder.bind(pl_name);
+    }
+
+    // Bind file type params
+    for ft in &file_types_filter {
+        query_builder = query_builder.bind(ft);
     }
 
     let row = query_builder.fetch_one(pool).await?;
@@ -6363,6 +6862,8 @@ impl Default for FilesQuery {
             linked_only: None,
             unlinked: None,
             non_default_only: None,
+            file_types: None,
+            services: None,
             sort: None,
             order: None,
             page_size: None,

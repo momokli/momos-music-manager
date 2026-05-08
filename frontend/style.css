@@ -221,7 +221,7 @@ body {
     flex-direction: column;
     justify-content: center;
     width: 100%;
-    max-width: calc((100vh - 2 * var(--space-8)) * 4 / 3);
+    max-width: min(95vw, 1000px);
     margin: 0 auto;
     text-align: center;
 }
@@ -242,9 +242,9 @@ body {
     border: 1px solid var(--border);
     border-radius: var(--radius-xl);
     padding: var(--space-5) var(--space-6);
-    width: fit-content;
+    width: 100%;
+    max-width: min(90vw, 900px);
     margin: 0 auto;
-    zoom: 1.5;
 }
 
 /* ── Tag Card (Row 1) ──────────────────── */
@@ -254,41 +254,39 @@ body {
     border-bottom: 1px solid var(--border);
 }
 
-.tag-card-main {
+.tag-card-name-row {
     display: flex;
+    justify-content: center;
     align-items: center;
-    justify-content: center;
-    gap: var(--space-4);
     margin-bottom: var(--space-3);
-    flex-wrap: wrap;
-}
-
-.tag-card-left {
-    display: flex;
-    align-items: baseline;
-    justify-content: center;
-    gap: var(--space-2);
 }
 
 .tag-card-name {
-    font-size: 1.5rem;
+    font-size: 1.35rem;
     font-weight: 700;
     color: var(--text);
-    line-height: 1.2;
+    line-height: 1.35;
+    overflow-wrap: break-word;
+    word-break: break-word;
+    white-space: normal;
+    max-width: 100%;
+    text-align: center;
 }
 
 .tag-card-id {
-    font-size: 0.7rem;
+    font-size: 0.75rem;
     color: var(--text-subtle);
-    background: var(--border);
-    padding: 1px 8px;
+    background: var(--bg-tertiary);
+    padding: 2px 10px;
     border-radius: var(--radius-md);
+    font-weight: 600;
+    font-family: var(--font-mono);
+    letter-spacing: 0.02em;
 }
 
 .tag-card-meta {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    justify-content: center;
     gap: var(--space-3);
 }
 
@@ -309,9 +307,10 @@ body {
 
 .tag-card-services {
     display: flex;
-    gap: var(--space-3);
+    gap: var(--space-4);
     align-items: center;
     justify-content: center;
+    flex-wrap: wrap;
 }
 
 .tag-service {
@@ -341,7 +340,7 @@ body {
 .cat-grid-row .cat-btn {
     flex: 1;
     min-width: 0;
-    max-width: 220px;
+    max-width: 260px;
     padding: var(--space-4) var(--space-3);
     justify-content: flex-start;
     min-height: 150px;
@@ -355,7 +354,7 @@ body {
 
 .cat-default-row .cat-btn {
     width: 100%;
-    max-width: calc(220px * 3 + var(--space-3) * 2);
+    max-width: calc(260px * 3 + var(--space-3) * 2);
 }
 
 /* ── Base Card Button ──────────────────── */
@@ -394,6 +393,14 @@ body {
     align-items: center;
     gap: var(--space-2);
     margin-bottom: 0;
+    max-width: 100%;
+}
+
+.cat-btn-label {
+    overflow-wrap: break-word;
+    word-break: break-word;
+    white-space: normal;
+    max-width: 100%;
 }
 
 .cat-btn-icon {
@@ -829,6 +836,65 @@ select.input-text {
     background: var(--accent-bg);
     color: var(--accent);
     border-color: var(--accent);
+}
+
+.filter-row-label.toggleable {
+    cursor: pointer;
+    user-select: none;
+    padding: 3px 8px;
+    border-radius: 5px;
+    transition: all 0.15s ease;
+    width: 80px;
+    flex-shrink: 0;
+    text-align: center;
+    display: inline-block;
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-subtle);
+}
+
+.filter-row-label.toggleable:hover {
+    background: var(--accent-bg);
+    color: var(--accent);
+}
+
+.filter-row-label.toggleable.active {
+    background: var(--accent-bg);
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.filter-row-label.toggleable.off {
+    opacity: 0.55;
+    color: var(--text-muted);
+}
+
+/* ─── Filter section headers ─── */
+.filter-section-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 0 3px 0;
+    margin-top: 6px;
+    border-top: 1px solid var(--border);
+    font-size: 0.62rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-subtle);
+}
+
+.filter-section-header i {
+    font-size: 0.55rem;
+    opacity: 0.6;
+}
+
+.filter-disabled {
+    opacity: 0.4 !important;
 }
 
 /* ── Dual Range Slider (BPM) ───────────── */

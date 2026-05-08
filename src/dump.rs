@@ -178,6 +178,8 @@ pub struct DumpServicePlaylist {
     #[serde(default)]
     pub metadata_json: Option<String>,
     #[serde(default)]
+    pub remote_track_count: i64,
+    #[serde(default)]
     pub imported_at: i64,
     #[serde(default)]
     pub updated_at: i64,
@@ -569,6 +571,7 @@ async fn export_service_playlists(pool: &Pool<Sqlite>) -> Result<Vec<DumpService
                 name: r.get("name"),
                 description: r.get("description"),
                 metadata_json: r.get("metadata_json"),
+                remote_track_count: r.get("remote_track_count"),
                 imported_at: r.get("imported_at"),
                 updated_at: r.get("updated_at"),
             })
@@ -1040,10 +1043,10 @@ async fn import_service_playlists(
     let mut count = 0;
     for r in rows {
         match sqlx::query(
-            "INSERT INTO service_playlists (id, service, playlist_id, name, description, metadata_json, imported_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO service_playlists (id, service, playlist_id, name, description, metadata_json, remote_track_count, imported_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(r.id).bind(&r.service).bind(&r.playlist_id).bind(&r.name)
-        .bind(&r.description).bind(&r.metadata_json).bind(r.imported_at).bind(r.updated_at)
+        .bind(&r.description).bind(&r.metadata_json).bind(r.remote_track_count).bind(r.imported_at).bind(r.updated_at)
         .execute(&mut **tx).await
         {
             Ok(_) => count += 1,

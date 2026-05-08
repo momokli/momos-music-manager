@@ -1,6 +1,6 @@
 # Momo's Music Manager — Agent Guidance & Implementation Plan
 
-> **Last Updated**: 2026-05-01 — Comprehensive plan based on full code review
+> **Last Updated**: 2026-05-08 — Updated with current CRUD page status + optimizations
 
 ---
 
@@ -23,6 +23,7 @@ Single developer, no production data, no backward compatibility needed.
 8. **Task Manager**: In-memory task tracking — 4 operation types (ServiceSync, WriteComment, RecomputeEmbeddings, ScanFolder)
 9. **Sync State**: In-memory `TaskManager` — tasks auto-pruned 5 min after completion
 10. **Config Priority** (highest wins): Env vars > `~/.config/momos-music-manager/config.toml` > built-in defaults
+11. **Server-Side Filtering**: All filters must be server-side on paginated pages. Client-side filtering after pagination breaks page counts — see Phase 10
 
 ---
 
@@ -51,8 +52,6 @@ playlist_id  = "your_youtube_playlist_id"
 Dev-only env vars (not in config.toml):
 
 - `DATABASE_URL` — default `sqlite:app.db`
-- `SPOTIFY_API_CACHE` — `record`/`replay` for dev
-- `SCAN_CACHE` — `record`/`replay` for dev
 
 ---
 
@@ -73,24 +72,6 @@ cargo run -- scan-file /path/to/file.stem.m4a
 
 # Delete old DBs + restart
 rm -f app.db && cargo run -- serve --host 127.0.0.1 --port 3000
-
-# Record Spotify API responses for later replay
-SPOTIFY_API_CACHE=record cargo run -- serve
-
-# Replay cached responses (no API calls, seconds instead of minutes)
-SPOTIFY_API_CACHE=replay cargo run -- serve
-
-# Clear cached API responses
-rm -rf dev-data/spotify-api
-
-# Record folder scan metadata for later replay
-SCAN_CACHE=record cargo run -- serve
-
-# Replay cached folder scan (no lofty/exiftool calls, seconds instead of minutes)
-SCAN_CACHE=replay cargo run -- serve
-
-# Clear cached scan metadata (forces re-extraction next scan)
-rm -rf dev-data/scan-cache
 
 # Dump DB to JSON (save state before deleting app.db)
 cargo run -- dump
@@ -142,7 +123,6 @@ src/
 ├── dump.rs              # DB dump/restore (JSON)
 ├── embeddings.rs        # Semantic tag embeddings (candle/ML)
 ├── poller.rs            # Playlist subscription background poller
-├── scan_cache.rs        # File scan caching (record/replay)
 ├── spotify/
 │   ├── mod.rs
 │   ├── client.rs        # Spotify OAuth client
@@ -242,76 +222,87 @@ const state = {
 
 Before rolling out any page, make sure the system works end-to-end:
 
-- [ ] **Backend:** Sort + pagination on all list endpoints (`sort`, `order`, `limit`, `offset`, `pageSize`)
-- [ ] **Backend:** `apply_sort` helper with whitelist validation in `api.rs`
-- [ ] **Frontend:** All shared modules present and working (`crud.js`, `column-config.js`, `search-filter.js`, `components.js`, `api.js`)
-- [ ] **Frontend:** Confirm CSS for sortable columns, page-size selector, column config is in `style.css`
-- [ ] **Smoke test:** `#files` page works with sort, page size, hash sync
+- [x] **Backend:** Sort + pagination on all list endpoints (`sort`, `order`, `limit`, `offset`, `pageSize`)
+- [x] **Backend:** `apply_sort` helper with whitelist validation in `api.rs`
+- [x] **Frontend:** All shared modules present and working (`crud.js`, `column-config.js`, `search-filter.js`, `components.js`, `api.js`)
+- [x] **Frontend:** Confirm CSS for sortable columns, page-size selector, column config is in `style.css`
+- [x] **Smoke test:** `#files` page works with sort, page size, hash sync
 
 ---
 
-## Phase 1: Files Page (Reference Blueprint)
+## Phase 1: Files Page (Reference Blueprint) ✅ COMPLETE
 
 **File:** `frontend/pages/files.js`
 
-This is the richest page — get it right and all others follow the same pattern.
+This is the richest page. All checklist items implemented.
 
-- [ ] **Stable toolbar** — Search input + filter panel (BPM, key grid, tags) rendered once, preserved across re-renders. Comment-writer sidebar stays stable.
-- [ ] **Body** — Stats row (count + refresh + page-size selector), sortable table with column config, pagination
-- [ ] **Hash sync** — `updateHash()` on every filter change, `parseHash()` on init
-- [ ] **Column config** — `loadColumnConfig("files", FILES_COLUMNS)`, column visibility/reorder/resize via `column-config.js`
-- [ ] **Cell renderers** — Each column has a renderer in `FILES_CELL_RENDERERS`. Comment column shows diff (old strikethrough, new green).
-- [ ] **PMV filter** — Category + aggregate split (P/M/V multi-select | Full/Partial/None single), either/or logic, reads comment bracket
-- [ ] **Service filter** — Multi-select icons, class-based selector for both views
-- [ ] **Actions panel** — Refresh Metadata + Write Comments buttons to the right of filter panel (CSS grid `4fr 1fr`)
+- [x] **Stable toolbar** — Search + filter panel (BPM, key grid, tags). Comment-writer sidebar stays stable.
+- [x] **Body** — Stats row (count + refresh + page-size selector), sortable table with column config, pagination
+- [x] **Hash sync** — `updateHash()` on every filter change, `parseHash()` on init
+- [x] **Column config** — `loadColumnConfig("files", FILES_COLUMNS)`, column visibility/reorder/resize via `column-config.js`
+- [x] **Cell renderers** — Each column has a renderer in `FILES_CELL_RENDERERS`. Comment column shows diff (old strikethrough, new green).
+- [x] **PMV filter** — Category + aggregate split (P/M/V multi-select | Full/Partial/None single), either/or logic, reads comment bracket
+- [x] **Service filter** — Multi-select icons, class-based selector for both views
+- [x] **Actions panel** — Refresh Metadata + Write Comments buttons (CSS grid `4fr 1fr`)
 
 ---
 
-## Phase 2: Tracks Page
+## Phase 2: Tracks Page ✅ COMPLETE
 
 **File:** `frontend/pages/tracks.js`
 
-Already has stable toolbar + playlist context badge. Needs retrofit:
+2-column filter panel with typeahead tag + playlist search, file type filter,
+and service/PMV. Server-side pagination, column config.
 
-- [ ] **Sortable headers** — Use `sortableTh`, `wireSortableHeaders` from `crud.js`
-- [ ] **Page size selector** — Use `renderPageSizeSelector`, `wirePageSizeSelector`
-- [ ] **Hash sync** — Use `updateHash` instead of reading-only
-- [ ] **Column config** — `loadColumnConfig("tracks", TRACKS_COLUMNS)`
-- [ ] **Playlists column** — Show tag chips with category colors using `playlistTags` from API
-- [ ] **Comment column** — Same diff rendering as files, using linked file comments
-- [ ] **Playlist count column** — Numeric badge showing how many playlists a track belongs to
-- [ ] **PMV + Service filters** — Same pattern as files page
+- [x] **Sortable headers / page size / hash sync / column config** — Standard CRUD pattern
+- [x] **Playlists column** — Tag chips with category colors via `playlistTags` from API
+- [x] **Playlist typeahead filter** — Searches `/api/playlists`, backend `playlistNames` param
+- [x] **Tag typeahead filter** — Searches `/api/tags`, backend `tags` param
+- [x] **File type filter** — FLAC, STEM.M4A, MP3 | ANY, NONE (like PMV toggle)
+- [x] **Service filter** — Multi-select icon buttons
+- [x] **PMV filter** — Categories + aggregate toggle (⚠️ dead code — see Phase 10.2)
+- [x] **Filter toggle** — Collapsible panel with localStorage persistence
+
+⚠️ **Known bug**: Service, file type, and PMV filtering are client-side only.
+This means pagination is broken when filters are active — see Phase 10.
 
 ---
 
-## Phase 3: Playlists Page
+## Phase 3: Playlists Page ✅ COMPLETE
 
 **File:** `frontend/pages/playlists.js`
 
-Full retrofit following files/tracks pattern:
+Full retrofit complete. **Tag lookup optimized** (2026-05-08): backend now returns
+`tagName` via `v_tag_playlist` join, eliminating separate `/api/tags` fetch and
+fixing bug where tags beyond page 1 were invisible.
 
-- [ ] **Stable toolbar** — Search input + service filter dropdown + Create Tags button
-- [ ] **Column model** — Name, Service, Tracks (count + local mismatch), Tags, Deemix, Sync, Imported, Updated, Subscribe, View, Actions
-- [ ] **Sort** — All sortable columns (name, service, track_count, imported_at, updated_at)
-- [ ] **Hash sync + page size** — Standard pattern
-- [ ] **Service filter** — Dropdown or icon buttons (like files/tracks)
-- [ ] **Deemix column** — Status badges (queued/downloading/completed/failed) + add/retry buttons
-- [ ] **Subscription column** — Bell icon toggle (green = subscribed)
-- [ ] **View Tracks link** — `#tracks?playlistId=...` with playlist context
-- [ ] **Create/Edit tag** — Buttons open inline or modal
+**PMV filter intentionally removed** — playlists have no comment data so PMV
+filtering was dead code (`pmvFromComment("")` always returned all-false).
+Can be re-added when backend provides comment/PMV info for playlists.
+
+- [x] **Stable toolbar** — 2-col filter-panel with search, service icons, Create Tags
+- [x] **Column model** — Name, Service, Tracks (local/remote count), Tags, Deemix, Sync, Imported, Updated, Subscribe, View, Actions
+- [x] **Sort** — All sortable columns via `wireSortableHeaders`
+- [x] **Hash sync + page size** — `updateHash` + `wirePageSizeSelector`
+- [x] **Service filter** — Multi-select icon buttons
+- [x] **Deemix column** — Status badges + add/retry/restart buttons
+- [x] **Subscription column** — Bell icon toggle (green = subscribed)
+- [x] **View Tracks link** — `#tracks?playlistId=...` with playlist context
+- [x] **Create/Edit tag** — Buttons (create from playlist name, edit tag)
+- [x] **Tag display** — Uses `tagName` from playlists API response (server-side `v_tag_playlist` join)
 
 ---
 
-## Phase 4: Tags Page
+## Phase 4: Tags Page ✅ COMPLETE
 
 **File:** `frontend/pages/tags.js`
 
-Currently client-side filtered. Needs server-side pagination:
+Server-side pagination, sort, column config, filter panel.
 
-- [ ] **Backend:** Add `sort`, `order`, `search`, `category`, `limit`, `offset` to `GET /api/tags` + `GET /api/tags/count`
-- [ ] **Column model** — Tag Name (sortable), Category (badge with icon, sortable), Files (count from `v_tag_file_counts`), Created (sortable), Actions
-- [ ] **Stable toolbar** — Search + category filter
-- [ ] **Standard pattern** — Hash sync, page size, column config
+- [x] **Backend:** `sort`, `order`, `search`, `category`, `limit`, `offset` on `GET /api/tags` + `GET /api/tags/count`
+- [x] **Column model** — Tag Name (sortable), Category (badge with icon, sortable), Files (count), Created (sortable), Actions
+- [x] **Stable toolbar** — Search + category filter buttons + New Tag button
+- [x] **Standard pattern** — Hash sync, page size, column config, layout mode toggle
 
 ---
 
@@ -361,28 +352,25 @@ Phases 2–4 can run in parallel after Phase 1 completes (disjoint write scopes)
 
 ## Phase 8: Filter UI Parity + Modifier Column Layout
 
-**Context**: Files and Tracks now have a 2-column filter box (File Info | Classification) with
-section headers, toggleable rows, PMV filter, and service icons. Playlists and Tags still use
-a flat toolbar with inline filter buttons right of the search bar. All pages are also missing
-the \"Modify Column Layout\" button from the prototype.
+**Context**: Files, Tracks, and Playlists now have a 2-column filter box (File Info | Classification) with
+section headers, toggleable rows, PMV filter (where applicable), and service icons. Tags still uses
+a flat toolbar with inline filter buttons right of the search bar. Some pages are also missing
+the "Modify Column Layout" button from the prototype.
 
-### 8.1 — Playlists filter box retrofit
+### 8.1 — Playlists filter box retrofit ✅ COMPLETE
 
 **File**: `frontend/pages/playlists.js`
 
-Replace the current flat toolbar header with a collapsible filter-panel (same structure as tracks).
-Inside the filter-panel-body, add a 2-column grid:
-
-- **Left**: Search placeholder / no playlists-specific numeric filters needed
-- **Right**: Classification — Service icon buttons + PMV filter row (P/M/V | Full/Partial/None)
+Filter-panel with 2-col grid, service icons, collapsible toggle done.
+PMV filter removed (2026-05-08) — playlists have no comment data, dead code.
 
 **Tasks**:
 
-- [ ] Wrap `renderToolbar` in `.filter-panel` with header (search + toggle) + body (2-col grid)
-- [ ] Add service filter icon buttons (spotify/soundcloud/youtube)
-- [ ] Add PMV filter row with multi-select cats + single-select agg
-- [ ] Keep Create Tags button
-- [ ] Add toggleable `data-filter` labels with generic toggle handler
+- [x] Wrap renderToolbar in filter-panel with header + body (2-col grid)
+- [x] Add service filter icon buttons (spotify/soundcloud/youtube/deemix)
+- [x] PMV filter row removed (dead code, no comment data on playlists)
+- [x] Keep Create Tags button
+- [x] Add toggleable data-filter labels with generic toggle handler
 
 ### 8.2 — Tags filter box retrofit
 
@@ -578,3 +566,143 @@ let state = {
 
 Backend (9.1a + 9.1b) and frontend (9.2a) can run in parallel — only the
 registration step (9.2b) depends on the page module existing.
+
+---
+
+## Phase 10: Server-Side Filtering — Fix Pagination Bug
+
+**Context**: Tracks page (and potentially Files page) has client-side filters
+(service multi-select, file types, PMV) applied in `applyClientFilters()`. These
+reduce per-page results AFTER server pagination, so:
+
+- Server returns page 0 (25 tracks) from the full unfiltered set
+- Client filters those 25 down to e.g. 12 (service filter) or 8 (service + file type)
+- But `_total` from `/api/tracks/count` is still the unfiltered total
+- Pagination shows wrong page counts, and each page has varying result counts
+
+**Root cause**: Client-side filtering on a server-paginated endpoint is
+fundamentally broken. All filtering MUST be server-side.
+
+### 10.1 — Tracks: Move service + file type filters to server
+
+**File**: `src/api.rs` (TracksQuery, get_tracks, get_tracks_count) + `frontend/pages/tracks.js`
+
+**10.1a — Add `services` (multi-select) to TracksQuery**
+
+Currently `TracksQuery.service` is `Option<String>` (single). Change to accept
+comma-separated multi-select so the frontend can send all selected services.
+
+**Implementation**:
+
+```rust
+// Replace `service: Option<String>` with:
+pub services: Option<String>,  // comma-separated, e.g. "spotify,soundcloud"
+```
+
+In `get_tracks` / `get_tracks_count`, parse into `Vec<String>`, then use `IN (?,?,...)`.
+Bind each service name individually (not comma expansion).
+
+**Frontend `buildParams()`**: Send `services` param instead of relying on `applyClientFilters`:
+
+```js
+if (state.selectedServices && state.selectedServices.length > 0) {
+  params.set("services", state.selectedServices.join(","));
+}
+```
+
+Remove the service filter block from `applyClientFilters()`.
+
+**10.1b — Add `fileTypes` (multi-select) to TracksQuery**
+
+Track file types live in `files.file_type` via `v_file_track_link`. Need to
+extend the query to join and filter by file type.
+
+**Implementation**:
+
+```rust
+pub file_types: Option<String>,  // comma-separated, e.g. "flac,stem.m4a"
+```
+
+In `get_tracks` / `get_tracks_count`, parse into `Vec<String>`, add:
+
+```sql
+AND EXISTS (
+  SELECT 1 FROM v_file_track_link v
+  LEFT JOIN files f ON f.id = v.file_id
+  WHERE v.track_id = st.id AND f.file_type IN (?,?,?)
+)
+```
+
+For the aggregate modes (ANY/NONE), use `fileTypeAgg` as a separate query param:
+
+- `fileTypeAgg=any` → `AND EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.track_id = st.id)`
+- `fileTypeAgg=none` → `AND NOT EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.track_id = st.id)`
+
+**Frontend `buildParams()`**: Send both `fileTypes` and `fileTypeAgg`:
+
+```js
+if (state.fileTypes && state.fileTypes.length > 0) {
+  params.set("fileTypes", state.fileTypes.join(","));
+}
+if (state.fileTypeAgg) {
+  params.set("fileTypeAgg", state.fileTypeAgg);
+}
+```
+
+Remove the file type filter block from `applyClientFilters()`.
+
+### 10.2 — Tracks: Fix PMV filter (dead code)
+
+`ApiServiceTrack` has no `comment` or `commentTarget` fields, so
+`pmvFromComment(t.commentTarget || t.comment || "")` always receives an empty
+string. PMV filtering on tracks page is dead code — it never filters anything.
+
+**Options**:
+
+1. **Remove PMV from tracks page** — PMV is local-file metadata from Traktor
+   comments. It doesn't apply to service tracks. Remove the PMV filter row,
+   state, and wiring from `tracks.js`.
+2. **Join file comments** — If we want PMV on tracks, enrich `ApiServiceTrack`
+   with linked file's comment via `v_file_track_link`. More complex but useful.
+
+**Recommendation**: Remove PMV from tracks (Option 1). Same rationale as
+playlists PMV removal — the data isn't there.
+
+### 10.3 — Files: Audit for same bug
+
+**File**: `frontend/pages/files.js`
+
+The files page has the same pattern — `applyClientFilters` does PMV, file type,
+and comment status filtering client-side. However, the files page has more
+server-side filter support (`FilesQuery` has `key`, `tags`, `linked_only`,
+`unlinked`, `non_default_only`).
+
+**Check needed**:
+
+- PMV filter on files: is it server-side? (No, it's in `applyClientFilters`)
+- File type filter on files: is it server-side? (No, it's in `applyClientFilters`)
+- Comment status filter: server-side? (No, it's in `applyClientFilters`)
+
+If the files page shows the same pagination bug, apply the same fix: move
+PMV, file type, and comment status filters to server-side `FilesQuery`.
+
+### 10.4 — Implementation Order
+
+| Sub   | What                                       | Where                        | Effort |
+| ----- | ------------------------------------------ | ---------------------------- | ------ |
+| 10.1a | Multi-service server-side filter           | api.rs + tracks.js           | Small  |
+| 10.1b | File type server-side filter               | api.rs + tracks.js           | Medium |
+| 10.2  | Remove PMV from tracks or fix              | tracks.js (+ api.rs if kept) | Small  |
+| 10.3a | Audit files page pagination                | files.js                     | Small  |
+| 10.3b | Move files filters server-side (if needed) | api.rs + files.js            | Medium |
+
+10.1a and 10.1b can run in parallel. 10.2 follows from either decision.
+10.3 is independent.
+
+### 10.5 — General Rule
+
+> **No `applyClientFilters` on paginated pages.** All filters that affect which
+> tracks appear MUST go through the server query so the count stays in sync.
+> The only exception is filters on pre-fetched enrichment data that every
+> track already has and the server doesn't need to re-count (but even then,
+> prefer server-side for correctness).

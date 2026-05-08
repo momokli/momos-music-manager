@@ -183,6 +183,7 @@ async fn poll_subscribed_playlist(
             playlist_name,
             playlist_description,
             None, // metadata_json – not needed for poller
+            0,    // remote_track_count – unknown for poller
         )
         .await
         .context("Failed to upsert service playlist")?;

@@ -29,6 +29,7 @@ import {
   wireColumnResize,
   wireColumnDragReorder,
   wireConfigTrigger,
+  reorderTableColumns,
 } from "../shared/column-config.js";
 
 /* ------------------------------------------------------------------ */
@@ -622,7 +623,7 @@ async function fetchAndRender() {
       // Wire column resize/drag/config
       wireColumnResize(contentEl, "folders", FOLDERS_COLUMNS, colConfig);
       wireColumnDragReorder(contentEl, "folders", FOLDERS_COLUMNS, colConfig, () => {
-        fetchAndRender();
+        reorderTableColumns(contentEl, colConfig);
       });
       wireConfigTrigger(contentEl, "folders", FOLDERS_COLUMNS, colConfig, () => {
         fetchAndRender();

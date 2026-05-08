@@ -9,7 +9,8 @@
  * keep the search input stable (no focus loss on reload).
  *
  * URL hash params:
- *   #tracks?search=foo&selectedServices=spotify,soundcloud&pmvCategories=p,m&pmvAggregate=full&page=0&playlistId=42&playlistName=Summer
+ *   #tracks?search=foo&selectedServices=spotify,soundcloud&selectedTags=house,jazz&selectedPlaylists=MyPlaylist
+ *          &fileTypes=flac,stem.m4a&fileTypeAgg=any&page=0&playlistId=42&playlistName=Summer
  */
 
 import { fetchJSON } from "../shared/api.js";
@@ -32,6 +33,7 @@ import {
   wireColumnResize,
   wireColumnDragReorder,
   wireConfigTrigger,
+  reorderTableColumns,
 } from "../shared/column-config.js";
 import { renderActionsPanel } from "../shared/actions-panel.js";
 
@@ -191,45 +193,11 @@ function pmvFromComment(comment) {
 }
 
 /**
- * Apply client-side filters that cannot be handled server-side:
- * - Service filter (multi-select OR from icon buttons)
- * - PMV filter (categories or aggregate from comment bracket)
+ * Apply client-side filters that cannot be handled server-side.
+ * Currently all filters are server-side, so this is a no-op pass-through.
  */
-function applyClientFilters(tracks, state) {
-  let result = tracks;
-
-  // Service filter (multi-select OR)
-  if (state.selectedServices && state.selectedServices.length > 0) {
-    result = result.filter(
-      (t) => t.service && state.selectedServices.includes(t.service),
-    );
-  }
-
-  // PMV filter
-  if (state.pmvCategories && state.pmvCategories.length > 0) {
-    result = result.filter((t) => {
-      const pmv = pmvFromComment(t.commentTarget || t.comment || "");
-      return state.pmvCategories.some((c) => pmv[c]);
-    });
-  } else if (state.pmvAggregate) {
-    result = result.filter((t) => {
-      const pmv = pmvFromComment(t.commentTarget || t.comment || "");
-      const hasAny = pmv.p || pmv.m || pmv.v;
-      const hasAll = pmv.p && pmv.m && pmv.v;
-      switch (state.pmvAggregate) {
-        case "full":
-          return hasAll;
-        case "partial":
-          return hasAny;
-        case "none":
-          return !hasAny;
-        default:
-          return true;
-      }
-    });
-  }
-
-  return result;
+function applyClientFilters(tracks, _state) {
+  return tracks;
 }
 
 /* ------------------------------------------------------------------ */
@@ -266,11 +234,11 @@ function adaptTrack(t) {
 
 /**
  * Render the toolbar HTML (called once on init).
- * Includes search input, service icon buttons, PMV filter row, and
+ * Includes search input, service icon buttons, file type filter buttons, and
  * optional playlist context badge when scoped to a playlist.
  *
  * @param {string} search  — current search value
- * @param {object} state   — current state (used for playlistName, selectedServices, pmvCategories, pmvAggregate)
+ * @param {object} state   — current state (used for playlistName, selectedServices, fileTypes, fileTypeAgg)
  * @returns {string} HTML
  */
 function renderToolbar(search, state) {
@@ -285,7 +253,23 @@ function renderToolbar(search, state) {
   }
 
   const selServices = state.selectedServices || [];
-  const pmvCats = state.pmvCategories || [];
+  const selTags = state.selectedTags || [];
+  const selFileTypes = state.fileTypes || [];
+  const selPlaylists = state.selectedPlaylists || [];
+
+  const tagChipsHtml = selTags
+    .map(
+      (t) =>
+        `<span class="tag-chip" data-value="${escapeHtml(t)}">${escapeHtml(t)} <i class="fas fa-times tag-chip-x"></i></span>`,
+    )
+    .join("");
+
+  const playlistChipsHtml = selPlaylists
+    .map(
+      (p) =>
+        `<span class="tag-chip" data-value="${escapeHtml(p)}">${escapeHtml(p)} <i class="fas fa-times tag-chip-x"></i></span>`,
+    )
+    .join("");
 
   return `<div class="filter-panel" id="tracks-filter-panel">
     <div class="filter-panel-header">
@@ -296,28 +280,60 @@ function renderToolbar(search, state) {
       </button>
     </div>
     <div class="filter-panel-body">
-      <!-- Service filter -->
-      <div class="filter-row">
-        <span class="filter-row-label toggleable" data-filter="service">Service</span>
-        <div class="filter-group service-filter-group" style="flex-wrap:wrap">
-          <button class="filter-btn${selServices.includes("spotify") ? " active" : ""}" data-value="spotify" title="Spotify"><i class="fab fa-spotify"></i></button>
-          <button class="filter-btn${selServices.includes("soundcloud") ? " active" : ""}" data-value="soundcloud" title="SoundCloud"><i class="fab fa-soundcloud"></i></button>
-          <button class="filter-btn${selServices.includes("youtube") ? " active" : ""}" data-value="youtube" title="YouTube"><i class="fab fa-youtube"></i></button>
+      <!-- Playlist & Tag filters (outside scroll to avoid dropdown clipping) -->
+      <div class="filter-row" style="padding:0 0 var(--space-2) 0;border-bottom:1px solid var(--border);margin-bottom:var(--space-2);">
+        <span class="filter-row-label toggleable" data-filter="playlist" style="width:auto;padding:3px 10px">Playlist</span>
+        <div class="typeahead-wrap" style="flex:1;min-width:140px">
+          <div class="tag-search-wrap">
+            <i class="fas fa-list"></i>
+            <input type="text" class="input-text input-search" id="tracks-playlist-search"
+                   placeholder="filter by PLAYLIST" autocomplete="off">
+            <div class="tag-dropdown" id="tracks-playlist-dropdown"></div>
+          </div>
         </div>
+        <div class="tag-chips" id="tracks-playlist-chips" style="display:flex;flex-wrap:wrap;gap:4px;flex:2">${playlistChipsHtml}</div>
       </div>
-      <!-- PMV filter -->
-      <div class="filter-row">
-        <span class="filter-row-label toggleable" data-filter="pmv">PMV</span>
-        <div class="filter-group" id="track-pmv-cat-btns" style="flex-wrap:wrap">
-          <button class="filter-btn${pmvCats.includes("p") ? " active" : ""}" data-value="p" title="Has Phase tags">P</button>
-          <button class="filter-btn${pmvCats.includes("m") ? " active" : ""}" data-value="m" title="Has Mood tags">M</button>
-          <button class="filter-btn${pmvCats.includes("v") ? " active" : ""}" data-value="v" title="Has Vibe tags">V</button>
+      <div class="filter-row" style="padding:0 0 var(--space-2) 0;border-bottom:1px solid var(--border);margin-bottom:var(--space-2);">
+        <span class="filter-row-label toggleable" data-filter="tag" style="width:auto;padding:3px 10px">Tag</span>
+        <div class="typeahead-wrap" style="flex:1;min-width:140px">
+          <div class="tag-search-wrap">
+            <i class="fas fa-tag"></i>
+            <input type="text" class="input-text input-search" id="tracks-tag-search"
+                   placeholder="filter by TAG" autocomplete="off">
+            <div class="tag-dropdown" id="tracks-tag-dropdown"></div>
+          </div>
         </div>
-        <span class="pmv-sep">|</span>
-        <div class="filter-group" id="track-pmv-agg-btns" style="flex-wrap:wrap">
-          <button class="filter-btn${state.pmvAggregate === "full" ? " active" : ""}" data-value="full" title="Has all three categories">Full</button>
-          <button class="filter-btn${state.pmvAggregate === "partial" ? " active" : ""}" data-value="partial" title="Has at least one category">Partial</button>
-          <button class="filter-btn${state.pmvAggregate === "none" ? " active" : ""}" data-value="none" title="Has no PMV categories">None</button>
+        <div class="tag-chips" id="tracks-tag-chips" style="display:flex;flex-wrap:wrap;gap:4px;flex:2">${tagChipsHtml}</div>
+      </div>
+      <div class="filter-panel-scroll" style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-2) var(--space-4);">
+        <div>
+          <div class="filter-section-header" style="margin-top:0"><i class="fas fa-filter"></i> File Info</div>
+          <!-- Service filter -->
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="service">Service</span>
+            <div class="filter-group service-filter-group" style="flex-wrap:wrap">
+              <button class="filter-btn${selServices.includes("spotify") ? " active" : ""}" data-value="spotify" title="Spotify"><i class="fab fa-spotify"></i></button>
+              <button class="filter-btn${selServices.includes("soundcloud") ? " active" : ""}" data-value="soundcloud" title="SoundCloud"><i class="fab fa-soundcloud"></i></button>
+              <button class="filter-btn${selServices.includes("youtube") ? " active" : ""}" data-value="youtube" title="YouTube"><i class="fab fa-youtube"></i></button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="filter-section-header" style="margin-top:0"><i class="fas fa-tag"></i> Classification</div>
+          <!-- File type filter -->
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="fileType">Type</span>
+            <div class="filter-group" id="track-filetype-btns" style="flex-wrap:wrap">
+              <button class="filter-btn${selFileTypes.includes("flac") ? " active" : ""}" data-value="flac">FLAC</button>
+              <button class="filter-btn${selFileTypes.includes("stem.m4a") ? " active" : ""}" data-value="stem.m4a">STEM.M4A</button>
+              <button class="filter-btn${selFileTypes.includes("mp3") ? " active" : ""}" data-value="mp3">MP3</button>
+            </div>
+            <span class="pmv-sep">|</span>
+            <div class="filter-group" id="track-filetype-agg-btns" style="flex-wrap:wrap">
+              <button class="filter-btn${state.fileTypeAgg === "any" ? " active" : ""}" data-value="any" title="Has at least one local file">ANY</button>
+              <button class="filter-btn${state.fileTypeAgg === "none" ? " active" : ""}" data-value="none" title="Has no local files">NONE</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -430,6 +446,21 @@ function buildParams(state) {
   if (state.order) params.set("order", state.order);
   if (state.search) params.set("search", state.search);
   if (state.playlistId) params.set("playlistId", String(state.playlistId));
+  if (state.selectedTags && state.selectedTags.length > 0) {
+    params.set("tags", state.selectedTags.join(","));
+  }
+  if (state.selectedPlaylists && state.selectedPlaylists.length > 0) {
+    params.set("playlistNames", state.selectedPlaylists.join(","));
+  }
+  if (state.selectedServices && state.selectedServices.length > 0) {
+    params.set("services", state.selectedServices.join(","));
+  }
+  if (state.fileTypes && state.fileTypes.length > 0) {
+    params.set("fileTypes", state.fileTypes.join(","));
+  }
+  if (state.fileTypeAgg) {
+    params.set("fileTypeAgg", state.fileTypeAgg);
+  }
   return params;
 }
 
@@ -452,8 +483,10 @@ async function fetchAndRender(container, signal, state) {
     order: "asc",
     search: "",
     selectedServices: [],
-    pmvCategories: [],
-    pmvAggregate: "",
+    selectedTags: [],
+    selectedPlaylists: [],
+    fileTypes: [],
+    fileTypeAgg: "",
     page: 0,
   });
   setContent(renderLoading("Loading tracks…"));
@@ -531,25 +564,25 @@ function wireToolbarEvents(container, signal, state) {
     );
   }
 
-  // ── PMV category buttons (multi-select: P, M, V) ──
-  const pmvCatBtns = container.querySelector("#track-pmv-cat-btns");
-  if (pmvCatBtns) {
-    pmvCatBtns.addEventListener(
+  // ── File type category buttons (multi-select: FLAC, STEM.M4A, MP3) ──
+  const ftBtns = container.querySelector("#track-filetype-btns");
+  if (ftBtns) {
+    ftBtns.addEventListener(
       "click",
       (e) => {
         const btn = e.target.closest(".filter-btn");
         if (!btn) return;
         const val = btn.dataset.value;
-        const idx = state.pmvCategories.indexOf(val);
+        const idx = state.fileTypes.indexOf(val);
         if (idx >= 0) {
-          state.pmvCategories.splice(idx, 1);
+          state.fileTypes.splice(idx, 1);
         } else {
-          // Clear aggregate group when picking categories
-          state.pmvAggregate = "";
+          // Clear aggregate group when picking specific types
+          state.fileTypeAgg = "";
           container
-            .querySelectorAll("#track-pmv-agg-btns .filter-btn")
+            .querySelectorAll("#track-filetype-agg-btns .filter-btn")
             .forEach((b) => b.classList.remove("active"));
-          state.pmvCategories.push(val);
+          state.fileTypes.push(val);
         }
         state.page = 0;
         fetchAndRender(container, signal, state);
@@ -558,24 +591,24 @@ function wireToolbarEvents(container, signal, state) {
     );
   }
 
-  // ── PMV aggregate buttons (single-select: Full, Partial, None) ──
-  const pmvAggBtns = container.querySelector("#track-pmv-agg-btns");
-  if (pmvAggBtns) {
-    pmvAggBtns.addEventListener(
+  // ── File type aggregate buttons (single-select: ANY, NONE) ──
+  const ftAggBtns = container.querySelector("#track-filetype-agg-btns");
+  if (ftAggBtns) {
+    ftAggBtns.addEventListener(
       "click",
       (e) => {
         const btn = e.target.closest(".filter-btn");
         if (!btn) return;
         const val = btn.dataset.value;
-        if (state.pmvAggregate === val) {
-          state.pmvAggregate = "";
+        if (state.fileTypeAgg === val) {
+          state.fileTypeAgg = "";
         } else {
           // Clear category group when picking aggregate
-          state.pmvCategories = [];
+          state.fileTypes = [];
           container
-            .querySelectorAll("#track-pmv-cat-btns .filter-btn")
+            .querySelectorAll("#track-filetype-btns .filter-btn")
             .forEach((b) => b.classList.remove("active"));
-          state.pmvAggregate = val;
+          state.fileTypeAgg = val;
         }
         state.page = 0;
         fetchAndRender(container, signal, state);
@@ -583,6 +616,293 @@ function wireToolbarEvents(container, signal, state) {
       { signal },
     );
   }
+
+  // ── Tag search (typeahead) ──
+  wireTagSearch(
+    container,
+    signal,
+    state,
+    "tracks-tag-search",
+    "tracks-tag-dropdown",
+    "tracks-tag-chips",
+    "selectedTags",
+    "/api/tags",
+  );
+
+  // ── Playlist search (typeahead) ──
+  wireTagSearch(
+    container,
+    signal,
+    state,
+    "tracks-playlist-search",
+    "tracks-playlist-dropdown",
+    "tracks-playlist-chips",
+    "selectedPlaylists",
+    "/api/playlists",
+  );
+
+  // ── Generic toggle for data-filter labels ──
+  const filterPanel = container.querySelector("#tracks-filter-panel");
+  filterPanel?.querySelectorAll("[data-filter]").forEach((label) => {
+    function updateFilterUI() {
+      const key = label.dataset.filter + "Enabled";
+      const isActive = state[key] !== false;
+      label.classList.toggle("active", isActive);
+      label.classList.toggle("off", !isActive);
+      const row = label.closest(".filter-row");
+      if (row) {
+        const inputs = row.querySelectorAll(
+          "select, input, button, .filter-group, .tag-chips, .dual-range-wrap, .key-grid-wrap, .typeahead-wrap",
+        );
+        inputs.forEach((el) => el.classList.toggle("filter-disabled", !isActive));
+      }
+    }
+    label.addEventListener("click", () => {
+      const key = label.dataset.filter + "Enabled";
+      state[key] = state[key] === false ? true : false;
+      state.page = 0;
+      updateFilterUI();
+      updateHash("tracks", state, {
+        sort: "",
+        order: "asc",
+        search: "",
+        selectedServices: [],
+        page: 0,
+      });
+      fetchAndRender(container, signal, state);
+    });
+    updateFilterUI();
+  });
+
+  // ── Auto-enable disabled filter sections on click ──
+  filterPanel?.addEventListener("click", (e) => {
+    const row = e.target.closest(".filter-row");
+    if (!row) return;
+    const label = row.querySelector("[data-filter]");
+    if (!label) return;
+    const key = label.dataset.filter + "Enabled";
+    if (state[key] !== false) return;
+    if (e.target.closest("[data-filter]")) return;
+    state[key] = true;
+    state.page = 0;
+    label.classList.add("active");
+    label.classList.remove("off");
+    const inputs = row.querySelectorAll(
+      "select, input, button, .filter-group, .tag-chips, .dual-range-wrap, .key-grid-wrap, .typeahead-wrap",
+    );
+    inputs.forEach((el) => el.classList.remove("filter-disabled"));
+    fetchAndRender(container, signal, state);
+  });
+}
+
+/**
+ * Wire a tag/playlist search typeahead dropdown (same pattern as files page).
+ *
+ * @param {HTMLElement} container
+ * @param {AbortSignal} signal
+ * @param {object} state
+ * @param {string} inputId — DOM id of the search input
+ * @param {string} dropdownId — DOM id of the dropdown container
+ * @param {string} chipsId — DOM id of the chips container
+ * @param {string} stateKey — key in state to store selected items (e.g. "selectedTags")
+ * @param {string} apiPath — API path for search (e.g. "/api/tags" or "/api/playlists")
+ */
+function wireTagSearch(
+  container,
+  signal,
+  state,
+  inputId,
+  dropdownId,
+  chipsId,
+  stateKey,
+  apiPath,
+) {
+  const input = container.querySelector("#" + inputId);
+  const dropdown = container.querySelector("#" + dropdownId);
+  if (!input || !dropdown) return;
+
+  let timer;
+  let selectedIndex = -1;
+
+  function updateSelection() {
+    const items = dropdown.querySelectorAll(".tag-dropdown-item");
+    items.forEach((item, i) => {
+      item.classList.toggle("selected", i === selectedIndex);
+    });
+    const selected = items[selectedIndex];
+    if (selected) {
+      selected.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function addSelectedItem() {
+    const items = dropdown.querySelectorAll(".tag-dropdown-item");
+    const selected = items[selectedIndex];
+    if (!selected) return;
+    const value = selected.dataset.tag;
+    if (!value) return;
+    if (!state[stateKey].includes(value)) {
+      state[stateKey].push(value);
+      state.page = 0;
+    }
+    input.value = "";
+    dropdown.classList.remove("open");
+    dropdown.innerHTML = "";
+    selectedIndex = -1;
+    renderChips();
+    fetchAndRender(container, signal, state);
+  }
+
+  function renderChips() {
+    const chipsContainer = container.querySelector("#" + chipsId);
+    if (!chipsContainer) return;
+    chipsContainer.innerHTML = state[stateKey]
+      .map(
+        (v) =>
+          `<span class="tag-chip" data-value="${escapeHtml(v)}">${escapeHtml(v)} <i class="fas fa-times tag-chip-x"></i></span>`,
+      )
+      .join("");
+  }
+
+  input.addEventListener(
+    "input",
+    () => {
+      clearTimeout(timer);
+      selectedIndex = -1;
+      const q = input.value.trim();
+      if (!q) {
+        dropdown.classList.remove("open");
+        dropdown.innerHTML = "";
+        return;
+      }
+      timer = setTimeout(async () => {
+        try {
+          const resp = await fetchJSON(`${apiPath}?search=${encodeURIComponent(q)}`);
+          // Handle both response formats:
+          // - Tags: { data: [ { name: "..." }, ... ] } — data is an array
+          // - Playlists: { data: { playlists: [ { name: "..." }, ... ] } } — data has a playlists key
+          let items = resp.data;
+          if (!items) {
+            items = [];
+          } else if (!Array.isArray(items)) {
+            // Could be { playlists: [...] }
+            items = items.playlists || [];
+          }
+          const labelKey = "name";
+          if (items.length === 0) {
+            dropdown.innerHTML = `<div class="tag-dropdown-empty">No results found</div>`;
+            selectedIndex = -1;
+          } else {
+            dropdown.innerHTML = items
+              .map(
+                (item, i) =>
+                  `<div class="tag-dropdown-item${i === 0 ? " selected" : ""}" data-tag="${escapeHtml(item[labelKey])}">
+                    <span class="tag-dropdown-name">${escapeHtml(item[labelKey])}</span>
+                  </div>`,
+              )
+              .join("");
+            selectedIndex = 0;
+          }
+          dropdown.classList.add("open");
+        } catch {
+          // ignore errors during search
+        }
+      }, 150);
+    },
+    { signal },
+  );
+
+  dropdown.addEventListener(
+    "click",
+    (e) => {
+      const item = e.target.closest(".tag-dropdown-item");
+      if (!item) return;
+      const value = item.dataset.tag;
+      if (!value) return;
+      if (!state[stateKey].includes(value)) {
+        state[stateKey].push(value);
+        state.page = 0;
+      }
+      input.value = "";
+      dropdown.classList.remove("open");
+      dropdown.innerHTML = "";
+      selectedIndex = -1;
+      renderChips();
+      fetchAndRender(container, signal, state);
+    },
+    { signal },
+  );
+
+  input.addEventListener(
+    "keydown",
+    (e) => {
+      if (!dropdown.classList.contains("open")) return;
+      const items = dropdown.querySelectorAll(".tag-dropdown-item");
+      switch (e.key) {
+        case "ArrowDown":
+          e.preventDefault();
+          if (items.length === 0) return;
+          selectedIndex = Math.min(selectedIndex + 1, items.length - 1);
+          updateSelection();
+          break;
+        case "ArrowUp":
+          e.preventDefault();
+          if (items.length === 0) return;
+          selectedIndex = Math.max(selectedIndex - 1, 0);
+          updateSelection();
+          break;
+        case "Enter":
+          e.preventDefault();
+          addSelectedItem();
+          break;
+        case "Escape":
+          dropdown.classList.remove("open");
+          dropdown.innerHTML = "";
+          selectedIndex = -1;
+          input.blur();
+          break;
+      }
+    },
+    { signal },
+  );
+
+  // Close dropdown on outside click
+  document.addEventListener(
+    "click",
+    (e) => {
+      const wrap = container.querySelector("#" + inputId).closest(".tag-search-wrap");
+      if (!wrap || wrap.contains(e.target)) return;
+      if (dropdown) {
+        dropdown.classList.remove("open");
+        dropdown.innerHTML = "";
+        selectedIndex = -1;
+      }
+    },
+    { signal },
+  );
+
+  // Chip removal (delegated)
+  const chipsContainer = container.querySelector("#" + chipsId);
+  if (chipsContainer) {
+    chipsContainer.addEventListener(
+      "click",
+      (e) => {
+        const x = e.target.closest(".tag-chip-x");
+        if (!x) return;
+        const chip = x.closest(".tag-chip");
+        if (!chip) return;
+        const value = chip.dataset.value;
+        state[stateKey] = state[stateKey].filter((v) => v !== value);
+        state.page = 0;
+        renderChips();
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // Initial render
+  renderChips();
 }
 
 function wireContentEvents(container, signal, state) {
@@ -631,7 +951,7 @@ function wireContentEvents(container, signal, state) {
   if (state.layoutMode) {
     wireColumnResize(container, "tracks", TRACKS_COLUMNS, colConfig);
     wireColumnDragReorder(container, "tracks", TRACKS_COLUMNS, colConfig, () => {
-      fetchAndRender(container, signal, state);
+      reorderTableColumns(container, colConfig);
     });
   }
   wireConfigTrigger(container, "tracks", TRACKS_COLUMNS, colConfig, () => {
@@ -677,11 +997,17 @@ export async function init(container, signal, hashParams) {
     sort: hashParams?.sort || "",
     order: hashParams?.order || "asc",
     selectedServices: parseCSV(hashParams?.selectedServices),
-    pmvCategories: parseCSV(hashParams?.pmvCategories),
-    pmvAggregate: hashParams?.pmvAggregate || "",
+    selectedTags: parseCSV(hashParams?.selectedTags),
+    selectedPlaylists: parseCSV(hashParams?.selectedPlaylists),
+    fileTypes: parseCSV(hashParams?.fileTypes),
+    fileTypeAgg: hashParams?.fileTypeAgg || "",
     playlistId: hashParams?.playlistId ? parseInt(hashParams.playlistId) : null,
     playlistName: hashParams?.playlistName || null,
     layoutMode: false,
+    serviceEnabled: true,
+    tagEnabled: true,
+    playlistEnabled: true,
+    fileTypeEnabled: true,
   };
 
   // Reset layout mode on page entry

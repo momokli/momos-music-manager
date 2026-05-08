@@ -32,7 +32,6 @@ mod digging;
 mod dump;
 mod embeddings;
 mod poller;
-mod scan_cache;
 mod spotify;
 mod tasks;
 mod traktor;

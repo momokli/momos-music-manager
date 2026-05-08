@@ -37,6 +37,7 @@ import {
   wireColumnResize,
   wireColumnDragReorder,
   wireConfigTrigger,
+  reorderTableColumns,
 } from "../shared/column-config.js";
 import { renderActionsPanel } from "../shared/actions-panel.js";
 
@@ -75,8 +76,7 @@ const HASH_DEFAULTS = {
   untaggedOnly: false,
   mismatchOnly: false,
   selectedServices: [],
-  pmvCategories: [],
-  pmvAggregate: "",
+  subscribed: false,
 };
 
 const HASH_SCHEMA = {
@@ -88,8 +88,7 @@ const HASH_SCHEMA = {
   untaggedOnly: { type: "boolean", default: false },
   mismatchOnly: { type: "boolean", default: false },
   selectedServices: { type: "array", default: [] },
-  pmvCategories: { type: "array", default: [] },
-  pmvAggregate: { type: "string", default: "" },
+  subscribed: { type: "boolean", default: false },
 };
 
 /* ------------------------------------------------------------------ */
@@ -167,7 +166,7 @@ function deemixCell(r) {
   const restartBtn = status
     ? `<button class="btn btn-sm btn-icon" data-act="deemix-restart" data-deemix-id="${r.deemixId || ""}" data-name="${escapeHtml(r.name)}" data-id="${r.id}" title="Re-download via deemix"><i class="fa-solid fa-arrows-rotate"></i></button>`
     : "";
-  const addBtn = `<button class="btn btn-sm btn-icon" data-act="deemix-add" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Add to Deemix download queue"><i class="fa-solid fa-plus"></i></button>`;
+  const addBtn = `<button class="btn btn-sm btn-icon" data-act="deemix-add" data-id="${r.id}" data-playlist-id="${r.playlistId}" data-name="${escapeHtml(r.name)}" title="Add to Deemix download queue"><i class="fa-solid fa-plus"></i></button>`;
 
   if (!status) return addBtn;
   if (status === "queued") {
@@ -264,18 +263,10 @@ function renderToolbar(state) {
             </div>
           </div>
           <div class="filter-row">
-            <span class="filter-row-label toggleable" data-filter="pmv">PMV</span>
-            <div class="filter-group" id="playlists-pmv-cat-btns" style="flex-wrap:wrap">
-              <button class="filter-btn${(state.pmvCategories || []).includes("p") ? " active" : ""}" data-value="p" title="Has Phase tags">P</button>
-              <button class="filter-btn${(state.pmvCategories || []).includes("m") ? " active" : ""}" data-value="m" title="Has Mood tags">M</button>
-              <button class="filter-btn${(state.pmvCategories || []).includes("v") ? " active" : ""}" data-value="v" title="Has Vibe tags">V</button>
-            </div>
-            <span class="pmv-sep">|</span>
-            <div class="filter-group" id="playlists-pmv-agg-btns" style="flex-wrap:wrap">
-              <button class="filter-btn${state.pmvAggregate === "full" ? " active" : ""}" data-value="full" title="Has all three categories">Full</button>
-              <button class="filter-btn${state.pmvAggregate === "partial" ? " active" : ""}" data-value="partial" title="Has at least one category">Partial</button>
-              <button class="filter-btn${state.pmvAggregate === "none" ? " active" : ""}" data-value="none" title="Has no PMV categories">None</button>
-            </div>
+            <span class="filter-row-label">Subscription</span>
+            <button class="filter-btn subscribed-filter-btn${state.subscribed ? " active" : ""}" title="${state.subscribed ? "Showing subscribed only" : "Show only subscribed playlists"}">
+              <i class="fas fa-bell"></i>
+            </button>
           </div>
         </div>
       </div>
@@ -376,6 +367,7 @@ function buildParams(state) {
   if (state.search) params.set("search", state.search);
   if (state.untaggedOnly) params.set("untagged", "true");
   if (state.mismatchOnly) params.set("mismatch", "true");
+  if (state.subscribed) params.set("subscribed", "true");
   return params;
 }
 
@@ -384,25 +376,8 @@ function buildParams(state) {
 /* ------------------------------------------------------------------ */
 
 /**
- * Extract PMV categories present in a playlist's comment bracket.
- * Returns { p: bool, m: bool, v: bool }.
- * Playlists currently don't have comment data, so this always returns
- * all-false until the backend provides comment/PMV info.
- */
-function pmvFromComment(comment) {
-  if (!comment) return { p: false, m: false, v: false };
-  const m = comment.match(/^\[([PMV_]+)\]/);
-  if (!m) return { p: false, m: false, v: false };
-  return {
-    p: m[1].includes("P"),
-    m: m[1].includes("M"),
-    v: m[1].includes("V"),
-  };
-}
-
-/**
  * Apply client-side filters to a playlist list.
- * Filters: service (multi-select OR), PMV categories/aggregate.
+ * Filters: service (multi-select OR).
  */
 function applyClientFilters(playlists, state) {
   let result = playlists;
@@ -410,30 +385,6 @@ function applyClientFilters(playlists, state) {
   // Service filter (multi-select OR)
   if (state.selectedServices && state.selectedServices.length > 0) {
     result = result.filter((p) => state.selectedServices.includes(p.svc));
-  }
-
-  // PMV filter — reads comment bracket if available
-  if (state.pmvCategories && state.pmvCategories.length > 0) {
-    result = result.filter((p) => {
-      const pmv = pmvFromComment(p.comment || "");
-      return state.pmvCategories.some((c) => pmv[c]);
-    });
-  } else if (state.pmvAggregate) {
-    result = result.filter((p) => {
-      const pmv = pmvFromComment(p.comment || "");
-      const hasAny = pmv.p || pmv.m || pmv.v;
-      const hasAll = pmv.p && pmv.m && pmv.v;
-      switch (state.pmvAggregate) {
-        case "full":
-          return hasAll;
-        case "partial":
-          return hasAny;
-        case "none":
-          return !hasAny;
-        default:
-          return true;
-      }
-    });
   }
 
   return result;
@@ -460,24 +411,17 @@ async function fetchAndRender(container, signal, state) {
 
   try {
     // Build server-side params, then remove pagination — we paginate
-    // client-side after applying client-side filters (service, PMV).
+    // client-side after applying client-side filters (service multi-select).
     const params = buildParams(state);
     const fetchParams = new URLSearchParams(params);
     fetchParams.delete("limit");
     fetchParams.delete("offset");
 
-    const [plResp, tagsResp, subsResp] = await Promise.all([
+    const [plResp, subsResp] = await Promise.all([
       fetchJSON(`/api/playlists?${fetchParams}`, { signal }),
-      fetchJSON("/api/tags", { signal }),
       fetchJSON("/api/playlists/subscriptions", { signal }),
     ]);
     if (signal.aborted) return;
-
-    // Build tag lookup: tag name (lowercase) -> tag name
-    const tagLookup = {};
-    for (const t of tagsResp.data || []) {
-      tagLookup[t.name.toLowerCase()] = t.name;
-    }
 
     // Build subscription lookup: key = "service:playlist_id" -> subscription object
     const subLookup = {};
@@ -499,7 +443,7 @@ async function fetchAndRender(container, signal, state) {
         l: p.localTrackCount ?? 0,
         r: p.remoteTrackCount ?? 0,
         sync: null,
-        tag: tagLookup[p.name.toLowerCase()] || null,
+        tag: p.tagName || null,
         deemixStatus: p.deemixStatus || null,
         deemixId: p.deemixId || null,
         importedAt: p.importedAt || p.imported_at || null,
@@ -507,7 +451,7 @@ async function fetchAndRender(container, signal, state) {
       };
     });
 
-    // Apply client-side filters (service multi-select, PMV)
+    // Apply client-side filters (service multi-select)
     adapted = applyClientFilters(adapted, state);
 
     // Client-side pagination
@@ -583,51 +527,13 @@ function wireToolbarEvents(container, signal, state) {
     );
   }
 
-  // PMV category buttons (multi-select: P, M, V)
-  const pmvCat = container.querySelector("#playlists-pmv-cat-btns");
-  if (pmvCat) {
-    pmvCat.addEventListener(
+  // Subscribed filter toggle
+  const subBtn = container.querySelector(".subscribed-filter-btn");
+  if (subBtn) {
+    subBtn.addEventListener(
       "click",
-      (e) => {
-        const btn = e.target.closest(".filter-btn");
-        if (!btn) return;
-        const v = btn.dataset.value;
-        const i = state.pmvCategories.indexOf(v);
-        if (i >= 0) state.pmvCategories.splice(i, 1);
-        else {
-          state.pmvAggregate = "";
-          state.pmvCategories.push(v);
-          const aggBtns = container.querySelectorAll(
-            "#playlists-pmv-agg-btns .filter-btn",
-          );
-          for (const b of aggBtns) b.classList.remove("active");
-        }
-        state.page = 0;
-        updateHash("playlists", state, HASH_DEFAULTS);
-        fetchAndRender(container, signal, state);
-      },
-      { signal },
-    );
-  }
-
-  // PMV aggregate buttons (single-select: Full, Partial, None)
-  const pmvAgg = container.querySelector("#playlists-pmv-agg-btns");
-  if (pmvAgg) {
-    pmvAgg.addEventListener(
-      "click",
-      (e) => {
-        const btn = e.target.closest(".filter-btn");
-        if (!btn) return;
-        const v = btn.dataset.value;
-        if (state.pmvAggregate === v) state.pmvAggregate = "";
-        else {
-          state.pmvCategories = [];
-          state.pmvAggregate = v;
-          const catBtns = container.querySelectorAll(
-            "#playlists-pmv-cat-btns .filter-btn",
-          );
-          for (const b of catBtns) b.classList.remove("active");
-        }
+      () => {
+        state.subscribed = !state.subscribed;
         state.page = 0;
         updateHash("playlists", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
@@ -787,6 +693,23 @@ function wireContentEvents(container, signal, state) {
               body: JSON.stringify({ service: svc, playlistId: plId }),
             });
             showToast("Subscribed", "success");
+
+            // Also queue for deemix download (Spotify playlists only, best-effort)
+            if (svc === "spotify" && plId) {
+              try {
+                await fetchJSON("/api/services/deemix/queue", {
+                  method: "POST",
+                  body: JSON.stringify({
+                    url: `https://open.spotify.com/playlist/${plId}`,
+                  }),
+                });
+                showToast("Also queued for download", "success");
+              } catch (deemixErr) {
+                // Deemix might not be configured — silently ignore
+                console.warn("Auto-deemix queue failed:", deemixErr);
+              }
+            }
+
             updateHash("playlists", state, HASH_DEFAULTS);
             fetchAndRender(container, signal, state);
           } catch (err) {
@@ -913,8 +836,7 @@ function wireContentEvents(container, signal, state) {
   if (state.layoutMode) {
     wireColumnResize(container, "playlists", PLAYLISTS_COLUMNS, colConfig);
     wireColumnDragReorder(container, "playlists", PLAYLISTS_COLUMNS, colConfig, () => {
-      updateHash("playlists", state, HASH_DEFAULTS);
-      fetchAndRender(container, signal, state);
+      reorderTableColumns(container, colConfig);
     });
   }
   wireConfigTrigger(container, "playlists", PLAYLISTS_COLUMNS, colConfig, () => {
@@ -958,10 +880,8 @@ export async function init(container, signal, hashParams) {
     untaggedOnly: parsed.untaggedOnly,
     mismatchOnly: parsed.mismatchOnly,
     selectedServices: parsed.selectedServices || [],
-    pmvCategories: parsed.pmvCategories || [],
-    pmvAggregate: parsed.pmvAggregate || "",
     serviceEnabled: true,
-    pmvEnabled: true,
+    subscribed: parsed.subscribed,
     layoutMode: false,
   };
 
@@ -984,7 +904,7 @@ export async function init(container, signal, hashParams) {
       <div id="playlists-content" style="min-height:200px;">${renderLoading("Loading playlists…")}</div>
     </div>`;
 
-  // Wire toolbar events once (search, service filter, PMV, toggles)
+  // Wire toolbar events once (search, service filter, toggles)
   wireToolbarEvents(container, signal, state);
 
   // Wire filter panel collapse/expand toggle

@@ -15,7 +15,6 @@ use tracing::{debug, error, info, warn};
 use crate::db::{upsert_service_playlist, upsert_service_track};
 use crate::spotify::client::SpotifyClient;
 use crate::spotify::models::{PlaylistInfo, TrackInfo};
-use crate::spotify::replay::{self, CacheMode, CachedTrackEntry};
 use crate::tasks::{SyncProgress, SyncResult, SyncType, TaskStatus};
 
 /// Spotify sync worker that performs background sync operations
@@ -37,9 +36,6 @@ pub struct SpotifySyncWorker {
 
     /// Progress tracking for this sync task
     progress: std::sync::Arc<tokio::sync::RwLock<SyncProgress>>,
-
-    /// API response caching mode (record/replay for dev)
-    cache_mode: CacheMode,
 }
 
 impl SpotifySyncWorker {
@@ -52,12 +48,6 @@ impl SpotifySyncWorker {
         cancel_token: CancellationToken,
         progress: std::sync::Arc<tokio::sync::RwLock<SyncProgress>>,
     ) -> Self {
-        let cache_mode = CacheMode::from_env();
-        if cache_mode.should_replay() {
-            info!("Spotify sync worker in REPLAY mode — no API calls will be made");
-        } else if cache_mode.should_record() {
-            info!("Spotify sync worker in RECORD mode — API responses will be cached");
-        }
         Self {
             db,
             spotify_client,
@@ -65,7 +55,6 @@ impl SpotifySyncWorker {
             sync_type,
             cancel_token,
             progress,
-            cache_mode,
         }
     }
 
@@ -137,73 +126,7 @@ impl SpotifySyncWorker {
 
     /// Sync only playlists (metadata)
     async fn sync_playlists_only(&mut self) -> Result<SyncResult> {
-        // ── REPLAY ──────────────────────────────────────────────────────────────
-        if self.cache_mode.should_replay() {
-            info!("REPLAY: Loading playlists from cache");
-            {
-                let mut progress = self.progress.write().await;
-                progress.status = TaskStatus::Running;
-                progress.add_log("Replaying playlists from cache".to_string());
-            }
-
-            let cached = match replay::load_playlists().await? {
-                Some(c) => c,
-                None => {
-                    error!("No cached playlists found — cannot replay");
-                    return Ok(SyncResult::failed(
-                        "No cached playlists found. Run with SPOTIFY_API_CACHE=record first."
-                            .to_string(),
-                    ));
-                }
-            };
-
-            let mut playlist_count = 0;
-            let mut playlist_names = Vec::new();
-
-            for info in &cached {
-                if self.is_cancelled() {
-                    return Ok(SyncResult::failed("Sync cancelled by user".to_string()));
-                }
-
-                playlist_count += 1;
-                playlist_names.push(info.name.clone());
-
-                self.update_playlist_progress(playlist_count, Some(cached.len()), &info.name)
-                    .await;
-
-                debug!(
-                    "REPLAY: Storing playlist {}/{}: {}",
-                    playlist_count,
-                    cached.len(),
-                    info.name
-                );
-
-                if let Err(e) = self.store_playlist_core(info).await {
-                    error!("REPLAY: Failed to store playlist {}: {:?}", info.name, e);
-                }
-            }
-
-            {
-                let mut progress = self.progress.write().await;
-                progress.total_playlists = Some(playlist_count);
-                progress.status = TaskStatus::Completed;
-                progress.add_log(format!("Replay completed: {} playlists", playlist_count));
-            }
-
-            info!(
-                "REPLAY: Playlist sync completed: {} playlists",
-                playlist_count
-            );
-            return Ok(SyncResult::success(
-                playlist_count,
-                0,
-                playlist_names,
-                Vec::new(),
-            ));
-        }
-
-        // ── LIVE / RECORD ──────────────────────────────────────────────────────
-        info!("Starting playlist-only sync (mode={:?})", self.cache_mode);
+        info!("Starting playlist-only sync");
 
         {
             let mut progress = self.progress.write().await;
@@ -223,7 +146,6 @@ impl SpotifySyncWorker {
         };
         let mut playlist_count = 0;
         let mut playlist_names = Vec::new();
-        let mut cached_playlists: Vec<PlaylistInfo> = Vec::new(); // used in record mode
 
         while let Some(playlist_result) = playlists_stream.next().await {
             // Check for cancellation
@@ -251,27 +173,11 @@ impl SpotifySyncWorker {
                         error!("Failed to store playlist {}: {:?}", playlist.name, e);
                         // Continue with next playlist
                     }
-
-                    // In record mode, also buffer for cache
-                    if self.cache_mode.should_record() {
-                        cached_playlists.push(PlaylistInfo::from(&playlist));
-                    }
                 }
                 Err(e) => {
                     error!("Failed to fetch playlist: {:?}", e);
                     // Continue with next playlist
                 }
-            }
-        }
-
-        // ── RECORD: persist cache ──────────────────────────────────────────────
-        if self.cache_mode.should_record() {
-            info!(
-                "RECORD: Saving {} playlists to cache",
-                cached_playlists.len()
-            );
-            if let Err(e) = replay::save_playlists(&cached_playlists).await {
-                error!("RECORD: Failed to save playlists cache: {:?}", e);
             }
         }
 
@@ -295,105 +201,7 @@ impl SpotifySyncWorker {
 
     /// Sync tracks for a specific playlist
     async fn sync_tracks_for_playlist(&mut self, playlist_id: &str) -> Result<SyncResult> {
-        // ── REPLAY ──────────────────────────────────────────────────────────────
-        if self.cache_mode.should_replay() {
-            info!(
-                "REPLAY: Loading tracks for playlist {} from cache",
-                playlist_id
-            );
-            {
-                let mut progress = self.progress.write().await;
-                progress.status = TaskStatus::Running;
-                progress.add_log(format!("Replaying tracks for playlist {}", playlist_id));
-            }
-
-            let cached_tracks = match replay::load_playlist_tracks(playlist_id).await? {
-                Some(c) => c,
-                None => {
-                    error!("No cached tracks for playlist {}", playlist_id);
-                    return Ok(SyncResult::failed(format!(
-                        "No cached tracks for playlist {}. Run with SPOTIFY_API_CACHE=record first.",
-                        playlist_id
-                    )));
-                }
-            };
-
-            let playlist_name = cached_tracks
-                .first()
-                .map(|e| e.track.name.clone())
-                .unwrap_or_else(|| playlist_id.to_string());
-
-            let mut track_count = 0;
-            let mut track_names = Vec::new();
-
-            for entry in &cached_tracks {
-                if self.is_cancelled() {
-                    return Ok(SyncResult::failed("Sync cancelled by user".to_string()));
-                }
-
-                track_count += 1;
-                track_names.push(entry.track.name.clone());
-
-                if track_count % 10 == 0 || track_count == 1 {
-                    self.update_track_progress(
-                        track_count,
-                        Some(cached_tracks.len()),
-                        &entry.track.name,
-                        &playlist_name,
-                    )
-                    .await;
-                }
-
-                debug!(
-                    "REPLAY: Storing track {}/{}: {}",
-                    track_count,
-                    cached_tracks.len(),
-                    entry.track.name
-                );
-
-                if let Err(e) = self
-                    .store_track_core_with_added_at(
-                        &entry.track,
-                        playlist_id,
-                        entry.position,
-                        entry.added_at,
-                    )
-                    .await
-                {
-                    error!(
-                        "REPLAY: Failed to store track {}: {:?}",
-                        entry.track.name, e
-                    );
-                }
-            }
-
-            {
-                let mut progress = self.progress.write().await;
-                progress.total_tracks = Some(track_count);
-                progress.status = TaskStatus::Completed;
-                progress.add_log(format!(
-                    "Replay completed for {}: {} tracks",
-                    playlist_name, track_count
-                ));
-            }
-
-            info!(
-                "REPLAY: Track sync completed for playlist {}: {} tracks",
-                playlist_name, track_count
-            );
-            return Ok(SyncResult::success(
-                0,
-                track_count,
-                vec![playlist_name],
-                track_names,
-            ));
-        }
-
-        // ── LIVE / RECORD ──────────────────────────────────────────────────────
-        info!(
-            "Starting tracks sync for playlist: {} (mode={:?})",
-            playlist_id, self.cache_mode
-        );
+        info!("Starting tracks sync for playlist: {}", playlist_id);
 
         {
             let mut progress = self.progress.write().await;
@@ -419,7 +227,6 @@ impl SpotifySyncWorker {
         let mut track_count = 0;
         let mut track_names = Vec::new();
         let mut position = 0;
-        let mut cached_tracks: Vec<CachedTrackEntry> = Vec::new(); // used in record mode
 
         while let Some(track_result) = tracks_stream.next().await {
             // Check for cancellation
@@ -471,15 +278,6 @@ impl SpotifySyncWorker {
                             error!("Failed to store track {}: {:?}", track.name, e);
                             // Continue with next track
                         }
-
-                        // In record mode, also buffer for cache
-                        if self.cache_mode.should_record() {
-                            cached_tracks.push(CachedTrackEntry {
-                                track: TrackInfo::from(&track),
-                                position: position as i64,
-                                added_at,
-                            });
-                        }
                     }
                 }
                 Err(e) => {
@@ -489,18 +287,6 @@ impl SpotifySyncWorker {
                     );
                     // Continue with next track
                 }
-            }
-        }
-
-        // ── RECORD: persist cache ──────────────────────────────────────────────
-        if self.cache_mode.should_record() {
-            info!(
-                "RECORD: Saving {} tracks for playlist {} to cache",
-                cached_tracks.len(),
-                playlist_id
-            );
-            if let Err(e) = replay::save_playlist_tracks(playlist_id, cached_tracks).await {
-                error!("RECORD: Failed to save tracks cache: {:?}", e);
             }
         }
 
@@ -530,103 +316,7 @@ impl SpotifySyncWorker {
 
     /// Sync tracks for all playlists in the database
     async fn sync_all_tracks(&mut self) -> Result<SyncResult> {
-        // ── REPLAY ──────────────────────────────────────────────────────────────
-        if self.cache_mode.should_replay() {
-            info!("REPLAY: Loading all playlists + tracks from cache");
-            {
-                let mut progress = self.progress.write().await;
-                progress.status = TaskStatus::Running;
-                progress.add_log("Replaying all tracks from cache".to_string());
-            }
-
-            let cached_playlists = match replay::load_playlists().await? {
-                Some(c) => c,
-                None => {
-                    error!("No cached playlists found — cannot replay all tracks");
-                    return Ok(SyncResult::failed(
-                        "No cached playlists found. Run with SPOTIFY_API_CACHE=record first."
-                            .to_string(),
-                    ));
-                }
-            };
-
-            let total_playlists = cached_playlists.len();
-            let mut total_tracks = 0;
-            let mut track_names = Vec::new();
-            let mut playlist_names = Vec::new();
-
-            for (i, pl) in cached_playlists.iter().enumerate() {
-                if self.is_cancelled() {
-                    return Ok(SyncResult::failed("Sync cancelled by user".to_string()));
-                }
-
-                let playlist_id = &pl.id;
-                let playlist_name = &pl.name;
-                playlist_names.push(playlist_name.clone());
-
-                // Ensure the playlist is stored so track FK works
-                if let Err(e) = self.store_playlist_core(pl).await {
-                    error!(
-                        "REPLAY: Failed to pre-store playlist {}: {:?}",
-                        playlist_name, e
-                    );
-                }
-
-                {
-                    let mut progress = self.progress.write().await;
-                    progress.current_playlist = Some(i + 1);
-                    progress.total_playlists = Some(total_playlists);
-                    progress.current_playlist_name = Some(playlist_name.clone());
-                    progress.add_log(format!(
-                        "Processing playlist {}/{}: {}",
-                        i + 1,
-                        total_playlists,
-                        playlist_name
-                    ));
-                }
-
-                // Let sync_tracks_for_playlist handle its own replay
-                match self.sync_tracks_for_playlist(playlist_id).await {
-                    Ok(result) => {
-                        total_tracks += result.track_count;
-                        track_names.extend(result.track_names);
-                    }
-                    Err(e) => {
-                        error!(
-                            "REPLAY: Failed to sync tracks for playlist {}: {:?}",
-                            playlist_id, e
-                        );
-                    }
-                }
-            }
-
-            {
-                let mut progress = self.progress.write().await;
-                progress.status = TaskStatus::Completed;
-                progress.add_log(format!(
-                    "All tracks replay completed: {} tracks in {} playlists",
-                    total_tracks, total_playlists
-                ));
-            }
-
-            info!(
-                "REPLAY: All tracks completed: {} tracks in {} playlists",
-                total_tracks, total_playlists
-            );
-
-            return Ok(SyncResult::success(
-                total_playlists,
-                total_tracks,
-                playlist_names,
-                track_names,
-            ));
-        }
-
-        // ── LIVE / RECORD ──────────────────────────────────────────────────────
-        info!(
-            "Starting sync for all playlists (mode={:?})",
-            self.cache_mode
-        );
+        info!("Starting sync for all playlists");
 
         {
             let mut progress = self.progress.write().await;
@@ -787,6 +477,7 @@ impl SpotifySyncWorker {
             &info.name,
             info.description.as_deref(),
             Some(&metadata_json),
+            info.track_count as i64,
         )
         .await
         .context("Failed to upsert playlist")?;

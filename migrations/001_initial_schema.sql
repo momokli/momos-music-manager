@@ -49,6 +49,7 @@ CREATE TABLE service_playlists (
     name TEXT NOT NULL,  -- wird mit tags.name gematcht
     description TEXT,
     metadata_json TEXT,
+    remote_track_count INTEGER DEFAULT 0,
     imported_at INTEGER DEFAULT (unixepoch()),
     updated_at INTEGER DEFAULT (unixepoch()),
     UNIQUE(service, playlist_id)

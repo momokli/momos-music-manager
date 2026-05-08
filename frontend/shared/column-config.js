@@ -125,10 +125,12 @@ export function renderColumnHeaders(config, columns, state, sortableTh) {
         const th = sortableTh(model.label, model.sortKey, state, {
           style: `width:${c.width}px;min-width:30px;max-width:${c.width}px`,
         });
-        // Inject resize handle before closing </th>
-        return th.replace("</th>", `${addResizeHandle()}</th>`);
+        // Inject resize handle + data-col-id before closing </th>
+        return th
+          .replace("</th>", `${addResizeHandle()}</th>`)
+          .replace("<th", `<th data-col-id="${c.id}"`);
       }
-      return `<th style="width:${c.width}px;min-width:30px;max-width:${c.width}px">${escapeHtml(model.label)}${addResizeHandle()}</th>`;
+      return `<th data-col-id="${c.id}" style="width:${c.width}px;min-width:30px;max-width:${c.width}px">${escapeHtml(model.label)}${addResizeHandle()}</th>`;
     })
     .join("");
 }
@@ -149,9 +151,9 @@ export function renderColumnCells(config, columns, cellRenderers, row) {
       const model = columns.find((m) => m.id === c.id);
       if (!model) return "";
       const renderer = cellRenderers[c.id];
-      if (!renderer) return "<td></td>";
+      if (!renderer) return `<td data-col-id="${c.id}"></td>`;
       const content = renderer(row);
-      return `<td style="width:${c.width}px;min-width:30px;max-width:${c.width}px">${content}</td>`;
+      return `<td data-col-id="${c.id}" style="width:${c.width}px;min-width:30px;max-width:${c.width}px">${content}</td>`;
     })
     .join("");
 }
@@ -394,7 +396,7 @@ function openConfigModal(pageId, columns, config, onSave) {
           <span class="col-config-drag-handle"><i class="fas fa-grip-lines"></i></span>
           <input type="checkbox" class="col-config-checkbox" data-cid="${c.id}" ${c.visible ? "checked" : ""}>
           <span class="col-config-label">${escapeHtml(label)}</span>
-          <input type="number" class="col-config-width" data-cid="${c.id}" value="${c.width}" min="1" max="100">
+          <input type="number" class="col-config-width" data-cid="${c.id}" value="${c.width}" min="30" max="500">
         </div>`;
     })
     .join("");
@@ -451,8 +453,8 @@ function openConfigModal(pageId, columns, config, onSave) {
           const entry = workingCopy.find((c) => c.id === input.dataset.cid);
           if (entry)
             entry.width = Math.max(
-              1,
-              Math.min(100, parseInt(input.value, 10) || entry.width),
+              30,
+              Math.min(500, parseInt(input.value, 10) || entry.width),
             );
         });
 
@@ -528,4 +530,47 @@ function wireModalDragReorder() {
       });
     });
   });
+}
+
+/* ------------------------------------------------------------------ */
+/*  DOM-only column reorder (no API call, no re-render)               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Reorder the DOM elements of a table to match a new column config order.
+ *
+ * This is used after a column drag-drop to avoid re-fetching data and
+ * re-rendering the entire table body.  The data hasn't changed — only the
+ * column order has.
+ *
+ * Relies on `data-col-id` attributes on `<th>` and `<td>` elements,
+ * set by `renderColumnHeaders` and `renderColumnCells`.
+ *
+ * @param {HTMLElement} container — element containing the `.data-table`
+ * @param {Array} config — current column config (already reordered)
+ */
+export function reorderTableColumns(container, config) {
+  const table = container.querySelector(".data-table");
+  if (!table) return;
+
+  const theadRow = table.querySelector("thead tr");
+  const tbody = table.querySelector("tbody");
+  if (!theadRow || !tbody) return;
+
+  const visible = config.filter((c) => c.visible);
+
+  // Reorder <th> elements in <thead>
+  for (const entry of visible) {
+    const th = theadRow.querySelector(`th[data-col-id="${entry.id}"]`);
+    if (th) theadRow.appendChild(th);
+  }
+
+  // Reorder <td> elements in each <tr> of <tbody>
+  const rows = tbody.querySelectorAll("tr");
+  for (const row of rows) {
+    for (const entry of visible) {
+      const td = row.querySelector(`td[data-col-id="${entry.id}"]`);
+      if (td) row.appendChild(td);
+    }
+  }
 }

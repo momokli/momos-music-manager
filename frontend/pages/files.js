@@ -36,6 +36,7 @@ import {
   wireColumnResize,
   wireColumnDragReorder,
   wireConfigTrigger,
+  reorderTableColumns,
 } from "../shared/column-config.js";
 
 /* ------------------------------------------------------------------ */
@@ -653,6 +654,12 @@ function buildParams(state) {
   if (state.linkedOnly) params.set("linkedOnly", "true");
   if (state.unlinked) params.set("unlinked", "true");
   if (state.nonDefaultOnly) params.set("nonDefaultOnly", "true");
+  if (state.selectedServices && state.selectedServices.length > 0) {
+    params.set("services", state.selectedServices.join(","));
+  }
+  if (state.fileTypes && state.fileTypes.length > 0) {
+    params.set("fileTypes", state.fileTypes.join(","));
+  }
   if (state.sort) params.set("sort", state.sort);
   if (state.order === "desc") params.set("order", "desc");
   return params;
@@ -680,19 +687,11 @@ function pmvFromComment(comment) {
 /**
  * Apply client-side filters to a file list.
  * These filters operate on fields computed only on the client
- * (PMV categories from comment brackets, comment status, file type, services).
+ * (PMV categories from comment brackets, comment status).
+ * Service and file type filtering moved server-side for correct pagination.
  */
 function applyClientFilters(files, state) {
   let result = files;
-
-  // Service filter (multi-select OR)
-  if (state.selectedServices && state.selectedServices.length > 0) {
-    result = result.filter(
-      (f) =>
-        f.matchedServices &&
-        f.matchedServices.some((s) => state.selectedServices.includes(s)),
-    );
-  }
 
   // PMV filter
   if (state.pmvCategories && state.pmvCategories.length > 0) {
@@ -725,15 +724,6 @@ function applyClientFilters(files, state) {
       if (state.commentStatuses.includes("needs_update") && needsUpdate) return true;
       if (state.commentStatuses.includes("uptodate") && !needsUpdate) return true;
       return false;
-    });
-  }
-
-  // File type filter (multi-select OR)
-  if (state.fileTypes && state.fileTypes.length > 0) {
-    result = result.filter((f) => {
-      // f.fileType comes from adaptFile — match against the extension/type
-      const ft = (f.fileType || "").toLowerCase();
-      return state.fileTypes.some((t) => ft === t.toLowerCase());
     });
   }
 
@@ -1438,7 +1428,7 @@ function wireContentEvents(signal, state) {
   if (state.layoutMode) {
     wireColumnResize(contentEl, "files", FILES_COLUMNS, colConfig);
     wireColumnDragReorder(contentEl, "files", FILES_COLUMNS, colConfig, () => {
-      fetchAndRender(signal, state);
+      reorderTableColumns(contentEl, colConfig);
     });
   }
   wireConfigTrigger(contentEl, "files", FILES_COLUMNS, colConfig, () => {

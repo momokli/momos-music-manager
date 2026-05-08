@@ -170,7 +170,6 @@ POST /api/folders/{id}/scan
 
 1. Walk directory tree (configurable depth/exclusions)
 2. For each audio file:
-   - Check scan cache (if SCAN_CACHE=replay)
    - Extract metadata via lofty + exiftool
    - Store/update in `files` table
    - Update progress

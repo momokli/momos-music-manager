@@ -281,7 +281,7 @@ function renderCategoryRow(c) {
   const prefixHtml = `<span class="cat-info-wrap">
     <span class="prefix-badge${c.prefix ? "" : " prefix-empty"}">${c.prefix ? escapeHtml(c.prefix) : "&mdash;"}</span>
     <button class="cat-edit-btn" data-edit="prefix" data-id="${c.id}" title="${c.prefix ? "Edit prefix" : "Add prefix"}"><i class="fa-solid fa-pen"></i></button>
-    <input type="text" class="cat-inline-input" data-field="prefix" value="${escapeAttr(c.prefix)}" maxlength="1" hidden>
+    <input type="text" class="cat-inline-input" data-field="prefix" value="${escapeHtml(c.prefix)}" maxlength="1" hidden>
   </span>`;
 
   const deleteTitle = "Delete category";
@@ -291,14 +291,14 @@ function renderCategoryRow(c) {
       <div class="cat-row-drag-handle" title="Drag to reorder">
         <i class="fa-solid fa-grip-vertical"></i>
       </div>
-      <span class="cat-row-icon" data-id="${c.id}" data-icon="${escapeAttr(c.icon)}" style="--cat-color:${hashColor}" title="Click to change icon">
+      <span class="cat-row-icon" data-id="${c.id}" data-icon="${escapeHtml(c.icon)}" style="--cat-color:${hashColor}" title="Click to change icon">
         <i class="${c.icon}"></i>
       </span>
       ${prefixHtml}
       <span class="cat-info-wrap">
         <span class="cat-row-name">${escapeHtml(c.name)}</span>
         <button class="cat-edit-btn" data-edit="name" data-id="${c.id}" title="Edit name"><i class="fa-solid fa-pen"></i></button>
-        <input type="text" class="cat-inline-input" data-field="name" value="${escapeAttr(c.name)}" hidden>
+        <input type="text" class="cat-inline-input" data-field="name" value="${escapeHtml(c.name)}" hidden>
       </span>
       <span class="cat-row-meta-group">
         ${defaultStar}
@@ -1041,15 +1041,6 @@ function cancelInlineEdit(input) {
 /*  Icon Picker (modal version)                                        */
 /* ================================================================== */
 
-function escapeAttr(s) {
-  if (typeof s !== "string") return "";
-  return s
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
 function deleteCategory(catId, catName) {
   const cleanup = showModal({
     title: "Delete Category",
@@ -1057,7 +1048,7 @@ function deleteCategory(catId, catName) {
     bodyHtml: `
       <div style="padding:0;">
         <p style="color:var(--text-muted);margin-bottom:var(--space-4);">
-          Are you sure you want to delete the category <strong>"${escapeAttr(catName)}"</strong>?
+          Are you sure you want to delete the category <strong>"${escapeHtml(catName)}"</strong>?
         </p>
         <p style="font-size:0.85rem;color:var(--red);display:flex;align-items:center;gap:var(--space-1);">
           <i class="fa-solid fa-exclamation-triangle"></i>

@@ -39,6 +39,7 @@ import {
   wireColumnResize,
   wireColumnDragReorder,
   wireConfigTrigger,
+  reorderTableColumns,
 } from "../shared/column-config.js";
 import { renderActionsPanel } from "../shared/actions-panel.js";
 
@@ -175,17 +176,17 @@ function renderToolbar(state) {
     <div class="filter-panel-body">
       <div class="filter-panel-scroll" style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-2) var(--space-4);">
         <div>
-          <div class="filter-section-header" style="margin-top:0"><i class="fas fa-music"></i> Tag Info</div>
+          <div class="filter-section-header" style="margin-top:0"><i class="fas fa-tag"></i> Tag Info</div>
+          <!-- Search is in the header — no additional tag info filters -->
+        </div>
+        <div>
+          <div class="filter-section-header" style="margin-top:0"><i class="fas fa-tag"></i> Classification</div>
           <div class="filter-row">
             <span class="filter-row-label toggleable" data-filter="category">Category</span>
             <div class="filter-group" id="tags-category-filter" style="flex-wrap:wrap">
               ${categoryBtns}
             </div>
           </div>
-        </div>
-        <div>
-          <div class="filter-section-header" style="margin-top:0"><i class="fas fa-tag"></i> Filter</div>
-          <!-- Additional filters can be added here -->
         </div>
       </div>
     </div>
@@ -309,7 +310,7 @@ function wireContentEvents(container, signal, state) {
   if (state.layoutMode) {
     wireColumnResize(container, "tags", TAGS_COLUMNS, colConfig);
     wireColumnDragReorder(container, "tags", TAGS_COLUMNS, colConfig, () => {
-      fetchAndRender(container, signal, state);
+      reorderTableColumns(container, colConfig);
     });
   }
   wireConfigTrigger(container, "tags", TAGS_COLUMNS, colConfig, () => {
@@ -548,15 +549,24 @@ export async function init(container, signal, hashParams) {
         const idx = state.selectedCategories.indexOf(val);
         if (idx >= 0) {
           state.selectedCategories.splice(idx, 1);
+          btn.classList.remove("active");
         } else {
           if (val === "") {
-            // "All Categories" — clear selection
+            // "All Categories" — clear selection and remove active from all buttons
             state.selectedCategories = [];
+            catFilter
+              .querySelectorAll(".filter-btn")
+              .forEach((b) => b.classList.remove("active"));
           } else {
             // Remove "" if it's in the array (All Categories deselected)
             const allIdx = state.selectedCategories.indexOf("");
-            if (allIdx >= 0) state.selectedCategories.splice(allIdx, 1);
+            if (allIdx >= 0) {
+              state.selectedCategories.splice(allIdx, 1);
+              const allBtn = catFilter.querySelector('.filter-btn[data-value=""]');
+              if (allBtn) allBtn.classList.remove("active");
+            }
             state.selectedCategories.push(val);
+            btn.classList.add("active");
           }
         }
         state.page = 0;
