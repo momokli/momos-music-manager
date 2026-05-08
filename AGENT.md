@@ -202,8 +202,9 @@ This section is **dynamic** — plans are appended, updated, and checked off as 
 
 ## Plan: tags-filter-box
 
-**Status**: proposed
+**Status**: done ✅
 **Branch**: `feat/tags-filter-box`
+**Ready for review**: yes
 **Depends on**: nothing
 **Migration needed**: no
 
@@ -227,7 +228,7 @@ Retrofit the Tags page filter toolbar into the canonical 2-column filter-panel p
 
 ## Plan: modifier-column-layout
 
-**Status**: proposed
+**Status**: done ✅ (already on `main` — implemented in prior work)
 **Branch**: `feat/modifier-column-layout`
 **Depends on**: nothing
 **Migration needed**: no
@@ -258,8 +259,9 @@ Add the "Modify Column Layout" toggle button to all CRUD pages (files, tracks, p
 
 ## Plan: column-resize-pixel
 
-**Status**: proposed
+**Status**: done ✅
 **Branch**: `feat/column-resize-pixel`
+**Ready for review**: yes
 **Depends on**: nothing
 **Migration needed**: no
 
@@ -285,8 +287,9 @@ Fix column resize feedback loop by switching from percentage-based to pixel-base
 
 ## Plan: import-export-ui
 
-**Status**: proposed
+**Status**: done ✅
 **Branch**: `feat/import-export-ui`
+**Ready for review**: yes
 **Depends on**: nothing
 **Migration needed**: no
 
@@ -317,8 +320,9 @@ Add web UI wrapping CLI `dump`/`restore` commands. Backend: `GET /api/dump` (dow
 
 ## Plan: server-side-filtering
 
-**Status**: proposed
+**Status**: done ✅
 **Branch**: `feat/server-side-filtering`
+**Ready for review**: yes
 **Depends on**: nothing
 **Migration needed**: no
 
