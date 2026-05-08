@@ -653,6 +653,22 @@ function buildParams(state) {
   if (state.linkedOnly) params.set("linkedOnly", "true");
   if (state.unlinked) params.set("unlinked", "true");
   if (state.nonDefaultOnly) params.set("nonDefaultOnly", "true");
+  // Server-side filters
+  if (state.selectedServices && state.selectedServices.length > 0) {
+    params.set("selectedServices", state.selectedServices.join(","));
+  }
+  if (state.pmvCategories && state.pmvCategories.length > 0) {
+    params.set("pmvCategories", state.pmvCategories.join(","));
+  }
+  if (state.pmvAggregate) {
+    params.set("pmvAggregate", state.pmvAggregate);
+  }
+  if (state.fileTypes && state.fileTypes.length > 0) {
+    params.set("fileTypes", state.fileTypes.join(","));
+  }
+  if (state.commentStatuses && state.commentStatuses.length > 0) {
+    params.set("commentStatuses", state.commentStatuses.join(","));
+  }
   if (state.sort) params.set("sort", state.sort);
   if (state.order === "desc") params.set("order", "desc");
   return params;
@@ -662,117 +678,27 @@ function buildParams(state) {
 /*  Fetch + Render cycle                                               */
 /* ------------------------------------------------------------------ */
 
-/**
- * Extract PMV categories present in a file's comment bracket.
- * Returns { p: bool, m: bool, v: bool }.
- */
-function pmvFromComment(comment) {
-  if (!comment) return { p: false, m: false, v: false };
-  const m = comment.match(/^\[([PMV_]+)\]/);
-  if (!m) return { p: false, m: false, v: false };
-  return {
-    p: m[1].includes("P"),
-    m: m[1].includes("M"),
-    v: m[1].includes("V"),
-  };
-}
-
-/**
- * Apply client-side filters to a file list.
- * These filters operate on fields computed only on the client
- * (PMV categories from comment brackets, comment status, file type, services).
- */
-function applyClientFilters(files, state) {
-  let result = files;
-
-  // Service filter (multi-select OR)
-  if (state.selectedServices && state.selectedServices.length > 0) {
-    result = result.filter(
-      (f) =>
-        f.matchedServices &&
-        f.matchedServices.some((s) => state.selectedServices.includes(s)),
-    );
-  }
-
-  // PMV filter
-  if (state.pmvCategories && state.pmvCategories.length > 0) {
-    result = result.filter((f) => {
-      const pmv = pmvFromComment(f.commentTarget || f.comment || "");
-      return state.pmvCategories.some((c) => pmv[c]);
-    });
-  } else if (state.pmvAggregate) {
-    result = result.filter((f) => {
-      const pmv = pmvFromComment(f.commentTarget || f.comment || "");
-      const hasAny = pmv.p || pmv.m || pmv.v;
-      const hasAll = pmv.p && pmv.m && pmv.v;
-      switch (state.pmvAggregate) {
-        case "full":
-          return hasAll;
-        case "partial":
-          return hasAny;
-        case "none":
-          return !hasAny;
-        default:
-          return true;
-      }
-    });
-  }
-
-  // Comment status filter
-  if (state.commentStatuses && state.commentStatuses.length > 0) {
-    result = result.filter((f) => {
-      const needsUpdate = f.needsUpdate;
-      if (state.commentStatuses.includes("needs_update") && needsUpdate) return true;
-      if (state.commentStatuses.includes("uptodate") && !needsUpdate) return true;
-      return false;
-    });
-  }
-
-  // File type filter (multi-select OR)
-  if (state.fileTypes && state.fileTypes.length > 0) {
-    result = result.filter((f) => {
-      // f.fileType comes from adaptFile — match against the extension/type
-      const ft = (f.fileType || "").toLowerCase();
-      return state.fileTypes.some((t) => ft === t.toLowerCase());
-    });
-  }
-
-  return result;
-}
-
 async function fetchAndRender(signal, state) {
   const contentEl = document.getElementById("files-content");
   if (!contentEl) return;
   contentEl.innerHTML = renderLoading("Loading files…");
 
   try {
-    // Build server-side params (search, bpm, key, tags, linked/unlinked, nonDefaultOnly)
     const params = buildParams(state);
 
-    // Remove pagination — we paginate client-side after applying client filters
-    const fetchParams = new URLSearchParams(params);
-    fetchParams.delete("limit");
-    fetchParams.delete("offset");
-
-    const resp = await fetchJSON(`/api/files?${fetchParams}`, { signal });
+    const [filesResp, countResp] = await Promise.all([
+      fetchJSON(`/api/files?${params}`, { signal }),
+      fetchJSON(`/api/files/count?${params}`, { signal }),
+    ]);
     if (signal.aborted) return;
 
-    let files = (resp.data || []).map(adaptFile);
+    const files = (filesResp.data || []).map(adaptFile);
+    const total = countResp.data;
 
-    // Apply client-side filters (services, PMV, comment, fileType)
-    files = applyClientFilters(files, state);
-
-    // Client-side pagination
-    const total = files.length;
-    const paged = files.slice(
-      state.page * state.pageSize,
-      (state.page + 1) * state.pageSize,
-    );
-
-    if (paged.length === 0 && total === 0) {
+    if (files.length === 0 && total === 0) {
       contentEl.innerHTML = renderEmptyBody();
     } else {
-      contentEl.innerHTML = renderBody({ _total: total, files: paged }, state);
+      contentEl.innerHTML = renderBody({ _total: total, files }, state);
     }
 
     wireContentEvents(signal, state);

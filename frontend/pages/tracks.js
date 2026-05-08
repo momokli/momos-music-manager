@@ -9,7 +9,7 @@
  * keep the search input stable (no focus loss on reload).
  *
  * URL hash params:
- *   #tracks?search=foo&selectedServices=spotify,soundcloud&pmvCategories=p,m&pmvAggregate=full&page=0&playlistId=42&playlistName=Summer
+ *   #tracks?search=foo&selectedServices=spotify,soundcloud&page=0&playlistId=42&playlistName=Summer
  */
 
 import { fetchJSON } from "../shared/api.js";
@@ -175,63 +175,6 @@ function renderLocalFiles(t) {
     .join(" ");
 }
 
-/**
- * Extract PMV categories present in a comment bracket.
- * Returns { p: bool, m: bool, v: bool }.
- */
-function pmvFromComment(comment) {
-  if (!comment) return { p: false, m: false, v: false };
-  const m = comment.match(/^\[([PMV_]+)\]/);
-  if (!m) return { p: false, m: false, v: false };
-  return {
-    p: m[1].includes("P"),
-    m: m[1].includes("M"),
-    v: m[1].includes("V"),
-  };
-}
-
-/**
- * Apply client-side filters that cannot be handled server-side:
- * - Service filter (multi-select OR from icon buttons)
- * - PMV filter (categories or aggregate from comment bracket)
- */
-function applyClientFilters(tracks, state) {
-  let result = tracks;
-
-  // Service filter (multi-select OR)
-  if (state.selectedServices && state.selectedServices.length > 0) {
-    result = result.filter(
-      (t) => t.service && state.selectedServices.includes(t.service),
-    );
-  }
-
-  // PMV filter
-  if (state.pmvCategories && state.pmvCategories.length > 0) {
-    result = result.filter((t) => {
-      const pmv = pmvFromComment(t.commentTarget || t.comment || "");
-      return state.pmvCategories.some((c) => pmv[c]);
-    });
-  } else if (state.pmvAggregate) {
-    result = result.filter((t) => {
-      const pmv = pmvFromComment(t.commentTarget || t.comment || "");
-      const hasAny = pmv.p || pmv.m || pmv.v;
-      const hasAll = pmv.p && pmv.m && pmv.v;
-      switch (state.pmvAggregate) {
-        case "full":
-          return hasAll;
-        case "partial":
-          return hasAny;
-        case "none":
-          return !hasAny;
-        default:
-          return true;
-      }
-    });
-  }
-
-  return result;
-}
-
 /* ------------------------------------------------------------------ */
 /*  Adapter                                                            */
 /* ------------------------------------------------------------------ */
@@ -266,11 +209,11 @@ function adaptTrack(t) {
 
 /**
  * Render the toolbar HTML (called once on init).
- * Includes search input, service icon buttons, PMV filter row, and
+ * Includes search input, service icon buttons, and
  * optional playlist context badge when scoped to a playlist.
  *
  * @param {string} search  — current search value
- * @param {object} state   — current state (used for playlistName, selectedServices, pmvCategories, pmvAggregate)
+ * @param {object} state   — current state (used for playlistName, selectedServices)
  * @returns {string} HTML
  */
 function renderToolbar(search, state) {
@@ -285,7 +228,6 @@ function renderToolbar(search, state) {
   }
 
   const selServices = state.selectedServices || [];
-  const pmvCats = state.pmvCategories || [];
 
   return `<div class="filter-panel" id="tracks-filter-panel">
     <div class="filter-panel-header">
@@ -305,21 +247,7 @@ function renderToolbar(search, state) {
           <button class="filter-btn${selServices.includes("youtube") ? " active" : ""}" data-value="youtube" title="YouTube"><i class="fab fa-youtube"></i></button>
         </div>
       </div>
-      <!-- PMV filter -->
-      <div class="filter-row">
-        <span class="filter-row-label toggleable" data-filter="pmv">PMV</span>
-        <div class="filter-group" id="track-pmv-cat-btns" style="flex-wrap:wrap">
-          <button class="filter-btn${pmvCats.includes("p") ? " active" : ""}" data-value="p" title="Has Phase tags">P</button>
-          <button class="filter-btn${pmvCats.includes("m") ? " active" : ""}" data-value="m" title="Has Mood tags">M</button>
-          <button class="filter-btn${pmvCats.includes("v") ? " active" : ""}" data-value="v" title="Has Vibe tags">V</button>
-        </div>
-        <span class="pmv-sep">|</span>
-        <div class="filter-group" id="track-pmv-agg-btns" style="flex-wrap:wrap">
-          <button class="filter-btn${state.pmvAggregate === "full" ? " active" : ""}" data-value="full" title="Has all three categories">Full</button>
-          <button class="filter-btn${state.pmvAggregate === "partial" ? " active" : ""}" data-value="partial" title="Has at least one category">Partial</button>
-          <button class="filter-btn${state.pmvAggregate === "none" ? " active" : ""}" data-value="none" title="Has no PMV categories">None</button>
-        </div>
-      </div>
+
     </div>
   </div>`;
 }
@@ -430,6 +358,16 @@ function buildParams(state) {
   if (state.order) params.set("order", state.order);
   if (state.search) params.set("search", state.search);
   if (state.playlistId) params.set("playlistId", String(state.playlistId));
+  // Server-side filters
+  if (state.selectedServices && state.selectedServices.length > 0) {
+    params.set("services", state.selectedServices.join(","));
+  }
+  if (state.fileTypes && state.fileTypes.length > 0) {
+    params.set("fileTypes", state.fileTypes.join(","));
+  }
+  if (state.fileTypeAgg) {
+    params.set("fileTypeAgg", state.fileTypeAgg);
+  }
   return params;
 }
 
@@ -452,8 +390,6 @@ async function fetchAndRender(container, signal, state) {
     order: "asc",
     search: "",
     selectedServices: [],
-    pmvCategories: [],
-    pmvAggregate: "",
     page: 0,
   });
   setContent(renderLoading("Loading tracks…"));
@@ -465,9 +401,7 @@ async function fetchAndRender(container, signal, state) {
     ]);
     if (signal.aborted) return;
 
-    let clientTracks = tracksResp.data.map(adaptTrack);
-    // Apply client-side filters (service multi-select, PMV)
-    clientTracks = applyClientFilters(clientTracks, state);
+    const clientTracks = tracksResp.data.map(adaptTrack);
 
     const data = {
       _total: countResp.data,
@@ -506,7 +440,7 @@ async function fetchAndRender(container, signal, state) {
 
 /**
  * Wire toolbar filter events (called once after toolbar is mounted).
- * Handles multi-select service icon buttons and PMV category/aggregate buttons.
+ * Handles multi-select service icon buttons.
  */
 function wireToolbarEvents(container, signal, state) {
   // ── Multi-select service filter ──
@@ -523,59 +457,6 @@ function wireToolbarEvents(container, signal, state) {
           state.selectedServices.splice(idx, 1);
         } else {
           state.selectedServices.push(value);
-        }
-        state.page = 0;
-        fetchAndRender(container, signal, state);
-      },
-      { signal },
-    );
-  }
-
-  // ── PMV category buttons (multi-select: P, M, V) ──
-  const pmvCatBtns = container.querySelector("#track-pmv-cat-btns");
-  if (pmvCatBtns) {
-    pmvCatBtns.addEventListener(
-      "click",
-      (e) => {
-        const btn = e.target.closest(".filter-btn");
-        if (!btn) return;
-        const val = btn.dataset.value;
-        const idx = state.pmvCategories.indexOf(val);
-        if (idx >= 0) {
-          state.pmvCategories.splice(idx, 1);
-        } else {
-          // Clear aggregate group when picking categories
-          state.pmvAggregate = "";
-          container
-            .querySelectorAll("#track-pmv-agg-btns .filter-btn")
-            .forEach((b) => b.classList.remove("active"));
-          state.pmvCategories.push(val);
-        }
-        state.page = 0;
-        fetchAndRender(container, signal, state);
-      },
-      { signal },
-    );
-  }
-
-  // ── PMV aggregate buttons (single-select: Full, Partial, None) ──
-  const pmvAggBtns = container.querySelector("#track-pmv-agg-btns");
-  if (pmvAggBtns) {
-    pmvAggBtns.addEventListener(
-      "click",
-      (e) => {
-        const btn = e.target.closest(".filter-btn");
-        if (!btn) return;
-        const val = btn.dataset.value;
-        if (state.pmvAggregate === val) {
-          state.pmvAggregate = "";
-        } else {
-          // Clear category group when picking aggregate
-          state.pmvCategories = [];
-          container
-            .querySelectorAll("#track-pmv-cat-btns .filter-btn")
-            .forEach((b) => b.classList.remove("active"));
-          state.pmvAggregate = val;
         }
         state.page = 0;
         fetchAndRender(container, signal, state);
@@ -677,8 +558,6 @@ export async function init(container, signal, hashParams) {
     sort: hashParams?.sort || "",
     order: hashParams?.order || "asc",
     selectedServices: parseCSV(hashParams?.selectedServices),
-    pmvCategories: parseCSV(hashParams?.pmvCategories),
-    pmvAggregate: hashParams?.pmvAggregate || "",
     playlistId: hashParams?.playlistId ? parseInt(hashParams.playlistId) : null,
     playlistName: hashParams?.playlistName || null,
     layoutMode: false,
@@ -722,7 +601,7 @@ export async function init(container, signal, hashParams) {
     wireSearchFilter(filterPanel, state, () => fetchAndRender(container, signal, state));
   }
 
-  // Wire toolbar filter events (service icons, PMV)
+  // Wire toolbar filter events (service icons)
   wireToolbarEvents(container, signal, state);
 
   // Wire actions panel refresh
