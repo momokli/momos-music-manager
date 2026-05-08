@@ -1,6 +1,12 @@
-# Momo's Music Manager — Agent Guidance & Implementation Plan
+# Momo's Music Manager — Agent Guidance
 
-> **Last Updated**: 2026-05-01 — Comprehensive plan based on full code review
+> **Last Updated**: 2026-06-10 — New workflow: feature branches + additive migrations
+
+---
+
+# Section 1: Agent Reference
+
+This section is **static** — it's the system prompt for any agent working on this project.
 
 ---
 
@@ -13,16 +19,26 @@ Single developer, no production data, no backward compatibility needed.
 
 ## Key Principles
 
-1. **Schema**: 12 tables/views — `tag_categories`, `tags`, `service_tracks`, `service_playlists`, `service_playlist_tracks`, `files`, `service_config`, `folders`, `subscriptions`, `tag_embeddings`, `tag_energy_levels`, `tag_similarities` (plus views: `unified_tracks`, `v_file_track_link`, `v_tag_playlist`, `v_file_tags`, `v_subscriptions`, `v_tag_categories`, `v_tags_with_categories`)
-2. **Single Migration**: Only `migrations/001_initial_schema.sql` — replace it and delete all DB files if schema changes
-3. **Separate Types**: `File` (local files with BPM/Key) vs `ServiceTrack` (service entries, no BPM/Key) — linked via `v_file_track_link` view
-4. **Tags = Playlists**: Via name matching (case-insensitive). Setlist is default category.
-5. **Comment Format**: `[{phase_char}{mood_char}{vibe_char}] {tags} {source_id}` — e.g. `[PMV] build jazzy warehouse sp:xxx`
-6. **Service IDs**: Direct columns on `files` (`spotify_id`, `soundcloud_id`, `youtube_id`)
-7. **Key Matching**: Rust-only (Camelot wheel, no DB table)
-8. **Task Manager**: In-memory task tracking — 4 operation types (ServiceSync, WriteComment, RecomputeEmbeddings, ScanFolder)
-9. **Sync State**: In-memory `TaskManager` — tasks auto-pruned 5 min after completion
-10. **Config Priority** (highest wins): Env vars > `~/.config/momos-music-manager/config.toml` > built-in defaults
+### Workflow
+
+1. **`main` is always clean** — never commit directly to `main`. Every change goes through a feature branch.
+2. **Feature branches** — `feat/short-description` or `fix/short-description`, branched from `main`.
+3. **Rebase > Merge** — rebase feature branch onto `main`, then fast-forward merge. Linear history.
+4. **Additive migrations** — never modify `001_initial_schema.sql`. New schema changes = `002_description.sql`, `003_description.sql`, etc. `sqlx::migrate!()` handles ordering.
+5. **Plan first** — every task starts with a Plan entry in Section 2 of this file. User reviews the plan, then agents are spawned.
+
+### Architecture
+
+6. **Schema**: 12 tables/views — `tag_categories`, `tags`, `service_tracks`, `service_playlists`, `service_playlist_tracks`, `files`, `service_config`, `folders`, `subscriptions`, `tag_embeddings`, `tag_energy_levels`, `tag_similarities` (plus views: `unified_tracks`, `v_file_track_link`, `v_tag_playlist`, `v_file_tags`, `v_subscriptions`, `v_tag_categories`, `v_tags_with_categories`)
+7. **Separate Types**: `File` (local files with BPM/Key) vs `ServiceTrack` (service entries, no BPM/Key) — linked via `v_file_track_link` view
+8. **Tags = Playlists**: Via name matching (case-insensitive). Setlist is default category.
+9. **Comment Format**: `[{phase_char}{mood_char}{vibe_char}] {tags} {source_id}` — e.g. `[PMV] build jazzy warehouse sp:xxx`
+10. **Service IDs**: Direct columns on `files` (`spotify_id`, `soundcloud_id`, `youtube_id`)
+11. **Key Matching**: Rust-only (Camelot wheel, no DB table)
+12. **Task Manager**: In-memory task tracking — 4 operation types (ServiceSync, WriteComment, RecomputeEmbeddings, ScanFolder)
+13. **Sync State**: In-memory `TaskManager` — tasks auto-pruned 5 min after completion
+14. **Config Priority** (highest wins): Env vars > `~/.config/momos-music-manager/config.toml` > built-in defaults
+15. **Server-Side Filtering**: All filters must be server-side on paginated pages. Client-side filtering after pagination breaks page counts.
 
 ---
 
@@ -51,8 +67,6 @@ playlist_id  = "your_youtube_playlist_id"
 Dev-only env vars (not in config.toml):
 
 - `DATABASE_URL` — default `sqlite:app.db`
-- `SPOTIFY_API_CACHE` — `record`/`replay` for dev
-- `SCAN_CACHE` — `record`/`replay` for dev
 
 ---
 
@@ -71,28 +85,10 @@ cd frontend && python3 -m http.server 8000
 # Scan single file for metadata debugging
 cargo run -- scan-file /path/to/file.stem.m4a
 
-# Delete old DBs + restart
+# Delete old DBs + restart (only when messing with migrations during dev)
 rm -f app.db && cargo run -- serve --host 127.0.0.1 --port 3000
 
-# Record Spotify API responses for later replay
-SPOTIFY_API_CACHE=record cargo run -- serve
-
-# Replay cached responses (no API calls, seconds instead of minutes)
-SPOTIFY_API_CACHE=replay cargo run -- serve
-
-# Clear cached API responses
-rm -rf dev-data/spotify-api
-
-# Record folder scan metadata for later replay
-SCAN_CACHE=record cargo run -- serve
-
-# Replay cached folder scan (no lofty/exiftool calls, seconds instead of minutes)
-SCAN_CACHE=replay cargo run -- serve
-
-# Clear cached scan metadata (forces re-extraction next scan)
-rm -rf dev-data/scan-cache
-
-# Dump DB to JSON (save state before deleting app.db)
+# Dump DB to JSON
 cargo run -- dump
 
 # Restore DB from JSON dump
@@ -106,13 +102,13 @@ cargo run -- serve  # then use the Traktor import page in the frontend
 
 ## Important Gotchas
 
-- **Before testing**: Always delete old DB files (`app.db`, `compile_check.db`, `test.db`)
-- **If you see "migration 27" errors**: DELETE ALL DB files and start fresh
-- **No SoundCloud/YouTube OAuth yet** — framework is ready, actual flow not implemented
+- **Migrations are additive** — never edit `001_initial_schema.sql`. Create `002_xxx.sql` etc.
+- **To reset a dirty migration state**: delete `app.db` and re-run — migrations run 001→002→003 from scratch.
 - **Frontend is an SPA** — modular vanilla JS with ES modules in `frontend/`. Hash-based router (`app.js`), shared modules in `shared/`, pages in `pages/`. Serve embedded via `rust-embed`, no separate dev server needed.
-- **Docker** was removed — will be recreated later. Use `cargo run` for now.
 - **digging.html** is a standalone HTML page (not part of the SPA) for the digging/curation workflow
 - **Playlist subscriptions** poll every 30s in the background — managed in `poller.rs`
+- **No SoundCloud/YouTube OAuth yet** — framework is ready, actual flow not implemented
+- **Docker** was removed — will be recreated later. Use `cargo run` for now.
 
 ---
 
@@ -142,12 +138,10 @@ src/
 ├── dump.rs              # DB dump/restore (JSON)
 ├── embeddings.rs        # Semantic tag embeddings (candle/ML)
 ├── poller.rs            # Playlist subscription background poller
-├── scan_cache.rs        # File scan caching (record/replay)
 ├── spotify/
 │   ├── mod.rs
 │   ├── client.rs        # Spotify OAuth client
 │   ├── models.rs        # PlaylistInfo, TrackInfo
-│   ├── replay.rs        # API response cache (record/replay)
 │   └── sync_worker.rs   # Background sync worker
 ├── tasks/
 │   └── mod.rs           # TaskManager (generic) + task workers
@@ -198,383 +192,186 @@ src/
 
 ---
 
-# 🎯 FRONTEND ROLLOUT PLAN
+# Section 2: Active Plans
 
-> `frontend/prototype.html` is the validated reference implementation.
-> All list/table pages follow the same canonical CRUD pattern:
-> stable toolbar + re-rendered body (stats, table, pagination) + sort + page size + hash sync + column config.
+This section is **dynamic** — plans are appended, updated, and checked off as work progresses.
 
----
-
-## Canonical Pattern (from prototype)
-
-Each CRUD page module follows this contract:
-
-```js
-// Exported entry point (called by app.js)
-export async function init(container, signal, hashParams) { ... }
-```
-
-**Internal structure:**
-
-| Function                                   | Renders | Responsibility                             |
-| ------------------------------------------ | ------- | ------------------------------------------ |
-| `renderToolbar(state)`                     | Once    | Search + filters + view-specific controls  |
-| `renderBody(data, state)`                  | On data | Stats + table + pagination + page-size     |
-| `buildParams(state)`                       | —       | Serialises state → API query params        |
-| `fetchAndRender(container, signal, state)` | —       | Fetches data, calls renderBody             |
-| `updateHash(state)`                        | —       | Silently syncs to `window.location.hash`   |
-| `init(container, signal, hashParams)`      | —       | Parses hash, renders toolbar, wires events |
-
-**State shape (common fields):**
-
-```js
-const state = {
-  page: 0, pageSize: from localStorage,
-  search: "", sort: "", order: "asc",
-  // view-specific filters...
-};
-```
+**Lifecycle**: `proposed` → `approved` → `in-progress` → `done`
 
 ---
 
-## Phase 0: Baseline — Ensure Clean Foundation
+## Plan: tags-filter-box
 
-Before rolling out any page, make sure the system works end-to-end:
+**Status**: proposed
+**Branch**: `feat/tags-filter-box`
+**Depends on**: nothing
+**Migration needed**: no
 
-- [ ] **Backend:** Sort + pagination on all list endpoints (`sort`, `order`, `limit`, `offset`, `pageSize`)
-- [ ] **Backend:** `apply_sort` helper with whitelist validation in `api.rs`
-- [ ] **Frontend:** All shared modules present and working (`crud.js`, `column-config.js`, `search-filter.js`, `components.js`, `api.js`)
-- [ ] **Frontend:** Confirm CSS for sortable columns, page-size selector, column config is in `style.css`
-- [ ] **Smoke test:** `#files` page works with sort, page size, hash sync
+### Description
 
----
+Retrofit the Tags page filter toolbar into the canonical 2-column filter-panel pattern (same as Playlists/File pages). Replace the flat toolbar with a collapsible filter-panel containing category selector + search + New Tag button.
 
-## Phase 1: Files Page (Reference Blueprint)
+### Files to modify
 
-**File:** `frontend/pages/files.js`
+- `frontend/pages/tags.js`
 
-This is the richest page — get it right and all others follow the same pattern.
+### Acceptance Criteria
 
-- [ ] **Stable toolbar** — Search input + filter panel (BPM, key grid, tags) rendered once, preserved across re-renders. Comment-writer sidebar stays stable.
-- [ ] **Body** — Stats row (count + refresh + page-size selector), sortable table with column config, pagination
-- [ ] **Hash sync** — `updateHash()` on every filter change, `parseHash()` on init
-- [ ] **Column config** — `loadColumnConfig("files", FILES_COLUMNS)`, column visibility/reorder/resize via `column-config.js`
-- [ ] **Cell renderers** — Each column has a renderer in `FILES_CELL_RENDERERS`. Comment column shows diff (old strikethrough, new green).
-- [ ] **PMV filter** — Category + aggregate split (P/M/V multi-select | Full/Partial/None single), either/or logic, reads comment bracket
-- [ ] **Service filter** — Multi-select icons, class-based selector for both views
-- [ ] **Actions panel** — Refresh Metadata + Write Comments buttons to the right of filter panel (CSS grid `4fr 1fr`)
+- [ ] Filter-panel with collapsible toggle (localStorage persistence)
+- [ ] 2-col grid: Category filter (multi-select buttons) | Search + New Tag button
+- [ ] Toggleable data-filter labels with generic toggle handler
+- [ ] No regressions to existing sort/pagination/hash-sync/column-config
+- [ ] Compile check: no backend changes needed
 
 ---
 
-## Phase 2: Tracks Page
+## Plan: modifier-column-layout
 
-**File:** `frontend/pages/tracks.js`
+**Status**: proposed
+**Branch**: `feat/modifier-column-layout`
+**Depends on**: nothing
+**Migration needed**: no
 
-Already has stable toolbar + playlist context badge. Needs retrofit:
+### Description
 
-- [ ] **Sortable headers** — Use `sortableTh`, `wireSortableHeaders` from `crud.js`
-- [ ] **Page size selector** — Use `renderPageSizeSelector`, `wirePageSizeSelector`
-- [ ] **Hash sync** — Use `updateHash` instead of reading-only
-- [ ] **Column config** — `loadColumnConfig("tracks", TRACKS_COLUMNS)`
-- [ ] **Playlists column** — Show tag chips with category colors using `playlistTags` from API
-- [ ] **Comment column** — Same diff rendering as files, using linked file comments
-- [ ] **Playlist count column** — Numeric badge showing how many playlists a track belongs to
-- [ ] **PMV + Service filters** — Same pattern as files page
+Add the "Modify Column Layout" toggle button to all CRUD pages (files, tracks, playlists, tags). When active: column headers become draggable (reorder), resize handles appear, and a "Done" button replaces the toggle. Reuses existing `column-config.js` wiring.
 
----
+### Files to modify
 
-## Phase 3: Playlists Page
+- `frontend/pages/files.js`
+- `frontend/pages/tracks.js`
+- `frontend/pages/playlists.js`
+- `frontend/pages/tags.js`
+- `frontend/shared/column-config.js` (minor — ensure `wireColumnResize` / `wireColumnDragReorder` are exported and usable)
 
-**File:** `frontend/pages/playlists.js`
+### Acceptance Criteria
 
-Full retrofit following files/tracks pattern:
-
-- [ ] **Stable toolbar** — Search input + service filter dropdown + Create Tags button
-- [ ] **Column model** — Name, Service, Tracks (count + local mismatch), Tags, Deemix, Sync, Imported, Updated, Subscribe, View, Actions
-- [ ] **Sort** — All sortable columns (name, service, track_count, imported_at, updated_at)
-- [ ] **Hash sync + page size** — Standard pattern
-- [ ] **Service filter** — Dropdown or icon buttons (like files/tracks)
-- [ ] **Deemix column** — Status badges (queued/downloading/completed/failed) + add/retry buttons
-- [ ] **Subscription column** — Bell icon toggle (green = subscribed)
-- [ ] **View Tracks link** — `#tracks?playlistId=...` with playlist context
-- [ ] **Create/Edit tag** — Buttons open inline or modal
+- [ ] `state.layoutMode` added to all 4 pages
+- [ ] Toggle button in each page's stats row: "Modify Column Layout" ↔ "Done"
+- [ ] `.layout-mode` CSS class on `<body>` enables resize handles + drag
+- [ ] Reordering persists (column config saved on "Done")
+- [ ] Resize persists
+- [ ] No regressions to existing sort/pagination/hash-sync
+- [ ] Compile check: no backend changes needed
 
 ---
 
-## Phase 4: Tags Page
+## Plan: column-resize-pixel
 
-**File:** `frontend/pages/tags.js`
+**Status**: proposed
+**Branch**: `feat/column-resize-pixel`
+**Depends on**: nothing
+**Migration needed**: no
 
-Currently client-side filtered. Needs server-side pagination:
+### Description
 
-- [ ] **Backend:** Add `sort`, `order`, `search`, `category`, `limit`, `offset` to `GET /api/tags` + `GET /api/tags/count`
-- [ ] **Column model** — Tag Name (sortable), Category (badge with icon, sortable), Files (count from `v_tag_file_counts`), Created (sortable), Actions
-- [ ] **Stable toolbar** — Search + category filter
-- [ ] **Standard pattern** — Hash sync, page size, column config
+Fix column resize feedback loop by switching from percentage-based to pixel-based sizing in `column-config.js`. Replace `width: XX%` with `width: XXpx`, clamp 30–500px, use new localStorage key (`columnConfig_v2_` prefix) to avoid stale percentage data.
 
----
+### Files to modify
 
-## Phase 5: Tag Categories Page
+- `frontend/shared/column-config.js`
+- `frontend/style.css`
 
-**File:** `frontend/pages/tag-categories.js`
+### Acceptance Criteria
 
-Special UI (drag-and-drop reorder, energy levels). Less table-like but still needs:
-
-- [ ] Consistent tooling — reuse `fetchJSON`, `escapeHtml`, `showToast` from shared modules
-- [ ] Energy level editor — inline or modal for Phase tags
-
----
-
-## Phase 6: Validate & Polish
-
-- [ ] All pages consistent: same toolbar/body pattern, same hash sync, same page-size storage
-- [ ] No duplicated toast/escapeHtml/fetch code across pages
-- [ ] All column config storage keys per-page (`columnConfig_files`, `columnConfig_tracks`, etc.)
-- [ ] Responsive: filter panel collapses, tables horizontal-scroll
-- [ ] Keyboard: Search input preserves focus, Escape clears filters
-- [ ] Empty states: Zero data / no results / loading states all handled
+- [ ] `wireColumnResize()` uses pixel math instead of percentage
+- [ ] `renderColumnHeaders()` outputs `style="width:XXpx;min-width:30px;max-width:XXpx"`
+- [ ] `loadColumnConfig()` uses key `columnConfig_v2_{page}`
+- [ ] Default widths scaled from % to px (e.g. 18% → 180px)
+- [ ] Dragging resizes smoothly without feedback loop
+- [ ] Compile check: no backend changes needed
 
 ---
 
-## Phase 7 (Optional): Remaining Pages
+## Plan: import-export-ui
 
-Apply same pattern to folders, tasks, deemix-queue, services pages following the blueprint.
+**Status**: proposed
+**Branch**: `feat/import-export-ui`
+**Depends on**: nothing
+**Migration needed**: no
 
----
+### Description
 
-## Implementation Order
+Add web UI wrapping CLI `dump`/`restore` commands. Backend: `GET /api/dump` (download JSON) + `POST /api/restore?confirm=true` (upload JSON). Frontend: new `#data` page with Export section (download button) + Import section (file upload → preview → confirm → restore).
 
-| Phase | Page           | Effort | Dependencies      |
-| ----- | -------------- | ------ | ----------------- |
-| 0     | Baseline       | Medium | None              |
-| 1     | Files          | Large  | Phase 0 ✓         |
-| 2     | Tracks         | Medium | Phase 1 (pattern) |
-| 3     | Playlists      | Medium | Phase 1 (pattern) |
-| 4     | Tags           | Medium | Phase 1 + backend |
-| 5     | Tag Categories | Small  | None              |
-| 6     | Validate       | Small  | All above         |
+### Files to modify
 
-Phases 2–4 can run in parallel after Phase 1 completes (disjoint write scopes).
+- `src/api.rs` — add `dump_handler` and `restore_handler` endpoints
+- `frontend/pages/data.js` — new page module (canonical pattern, no table/pagination)
+- `frontend/app.js` — register `"data": "data"` in PAGE_MAP
+- `frontend/shared/nav.js` — add Import/Export entry under TOOLS_ITEMS
 
----
+### Acceptance Criteria
 
-## Phase 8: Filter UI Parity + Modifier Column Layout
-
-**Context**: Files and Tracks now have a 2-column filter box (File Info | Classification) with
-section headers, toggleable rows, PMV filter, and service icons. Playlists and Tags still use
-a flat toolbar with inline filter buttons right of the search bar. All pages are also missing
-the \"Modify Column Layout\" button from the prototype.
-
-### 8.1 — Playlists filter box retrofit
-
-**File**: `frontend/pages/playlists.js`
-
-Replace the current flat toolbar header with a collapsible filter-panel (same structure as tracks).
-Inside the filter-panel-body, add a 2-column grid:
-
-- **Left**: Search placeholder / no playlists-specific numeric filters needed
-- **Right**: Classification — Service icon buttons + PMV filter row (P/M/V | Full/Partial/None)
-
-**Tasks**:
-
-- [ ] Wrap `renderToolbar` in `.filter-panel` with header (search + toggle) + body (2-col grid)
-- [ ] Add service filter icon buttons (spotify/soundcloud/youtube)
-- [ ] Add PMV filter row with multi-select cats + single-select agg
-- [ ] Keep Create Tags button
-- [ ] Add toggleable `data-filter` labels with generic toggle handler
-
-### 8.2 — Tags filter box retrofit
-
-**File**: `frontend/pages/tags.js`
-
-Same pattern — replace flat toolbar with filter-panel + 2-col grid.
-
-- [ ] Left column: Category filter (as dropdown or filter-group buttons)
-- [ ] Right column: PMV could be added if tags have comment data; otherwise just Search placeholder
-- [ ] Keep New Tag button
-- [ ] Add toggleable label for category filter
-
-### 8.3 — Modifier Column Layout button
-
-By default, all CRUD pages display the table in normal read mode. The prototype has a
-\"Modify Column Layout\" button in the stats row that toggles `state.layoutMode`. When active:
-
-- Column headers become draggable (reorder)
-- Column resize handles appear (drag to resize)
-- A \"Done\" button replaces it to exit layout mode
-
-**Tasks**:
-
-- [ ] Add `layoutMode` to state in all CRUD pages (files, tracks, playlists, tags)
-- [ ] Add the toggle button HTML in each page's `renderBody` / stats row
-- [ ] Wire the toggle: `state.layoutMode = !state.layoutMode` → re-render
-- [ ] CSS: `.layout-mode` class on `<body>` shows resize handles, enables drag
-- [ ] `wireColumnResize` and `wireColumnDragReorder` already exist in `column-config.js`
-
-The shared modules (`column-config.js`) already have all the wiring functions — just need
-the toggle button added to each page's body render and the state flag.
-
-### 8.4 — Implementation Order
-
-| Sub | What                 | Pages                       | Effort |
-| --- | -------------------- | --------------------------- | ------ |
-| 8.1 | Playlists filter box | playlists.js                | Medium |
-| 8.2 | Tags filter box      | tags.js                     | Small  |
-| 8.3 | Column layout button | files/tracks/playlists/tags | Small  |
-
-8.1 and 8.2 can run in parallel (disjoint files). 8.3 can also run in parallel
-with both (different sections of the same files, but non-overlapping edits).
+- [ ] `GET /api/dump` returns JSON download with `Content-Disposition` header
+- [ ] `POST /api/restore?confirm=true` accepts multipart upload, restores DB
+- [ ] `POST /api/restore` without `confirm=true` returns 400
+- [ ] Frontend Export: fetch + trigger browser download, loading spinner
+- [ ] Frontend Import: file picker → preview (row counts per table, timestamp) → confirm → restore → redirect to dashboard
+- [ ] Warning banner on import section: "⚠️ This will replace ALL existing data"
+- [ ] Destructive button styled red
+- [ ] Backend compiles (`cargo build`)
+- [ ] Tested with `curl` first
 
 ---
 
-## Phase 8.5: Column Resize & Drag Bugfix
+## Plan: server-side-filtering
 
-**Context**: `shared/column-config.js` uses percentage-based sizing (3-60%), but the
-prototype uses pixel-based sizing (30-500px). Percentage causes a feedback loop —
-changing a column's % width changes the table's total width, which changes the other
-columns' % calculations mid-drag. Plus min/max constraints aren't set on cells.
+**Status**: proposed
+**Branch**: `feat/server-side-filtering`
+**Depends on**: nothing
+**Migration needed**: no
 
-**Fix**: Switch to pixel-based sizing like the prototype `wireResize()`:
+### Description
 
-- `renderColumnHeaders()` — render `width:XXpx;min-width:30px;max-width:XXpx`
-- `wireColumnResize()` — pixel math, clamping 30-500px, set minWidth/maxWidth/width on th AND td
-- `loadColumnConfig()` — use new localStorage key `columnConfig_v2_{page}` to avoid old % data
-- `defaultWidth` values — multiply by 10 to convert % to px (e.g. 18% → 180px)
+Move client-side filters on Tracks and Files pages to server-side to fix pagination bugs. On Tracks: add `services`, `fileTypes`, `fileTypeAgg` to `TracksQuery`. Remove PMV filter from Tracks (dead code — service tracks have no comment data). On Files: audit and move PMV/file-type/comment-status filters to `FilesQuery`.
 
-**Files**: `frontend/shared/column-config.js`, `frontend/style.css`
+### Files to modify
 
-**Implementation Order**:
-| Sub | What | Effort |
-|------|------------------------------------------|--------|
-| 8.5a | Rewrite wireColumnResize to pixel space | Small |
-| 8.5b | Rewrite renderColumnHeaders to pixel | Small |
-| 8.5c | localStorage key migration (v2 prefix) | Small |
-| 8.5d | Scale defaultWidth values for pixel | Small |
+- `src/api.rs` — extend `TracksQuery` / `FilesQuery` with new filter params
+- `frontend/pages/tracks.js` — move filters to `buildParams()`, remove `applyClientFilters` blocks
+- `frontend/pages/files.js` — move filters to `buildParams()`, remove `applyClientFilters` blocks
+
+### Acceptance Criteria
+
+- [ ] `services=spotify,soundcloud` param filters tracks server-side via SQL `IN`
+- [ ] `fileTypes=flac,stem.m4a` param filters tracks via `v_file_track_link` EXISTS join
+- [ ] `fileTypeAgg=any|none` param toggles has-file/has-no-file filters
+- [ ] PMV filter row removed from Tracks page (dead code — no comment data)
+- [ ] Files page filters (PMV, file type, comment status) moved to server
+- [ ] Pagination works correctly when filters are active (total count matches filtered set)
+- [ ] No `applyClientFilters` remains in either page (or only for truly client-only concerns)
+- [ ] Backend compiles (`cargo build`)
 
 ---
 
-## Phase 9: Import/Export UI (GUI Wrapper for CLI dump/restore)
+## Plan: cleanup-feat-current-wip
 
-**Context**: The CLI already has `cargo run -- dump` and `cargo run -- restore`
-that serialize/deserialize the entire DB to/from a JSON file. This phase adds
-a web UI page (`#data`) that wraps these operations — download a dump as JSON,
-or upload a JSON file to restore.
+**Status**: done ✅
+**Branch**: `feat/current-wip`
+**Migration needed**: no
 
-### 9.1 — Backend: API Endpoints
+### Description
 
-**File**: `src/api.rs` + new handler functions
+Preserved all unstaged work from the old `main` into a feature branch for cherry-picking later.
 
-Two new endpoints, reusing the existing `dump.rs` functions directly:
+### Files modified
 
-#### `GET /api/dump` — Export database as JSON download
+All 27 files that had uncommitted changes + deleted modules (`src/scan_cache.rs`, `src/spotify/replay.rs`).
 
-- Calls `crate::dump::export_dump(pool, &temp_path)` to a temp file
-- Returns the JSON with `Content-Type: application/json` and
-  `Content-Disposition: attachment; filename="momos-dump-{timestamp}.json"`
-- Cleans up the temp file after streaming (or use an in-memory approach —
-  serialize directly to a `Vec<u8>` and return as response body)
-- **Prefer in-memory**: Skip the temp file entirely — build the `DataDump`,
-  serialize to `Vec<u8>` with `serde_json::to_vec_pretty`, return as
-  `axum::response::Response` with proper headers
+### Completed
 
-#### `POST /api/restore` — Import database from uploaded JSON
+- [x] `git stash --include-untracked` on `main`
+- [x] `git stash branch feat/current-wip` — creates branch + applies stash
+- [x] `git add -A && git commit -m "wip: current working state before workflow reset"`
+- [x] `git checkout main` — working tree clean, ready for new feature branches
 
-- Accepts `multipart/form-data` with a single file field (e.g. `"file"`)
-- Reads the uploaded bytes into a temp file
-- Calls `crate::dump::import_dump(pool, &temp_path)`
-- Returns `{ success: true, rows_imported: N, tables: { ... } }`
-- **⚠️ Destructive**: This wipes all existing data. Add a `?confirm=true`
-  query param as a safety guard — reject with 400 if not set.
-- Handler must extract `axum::extract::Multipart` and write the uploaded
-  file to a temp path (e.g. `std::env::temp_dir() / "momos-restore-{uuid}.json"`)
+---
 
-**Dependencies**: `axum` already has multipart support via `axum-extra` or
-we can use `axum::extract::Multipart` (built-in). Add `uuid` crate for temp
-file names if not already present.
+## Completed Archives
 
-**Router additions** (in `api::router()`):
-
-```rust
-.route("/api/dump", get(dump_handler))
-.route("/api/restore", post(restore_handler))
-```
-
-### 9.2 — Frontend: New `#data` Page
-
-**File**: `frontend/pages/data.js` (new)
-
-Follows the canonical page pattern from Phase 1 but simpler — no table, no
-pagination. Just two sections:
-
-#### Export Section
-
-- Card with description: "Download a complete backup of your music manager
-  database as a JSON file."
-- "Export Database" button → `fetchJSON('/api/dump')` then trigger browser
-  download (create blob URL + click `<a download>`)
-- Show timestamp of last export (from the fetched JSON metadata)
-- Loading spinner while fetching
-
-#### Import Section
-
-- Card with description + **warning** banner: "⚠️ This will replace ALL
-  existing data. Make sure you have a backup."
-- File input (styled drop zone or simple `<input type="file" accept=".json">`)
-- After file selection: show a preview card with:
-  - File name + size
-  - Summary of contents (parse JSON client-side, show row counts per table)
-  - `dumped_at` timestamp from the JSON
-- "Restore from Backup" button (red/destructive styling):
-  - Sends `POST /api/restore?confirm=true` with the file as multipart
-  - Shows progress/loading state
-  - On success: toast + redirect to dashboard
-  - On error: show error message
-
-#### State
-
-```js
-let state = {
-  exportLoading: false,
-  importFile: null, // File object from input
-  importPreview: null, // parsed JSON summary
-  importLoading: false,
-};
-```
-
-#### Page Registration
-
-- Add `"data": "data"` to `PAGE_MAP` in `frontend/app.js`
-- Add nav entry in `frontend/shared/nav.js` under TOOLS_ITEMS:
-  `{ id: "data", label: "Import/Export", icon: "fa-database" }`
-
-### 9.3 — UX Details
-
-- Export button should trigger a browser download (not open in tab)
-- Import should have a two-step flow: select file → review → confirm
-- After successful import, the page should redirect to `#dashboard` after 2s
-  (since all data changed, the current page state is stale)
-- Import preview parses the JSON client-side to show row counts — this is
-  read-only and just for user confidence before hitting the destructive button
-- Empty state: if no file selected yet, the import card just shows the
-  drop zone / file input
-
-### 9.4 — Security Considerations
-
-- The restore endpoint is **destructive** — it wipes the entire DB
-- Frontend should make the danger clear (red button, warning text, confirm step)
-- Backend requires `?confirm=true` as a basic guard against accidental calls
-- No auth yet (single-user app), so this is acceptable for now
-
-### 9.5 — Implementation Order
-
-| Step | What              | Where               | Effort |
-| ---- | ----------------- | ------------------- | ------ |
-| 9.1a | GET /api/dump     | api.rs              | Small  |
-| 9.1b | POST /api/restore | api.rs              | Medium |
-| 9.2a | Page module       | pages/data.js (new) | Medium |
-| 9.2b | Router + nav reg  | app.js + nav.js     | Small  |
-| 9.3  | Polish + test     | —                   | Small  |
-
-Backend (9.1a + 9.1b) and frontend (9.2a) can run in parallel — only the
-registration step (9.2b) depends on the page module existing.
+- **Phase 1** (Files Page) — Reference blueprint complete ✅
+- **Phase 2** (Tracks Page) — Complete, awaiting server-side filter fix ✅
+- **Phase 3** (Playlists Page) — Complete with tag lookup optimization ✅
+- **Phase 4** (Tags Page) — Complete ✅
+- **Phase 8.1** (Playlists filter box) — Complete ✅
