@@ -41,54 +41,54 @@ const STATUS_OPTIONS = [
 ];
 
 const DEEMIX_COLUMNS = [
-  { id: "status", label: "Status", sortable: true, sortKey: "status", defaultWidth: 8 },
-  { id: "title", label: "Title", sortable: true, sortKey: "title", defaultWidth: 16 },
-  { id: "artist", label: "Artist", sortable: true, sortKey: "artist", defaultWidth: 12 },
+  { id: "status", label: "Status", sortable: true, sortKey: "status", defaultWidth: 80 },
+  { id: "title", label: "Title", sortable: true, sortKey: "title", defaultWidth: 160 },
+  { id: "artist", label: "Artist", sortable: true, sortKey: "artist", defaultWidth: 120 },
   {
     id: "playlistName",
     label: "Playlist Name",
     sortable: true,
     sortKey: "playlist_name",
-    defaultWidth: 14,
+    defaultWidth: 140,
   },
-  { id: "url", label: "URL", sortable: false, defaultWidth: 6 },
+  { id: "url", label: "URL", sortable: false, defaultWidth: 60 },
   {
     id: "progress",
     label: "Progress",
     sortable: true,
     sortKey: "progress",
-    defaultWidth: 8,
+    defaultWidth: 80,
   },
   {
     id: "total",
     label: "Total",
     sortable: true,
     sortKey: "track_count_total",
-    defaultWidth: 6,
+    defaultWidth: 60,
   },
   {
     id: "downloaded",
     label: "Downloaded",
     sortable: true,
     sortKey: "track_count_downloaded",
-    defaultWidth: 8,
+    defaultWidth: 80,
   },
-  { id: "detail", label: "Detail", sortable: false, defaultWidth: 10 },
+  { id: "detail", label: "Detail", sortable: false, defaultWidth: 100 },
   {
     id: "created",
     label: "Created",
     sortable: true,
     sortKey: "created_at",
-    defaultWidth: 8,
+    defaultWidth: 80,
   },
   {
     id: "updated",
     label: "Updated",
     sortable: true,
     sortKey: "updated_at",
-    defaultWidth: 8,
+    defaultWidth: 80,
   },
-  { id: "actions", label: "Actions", sortable: false, defaultWidth: 10 },
+  { id: "actions", label: "Actions", sortable: false, defaultWidth: 100 },
 ];
 
 const DEEMIX_CELL_RENDERERS = {
