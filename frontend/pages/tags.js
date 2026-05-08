@@ -166,8 +166,7 @@ function renderToolbar(state) {
 
   return `<div class="filter-panel" id="tags-filter-panel">
     <div class="filter-panel-header">
-      ${renderSearchInput("tags", state.search)}
-      <button class="btn btn-primary" id="tags-new-btn"><i class="fas fa-plus"></i> New Tag</button>
+      <span style="flex:1;font-weight:600"><i class="fas fa-tags"></i> Filters</span>
       <button class="filter-panel-toggle" id="tags-filter-toggle" title="Toggle filters">
         <i class="fas fa-chevron-up chevron"></i>
       </button>
@@ -185,7 +184,10 @@ function renderToolbar(state) {
         </div>
         <div>
           <div class="filter-section-header" style="margin-top:0"><i class="fas fa-tag"></i> Filter</div>
-          <!-- Additional filters can be added here -->
+          <div class="filter-row" style="flex-wrap:wrap;gap:var(--space-2)">
+            <div style="flex:1;min-width:180px">${renderSearchInput("tags", state.search)}</div>
+            <button class="btn btn-primary" id="tags-new-btn" style="white-space:nowrap"><i class="fas fa-plus"></i> New Tag</button>
+          </div>
         </div>
       </div>
     </div>
