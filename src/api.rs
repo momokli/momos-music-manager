@@ -4379,44 +4379,6 @@ async fn playlists_handler(
         count_builder.push_bind(format!("%{}%", search));
     }
 
-    // PMV filter via tag category: p→Phase, m→Mood, v→Vibe
-    if let Some(ref pmv_cats) = query.pmv_categories {
-        let cats: Vec<String> = pmv_cats
-            .split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect();
-        let pmv_map: std::collections::HashMap<&str, &str> =
-            [("p", "Phase"), ("m", "Mood"), ("v", "Vibe")]
-                .iter()
-                .cloned()
-                .collect();
-        let category_names: Vec<String> = cats
-            .iter()
-            .filter_map(|c| pmv_map.get(c.as_str()).map(|n| n.to_string()))
-            .collect();
-        if !category_names.is_empty() {
-            let clause = if has_where { " AND " } else { " WHERE " };
-            let exists_prefix = format!(
-                "{}EXISTS (SELECT 1 FROM tags t JOIN tag_categories tc ON t.category_id = tc.id WHERE LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name)) AND tc.name IN (",
-                clause
-            );
-            main_builder.push(&exists_prefix);
-            count_builder.push(&exists_prefix);
-            for (i, name) in category_names.iter().enumerate() {
-                if i > 0 {
-                    main_builder.push(", ");
-                    count_builder.push(", ");
-                }
-                main_builder.push_bind(name.clone());
-                count_builder.push_bind(name.clone());
-            }
-            main_builder.push("))");
-            count_builder.push("))");
-            has_where = true;
-        }
-    }
-
     main_builder.push(" GROUP BY sp.id");
 
     // Dynamic sort with whitelist + column name mapping
@@ -4461,6 +4423,44 @@ async fn playlists_handler(
         Err(e) => {
             return internal_error(format!("Failed to get total count: {}", e)).into_response();
         }
+    };
+
+    // Post-query PMV filter: playlist's tag category must match p→Phase, m→Mood, v→Vibe
+    let playlists = if let Some(ref pmv_cats) = query.pmv_categories {
+        let cats: Vec<String> = pmv_cats.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+        let pmv_map: std::collections::HashMap<&str, &str> =
+            [("p", "Phase"), ("m", "Mood"), ("v", "Vibe")].iter().cloned().collect();
+        let category_names: Vec<&str> = cats.iter().filter_map(|c| pmv_map.get(c.as_str()).copied()).collect();
+        if !category_names.is_empty() && !playlists.is_empty() {
+            use std::collections::HashSet;
+            let mut matching_names: HashSet<String> = HashSet::new();
+            for p in &playlists {
+                let tag_cat: Option<String> = sqlx::query_scalar(
+                    "SELECT tc.name FROM tags t JOIN tag_categories tc ON t.category_id = tc.id WHERE LOWER(TRIM(t.name)) = LOWER(TRIM(?))"
+                )
+                .bind(&p.name)
+                .fetch_optional(&state.db)
+                .await
+                .unwrap_or(None);
+                if let Some(ref cat) = tag_cat {
+                    if category_names.contains(&cat.as_str()) {
+                        matching_names.insert(p.name.clone());
+                    }
+                }
+            }
+            playlists.into_iter().filter(|p| matching_names.contains(&p.name)).collect()
+        } else {
+            playlists
+        }
+    } else {
+        playlists
+    };
+
+    // Update count if PMV filter was applied
+    let total = if query.pmv_categories.is_some() {
+        playlists.len() as i64
+    } else {
+        total
     };
 
     // Get deemix status via SQL LEFT JOIN (matches playlist_id in URL)
