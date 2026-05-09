@@ -542,6 +542,21 @@ export async function init(container, signal, hashParams) {
 
     // ── Category multi-select toggle ──
     const catFilter = toolbar.querySelector("#tags-category-filter");
+
+    function syncCategoryFilterUI() {
+      if (!catFilter) return;
+      const btns = catFilter.querySelectorAll(".filter-btn[data-value]");
+      btns.forEach((btn) => {
+        const val = btn.dataset.value;
+        if (val === "") {
+          // "All Categories" is active when nothing else is selected
+          btn.classList.toggle("active", state.selectedCategories.length === 0);
+        } else {
+          btn.classList.toggle("active", state.selectedCategories.includes(val));
+        }
+      });
+    }
+
     if (catFilter) {
       catFilter.addEventListener("click", (e) => {
         const btn = e.target.closest(".filter-btn[data-value]");
@@ -562,6 +577,7 @@ export async function init(container, signal, hashParams) {
           }
         }
         state.page = 0;
+        syncCategoryFilterUI();
         updateHash("tags", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
       });
