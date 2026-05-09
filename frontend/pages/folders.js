@@ -82,38 +82,44 @@ const ALL_EXTENSIONS = [
 /* ------------------------------------------------------------------ */
 
 const FOLDERS_COLUMNS = [
-  { id: "path", label: "Path", sortable: true, sortKey: "path", defaultWidth: 25 },
-  { id: "files", label: "Files", sortable: true, sortKey: "file_count", defaultWidth: 8 },
+  { id: "path", label: "Path", sortable: true, sortKey: "path", defaultWidth: 250 },
+  {
+    id: "files",
+    label: "Files",
+    sortable: true,
+    sortKey: "file_count",
+    defaultWidth: 80,
+  },
   {
     id: "watch",
     label: "Watch",
     sortable: true,
     sortKey: "watch_enabled",
-    defaultWidth: 6,
+    defaultWidth: 60,
   },
   {
     id: "recursive",
     label: "Recursive",
     sortable: true,
     sortKey: "scan_recursive",
-    defaultWidth: 6,
+    defaultWidth: 60,
   },
-  { id: "extensions", label: "Extensions", sortable: false, defaultWidth: 12 },
+  { id: "extensions", label: "Extensions", sortable: false, defaultWidth: 120 },
   {
     id: "maxDepth",
     label: "Max Depth",
     sortable: true,
     sortKey: "max_depth",
-    defaultWidth: 6,
+    defaultWidth: 60,
   },
   {
     id: "scanned",
     label: "Scanned",
     sortable: true,
     sortKey: "last_scanned",
-    defaultWidth: 12,
+    defaultWidth: 120,
   },
-  { id: "actions", label: "Actions", sortable: false, defaultWidth: 25 },
+  { id: "actions", label: "Actions", sortable: false, defaultWidth: 250 },
 ];
 
 /* ------------------------------------------------------------------ */

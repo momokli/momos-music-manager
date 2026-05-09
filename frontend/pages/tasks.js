@@ -222,30 +222,30 @@ function renderTaskRow(t) {
 /* ------------------------------------------------------------------ */
 
 const TASKS_COLUMNS = [
-  { id: "status", label: "Status", sortable: true, sortKey: "status", defaultWidth: 8 },
-  { id: "details", label: "Details", sortable: false, defaultWidth: 30 },
+  { id: "status", label: "Status", sortable: true, sortKey: "status", defaultWidth: 80 },
+  { id: "details", label: "Details", sortable: false, defaultWidth: 300 },
   {
     id: "progress",
     label: "Progress",
     sortable: true,
     sortKey: "progress",
-    defaultWidth: 20,
+    defaultWidth: 200,
   },
   {
     id: "created",
     label: "Created",
     sortable: true,
     sortKey: "created_at",
-    defaultWidth: 14,
+    defaultWidth: 140,
   },
   {
     id: "updated",
     label: "Updated",
     sortable: true,
     sortKey: "updated_at",
-    defaultWidth: 14,
+    defaultWidth: 140,
   },
-  { id: "actions", label: "Actions", sortable: false, defaultWidth: 14 },
+  { id: "actions", label: "Actions", sortable: false, defaultWidth: 140 },
 ];
 
 const TASKS_CELL_RENDERERS = {
