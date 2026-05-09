@@ -289,8 +289,8 @@ async function fetchAndRender(container, signal, state) {
       signal,
     });
     if (signal.aborted) return;
-    const items = (resp.data || []).map(adaptItem);
-    const totalCount = resp._total ?? items.length;
+    const items = (resp.data?.items || []).map(adaptItem);
+    const totalCount = resp.data?.total ?? items.length;
     if (items.length === 0 && totalCount === 0) {
       setContent(renderEmptyBody(state));
       wireContentEvents(container, signal, state);
