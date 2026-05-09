@@ -76,7 +76,6 @@ const HASH_DEFAULTS = {
   mismatchOnly: false,
   selectedServices: [],
   pmvCategories: [],
-  pmvAggregate: "",
 };
 
 const HASH_SCHEMA = {
@@ -89,7 +88,6 @@ const HASH_SCHEMA = {
   mismatchOnly: { type: "boolean", default: false },
   selectedServices: { type: "array", default: [] },
   pmvCategories: { type: "array", default: [] },
-  pmvAggregate: { type: "string", default: "" },
 };
 
 /* ------------------------------------------------------------------ */
@@ -270,12 +268,6 @@ function renderToolbar(state) {
               <button class="filter-btn${(state.pmvCategories || []).includes("m") ? " active" : ""}" data-value="m" title="Has Mood tags">M</button>
               <button class="filter-btn${(state.pmvCategories || []).includes("v") ? " active" : ""}" data-value="v" title="Has Vibe tags">V</button>
             </div>
-            <span class="pmv-sep">|</span>
-            <div class="filter-group" id="playlists-pmv-agg-btns" style="flex-wrap:wrap">
-              <button class="filter-btn${state.pmvAggregate === "full" ? " active" : ""}" data-value="full" title="Has all three categories">Full</button>
-              <button class="filter-btn${state.pmvAggregate === "partial" ? " active" : ""}" data-value="partial" title="Has at least one category">Partial</button>
-              <button class="filter-btn${state.pmvAggregate === "none" ? " active" : ""}" data-value="none" title="Has no PMV categories">None</button>
-            </div>
           </div>
         </div>
       </div>
@@ -376,6 +368,9 @@ function buildParams(state) {
   if (state.search) params.set("search", state.search);
   if (state.untaggedOnly) params.set("untagged", "true");
   if (state.mismatchOnly) params.set("mismatch", "true");
+  if (state.pmvCategories && state.pmvCategories.length > 0) {
+    params.set("pmvCategories", state.pmvCategories.join(","));
+  }
   return params;
 }
 
@@ -389,55 +384,11 @@ function buildParams(state) {
  * Playlists currently don't have comment data, so this always returns
  * all-false until the backend provides comment/PMV info.
  */
-function pmvFromComment(comment) {
-  if (!comment) return { p: false, m: false, v: false };
-  const m = comment.match(/^\[([PMV_]+)\]/);
-  if (!m) return { p: false, m: false, v: false };
-  return {
-    p: m[1].includes("P"),
-    m: m[1].includes("M"),
-    v: m[1].includes("V"),
-  };
-}
 
 /**
  * Apply client-side filters to a playlist list.
  * Filters: service (multi-select OR), PMV categories/aggregate.
  */
-function applyClientFilters(playlists, state) {
-  let result = playlists;
-
-  // Service filter (multi-select OR)
-  if (state.selectedServices && state.selectedServices.length > 0) {
-    result = result.filter((p) => state.selectedServices.includes(p.svc));
-  }
-
-  // PMV filter — reads comment bracket if available
-  if (state.pmvCategories && state.pmvCategories.length > 0) {
-    result = result.filter((p) => {
-      const pmv = pmvFromComment(p.comment || "");
-      return state.pmvCategories.some((c) => pmv[c]);
-    });
-  } else if (state.pmvAggregate) {
-    result = result.filter((p) => {
-      const pmv = pmvFromComment(p.comment || "");
-      const hasAny = pmv.p || pmv.m || pmv.v;
-      const hasAll = pmv.p && pmv.m && pmv.v;
-      switch (state.pmvAggregate) {
-        case "full":
-          return hasAll;
-        case "partial":
-          return hasAny;
-        case "none":
-          return !hasAny;
-        default:
-          return true;
-      }
-    });
-  }
-
-  return result;
-}
 
 /* ------------------------------------------------------------------ */
 /*  Fetch + Render cycle                                               */
@@ -506,9 +457,6 @@ async function fetchAndRender(container, signal, state) {
         updatedAt: p.updatedAt || p.updated_at || null,
       };
     });
-
-    // Apply client-side filters (service multi-select, PMV)
-    adapted = applyClientFilters(adapted, state);
 
     // Client-side pagination
     const total = adapted.length;
@@ -594,19 +542,19 @@ function wireToolbarEvents(container, signal, state) {
 
   // PMV category buttons (multi-select: P, M, V) + aggregate (single-select)
   const pmvCatEl = container.querySelector("#playlists-pmv-cat-btns");
-  const pmvAggEl = container.querySelector("#playlists-pmv-agg-btns");
+
 
   function syncPmvFilterUI() {
     if (pmvCatEl) {
       pmvCatEl.querySelectorAll(".filter-btn").forEach((btn) => {
         btn.classList.toggle("active", state.pmvCategories.includes(btn.dataset.value));
       });
-    }
-    if (pmvAggEl) {
-      pmvAggEl.querySelectorAll(".filter-btn").forEach((btn) => {
-        btn.classList.toggle("active", btn.dataset.value === state.pmvAggregate);
-      });
-    }
+
+
+
+
+
+
   }
 
   if (pmvCatEl) {
@@ -619,7 +567,7 @@ function wireToolbarEvents(container, signal, state) {
         const i = state.pmvCategories.indexOf(v);
         if (i >= 0) state.pmvCategories.splice(i, 1);
         else {
-          state.pmvAggregate = "";
+
           state.pmvCategories.push(v);
         }
         state.page = 0;
@@ -631,71 +579,6 @@ function wireToolbarEvents(container, signal, state) {
     );
   }
 
-  // PMV aggregate buttons (single-select: Full, Partial, None)
-  if (pmvAggEl) {
-    pmvAggEl.addEventListener(
-      "click",
-      (e) => {
-        const btn = e.target.closest(".filter-btn");
-        if (!btn) return;
-        const v = btn.dataset.value;
-        if (state.pmvAggregate === v) state.pmvAggregate = "";
-        else {
-          state.pmvCategories = [];
-          state.pmvAggregate = v;
-        }
-        state.page = 0;
-        syncPmvFilterUI();
-        updateHash("playlists", state, HASH_DEFAULTS);
-        fetchAndRender(container, signal, state);
-      },
-      { signal },
-    );
-  }
-
-  // Generic toggle for data-filter labels
-  const labels = filterPanel.querySelectorAll("[data-filter]");
-  for (const label of labels) {
-    const updateUI = () => {
-      const key = label.dataset.filter + "Enabled";
-      const active = state[key] !== false;
-      label.classList.toggle("active", active);
-      label.classList.toggle("off", !active);
-      const row = label.closest(".filter-row");
-      if (row) {
-        const inputs = row.querySelectorAll("select, input, button, .filter-group");
-        for (const el of inputs) el.classList.toggle("filter-disabled", !active);
-      }
-    };
-    label.addEventListener("click", () => {
-      const key = label.dataset.filter + "Enabled";
-      if (state[key] === false) state[key] = true;
-      else state[key] = false;
-      state.page = 0;
-      updateUI();
-      updateHash("playlists", state, HASH_DEFAULTS);
-      fetchAndRender(container, signal, state);
-    });
-    updateUI();
-  }
-
-  filterPanel.addEventListener("click", (e) => {
-    const row = e.target.closest(".filter-row");
-    if (!row) return;
-    const label = row.querySelector("[data-filter]");
-    if (!label) return;
-    const key = label.dataset.filter + "Enabled";
-    if (state[key] !== false) return;
-    if (e.target.closest("[data-filter]")) return;
-    state[key] = true;
-    label.classList.add("active");
-    label.classList.remove("off");
-    const inputs = row.querySelectorAll("select, input, button, .filter-group");
-    for (const el of inputs) el.classList.remove("filter-disabled");
-    state.page = 0;
-    updateHash("playlists", state, HASH_DEFAULTS);
-    fetchAndRender(container, signal, state);
-  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -713,7 +596,6 @@ function wireContentEvents(container, signal, state) {
   }
 
   // Sortable headers
-  const tbl = container.querySelector("#pl-tbl");
   if (tbl) {
     wireSortableHeaders(tbl, state, () => {
       updateHash("playlists", state, HASH_DEFAULTS);
@@ -721,6 +603,7 @@ function wireContentEvents(container, signal, state) {
     });
   }
 
+  const tbl = container.querySelector("#pl-tbl");
   // Page size selector
   wirePageSizeSelector(container, state, () => {
     updateHash("playlists", state, HASH_DEFAULTS);
@@ -951,6 +834,8 @@ function wireContentEvents(container, signal, state) {
   }
 }
 
+}
+
 /* ------------------------------------------------------------------ */
 /*  Initialisation                                                     */
 /* ------------------------------------------------------------------ */
@@ -976,7 +861,7 @@ export async function init(container, signal, hashParams) {
     mismatchOnly: parsed.mismatchOnly,
     selectedServices: parsed.selectedServices || [],
     pmvCategories: parsed.pmvCategories || [],
-    pmvAggregate: parsed.pmvAggregate || "",
+
     serviceEnabled: true,
     pmvEnabled: true,
     layoutMode: false,

@@ -539,6 +539,7 @@ pub struct PlaylistsQuery {
     pub sort: Option<String>,
     pub order: Option<String>,
     pub page_size: Option<i64>,
+    pub pmv_categories: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4365,6 +4366,30 @@ async fn playlists_handler(
             count_builder.push(" WHERE sp.name LIKE ");
         }
         count_builder.push_bind(format!("%{}%", search));
+    }
+
+    // PMV filter via tag category: p→Phase, m→Mood, v→Vibe
+    if let Some(ref pmv_cats) = query.pmv_categories {
+        let cats: Vec<String> = pmv_cats.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+        let pmv_map: std::collections::HashMap<&str, &str> =
+            [("p", "Phase"), ("m", "Mood"), ("v", "Vibe")].iter().cloned().collect();
+        let category_names: Vec<String> =
+            cats.iter().filter_map(|c| pmv_map.get(c.as_str()).map(|n| n.to_string())).collect();
+        if !category_names.is_empty() {
+            let placeholders: Vec<&str> = category_names.iter().map(|_| "?").collect();
+            let clause = if has_where { " AND " } else { " WHERE " };
+            let sql = format!(
+                "{}EXISTS (SELECT 1 FROM tags t JOIN tag_categories tc ON t.category_id = tc.id WHERE LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name)) AND tc.name IN ({}))",
+                clause, placeholders.join(", ")
+            );
+            main_builder.push(&sql);
+            count_builder.push(&sql);
+            for name in &category_names {
+                main_builder.push_bind(name.clone());
+                count_builder.push_bind(name.clone());
+            }
+            has_where = true;
+        }
     }
 
     main_builder.push(" GROUP BY sp.id");
