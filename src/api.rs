@@ -5815,10 +5815,11 @@ async fn get_all_tags(pool: &Pool<Sqlite>, query: &TagsQuery) -> Result<Vec<ApiT
             Some(format!("%{}%", s))
         }
     });
-    let category_filter = query
+    let categories: Option<Vec<String>> = query
         .category
         .as_ref()
-        .and_then(|c| if c.is_empty() { None } else { Some(c) });
+        .and_then(|c| if c.is_empty() { None } else { Some(c) })
+        .map(|c| c.split(',').map(|s| s.trim().to_string()).collect());
 
     let mut sql = String::from(
         "SELECT t.id, t.name, t.category_id, t.sort_order, t.created_at, t.reviewed_at,
@@ -5833,8 +5834,9 @@ async fn get_all_tags(pool: &Pool<Sqlite>, query: &TagsQuery) -> Result<Vec<ApiT
     if search_pattern.is_some() {
         sql.push_str(" AND (t.name LIKE ? OR tc.name LIKE ?)");
     }
-    if category_filter.is_some() {
-        sql.push_str(" AND tc.name = ?");
+    if let Some(ref cats) = categories {
+        let placeholders: Vec<&str> = cats.iter().map(|_| "?").collect();
+        sql.push_str(&format!(" AND tc.name IN ({})", placeholders.join(", ")));
     }
 
     apply_sort(
@@ -5852,8 +5854,10 @@ async fn get_all_tags(pool: &Pool<Sqlite>, query: &TagsQuery) -> Result<Vec<ApiT
     if let Some(ref pattern) = search_pattern {
         q = q.bind(pattern).bind(pattern);
     }
-    if let Some(ref cat) = category_filter {
-        q = q.bind(cat);
+    if let Some(ref cats) = categories {
+        for cat in cats {
+            q = q.bind(cat);
+        }
     }
 
     q = q.bind(limit).bind(offset);
@@ -5891,24 +5895,28 @@ pub async fn get_tags_count(pool: &Pool<Sqlite>, query: &TagsQuery) -> Result<i6
             Some(format!("%{}%", s))
         }
     });
-    let category_filter = query
+    let categories: Option<Vec<String>> = query
         .category
         .as_ref()
-        .and_then(|c| if c.is_empty() { None } else { Some(c) });
+        .and_then(|c| if c.is_empty() { None } else { Some(c) })
+        .map(|c| c.split(',').map(|s| s.trim().to_string()).collect());
 
     if search_pattern.is_some() {
         sql.push_str(" AND (t.name LIKE ? OR tc.name LIKE ?)");
     }
-    if category_filter.is_some() {
-        sql.push_str(" AND tc.name = ?");
+    if let Some(ref cats) = categories {
+        let placeholders: Vec<&str> = cats.iter().map(|_| "?").collect();
+        sql.push_str(&format!(" AND tc.name IN ({})", placeholders.join(", ")));
     }
 
     let mut q = sqlx::query_scalar::<_, i64>(&sql);
     if let Some(ref pattern) = search_pattern {
         q = q.bind(pattern).bind(pattern);
     }
-    if let Some(ref cat) = category_filter {
-        q = q.bind(cat);
+    if let Some(ref cats) = categories {
+        for cat in cats {
+            q = q.bind(cat as &str);
+        }
     }
 
     q.fetch_one(pool).await.map_err(|e| anyhow::anyhow!("{e}"))
