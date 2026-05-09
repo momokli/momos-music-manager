@@ -565,6 +565,14 @@ function wireToolbarEvents(container, signal, state) {
 
   // Multi-select service filter
   const svcGroup = container.querySelector(".service-filter-group");
+
+  function syncServiceFilterUI() {
+    if (!svcGroup) return;
+    svcGroup.querySelectorAll(".filter-btn").forEach((btn) => {
+      btn.classList.toggle("active", state.selectedServices.includes(btn.dataset.value));
+    });
+  }
+
   if (svcGroup) {
     svcGroup.addEventListener(
       "click",
@@ -576,6 +584,7 @@ function wireToolbarEvents(container, signal, state) {
         if (i >= 0) state.selectedServices.splice(i, 1);
         else state.selectedServices.push(v);
         state.page = 0;
+        syncServiceFilterUI();
         updateHash("playlists", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
       },
@@ -583,10 +592,25 @@ function wireToolbarEvents(container, signal, state) {
     );
   }
 
-  // PMV category buttons (multi-select: P, M, V)
-  const pmvCat = container.querySelector("#playlists-pmv-cat-btns");
-  if (pmvCat) {
-    pmvCat.addEventListener(
+  // PMV category buttons (multi-select: P, M, V) + aggregate (single-select)
+  const pmvCatEl = container.querySelector("#playlists-pmv-cat-btns");
+  const pmvAggEl = container.querySelector("#playlists-pmv-agg-btns");
+
+  function syncPmvFilterUI() {
+    if (pmvCatEl) {
+      pmvCatEl.querySelectorAll(".filter-btn").forEach((btn) => {
+        btn.classList.toggle("active", state.pmvCategories.includes(btn.dataset.value));
+      });
+    }
+    if (pmvAggEl) {
+      pmvAggEl.querySelectorAll(".filter-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.value === state.pmvAggregate);
+      });
+    }
+  }
+
+  if (pmvCatEl) {
+    pmvCatEl.addEventListener(
       "click",
       (e) => {
         const btn = e.target.closest(".filter-btn");
@@ -597,12 +621,9 @@ function wireToolbarEvents(container, signal, state) {
         else {
           state.pmvAggregate = "";
           state.pmvCategories.push(v);
-          const aggBtns = container.querySelectorAll(
-            "#playlists-pmv-agg-btns .filter-btn",
-          );
-          for (const b of aggBtns) b.classList.remove("active");
         }
         state.page = 0;
+        syncPmvFilterUI();
         updateHash("playlists", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
       },
@@ -611,9 +632,8 @@ function wireToolbarEvents(container, signal, state) {
   }
 
   // PMV aggregate buttons (single-select: Full, Partial, None)
-  const pmvAgg = container.querySelector("#playlists-pmv-agg-btns");
-  if (pmvAgg) {
-    pmvAgg.addEventListener(
+  if (pmvAggEl) {
+    pmvAggEl.addEventListener(
       "click",
       (e) => {
         const btn = e.target.closest(".filter-btn");
@@ -623,12 +643,9 @@ function wireToolbarEvents(container, signal, state) {
         else {
           state.pmvCategories = [];
           state.pmvAggregate = v;
-          const catBtns = container.querySelectorAll(
-            "#playlists-pmv-cat-btns .filter-btn",
-          );
-          for (const b of catBtns) b.classList.remove("active");
         }
         state.page = 0;
+        syncPmvFilterUI();
         updateHash("playlists", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
       },
