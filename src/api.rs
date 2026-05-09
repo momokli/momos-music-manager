@@ -5145,6 +5145,86 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
         );
     }
 
+    // Service filter: files linked to a service track with matching service
+    if let Some(ref services_str) = query.selected_services {
+        let services: Vec<&str> = services_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !services.is_empty() {
+            let placeholders: Vec<String> = services.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM v_file_track_link vf JOIN service_tracks st ON st.id = vf.track_id WHERE vf.file_id = files.id AND st.service IN ({}))",
+                placeholders.join(",")
+            ));
+        }
+    }
+
+    // PMV filter — check comment bracket for phase/mood/vibe chars
+    if let Some(ref pmv_cats) = query.pmv_categories {
+        let cats: Vec<String> = pmv_cats
+            .split(',')
+            .map(|s| s.trim().to_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !cats.is_empty() {
+            let mut pmv_clauses: Vec<String> = Vec::new();
+            for c in &cats {
+                let ch = c.chars().next().unwrap();
+                pmv_clauses.push(format!(
+                    "(SUBSTR(files.comment, 2, 1) = '{c}' OR SUBSTR(files.comment, 3, 1) = '{c}' OR SUBSTR(files.comment, 4, 1) = '{c}')",
+                    c = ch
+                ));
+            }
+            sql.push_str(&format!(
+                " AND (files.comment IS NOT NULL AND files.comment LIKE '[___]%' AND ({}))",
+                pmv_clauses.join(" OR ")
+            ));
+        }
+    } else if let Some(ref pmv_agg) = query.pmv_aggregate {
+        match pmv_agg.as_str() {
+            "full" => {
+                sql.push_str(
+                    " AND (files.comment IS NOT NULL AND files.comment LIKE '[___]%' AND \
+                     (SUBSTR(files.comment, 2, 1) IN ('P','M','V') OR \
+                      SUBSTR(files.comment, 3, 1) IN ('P','M','V') OR \
+                      SUBSTR(files.comment, 4, 1) IN ('P','M','V')))",
+                );
+            }
+            "partial" => {
+                sql.push_str(
+                    " AND (files.comment IS NOT NULL AND files.comment LIKE '[___]%' AND \
+                     (SUBSTR(files.comment, 2, 1) IN ('P','M','V') OR \
+                      SUBSTR(files.comment, 3, 1) IN ('P','M','V') OR \
+                      SUBSTR(files.comment, 4, 1) IN ('P','M','V')))",
+                );
+            }
+            "none" => {
+                sql.push_str(
+                    " AND (files.comment IS NULL OR files.comment NOT LIKE '[___]%' OR \
+                     (SUBSTR(files.comment, 2, 1) NOT IN ('P','M','V') AND \
+                      SUBSTR(files.comment, 3, 1) NOT IN ('P','M','V') AND \
+                      SUBSTR(files.comment, 4, 1) NOT IN ('P','M','V')))",
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // File type filter
+    if let Some(ref ft_str) = query.file_types {
+        let types: Vec<&str> = ft_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !types.is_empty() {
+            let placeholders: Vec<String> = types.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(" AND file_type IN ({})", placeholders.join(",")));
+        }
+    }
+
     apply_sort(
         &mut sql,
         query.sort.as_deref(),
@@ -5191,6 +5271,28 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
             .filter(|s| !s.is_empty())
         {
             q = q.bind(k);
+        }
+    }
+
+    // Bind params for service filter
+    if let Some(ref services_str) = query.selected_services {
+        for s in services_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(s);
+        }
+    }
+
+    // Bind params for file type filter
+    if let Some(ref ft_str) = query.file_types {
+        for t in ft_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(t);
         }
     }
 
@@ -5268,6 +5370,28 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
         api_files.push(api_file);
     }
 
+    // Apply comment status filter in Rust (since comment_needs_update is computed)
+    if let Some(ref cs_str) = query.comment_statuses {
+        let statuses: Vec<&str> = cs_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !statuses.is_empty() {
+            api_files.retain(|f| {
+                let needs_update = f.comment_needs_update;
+                let mut keep = false;
+                if statuses.contains(&"needs_update") && needs_update {
+                    keep = true;
+                }
+                if statuses.contains(&"uptodate") && !needs_update {
+                    keep = true;
+                }
+                keep
+            });
+        }
+    }
+
     Ok(api_files)
 }
 
@@ -5317,6 +5441,78 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
         );
     }
 
+    // Service filter
+    if let Some(ref services_str) = query.selected_services {
+        let services: Vec<&str> = services_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !services.is_empty() {
+            let placeholders: Vec<String> = services.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM v_file_track_link vf JOIN service_tracks st ON st.id = vf.track_id WHERE vf.file_id = files.id AND st.service IN ({}))",
+                placeholders.join(",")
+            ));
+        }
+    }
+
+    // PMV filter
+    if let Some(ref pmv_cats) = query.pmv_categories {
+        let cats: Vec<String> = pmv_cats
+            .split(',')
+            .map(|s| s.trim().to_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !cats.is_empty() {
+            let mut pmv_clauses: Vec<String> = Vec::new();
+            for c in &cats {
+                let ch = c.chars().next().unwrap();
+                pmv_clauses.push(format!(
+                    "(SUBSTR(files.comment, 2, 1) = '{c}' OR SUBSTR(files.comment, 3, 1) = '{c}' OR SUBSTR(files.comment, 4, 1) = '{c}')",
+                    c = ch
+                ));
+            }
+            sql.push_str(&format!(
+                " AND (files.comment IS NOT NULL AND files.comment LIKE '[___]%' AND ({}))",
+                pmv_clauses.join(" OR ")
+            ));
+        }
+    } else if let Some(ref pmv_agg) = query.pmv_aggregate {
+        match pmv_agg.as_str() {
+            "full" | "partial" => {
+                sql.push_str(
+                    " AND (files.comment IS NOT NULL AND files.comment LIKE '[___]%' AND \
+                     (SUBSTR(files.comment, 2, 1) IN ('P','M','V') OR \
+                      SUBSTR(files.comment, 3, 1) IN ('P','M','V') OR \
+                      SUBSTR(files.comment, 4, 1) IN ('P','M','V')))",
+                );
+            }
+            "none" => {
+                sql.push_str(
+                    " AND (files.comment IS NULL OR files.comment NOT LIKE '[___]%' OR \
+                     (SUBSTR(files.comment, 2, 1) NOT IN ('P','M','V') AND \
+                      SUBSTR(files.comment, 3, 1) NOT IN ('P','M','V') AND \
+                      SUBSTR(files.comment, 4, 1) NOT IN ('P','M','V')))",
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // File type filter
+    if let Some(ref ft_str) = query.file_types {
+        let types: Vec<&str> = ft_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !types.is_empty() {
+            let placeholders: Vec<String> = types.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(" AND file_type IN ({})", placeholders.join(",")));
+        }
+    }
+
     let mut q = sqlx::query(&sql);
 
     if let Some(ref search) = query.search
@@ -5345,8 +5541,126 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
         }
     }
 
+    // Bind params for service filter
+    if let Some(ref services_str) = query.selected_services {
+        for s in services_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(s);
+        }
+    }
+
+    // Bind params for file type filter
+    if let Some(ref ft_str) = query.file_types {
+        for t in ft_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(t);
+        }
+    }
+
     let row = q.fetch_one(pool).await?;
-    Ok(row.try_get("count")?)
+    let count: i64 = row.try_get("count")?;
+
+    // If comment status filter is active, we need to compute comment_needs_update
+    // and filter in Rust for an accurate count
+    if let Some(ref cs_str) = query.comment_statuses {
+        let statuses: Vec<&str> = cs_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !statuses.is_empty() && count > 0 {
+            // Fetch all matching IDs without limit/offset
+            let id_sql = sql.replace("SELECT COUNT(*) as count FROM", "SELECT id FROM");
+            let mut id_q = sqlx::query_scalar::<_, i64>(&id_sql);
+            // Re-bind all params
+            let search_pat = query.search.as_ref().and_then(|s| {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(format!("%{}%", s))
+                }
+            });
+            if let Some(ref pat) = search_pat {
+                id_q = id_q
+                    .bind(pat.as_str())
+                    .bind(pat.as_str())
+                    .bind(pat.as_str());
+            }
+            if let Some(bpm_min) = query.bpm_min {
+                id_q = id_q.bind(bpm_min);
+            }
+            if let Some(bpm_max) = query.bpm_max {
+                id_q = id_q.bind(bpm_max);
+            }
+            if let Some(ref key_str) = query.key {
+                for k in key_str
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    id_q = id_q.bind(k);
+                }
+            }
+            if let Some(ref services_str) = query.selected_services {
+                for s in services_str
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    id_q = id_q.bind(s);
+                }
+            }
+            if let Some(ref ft_str) = query.file_types {
+                for t in ft_str
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    id_q = id_q.bind(t);
+                }
+            }
+
+            let ids: Vec<i64> = id_q.fetch_all(pool).await?;
+
+            let mut filtered_count: i64 = 0;
+            for file_id in ids {
+                match compute_target_comment(pool, file_id).await {
+                    Ok(target_comment) => {
+                        let comment: Option<String> =
+                            sqlx::query_scalar("SELECT comment FROM files WHERE id = ?")
+                                .bind(file_id)
+                                .fetch_optional(pool)
+                                .await?
+                                .flatten();
+
+                        let needs_update = comment.as_ref() != Some(&target_comment);
+                        let mut keep = false;
+                        if statuses.contains(&"needs_update") && needs_update {
+                            keep = true;
+                        }
+                        if statuses.contains(&"uptodate") && !needs_update {
+                            keep = true;
+                        }
+                        if keep {
+                            filtered_count += 1;
+                        }
+                    }
+                    Err(_) => {
+                        filtered_count += 1;
+                    }
+                }
+            }
+            return Ok(filtered_count);
+        }
+    }
+
+    Ok(count)
 }
 
 async fn get_file_by_id(pool: &Pool<Sqlite>, id: i64) -> Result<ApiFile> {
@@ -5400,6 +5714,9 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     let limit = query.page_size.or(query.limit).unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
     let service_filter = query.service.clone();
+    let services_filter = query.services.clone();
+    let file_types_filter = query.file_types.clone();
+    let file_type_agg_filter = query.file_type_agg.clone();
     let search_pattern = query.search.as_ref().and_then(|s| {
         if s.is_empty() {
             None
@@ -5422,7 +5739,48 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     }
 
     if service_filter.is_some() {
-        sql.push_str(" AND service = ?");
+        sql.push_str(" AND st.service = ?");
+    }
+
+    if let Some(ref svcs) = services_filter {
+        let svc_list: Vec<&str> = svcs
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !svc_list.is_empty() {
+            let placeholders: Vec<String> = svc_list.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(" AND st.service IN ({})", placeholders.join(",")));
+        }
+    }
+
+    if let Some(ref ft_agg) = file_type_agg_filter {
+        match ft_agg.as_str() {
+            "any" => {
+                sql.push_str(
+                    " AND EXISTS (SELECT 1 FROM v_file_track_link vft WHERE vft.track_id = st.id)",
+                );
+            }
+            "none" => {
+                sql.push_str(" AND NOT EXISTS (SELECT 1 FROM v_file_track_link vft WHERE vft.track_id = st.id)");
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(ref ft_types) = file_types_filter {
+        let type_list: Vec<&str> = ft_types
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !type_list.is_empty() {
+            let placeholders: Vec<String> = type_list.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM v_file_track_link vft2 JOIN files f2 ON f2.id = vft2.file_id WHERE vft2.track_id = st.id AND f2.file_type IN ({})))",
+                placeholders.join(",")
+            ));
+        }
     }
 
     if playlist_id_filter.is_some() {
@@ -5455,6 +5813,22 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
 
     if let Some(service) = &service_filter {
         query_builder = query_builder.bind(service);
+    }
+
+    if let Some(ref svcs) = services_filter {
+        for s in svcs.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            query_builder = query_builder.bind(s);
+        }
+    }
+
+    if let Some(ref ft_types) = file_types_filter {
+        for t in ft_types
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            query_builder = query_builder.bind(t);
+        }
     }
 
     if let Some(pid) = playlist_id_filter {
@@ -5601,6 +5975,9 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
 
 async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i64> {
     let service_filter = query.service.clone();
+    let services_filter = query.services.clone();
+    let file_types_filter = query.file_types.clone();
+    let file_type_agg_filter = query.file_type_agg.clone();
     let search_pattern = query.search.as_ref().and_then(|s| {
         if s.is_empty() {
             None
@@ -5622,7 +5999,48 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
     }
 
     if service_filter.is_some() {
-        sql.push_str(" AND service = ?");
+        sql.push_str(" AND st.service = ?");
+    }
+
+    if let Some(ref svcs) = services_filter {
+        let svc_list: Vec<&str> = svcs
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !svc_list.is_empty() {
+            let placeholders: Vec<String> = svc_list.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(" AND st.service IN ({})", placeholders.join(",")));
+        }
+    }
+
+    if let Some(ref ft_agg) = file_type_agg_filter {
+        match ft_agg.as_str() {
+            "any" => {
+                sql.push_str(
+                    " AND EXISTS (SELECT 1 FROM v_file_track_link vft WHERE vft.track_id = st.id)",
+                );
+            }
+            "none" => {
+                sql.push_str(" AND NOT EXISTS (SELECT 1 FROM v_file_track_link vft WHERE vft.track_id = st.id)");
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(ref ft_types) = file_types_filter {
+        let type_list: Vec<&str> = ft_types
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !type_list.is_empty() {
+            let placeholders: Vec<String> = type_list.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM v_file_track_link vft2 JOIN files f2 ON f2.id = vft2.file_id WHERE vft2.track_id = st.id AND f2.file_type IN ({})))",
+                placeholders.join(",")
+            ));
+        }
     }
 
     if playlist_id_filter.is_some() {
@@ -5637,6 +6055,22 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
 
     if let Some(service) = service_filter.as_ref() {
         query_builder = query_builder.bind(service);
+    }
+
+    if let Some(ref svcs) = services_filter {
+        for s in svcs.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            query_builder = query_builder.bind(s);
+        }
+    }
+
+    if let Some(ref ft_types) = file_types_filter {
+        for t in ft_types
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            query_builder = query_builder.bind(t);
+        }
     }
 
     if let Some(pid) = playlist_id_filter {
