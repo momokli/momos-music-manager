@@ -394,7 +394,7 @@ function openConfigModal(pageId, columns, config, onSave) {
           <span class="col-config-drag-handle"><i class="fas fa-grip-lines"></i></span>
           <input type="checkbox" class="col-config-checkbox" data-cid="${c.id}" ${c.visible ? "checked" : ""}>
           <span class="col-config-label">${escapeHtml(label)}</span>
-          <input type="number" class="col-config-width" data-cid="${c.id}" value="${c.width}" min="1" max="100">
+          <input type="number" class="col-config-width" data-cid="${c.id}" value="${c.width}" min="30" max="500">
         </div>`;
     })
     .join("");
@@ -451,8 +451,8 @@ function openConfigModal(pageId, columns, config, onSave) {
           const entry = workingCopy.find((c) => c.id === input.dataset.cid);
           if (entry)
             entry.width = Math.max(
-              1,
-              Math.min(100, parseInt(input.value, 10) || entry.width),
+              30,
+              Math.min(500, parseInt(input.value, 10) || entry.width),
             );
         });
 
