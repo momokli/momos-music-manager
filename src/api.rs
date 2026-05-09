@@ -5,7 +5,7 @@
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Redirect},
     routing::{delete, get, post, put},
@@ -982,7 +982,10 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/health", get(health_check_handler))
         .route("/api/dump", get(dump_handler))
-        .route("/api/restore", post(restore_handler))
+        .route(
+            "/api/restore",
+            post(restore_handler).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
+        )
         .route(
             "/api/folders",
             get(folders_handler).post(add_folder_handler),
