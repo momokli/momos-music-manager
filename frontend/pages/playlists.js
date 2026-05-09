@@ -458,6 +458,7 @@ async function fetchAndRender(container, signal, state) {
       };
     });
 
+
     // Client-side pagination
     const total = adapted.length;
     const paged = adapted.slice(
@@ -540,21 +541,15 @@ function wireToolbarEvents(container, signal, state) {
     );
   }
 
-  // PMV category buttons (multi-select: P, M, V) + aggregate (single-select)
+  // PMV category buttons (multi-select: P, M, V)
   const pmvCatEl = container.querySelector("#playlists-pmv-cat-btns");
-
 
   function syncPmvFilterUI() {
     if (pmvCatEl) {
       pmvCatEl.querySelectorAll(".filter-btn").forEach((btn) => {
         btn.classList.toggle("active", state.pmvCategories.includes(btn.dataset.value));
       });
-
-
-
-
-
-
+    }
   }
 
   if (pmvCatEl) {
@@ -566,10 +561,7 @@ function wireToolbarEvents(container, signal, state) {
         const v = btn.dataset.value;
         const i = state.pmvCategories.indexOf(v);
         if (i >= 0) state.pmvCategories.splice(i, 1);
-        else {
-
-          state.pmvCategories.push(v);
-        }
+        else state.pmvCategories.push(v);
         state.page = 0;
         syncPmvFilterUI();
         updateHash("playlists", state, HASH_DEFAULTS);
@@ -579,6 +571,49 @@ function wireToolbarEvents(container, signal, state) {
     );
   }
 
+  // Generic toggle for data-filter labels
+  const labels = filterPanel.querySelectorAll("[data-filter]");
+  for (const label of labels) {
+    const updateUI = () => {
+      const key = label.dataset.filter + "Enabled";
+      const active = state[key] !== false;
+      label.classList.toggle("active", active);
+      label.classList.toggle("off", !active);
+      const row = label.closest(".filter-row");
+      if (row) {
+        const inputs = row.querySelectorAll("select, input, button, .filter-group");
+        for (const el of inputs) el.classList.toggle("filter-disabled", !active);
+      }
+    };
+    label.addEventListener("click", () => {
+      const key = label.dataset.filter + "Enabled";
+      if (state[key] === false) state[key] = true;
+      else state[key] = false;
+      state.page = 0;
+      updateUI();
+      updateHash("playlists", state, HASH_DEFAULTS);
+      fetchAndRender(container, signal, state);
+    });
+    updateUI();
+  }
+
+  filterPanel.addEventListener("click", (e) => {
+    const row = e.target.closest(".filter-row");
+    if (!row) return;
+    const label = row.querySelector("[data-filter]");
+    if (!label) return;
+    const key = label.dataset.filter + "Enabled";
+    if (state[key] !== false) return;
+    if (e.target.closest("[data-filter]")) return;
+    state[key] = true;
+    label.classList.add("active");
+    label.classList.remove("off");
+    const inputs = row.querySelectorAll("select, input, button, .filter-group");
+    for (const el of inputs) el.classList.remove("filter-disabled");
+    state.page = 0;
+    updateHash("playlists", state, HASH_DEFAULTS);
+    fetchAndRender(container, signal, state);
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -596,6 +631,7 @@ function wireContentEvents(container, signal, state) {
   }
 
   // Sortable headers
+  const tbl = container.querySelector("#pl-tbl");
   if (tbl) {
     wireSortableHeaders(tbl, state, () => {
       updateHash("playlists", state, HASH_DEFAULTS);
@@ -603,7 +639,6 @@ function wireContentEvents(container, signal, state) {
     });
   }
 
-  const tbl = container.querySelector("#pl-tbl");
   // Page size selector
   wirePageSizeSelector(container, state, () => {
     updateHash("playlists", state, HASH_DEFAULTS);
@@ -834,8 +869,6 @@ function wireContentEvents(container, signal, state) {
   }
 }
 
-}
-
 /* ------------------------------------------------------------------ */
 /*  Initialisation                                                     */
 /* ------------------------------------------------------------------ */
@@ -861,7 +894,6 @@ export async function init(container, signal, hashParams) {
     mismatchOnly: parsed.mismatchOnly,
     selectedServices: parsed.selectedServices || [],
     pmvCategories: parsed.pmvCategories || [],
-
     serviceEnabled: true,
     pmvEnabled: true,
     layoutMode: false,
