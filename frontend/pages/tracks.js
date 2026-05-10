@@ -1477,7 +1477,7 @@ function wireContentEvents(container, signal, state) {
  */
 function updateSelectionUI(container, state) {
   const count = state.selectedTrackIds.size;
-  updateSelectionCount(container, count);
+  updateSelectionCount(container, "tracks", count);
 
   // Compute needs-comment count from backend
   computeNeedsCount(container, state);
@@ -1632,7 +1632,7 @@ export async function init(container, signal, hashParams) {
   }
 
   // Render stable toolbar + actions panel + content wrapper ONCE
-  const actionsHtml = renderActionsPanel([
+  const actionsHtml = renderActionsPanel("tracks", [
     {
       id: "write-comments",
       label: "WRITE COMMENTS",

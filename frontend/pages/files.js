@@ -15,6 +15,7 @@ import {
   showToast,
   showModal,
 } from "../shared/components.js";
+import { renderActionsPanel, updateSelectionCount } from "../shared/actions-panel.js";
 import { formatBPM, formatDuration } from "../shared/format.js";
 import { fetchJSON } from "../shared/api.js";
 import { renderSearchInput, wireSearchFilter } from "../shared/search-filter.js";
@@ -584,7 +585,8 @@ function renderToolbar(state) {
 
 function renderEmptyBody() {
   const config = loadColumnConfig("files", FILES_COLUMNS);
-  const headers = renderColumnHeaders(
+  const checkboxHeader = '<th class="col-checkbox"></th>';
+  const dataHeaders = renderColumnHeaders(
     config,
     FILES_COLUMNS,
     { sort: "", order: "" },
@@ -601,8 +603,8 @@ function renderEmptyBody() {
       </div>
     </div>
     <div class="table-wrap"><table class="data-table">
-      <thead><tr>${headers}</tr></thead>
-      <tbody><tr><td colspan="${visibleCount}"><div class="text-center text-muted" style="padding:32px;text-align:center;">No files found. Scan a folder to get started.</div></td></tr></tbody>
+      <thead><tr>${checkboxHeader}${dataHeaders}</tr></thead>
+      <tbody><tr><td colspan="${visibleCount + 1}"><div class="text-center text-muted" style="padding:32px;text-align:center;">No files found. Scan a folder to get started.</div></td></tr></tbody>
     </table></div>`;
 }
 
@@ -610,13 +612,29 @@ function renderBody(data, state) {
   const totalPages = Math.ceil(data._total / state.pageSize) || 1;
   const currentPage = state.page + 1;
   const config = loadColumnConfig("files", FILES_COLUMNS);
-  const headers = renderColumnHeaders(config, FILES_COLUMNS, state, sortableTh);
+  const dataHeaders = renderColumnHeaders(config, FILES_COLUMNS, state, sortableTh);
+
+  // Checkbox column (select-all header, per-row checkboxes)
+  const selectedSet = state.selectedFileIds || new Set();
+  const allOnPageSelected =
+    data.files.length > 0 && data.files.every((f) => selectedSet.has(f.id));
+  const checkboxHeader =
+    '<th class="col-checkbox"><input type="checkbox" class="files-select-all" id="files-select-all"' +
+    (allOnPageSelected ? " checked" : "") +
+    "></th>";
+  const headers = checkboxHeader + dataHeaders;
 
   const rowsHtml = data.files
-    .map(
-      (f) =>
-        `<tr>${renderColumnCells(config, FILES_COLUMNS, FILES_CELL_RENDERERS, f)}</tr>`,
-    )
+    .map((f) => {
+      const checked = selectedSet.has(f.id);
+      const cb =
+        '<td class="col-checkbox"><input type="checkbox" class="files-row-checkbox" data-file-id="' +
+        f.id +
+        '"' +
+        (checked ? " checked" : "") +
+        "></td>";
+      return `<tr>${cb}${renderColumnCells(config, FILES_COLUMNS, FILES_CELL_RENDERERS, f)}</tr>`;
+    })
     .join("");
 
   return `
@@ -689,8 +707,8 @@ function buildParams(state) {
 /*  Fetch + Render cycle                                               */
 /* ------------------------------------------------------------------ */
 
-async function fetchAndRender(signal, state) {
-  const contentEl = document.getElementById("files-content");
+async function fetchAndRender(container, signal, state) {
+  const contentEl = container.querySelector("#files-content");
   if (!contentEl) return;
   contentEl.innerHTML = renderLoading("Loading files…");
 
@@ -701,7 +719,7 @@ async function fetchAndRender(signal, state) {
       fetchJSON(`/api/files?${params}`, { signal }),
       fetchJSON(`/api/files/count?${params}`, { signal }),
     ]);
-    if (signal.aborted) return;
+    if (signal && signal.aborted) return;
 
     const files = (filesResp.data || []).map(adaptFile);
     const total = countResp.data;
@@ -712,7 +730,8 @@ async function fetchAndRender(signal, state) {
       contentEl.innerHTML = renderBody({ _total: total, files }, state);
     }
 
-    wireContentEvents(signal, state);
+    wireContentEvents(container, signal, state);
+    updateSelectionUI(container, state);
   } catch (err) {
     if (err.name === "AbortError") return;
     contentEl.innerHTML = renderErrorBlock({
@@ -734,7 +753,7 @@ function wireToolbarEvents(container, signal, state) {
   if (filterPanel) {
     wireSearchFilter(filterPanel, state, () => {
       updateHash("files", state, HASH_DEFAULTS);
-      fetchAndRender(signal, state);
+      fetchAndRender(container, signal, state);
     });
   }
 
@@ -814,7 +833,7 @@ function wireToolbarEvents(container, signal, state) {
           }
           state.page = 0;
           updateHash("files", state, HASH_DEFAULTS);
-          fetchAndRender(signal, state);
+          fetchAndRender(container, signal, state);
           return;
         }
 
@@ -829,7 +848,7 @@ function wireToolbarEvents(container, signal, state) {
         }
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
@@ -869,7 +888,7 @@ function wireToolbarEvents(container, signal, state) {
       selectedIndex = -1;
       renderTagChips();
       updateHash("files", state, HASH_DEFAULTS);
-      fetchAndRender(signal, state);
+      fetchAndRender(container, signal, state);
     }
 
     tagSearch.addEventListener(
@@ -928,7 +947,7 @@ function wireToolbarEvents(container, signal, state) {
         selectedIndex = -1;
         renderTagChips();
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
@@ -1008,7 +1027,7 @@ function wireToolbarEvents(container, signal, state) {
         state.selectedTags = state.selectedTags.filter((t) => t !== tag);
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
@@ -1029,7 +1048,7 @@ function wireToolbarEvents(container, signal, state) {
         }
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
@@ -1046,7 +1065,7 @@ function wireToolbarEvents(container, signal, state) {
         }
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
@@ -1061,7 +1080,7 @@ function wireToolbarEvents(container, signal, state) {
         state.nonDefaultOnly = !state.nonDefaultOnly;
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
@@ -1119,7 +1138,7 @@ function wireToolbarEvents(container, signal, state) {
         }
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
@@ -1147,7 +1166,7 @@ function wireToolbarEvents(container, signal, state) {
         }
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
@@ -1174,7 +1193,7 @@ function wireToolbarEvents(container, signal, state) {
         }
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
@@ -1197,7 +1216,7 @@ function wireToolbarEvents(container, signal, state) {
         }
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
@@ -1220,7 +1239,7 @@ function wireToolbarEvents(container, signal, state) {
         }
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
@@ -1247,7 +1266,7 @@ function wireToolbarEvents(container, signal, state) {
       state.page = 0;
       updateFilterUI();
       updateHash("files", state, HASH_DEFAULTS);
-      fetchAndRender(signal, state);
+      fetchAndRender(container, signal, state);
     });
     updateFilterUI();
   });
@@ -1271,7 +1290,7 @@ function wireToolbarEvents(container, signal, state) {
       )
       .forEach((el) => el.classList.remove("filter-disabled"));
     updateHash("files", state, HASH_DEFAULTS);
-    fetchAndRender(signal, state);
+    fetchAndRender(container, signal, state);
   });
 }
 
@@ -1279,8 +1298,8 @@ function wireToolbarEvents(container, signal, state) {
 /*  Content event wiring (called after each body render)               */
 /* ------------------------------------------------------------------ */
 
-function wireContentEvents(signal, state) {
-  const contentEl = document.getElementById("files-content");
+function wireContentEvents(container, signal, state) {
+  const contentEl = container.querySelector("#files-content");
   if (!contentEl) return;
 
   // ── Refresh button ──
@@ -1290,7 +1309,7 @@ function wireContentEvents(signal, state) {
       "click",
       () => {
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
@@ -1301,7 +1320,7 @@ function wireContentEvents(signal, state) {
   if (tableEl) {
     wireSortableHeaders(tableEl, state, () => {
       updateHash("files", state, HASH_DEFAULTS);
-      fetchAndRender(signal, state);
+      fetchAndRender(container, signal, state);
     });
   }
 
@@ -1316,7 +1335,7 @@ function wireContentEvents(signal, state) {
         state.pageSize = val;
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
@@ -1331,7 +1350,7 @@ function wireContentEvents(signal, state) {
         if (state.page > 0) {
           state.page--;
           updateHash("files", state, HASH_DEFAULTS);
-          fetchAndRender(signal, state);
+          fetchAndRender(container, signal, state);
         }
       },
       { signal },
@@ -1345,7 +1364,7 @@ function wireContentEvents(signal, state) {
       () => {
         state.page++;
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
@@ -1375,11 +1394,11 @@ function wireContentEvents(signal, state) {
   if (state.layoutMode) {
     wireColumnResize(contentEl, "files", FILES_COLUMNS, colConfig);
     wireColumnDragReorder(contentEl, "files", FILES_COLUMNS, colConfig, () => {
-      fetchAndRender(signal, state);
+      fetchAndRender(container, signal, state);
     });
   }
   wireConfigTrigger(contentEl, "files", FILES_COLUMNS, colConfig, () => {
-    fetchAndRender(signal, state);
+    fetchAndRender(container, signal, state);
   });
 
   // ── Layout mode toggle ──
@@ -1391,10 +1410,124 @@ function wireContentEvents(signal, state) {
         state.layoutMode = !state.layoutMode;
         document.body.classList.toggle("layout-mode", state.layoutMode);
         updateHash("files", state, HASH_DEFAULTS);
-        fetchAndRender(signal, state);
+        fetchAndRender(container, signal, state);
       },
       { signal },
     );
+  }
+
+  // ── Checkbox selection ──
+  // Select-all checkbox
+  const selectAllCb = container.querySelector("#files-select-all");
+  if (selectAllCb) {
+    selectAllCb.onclick = () => {
+      const checked = selectAllCb.checked;
+      const rowCbs = container.querySelectorAll(".files-row-checkbox");
+      rowCbs.forEach((cb) => {
+        const fileId = parseInt(cb.dataset.fileId, 10);
+        if (checked) state.selectedFileIds.add(fileId);
+        else state.selectedFileIds.delete(fileId);
+        cb.checked = checked;
+      });
+      updateSelectionUI(container, state);
+    };
+  }
+
+  // Individual row checkboxes
+  const rowCbs = container.querySelectorAll(".files-row-checkbox");
+  rowCbs.forEach((cb) => {
+    cb.onclick = () => {
+      const fileId = parseInt(cb.dataset.fileId, 10);
+      if (cb.checked) state.selectedFileIds.add(fileId);
+      else state.selectedFileIds.delete(fileId);
+      const allCb = container.querySelector("#files-select-all");
+      if (allCb) {
+        const allRowCbs = container.querySelectorAll(".files-row-checkbox");
+        allCb.checked =
+          allRowCbs.length > 0 && Array.from(allRowCbs).every((rc) => rc.checked);
+      }
+      updateSelectionUI(container, state);
+    };
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Selection + Bulk Actions                                           */
+/* ------------------------------------------------------------------ */
+
+function updateSelectionUI(container, state) {
+  const count = state.selectedFileIds.size;
+  updateSelectionCount(container, "files", count);
+  computeNeedsCount(container, state);
+}
+
+async function computeNeedsCount(container, state) {
+  const btn = container.querySelector("#files-actions-write-comments");
+  if (!btn) return;
+
+  const selectedIds = Array.from(state.selectedFileIds);
+  if (selectedIds.length === 0) {
+    btn.innerHTML = '<i class="fas fa-pen"></i> WRITE COMMENTS';
+    state.needsCommentCount = 0;
+    return;
+  }
+
+  btn.innerHTML = '<i class="fas fa-pen"></i> WRITE COMMENTS (...)';
+  btn.disabled = true;
+
+  try {
+    const resp = await fetchJSON("/api/files/needs-comment-count", {
+      method: "POST",
+      body: JSON.stringify({ fileIds: selectedIds }),
+    });
+    state.needsCommentCount = resp.data.filesNeedingUpdate || 0;
+    btn.innerHTML = `<i class="fas fa-pen"></i> WRITE COMMENTS (${state.needsCommentCount})`;
+  } catch (err) {
+    console.warn("Failed to compute needs-comment count:", err);
+    btn.innerHTML = '<i class="fas fa-pen"></i> WRITE COMMENTS';
+  } finally {
+    btn.disabled = state.selectedFileIds.size === 0;
+  }
+}
+
+async function writeCommentsForSelected(container, state) {
+  const selectedIds = Array.from(state.selectedFileIds);
+  if (selectedIds.length === 0) {
+    showToast("No files selected.", "warning");
+    return;
+  }
+
+  const btn = container.querySelector("#files-actions-write-comments");
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Writing...';
+  }
+
+  try {
+    const resp = await fetchJSON("/api/files/write-comments-by-ids", {
+      method: "POST",
+      body: JSON.stringify({ fileIds: selectedIds }),
+    });
+    const data = resp.data;
+    if (data.fileCount > 0) {
+      showToast(
+        `Comment write queued (task #${data.taskId}, ${data.fileCount} file(s))`,
+        "success",
+      );
+    } else {
+      showToast("All comments are up to date", "info");
+    }
+    state.selectedFileIds.clear();
+    state.needsCommentCount = 0;
+    updateSelectionUI(container, state);
+    fetchAndRender(container, null, state);
+  } catch (err) {
+    showToast(`Failed to queue comment write: ${err.message}`, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-pen"></i> WRITE COMMENTS';
+    }
   }
 }
 
@@ -1439,23 +1572,30 @@ export async function init(container, signal, hashParams) {
     commentEnabled: true,
     fileTypeEnabled: true,
     layoutMode: false,
+    selectedFileIds: new Set(),
+    needsCommentCount: 0,
   };
 
   // Reset layout mode on page entry
   document.body.classList.remove("layout-mode");
+
+  // Build actions panel
+  const actionsHtml = renderActionsPanel("files", [
+    {
+      id: "write-comments",
+      label: "WRITE COMMENTS",
+      icon: "fas fa-pen",
+      cls: "btn-primary",
+      action: "write-comments",
+    },
+  ]);
 
   // Render toolbar ONCE (stable, preserves focus)
   container.innerHTML = `
     <div style="display:flex;flex-direction:column;gap:var(--space-4);">
       <div style="display:flex;gap:var(--space-4);align-items:flex-start;">
         <div style="flex:4">${renderToolbar(state)}</div>
-        <div class="actions-panel" style="flex:1;min-width:180px;max-width:220px;">
-          <div class="actions-panel-header">
-            <span><i class="fas fa-bolt"></i> Actions</span>
-            <span class="actions-sel-count" id="files-sel-count">0</span>
-          </div>
-          <button class="btn btn-sm" id="files-actions-refresh"><i class="fas fa-rotate"></i> Refresh</button>
-        </div>
+        ${actionsHtml}
       </div>
       <div id="files-content"></div>
     </div>`;
@@ -1467,10 +1607,16 @@ export async function init(container, signal, hashParams) {
   import("../shared/actions-panel.js").then(({ wireActionsRefresh }) => {
     wireActionsRefresh(container, "files", () => {
       state.page = 0;
-      return fetchAndRender(signal, state);
+      return fetchAndRender(container, signal, state);
     });
   });
 
+  // Wire WRITE COMMENTS button in actions panel
+  const writeBtn = container.querySelector("#files-actions-write-comments");
+  if (writeBtn) {
+    writeBtn.onclick = () => writeCommentsForSelected(container, state);
+  }
+
   // Initial fetch + render
-  await fetchAndRender(signal, state);
+  await fetchAndRender(container, signal, state);
 }

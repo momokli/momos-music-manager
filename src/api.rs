@@ -228,6 +228,26 @@ struct TracksWriteCommentsResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct FilesBulkRequest {
+    pub file_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesBulkCommentCountResponse {
+    pub total_files: usize,
+    pub files_needing_update: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesBulkWriteCommentsResponse {
+    pub task_id: String,
+    pub file_count: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct NeedsUpdateCountQuery {
     pub linked_only: Option<bool>,
     pub tags: Option<String>,
@@ -881,6 +901,14 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/files/bulk-sync", post(bulk_sync_handler))
         .route("/api/files/write-comments", post(bulk_sync_handler))
+        .route(
+            "/api/files/needs-comment-count",
+            post(files_needs_comment_count_by_ids_handler),
+        )
+        .route(
+            "/api/files/write-comments-by-ids",
+            post(files_write_comments_by_ids_handler),
+        )
         .route("/api/tracks", get(tracks_handler))
         .route("/api/tracks/count", get(tracks_count_handler))
         .route(
@@ -1379,6 +1407,139 @@ async fn files_needs_update_count_handler(
             internal_error(format!("Failed to count files needing update: {}", e)).into_response()
         }
     }
+}
+
+/// POST /api/files/needs-comment-count
+/// Takes a list of file IDs and returns how many have comments that need updating.
+async fn files_needs_comment_count_by_ids_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<FilesBulkRequest>,
+) -> impl IntoResponse {
+    let total_files = body.file_ids.len();
+    if total_files == 0 {
+        return Json(ApiResponse {
+            data: FilesBulkCommentCountResponse {
+                total_files: 0,
+                files_needing_update: 0,
+            },
+        })
+        .into_response();
+    }
+
+    // Fetch files by ID
+    let placeholders: Vec<String> = body.file_ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT * FROM files WHERE id IN ({})",
+        placeholders.join(",")
+    );
+    let mut q = sqlx::query_as::<_, crate::db::File>(&sql);
+    for id in &body.file_ids {
+        q = q.bind(id);
+    }
+
+    let files = match q.fetch_all(&state.db).await {
+        Ok(f) => f,
+        Err(e) => {
+            return internal_error(format!("Failed to fetch files: {}", e)).into_response();
+        }
+    };
+
+    let mut files_needing_update = 0usize;
+    for file in &files {
+        match compute_target_comment(&state.db, file.id).await {
+            Ok(target) => {
+                if file.comment.as_deref() != Some(&target) {
+                    files_needing_update += 1;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Could not compute target for file {}: {}", file.id, e);
+                files_needing_update += 1;
+            }
+        }
+    }
+
+    Json(ApiResponse {
+        data: FilesBulkCommentCountResponse {
+            total_files,
+            files_needing_update,
+        },
+    })
+    .into_response()
+}
+
+/// POST /api/files/write-comments-by-ids
+/// Takes a list of file IDs, computes which need comment updates,
+/// and queues a write-comment task for those files.
+async fn files_write_comments_by_ids_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<FilesBulkRequest>,
+) -> impl IntoResponse {
+    if body.file_ids.is_empty() {
+        return Json(ApiResponse {
+            data: FilesBulkWriteCommentsResponse {
+                task_id: String::new(),
+                file_count: 0,
+            },
+        })
+        .into_response();
+    }
+
+    // Fetch files by ID
+    let placeholders: Vec<String> = body.file_ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT * FROM files WHERE id IN ({})",
+        placeholders.join(",")
+    );
+    let mut q = sqlx::query_as::<_, crate::db::File>(&sql);
+    for id in &body.file_ids {
+        q = q.bind(id);
+    }
+
+    let files = match q.fetch_all(&state.db).await {
+        Ok(f) => f,
+        Err(e) => {
+            return internal_error(format!("Failed to fetch files: {}", e)).into_response();
+        }
+    };
+
+    // Filter to only files that need an update
+    let mut needs_update: Vec<i64> = Vec::new();
+    for file in &files {
+        match compute_target_comment(&state.db, file.id).await {
+            Ok(target) => {
+                if file.comment.as_deref() != Some(&target) {
+                    needs_update.push(file.id);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Could not compute target for file {}: {}", file.id, e);
+                needs_update.push(file.id);
+            }
+        }
+    }
+
+    if needs_update.is_empty() {
+        return Json(ApiResponse {
+            data: FilesBulkWriteCommentsResponse {
+                task_id: String::new(),
+                file_count: 0,
+            },
+        })
+        .into_response();
+    }
+
+    let file_count = needs_update.len();
+    let task_id =
+        crate::tasks::start_write_comment_task(&state.task_manager, &state.db, needs_update).await;
+
+    Json(ApiResponse {
+        data: FilesBulkWriteCommentsResponse {
+            task_id,
+            file_count,
+        },
+    })
+    .into_response()
 }
 
 /// POST /api/tracks/needs-comment-count
