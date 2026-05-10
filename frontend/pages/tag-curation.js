@@ -721,7 +721,9 @@ function wireEvents(container) {
         return;
       }
 
-      const items = dropdown.querySelectorAll(state.pickerMode ? ".cat-pick-btn" : ".typeahead-item");
+      const items = dropdown.querySelectorAll(
+        state.pickerMode ? ".cat-pick-btn" : ".typeahead-item",
+      );
 
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -734,31 +736,27 @@ function wireEvents(container) {
       if (e.key === "ArrowUp") {
         e.preventDefault();
         if (items.length === 0) return;
-        state.pickerSelectedIndex = (state.pickerSelectedIndex - 1 + items.length) % items.length;
+        state.pickerSelectedIndex =
+          (state.pickerSelectedIndex - 1 + items.length) % items.length;
         highlightItem(state.pickerSelectedIndex);
         return;
       }
 
       if (e.key === "Enter") {
         e.preventDefault();
-        if (dropdown.style.display === "none" || items.length === 0 || state.pickerSelectedIndex < 0) {
+        if (dropdown.style.display === "none") {
+          return;
+        }
+        // If debounce hasn't fired yet, pick first item
+        if (state.pickerSelectedIndex < 0) state.pickerSelectedIndex = 0;
+        if (items.length === 0 || state.pickerSelectedIndex >= items.length) {
           return;
         }
         if (state.pickerMode) {
-          // In picker mode: create the tag with the selected category
           const el = items[state.pickerSelectedIndex];
           const categoryName = el.dataset.category;
           const tagName = el.dataset.tagname;
-          try {
-            const newTag = await createTag(tagName, categoryName);
-            await addParent(newTag, container);
-            showToast(`Created "${tagName}" and added as parent`, "success");
-          } catch (err) {
-            showToast(`Failed: ${err.message}`, "error");
-          }
-          dropdown.style.display = "none";
-          searchInput.value = "";
-          state.pickerMode = false;
+          tryCreateTag(tagName, categoryName, searchInput, dropdown, container);
         } else {
           selectItem(state.pickerSelectedIndex, searchInput, dropdown, container);
         }
@@ -767,7 +765,12 @@ function wireEvents(container) {
 
     // Close dropdown on outside click
     document.addEventListener("click", (e) => {
-      if (searchInput && dropdown && !searchInput.contains(e.target) && !dropdown.contains(e.target)) {
+      if (
+        searchInput &&
+        dropdown &&
+        !searchInput.contains(e.target) &&
+        !dropdown.contains(e.target)
+      ) {
         state.pickerMode = false;
         dropdown.style.display = "none";
       }
@@ -803,10 +806,10 @@ function wireEvents(container) {
 /** Show category buttons inline in the dropdown */
 function showCategoryPicker(tagName, searchInput, dropdown, container) {
   const cats = [
-    { name: "Phase",   color: "var(--purple)", icon: "fa-activity" },
-    { name: "Mood",    color: "var(--pink)",   icon: "fa-heart" },
-    { name: "Vibe",    color: "var(--yellow)", icon: "fa-sparkles" },
-    { name: "Merkmal", color: "var(--green)",  icon: "fa-hash" },
+    { name: "Phase", color: "var(--purple)", icon: "fa-activity" },
+    { name: "Mood", color: "var(--pink)", icon: "fa-heart" },
+    { name: "Vibe", color: "var(--yellow)", icon: "fa-sparkles" },
+    { name: "Merkmal", color: "var(--green)", icon: "fa-hash" },
   ];
 
   state.pickerMode = true;
@@ -837,14 +840,14 @@ function showCategoryPicker(tagName, searchInput, dropdown, container) {
     el.addEventListener("click", () => {
       const categoryName = el.dataset.category;
       const tagName = el.dataset.tagname;
-      doCreateTag(tagName, categoryName, searchInput, dropdown, container);
+      tryCreateTag(tagName, categoryName, searchInput, dropdown, container);
     });
   });
 }
 
-async function doCreateTag(tagName, categoryName, searchInput, dropdown, container) {
+async function tryCreateTag(tagName, categoryName, searchInput, dropdown, container) {
   try {
-    const newTag = await createTag(tagName, categoryName);
+    var newTag = await createTag(tagName, categoryName);
     await addParent(newTag, container);
     showToast(`Created "${tagName}" and added as parent`, "success");
   } catch (err) {
