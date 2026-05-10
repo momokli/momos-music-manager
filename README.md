@@ -210,6 +210,8 @@ Open Traktor → run "Consistency Check" over all tracks → Comments visible �
 | `#auto-categorize` | `pages/auto-categorize.js` | AI tag categorization wizard             |
 | `#traktor-import`  | `pages/traktor-import.js`  | Traktor collection import                |
 | `#digging`         | `pages/digging.js`         | Digging curator — chain-based sessions   |
+| `#data`            | `pages/data.js`            | Import/Export database                   |
+| `#tag-curation`    | `pages/tag-curation.js`    | Tag parent curation workflow             |
 
 ---
 
@@ -224,6 +226,9 @@ Open Traktor → run "Consistency Check" over all tracks → Comments visible �
 | Folders   | `CRUD /api/folders`                     |
 | Services  | `GET/POST /api/services/{service}/...`  |
 | Tasks     | `GET/DELETE /api/tasks`                 |
+| Data      | `GET /api/dump`, `POST /api/restore`    |
+| Curation  | `GET /api/tags/curation-queue`          |
+| Parents   | `GET/PUT /api/tags/{id}/parents`        |
 | Digging   | `GET/POST /api/digging/...`             |
 | Health    | `GET /api/health`                       |
 
@@ -283,14 +288,18 @@ momos-music-manager/
 │       ├── playlists.js
 │       ├── tags.js
 │       ├── tag-categories.js
+│       ├── tag-curation.js
 │       ├── services.js
 │       ├── tasks.js
 │       ├── folders.js
+│       ├── data.js
 │       ├── auto-categorize.js
 │       ├── digging.js
 │       └── traktor-import.js
 ├── migrations/
-│   └── 001_initial_schema.sql  # Single migration
+│   ├── 001_initial_schema.sql             # Initial schema
+│   ├── 002_playlist_fetch_tracking.sql    # Playlist sync tracking columns
+│   └── 003_tag_parents.sql                # Tag parent resolution views
 └── docs/
     ├── ARCHITECTURE.md     # System architecture
     ├── COMMENT_SYSTEM.md   # Comment format spec
@@ -303,7 +312,9 @@ momos-music-manager/
 ## Important
 
 - **Delete old DB files** after schema changes: `rm -f app.db*`
+- **Column config**: uses `columnConfig_v2_` localStorage key (pixel-based); old percentage-based config is ignored
 - If you see "migration 27" errors: delete all DB files and restart
+- Migrations are additive (`001_initial_schema.sql`, `002_playlist_fetch_tracking.sql`, `003_tag_parents.sql`)
 - SoundCloud and YouTube OAuth are not yet implemented
 - Playlist subscriptions poll every 30 seconds in the background
 - The digging page (`digging.html`) is a standalone page, not part of the SPA

@@ -828,25 +828,123 @@ For shipping a Release Candidate, the friction of the two-process setup was the 
 - Tracks page supports playlist-scoped viewing with URL-based state
 - Schema was extended without breaking changes (migration delete + recreate)
 
-| Date       | Decision                              | Description                                                                                        |
-| ---------- | ------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Initial    | ADR-001, 003, 004, 006, 011, 013, 014 | Core architecture decisions                                                                        |
-| 2026-04-17 | ADR-015                               | Structured comment format                                                                          |
-| 2026-04-19 | ADR-016, 017, 018                     | Service tracks API, POC strategy, Folder CRUD                                                      |
-| 2026-04-20 | ADR-019                               | Folder scanning configuration                                                                      |
-| 2026-04-23 | ADR-022                               | Target comment computation                                                                         |
-| 2026-04-24 | ADR-023, 024                          | TaskManager, WriteComment                                                                          |
-| 2026-04-25 | —                                     | Cleanup: removed outdated ADRs (React, Docker, design.html, presets, bugfixes)                     |
-| 2026-06-xx | ADR-025                               | Semantic tag categorization with local embeddings (candle + all-MiniLM-L6-v2)                      |
-| 2026-06-xx | ADR-026                               | Unified task system with progress tracking, ScanFolder, conflict keys, pruning                     |
-| 2026-06-xx | ADR-027                               | All 11 frontend pages wired to backend API with data adapters, error handling, and AbortController |
-| 2026-06-xx | ADR-028                               | Playlist subscriptions with background polling (poll_interval_secs, auto-track-discovery)          |
-| 2026-04-29 | ADR-029                               | Spotify API response cache for development (record/replay, dev-data/spotify-api)                   |
-| 2026-05-09 | ADR-030                               | Scan cache for development (record/replay, dev-data/scan-cache, auto-invalidation)                 |
-| 2026-04-30 | ADR-031                               | Config.toml migration — config priority (env > config.toml > defaults)                             |
-| 2026-04-30 | ADR-033                               | Single-binary shipping with embedded frontend + Font Awesome bundle                                |
-| 2026-05-01 | ADR-034                               | Database path in config.toml — `[database].url` with shellexpand + env var fallback                |
-| 2026-05-01 | ADR-035                               | macOS Launch Agent — `install-launch-agent`, `uninstall-launch-agent`, `service-status`            |
-| 2026-05-01 | ADR-036                               | Dynamic redirect URI for OAuth — `--public-url` flag, fallback chain                               |
-| 2026-05-01 | ADR-037                               | Clean startup logging — consolidated banner, poller subscription count, actual bound port          |
-| 2026-05-01 | ADR-038                               | Deemix download service integration — web-UI-only config, cookie-auth, playlist download queue     |
+| Date       | Decision                              | Description                                                                                         |
+| ---------- | ------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Initial    | ADR-001, 003, 004, 006, 011, 013, 014 | Core architecture decisions                                                                         |
+| 2026-04-17 | ADR-015                               | Structured comment format                                                                           |
+| 2026-04-19 | ADR-016, 017, 018                     | Service tracks API, POC strategy, Folder CRUD                                                       |
+| 2026-04-20 | ADR-019                               | Folder scanning configuration                                                                       |
+| 2026-04-23 | ADR-022                               | Target comment computation                                                                          |
+| 2026-04-24 | ADR-023, 024                          | TaskManager, WriteComment                                                                           |
+| 2026-04-25 | —                                     | Cleanup: removed outdated ADRs (React, Docker, design.html, presets, bugfixes)                      |
+| 2026-06-xx | ADR-025                               | Semantic tag categorization with local embeddings (candle + all-MiniLM-L6-v2)                       |
+| 2026-06-xx | ADR-026                               | Unified task system with progress tracking, ScanFolder, conflict keys, pruning                      |
+| 2026-06-xx | ADR-027                               | All 11 frontend pages wired to backend API with data adapters, error handling, and AbortController  |
+| 2026-06-xx | ADR-028                               | Playlist subscriptions with background polling (poll_interval_secs, auto-track-discovery)           |
+| 2026-04-29 | ADR-029                               | Spotify API response cache for development (record/replay, dev-data/spotify-api)                    |
+| 2026-05-09 | ADR-030                               | Scan cache for development (record/replay, dev-data/scan-cache, auto-invalidation)                  |
+| 2026-04-30 | ADR-031                               | Config.toml migration — config priority (env > config.toml > defaults)                              |
+| 2026-04-30 | ADR-033                               | Single-binary shipping with embedded frontend + Font Awesome bundle                                 |
+| 2026-05-01 | ADR-034                               | Database path in config.toml — `[database].url` with shellexpand + env var fallback                 |
+| 2026-05-01 | ADR-035                               | macOS Launch Agent — `install-launch-agent`, `uninstall-launch-agent`, `service-status`             |
+| 2026-05-01 | ADR-036                               | Dynamic redirect URI for OAuth — `--public-url` flag, fallback chain                                |
+| 2026-05-01 | ADR-037                               | Clean startup logging — consolidated banner, poller subscription count, actual bound port           |
+| 2026-05-01 | ADR-038                               | Deemix download service integration — web-UI-only config, cookie-auth, playlist download queue      |
+| 2026-06-10 | ADR-039                               | Column resize switched to pixel-based sizing (30–500px) with `columnConfig_v2_` key                 |
+| 2026-06-10 | ADR-040                               | Server-side filtering for Tracks and Files pages — all filters in SQL, pagination-aware             |
+| 2026-06-10 | ADR-041                               | Import/Export web UI — `GET /api/dump`, `POST /api/restore`, `#data` page with preview              |
+| 2026-06-10 | ADR-042                               | Bulk write comments — multi-select checkboxes + "WRITE COMMENTS (X)" on Tracks and Files pages      |
+| 2026-06-10 | ADR-043                               | Spotify rate-limit retry — parse `Retry-After` header from 429, retry with backoff (max 3 attempts) |
+| 2026-06-10 | ADR-044                               | Tag parent resolution — Setlist tags resolve to parent tags via `tag_parents` table + views         |
+| 2026-06-10 | ADR-045                               | Tag curation workflow page — sequential prev/next + typeahead + "Create & Add" inline flow          |
+
+---
+
+## ADR-039: Pixel-Based Column Resize
+
+**Date**: 2026-06-10
+**Status**: Accepted (implemented)
+
+**Context**: Column resize on CRUD pages used percentage-based widths (e.g. `width: 18%`). When dragging a resize handle, the percentage recalculated on each mouse-move event, causing a feedback loop where columns shrank/grew uncontrollably.
+
+**Decision**: Switch to pixel-based sizing: each column has an explicit pixel width (30–500px range). New `columnConfig_v2_` localStorage key avoids stale percentage data from v1. Default widths are scaled from old percent-based values (e.g. 18% → 180px).
+
+**Consequences**: Smooth, predictable column resizing. Old config is silently ignored — users see default widths on first v0.2.0 load.
+
+---
+
+## ADR-040: Server-Side Filtering
+
+**Date**: 2026-06-10
+**Status**: Accepted (implemented)
+
+**Context**: Client-side filtering on Tracks and Files pages (JavaScript `Array.filter()` after API fetch) broke pagination — the total count from the server didn't match the filtered set. Page numbers were wrong, and some pages had fewer items than expected.
+
+**Decision**: Move all filters to server-side SQL. Extended `TracksQuery` with `services`, `fileTypes`, `fileTypeAgg` params. Extended `FilesQuery` with PMV, file type, and comment-status filters. Client-side `applyClientFilters` blocks removed. All pagination counts now come from filtered queries.
+
+**Consequences**: Correct pagination with filters active. Slightly more complex SQL queries with dynamic WHERE clauses, but more accurate results. Removed dead PMV filter from Tracks page (service tracks have no comment data).
+
+---
+
+## ADR-041: Import/Export Web UI
+
+**Date**: 2026-06-10
+**Status**: Accepted (implemented)
+
+**Context**: Database dump/restore was only available via CLI (`cargo run -- dump` / `cargo run -- restore`). Users wanted a web UI for backup and migration.
+
+**Decision**: Add `GET /api/dump` (returns JSON with `Content-Disposition` header for browser download) and `POST /api/restore?confirm=true` (multipart JSON upload, replaces entire DB). New `#data` page with Export section (download button with spinner) and Import section (file picker → preview with row counts per table + timestamp → confirm → restore). Destructive restore button styled red with warning banner.
+
+**Consequences**: Easy backup and migration without CLI access. Body limit increased to 100MB for large dumps. Safety gate: restore requires `?confirm=true` query param.
+
+---
+
+## ADR-042: Bulk Write Comments
+
+**Date**: 2026-06-10
+**Status**: Accepted (implemented)
+
+**Context**: Writing comments to files was a per-file operation (click pencil icon on each row). For large libraries, this was tedious. Users wanted to select multiple tracks/files and write comments in bulk.
+
+**Decision**: Add multi-select checkboxes (select-all header + per-row) to Tracks and Files pages. Selection state uses `Set` for efficient membership checks, persists across page navigation. An ACTIONS panel shows "WRITE COMMENTS (X)" where X = count of selected items needing comment updates (computed server-side via `POST /api/{entity}/needs-comment-count`). Clicking the button queues write-comment tasks via `POST /api/{entity}/write-comments[-by-ids]`.
+
+**Consequences**: Efficient bulk operations. Shared `actions-panel.js` module for reusability. Tracks → files resolution goes through `v_file_track_link`; files are direct. Selection cleared after successful write. Toast notifications for success/error/up-to-date.
+
+---
+
+## ADR-043: Spotify Rate-Limit Retry
+
+**Date**: 2026-06-10
+**Status**: Accepted (implemented)
+
+**Context**: Spotify's API returns HTTP 429 with a `Retry-After` header when rate limits are exceeded. The sync worker was firing all playlist syncs in a tight loop with no delay or retry, causing failures during large sync batches.
+
+**Decision**: Parse the `Retry-After` header from 429 responses by walking the error chain (`rspotify::ClientError::Http` → `ReqwestError::StatusCode(response)`). Wrap API calls in a retry loop (max 3 attempts per playlist) with the `Retry-After` duration + 1s sleep. Add 300ms `tokio::sleep` between successful playlist syncs to stay under Spotify's soft rate limit (~3 req/s). Non-429 errors fail immediately.
+
+**Consequences**: Reliable batch syncs without manual intervention. `warn!` logging on each retry with the `Retry-After` duration. Max 3 retries prevents infinite loops on persistent rate limits.
+
+---
+
+## ADR-044: Tag Parent Resolution
+
+**Date**: 2026-06-10
+**Status**: Accepted (implemented)
+
+**Context**: Setlist-category tags are long playlist names (e.g. `Dark Techno/2026/Hardtechno/Some Event`). File comments using these tags were unwieldy. Users wanted shorter, meaningful tags with proper PMV categorization to appear in comments instead.
+
+**Decision**: Allow Setlist tags to have "parent" tags that replace them in file comments. New `tag_parents` table (UNIQUE on tag_id + parent_tag_id) with validation: only Setlist tags can have parents, no self-references, parents must exist. Two new views: `v_resolved_tags` (returns parents if they exist, otherwise the tag itself) and `v_file_resolved_tags` (like `v_file_tags` but through `v_resolved_tags`). `compute_target_comment()` queries `v_file_resolved_tags` instead of `v_file_tags`. Migration: `003_tag_parents.sql`.
+
+**Consequences**: Clean, categorized comments. A Setlist tag with parents `dark` (Mood), `techno` (Vibe), `hard` (Merkmal) produces `[PMV] dark techno hard` instead of `[S--] Dark Techno/2026/...`. Tags without parents work as before (backward compatible). Parent editing available in Tags page Edit modal and Tag Curation page.
+
+---
+
+## ADR-045: Tag Curation Workflow Page
+
+**Date**: 2026-06-10
+**Status**: Accepted (implemented)
+
+**Context**: Assigning parent tags to Setlist tags one-by-one via the Tags page Edit modal was tedious. Users needed a dedicated workflow to go through the entire Setlist tag queue efficiently.
+
+**Decision**: New `#tag-curation` page with a sequential workflow (prev/next with keyboard shortcuts ←/→ or p/n, progress bar), a tag card showing the full name + metadata, a parent chip editor with typeahead search, and an inline "Create & Add" flow (pick category → create new tag → immediately add as parent). A collapsible "Browse All" mini table supports search, has_parents filter, sort (name/length/files/parents), and click-to-jump. Auto-save: every add/remove immediately PUTs parents to the API; navigation waits for in-flight saves. Backend endpoint: `GET /api/tags/curation-queue` with filtering/sorting params.
+
+**Consequences**: Efficient batch curation. No manual save button needed — changes persist immediately. Keyboard shortcuts speed up navigation. The "Create & Add" flow eliminates the need to pre-create parent tags.

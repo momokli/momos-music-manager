@@ -1,6 +1,6 @@
 # Momo's Music Manager — Agent Guidance
 
-> **Last Updated**: 2026-06-10 — New workflow: feature branches + additive migrations
+> **Last Updated**: 2026-06-10 — v0.2.0 release prep (review/all-features)
 
 ---
 
@@ -166,6 +166,8 @@ src/
 | `#tasks`           | `frontend/pages/tasks.js`           | Task manager UI                    |
 | `#auto-categorize` | `frontend/pages/auto-categorize.js` | AI tag categorization wizard       |
 | `#traktor`         | `frontend/pages/traktor-import.js`  | Traktor collection import          |
+| `#data`            | `frontend/pages/data.js`            | Import/export database             |
+| `#tag-curation`    | `frontend/pages/tag-curation.js`    | Tag parent curation workflow       |
 | `digging.html`     | (standalone HTML)                   | Curator/session-builder page       |
 
 ---
@@ -178,6 +180,7 @@ src/
 - `docs/TASK_MANAGER.md` — Task manager details
 - `docs/FRONTEND_BUILD_PLAN.md` — SPA migration history (mostly historical, some details outdated)
 - `docs/FRONTEND_NEXT_PLAN.md` — Remaining frontend work (partially done)
+- `CHANGELOG.md` — Release changelog
 
 ---
 
@@ -630,9 +633,9 @@ Add multi-select checkboxes to the Tracks page with an ACTIONS panel containing 
 
 ## Plan: files-bulk-comments
 
-**Status**: proposed
+**Status**: done ✅
 **Branch**: `feat/files-bulk-comments`
-**Ready for review**: no
+**Ready for review**: yes
 **Depends on**: `feat/tracks-bulk-comments` (already merged into `review/all-features`)
 **Migration needed**: no
 
@@ -712,7 +715,7 @@ Files already return `needsUpdate` from the API. We _could_ compute X client-sid
 
 ## Plan: spotify-rate-limit-retry
 
-**Status**: proposed
+**Status**: done ✅
 **Branch**: `feat/spotify-rate-limit-retry`
 **Ready for review**: yes
 **Depends on**: nothing

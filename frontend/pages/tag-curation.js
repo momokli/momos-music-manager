@@ -57,10 +57,6 @@ const CATEGORY_INFO = {
 /** All tags loaded once for client-side search */
 let allTags = [];
 
-/** Inline category picker state */
-let pickerMode = false;
-let pickerSelectedIndex = -1;
-
 const state = {
   queue: [],
   currentIndex: 0,
@@ -76,6 +72,8 @@ const state = {
   browseSort: "length",
   browseOrder: "desc",
   browseHasParents: "any",
+  pickerMode: false,
+  pickerSelectedIndex: -1,
 };
 
 /* ------------------------------------------------------------------ */
@@ -627,15 +625,15 @@ function wireEvents(container) {
       items.push({ type: "create", search: q });
 
       // Clamp pickerSelectedIndex
-      let idx = pickerSelectedIndex;
+      let idx = state.pickerSelectedIndex;
       if (idx >= items.length) idx = items.length - 1;
       if (idx < 0) idx = 0;
-      pickerSelectedIndex = idx;
+      state.pickerSelectedIndex = idx;
 
       let html = items
         .map((item, idx2) => {
           const sel =
-            idx2 === pickerSelectedIndex
+            idx2 === state.pickerSelectedIndex
               ? "background:var(--accent-bg);outline:1px solid var(--accent);"
               : "";
           if (item.type === "tag") {
@@ -694,15 +692,15 @@ function wireEvents(container) {
 
     searchInput.addEventListener("input", () => {
       clearTimeout(updateTimer);
-      pickerSelectedIndex = -1;
-      pickerMode = false;
+      state.pickerSelectedIndex = -1;
+      state.pickerMode = false;
       if (searchInput.value.trim().length === 0) {
         dropdown.style.display = "none";
         if (addBtn) addBtn.disabled = true;
         return;
       }
       updateTimer = setTimeout(() => {
-        pickerSelectedIndex = 0;
+        state.pickerSelectedIndex = 0;
         updateDropdown();
       }, 100);
     });
@@ -710,10 +708,10 @@ function wireEvents(container) {
     // Keyboard navigation: arrows + enter + escape
     searchInput.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
-        if (pickerMode) {
+        if (state.pickerMode) {
           // Go back to search mode
-          pickerMode = false;
-          pickerSelectedIndex = 0;
+          state.pickerMode = false;
+          state.pickerSelectedIndex = 0;
           updateDropdown();
           searchInput.focus();
           return;
@@ -723,32 +721,32 @@ function wireEvents(container) {
         return;
       }
 
-      const items = dropdown.querySelectorAll(pickerMode ? ".cat-pick-btn" : ".typeahead-item");
+      const items = dropdown.querySelectorAll(state.pickerMode ? ".cat-pick-btn" : ".typeahead-item");
 
       if (e.key === "ArrowDown") {
         e.preventDefault();
         if (items.length === 0) return;
-        pickerSelectedIndex = (pickerSelectedIndex + 1) % items.length;
-        highlightItem(pickerSelectedIndex);
+        state.pickerSelectedIndex = (state.pickerSelectedIndex + 1) % items.length;
+        highlightItem(state.pickerSelectedIndex);
         return;
       }
 
       if (e.key === "ArrowUp") {
         e.preventDefault();
         if (items.length === 0) return;
-        pickerSelectedIndex = (pickerSelectedIndex - 1 + items.length) % items.length;
-        highlightItem(pickerSelectedIndex);
+        state.pickerSelectedIndex = (state.pickerSelectedIndex - 1 + items.length) % items.length;
+        highlightItem(state.pickerSelectedIndex);
         return;
       }
 
       if (e.key === "Enter") {
         e.preventDefault();
-        if (dropdown.style.display === "none" || items.length === 0 || pickerSelectedIndex < 0) {
+        if (dropdown.style.display === "none" || items.length === 0 || state.pickerSelectedIndex < 0) {
           return;
         }
-        if (pickerMode) {
+        if (state.pickerMode) {
           // In picker mode: create the tag with the selected category
-          const el = items[pickerSelectedIndex];
+          const el = items[state.pickerSelectedIndex];
           const categoryName = el.dataset.category;
           const tagName = el.dataset.tagname;
           try {
@@ -760,9 +758,9 @@ function wireEvents(container) {
           }
           dropdown.style.display = "none";
           searchInput.value = "";
-          pickerMode = false;
+          state.pickerMode = false;
         } else {
-          selectItem(pickerSelectedIndex, searchInput, dropdown, container);
+          selectItem(state.pickerSelectedIndex, searchInput, dropdown, container);
         }
       }
     });
@@ -770,7 +768,7 @@ function wireEvents(container) {
     // Close dropdown on outside click
     document.addEventListener("click", (e) => {
       if (searchInput && dropdown && !searchInput.contains(e.target) && !dropdown.contains(e.target)) {
-        pickerMode = false;
+        state.pickerMode = false;
         dropdown.style.display = "none";
       }
     });
@@ -811,8 +809,8 @@ function showCategoryPicker(tagName, searchInput, dropdown, container) {
     { name: "Merkmal", color: "var(--green)",  icon: "fa-hash" },
   ];
 
-  pickerMode = true;
-  pickerSelectedIndex = 0;
+  state.pickerMode = true;
+  state.pickerSelectedIndex = 0;
 
   const html = cats
     .map(
@@ -854,7 +852,7 @@ async function doCreateTag(tagName, categoryName, searchInput, dropdown, contain
   }
   dropdown.style.display = "none";
   searchInput.value = "";
-  pickerMode = false;
+  state.pickerMode = false;
 }
 
 /* ------------------------------------------------------------------ */
