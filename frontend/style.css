@@ -3340,3 +3340,15 @@ th.drop-target {
     background: var(--red-hover);
     border-color: var(--red-hover);
 }
+
+/* Checkbox column for row selection */
+.data-table .col-checkbox {
+    width: 32px;
+    min-width: 32px;
+    padding: var(--space-1) 4px;
+    text-align: center;
+}
+.data-table .col-checkbox input[type="checkbox"] {
+    cursor: pointer;
+    accent-color: var(--accent);
+}

@@ -1,66 +1,76 @@
 /**
  * actions-panel.js — Shared actions panel for CRUD pages.
  *
- * Renders a small action card (refresh + selection count) in the right column
- * of the filter area (4/5 + 1/5 grid). Each page uses this in init().
+ * Provides rendering and wiring for the right-side actions panel
+ * that appears on CRUD pages with bulk selection support.
  *
- * Usage:
- *   import { renderActionsPanel } from "../shared/actions-panel.js";
- *   const actionsHtml = renderActionsPanel("files");
- *   // In toolbar container:
- *   container.innerHTML = `
- *     <div style="display:grid;grid-template-columns:4fr 1fr;gap:var(--space-4);">
- *       <div>${toolbarHtml}</div>
- *       ${actionsHtml}
- *     </div>
- *     <div id="files-content">...</div>
- *   `;
+ * Panel structure:
+ *   Header: "Actions" + selection count badge
+ *   Buttons: Refresh + page-specific action buttons
+ *
+ * Exports:
+ *   renderActionsPanel(buttons)
+ *   wireActionsRefresh(container, pageId, refreshFn)
+ *   updateSelectionCount(container, count)
  */
+
+import { escapeHtml } from "./components.js";
 
 /**
  * Render the actions panel HTML.
- * @param {string} pageId — used to create unique DOM IDs
- * @param {object} [opts]
- * @param {boolean} [opts.hideRefresh] — hide the refresh button
+ *
+ * @param {Array<{id: string, label: string, icon: string, cls?: string, action: string}>} buttons
  * @returns {string} HTML
  */
-export function renderActionsPanel(pageId, opts = {}) {
+export function renderActionsPanel(buttons = []) {
+  const buttonsHtml = buttons
+    .map(
+      (b) =>
+        `<button class="btn btn-sm ${b.cls || ""}" id="tracks-actions-${b.id}" data-action="${b.action}"><i class="${b.icon}"></i> ${escapeHtml(b.label)}</button>`,
+    )
+    .join("");
+
   return `
-    <div class="actions-panel">
-      <div class="actions-panel-header">
-        <span><i class="fas fa-bolt"></i> Actions</span>
-        <span class="actions-sel-count" id="${pageId}-sel-count">0</span>
+    <div class="filter-panel" style="flex:1;min-width:180px;max-width:240px;">
+      <div class="filter-panel-header">
+        <span style="font-weight:600;font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.04em;"><i class="fas fa-bolt"></i> Actions</span>
+        <span class="actions-sel-count" id="tracks-sel-count" style="display:none">0</span>
       </div>
-      ${opts.hideRefresh ? "" : `<button class="btn btn-sm" id="${pageId}-actions-refresh"><i class="fas fa-rotate"></i> Refresh</button>`}
+      <div class="filter-panel-body" style="padding:var(--space-3) var(--space-4);display:flex;flex-direction:column;gap:var(--space-2);">
+        <button class="btn btn-sm" id="tracks-actions-refresh"><i class="fas fa-rotate"></i> Refresh</button>
+        ${buttonsHtml}
+      </div>
     </div>`;
 }
 
 /**
- * Wire the actions panel refresh button.
- * @param {Element} container
- * @param {string} pageId
- * @param {Function} onRefresh — async callback, return a promise
+ * Wire the refresh button in the actions panel.
+ *
+ * @param {HTMLElement} container - The page container
+ * @param {string} pageId - Page identifier
+ * @param {() => Promise<void>} refreshFn - Function to call on refresh
  */
-export function wireActionsRefresh(container, pageId, onRefresh) {
+export function wireActionsRefresh(container, pageId, refreshFn) {
   const btn = container.querySelector(`#${pageId}-actions-refresh`);
-  if (!btn) return;
-  btn.addEventListener("click", () => {
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-    Promise.resolve(onRefresh()).finally(() => {
-      btn.disabled = false;
-      btn.innerHTML = '<i class="fas fa-rotate"></i> Refresh';
-    });
-  });
+  if (btn) {
+    btn.onclick = () => refreshFn();
+  }
 }
 
 /**
- * Update the selection count in the actions panel.
- * @param {Element} container
- * @param {string} pageId
- * @param {number} count
+ * Update the selection count badge in the actions panel.
+ *
+ * @param {HTMLElement} container - The page container
+ * @param {number} count - Number of selected items
  */
-export function updateActionsSelCount(container, pageId, count) {
-  const el = container.querySelector(`#${pageId}-sel-count`);
-  if (el) el.textContent = count > 0 ? String(count) : "0";
+export function updateSelectionCount(container, count) {
+  const badge = container.querySelector("#tracks-sel-count");
+  if (badge) {
+    if (count > 0) {
+      badge.textContent = String(count);
+      badge.style.display = "";
+    } else {
+      badge.style.display = "none";
+    }
+  }
 }

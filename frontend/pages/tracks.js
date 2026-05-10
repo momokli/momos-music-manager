@@ -13,7 +13,12 @@
  */
 
 import { fetchJSON } from "../shared/api.js";
-import { escapeHtml, renderLoading, renderErrorBlock } from "../shared/components.js";
+import {
+  escapeHtml,
+  renderLoading,
+  renderErrorBlock,
+  showToast,
+} from "../shared/components.js";
 import { formatDuration } from "../shared/format.js";
 import { renderSearchInput, wireSearchFilter } from "../shared/search-filter.js";
 import {
@@ -33,7 +38,7 @@ import {
   wireColumnDragReorder,
   wireConfigTrigger,
 } from "../shared/column-config.js";
-import { renderActionsPanel } from "../shared/actions-panel.js";
+import { renderActionsPanel, updateSelectionCount } from "../shared/actions-panel.js";
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -263,6 +268,7 @@ function renderBody(data, state) {
   const totalPages = Math.ceil(totalCount / state.pageSize) || 1;
   const pageId = "tracks";
   const isScoped = !!state.playlistId;
+  const selectedSet = state.selectedTrackIds || new Set();
 
   // Load column config, hide Playlists when scoped to a playlist
   const config = loadColumnConfig("tracks", TRACKS_COLUMNS);
@@ -271,13 +277,28 @@ function renderBody(data, state) {
     if (plEntry) plEntry.visible = false;
   }
 
-  const headers = renderColumnHeaders(config, TRACKS_COLUMNS, state, sortableTh);
+  const dataHeaders = renderColumnHeaders(config, TRACKS_COLUMNS, state, sortableTh);
+
+  // Checkbox column header (select-all, outside column config)
+  const allOnPageSelected =
+    tracks.length > 0 && tracks.every((t) => selectedSet.has(t.id));
+  const checkboxHeader =
+    '<th class="col-checkbox"><input type="checkbox" class="tracks-select-all" id="tracks-select-all"' +
+    (allOnPageSelected ? " checked" : "") +
+    "></th>";
+  const headers = checkboxHeader + dataHeaders;
 
   const rowsHtml = tracks
-    .map(
-      (t) =>
-        `<tr>${renderColumnCells(config, TRACKS_COLUMNS, TRACKS_CELL_RENDERERS, t)}</tr>`,
-    )
+    .map((t) => {
+      const checked = selectedSet.has(t.id);
+      const cb =
+        '<td class="col-checkbox"><input type="checkbox" class="tracks-row-checkbox" data-track-id="' +
+        t.id +
+        '"' +
+        (checked ? " checked" : "") +
+        "></td>";
+      return `<tr>${cb}${renderColumnCells(config, TRACKS_COLUMNS, TRACKS_CELL_RENDERERS, t)}</tr>`;
+    })
     .join("");
 
   const stats = `<div class="stats-row">
@@ -320,13 +341,15 @@ function renderEmptyBody(state) {
     const plEntry = config.find((c) => c.id === "playlists");
     if (plEntry) plEntry.visible = false;
   }
-  const headers = renderColumnHeaders(
+  const dataHeaders = renderColumnHeaders(
     config,
     TRACKS_COLUMNS,
     { sort: "", order: "" },
     sortableTh,
   );
-  const visibleCount = config.filter((c) => c.visible).length;
+  const checkboxHeader = '<th class="col-checkbox"></th>';
+  const headers = checkboxHeader + dataHeaders;
+  const visibleCount = config.filter((c) => c.visible).length + 1;
 
   return `
     <div class="stats-row">
@@ -399,7 +422,7 @@ async function fetchAndRender(container, signal, state) {
       fetchJSON(`/api/tracks?${buildParams(state)}`, { signal }),
       fetchJSON(`/api/tracks/count?${buildParams(state)}`, { signal }),
     ]);
-    if (signal.aborted) return;
+    if (signal && signal.aborted) return;
 
     const clientTracks = tracksResp.data.map(adaptTrack);
 
@@ -412,15 +435,17 @@ async function fetchAndRender(container, signal, state) {
     if (data.tracks.length === 0 && data._total === 0) {
       setContent(renderEmptyBody(state));
       wireContentEvents(container, signal, state);
+      updateSelectionUI(container, state);
       return;
     }
 
     setContent(renderBody(data, state));
     wireContentEvents(container, signal, state);
+    updateSelectionUI(container, state);
   } catch (err) {
     if (err.name === "AbortError") return;
     try {
-      if (signal.aborted) return;
+      if (signal && signal.aborted) return;
     } catch {
       return;
     }
@@ -528,6 +553,144 @@ function wireContentEvents(container, signal, state) {
       fetchAndRender(container, signal, state);
     };
   }
+
+  // ── Checkbox selection ──
+  // Select-all checkbox
+  const selectAllCb = container.querySelector("#tracks-select-all");
+  if (selectAllCb) {
+    selectAllCb.onclick = () => {
+      const checked = selectAllCb.checked;
+      // Get all track IDs currently visible on the page
+      const rowCbs = container.querySelectorAll(".tracks-row-checkbox");
+      rowCbs.forEach((cb) => {
+        const trackId = parseInt(cb.dataset.trackId, 10);
+        if (checked) {
+          state.selectedTrackIds.add(trackId);
+        } else {
+          state.selectedTrackIds.delete(trackId);
+        }
+        cb.checked = checked;
+      });
+      updateSelectionUI(container, state);
+    };
+  }
+
+  // Individual row checkboxes
+  const rowCbs = container.querySelectorAll(".tracks-row-checkbox");
+  rowCbs.forEach((cb) => {
+    cb.onclick = () => {
+      const trackId = parseInt(cb.dataset.trackId, 10);
+      if (cb.checked) {
+        state.selectedTrackIds.add(trackId);
+      } else {
+        state.selectedTrackIds.delete(trackId);
+      }
+      // Update select-all checkbox
+      const allCb = container.querySelector("#tracks-select-all");
+      if (allCb) {
+        const allRowCbs = container.querySelectorAll(".tracks-row-checkbox");
+        allCb.checked =
+          allRowCbs.length > 0 && Array.from(allRowCbs).every((rc) => rc.checked);
+      }
+      updateSelectionUI(container, state);
+    };
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Selection + Bulk Actions                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Update the selection count badge and needs-comment count in the actions panel.
+ */
+function updateSelectionUI(container, state) {
+  const count = state.selectedTrackIds.size;
+  updateSelectionCount(container, count);
+
+  // Compute needs-comment count from backend
+  computeNeedsCount(container, state);
+}
+
+/**
+ * Query /api/tracks/needs-comment-count for the currently selected tracks.
+ * Updates the WRITE COMMENTS button label with the count.
+ */
+async function computeNeedsCount(container, state) {
+  const btn = container.querySelector("#tracks-actions-write-comments");
+  if (!btn) return;
+
+  const selectedIds = Array.from(state.selectedTrackIds);
+  if (selectedIds.length === 0) {
+    btn.innerHTML = '<i class="fas fa-pen"></i> WRITE COMMENTS';
+    state.needsCommentCount = 0;
+    return;
+  }
+
+  // Show loading indicator
+  btn.innerHTML = '<i class="fas fa-pen"></i> WRITE COMMENTS (...)';
+  btn.disabled = true;
+
+  try {
+    const resp = await fetchJSON("/api/tracks/needs-comment-count", {
+      method: "POST",
+      body: JSON.stringify({ trackIds: selectedIds }),
+    });
+    const data = resp.data;
+    state.needsCommentCount = data.tracksNeedingUpdate || 0;
+    btn.innerHTML = `<i class="fas fa-pen"></i> WRITE COMMENTS (${state.needsCommentCount})`;
+  } catch (err) {
+    console.warn("Failed to compute needs-comment count:", err);
+    btn.innerHTML = '<i class="fas fa-pen"></i> WRITE COMMENTS';
+  } finally {
+    btn.disabled = state.selectedTrackIds.size === 0;
+  }
+}
+
+/**
+ * Write comments for files linked to the currently selected tracks.
+ */
+async function writeCommentsForSelected(container, state) {
+  const selectedIds = Array.from(state.selectedTrackIds);
+  if (selectedIds.length === 0) {
+    showToast("No tracks selected.", "warning");
+    return;
+  }
+
+  const btn = container.querySelector("#tracks-actions-write-comments");
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Writing...';
+  }
+
+  try {
+    const resp = await fetchJSON("/api/tracks/write-comments", {
+      method: "POST",
+      body: JSON.stringify({ trackIds: selectedIds }),
+    });
+    const data = resp.data;
+    if (data.fileCount > 0) {
+      showToast(
+        `Comment write queued (task #${data.taskId}, ${data.fileCount} file(s))`,
+        "success",
+      );
+    } else {
+      showToast("All comments are up to date", "info");
+    }
+    // Reset selection after successful write
+    state.selectedTrackIds.clear();
+    state.needsCommentCount = 0;
+    updateSelectionUI(container, state);
+    // Re-render to clear checkboxes
+    fetchAndRender(container, null, state);
+  } catch (err) {
+    showToast(`Failed to queue comment write: ${err.message}`, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-pen"></i> WRITE COMMENTS';
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -561,6 +724,8 @@ export async function init(container, signal, hashParams) {
     playlistId: hashParams?.playlistId ? parseInt(hashParams.playlistId) : null,
     playlistName: hashParams?.playlistName || null,
     layoutMode: false,
+    selectedTrackIds: new Set(),
+    needsCommentCount: 0,
   };
 
   // Reset layout mode on page entry
@@ -580,17 +745,21 @@ export async function init(container, signal, hashParams) {
   }
 
   // Render stable toolbar + actions panel + content wrapper ONCE
+  const actionsHtml = renderActionsPanel([
+    {
+      id: "write-comments",
+      label: "WRITE COMMENTS",
+      icon: "fas fa-pen",
+      cls: "btn-primary btn-write-comments",
+      action: "write-comments",
+    },
+  ]);
+
   container.innerHTML = `
     <div style="display:flex;flex-direction:column;gap:var(--space-4);">
       <div style="display:flex;gap:var(--space-4);align-items:flex-start;">
         <div style="flex:4;min-width:0;">${renderToolbar(state.search, state)}</div>
-        <div class="actions-panel" style="flex:1;min-width:180px;max-width:220px;">
-          <div class="actions-panel-header">
-            <span><i class="fas fa-bolt"></i> Actions</span>
-            <span class="actions-sel-count" id="tracks-sel-count">0</span>
-          </div>
-          <button class="btn btn-sm" id="tracks-actions-refresh"><i class="fas fa-rotate"></i> Refresh</button>
-        </div>
+        ${actionsHtml}
       </div>
       <div id="tracks-content" style="min-height:200px;">${renderLoading("Loading tracks…")}</div>
     </div>`;
@@ -611,6 +780,12 @@ export async function init(container, signal, hashParams) {
       return fetchAndRender(container, signal, state);
     });
   });
+
+  // Wire WRITE COMMENTS button in actions panel
+  const writeBtn = container.querySelector("#tracks-actions-write-comments");
+  if (writeBtn) {
+    writeBtn.onclick = () => writeCommentsForSelected(container, state);
+  }
 
   // Wire playlist context clear button
   const clearBtn = container.querySelector(".playlist-context-clear");
