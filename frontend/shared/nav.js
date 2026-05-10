@@ -36,6 +36,7 @@ const NAV_SECTIONS = [
 ];
 
 const TOOLS_ITEMS = [
+  { id: "tag-curation", label: "Tag Curation", icon: "fa-sitemap" },
   { id: "auto-categorize", label: "Auto-Categorize", icon: "fa-brain" },
   { id: "digging", label: "Digging Curator", icon: "fa-bullseye" },
   { id: "data", label: "Import/Export", icon: "fa-database" },

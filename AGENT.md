@@ -659,6 +659,7 @@ Unlike tracks, files don't need a join — they ARE the comment-bearing entity. 
 2. **`POST /api/files/write-comments-by-ids`** — takes `{ fileIds: [1,2,3] }`, fetches files, filters to those needing updates, calls `start_write_comment_task`, returns `{ taskId, fileCount }`
 
 Router additions (in `src/api.rs`, near existing file routes):
+
 - `.route("/api/files/needs-comment-count", post(files_needs_comment_count_by_ids_handler))`
 - `.route("/api/files/write-comments-by-ids", post(files_write_comments_by_ids_handler))`
 
@@ -678,17 +679,17 @@ Same pattern as tracks, adapted to the files page structure:
 
 #### Key differences from tracks
 
-| Aspect | Tracks | Files |
-|--------|--------|-------|
-| Endpoint entity | tracks → joined to files via `v_file_track_link` | files directly |
-| needs-update count response | `{ totalTracks, tracksNeedingUpdate, filesNeedingUpdate }` | `{ totalFiles, filesNeedingUpdate }` |
-| needsUpdate field | computed server-side per-request | already in API response (`needsUpdate`), but still verify server-side for accuracy |
-| Import/state | `showToast`, `updateSelectionCount` already imported | `showToast` already imported, `updateSelectionCount` needs adding |
-| renderBody params | `(data, state)` — already has `state` | `(data, state)` — already has `state` |
+| Aspect                      | Tracks                                                     | Files                                                                              |
+| --------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Endpoint entity             | tracks → joined to files via `v_file_track_link`           | files directly                                                                     |
+| needs-update count response | `{ totalTracks, tracksNeedingUpdate, filesNeedingUpdate }` | `{ totalFiles, filesNeedingUpdate }`                                               |
+| needsUpdate field           | computed server-side per-request                           | already in API response (`needsUpdate`), but still verify server-side for accuracy |
+| Import/state                | `showToast`, `updateSelectionCount` already imported       | `showToast` already imported, `updateSelectionCount` needs adding                  |
+| renderBody params           | `(data, state)` — already has `state`                      | `(data, state)` — already has `state`                                              |
 
 #### Potential client-side optimization
 
-Files already return `needsUpdate` from the API. We *could* compute X client-side (count `selectedFileIds ∩ files.where(f => f.needsUpdate)`), avoiding the `/api/files/needs-comment-count` round-trip. But the server-side check is more accurate (recomputes target comment fresh), so stick with the backend endpoint for consistency with tracks.
+Files already return `needsUpdate` from the API. We _could_ compute X client-side (count `selectedFileIds ∩ files.where(f => f.needsUpdate)`), avoiding the `/api/files/needs-comment-count` round-trip. But the server-side check is more accurate (recomputes target comment fresh), so stick with the backend endpoint for consistency with tracks.
 
 ### Files to modify
 
@@ -724,6 +725,7 @@ Parse Spotify's `Retry-After` header from 429 responses and add retry logic with
 ### Technical detail
 
 rspotify's error chain is:
+
 ```
 rspotify::ClientError::Http(Box<rspotify_http::ReqwestError>)
   → ReqwestError::StatusCode(reqwest::Response)
@@ -746,6 +748,7 @@ We can downcast to `reqwest::Response` to read the header. This is already possi
 2. **Modify `sync_playlist_list`**: between playlist syncs, add a 300ms `tokio::sleep` to stay under Spotify's soft rate limit (~3 req/s).
 
 3. **Modify `sync_tracks_for_playlist`**: wrap the `get_playlist` call (the first API call that triggers 429) in a retry loop:
+
    ```
    for attempt in 0..3:
      match client.get_playlist(id):
@@ -753,6 +756,7 @@ We can downcast to `reqwest::Response` to read the header. This is already possi
        Err(e) if is_429(e) → sleep extract_retry_after(e) or default 5s, continue
        Err(e) → bail (not a rate limit)
    ```
+
    Same for `get_playlist_tracks`.
 
 4. **Modify `sync_playlists_only`**: same retry pattern for the playlist fetch loop.
@@ -771,3 +775,92 @@ We can downcast to `reqwest::Response` to read the header. This is already possi
 - [ ] Non-429 errors still fail immediately
 - [ ] Backend compiles (`cargo build`)
 - [ ] Batch sync runs without `429 Too Many Requests` failures (tested against Spotify)
+
+---
+
+## Plan: tag-parents
+
+**Status**: done ✅
+**Branch**: `feat/tag-parents`
+**Ready for review**: yes
+**Depends on**: nothing
+**Migration needed**: yes — `003_tag_parents.sql`
+
+### Description
+
+Allow Setlist-category tags (long playlist names) to have "parent" tags that replace them in file comments. A Setlist tag like `Dark Techno/2026/Hardtechno/...` resolves to parent tags `dark` (Mood), `techno` (Vibe), `hard` (Merkmal). Comments use the parent tag names and categories instead of the long original. Only Setlist tags can have parents; P/M/V/E tags cannot.
+
+### Schema
+
+- **`tag_parents`** table: `(id, tag_id, parent_tag_id, created_at)` with UNIQUE(tag_id, parent_tag_id)
+- **`v_resolved_tags`** view: for each tag, returns parent tags if they exist, otherwise the tag itself
+- **`v_file_resolved_tags`** view: like `v_file_tags` but resolves through `v_resolved_tags`
+
+### Backend Changes
+
+- **`src/db.rs`**: `get_tag_parents()`, `get_tag_children()`, `set_tag_parents()` (with validation: Setlist-only, no self-ref, parents must exist)
+- **`src/db.rs`**: `compute_target_comment()` now queries `v_file_resolved_tags` instead of `v_file_tags`
+- **`src/api.rs`**: `GET /api/tags/{id}/parents`, `PUT /api/tags/{id}/parents`, `GET /api/tags/{id}/children`
+
+### Frontend Changes
+
+- **`frontend/pages/tags.js`**: Edit modal shows "Parent Tags" section for Setlist tags with typeahead search, chip management, and save
+
+### Acceptance Criteria
+
+- [x] Setlist tags can be assigned parent tags via API and frontend
+- [x] Non-Setlist tags rejected with clear error
+- [x] Self-reference prevented
+- [x] Non-existent parent tags rejected
+- [x] `compute_target_comment` uses resolved parent tags (names + categories)
+- [x] Comment PMV indicators reflect parent tag categories
+- [x] Tags without parents work as before (backward compatible)
+- [x] Backend compiles (`cargo build`)
+- [x] Migration runs cleanly
+- [x] Tested with curl
+
+---
+
+## Plan: tag-curation-page
+
+**Status**: done ✅
+**Branch**: `feat/tag-curation-page`
+**Ready for review**: yes
+**Depends on**: `feat/tag-parents`
+**Migration needed**: no
+
+### Description
+
+A dedicated curation workflow page for going through Setlist tags and assigning parent tags efficiently. Combines a sequential workflow (prev/next through the queue) with a browsable table to jump around, plus smart search that can add existing tags or create-and-add new ones inline.
+
+### Backend Changes
+
+- **`src/db.rs`**: `get_curation_queue()` — returns Setlist tags with parent counts, file counts, and full parent tag details as JSON. Filterable by search, has_parents (yes/no/any), sortable by name/length/files/parents.
+- **`src/api.rs`**: `GET /api/tags/curation-queue` endpoint with `CurationQueueQuery` params
+
+### Frontend Changes
+
+- **`frontend/pages/tag-curation.js`** — new 950-line page module with:
+  - Top nav bar: prev/next with progress bar (keyboard shortcuts ←/→ or p/n)
+  - Tag card: big tag name, metadata
+  - Parent tags editor: chips with remove, typeahead search with "Add" button, inline "Create & Add" popover (category picker → create → add as parent)
+  - Browse All: collapsible mini table of Setlist tags with search/sort/filter, click to jump
+  - Auto-save: every add/remove immediately PUTs parents; navigation waits for in-flight saves
+- **`frontend/app.js`**: register `"tag-curation"` in PAGE_MAP
+- **`frontend/shared/nav.js`**: add "Tag Curation" link to TOOLS_ITEMS
+
+### Acceptance Criteria
+
+- [x] Curation queue lists all Setlist tags sorted by name length (descending)
+- [x] Search filter works (by tag name)
+- [x] has_parents filter works (yes/no/any)
+- [x] Sort by name/length/files/parents works
+- [x] Each result includes parent tag details (id, name, category, icon)
+- [x] Parent chips show category badges with correct colors
+- [x] Typeahead search finds existing tags and can add them as parents
+- [x] "Create & Add" flow creates a new tag and immediately adds as parent
+- [x] Removing a parent chip removes the parent relationship
+- [x] Auto-save: changes persist immediately via API
+- [x] Navigation (prev/next/jump) works with auto-save
+- [x] Backend compiles (`cargo build`)
+- [x] Tested with curl

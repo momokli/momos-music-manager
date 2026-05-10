@@ -993,6 +993,112 @@ pub async fn delete_tag(pool: &Pool<Sqlite>, tag_id: i64) -> Result<()> {
     Ok(())
 }
 
+// ─── Tag Parents ────────────────────────────────────────────────────────────
+
+/// Get all parent tags for a given tag
+pub async fn get_tag_parents(pool: &Pool<Sqlite>, tag_id: i64) -> Result<Vec<Tag>> {
+    let parents = sqlx::query_as::<_, Tag>(
+        r#"
+        SELECT t.id, t.name, t.category_id, t.sort_order, t.created_at
+        FROM tag_parents tp
+        JOIN tags t ON t.id = tp.parent_tag_id
+        WHERE tp.tag_id = ?
+        ORDER BY t.name
+        "#,
+    )
+    .bind(tag_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(parents)
+}
+
+/// Get all tags that use this tag as a parent (reverse lookup)
+pub async fn get_tag_children(pool: &Pool<Sqlite>, parent_tag_id: i64) -> Result<Vec<Tag>> {
+    let children = sqlx::query_as::<_, Tag>(
+        r#"
+        SELECT t.id, t.name, t.category_id, t.sort_order, t.created_at
+        FROM tag_parents tp
+        JOIN tags t ON t.id = tp.tag_id
+        WHERE tp.parent_tag_id = ?
+        ORDER BY t.name
+        "#,
+    )
+    .bind(parent_tag_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(children)
+}
+
+/// Set parent tags for a tag (replaces all existing parents).
+/// Only tags in the Setlist category can have parents.
+/// Returns the new list of parent tags.
+pub async fn set_tag_parents(
+    pool: &Pool<Sqlite>,
+    tag_id: i64,
+    parent_tag_ids: &[i64],
+) -> Result<Vec<Tag>> {
+    // Validate: the tag must be in the Setlist category
+    let category_row = sqlx::query(
+        "SELECT tc.name FROM tags t JOIN tag_categories tc ON tc.id = t.category_id WHERE t.id = ?",
+    )
+    .bind(tag_id)
+    .fetch_optional(pool)
+    .await?;
+
+    match category_row {
+        Some(row) => {
+            let cat_name: String = row.try_get("name")?;
+            if cat_name != "Setlist" {
+                return Err(anyhow::anyhow!(
+                    "Only Setlist tags can have parent tags. Tag is in category: {}",
+                    cat_name
+                ));
+            }
+        }
+        None => return Err(anyhow::anyhow!("Tag with id {} not found", tag_id)),
+    }
+
+    // Validate: no self-reference
+    if parent_tag_ids.contains(&tag_id) {
+        return Err(anyhow::anyhow!("A tag cannot be its own parent"));
+    }
+
+    // Validate: all parent tags exist
+    for &parent_id in parent_tag_ids {
+        let exists: bool = sqlx::query_scalar("SELECT COUNT(*) > 0 FROM tags WHERE id = ?")
+            .bind(parent_id)
+            .fetch_one(pool)
+            .await?;
+        if !exists {
+            return Err(anyhow::anyhow!(
+                "Parent tag with id {} not found",
+                parent_id
+            ));
+        }
+    }
+
+    // Delete existing parents and insert new ones in a transaction
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("DELETE FROM tag_parents WHERE tag_id = ?")
+        .bind(tag_id)
+        .execute(&mut *tx)
+        .await?;
+
+    for &parent_id in parent_tag_ids {
+        sqlx::query("INSERT OR IGNORE INTO tag_parents (tag_id, parent_tag_id) VALUES (?, ?)")
+            .bind(tag_id)
+            .bind(parent_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    tx.commit().await?;
+
+    // Return the new parent tags
+    get_tag_parents(pool, tag_id).await
+}
+
 /// Get playlists that don't have corresponding tags (case-insensitive name matching)
 pub async fn get_playlists_without_tags(pool: &Pool<Sqlite>) -> Result<Vec<ServicePlaylist>> {
     let playlists = sqlx::query_as::<_, ServicePlaylist>(
@@ -1604,12 +1710,13 @@ pub async fn compute_target_comment(pool: &Pool<Sqlite>, file_id: i64) -> Result
         .fetch_one(pool)
         .await?;
 
-    // Get all tags for this file with category prefix via v_file_tags view
+    // Get all tags for this file with category prefix via v_file_resolved_tags view
+    // This resolves Setlist tags through their parent tags (if any)
     let tag_rows = sqlx::query(
-        "SELECT ft.tag_name, ft.prefix
-         FROM v_file_tags ft
-         WHERE ft.file_id = ?
-         ORDER BY ft.sort_order, ft.tag_name",
+        "SELECT frt.tag_name, frt.prefix
+         FROM v_file_resolved_tags frt
+         WHERE frt.file_id = ?
+         ORDER BY frt.sort_order, frt.tag_name",
     )
     .bind(file_id)
     .fetch_all(pool)
@@ -2347,6 +2454,110 @@ async fn row_by_service_and_playlist_id(
 // Tag Similarity (Semantic Tag Matching)
 // ============================================================================
 
+// ─── Curation Queue ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct CurationTag {
+    pub id: i64,
+    pub name: String,
+    pub file_count: i64,
+    pub parent_count: i64,
+    pub category_id: i64,
+    pub category: String,
+    pub category_icon: String,
+    pub parents_json: String,
+}
+
+/// Get the curation queue: all Setlist tags with file counts, parent counts,
+/// and full parent tag details as a JSON string.
+pub async fn get_curation_queue(
+    pool: &Pool<Sqlite>,
+    search: Option<&str>,
+    sort: Option<&str>,
+    order: Option<&str>,
+    has_parents: Option<&str>,
+    limit: Option<i64>,
+) -> Result<Vec<CurationTag>> {
+    let limit = limit.unwrap_or(200);
+    let search_pattern = search.and_then(|s| {
+        if s.is_empty() {
+            None
+        } else {
+            Some(format!("%{}%", s))
+        }
+    });
+
+    let mut sql = String::from(
+        r#"
+        SELECT
+            t.id,
+            t.name,
+            COALESCE(vfc.file_count, 0) AS file_count,
+            COALESCE(tp_count.parent_count, 0) AS parent_count,
+            tc.id AS category_id,
+            tc.name AS category,
+            tc.icon AS category_icon,
+            COALESCE(
+                (SELECT json_group_array(json_object(
+                    'id', pt.id,
+                    'name', pt.name,
+                    'category', ptc.name,
+                    'categoryIcon', ptc.icon
+                ))
+                 FROM tag_parents tp
+                 JOIN tags pt ON pt.id = tp.parent_tag_id
+                 JOIN tag_categories ptc ON ptc.id = pt.category_id
+                 WHERE tp.tag_id = t.id),
+                '[]'
+            ) AS parents_json
+        FROM tags t
+        JOIN tag_categories tc ON tc.id = t.category_id
+        LEFT JOIN v_tag_file_counts vfc ON vfc.tag_id = t.id
+        LEFT JOIN (
+            SELECT tag_id, COUNT(*) AS parent_count
+            FROM tag_parents
+            GROUP BY tag_id
+        ) tp_count ON tp_count.tag_id = t.id
+        WHERE tc.name = 'Setlist'
+        "#,
+    );
+
+    if search_pattern.is_some() {
+        sql.push_str(" AND t.name LIKE ?");
+    }
+
+    if let Some(has_p) = has_parents {
+        match has_p {
+            "yes" => sql.push_str(" AND tp_count.parent_count > 0"),
+            "no" => {
+                sql.push_str(" AND (tp_count.parent_count = 0 OR tp_count.parent_count IS NULL)")
+            }
+            _ => {} // "any" or anything else → no filter
+        }
+    }
+
+    // Sort: name | length | files | parents; default length DESC
+    let sort_col = match sort {
+        Some("name") => "t.name",
+        Some("files") => "file_count",
+        Some("parents") => "parent_count",
+        _ => "LENGTH(t.name)", // "length" or default
+    };
+    let ord = match order {
+        Some("asc") => "ASC",
+        _ => "DESC", // default desc
+    };
+    sql.push_str(&format!(" ORDER BY {} {}", sort_col, ord));
+    sql.push_str(" LIMIT ?");
+
+    let mut q = sqlx::query_as::<_, CurationTag>(&sql);
+    if let Some(ref pattern) = search_pattern {
+        q = q.bind(pattern);
+    }
+    q = q.bind(limit);
+    q.fetch_all(pool).await.map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 /// Get all tags associated with a file (via service track → playlist → tag matching)
 pub async fn get_tags_for_file(pool: &Pool<Sqlite>, file_id: i64) -> Result<Vec<Tag>> {
     // Get all tags for this file via v_file_tags view (resolves file→track→playlist→tag)
@@ -2528,7 +2739,6 @@ pub async fn find_tag_similar_tracks(
                 // Check if we already have this pair
                 let already = entry.5.iter().any(|(s, _, _)| s == seed_name);
                 if !already {
-                    // Get the best similarity for this seed->candidate pair
                     let best_sim = seed_matches
                         .iter()
                         .filter(|(st, _)| st == seed_tid)

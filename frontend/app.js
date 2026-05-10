@@ -27,6 +27,7 @@ const PAGE_MAP = {
   "traktor-import": "traktor-import",
   "deemix-queue": "deemix-queue",
   data: "data",
+  "tag-curation": "tag-curation",
 };
 
 let currentPageId = null;

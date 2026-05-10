@@ -406,7 +406,26 @@ function showNewTagModal(categories, reloadFn) {
   });
 }
 
-function showEditTagModal(tagId, currentName, currentCategory, categories, reloadFn) {
+async function showEditTagModal(
+  tagId,
+  currentName,
+  currentCategory,
+  categories,
+  reloadFn,
+) {
+  const isSetlist = currentCategory === "Setlist";
+
+  // Fetch parent tags if this is a Setlist tag
+  let parents = [];
+  if (isSetlist) {
+    try {
+      const resp = await fetchJSON(`/api/tags/${tagId}/parents`);
+      parents = resp.data || [];
+    } catch (_) {
+      // Ignore — parents section just won't show pre-loaded data
+    }
+  }
+
   const catOptions = categories
     .map(
       (c) =>
@@ -414,9 +433,47 @@ function showEditTagModal(tagId, currentName, currentCategory, categories, reloa
     )
     .join("");
 
+  // Build parent tags section HTML (only for Setlist tags)
+  let parentSectionHtml = "";
+  if (isSetlist) {
+    const chipHtml =
+      parents.length > 0
+        ? parents
+            .map(
+              (p) =>
+                `<span class="tag-chip" data-parent-id="${p.id}" style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;background:var(--surface-2);border-radius:4px;font-size:0.85rem;margin:2px;">
+                  <span class="category-badge" style="color:${(CATEGORY_INFO[p.category] || CATEGORY_INFO.Setlist).color};font-size:0.7rem;font-weight:700;">${p.category || "?"}</span>
+                  ${escapeHtml(p.name)}
+                  <button class="btn btn-sm btn-icon parent-remove-btn" data-parent-id="${p.id}" style="padding:0 4px;line-height:1;color:var(--text-subtle);" title="Remove parent"><i class="fas fa-times"></i></button>
+                </span>`,
+            )
+            .join("")
+        : `<span class="text-subtle" style="font-size:0.85rem;">No parent tags set. This long tag name will appear in comments as-is.</span>`;
+
+    parentSectionHtml = `
+      <div class="form-group" style="margin-top:var(--space-4);padding-top:var(--space-4);border-top:1px solid var(--border-color);">
+        <label style="display:flex;align-items:center;gap:6px;">
+          <i class="fas fa-sitemap"></i> Parent Tags
+          <span class="text-subtle" style="font-weight:400;font-size:0.8rem;">(aliases used in comments)</span>
+        </label>
+        <div id="edit-tag-parents-chips" style="display:flex;flex-wrap:wrap;gap:2px;margin-bottom:8px;min-height:28px;">
+          ${chipHtml}
+        </div>
+        <div style="display:flex;gap:6px;">
+          <div class="typeahead-wrap" style="flex:1;position:relative;">
+            <input type="text" class="input-text w-full" id="edit-tag-parent-search" placeholder="Search tags to add as parents…" autocomplete="off">
+            <div id="edit-tag-parent-dropdown" class="typeahead-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;max-height:200px;overflow-y:auto;background:var(--bg);border:1px solid var(--border-color);border-radius:0 0 var(--radius) var(--radius);z-index:100;"></div>
+          </div>
+        </div>
+        <div class="text-subtle" style="font-size:0.75rem;margin-top:4px;">
+          Parent tags replace this tag in file comments. Each parent contributes its own category (P/M/V/E).
+        </div>
+      </div>`;
+  }
+
   showModal({
     title: `Edit Tag`,
-    width: "500px",
+    width: isSetlist ? "560px" : "500px",
     bodyHtml: `
       <div style="padding:var(--space-6);">
         <div class="form-group">
@@ -429,6 +486,7 @@ function showEditTagModal(tagId, currentName, currentCategory, categories, reloa
             ${catOptions}
           </select>
         </div>
+        ${parentSectionHtml}
       </div>
       <div class="modal-actions" style="padding:0 var(--space-6) var(--space-6)">
         <button class="btn" data-modal-action="close">Cancel</button>
@@ -451,10 +509,26 @@ function showEditTagModal(tagId, currentName, currentCategory, categories, reloa
         return;
       }
       try {
+        // Save tag metadata
         await fetchJSON(`/api/tags/${tagId}`, {
           method: "PUT",
           body: JSON.stringify({ name, categoryId }),
         });
+
+        // Save parent tags (only if Setlist — collect from chips)
+        if (isSetlist) {
+          const chips = document.querySelectorAll(
+            "#edit-tag-parents-chips .tag-chip[data-parent-id]",
+          );
+          const parentIds = Array.from(chips).map((c) =>
+            parseInt(c.dataset.parentId, 10),
+          );
+          await fetchJSON(`/api/tags/${tagId}/parents`, {
+            method: "PUT",
+            body: JSON.stringify({ parentTagIds: parentIds }),
+          });
+        }
+
         showToast("Tag updated", "success");
         close();
         reloadFn();
@@ -462,6 +536,151 @@ function showEditTagModal(tagId, currentName, currentCategory, categories, reloa
         showToast(`Failed: ${err.message}`, "error");
       }
     },
+  });
+
+  // Wire parent tag typeahead (only for Setlist tags)
+  if (isSetlist) {
+    wireParentTypeahead(tagId, parents);
+  }
+}
+
+/** Wire the parent tag typeahead search + chip management */
+function wireParentTypeahead(tagId, initialParents) {
+  const searchInput = document.getElementById("edit-tag-parent-search");
+  const dropdown = document.getElementById("edit-tag-parent-dropdown");
+  const chipsContainer = document.getElementById("edit-tag-parents-chips");
+  if (!searchInput || !dropdown || !chipsContainer) return;
+
+  // Track parent IDs in a Set for quick lookup
+  const parentIds = new Set(initialParents.map((p) => p.id));
+  let debounceTimer = null;
+
+  // Add a parent tag chip to the UI
+  function addParentChip(tag) {
+    if (parentIds.has(tag.id)) return;
+    parentIds.add(tag.id);
+
+    const catInfo = CATEGORY_INFO[tag.category] || CATEGORY_INFO.Setlist;
+    const chip = document.createElement("span");
+    chip.className = "tag-chip";
+    chip.dataset.parentId = tag.id;
+    chip.style.cssText =
+      "display:inline-flex;align-items:center;gap:4px;padding:2px 8px;background:var(--surface-2);border-radius:4px;font-size:0.85rem;margin:2px;";
+    chip.innerHTML = `
+      <span class="category-badge" style="color:${catInfo.color};font-size:0.7rem;font-weight:700;">${tag.category || "?"}</span>
+      ${escapeHtml(tag.name)}
+      <button class="btn btn-sm btn-icon parent-remove-btn" data-parent-id="${tag.id}" style="padding:0 4px;line-height:1;color:var(--text-subtle);" title="Remove parent"><i class="fas fa-times"></i></button>
+    `;
+
+    // Wire remove button
+    chip.querySelector(".parent-remove-btn").addEventListener("click", () => {
+      parentIds.delete(tag.id);
+      chip.remove();
+      updatePlaceholder();
+    });
+
+    chipsContainer.appendChild(chip);
+    updatePlaceholder();
+  }
+
+  // Show/hide the "no parents" placeholder
+  function updatePlaceholder() {
+    const existing = chipsContainer.querySelector(".text-subtle");
+    if (parentIds.size === 0) {
+      if (!existing) {
+        const ph = document.createElement("span");
+        ph.className = "text-subtle";
+        ph.style.cssText = "font-size:0.85rem;";
+        ph.textContent =
+          "No parent tags set. This long tag name will appear in comments as-is.";
+        chipsContainer.appendChild(ph);
+      }
+    } else {
+      if (existing) existing.remove();
+    }
+  }
+
+  // Wire remove on existing chips
+  chipsContainer.querySelectorAll(".parent-remove-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pid = parseInt(btn.dataset.parentId, 10);
+      parentIds.delete(pid);
+      btn.closest(".tag-chip")?.remove();
+      updatePlaceholder();
+    });
+  });
+
+  // Typeahead search
+  searchInput.addEventListener("input", () => {
+    clearTimeout(debounceTimer);
+    const q = searchInput.value.trim();
+    if (q.length < 1) {
+      dropdown.style.display = "none";
+      return;
+    }
+    debounceTimer = setTimeout(async () => {
+      try {
+        const resp = await fetchJSON(
+          `/api/tags?search=${encodeURIComponent(q)}&limit=10`,
+        );
+        const results = (resp.data || []).filter(
+          (t) => t.id !== tagId && !parentIds.has(t.id),
+        );
+        if (results.length === 0) {
+          dropdown.innerHTML =
+            '<div style="padding:8px 12px;color:var(--text-subtle);font-size:0.85rem;">No matching tags</div>';
+        } else {
+          dropdown.innerHTML = results
+            .map((t) => {
+              const catInfo = CATEGORY_INFO[t.category] || CATEGORY_INFO.Setlist;
+              return `<div class="typeahead-item" data-id="${t.id}" data-name="${escapeHtml(t.name)}" data-category="${escapeHtml(t.category || "")}" style="padding:6px 12px;cursor:pointer;display:flex;align-items:center;gap:6px;">
+                <span class="category-badge" style="color:${catInfo.color};font-size:0.7rem;font-weight:700;">${t.category || "?"}</span>
+                ${escapeHtml(t.name)}
+              </div>`;
+            })
+            .join("");
+        }
+        dropdown.style.display = "block";
+      } catch (_) {
+        dropdown.style.display = "none";
+      }
+    }, 250);
+  });
+
+  // Click to select from dropdown
+  dropdown.addEventListener("click", (e) => {
+    const item = e.target.closest(".typeahead-item");
+    if (!item) return;
+    const id = parseInt(item.dataset.id, 10);
+    const name = item.dataset.name;
+    const category = item.dataset.category;
+    addParentChip({ id, name, category });
+    searchInput.value = "";
+    dropdown.style.display = "none";
+  });
+
+  // Close dropdown on outside click
+  document.addEventListener("click", (e) => {
+    if (!searchInput.contains(e.target) && !dropdown.contains(e.target)) {
+      dropdown.style.display = "none";
+    }
+  });
+
+  // Keyboard: Enter to select first, Escape to close
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      dropdown.style.display = "none";
+    } else if (e.key === "Enter") {
+      const first = dropdown.querySelector(".typeahead-item");
+      if (first) {
+        const id = parseInt(first.dataset.id, 10);
+        const name = first.dataset.name;
+        const category = first.dataset.category;
+        addParentChip({ id, name, category });
+        searchInput.value = "";
+        dropdown.style.display = "none";
+      }
+    }
   });
 }
 

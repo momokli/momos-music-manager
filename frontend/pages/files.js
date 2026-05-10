@@ -885,6 +885,11 @@ function wireToolbarEvents(container, signal, state) {
       tagSearch.value = "";
       tagDropdown.classList.remove("open");
       tagDropdown.innerHTML = "";
+      tagDropdown.style.position = "";
+      tagDropdown.style.top = "";
+      tagDropdown.style.left = "";
+      tagDropdown.style.width = "";
+      tagDropdown.style.zIndex = "";
       selectedIndex = -1;
       renderTagChips();
       updateHash("files", state, HASH_DEFAULTS);
@@ -900,6 +905,11 @@ function wireToolbarEvents(container, signal, state) {
         if (!q) {
           tagDropdown.classList.remove("open");
           tagDropdown.innerHTML = "";
+          tagDropdown.style.position = "";
+          tagDropdown.style.top = "";
+          tagDropdown.style.left = "";
+          tagDropdown.style.width = "";
+          tagDropdown.style.zIndex = "";
           return;
         }
         timer = setTimeout(async () => {
@@ -921,6 +931,13 @@ function wireToolbarEvents(container, signal, state) {
                 .join("");
               selectedIndex = 0;
             }
+            // Position dropdown relative to viewport to escape overflow clipping
+            const rect = tagSearch.getBoundingClientRect();
+            tagDropdown.style.position = "fixed";
+            tagDropdown.style.top = rect.bottom + 2 + "px";
+            tagDropdown.style.left = rect.left + "px";
+            tagDropdown.style.width = rect.width + "px";
+            tagDropdown.style.zIndex = "200";
             tagDropdown.classList.add("open");
           } catch {
             // ignore errors during search
@@ -944,6 +961,11 @@ function wireToolbarEvents(container, signal, state) {
         tagSearch.value = "";
         tagDropdown.classList.remove("open");
         tagDropdown.innerHTML = "";
+        tagDropdown.style.position = "";
+        tagDropdown.style.top = "";
+        tagDropdown.style.left = "";
+        tagDropdown.style.width = "";
+        tagDropdown.style.zIndex = "";
         selectedIndex = -1;
         renderTagChips();
         updateHash("files", state, HASH_DEFAULTS);
@@ -977,6 +999,11 @@ function wireToolbarEvents(container, signal, state) {
           case "Escape":
             tagDropdown.classList.remove("open");
             tagDropdown.innerHTML = "";
+            tagDropdown.style.position = "";
+            tagDropdown.style.top = "";
+            tagDropdown.style.left = "";
+            tagDropdown.style.width = "";
+            tagDropdown.style.zIndex = "";
             selectedIndex = -1;
             tagSearch.blur();
             break;
@@ -994,11 +1021,27 @@ function wireToolbarEvents(container, signal, state) {
         if (tagDropdown) {
           tagDropdown.classList.remove("open");
           tagDropdown.innerHTML = "";
+          tagDropdown.style.position = "";
+          tagDropdown.style.top = "";
+          tagDropdown.style.left = "";
+          tagDropdown.style.width = "";
+          tagDropdown.style.zIndex = "";
           selectedIndex = -1;
         }
       },
       { signal },
     );
+
+    // Reposition dropdown on scroll/resize while open
+    function repositionDropdown() {
+      if (!tagDropdown.classList.contains("open")) return;
+      const rect = tagSearch.getBoundingClientRect();
+      tagDropdown.style.top = rect.bottom + 2 + "px";
+      tagDropdown.style.left = rect.left + "px";
+      tagDropdown.style.width = rect.width + "px";
+    }
+    window.addEventListener("scroll", repositionDropdown, { signal, passive: true });
+    window.addEventListener("resize", repositionDropdown, { signal, passive: true });
   }
 
   // ── Tag chip rendering helper ──

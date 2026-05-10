@@ -25,16 +25,17 @@ use crate::AppState;
 use crate::config::ServiceCredentials;
 #[allow(unused_imports)]
 use crate::db::{
-    File, Folder, ServiceConfig, ServiceConnections, ServiceTrack, bulk_check_tags,
+    CurationTag, File, Folder, ServiceConfig, ServiceConnections, ServiceTrack, bulk_check_tags,
     bulk_create_tags, bulk_review_tags, bulk_update_tags, categorize_tag as db_categorize_tag,
     clear_all_embeddings, compute_target_comment, create_tag, create_tag_category,
     create_tags_from_playlists, delete_folder, delete_tag, delete_tag_category,
-    find_tag_similar_tracks, get_all_embeddings, get_embeddings_by_category, get_folder_by_id,
-    get_folder_file_count, get_folders as db_get_folders, get_playlists_without_tags,
-    get_service_config, get_tag_categories, get_tag_category_by_id, get_tag_embedding,
-    get_tag_review_counts, get_tags_for_file, get_unreviewed_tags, list_subscriptions, scan_folder,
-    update_folder_active, update_folder_with_config, update_service_connection_status,
-    update_service_tokens, update_tag, update_tag_category_metadata, upsert_tag_embedding,
+    find_tag_similar_tracks, get_all_embeddings, get_curation_queue, get_embeddings_by_category,
+    get_folder_by_id, get_folder_file_count, get_folders as db_get_folders,
+    get_playlists_without_tags, get_service_config, get_tag_categories, get_tag_category_by_id,
+    get_tag_children, get_tag_embedding, get_tag_parents, get_tag_review_counts, get_tags_for_file,
+    get_unreviewed_tags, list_subscriptions, scan_folder, set_tag_parents, update_folder_active,
+    update_folder_with_config, update_service_connection_status, update_service_tokens, update_tag,
+    update_tag_category_metadata, upsert_tag_embedding,
 };
 use crate::deemix::{
     DeemixAuthRequest, DeemixClient, DeemixCombinedQueueItem, DeemixEnqueueRequest,
@@ -626,6 +627,37 @@ pub struct TagsQuery {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct CurationQueueQuery {
+    pub search: Option<String>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+    #[serde(rename = "has_parents")]
+    pub has_parents: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurationParentTag {
+    pub id: i64,
+    pub name: String,
+    pub category: String,
+    pub category_icon: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurationQueueTag {
+    pub id: i64,
+    pub name: String,
+    pub category: String,
+    pub category_icon: String,
+    pub file_count: i64,
+    pub parent_count: i64,
+    pub parents: Vec<CurationParentTag>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FoldersQuery {
     pub limit: Option<i64>,
@@ -922,6 +954,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/tracks/{id}", get(track_handler))
         .route("/api/tags", get(tags_handler).post(create_tag_handler))
         .route("/api/tags/count", get(tags_count_handler))
+        .route("/api/tags/curation-queue", get(curation_queue_handler))
         .route(
             "/api/tags/service-coverage",
             get(tags_service_coverage_handler),
@@ -943,6 +976,11 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/tags/unreviewed", get(unreviewed_tags_handler))
         .route("/api/tags/{id}/categorize", put(categorize_tag_handler))
         .route("/api/tags/{id}/suggest", get(suggest_category_handler))
+        .route(
+            "/api/tags/{id}/parents",
+            get(tag_parents_handler).put(tag_parents_set_handler),
+        )
+        .route("/api/tags/{id}/children", get(tag_children_handler))
         .route("/api/embeddings/status", get(embeddings_status_handler))
         .route("/api/tags/bulk-import", post(bulk_import_handler))
         .route("/api/tags/bulk-resolve", post(bulk_resolve_handler))
@@ -2088,6 +2126,45 @@ async fn bulk_tag_handler(
         Err(e) => internal_error(e).into_response(),
     }
 }
+
+async fn curation_queue_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CurationQueueQuery>,
+) -> impl IntoResponse {
+    match get_curation_queue(
+        &state.db,
+        query.search.as_deref(),
+        query.sort.as_deref(),
+        query.order.as_deref(),
+        query.has_parents.as_deref(),
+        query.limit,
+    )
+    .await
+    {
+        Ok(tags) => {
+            // Parse parents_json into Vec<CurationParentTag> for each tag
+            let result: Vec<CurationQueueTag> = tags
+                .into_iter()
+                .map(|t| {
+                    let parents: Vec<CurationParentTag> =
+                        serde_json::from_str(&t.parents_json).unwrap_or_default();
+                    CurationQueueTag {
+                        id: t.id,
+                        name: t.name,
+                        category: t.category,
+                        category_icon: t.category_icon,
+                        file_count: t.file_count,
+                        parent_count: t.parent_count,
+                        parents,
+                    }
+                })
+                .collect();
+            Json(ApiResponse { data: result }).into_response()
+        }
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
 async fn tags_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TagsQuery>,
@@ -7630,6 +7707,91 @@ async fn find_tag_similar_tracks_handler(
 
     match crate::db::find_tag_similar_tracks(&state.db, id, limit).await {
         Ok(results) => Json(ApiResponse { data: results }).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+// ─── Tag Parents / Children Handlers ─────────────────────────────────────────
+
+/// Request body for setting tag parents
+#[derive(Debug, Deserialize)]
+struct SetTagParentsRequest {
+    #[serde(rename = "parentTagIds")]
+    parent_tag_ids: Vec<i64>,
+}
+
+/// GET /api/tags/{id}/parents
+/// Returns the parent tags for a given tag.
+async fn tag_parents_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match get_tag_parents(&state.db, id).await {
+        Ok(parents) => {
+            // Convert Tag to API Tag with category info
+            let mut api_tags: Vec<Tag> = Vec::new();
+            for parent in parents {
+                if let Ok(Some(api_tag)) = get_tag_with_category(&state.db, parent.id).await {
+                    api_tags.push(api_tag);
+                }
+            }
+            Json(ApiResponse { data: api_tags }).into_response()
+        }
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+/// PUT /api/tags/{id}/parents
+/// Sets (replaces) parent tags for a tag. Only Setlist tags can have parents.
+async fn tag_parents_set_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(request): Json<SetTagParentsRequest>,
+) -> impl IntoResponse {
+    match set_tag_parents(&state.db, id, &request.parent_tag_ids).await {
+        Ok(parents) => {
+            let mut api_tags: Vec<Tag> = Vec::new();
+            for parent in parents {
+                if let Ok(Some(api_tag)) = get_tag_with_category(&state.db, parent.id).await {
+                    api_tags.push(api_tag);
+                }
+            }
+            Json(ApiResponse { data: api_tags }).into_response()
+        }
+        Err(e) => {
+            let err_msg = e.to_string();
+            if err_msg.contains("Only Setlist tags")
+                || err_msg.contains("own parent")
+                || err_msg.contains("not found")
+            {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse { error: err_msg }),
+                )
+                    .into_response()
+            } else {
+                internal_error(e).into_response()
+            }
+        }
+    }
+}
+
+/// GET /api/tags/{id}/children
+/// Returns all tags that use this tag as a parent (reverse lookup).
+async fn tag_children_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match get_tag_children(&state.db, id).await {
+        Ok(children) => {
+            let mut api_tags: Vec<Tag> = Vec::new();
+            for child in children {
+                if let Ok(Some(api_tag)) = get_tag_with_category(&state.db, child.id).await {
+                    api_tags.push(api_tag);
+                }
+            }
+            Json(ApiResponse { data: api_tags }).into_response()
+        }
         Err(e) => internal_error(e).into_response(),
     }
 }
