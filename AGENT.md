@@ -1,6 +1,6 @@
 # Momo's Music Manager — Agent Guidance
 
-> **Last Updated**: 2026-06-10 — v0.2.0 release prep (review/all-features)
+> **Last Updated**: 2026-05-11 — v0.2.0 released
 
 ---
 
@@ -21,15 +21,29 @@ Single developer, no production data, no backward compatibility needed.
 
 ### Workflow
 
-1. **`main` is always clean** — never commit directly to `main`. Every change goes through a feature branch.
+1. **`main` is always clean** — never commit directly to `main`. Every change goes through a feature branch or the review staging branch.
 2. **Feature branches** — `feat/short-description` or `fix/short-description`, branched from `main`.
-3. **Rebase > Merge** — rebase feature branch onto `main`, then fast-forward merge. Linear history.
-4. **Additive migrations** — never modify `001_initial_schema.sql`. New schema changes = `002_description.sql`, `003_description.sql`, etc. `sqlx::migrate!()` handles ordering.
-5. **Plan first** — every task starts with a Plan entry in Section 2 of this file. User reviews the plan, then agents are spawned.
+3. **Staging branch** — `review/all-features` collects feature branches for a release. Feature branches are merged into it (not rebased). Small features or cleanup can be committed directly on it.
+4. **Plan first** — every task starts with a Plan entry in Section 2 of this file. User reviews the plan, then agents are spawned.
+5. **Additive migrations** — never modify `001_initial_schema.sql`. New schema changes get a new migration file. Before release, consolidate same-release migrations into the earliest one (e.g. `003_*.sql` → merged into `002_*.sql` if both are new in this release).
+
+### Release Process
+
+When bundling features for a release:
+
+1. **Collect branches** — merge all `feat/*` and `fix/*` branches into `review/all-features`. Commit any remaining work directly on it.
+2. **Consolidate migrations** — merge same-release migration files into the earliest new one. Only one net-new migration per release.
+3. **Write CHANGELOG** — create/update `CHANGELOG.md` from `git diff main..review/all-features`. Group by Added / Changed / Fixed.
+4. **Update ADRs** — add an ADR per feature in `docs/DECISIONS.md` (ADR-### format, date, status, context, decision, consequences).
+5. **Update README** — new pages, new endpoints, new migrations, updated project structure.
+6. **Update AGENT.md** — mark all plans as done, bump "Last Updated" date.
+7. **Verify** — `cargo build` must pass. Delete `app.db*` and test migrations from scratch.
+8. **Rebase onto main** — `git rebase main` on `review/all-features`, then `git checkout main && git merge --ff-only review/all-features`. Linear history preserved.
+9. **Tag** — `git tag v0.X.0` on `main`.
 
 ### Architecture
 
-6. **Schema**: 12 tables/views — `tag_categories`, `tags`, `service_tracks`, `service_playlists`, `service_playlist_tracks`, `files`, `service_config`, `folders`, `subscriptions`, `tag_embeddings`, `tag_energy_levels`, `tag_similarities` (plus views: `unified_tracks`, `v_file_track_link`, `v_tag_playlist`, `v_file_tags`, `v_subscriptions`, `v_tag_categories`, `v_tags_with_categories`)
+6. **Schema**: 13 tables — `tag_categories`, `tags`, `service_tracks`, `service_playlists`, `service_playlist_tracks`, `files`, `service_config`, `folders`, `subscriptions`, `tag_embeddings`, `tag_energy_levels`, `tag_similarities`, `tag_parents` (plus views: `unified_tracks`, `v_file_track_link`, `v_tag_playlist`, `v_file_tags`, `v_subscriptions`, `v_tag_categories`, `v_tags_with_categories`, `v_resolved_tags`, `v_file_resolved_tags`)
 7. **Separate Types**: `File` (local files with BPM/Key) vs `ServiceTrack` (service entries, no BPM/Key) — linked via `v_file_track_link` view
 8. **Tags = Playlists**: Via name matching (case-insensitive). Setlist is default category.
 9. **Comment Format**: `[{phase_char}{mood_char}{vibe_char}] {tags} {source_id}` — e.g. `[PMV] build jazzy warehouse sp:xxx`
