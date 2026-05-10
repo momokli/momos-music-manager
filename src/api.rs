@@ -207,6 +207,27 @@ struct BulkSyncRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TracksBulkRequest {
+    pub track_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TracksNeedsCommentCountResponse {
+    pub total_tracks: usize,
+    pub tracks_needing_update: usize,
+    pub files_needing_update: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TracksWriteCommentsResponse {
+    pub task_id: String,
+    pub file_count: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct NeedsUpdateCountQuery {
     pub linked_only: Option<bool>,
     pub tags: Option<String>,
@@ -842,6 +863,14 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/files/write-comments", post(bulk_sync_handler))
         .route("/api/tracks", get(tracks_handler))
         .route("/api/tracks/count", get(tracks_count_handler))
+        .route(
+            "/api/tracks/needs-comment-count",
+            post(tracks_needs_comment_count_handler),
+        )
+        .route(
+            "/api/tracks/write-comments",
+            post(tracks_write_comments_handler),
+        )
         .route("/api/tracks/{id}", get(track_handler))
         .route("/api/tags", get(tags_handler).post(create_tag_handler))
         .route("/api/tags/count", get(tags_count_handler))
@@ -1323,6 +1352,242 @@ async fn files_needs_update_count_handler(
             internal_error(format!("Failed to count files needing update: {}", e)).into_response()
         }
     }
+}
+
+/// POST /api/tracks/needs-comment-count
+/// Takes a list of track IDs, finds linked files, and counts how many tracks
+/// have at least one linked file whose comment needs updating.
+async fn tracks_needs_comment_count_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TracksBulkRequest>,
+) -> impl IntoResponse {
+    if body.track_ids.is_empty() {
+        return Json(ApiResponse {
+            data: TracksNeedsCommentCountResponse {
+                total_tracks: 0,
+                tracks_needing_update: 0,
+                files_needing_update: 0,
+            },
+        })
+        .into_response();
+    }
+
+    // Find linked files for the requested track IDs
+    let placeholders: Vec<String> = body.track_ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT DISTINCT v.file_id, v.track_id FROM v_file_track_link v WHERE v.track_id IN ({})",
+        placeholders.join(",")
+    );
+
+    let mut query = sqlx::query(&sql);
+    for id in &body.track_ids {
+        query = query.bind(id);
+    }
+
+    let rows = match query.fetch_all(&state.db).await {
+        Ok(r) => r,
+        Err(e) => {
+            return internal_error(format!("Failed to find linked files: {}", e)).into_response();
+        }
+    };
+
+    if rows.is_empty() {
+        return Json(ApiResponse {
+            data: TracksNeedsCommentCountResponse {
+                total_tracks: body.track_ids.len(),
+                tracks_needing_update: 0,
+                files_needing_update: 0,
+            },
+        })
+        .into_response();
+    }
+
+    // Collect unique file IDs and track→file mapping
+    use std::collections::{HashMap, HashSet};
+    let mut file_ids_set: HashSet<i64> = HashSet::new();
+    let mut track_file_map: HashMap<i64, Vec<i64>> = HashMap::new();
+    for row in &rows {
+        let file_id: i64 = row.try_get("file_id").unwrap_or(0);
+        let track_id: i64 = row.try_get("track_id").unwrap_or(0);
+        if file_id > 0 && track_id > 0 {
+            file_ids_set.insert(file_id);
+            track_file_map.entry(track_id).or_default().push(file_id);
+        }
+    }
+
+    let file_ids: Vec<i64> = file_ids_set.into_iter().collect();
+
+    // Fetch actual file records to get their current comments
+    let file_placeholders: Vec<String> = file_ids.iter().map(|_| "?".to_string()).collect();
+    let file_sql = format!(
+        "SELECT * FROM files WHERE id IN ({})",
+        file_placeholders.join(",")
+    );
+    let mut file_query = sqlx::query_as::<_, crate::db::File>(&file_sql);
+    for id in &file_ids {
+        file_query = file_query.bind(id);
+    }
+    let files = match file_query.fetch_all(&state.db).await {
+        Ok(f) => f,
+        Err(e) => {
+            return internal_error(format!("Failed to fetch files: {}", e)).into_response();
+        }
+    };
+
+    // Build a map of file_id → File for quick lookup
+    let file_map: HashMap<i64, &crate::db::File> = files.iter().map(|f| (f.id, f)).collect();
+
+    // Check each track: does it have at least one linked file needing an update?
+    let mut tracks_needing_update = 0usize;
+    let mut files_needing_update = 0usize;
+    let mut checked_files: HashSet<i64> = HashSet::new();
+
+    for track_id in &body.track_ids {
+        if let Some(linked_files) = track_file_map.get(track_id) {
+            let mut track_needs = false;
+            for file_id in linked_files {
+                if checked_files.contains(file_id) {
+                    // Already counted this file; but we still need to know if it needs update
+                    // Re-check from the map
+                    if let Some(file) = file_map.get(file_id) {
+                        let current = file.comment.as_deref().unwrap_or("");
+                        if let Ok(target) = compute_target_comment(&state.db, *file_id).await {
+                            if current != target {
+                                track_needs = true;
+                                // files_needing_update is deduped by checked_files below
+                            }
+                        }
+                    }
+                    continue;
+                }
+                checked_files.insert(*file_id);
+                if let Some(file) = file_map.get(file_id) {
+                    let current = file.comment.as_deref().unwrap_or("");
+                    if let Ok(target) = compute_target_comment(&state.db, *file_id).await {
+                        if current != target {
+                            files_needing_update += 1;
+                            track_needs = true;
+                        }
+                    }
+                }
+            }
+            if track_needs {
+                tracks_needing_update += 1;
+            }
+        }
+    }
+
+    Json(ApiResponse {
+        data: TracksNeedsCommentCountResponse {
+            total_tracks: body.track_ids.len(),
+            tracks_needing_update,
+            files_needing_update,
+        },
+    })
+    .into_response()
+}
+
+/// POST /api/tracks/write-comments
+/// Takes a list of track IDs, finds linked files whose comments need updating,
+/// and queues a write-comment task for those files.
+async fn tracks_write_comments_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TracksBulkRequest>,
+) -> impl IntoResponse {
+    if body.track_ids.is_empty() {
+        return Json(ApiResponse {
+            data: TracksWriteCommentsResponse {
+                task_id: String::new(),
+                file_count: 0,
+            },
+        })
+        .into_response();
+    }
+
+    // Find linked files for the requested track IDs
+    let placeholders: Vec<String> = body.track_ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT DISTINCT v.file_id FROM v_file_track_link v WHERE v.track_id IN ({})",
+        placeholders.join(",")
+    );
+
+    let mut query = sqlx::query(&sql);
+    for id in &body.track_ids {
+        query = query.bind(id);
+    }
+
+    let rows = match query.fetch_all(&state.db).await {
+        Ok(r) => r,
+        Err(e) => {
+            return internal_error(format!("Failed to find linked files: {}", e)).into_response();
+        }
+    };
+
+    let mut file_ids: Vec<i64> = Vec::new();
+    for row in &rows {
+        if let Ok(file_id) = row.try_get::<i64, _>("file_id") {
+            file_ids.push(file_id);
+        }
+    }
+
+    if file_ids.is_empty() {
+        return Json(ApiResponse {
+            data: TracksWriteCommentsResponse {
+                task_id: String::new(),
+                file_count: 0,
+            },
+        })
+        .into_response();
+    }
+
+    // Filter to only files that actually need an update
+    let mut needs_update = Vec::new();
+    for file_id in &file_ids {
+        match compute_target_comment(&state.db, *file_id).await {
+            Ok(target) => {
+                // Get the current comment
+                let file_result =
+                    sqlx::query_as::<_, crate::db::File>("SELECT * FROM files WHERE id = ?")
+                        .bind(file_id)
+                        .fetch_one(&state.db)
+                        .await;
+                if let Ok(file) = file_result {
+                    if file.comment.as_deref() != Some(&target) {
+                        needs_update.push(*file_id);
+                    }
+                } else {
+                    // If we can't read the file, include it anyway
+                    needs_update.push(*file_id);
+                }
+            }
+            Err(_) => {
+                // If we can't compute the target, include it anyway
+                needs_update.push(*file_id);
+            }
+        }
+    }
+
+    if needs_update.is_empty() {
+        return Json(ApiResponse {
+            data: TracksWriteCommentsResponse {
+                task_id: String::new(),
+                file_count: 0,
+            },
+        })
+        .into_response();
+    }
+
+    let file_count = needs_update.len();
+    let task_id =
+        crate::tasks::start_write_comment_task(&state.task_manager, &state.db, needs_update).await;
+
+    Json(ApiResponse {
+        data: TracksWriteCommentsResponse {
+            task_id,
+            file_count,
+        },
+    })
+    .into_response()
 }
 
 /// GET /api/files/service-links

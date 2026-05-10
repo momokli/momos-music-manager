@@ -31,7 +31,8 @@ export function getPageSize(fallback = 25) {
 export function renderPageSizeSelector(currentSize, available = [10, 25, 50, 100]) {
   const opts = available
     .map(
-      (s) => `<option value="${s}"${s === currentSize ? " selected" : ""}>${s} per page</option>`,
+      (s) =>
+        `<option value="${s}"${s === currentSize ? " selected" : ""}>${s} per page</option>`,
     )
     .join("");
   return `<select class="page-size-select" data-page-size="true">${opts}</select>`;
@@ -141,6 +142,7 @@ export function updateHash(pageId, state, defaults = {}) {
   const params = new URLSearchParams();
   for (const [key, val] of Object.entries(state)) {
     if (key === "pageSize") continue; // global, not in hash
+    if (val instanceof Set) continue; // Sets are not hash-serializable
     if (val === defaults[key] || val === undefined || val === null) continue;
     if (Array.isArray(val) && val.length === 0) continue;
     params.set(key, Array.isArray(val) ? val.join(",") : String(val));
