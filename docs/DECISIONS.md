@@ -932,7 +932,7 @@ For shipping a Release Candidate, the friction of the two-process setup was the 
 
 **Context**: Setlist-category tags are long playlist names (e.g. `Dark Techno/2026/Hardtechno/Some Event`). File comments using these tags were unwieldy. Users wanted shorter, meaningful tags with proper PMV categorization to appear in comments instead.
 
-**Decision**: Allow Setlist tags to have "parent" tags that replace them in file comments. New `tag_parents` table (UNIQUE on tag_id + parent_tag_id) with validation: only Setlist tags can have parents, no self-references, parents must exist. Two new views: `v_resolved_tags` (returns parents if they exist, otherwise the tag itself) and `v_file_resolved_tags` (like `v_file_tags` but through `v_resolved_tags`). `compute_target_comment()` queries `v_file_resolved_tags` instead of `v_file_tags`. Migration: `003_tag_parents.sql`.
+**Decision**: Allow Setlist tags to have "parent" tags that replace them in file comments. New `tag_parents` table (UNIQUE on tag_id + parent_tag_id) with validation: only Setlist tags can have parents, no self-references, parents must exist. Two new views: `v_resolved_tags` (returns parents if they exist, otherwise the tag itself) and `v_file_resolved_tags` (like `v_file_tags` but through `v_resolved_tags`). `compute_target_comment()` queries `v_file_resolved_tags` instead of `v_file_tags`. Migration: `002_playlist_fetch_tracking.sql` (merged).
 
 **Consequences**: Clean, categorized comments. A Setlist tag with parents `dark` (Mood), `techno` (Vibe), `hard` (Merkmal) produces `[PMV] dark techno hard` instead of `[S--] Dark Techno/2026/...`. Tags without parents work as before (backward compatible). Parent editing available in Tags page Edit modal and Tag Curation page.
 

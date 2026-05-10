@@ -8,7 +8,7 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
-- **Tag Parent Resolution**: Setlist-category tags can now have "parent" tags that replace them in file comments. A long Setlist tag like `Dark Techno/2026/Hardtechno/...` resolves to shorter parent tags (`dark`, `techno`, `hard`) with their own categories (Mood, Vibe, Merkmal). Comments use parent tag names and categories instead of the original. Backed by new `tag_parents` table + `v_resolved_tags` / `v_file_resolved_tags` views (migration `003_tag_parents.sql`).
+- **Tag Parent Resolution**: Setlist-category tags can now have "parent" tags that replace them in file comments. A long Setlist tag like `Dark Techno/2026/Hardtechno/...` resolves to shorter parent tags (`dark`, `techno`, `hard`) with their own categories (Mood, Vibe, Merkmal). Comments use parent tag names and categories instead of the original. Backed by new `tag_parents` table + `v_resolved_tags` / `v_file_resolved_tags` views.
 
 - **Tag Curation Page** (`#tag-curation`): A dedicated curation workflow page for going through Setlist tags and assigning parent tags. Features a sequential workflow (prev/next with keyboard shortcuts), tag card with metadata, parent chip editor with typeahead search, inline "Create & Add" flow (category picker → create → add as parent), and a browsable mini table. Auto-save persists changes immediately.
 
@@ -44,7 +44,7 @@ All notable changes to Momo's Music Manager.
 
 ### Migration Notes
 
-- **New migrations**: `002_playlist_fetch_tracking.sql` (playlist sync tracking columns), `003_tag_parents.sql` (tag_parents table + resolved-tag views).
+- **New migration**: `002_playlist_fetch_tracking.sql` (playlist sync tracking columns + tag_parents table + resolved-tag views).
 - Delete old `app.db*` files and restart to run migrations from scratch.
 - Column config localStorage uses `columnConfig_v2_` prefix — old percentage-based config is ignored.
 

@@ -298,8 +298,7 @@ momos-music-manager/
 │       └── traktor-import.js
 ├── migrations/
 │   ├── 001_initial_schema.sql             # Initial schema
-│   ├── 002_playlist_fetch_tracking.sql    # Playlist sync tracking columns
-│   └── 003_tag_parents.sql                # Tag parent resolution views
+│   └── 002_playlist_fetch_tracking.sql    # Playlist sync tracking + tag parent resolution
 └── docs/
     ├── ARCHITECTURE.md     # System architecture
     ├── COMMENT_SYSTEM.md   # Comment format spec
@@ -314,7 +313,7 @@ momos-music-manager/
 - **Delete old DB files** after schema changes: `rm -f app.db*`
 - **Column config**: uses `columnConfig_v2_` localStorage key (pixel-based); old percentage-based config is ignored
 - If you see "migration 27" errors: delete all DB files and restart
-- Migrations are additive (`001_initial_schema.sql`, `002_playlist_fetch_tracking.sql`, `003_tag_parents.sql`)
+- Migrations are additive (`001_initial_schema.sql`, `002_playlist_fetch_tracking.sql`)
 - SoundCloud and YouTube OAuth are not yet implemented
 - Playlist subscriptions poll every 30 seconds in the background
 - The digging page (`digging.html`) is a standalone page, not part of the SPA

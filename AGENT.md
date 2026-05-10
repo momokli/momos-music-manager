@@ -787,7 +787,7 @@ We can downcast to `reqwest::Response` to read the header. This is already possi
 **Branch**: `feat/tag-parents`
 **Ready for review**: yes
 **Depends on**: nothing
-**Migration needed**: yes — `003_tag_parents.sql`
+**Migration needed**: yes — merged into `002_playlist_fetch_tracking.sql`
 
 ### Description
 
