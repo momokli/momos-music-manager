@@ -233,6 +233,12 @@ function renderToolbar(search, state) {
   }
 
   const selServices = state.selectedServices || [];
+  const chipsHtml = (state.selectedTags || [])
+    .map(
+      (t) =>
+        `<span class="tag-chip" data-tag="${t}">${escapeHtml(t)} <i class="fas fa-times tag-chip-x"></i></span>`,
+    )
+    .join("");
 
   return `<div class="filter-panel" id="tracks-filter-panel">
     <div class="filter-panel-header">
@@ -243,16 +249,114 @@ function renderToolbar(search, state) {
       </button>
     </div>
     <div class="filter-panel-body">
-      <!-- Service filter -->
-      <div class="filter-row">
-        <span class="filter-row-label toggleable" data-filter="service">Service</span>
-        <div class="filter-group service-filter-group" style="flex-wrap:wrap">
-          <button class="filter-btn${selServices.includes("spotify") ? " active" : ""}" data-value="spotify" title="Spotify"><i class="fab fa-spotify"></i></button>
-          <button class="filter-btn${selServices.includes("soundcloud") ? " active" : ""}" data-value="soundcloud" title="SoundCloud"><i class="fab fa-soundcloud"></i></button>
-          <button class="filter-btn${selServices.includes("youtube") ? " active" : ""}" data-value="youtube" title="YouTube"><i class="fab fa-youtube"></i></button>
+      <div class="filter-panel-scroll" style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-2) var(--space-4);">
+        <!-- LEFT COLUMN: Track Info -->
+        <div>
+          <div class="filter-section-header" style="margin-top:0"><i class="fas fa-music"></i> Track Info</div>
+
+          <!-- Tags filter (typeahead + chips) -->
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="tag">Tags</span>
+            <div class="typeahead-wrap" style="flex:1">
+              <div class="tag-search-wrap">
+                <i class="fas fa-tag"></i>
+                <input type="text" class="input-text input-search" id="tracks-tag-search"
+                       placeholder="filter by TAG" autocomplete="off">
+                <div class="tag-dropdown" id="tracks-tag-dropdown"></div>
+              </div>
+            </div>
+            <div class="tag-chips" id="tracks-tag-chips">${chipsHtml}</div>
+          </div>
+
+          <!-- Date filter -->
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="date">Date</span>
+            <div style="display:flex;flex-direction:column;gap:4px;flex:1">
+              <!-- Imported row -->
+              <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+                <span style="font-size:0.7rem;color:var(--text-subtle);min-width:55px">Imported</span>
+                <select class="input-select" id="tracks-imported-mode" style="width:70px;font-size:0.7rem;padding:2px 4px;">
+                  <option value="">—</option>
+                  <option value="since" ${state.importedMode === "since" ? "selected" : ""}>Since</option>
+                  <option value="before" ${state.importedMode === "before" ? "selected" : ""}>Before</option>
+                </select>
+                <input type="number" class="input-text" id="tracks-imported-num"
+                       value="${state.importedNum ?? ""}" placeholder="#"
+                       style="width:50px;font-size:0.7rem;padding:2px 4px;" min="1">
+                <select class="input-select" id="tracks-imported-unit" style="width:75px;font-size:0.7rem;padding:2px 4px;">
+                  <option value="days" ${state.importedUnit === "days" ? "selected" : ""}>Days</option>
+                  <option value="weeks" ${state.importedUnit === "weeks" ? "selected" : ""}>Weeks</option>
+                  <option value="months" ${state.importedUnit === "months" ? "selected" : ""}>Months</option>
+                </select>
+              </div>
+              <!-- Latest Added row -->
+              <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+                <span style="font-size:0.7rem;color:var(--text-subtle);min-width:55px">Added</span>
+                <select class="input-select" id="tracks-added-mode" style="width:70px;font-size:0.7rem;padding:2px 4px;">
+                  <option value="">—</option>
+                  <option value="since" ${state.addedMode === "since" ? "selected" : ""}>Since</option>
+                  <option value="before" ${state.addedMode === "before" ? "selected" : ""}>Before</option>
+                </select>
+                <input type="number" class="input-text" id="tracks-added-num"
+                       value="${state.addedNum ?? ""}" placeholder="#"
+                       style="width:50px;font-size:0.7rem;padding:2px 4px;" min="1">
+                <select class="input-select" id="tracks-added-unit" style="width:75px;font-size:0.7rem;padding:2px 4px;">
+                  <option value="days" ${state.addedUnit === "days" ? "selected" : ""}>Days</option>
+                  <option value="weeks" ${state.addedUnit === "weeks" ? "selected" : ""}>Weeks</option>
+                  <option value="months" ${state.addedUnit === "months" ? "selected" : ""}>Months</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- RIGHT COLUMN: Classification -->
+        <div>
+          <div class="filter-section-header" style="margin-top:0"><i class="fas fa-tag"></i> Classification</div>
+
+          <!-- Service filter -->
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="service">Service</span>
+            <div class="filter-group service-filter-group" style="flex-wrap:wrap">
+              <button class="filter-btn${selServices.includes("spotify") ? " active" : ""}" data-value="spotify" title="Spotify"><i class="fab fa-spotify"></i></button>
+              <button class="filter-btn${selServices.includes("soundcloud") ? " active" : ""}" data-value="soundcloud" title="SoundCloud"><i class="fab fa-soundcloud"></i></button>
+              <button class="filter-btn${selServices.includes("youtube") ? " active" : ""}" data-value="youtube" title="YouTube"><i class="fab fa-youtube"></i></button>
+            </div>
+          </div>
+
+          <!-- PMV filter -->
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="pmv">PMV</span>
+            <div class="filter-group" id="pmv-cat-btns" style="flex-wrap:wrap">
+              <button class="filter-btn${(state.pmvCategories || []).includes("p") ? " active" : ""}" data-value="p" title="Has Phase tags">P</button>
+              <button class="filter-btn${(state.pmvCategories || []).includes("m") ? " active" : ""}" data-value="m" title="Has Mood tags">M</button>
+              <button class="filter-btn${(state.pmvCategories || []).includes("v") ? " active" : ""}" data-value="v" title="Has Vibe tags">V</button>
+            </div>
+            <span class="pmv-sep">|</span>
+            <div class="filter-group" id="pmv-agg-btns" style="flex-wrap:wrap">
+              <button class="filter-btn${state.pmvAggregate === "full" ? " active" : ""}" data-value="full" title="Has all three categories">Full</button>
+              <button class="filter-btn${state.pmvAggregate === "partial" ? " active" : ""}" data-value="partial" title="Has at least one category">Partial</button>
+              <button class="filter-btn${state.pmvAggregate === "none" ? " active" : ""}" data-value="none" title="Has no PMV categories">None</button>
+            </div>
+          </div>
+
+          <!-- Type filter -->
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="type">Type</span>
+            <div class="filter-group" id="tracks-filetype-filter" style="flex-wrap:wrap">
+              <button class="filter-btn${(state.fileTypes || []).includes("flac") ? " active" : ""}" data-value="flac">FLAC</button>
+              <button class="filter-btn${(state.fileTypes || []).includes("mp3") ? " active" : ""}" data-value="mp3">MP3</button>
+              <button class="filter-btn${(state.fileTypes || []).includes("stem.m4a") ? " active" : ""}" data-value="stem.m4a">Stem</button>
+              <button class="filter-btn${(state.fileTypes || []).includes("wav") ? " active" : ""}" data-value="wav">WAV</button>
+            </div>
+            <span class="pmv-sep">|</span>
+            <div class="filter-group" id="tracks-filetype-agg-btns" style="flex-wrap:wrap">
+              <button class="filter-btn${state.fileTypeAgg === "any" ? " active" : ""}" data-value="any" title="Has at least one local file">Some</button>
+              <button class="filter-btn${state.fileTypeAgg === "none" ? " active" : ""}" data-value="none" title="Has no local file">None</button>
+            </div>
+          </div>
         </div>
       </div>
-
     </div>
   </div>`;
 }
@@ -385,11 +489,44 @@ function buildParams(state) {
   if (state.selectedServices && state.selectedServices.length > 0) {
     params.set("services", state.selectedServices.join(","));
   }
+  if (state.selectedTags && state.selectedTags.length > 0) {
+    params.set("tags", state.selectedTags.join(","));
+  }
+  if (state.pmvCategories && state.pmvCategories.length > 0) {
+    params.set("pmvCategories", state.pmvCategories.join(","));
+  }
+  if (state.pmvAggregate) {
+    params.set("pmvAggregate", state.pmvAggregate);
+  }
   if (state.fileTypes && state.fileTypes.length > 0) {
     params.set("fileTypes", state.fileTypes.join(","));
   }
   if (state.fileTypeAgg) {
     params.set("fileTypeAgg", state.fileTypeAgg);
+  }
+  // Date filters — convert weeks/months to days
+  function toDays(num, unit) {
+    if (!num || num <= 0) return null;
+    switch (unit) {
+      case "weeks":
+        return num * 7;
+      case "months":
+        return num * 30;
+      default:
+        return num;
+    }
+  }
+  const importedDays = toDays(state.importedNum, state.importedUnit);
+  const addedDays = toDays(state.addedNum, state.addedUnit);
+  if (state.importedMode === "since" && importedDays) {
+    params.set("importedAfterDays", String(importedDays));
+  } else if (state.importedMode === "before" && importedDays) {
+    params.set("importedBeforeDays", String(importedDays));
+  }
+  if (state.addedMode === "since" && addedDays) {
+    params.set("addedAfterDays", String(addedDays));
+  } else if (state.addedMode === "before" && addedDays) {
+    params.set("addedBeforeDays", String(addedDays));
   }
   return params;
 }
@@ -413,6 +550,17 @@ async function fetchAndRender(container, signal, state) {
     order: "asc",
     search: "",
     selectedServices: [],
+    selectedTags: [],
+    pmvCategories: [],
+    pmvAggregate: "",
+    fileTypes: [],
+    fileTypeAgg: "",
+    importedMode: "",
+    importedNum: null,
+    importedUnit: "days",
+    addedMode: "",
+    addedNum: null,
+    addedUnit: "days",
     page: 0,
   });
   setContent(renderLoading("Loading tracks…"));
@@ -465,10 +613,13 @@ async function fetchAndRender(container, signal, state) {
 
 /**
  * Wire toolbar filter events (called once after toolbar is mounted).
- * Handles multi-select service icon buttons.
+ * Handles all filter interactions: service, tags, PMV, type, date,
+ * and generic toggleable labels.
  */
 function wireToolbarEvents(container, signal, state) {
-  // ── Multi-select service filter ──
+  const filterPanel = container.querySelector("#tracks-filter-panel");
+
+  // ── Multi-select service filter (fixes active class bug) ──
   const serviceGroup = container.querySelector(".service-filter-group");
   if (serviceGroup) {
     serviceGroup.addEventListener(
@@ -480,15 +631,735 @@ function wireToolbarEvents(container, signal, state) {
         const idx = state.selectedServices.indexOf(value);
         if (idx >= 0) {
           state.selectedServices.splice(idx, 1);
+          btn.classList.remove("active");
         } else {
           state.selectedServices.push(value);
+          btn.classList.add("active");
         }
         state.page = 0;
+        updateHash("tracks", state, {
+          sort: "",
+          order: "asc",
+          search: "",
+          selectedServices: [],
+          selectedTags: [],
+          pmvCategories: [],
+          pmvAggregate: "",
+          fileTypes: [],
+          fileTypeAgg: "",
+          importedMode: "",
+          importedNum: null,
+          importedUnit: "days",
+          addedMode: "",
+          addedNum: null,
+          addedUnit: "days",
+          page: 0,
+        });
         fetchAndRender(container, signal, state);
       },
       { signal },
     );
   }
+
+  // ── Tag search input with keyboard navigation (like Files page) ──
+  const tagSearch = container.querySelector("#tracks-tag-search");
+  const tagDropdown = container.querySelector("#tracks-tag-dropdown");
+  if (tagSearch && tagDropdown) {
+    let timer;
+    let selectedIndex = -1;
+
+    function updateSelection() {
+      const items = tagDropdown.querySelectorAll(".tag-dropdown-item");
+      items.forEach((item, i) => {
+        item.classList.toggle("selected", i === selectedIndex);
+      });
+      const selected = items[selectedIndex];
+      if (selected) {
+        selected.scrollIntoView({ block: "nearest" });
+      }
+    }
+
+    function addSelectedTag() {
+      const items = tagDropdown.querySelectorAll(".tag-dropdown-item");
+      const selected = items[selectedIndex];
+      if (!selected) return;
+      const tag = selected.dataset.tag;
+      if (!tag) return;
+      if (!state.selectedTags.includes(tag)) {
+        state.selectedTags.push(tag);
+        state.page = 0;
+      }
+      tagSearch.value = "";
+      tagDropdown.classList.remove("open");
+      tagDropdown.innerHTML = "";
+      selectedIndex = -1;
+      renderTagChips();
+      updateHash("tracks", state, {
+        sort: "",
+        order: "asc",
+        search: "",
+        selectedServices: [],
+        selectedTags: [],
+        pmvCategories: [],
+        pmvAggregate: "",
+        fileTypes: [],
+        fileTypeAgg: "",
+        importedMode: "",
+        importedNum: null,
+        importedUnit: "days",
+        addedMode: "",
+        addedNum: null,
+        addedUnit: "days",
+        page: 0,
+      });
+      fetchAndRender(container, signal, state);
+    }
+
+    tagSearch.addEventListener(
+      "input",
+      () => {
+        clearTimeout(timer);
+        selectedIndex = -1;
+        const q = tagSearch.value.trim();
+        if (!q) {
+          tagDropdown.classList.remove("open");
+          tagDropdown.innerHTML = "";
+          return;
+        }
+        timer = setTimeout(async () => {
+          try {
+            const resp = await fetchJSON(`/api/tags?search=${encodeURIComponent(q)}`);
+            const tags = resp.data || [];
+            if (tags.length === 0) {
+              tagDropdown.innerHTML = `<div class="tag-dropdown-empty">No tags found</div>`;
+              selectedIndex = -1;
+            } else {
+              tagDropdown.innerHTML = tags
+                .map(
+                  (t, i) =>
+                    `<div class="tag-dropdown-item${i === 0 ? " selected" : ""}" data-tag="${t.name}">
+                      <span class="tag-dropdown-name">${t.name}</span>
+                      ${t.category ? `<span class="tag-dropdown-cat">${t.category}</span>` : ""}
+                    </div>`,
+                )
+                .join("");
+              selectedIndex = 0;
+            }
+            tagDropdown.classList.add("open");
+          } catch {
+            // ignore errors during search
+          }
+        }, 150);
+      },
+      { signal },
+    );
+
+    tagDropdown.addEventListener(
+      "click",
+      (e) => {
+        const item = e.target.closest(".tag-dropdown-item");
+        if (!item) return;
+        const tag = item.dataset.tag;
+        if (!tag) return;
+        if (!state.selectedTags.includes(tag)) {
+          state.selectedTags.push(tag);
+          state.page = 0;
+        }
+        tagSearch.value = "";
+        tagDropdown.classList.remove("open");
+        tagDropdown.innerHTML = "";
+        selectedIndex = -1;
+        renderTagChips();
+        updateHash("tracks", state, {
+          sort: "",
+          order: "asc",
+          search: "",
+          selectedServices: [],
+          selectedTags: [],
+          pmvCategories: [],
+          pmvAggregate: "",
+          fileTypes: [],
+          fileTypeAgg: "",
+          importedMode: "",
+          importedNum: null,
+          importedUnit: "days",
+          addedMode: "",
+          addedNum: null,
+          addedUnit: "days",
+          page: 0,
+        });
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+
+    tagSearch.addEventListener(
+      "keydown",
+      (e) => {
+        if (!tagDropdown.classList.contains("open")) return;
+        const items = tagDropdown.querySelectorAll(".tag-dropdown-item");
+        switch (e.key) {
+          case "ArrowDown":
+            e.preventDefault();
+            if (items.length === 0) return;
+            selectedIndex = Math.min(selectedIndex + 1, items.length - 1);
+            updateSelection();
+            break;
+          case "ArrowUp":
+            e.preventDefault();
+            if (items.length === 0) return;
+            selectedIndex = Math.max(selectedIndex - 1, 0);
+            updateSelection();
+            break;
+          case "Enter":
+            e.preventDefault();
+            addSelectedTag();
+            break;
+          case "Escape":
+            tagDropdown.classList.remove("open");
+            tagDropdown.innerHTML = "";
+            selectedIndex = -1;
+            tagSearch.blur();
+            break;
+        }
+      },
+      { signal },
+    );
+
+    // Close dropdown on outside click
+    document.addEventListener(
+      "click",
+      (e) => {
+        const wrap = container.querySelector(".tag-search-wrap");
+        if (!wrap || wrap.contains(e.target)) return;
+        if (tagDropdown) {
+          tagDropdown.classList.remove("open");
+          tagDropdown.innerHTML = "";
+          selectedIndex = -1;
+        }
+      },
+      { signal },
+    );
+  }
+
+  // ── Tag chip rendering helper ──
+  function renderTagChips() {
+    const chipsContainer = container.querySelector("#tracks-tag-chips");
+    if (!chipsContainer) return;
+    chipsContainer.innerHTML = state.selectedTags
+      .map(
+        (t) =>
+          `<span class="tag-chip" data-tag="${t}">${escapeHtml(t)} <i class="fas fa-times tag-chip-x"></i></span>`,
+      )
+      .join("");
+  }
+
+  // ── Tag chip removal (delegated) ──
+  const chipsContainer = container.querySelector("#tracks-tag-chips");
+  if (chipsContainer) {
+    chipsContainer.addEventListener(
+      "click",
+      (e) => {
+        const x = e.target.closest(".tag-chip-x");
+        if (!x) return;
+        const chip = x.closest(".tag-chip");
+        if (!chip) return;
+        const tag = chip.dataset.tag;
+        state.selectedTags = state.selectedTags.filter((t) => t !== tag);
+        state.page = 0;
+        updateHash("tracks", state, {
+          sort: "",
+          order: "asc",
+          search: "",
+          selectedServices: [],
+          selectedTags: [],
+          pmvCategories: [],
+          pmvAggregate: "",
+          fileTypes: [],
+          fileTypeAgg: "",
+          importedMode: "",
+          importedNum: null,
+          importedUnit: "days",
+          addedMode: "",
+          addedNum: null,
+          addedUnit: "days",
+          page: 0,
+        });
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // ── PMV category buttons (multi-select: P, M, V) ──
+  const pmvCatBtns = container.querySelector("#pmv-cat-btns");
+  if (pmvCatBtns) {
+    pmvCatBtns.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn");
+        if (!btn) return;
+        const val = btn.dataset.value;
+        const idx = state.pmvCategories.indexOf(val);
+        if (idx >= 0) {
+          state.pmvCategories.splice(idx, 1);
+          btn.classList.remove("active");
+        } else {
+          // Clear aggregate group when picking categories
+          state.pmvAggregate = "";
+          container
+            .querySelectorAll("#pmv-agg-btns .filter-btn")
+            .forEach((b) => b.classList.remove("active"));
+          state.pmvCategories.push(val);
+          btn.classList.add("active");
+        }
+        state.page = 0;
+        updateHash("tracks", state, {
+          sort: "",
+          order: "asc",
+          search: "",
+          selectedServices: [],
+          selectedTags: [],
+          pmvCategories: [],
+          pmvAggregate: "",
+          fileTypes: [],
+          fileTypeAgg: "",
+          importedMode: "",
+          importedNum: null,
+          importedUnit: "days",
+          addedMode: "",
+          addedNum: null,
+          addedUnit: "days",
+          page: 0,
+        });
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // ── PMV aggregate buttons (single-select: Full, Partial, None) ──
+  const pmvAggBtns = container.querySelector("#pmv-agg-btns");
+  if (pmvAggBtns) {
+    pmvAggBtns.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn");
+        if (!btn) return;
+        const val = btn.dataset.value;
+        if (state.pmvAggregate === val) {
+          state.pmvAggregate = "";
+          btn.classList.remove("active");
+        } else {
+          // Clear category group when picking aggregate
+          state.pmvCategories = [];
+          container
+            .querySelectorAll("#pmv-cat-btns .filter-btn")
+            .forEach((b) => b.classList.remove("active"));
+          state.pmvAggregate = val;
+          container
+            .querySelectorAll("#pmv-agg-btns .filter-btn")
+            .forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+        }
+        state.page = 0;
+        updateHash("tracks", state, {
+          sort: "",
+          order: "asc",
+          search: "",
+          selectedServices: [],
+          selectedTags: [],
+          pmvCategories: [],
+          pmvAggregate: "",
+          fileTypes: [],
+          fileTypeAgg: "",
+          importedMode: "",
+          importedNum: null,
+          importedUnit: "days",
+          addedMode: "",
+          addedNum: null,
+          addedUnit: "days",
+          page: 0,
+        });
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // ── Multi-select file type filter ──
+  const filetypeBtns = container.querySelector("#tracks-filetype-filter");
+  if (filetypeBtns) {
+    filetypeBtns.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn");
+        if (!btn) return;
+        const value = btn.dataset.value;
+        const idx = state.fileTypes.indexOf(value);
+        if (idx >= 0) {
+          state.fileTypes.splice(idx, 1);
+          btn.classList.remove("active");
+        } else {
+          // Clear aggregate group when picking specific types
+          state.fileTypeAgg = "";
+          container
+            .querySelectorAll("#tracks-filetype-agg-btns .filter-btn")
+            .forEach((b) => b.classList.remove("active"));
+          state.fileTypes.push(value);
+          btn.classList.add("active");
+        }
+        state.page = 0;
+        updateHash("tracks", state, {
+          sort: "",
+          order: "asc",
+          search: "",
+          selectedServices: [],
+          selectedTags: [],
+          pmvCategories: [],
+          pmvAggregate: "",
+          fileTypes: [],
+          fileTypeAgg: "",
+          importedMode: "",
+          importedNum: null,
+          importedUnit: "days",
+          addedMode: "",
+          addedNum: null,
+          addedUnit: "days",
+          page: 0,
+        });
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // ── File type aggregate buttons (single-select: Some, None) ──
+  const filetypeAggBtns = container.querySelector("#tracks-filetype-agg-btns");
+  if (filetypeAggBtns) {
+    filetypeAggBtns.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn");
+        if (!btn) return;
+        const val = btn.dataset.value;
+        if (state.fileTypeAgg === val) {
+          state.fileTypeAgg = "";
+          btn.classList.remove("active");
+        } else {
+          // Clear specific types when picking aggregate
+          state.fileTypes = [];
+          container
+            .querySelectorAll("#tracks-filetype-filter .filter-btn")
+            .forEach((b) => b.classList.remove("active"));
+          state.fileTypeAgg = val;
+          container
+            .querySelectorAll("#tracks-filetype-agg-btns .filter-btn")
+            .forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+        }
+        state.page = 0;
+        updateHash("tracks", state, {
+          sort: "",
+          order: "asc",
+          search: "",
+          selectedServices: [],
+          selectedTags: [],
+          pmvCategories: [],
+          pmvAggregate: "",
+          fileTypes: [],
+          fileTypeAgg: "",
+          importedMode: "",
+          importedNum: null,
+          importedUnit: "days",
+          addedMode: "",
+          addedNum: null,
+          addedUnit: "days",
+          page: 0,
+        });
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // ── Date filter wiring ──
+  const importedMode = container.querySelector("#tracks-imported-mode");
+  const importedNum = container.querySelector("#tracks-imported-num");
+  const importedUnit = container.querySelector("#tracks-imported-unit");
+  const addedMode = container.querySelector("#tracks-added-mode");
+  const addedNum = container.querySelector("#tracks-added-num");
+  const addedUnit = container.querySelector("#tracks-added-unit");
+
+  function wireDateFilter() {
+    if (importedMode) {
+      importedMode.addEventListener(
+        "change",
+        () => {
+          state.importedMode = importedMode.value;
+          state.page = 0;
+          updateHash("tracks", state, {
+            sort: "",
+            order: "asc",
+            search: "",
+            selectedServices: [],
+            selectedTags: [],
+            pmvCategories: [],
+            pmvAggregate: "",
+            fileTypes: [],
+            fileTypeAgg: "",
+            importedMode: "",
+            importedNum: null,
+            importedUnit: "days",
+            addedMode: "",
+            addedNum: null,
+            addedUnit: "days",
+            page: 0,
+          });
+          fetchAndRender(container, signal, state);
+        },
+        { signal },
+      );
+    }
+    if (importedNum) {
+      importedNum.addEventListener(
+        "input",
+        () => {
+          const val = importedNum.value.trim();
+          state.importedNum = val ? parseInt(val, 10) : null;
+          state.page = 0;
+          updateHash("tracks", state, {
+            sort: "",
+            order: "asc",
+            search: "",
+            selectedServices: [],
+            selectedTags: [],
+            pmvCategories: [],
+            pmvAggregate: "",
+            fileTypes: [],
+            fileTypeAgg: "",
+            importedMode: "",
+            importedNum: null,
+            importedUnit: "days",
+            addedMode: "",
+            addedNum: null,
+            addedUnit: "days",
+            page: 0,
+          });
+          fetchAndRender(container, signal, state);
+        },
+        { signal },
+      );
+    }
+    if (importedUnit) {
+      importedUnit.addEventListener(
+        "change",
+        () => {
+          state.importedUnit = importedUnit.value;
+          state.page = 0;
+          updateHash("tracks", state, {
+            sort: "",
+            order: "asc",
+            search: "",
+            selectedServices: [],
+            selectedTags: [],
+            pmvCategories: [],
+            pmvAggregate: "",
+            fileTypes: [],
+            fileTypeAgg: "",
+            importedMode: "",
+            importedNum: null,
+            importedUnit: "days",
+            addedMode: "",
+            addedNum: null,
+            addedUnit: "days",
+            page: 0,
+          });
+          fetchAndRender(container, signal, state);
+        },
+        { signal },
+      );
+    }
+    if (addedMode) {
+      addedMode.addEventListener(
+        "change",
+        () => {
+          state.addedMode = addedMode.value;
+          state.page = 0;
+          updateHash("tracks", state, {
+            sort: "",
+            order: "asc",
+            search: "",
+            selectedServices: [],
+            selectedTags: [],
+            pmvCategories: [],
+            pmvAggregate: "",
+            fileTypes: [],
+            fileTypeAgg: "",
+            importedMode: "",
+            importedNum: null,
+            importedUnit: "days",
+            addedMode: "",
+            addedNum: null,
+            addedUnit: "days",
+            page: 0,
+          });
+          fetchAndRender(container, signal, state);
+        },
+        { signal },
+      );
+    }
+    if (addedNum) {
+      addedNum.addEventListener(
+        "input",
+        () => {
+          const val = addedNum.value.trim();
+          state.addedNum = val ? parseInt(val, 10) : null;
+          state.page = 0;
+          updateHash("tracks", state, {
+            sort: "",
+            order: "asc",
+            search: "",
+            selectedServices: [],
+            selectedTags: [],
+            pmvCategories: [],
+            pmvAggregate: "",
+            fileTypes: [],
+            fileTypeAgg: "",
+            importedMode: "",
+            importedNum: null,
+            importedUnit: "days",
+            addedMode: "",
+            addedNum: null,
+            addedUnit: "days",
+            page: 0,
+          });
+          fetchAndRender(container, signal, state);
+        },
+        { signal },
+      );
+    }
+    if (addedUnit) {
+      addedUnit.addEventListener(
+        "change",
+        () => {
+          state.addedUnit = addedUnit.value;
+          state.page = 0;
+          updateHash("tracks", state, {
+            sort: "",
+            order: "asc",
+            search: "",
+            selectedServices: [],
+            selectedTags: [],
+            pmvCategories: [],
+            pmvAggregate: "",
+            fileTypes: [],
+            fileTypeAgg: "",
+            importedMode: "",
+            importedNum: null,
+            importedUnit: "days",
+            addedMode: "",
+            addedNum: null,
+            addedUnit: "days",
+            page: 0,
+          });
+          fetchAndRender(container, signal, state);
+        },
+        { signal },
+      );
+    }
+  }
+  wireDateFilter();
+
+  // ── Generic toggle for data-filter labels ──
+  filterPanel?.querySelectorAll("[data-filter]").forEach((label) => {
+    function updateFilterUI() {
+      const key = label.dataset.filter + "Enabled";
+      const isActive = state[key] !== false;
+      label.classList.toggle("active", isActive);
+      label.classList.toggle("off", !isActive);
+      const row = label.closest(".filter-row");
+      if (row) {
+        const inputs = row.querySelectorAll(
+          "select, input, button, .filter-group, .tag-chips, .typeahead-wrap",
+        );
+        inputs.forEach((el) => el.classList.toggle("filter-disabled", !isActive));
+      }
+    }
+    label.addEventListener(
+      "click",
+      () => {
+        const key = label.dataset.filter + "Enabled";
+        state[key] = state[key] === false ? true : false;
+        state.page = 0;
+        updateFilterUI();
+        updateHash("tracks", state, {
+          sort: "",
+          order: "asc",
+          search: "",
+          selectedServices: [],
+          selectedTags: [],
+          pmvCategories: [],
+          pmvAggregate: "",
+          fileTypes: [],
+          fileTypeAgg: "",
+          importedMode: "",
+          importedNum: null,
+          importedUnit: "days",
+          addedMode: "",
+          addedNum: null,
+          addedUnit: "days",
+          page: 0,
+        });
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+    updateFilterUI();
+  });
+
+  // ── Auto-enable disabled filter sections on click ──
+  filterPanel?.addEventListener(
+    "click",
+    (e) => {
+      const row = e.target.closest(".filter-row");
+      if (!row) return;
+      const label = row.querySelector("[data-filter]");
+      if (!label) return;
+      const key = label.dataset.filter + "Enabled";
+      if (state[key] !== false) return;
+      if (e.target.closest("[data-filter]")) return;
+      state[key] = true;
+      state.page = 0;
+      label.classList.add("active");
+      label.classList.remove("off");
+      row
+        .querySelectorAll(
+          "select, input, button, .filter-group, .tag-chips, .typeahead-wrap",
+        )
+        .forEach((el) => el.classList.remove("filter-disabled"));
+      updateHash("tracks", state, {
+        sort: "",
+        order: "asc",
+        search: "",
+        selectedServices: [],
+        selectedTags: [],
+        pmvCategories: [],
+        pmvAggregate: "",
+        fileTypes: [],
+        fileTypeAgg: "",
+        importedMode: "",
+        importedNum: null,
+        importedUnit: "days",
+        addedMode: "",
+        addedNum: null,
+        addedUnit: "days",
+        page: 0,
+      });
+      fetchAndRender(container, signal, state);
+    },
+    { signal },
+  );
 }
 
 function wireContentEvents(container, signal, state) {
@@ -721,8 +1592,24 @@ export async function init(container, signal, hashParams) {
     sort: hashParams?.sort || "",
     order: hashParams?.order || "asc",
     selectedServices: parseCSV(hashParams?.selectedServices),
+    selectedTags: parseCSV(hashParams?.selectedTags),
+    pmvCategories: parseCSV(hashParams?.pmvCategories),
+    pmvAggregate: hashParams?.pmvAggregate || "",
+    fileTypes: parseCSV(hashParams?.fileTypes),
+    fileTypeAgg: hashParams?.fileTypeAgg || "",
+    importedMode: hashParams?.importedMode || "",
+    importedNum: hashParams?.importedNum ? parseInt(hashParams.importedNum) : null,
+    importedUnit: hashParams?.importedUnit || "days",
+    addedMode: hashParams?.addedMode || "",
+    addedNum: hashParams?.addedNum ? parseInt(hashParams.addedNum) : null,
+    addedUnit: hashParams?.addedUnit || "days",
     playlistId: hashParams?.playlistId ? parseInt(hashParams.playlistId) : null,
     playlistName: hashParams?.playlistName || null,
+    tagEnabled: true,
+    serviceEnabled: true,
+    pmvEnabled: true,
+    typeEnabled: true,
+    dateEnabled: true,
     layoutMode: false,
     selectedTrackIds: new Set(),
     needsCommentCount: 0,

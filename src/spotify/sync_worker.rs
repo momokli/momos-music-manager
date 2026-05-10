@@ -80,6 +80,9 @@ impl SpotifySyncWorker {
             SyncType::TracksForPlaylist(playlist_id) => {
                 self.sync_tracks_for_playlist(&playlist_id).await
             }
+            SyncType::TracksForPlaylistList(playlist_ids) => {
+                self.sync_playlist_list(playlist_ids).await
+            }
             SyncType::TracksAll => self.sync_all_tracks().await,
             SyncType::Full => self.sync_full().await,
         }
@@ -430,6 +433,13 @@ impl SpotifySyncWorker {
 
             match track_result {
                 Ok(item) => {
+                    // Describe the item before extracting track (avoid borrow-after-move)
+                    let item_desc = item.track.as_ref().map(|t| match t {
+                        PlayableItem::Track(t) => format!("Track({})", t.name),
+                        PlayableItem::Episode(e) => format!("Episode({})", e.name),
+                        _ => "Unknown".to_string(),
+                    }).unwrap_or_else(|| "None".to_string());
+
                     // Extract track from playlist item
                     if let Some(track) = item.track
                         && let PlayableItem::Track(track) = track
@@ -480,6 +490,9 @@ impl SpotifySyncWorker {
                                 added_at,
                             });
                         }
+                    } else {
+                        // Log skipped items: metadata total may include non-track content
+                        warn!("Skipping non-track item in '{}': {}", playlist_name, item_desc);
                     }
                 }
                 Err(e) => {
@@ -504,6 +517,32 @@ impl SpotifySyncWorker {
             }
         }
 
+        // ── Update per-playlist fetch tracking ───────────────────────────────
+        let mut conn = match self.db.acquire().await {
+            Ok(c) => c,
+            Err(e) => {
+                error!(
+                    "Failed to acquire DB connection for fetch tracking: {:?}",
+                    e
+                );
+                return Ok(SyncResult::failed(format!(
+                    "Failed to update fetch tracking: {:?}",
+                    e
+                )));
+            }
+        };
+        if let Err(e) = crate::db::update_playlist_fetch_tracking(
+            &mut conn,
+            "spotify",
+            playlist_id,
+            track_count as i64, // use actual fetched count, not metadata total (may include non-track items)
+        )
+        .await
+        {
+            error!("Failed to update playlist fetch tracking: {:?}", e);
+        }
+        drop(conn);
+
         // Update final progress
         {
             let mut progress = self.progress.write().await;
@@ -525,6 +564,73 @@ impl SpotifySyncWorker {
             track_count,
             vec![playlist_name],
             track_names,
+        ))
+    }
+
+    /// Sync tracks for a list of playlist IDs (batch operation)
+    async fn sync_playlist_list(&mut self, playlist_ids: Vec<String>) -> Result<SyncResult> {
+        let total = playlist_ids.len();
+        info!("Starting batch sync for {} playlist(s)", total);
+
+        {
+            let mut progress = self.progress.write().await;
+            progress.total_playlists = Some(total);
+            progress.status = TaskStatus::Running;
+            progress.add_log(format!("Batch sync: {} playlist(s) to process", total));
+        }
+
+        let mut total_playlist_count = 0;
+        let mut total_track_count = 0;
+        let mut all_playlist_names = Vec::new();
+        let mut all_track_names = Vec::new();
+
+        for (i, pid) in playlist_ids.iter().enumerate() {
+            if self.is_cancelled() {
+                info!("Batch sync cancelled after {}/{} playlists", i, total);
+                return Ok(SyncResult::failed("Sync cancelled by user".to_string()));
+            }
+
+            // Update playlist-level progress
+            {
+                let mut progress = self.progress.write().await;
+                progress.current_playlist = Some(i + 1);
+                progress.add_log(format!("Syncing playlist {}/{}: {}", i + 1, total, pid));
+            }
+
+            // Sync tracks for this playlist
+            match self.sync_tracks_for_playlist(pid).await {
+                Ok(result) => {
+                    total_playlist_count += result.playlist_count;
+                    total_track_count += result.track_count;
+                    all_playlist_names.extend(result.playlist_names);
+                    all_track_names.extend(result.track_names);
+                }
+                Err(e) => {
+                    error!("Failed to sync playlist {}: {:?}", pid, e);
+                    // Continue with next playlist
+                }
+            }
+        }
+
+        {
+            let mut progress = self.progress.write().await;
+            progress.status = TaskStatus::Completed;
+            progress.add_log(format!(
+                "Batch sync completed: {} playlists, {} tracks",
+                total_playlist_count, total_track_count
+            ));
+        }
+
+        info!(
+            "Batch sync completed: {} playlists, {} tracks",
+            total_playlist_count, total_track_count
+        );
+
+        Ok(SyncResult::success(
+            total_playlist_count,
+            total_track_count,
+            all_playlist_names,
+            all_track_names,
         ))
     }
 

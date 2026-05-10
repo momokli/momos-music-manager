@@ -109,6 +109,13 @@ const FILES_COLUMNS = [
   { id: "artist", label: "Artist", sortable: true, sortKey: "artist", defaultWidth: 80 },
   { id: "bpm", label: "BPM", sortable: true, sortKey: "bpm", defaultWidth: 80 },
   { id: "key", label: "Key", sortable: true, sortKey: "key", defaultWidth: 50 },
+  {
+    id: "format",
+    label: "Format",
+    sortable: true,
+    sortKey: "file_type",
+    defaultWidth: 60,
+  },
   { id: "linked", label: "Linked", sortable: false, defaultWidth: 50 },
   { id: "isrc", label: "ISRC", sortable: true, sortKey: "isrc", defaultWidth: 50 },
   {
@@ -153,6 +160,10 @@ const FILES_CELL_RENDERERS = {
   artist: (f) => escapeHtml(f.artist),
   bpm: (f) => `<span class="font-mono">${formatBPM(f.bpm)}</span>`,
   key: (f) => renderKeyBadge(f.key),
+  format: (f) =>
+    f.fileType
+      ? `<span class="badge badge-format">${escapeHtml(f.fileType.toUpperCase())}</span>`
+      : '<span class="text-muted">—</span>',
   linked: (f) => renderLinkBadge(f.matchedServices),
   isrc: (f) =>
     f.isrc ? `<code>${escapeHtml(f.isrc)}</code>` : '<span class="text-muted">—</span>',

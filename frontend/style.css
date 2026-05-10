@@ -101,7 +101,7 @@ body {
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    overflow-x: auto;
+    overflow: visible;
     flex: 1;
 }
 
@@ -130,6 +130,101 @@ body {
 }
 
 .topnav-link i {
+    font-size: 0.85rem;
+    width: 16px;
+    text-align: center;
+}
+
+/* ── Dropdown Nav ──────────────────────── */
+.topnav-dropdown {
+    position: relative;
+}
+
+.topnav-dropdown-trigger {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    font-weight: 500;
+    font-family: inherit;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: all var(--transition);
+    user-select: none;
+}
+
+.topnav-dropdown-trigger:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text);
+}
+
+.topnav-dropdown-trigger.active {
+    background: var(--accent-bg);
+    color: var(--accent);
+}
+
+.topnav-chevron {
+    font-size: 0.65rem;
+    transition: transform var(--transition);
+}
+
+.topnav-dropdown.open .topnav-chevron {
+    transform: rotate(180deg);
+}
+
+.topnav-dropdown-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    min-width: 200px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-1);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-4px);
+    transition: all var(--transition);
+    z-index: 200;
+}
+
+.topnav-dropdown.open .topnav-dropdown-menu {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+.topnav-dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.85rem;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: all var(--transition);
+}
+
+.topnav-dropdown-item:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text);
+}
+
+.topnav-dropdown-item.active {
+    background: var(--accent-bg);
+    color: var(--accent);
+}
+
+.topnav-dropdown-item i {
     font-size: 0.85rem;
     width: 16px;
     text-align: center;
@@ -1501,6 +1596,13 @@ th:not(.sort-asc):not(.sort-desc) i.fa-sort {
 .badge-key {
     background: rgba(99, 102, 241, 0.12);
     color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+}
+
+.badge-format {
+    background: rgba(100, 116, 139, 0.12);
+    color: var(--muted);
     font-family: var(--font-mono);
     font-size: 0.7rem;
 }
@@ -2961,6 +3063,15 @@ tr.row-mismatch td {
     .topnav-link {
         padding: var(--space-2);
         justify-content: center;
+    }
+
+    .topnav-dropdown-trigger {
+        padding: var(--space-2);
+        font-size: 0.8rem;
+    }
+
+    .topnav-dropdown-menu {
+        min-width: 180px;
     }
 
     .stats-grid {

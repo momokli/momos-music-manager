@@ -53,6 +53,8 @@ pub enum SyncOperation {
     Playlists,
     /// Sync tracks for a specific playlist
     TracksForPlaylist(String),
+    /// Sync tracks for a list of playlist IDs (batch operation)
+    TracksForPlaylistList(Vec<String>),
     /// Sync tracks for all playlists in the database
     TracksAll,
     /// Full sync: playlists + all tracks
@@ -80,6 +82,9 @@ impl From<SyncType> for SyncConfig {
         match sync_type {
             SyncType::Playlists => SyncConfig::Playlists,
             SyncType::TracksForPlaylist(id) => SyncConfig::TracksForPlaylist(id),
+            SyncType::TracksForPlaylistList(ids) => {
+                SyncConfig::TracksForPlaylist(ids.first().cloned().unwrap_or_default())
+            }
             SyncType::TracksAll => SyncConfig::TracksAll,
             SyncType::Full => SyncConfig::Full,
         }
@@ -116,6 +121,9 @@ impl SyncOperation {
         match self {
             SyncOperation::Playlists => SyncType::Playlists,
             SyncOperation::TracksForPlaylist(id) => SyncType::TracksForPlaylist(id.clone()),
+            SyncOperation::TracksForPlaylistList(ids) => {
+                SyncType::TracksForPlaylistList(ids.clone())
+            }
             SyncOperation::TracksAll => SyncType::TracksAll,
             SyncOperation::Full => SyncType::Full,
         }
@@ -264,7 +272,7 @@ impl SyncProgress {
                     return Some((current as f32 / total as f32) * 100.0);
                 }
             }
-            SyncType::TracksForPlaylist(_) => {
+            SyncType::TracksForPlaylist(_) | SyncType::TracksForPlaylistList(_) => {
                 if let (Some(current), Some(total)) = (self.current_track, self.total_tracks)
                     && total > 0
                 {
@@ -832,6 +840,13 @@ pub fn task_type_label(task_type: &TaskType) -> String {
             let op_label = match operation {
                 SyncOperation::Playlists => "playlists",
                 SyncOperation::TracksForPlaylist(_) => "tracks (single playlist)",
+                SyncOperation::TracksForPlaylistList(ids) => {
+                    if ids.len() == 1 {
+                        "tracks (1 playlist)"
+                    } else {
+                        "tracks (batch)"
+                    }
+                }
                 SyncOperation::TracksAll => "all tracks",
                 SyncOperation::Full => "full sync",
             };

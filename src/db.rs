@@ -63,6 +63,8 @@ pub struct ServicePlaylist {
     pub metadata_json: Option<String>,
     pub imported_at: i64,
     pub updated_at: i64,
+    pub last_fetched_at: Option<i64>,
+    pub remote_track_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -1555,13 +1557,24 @@ pub async fn update_file_comment(pool: &Pool<Sqlite>, file_id: i64, comment: &st
     Ok(())
 }
 
-/// Write comment to file using exiftool
+/// Write comment to file using exiftool.
+///
+/// Uses the appropriate exiftool tag based on file type:
+/// - FLAC files: `-flac:comment=` (Vorbis comment)
+/// - All other files: `-comment=` (generic)
 pub async fn write_comment_to_file(file_path: &str, comment: &str) -> Result<()> {
     use std::process::Command;
 
+    // FLAC uses Vorbis comments — exiftool's generic `-comment` tag doesn't work
+    let comment_tag = if file_path.to_lowercase().ends_with(".flac") {
+        format!("-flac:comment={}", comment)
+    } else {
+        format!("-comment={}", comment)
+    };
+
     let output = Command::new("exiftool")
         .arg("-overwrite_original")
-        .arg(format!("-comment={}", comment))
+        .arg(&comment_tag)
         .arg(file_path)
         .output()?;
 
@@ -1697,6 +1710,34 @@ pub async fn upsert_service_playlist(
     .fetch_one(conn)
     .await?;
     Ok(row)
+}
+
+/// Update per-playlist fetch tracking after a successful sync.
+/// Sets `last_fetched_at` to now and records the remote track count.
+pub async fn update_playlist_fetch_tracking(
+    conn: &mut SqliteConnection,
+    service: &str,
+    playlist_id: &str,
+    remote_track_count: i64,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        r#"
+        UPDATE service_playlists
+        SET last_fetched_at = ?,
+            remote_track_count = ?,
+            updated_at = ?
+        WHERE service = ? AND playlist_id = ?
+        "#,
+    )
+    .bind(now)
+    .bind(remote_track_count)
+    .bind(now)
+    .bind(service)
+    .bind(playlist_id)
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 /// Create or update a service track in the database

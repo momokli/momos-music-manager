@@ -514,9 +514,12 @@ pub struct Playlist {
     pub name: String,
     pub description: Option<String>,
     pub track_count: i64,
+    pub remote_track_count: i64,
+    pub last_fetched_at: Option<i64>,
     pub imported_at: i64,
     pub updated_at: i64,
     pub metadata_json: Option<String>,
+    pub tag_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -553,6 +556,13 @@ pub struct TracksQuery {
     pub file_type_agg: Option<String>,
     pub search: Option<String>,
     pub playlist_id: Option<i64>,
+    pub tags: Option<String>,
+    pub pmv_categories: Option<String>,
+    pub pmv_aggregate: Option<String>,
+    pub imported_after_days: Option<i64>,
+    pub imported_before_days: Option<i64>,
+    pub added_after_days: Option<i64>,
+    pub added_before_days: Option<i64>,
     pub sort: Option<String>,
     pub order: Option<String>,
     pub page_size: Option<i64>,
@@ -568,7 +578,8 @@ pub struct PlaylistsQuery {
     pub sort: Option<String>,
     pub order: Option<String>,
     pub page_size: Option<i64>,
-    pub pmv_categories: Option<String>,
+    pub categories: Option<String>, // comma-separated lowercase prefixes: p,m,v,e,s
+    pub subscribed: Option<bool>,   // true = only subscribed, false = only unsubscribed
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -974,6 +985,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/services/spotify/sync/playlists",
             post(spotify_sync_playlists_handler),
+        )
+        .route(
+            "/api/services/spotify/sync/playlists/batch",
+            post(spotify_sync_playlists_batch_handler),
         )
         .route(
             "/api/services/spotify/sync/tracks",
@@ -4555,6 +4570,146 @@ async fn spotify_sync_playlist_tracks_handler(
     }
 }
 
+/// Batch sync: fetch tracks for multiple playlists matching a criterion.
+/// `mode`: "stale" (local < remote or both zero) or "recent" (not fetched in 15+ min).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchSyncRequest {
+    pub mode: String,
+}
+
+async fn spotify_sync_playlists_batch_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BatchSyncRequest>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    if !state.config.is_spotify_configured() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                data: "Spotify not configured. Add SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET to .env file"
+                    .to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    // Query for matching Spotify playlists based on mode
+    let playlist_ids: Vec<String> = match body.mode.as_str() {
+        "stale" => {
+            // Playlists where local < remote, or both are 0 (never synced tracks)
+            match sqlx::query_scalar::<_, String>(
+                r#"
+                SELECT sp.playlist_id
+                FROM service_playlists sp
+                WHERE sp.service = 'spotify'
+                  AND (
+                      (SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id) < sp.remote_track_count
+                      OR (
+                          sp.remote_track_count = 0
+                          AND (SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id) = 0
+                      )
+                  )
+                "#,
+            )
+            .fetch_all(&state.db)
+            .await
+            {
+                Ok(ids) => ids,
+                Err(e) => {
+                    tracing::error!("Failed to query stale playlists: {}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiResponse {
+                            data: format!("Failed to query stale playlists: {}", e),
+                        }),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        "recent" => {
+            // Playlists not fetched within the last 15 minutes (900 seconds)
+            match sqlx::query_scalar::<_, String>(
+                r#"
+                SELECT sp.playlist_id
+                FROM service_playlists sp
+                WHERE sp.service = 'spotify'
+                  AND (
+                      sp.last_fetched_at IS NULL
+                      OR sp.last_fetched_at < unixepoch() - 900
+                  )
+                "#,
+            )
+            .fetch_all(&state.db)
+            .await
+            {
+                Ok(ids) => ids,
+                Err(e) => {
+                    tracing::error!("Failed to query recent playlists: {}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiResponse {
+                            data: format!("Failed to query recent playlists: {}", e),
+                        }),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    data: format!("Invalid mode '{}'. Must be 'stale' or 'recent'.", other),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if playlist_ids.is_empty() {
+        return Json(ApiResponse {
+            data: serde_json::json!({
+                "taskId": null,
+                "playlistCount": 0,
+                "message": "No matching playlists found"
+            }),
+        })
+        .into_response();
+    }
+
+    // Spawn a single batch task for all matching playlists
+    match crate::tasks::start_spotify_sync_task(
+        &state.task_manager,
+        &state.db,
+        &state.config,
+        SyncType::TracksForPlaylistList(playlist_ids.clone()),
+    )
+    .await
+    {
+        Ok(task_id) => Json(ApiResponse {
+            data: serde_json::json!({
+                "taskId": task_id,
+                "playlistCount": playlist_ids.len(),
+                "message": format!("Started batch sync for {} playlist(s)", playlist_ids.len())
+            }),
+        })
+        .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to start batch sync: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    data: format!("Failed to start batch sync: {}", e),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// Full sync (playlists + all tracks)
 async fn spotify_sync_full_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use axum::http::StatusCode;
@@ -4606,10 +4761,12 @@ async fn playlists_handler(
     let service_filter = query.service.clone();
 
     // Build main query with bind parameters (no string interpolation)
+    // LEFT JOIN v_tag_playlist for tag matching (tags.name is UNIQUE, so at most one match)
     let mut main_builder = QueryBuilder::new(
-        "SELECT sp.*, COUNT(spt.track_id) as track_count
+        "SELECT sp.*, COUNT(spt.track_id) as track_count, vtp.tag_name
          FROM service_playlists sp
-         LEFT JOIN service_playlist_tracks spt ON sp.id = spt.playlist_id",
+         LEFT JOIN service_playlist_tracks spt ON sp.id = spt.playlist_id
+         LEFT JOIN v_tag_playlist vtp ON vtp.playlist_id = sp.id",
     );
 
     let mut count_builder =
@@ -4642,6 +4799,59 @@ async fn playlists_handler(
             count_builder.push(" WHERE sp.name LIKE ");
         }
         count_builder.push_bind(format!("%{}%", search));
+        has_where = true;
+    }
+
+    // Category filter using v_playlist_tag_category view
+    // NOTE: push() treats ? as literal SQL, NOT as a bind placeholder.
+    // We push the prefix + paren, then push_bind each value (which emits its own ?),
+    // then close the paren. See commit 44ca2b8 for the same fix on PMV filter.
+    if let Some(ref cats) = query.categories {
+        let cat_list: Vec<String> = cats
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !cat_list.is_empty() {
+            main_builder
+                .push(" LEFT JOIN v_playlist_tag_category vptc ON vptc.playlist_id = sp.id");
+            count_builder
+                .push(" LEFT JOIN v_playlist_tag_category vptc ON vptc.playlist_id = sp.id");
+
+            let clause = if has_where {
+                " AND LOWER(vptc.prefix) IN ("
+            } else {
+                " WHERE LOWER(vptc.prefix) IN ("
+            };
+            main_builder.push(clause);
+            count_builder.push(clause);
+            for (i, cat) in cat_list.iter().enumerate() {
+                if i > 0 {
+                    main_builder.push(", ");
+                    count_builder.push(", ");
+                }
+                main_builder.push_bind(cat.clone());
+                count_builder.push_bind(cat.clone());
+            }
+            main_builder.push(")");
+            count_builder.push(")");
+            has_where = true;
+        }
+    }
+
+    // Subscription filter
+    if let Some(subscribed) = query.subscribed {
+        let clause = if has_where { " AND " } else { " WHERE " };
+        if subscribed {
+            let sub = "EXISTS (SELECT 1 FROM playlist_subscriptions ps WHERE ps.service = sp.service AND ps.playlist_id = sp.playlist_id)";
+            main_builder.push(format!("{}{}", clause, sub));
+            count_builder.push(format!("{}{}", clause, sub));
+        } else {
+            let sub = "NOT EXISTS (SELECT 1 FROM playlist_subscriptions ps WHERE ps.service = sp.service AND ps.playlist_id = sp.playlist_id)";
+            main_builder.push(format!("{}{}", clause, sub));
+            count_builder.push(format!("{}{}", clause, sub));
+        }
+        has_where = true;
     }
 
     main_builder.push(" GROUP BY sp.id");
@@ -4688,44 +4898,6 @@ async fn playlists_handler(
         Err(e) => {
             return internal_error(format!("Failed to get total count: {}", e)).into_response();
         }
-    };
-
-    // Post-query PMV filter: playlist's tag category must match p→Phase, m→Mood, v→Vibe
-    let playlists = if let Some(ref pmv_cats) = query.pmv_categories {
-        let cats: Vec<String> = pmv_cats.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
-        let pmv_map: std::collections::HashMap<&str, &str> =
-            [("p", "Phase"), ("m", "Mood"), ("v", "Vibe")].iter().cloned().collect();
-        let category_names: Vec<&str> = cats.iter().filter_map(|c| pmv_map.get(c.as_str()).copied()).collect();
-        if !category_names.is_empty() && !playlists.is_empty() {
-            use std::collections::HashSet;
-            let mut matching_names: HashSet<String> = HashSet::new();
-            for p in &playlists {
-                let tag_cat: Option<String> = sqlx::query_scalar(
-                    "SELECT tc.name FROM tags t JOIN tag_categories tc ON t.category_id = tc.id WHERE LOWER(TRIM(t.name)) = LOWER(TRIM(?))"
-                )
-                .bind(&p.name)
-                .fetch_optional(&state.db)
-                .await
-                .unwrap_or(None);
-                if let Some(ref cat) = tag_cat {
-                    if category_names.contains(&cat.as_str()) {
-                        matching_names.insert(p.name.clone());
-                    }
-                }
-            }
-            playlists.into_iter().filter(|p| matching_names.contains(&p.name)).collect()
-        } else {
-            playlists
-        }
-    } else {
-        playlists
-    };
-
-    // Update count if PMV filter was applied
-    let total = if query.pmv_categories.is_some() {
-        playlists.len() as i64
-    } else {
-        total
     };
 
     // Get deemix status via SQL LEFT JOIN (matches playlist_id in URL)
@@ -4812,9 +4984,13 @@ async fn playlists_handler(
                 "name": p.name,
                 "description": p.description,
                 "trackCount": p.track_count,
+                "localTrackCount": p.track_count,
+                "remoteTrackCount": p.remote_track_count,
+                "lastFetchedAt": p.last_fetched_at,
                 "importedAt": p.imported_at,
                 "updatedAt": p.updated_at,
                 "metadataJson": p.metadata_json,
+                "tagName": p.tag_name,
                 "deemixStatus": deemix_status,
                 "deemixId": deemix_id,
             })
@@ -6032,6 +6208,13 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         }
     });
     let playlist_id_filter = query.playlist_id;
+    let tags_filter = query.tags.clone();
+    let pmv_categories_filter = query.pmv_categories.clone();
+    let pmv_aggregate_filter = query.pmv_aggregate.clone();
+    let imported_after_days_filter = query.imported_after_days;
+    let imported_before_days_filter = query.imported_before_days;
+    let added_after_days_filter = query.added_after_days;
+    let added_before_days_filter = query.added_before_days;
 
     // If filtering by playlist, use DISTINCT to avoid duplicates from the JOIN
     let mut sql = if playlist_id_filter.is_some() {
@@ -6094,6 +6277,61 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         sql.push_str(" AND spt.playlist_id = ?");
     }
 
+    // Tags filter
+    if let Some(ref tags_str) = tags_filter {
+        let tag_list: Vec<&str> = tags_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !tag_list.is_empty() {
+            let placeholders: Vec<String> = tag_list.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND vtt.tag_name IN ({}))", placeholders.join(",")));
+        }
+    }
+
+    // PMV filter — categories and aggregate are mutually exclusive
+    if let Some(ref pmv_cats) = pmv_categories_filter {
+        let cat_list: Vec<String> = pmv_cats
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !cat_list.is_empty() {
+            let placeholders: Vec<String> = cat_list.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) IN ({}))", placeholders.join(",")));
+        }
+    } else if let Some(ref pmv_agg) = pmv_aggregate_filter {
+        match pmv_agg.as_str() {
+            "full" => {
+                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) = 'p')");
+                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) = 'm')");
+                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) = 'v')");
+            }
+            "partial" => {
+                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) IN ('p','m','v'))");
+            }
+            "none" => {
+                sql.push_str(" AND NOT EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) IN ('p','m','v'))");
+            }
+            _ => {}
+        }
+    }
+
+    // Date filters
+    if imported_after_days_filter.is_some() {
+        sql.push_str(" AND st.imported_at >= unixepoch('now', ?)");
+    }
+    if imported_before_days_filter.is_some() {
+        sql.push_str(" AND st.imported_at <= unixepoch('now', ?)");
+    }
+    if added_after_days_filter.is_some() {
+        sql.push_str(" AND (SELECT MAX(spt4.added_at) FROM service_playlist_tracks spt4 WHERE spt4.track_id = st.id) >= unixepoch('now', ?)");
+    }
+    if added_before_days_filter.is_some() {
+        sql.push_str(" AND (SELECT MAX(spt4.added_at) FROM service_playlist_tracks spt4 WHERE spt4.track_id = st.id) <= unixepoch('now', ?)");
+    }
+
     apply_sort(
         &mut sql,
         query.sort.as_deref(),
@@ -6140,6 +6378,42 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
 
     if let Some(pid) = playlist_id_filter {
         query_builder = query_builder.bind(pid);
+    }
+
+    // Tags filter binds
+    if let Some(ref tags_str) = tags_filter {
+        for tag in tags_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            query_builder = query_builder.bind(tag);
+        }
+    }
+
+    // PMV categories filter binds
+    if let Some(ref pmv_cats) = pmv_categories_filter {
+        for cat in pmv_cats
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        {
+            query_builder = query_builder.bind(cat);
+        }
+    }
+
+    // Date filter binds
+    if let Some(days) = imported_after_days_filter {
+        query_builder = query_builder.bind(format!("-{} days", days));
+    }
+    if let Some(days) = imported_before_days_filter {
+        query_builder = query_builder.bind(format!("-{} days", days));
+    }
+    if let Some(days) = added_after_days_filter {
+        query_builder = query_builder.bind(format!("-{} days", days));
+    }
+    if let Some(days) = added_before_days_filter {
+        query_builder = query_builder.bind(format!("-{} days", days));
     }
 
     let tracks = query_builder
@@ -6293,6 +6567,13 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
         }
     });
     let playlist_id_filter = query.playlist_id;
+    let tags_filter = query.tags.clone();
+    let pmv_categories_filter = query.pmv_categories.clone();
+    let pmv_aggregate_filter = query.pmv_aggregate.clone();
+    let imported_after_days_filter = query.imported_after_days;
+    let imported_before_days_filter = query.imported_before_days;
+    let added_after_days_filter = query.added_after_days;
+    let added_before_days_filter = query.added_before_days;
 
     let mut sql = if playlist_id_filter.is_some() {
         "SELECT COUNT(DISTINCT st.id) as count FROM service_tracks st JOIN service_playlist_tracks spt ON spt.track_id = st.id WHERE 1=1"
@@ -6354,6 +6635,61 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
         sql.push_str(" AND spt.playlist_id = ?");
     }
 
+    // Tags filter
+    if let Some(ref tags_str) = tags_filter {
+        let tag_list: Vec<&str> = tags_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !tag_list.is_empty() {
+            let placeholders: Vec<String> = tag_list.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND vtt.tag_name IN ({}))", placeholders.join(",")));
+        }
+    }
+
+    // PMV filter — categories and aggregate are mutually exclusive
+    if let Some(ref pmv_cats) = pmv_categories_filter {
+        let cat_list: Vec<String> = pmv_cats
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !cat_list.is_empty() {
+            let placeholders: Vec<String> = cat_list.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) IN ({}))", placeholders.join(",")));
+        }
+    } else if let Some(ref pmv_agg) = pmv_aggregate_filter {
+        match pmv_agg.as_str() {
+            "full" => {
+                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) = 'p')");
+                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) = 'm')");
+                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) = 'v')");
+            }
+            "partial" => {
+                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) IN ('p','m','v'))");
+            }
+            "none" => {
+                sql.push_str(" AND NOT EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) IN ('p','m','v'))");
+            }
+            _ => {}
+        }
+    }
+
+    // Date filters
+    if imported_after_days_filter.is_some() {
+        sql.push_str(" AND st.imported_at >= unixepoch('now', ?)");
+    }
+    if imported_before_days_filter.is_some() {
+        sql.push_str(" AND st.imported_at <= unixepoch('now', ?)");
+    }
+    if added_after_days_filter.is_some() {
+        sql.push_str(" AND (SELECT MAX(spt4.added_at) FROM service_playlist_tracks spt4 WHERE spt4.track_id = st.id) >= unixepoch('now', ?)");
+    }
+    if added_before_days_filter.is_some() {
+        sql.push_str(" AND (SELECT MAX(spt4.added_at) FROM service_playlist_tracks spt4 WHERE spt4.track_id = st.id) <= unixepoch('now', ?)");
+    }
+
     let mut query_builder = sqlx::query(&sql);
 
     if let Some(ref pattern) = search_pattern {
@@ -6382,6 +6718,42 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
 
     if let Some(pid) = playlist_id_filter {
         query_builder = query_builder.bind(pid);
+    }
+
+    // Tags filter binds
+    if let Some(ref tags_str) = tags_filter {
+        for tag in tags_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            query_builder = query_builder.bind(tag);
+        }
+    }
+
+    // PMV categories filter binds
+    if let Some(ref pmv_cats) = pmv_categories_filter {
+        for cat in pmv_cats
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        {
+            query_builder = query_builder.bind(cat);
+        }
+    }
+
+    // Date filter binds
+    if let Some(days) = imported_after_days_filter {
+        query_builder = query_builder.bind(format!("-{} days", days));
+    }
+    if let Some(days) = imported_before_days_filter {
+        query_builder = query_builder.bind(format!("-{} days", days));
+    }
+    if let Some(days) = added_after_days_filter {
+        query_builder = query_builder.bind(format!("-{} days", days));
+    }
+    if let Some(days) = added_before_days_filter {
+        query_builder = query_builder.bind(format!("-{} days", days));
     }
 
     let row = query_builder.fetch_one(pool).await?;

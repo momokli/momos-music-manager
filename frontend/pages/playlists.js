@@ -75,7 +75,8 @@ const HASH_DEFAULTS = {
   untaggedOnly: false,
   mismatchOnly: false,
   selectedServices: [],
-  pmvCategories: [],
+  categories: [],
+  subscribed: false,
 };
 
 const HASH_SCHEMA = {
@@ -87,7 +88,8 @@ const HASH_SCHEMA = {
   untaggedOnly: { type: "boolean", default: false },
   mismatchOnly: { type: "boolean", default: false },
   selectedServices: { type: "array", default: [] },
-  pmvCategories: { type: "array", default: [] },
+  categories: { type: "array", default: [] },
+  subscribed: { type: "boolean", default: false },
 };
 
 /* ------------------------------------------------------------------ */
@@ -127,7 +129,7 @@ const PLAYLISTS_COLUMNS = [
   { id: "tags", label: "Tags", sortable: false, defaultWidth: 140 },
   { id: "deemix", label: "Deemix", sortable: false, defaultWidth: 100 },
   { id: "sync", label: "Sync", sortable: false, defaultWidth: 80 },
-  { id: "subscribe", label: "Subscribe", sortable: false, defaultWidth: 80 },
+  { id: "subscribe", label: "Subscribed", sortable: false, defaultWidth: 80 },
   { id: "view", label: "View", sortable: false, defaultWidth: 60 },
   { id: "actions", label: "Actions", sortable: false, defaultWidth: 120 },
 ];
@@ -147,9 +149,18 @@ function tagCell(t) {
 }
 
 function syncCell(v) {
-  return v === null
-    ? `<em style="color:var(--text-muted)">Never</em>`
-    : `<span style="color:var(--text-muted)">${escapeHtml(v)}</span>`;
+  if (v === null || v === undefined) {
+    return `<em style="color:var(--text-muted)">Never</em>`;
+  }
+  const d = new Date(v * 1000);
+  const now = new Date();
+  const diffMin = Math.floor((now - d) / 60000);
+  let label;
+  if (diffMin < 1) label = "just now";
+  else if (diffMin < 60) label = `${diffMin}m ago`;
+  else if (diffMin < 1440) label = `${Math.floor(diffMin / 60)}h ago`;
+  else label = `${Math.floor(diffMin / 1440)}d ago`;
+  return `<span style="color:var(--text-muted)" title="${d.toLocaleString()}">${label}</span>`;
 }
 
 /** Show a subscription bell icon (green = subscribed, muted = not subscribed) */
@@ -215,7 +226,7 @@ const PLAYLISTS_CELL_RENDERERS = {
   service: (r) => sBadge(r.svc),
   tracks: (r) => {
     const mismatch = r.l !== r.r;
-    return `<span class="${mismatch ? "diff-badge" : "font-mono"}">${r.l} / ${r.r}</span>`;
+    return `<span class="${mismatch ? "diff-badge" : "font-mono"}" title="Local: ${r.l} • Remote: ${r.r}${mismatch ? " (mismatch)" : ""}">${r.l} / ${r.r}</span>`;
   },
   imported: (r) =>
     r.importedAt
@@ -241,6 +252,8 @@ function renderToolbar(state) {
     <div class="filter-panel-header">
       ${renderSearchInput("playlists", state.search)}
       <button class="btn btn-primary" id="playlists-create-tag"><i class="fas fa-tag"></i> Create Tags</button>
+      <button class="btn btn-sm" id="playlists-sync-stale" title="Sync playlists with 0 or fewer local tracks than remote"><i class="fas fa-sync-alt"></i> Sync Stale</button>
+      <button class="btn btn-sm" id="playlists-sync-recent" title="Sync playlists not fetched in 15+ minutes"><i class="fas fa-clock"></i> Sync Recent</button>
       <button class="filter-panel-toggle" id="playlists-filter-toggle" title="Toggle filters">
         <i class="fas fa-chevron-up chevron"></i>
       </button>
@@ -249,6 +262,12 @@ function renderToolbar(state) {
       <div class="filter-panel-scroll" style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-2) var(--space-4);">
         <div>
           <div class="filter-section-header" style="margin-top:0"><i class="fas fa-music"></i> Playlist Info</div>
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="sub">Subscription</span>
+            <div class="filter-group">
+              <button class="filter-btn${state.subscribed ? " active" : ""}" data-value="subscribed"><i class="fas fa-bell"></i> Subscribed</button>
+            </div>
+          </div>
         </div>
         <div>
           <div class="filter-section-header" style="margin-top:0"><i class="fas fa-tag"></i> Classification</div>
@@ -262,11 +281,13 @@ function renderToolbar(state) {
             </div>
           </div>
           <div class="filter-row">
-            <span class="filter-row-label toggleable" data-filter="pmv">PMV</span>
-            <div class="filter-group" id="playlists-pmv-cat-btns" style="flex-wrap:wrap">
-              <button class="filter-btn${(state.pmvCategories || []).includes("p") ? " active" : ""}" data-value="p" title="Has Phase tags">P</button>
-              <button class="filter-btn${(state.pmvCategories || []).includes("m") ? " active" : ""}" data-value="m" title="Has Mood tags">M</button>
-              <button class="filter-btn${(state.pmvCategories || []).includes("v") ? " active" : ""}" data-value="v" title="Has Vibe tags">V</button>
+            <span class="filter-row-label toggleable" data-filter="category">Category</span>
+            <div class="filter-group" id="playlists-category-btns" style="flex-wrap:wrap">
+              <button class="filter-btn${(state.categories || []).includes("p") ? " active" : ""}" data-value="p" title="Phase">Phase</button>
+              <button class="filter-btn${(state.categories || []).includes("m") ? " active" : ""}" data-value="m" title="Mood">Mood</button>
+              <button class="filter-btn${(state.categories || []).includes("v") ? " active" : ""}" data-value="v" title="Vibe">Vibe</button>
+              <button class="filter-btn${(state.categories || []).includes("e") ? " active" : ""}" data-value="e" title="Merkmal">Merkmal</button>
+              <button class="filter-btn${(state.categories || []).includes("s") ? " active" : ""}" data-value="s" title="Setlist">Setlist</button>
             </div>
           </div>
         </div>
@@ -368,27 +389,16 @@ function buildParams(state) {
   if (state.search) params.set("search", state.search);
   if (state.untaggedOnly) params.set("untagged", "true");
   if (state.mismatchOnly) params.set("mismatch", "true");
-  if (state.pmvCategories && state.pmvCategories.length > 0) {
-    params.set("pmvCategories", state.pmvCategories.join(","));
+  if (state.categories && state.categories.length > 0) {
+    params.set("categories", state.categories.join(","));
   }
+  if (state.subscribed) params.set("subscribed", "true");
   return params;
 }
 
 /* ------------------------------------------------------------------ */
 /*  Client-side filter helpers                                         */
 /* ------------------------------------------------------------------ */
-
-/**
- * Extract PMV categories present in a playlist's comment bracket.
- * Returns { p: bool, m: bool, v: bool }.
- * Playlists currently don't have comment data, so this always returns
- * all-false until the backend provides comment/PMV info.
- */
-
-/**
- * Apply client-side filters to a playlist list.
- * Filters: service (multi-select OR), PMV categories/aggregate.
- */
 
 /* ------------------------------------------------------------------ */
 /*  Fetch + Render cycle                                               */
@@ -410,36 +420,27 @@ async function fetchAndRender(container, signal, state) {
   setContent(renderLoading("Loading playlists…"));
 
   try {
-    // Build server-side params, then remove pagination — we paginate
-    // client-side after applying client-side filters (service, PMV).
-    const params = buildParams(state);
-    const fetchParams = new URLSearchParams(params);
-    fetchParams.delete("limit");
-    fetchParams.delete("offset");
+    // Server-side pagination — params already include limit/offset from buildParams
+    const params = new URLSearchParams(buildParams(state));
 
-    const [plResp, tagsResp, subsResp] = await Promise.all([
-      fetchJSON(`/api/playlists?${fetchParams}`, { signal }),
-      fetchJSON("/api/tags", { signal }),
+    const [plResp, subsResp] = await Promise.all([
+      fetchJSON(`/api/playlists?${params}`, { signal }),
       fetchJSON("/api/playlists/subscriptions", { signal }),
     ]);
     if (signal.aborted) return;
 
-    // Build tag lookup: tag name (lowercase) -> tag name
-    const tagLookup = {};
-    for (const t of tagsResp.data || []) {
-      tagLookup[t.name.toLowerCase()] = t.name;
-    }
-
-    // Build subscription lookup: key = "service:playlist_id" -> subscription object
+    // Build subscription lookup: key = "service:playlistId" -> subscription object
     const subLookup = {};
-    const subscriptions = subsResp.data?.subscriptions || [];
+    const subscriptions = Array.isArray(subsResp.data) ? subsResp.data : [];
     for (const s of subscriptions) {
-      subLookup[`${s.service}:${s.playlist_id}`] = s;
+      subLookup[`${s.service}:${s.playlistId}`] = s;
     }
 
-    let rawPlaylists = plResp.data.playlists || plResp.data || [];
+    const rawPlaylists = plResp.data.playlists || [];
+    const total = plResp.data.total ?? rawPlaylists.length;
 
-    let adapted = rawPlaylists.map((p) => {
+    // Adapt playlists with subscription + sync metadata
+    const adapted = rawPlaylists.map((p) => {
       const key = `${p.service}:${p.playlistId}`;
       return {
         id: p.id,
@@ -447,10 +448,10 @@ async function fetchAndRender(container, signal, state) {
         svc: p.service,
         playlistId: p.playlistId,
         sub: subLookup[key] || null,
-        l: p.localTrackCount ?? 0,
+        l: p.localTrackCount ?? p.trackCount ?? 0,
         r: p.remoteTrackCount ?? 0,
-        sync: null,
-        tag: tagLookup[p.name.toLowerCase()] || null,
+        sync: p.lastFetchedAt || null,
+        tag: p.tagName || null,
         deemixStatus: p.deemixStatus || null,
         deemixId: p.deemixId || null,
         importedAt: p.importedAt || p.imported_at || null,
@@ -458,21 +459,13 @@ async function fetchAndRender(container, signal, state) {
       };
     });
 
-
-    // Client-side pagination
-    const total = adapted.length;
-    const paged = adapted.slice(
-      state.page * state.pageSize,
-      (state.page + 1) * state.pageSize,
-    );
-
     const data = {
       _total: total,
-      playlists: paged,
+      playlists: adapted,
     };
 
     // Empty state (no playlists in DB at all)
-    if (paged.length === 0 && total === 0) {
+    if (adapted.length === 0 && total === 0) {
       setContent(renderEmptyBody(state.search));
       wireContentEvents(container, signal, state);
       return;
@@ -541,29 +534,47 @@ function wireToolbarEvents(container, signal, state) {
     );
   }
 
-  // PMV category buttons (multi-select: P, M, V)
-  const pmvCatEl = container.querySelector("#playlists-pmv-cat-btns");
+  // Category buttons (multi-select: Phase, Mood, Vibe, Merkmal, Setlist)
+  const categoryEl = container.querySelector("#playlists-category-btns");
 
-  function syncPmvFilterUI() {
-    if (pmvCatEl) {
-      pmvCatEl.querySelectorAll(".filter-btn").forEach((btn) => {
-        btn.classList.toggle("active", state.pmvCategories.includes(btn.dataset.value));
+  function syncCategoryFilterUI() {
+    if (categoryEl) {
+      categoryEl.querySelectorAll(".filter-btn").forEach((btn) => {
+        btn.classList.toggle("active", state.categories.includes(btn.dataset.value));
       });
     }
   }
 
-  if (pmvCatEl) {
-    pmvCatEl.addEventListener(
+  if (categoryEl) {
+    categoryEl.addEventListener(
       "click",
       (e) => {
         const btn = e.target.closest(".filter-btn");
         if (!btn) return;
         const v = btn.dataset.value;
-        const i = state.pmvCategories.indexOf(v);
-        if (i >= 0) state.pmvCategories.splice(i, 1);
-        else state.pmvCategories.push(v);
+        const i = state.categories.indexOf(v);
+        if (i >= 0) state.categories.splice(i, 1);
+        else state.categories.push(v);
         state.page = 0;
-        syncPmvFilterUI();
+        syncCategoryFilterUI();
+        updateHash("playlists", state, HASH_DEFAULTS);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // Subscription toggle (single button, on/off)
+  const subRow = container.querySelector(".filter-row:has([data-filter=sub])");
+  if (subRow) {
+    subRow.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn[data-value=subscribed]");
+        if (!btn) return;
+        state.subscribed = !state.subscribed;
+        state.page = 0;
+        btn.classList.toggle("active", state.subscribed);
         updateHash("playlists", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
       },
@@ -893,9 +904,11 @@ export async function init(container, signal, hashParams) {
     untaggedOnly: parsed.untaggedOnly,
     mismatchOnly: parsed.mismatchOnly,
     selectedServices: parsed.selectedServices || [],
-    pmvCategories: parsed.pmvCategories || [],
+    categories: parsed.categories || [],
+    subscribed: parsed.subscribed || false,
     serviceEnabled: true,
-    pmvEnabled: true,
+    categoryEnabled: true,
+    subEnabled: true,
     layoutMode: false,
   };
 
@@ -918,7 +931,7 @@ export async function init(container, signal, hashParams) {
       <div id="playlists-content" style="min-height:200px;">${renderLoading("Loading playlists…")}</div>
     </div>`;
 
-  // Wire toolbar events once (search, service filter, PMV, toggles)
+  // Wire toolbar events once (search, service filter, category, toggles)
   wireToolbarEvents(container, signal, state);
 
   // Wire filter panel collapse/expand toggle
@@ -971,6 +984,63 @@ export async function init(container, signal, hashParams) {
           showToast(`Failed to create tags: ${err.message}`, "error");
           createTagsBtn.disabled = false;
           createTagsBtn.innerHTML = '<i class="fas fa-tag"></i> Create Tags';
+        }
+      },
+      { signal },
+    );
+  }
+
+  // Sync Stale — batch sync playlists with 0 or fewer local tracks than remote
+  const syncStaleBtn = container.querySelector("#playlists-sync-stale");
+  if (syncStaleBtn) {
+    syncStaleBtn.addEventListener(
+      "click",
+      async () => {
+        try {
+          const resp = await fetchJSON("/api/services/spotify/sync/playlists/batch", {
+            method: "POST",
+            body: JSON.stringify({ mode: "stale" }),
+          });
+          const info = resp.data || {};
+          const count = info.playlistCount || 0;
+          if (count === 0) {
+            showToast("No stale playlists found", "info");
+          } else {
+            showToast(`Sync started for ${count} stale playlist(s)`, "success");
+            setTimeout(() => fetchAndRender(container, signal, state), 2000);
+          }
+        } catch (err) {
+          showToast(`Sync stale failed: ${err.message}`, "error");
+        }
+      },
+      { signal },
+    );
+  }
+
+  // Sync Recent — batch sync playlists not fetched in 15+ minutes
+  const syncRecentBtn = container.querySelector("#playlists-sync-recent");
+  if (syncRecentBtn) {
+    syncRecentBtn.addEventListener(
+      "click",
+      async () => {
+        try {
+          const resp = await fetchJSON("/api/services/spotify/sync/playlists/batch", {
+            method: "POST",
+            body: JSON.stringify({ mode: "recent" }),
+          });
+          const info = resp.data || {};
+          const count = info.playlistCount || 0;
+          if (count === 0) {
+            showToast("All playlists up to date", "info");
+          } else {
+            showToast(
+              `Sync started for ${count} playlist(s) not recently synced`,
+              "success",
+            );
+            setTimeout(() => fetchAndRender(container, signal, state), 2000);
+          }
+        } catch (err) {
+          showToast(`Sync recent failed: ${err.message}`, "error");
         }
       },
       { signal },
