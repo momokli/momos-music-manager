@@ -6,8 +6,10 @@
 //! with progress tracking, cancellation support, and error resilience.
 
 use anyhow::{Context, Result};
+use rspotify::ClientError;
 use rspotify::model::{PlayableItem, SimplifiedPlaylist, track::FullTrack};
 use sqlx::{Pool, Sqlite};
+use std::time::Duration;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -17,6 +19,35 @@ use crate::spotify::client::SpotifyClient;
 use crate::spotify::models::{PlaylistInfo, TrackInfo};
 use crate::spotify::replay::{self, CacheMode, CachedTrackEntry};
 use crate::tasks::{SyncProgress, SyncResult, SyncType, TaskStatus};
+
+/// Extract the Retry-After duration from a Spotify 429 rate-limit error.
+/// Works directly on an rspotify::ClientError.
+fn client_error_retry_after_secs(err: &ClientError) -> Option<u64> {
+    if let ClientError::Http(http_err) = err {
+        if let rspotify::http::HttpError::StatusCode(response) = http_err.as_ref() {
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                if let Some(retry_after) = response.headers().get("retry-after") {
+                    return retry_after.to_str().ok()?.parse::<u64>().ok();
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract the Retry-After duration from a Spotify 429 rate-limit error.
+/// Walks the anyhow error chain looking for rspotify::ClientError::Http
+/// containing a 429 StatusCode with a retry-after header.
+fn extract_retry_after_secs(err: &anyhow::Error) -> Option<u64> {
+    for cause in err.chain() {
+        if let Some(client_err) = cause.downcast_ref::<ClientError>() {
+            if let Some(secs) = client_error_retry_after_secs(client_err) {
+                return Some(secs);
+            }
+        }
+    }
+    None
+}
 
 /// Spotify sync worker that performs background sync operations
 pub struct SpotifySyncWorker {
@@ -214,14 +245,36 @@ impl SpotifySyncWorker {
         }
 
         debug!("Getting user playlists from Spotify client...");
-        let mut playlists_stream = match self.spotify_client.get_user_playlists().await {
-            Ok(stream) => {
-                debug!("Successfully got playlists stream");
-                stream
-            }
-            Err(e) => {
-                error!("Failed to get playlists stream: {:?}", e);
-                return Err(e);
+        let mut playlists_stream = {
+            let mut attempt = 0;
+            loop {
+                match self.spotify_client.get_user_playlists().await {
+                    Ok(stream) => {
+                        debug!("Successfully got playlists stream");
+                        break stream;
+                    }
+                    Err(e) => {
+                        if let Some(secs) = extract_retry_after_secs(&e) {
+                            attempt += 1;
+                            if attempt >= 3 {
+                                error!(
+                                    "Failed to get playlists stream after {} retries (rate limited): {:?}",
+                                    attempt, e
+                                );
+                                return Err(e);
+                            }
+                            let sleep_secs = secs + 1;
+                            warn!(
+                                "Spotify rate limited on playlist list. Retry-After: {}s, attempt {}/3, sleeping {}s",
+                                secs, attempt, sleep_secs
+                            );
+                            tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+                        } else {
+                            error!("Failed to get playlists stream: {:?}", e);
+                            return Err(e);
+                        }
+                    }
+                }
             }
         };
         let mut playlist_count = 0;
@@ -261,7 +314,16 @@ impl SpotifySyncWorker {
                     }
                 }
                 Err(e) => {
-                    error!("Failed to fetch playlist: {:?}", e);
+                    if let Some(secs) = extract_retry_after_secs(&e) {
+                        let sleep_secs = secs + 1;
+                        warn!(
+                            "Spotify rate limited on playlist list pagination. Retry-After: {}s, sleeping {}s",
+                            secs, sleep_secs
+                        );
+                        tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+                    } else {
+                        error!("Failed to fetch playlist: {:?}", e);
+                    }
                     // Continue with next playlist
                 }
             }
@@ -403,15 +465,40 @@ impl SpotifySyncWorker {
             progress.status = TaskStatus::Running;
         }
 
-        // First get playlist info
-        let playlist = match self.spotify_client.get_playlist(playlist_id).await {
-            Ok(playlist) => playlist,
-            Err(e) => {
-                error!("Failed to fetch playlist {}: {:?}", playlist_id, e);
-                return Ok(SyncResult::failed(format!(
-                    "Failed to fetch playlist: {:?}",
-                    e
-                )));
+        // First get playlist info (with retry on 429 rate limit)
+        let playlist = {
+            let mut attempt = 0;
+            loop {
+                match self.spotify_client.get_playlist(playlist_id).await {
+                    Ok(p) => break p,
+                    Err(e) => {
+                        if let Some(secs) = extract_retry_after_secs(&e) {
+                            attempt += 1;
+                            if attempt >= 3 {
+                                error!(
+                                    "Failed to fetch playlist {} after {} retries (rate limited): {:?}",
+                                    playlist_id, attempt, e
+                                );
+                                return Ok(SyncResult::failed(format!(
+                                    "Failed to fetch playlist: {:?}",
+                                    e
+                                )));
+                            }
+                            let sleep_secs = secs + 1; // +1 safety margin
+                            warn!(
+                                "Spotify rate limited (playlist {}). Retry-After: {}s, attempt {}/3, sleeping {}s",
+                                playlist_id, secs, attempt, sleep_secs
+                            );
+                            tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+                        } else {
+                            error!("Failed to fetch playlist {}: {:?}", playlist_id, e);
+                            return Ok(SyncResult::failed(format!(
+                                "Failed to fetch playlist: {:?}",
+                                e
+                            )));
+                        }
+                    }
+                }
             }
         };
 
@@ -434,11 +521,15 @@ impl SpotifySyncWorker {
             match track_result {
                 Ok(item) => {
                     // Describe the item before extracting track (avoid borrow-after-move)
-                    let item_desc = item.track.as_ref().map(|t| match t {
-                        PlayableItem::Track(t) => format!("Track({})", t.name),
-                        PlayableItem::Episode(e) => format!("Episode({})", e.name),
-                        _ => "Unknown".to_string(),
-                    }).unwrap_or_else(|| "None".to_string());
+                    let item_desc = item
+                        .track
+                        .as_ref()
+                        .map(|t| match t {
+                            PlayableItem::Track(t) => format!("Track({})", t.name),
+                            PlayableItem::Episode(e) => format!("Episode({})", e.name),
+                            _ => "Unknown".to_string(),
+                        })
+                        .unwrap_or_else(|| "None".to_string());
 
                     // Extract track from playlist item
                     if let Some(track) = item.track
@@ -492,7 +583,10 @@ impl SpotifySyncWorker {
                         }
                     } else {
                         // Log skipped items: metadata total may include non-track content
-                        warn!("Skipping non-track item in '{}': {}", playlist_name, item_desc);
+                        warn!(
+                            "Skipping non-track item in '{}': {}",
+                            playlist_name, item_desc
+                        );
                     }
                 }
                 Err(e) => {
@@ -609,6 +703,11 @@ impl SpotifySyncWorker {
                     error!("Failed to sync playlist {}: {:?}", pid, e);
                     // Continue with next playlist
                 }
+            }
+
+            // Gentle delay between playlist syncs to stay under rate limit
+            if i + 1 < total {
+                tokio::time::sleep(Duration::from_millis(300)).await;
             }
         }
 
