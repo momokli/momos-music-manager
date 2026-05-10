@@ -252,7 +252,7 @@ function renderToolbar(state) {
     <div class="filter-panel-header">
       ${renderSearchInput("playlists", state.search)}
       <button class="btn btn-primary" id="playlists-create-tag"><i class="fas fa-tag"></i> Create Tags</button>
-      <button class="btn btn-sm" id="playlists-sync-stale" title="Sync playlists with 0 or fewer local tracks than remote"><i class="fas fa-sync-alt"></i> Sync Stale</button>
+      <button class="btn btn-sm" id="playlists-sync-stale" title="Sync playlists where local ≠ remote track count"><i class="fas fa-sync-alt"></i> Sync Stale</button>
       <button class="btn btn-sm" id="playlists-sync-recent" title="Sync playlists not fetched in 15+ minutes"><i class="fas fa-clock"></i> Sync Recent</button>
       <button class="filter-panel-toggle" id="playlists-filter-toggle" title="Toggle filters">
         <i class="fas fa-chevron-up chevron"></i>
@@ -990,7 +990,7 @@ export async function init(container, signal, hashParams) {
     );
   }
 
-  // Sync Stale — batch sync playlists with 0 or fewer local tracks than remote
+  // Sync Stale — batch sync playlists where local != remote (any mismatch)
   const syncStaleBtn = container.querySelector("#playlists-sync-stale");
   if (syncStaleBtn) {
     syncStaleBtn.addEventListener(

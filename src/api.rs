@@ -4732,7 +4732,7 @@ async fn spotify_sync_playlist_tracks_handler(
 }
 
 /// Batch sync: fetch tracks for multiple playlists matching a criterion.
-/// `mode`: "stale" (local < remote or both zero) or "recent" (not fetched in 15+ min).
+/// `mode`: "stale" (local != remote) or "recent" (not fetched in 15+ min).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchSyncRequest {
@@ -4759,19 +4759,13 @@ async fn spotify_sync_playlists_batch_handler(
     // Query for matching Spotify playlists based on mode
     let playlist_ids: Vec<String> = match body.mode.as_str() {
         "stale" => {
-            // Playlists where local < remote, or both are 0 (never synced tracks)
+            // Playlists where local != remote (any mismatch)
             match sqlx::query_scalar::<_, String>(
                 r#"
                 SELECT sp.playlist_id
                 FROM service_playlists sp
                 WHERE sp.service = 'spotify'
-                  AND (
-                      (SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id) < sp.remote_track_count
-                      OR (
-                          sp.remote_track_count = 0
-                          AND (SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id) = 0
-                      )
-                  )
+                  AND (SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id) != sp.remote_track_count
                 "#,
             )
             .fetch_all(&state.db)
