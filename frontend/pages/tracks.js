@@ -1524,6 +1524,8 @@ function updateSelectionUI(container, state) {
 
   // Compute needs-comment count from backend
   computeNeedsCount(container, state);
+  // Compute needs-refresh count from backend
+  computeRefreshCount(container, state);
 }
 
 /**
@@ -1607,6 +1609,89 @@ async function writeCommentsForSelected(container, state) {
   }
 }
 
+/**
+ * Query /api/tracks/needs-refresh-count for the currently selected tracks.
+ * Updates the REFRESH button label with the count of tracks whose linked
+ * files have an on-disk comment that differs from the DB.
+ */
+async function computeRefreshCount(container, state) {
+  const btn = container.querySelector("#tracks-actions-refresh");
+  if (!btn) return;
+
+  const selectedIds = Array.from(state.selectedTrackIds);
+  if (selectedIds.length === 0) {
+    btn.innerHTML = '<i class="fas fa-rotate"></i> Refresh';
+    state.needsRefreshCount = 0;
+    return;
+  }
+
+  // Show loading indicator
+  btn.innerHTML = '<i class="fas fa-rotate"></i> Refresh (...)';
+  btn.disabled = true;
+
+  try {
+    const resp = await fetchJSON("/api/tracks/needs-refresh-count", {
+      method: "POST",
+      body: JSON.stringify({ trackIds: selectedIds }),
+    });
+    const data = resp.data;
+    state.needsRefreshCount = data.tracksNeedingRefresh || 0;
+    btn.innerHTML = `<i class="fas fa-rotate"></i> Refresh (${state.needsRefreshCount})`;
+  } catch (err) {
+    console.warn("Failed to compute needs-refresh count:", err);
+    btn.innerHTML = '<i class="fas fa-rotate"></i> Refresh';
+  } finally {
+    btn.disabled = state.selectedTrackIds.size === 0;
+  }
+}
+
+/**
+ * Re-read comments from files on disk for the currently selected tracks'
+ * linked files, and update the DB to match.
+ */
+async function refreshCommentsForSelected(container, state) {
+  const selectedIds = Array.from(state.selectedTrackIds);
+  if (selectedIds.length === 0) {
+    showToast("No tracks selected.", "warning");
+    return;
+  }
+
+  const btn = container.querySelector("#tracks-actions-refresh");
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Refreshing...';
+  }
+
+  try {
+    const resp = await fetchJSON("/api/tracks/refresh-comments", {
+      method: "POST",
+      body: JSON.stringify({ trackIds: selectedIds }),
+    });
+    const data = resp.data;
+    if (data.refreshedCount > 0) {
+      showToast(
+        `Refreshed ${data.refreshedCount} file(s) (${data.fileCount} checked)`,
+        "success",
+      );
+    } else {
+      showToast(`All ${data.fileCount} file(s) already in sync`, "info");
+    }
+    // Reset selection after successful refresh
+    state.selectedTrackIds.clear();
+    state.needsRefreshCount = 0;
+    updateSelectionUI(container, state);
+    // Re-render to clear checkboxes
+    fetchAndRender(container, null, state);
+  } catch (err) {
+    showToast(`Failed to refresh comments: ${err.message}`, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-rotate"></i> Refresh';
+    }
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Initialisation                                                     */
 /* ------------------------------------------------------------------ */
@@ -1656,6 +1741,7 @@ export async function init(container, signal, hashParams) {
     layoutMode: false,
     selectedTrackIds: new Set(),
     needsCommentCount: 0,
+    needsRefreshCount: 0,
   };
 
   // Reset layout mode on page entry
@@ -1703,13 +1789,11 @@ export async function init(container, signal, hashParams) {
   // Wire toolbar filter events (service icons)
   wireToolbarEvents(container, signal, state);
 
-  // Wire actions panel refresh
-  import("../shared/actions-panel.js").then(({ wireActionsRefresh }) => {
-    wireActionsRefresh(container, "tracks", () => {
-      state.page = 0;
-      return fetchAndRender(container, signal, state);
-    });
-  });
+  // Wire actions panel refresh — re-read comments from files for selected tracks
+  const refreshBtn = container.querySelector("#tracks-actions-refresh");
+  if (refreshBtn) {
+    refreshBtn.onclick = () => refreshCommentsForSelected(container, state);
+  }
 
   // Wire WRITE COMMENTS button in actions panel
   const writeBtn = container.querySelector("#tracks-actions-write-comments");

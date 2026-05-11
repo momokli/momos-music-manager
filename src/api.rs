@@ -25,15 +25,16 @@ use crate::AppState;
 use crate::config::ServiceCredentials;
 #[allow(unused_imports)]
 use crate::db::{
-    CurationTag, File, Folder, ServiceConfig, ServiceConnections, ServiceTrack, bulk_categorize_tags,
-    bulk_check_tags, bulk_create_tags, bulk_review_tags, bulk_update_tags, categorize_tag as db_categorize_tag,
-    clear_all_embeddings, compute_target_comment, create_tag, create_tag_category,
-    create_tags_from_playlists, delete_folder, delete_tag, delete_tag_category,
-    find_tag_similar_tracks, get_all_embeddings, get_curation_queue, get_embeddings_by_category,
-    get_folder_by_id, get_folder_file_count, get_folders as db_get_folders,
-    get_playlists_without_tags, get_service_config, get_tag_categories, get_tag_category_by_id,
-    get_tag_children, get_tag_embedding, get_tag_parents, get_tag_review_counts, get_tags_for_file,
-    get_unreviewed_tags, list_subscriptions, scan_folder, set_tag_parents, update_folder_active,
+    CurationTag, File, Folder, ServiceConfig, ServiceConnections, ServiceTrack,
+    bulk_categorize_tags, bulk_check_tags, bulk_create_tags, bulk_review_tags, bulk_update_tags,
+    categorize_tag as db_categorize_tag, clear_all_embeddings, compute_target_comment, create_tag,
+    create_tag_category, create_tags_from_playlists, delete_folder, delete_tag,
+    delete_tag_category, find_tag_similar_tracks, get_all_embeddings, get_curation_queue,
+    get_embeddings_by_category, get_folder_by_id, get_folder_file_count,
+    get_folders as db_get_folders, get_playlists_without_tags, get_service_config,
+    get_tag_categories, get_tag_category_by_id, get_tag_children, get_tag_embedding,
+    get_tag_parents, get_tag_review_counts, get_tags_for_file, get_unreviewed_tags,
+    list_subscriptions, read_comment_from_file, scan_folder, set_tag_parents, update_folder_active,
     update_folder_with_config, update_service_connection_status, update_service_tokens, update_tag,
     update_tag_category_metadata, upsert_tag_embedding,
 };
@@ -231,6 +232,22 @@ struct TracksNeedsCommentCountResponse {
 #[serde(rename_all = "camelCase")]
 struct TracksWriteCommentsResponse {
     pub task_id: String,
+    pub file_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TracksNeedsRefreshCountResponse {
+    pub total_tracks: usize,
+    pub tracks_needing_refresh: usize,
+    pub files_total: usize,
+    pub files_needing_refresh: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TracksRefreshCommentsResponse {
+    pub refreshed_count: usize,
     pub file_count: usize,
 }
 
@@ -958,6 +975,14 @@ pub fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/tracks/write-comments",
             post(tracks_write_comments_handler),
+        )
+        .route(
+            "/api/tracks/needs-refresh-count",
+            post(tracks_needs_refresh_count_handler),
+        )
+        .route(
+            "/api/tracks/refresh-comments",
+            post(tracks_refresh_comments_handler),
         )
         .route("/api/tracks/{id}", get(track_handler))
         .route("/api/tags", get(tags_handler).post(create_tag_handler))
@@ -1824,6 +1849,193 @@ async fn tracks_write_comments_handler(
         data: TracksWriteCommentsResponse {
             task_id,
             file_count,
+        },
+    })
+    .into_response()
+}
+
+/// POST /api/tracks/needs-refresh-count
+/// Takes a list of track IDs, finds linked files, reads the actual comment
+/// from each file on disk via exiftool, and counts how many tracks have at
+/// least one linked file whose on-disk comment differs from the DB.
+async fn tracks_needs_refresh_count_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TracksBulkRequest>,
+) -> impl IntoResponse {
+    let empty = TracksNeedsRefreshCountResponse {
+        total_tracks: body.track_ids.len(),
+        tracks_needing_refresh: 0,
+        files_total: 0,
+        files_needing_refresh: 0,
+    };
+
+    if body.track_ids.is_empty() {
+        return Json(ApiResponse { data: empty }).into_response();
+    }
+
+    // Find linked files for the requested track IDs
+    let placeholders: Vec<String> = body.track_ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT DISTINCT v.file_id, v.track_id, f.file_path, f.comment
+         FROM v_file_track_link v
+         JOIN files f ON f.id = v.file_id
+         WHERE v.track_id IN ({})",
+        placeholders.join(",")
+    );
+
+    let mut query = sqlx::query(&sql);
+    for id in &body.track_ids {
+        query = query.bind(id);
+    }
+
+    let rows = match query.fetch_all(&state.db).await {
+        Ok(r) => r,
+        Err(e) => {
+            return internal_error(format!("Failed to find linked files: {}", e)).into_response();
+        }
+    };
+
+    if rows.is_empty() {
+        return Json(ApiResponse { data: empty }).into_response();
+    }
+
+    use std::collections::HashSet;
+    let mut tracks_with_stale: HashSet<i64> = HashSet::new();
+    let mut files_checked: HashSet<i64> = HashSet::new();
+    let mut files_stale = 0usize;
+    let mut files_total = 0usize;
+
+    for row in &rows {
+        let file_id: i64 = row.try_get("file_id").unwrap_or(0);
+        let track_id: i64 = row.try_get("track_id").unwrap_or(0);
+        let file_path: String = row.try_get("file_path").unwrap_or_default();
+        let db_comment: Option<String> = row.try_get("comment").ok();
+
+        if file_id == 0 || file_path.is_empty() {
+            continue;
+        }
+
+        if files_checked.contains(&file_id) {
+            continue;
+        }
+        files_checked.insert(file_id);
+        files_total += 1;
+
+        // Read actual comment from the file on disk
+        match read_comment_from_file(&file_path).await {
+            Ok(disk_comment) => {
+                let disk_str = disk_comment.as_deref().unwrap_or("");
+                let db_str = db_comment.as_deref().unwrap_or("");
+                if disk_str != db_str {
+                    files_stale += 1;
+                    tracks_with_stale.insert(track_id);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read comment from '{}': {}", file_path, e);
+            }
+        }
+    }
+
+    Json(ApiResponse {
+        data: TracksNeedsRefreshCountResponse {
+            total_tracks: body.track_ids.len(),
+            tracks_needing_refresh: tracks_with_stale.len(),
+            files_total,
+            files_needing_refresh: files_stale,
+        },
+    })
+    .into_response()
+}
+
+/// POST /api/tracks/refresh-comments
+/// Takes a list of track IDs, finds linked files, reads the actual comment
+/// from each file on disk via exiftool, and updates the DB if different.
+async fn tracks_refresh_comments_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TracksBulkRequest>,
+) -> impl IntoResponse {
+    if body.track_ids.is_empty() {
+        return Json(ApiResponse {
+            data: TracksRefreshCommentsResponse {
+                refreshed_count: 0,
+                file_count: 0,
+            },
+        })
+        .into_response();
+    }
+
+    // Find linked files for the requested track IDs
+    let placeholders: Vec<String> = body.track_ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT DISTINCT v.file_id, f.file_path, f.comment
+         FROM v_file_track_link v
+         JOIN files f ON f.id = v.file_id
+         WHERE v.track_id IN ({})",
+        placeholders.join(",")
+    );
+
+    let mut query = sqlx::query(&sql);
+    for id in &body.track_ids {
+        query = query.bind(id);
+    }
+
+    let rows = match query.fetch_all(&state.db).await {
+        Ok(r) => r,
+        Err(e) => {
+            return internal_error(format!("Failed to find linked files: {}", e)).into_response();
+        }
+    };
+
+    if rows.is_empty() {
+        return Json(ApiResponse {
+            data: TracksRefreshCommentsResponse {
+                refreshed_count: 0,
+                file_count: 0,
+            },
+        })
+        .into_response();
+    }
+
+    use std::collections::HashSet;
+    let mut refreshed = 0usize;
+    let mut seen: HashSet<i64> = HashSet::new();
+
+    for row in &rows {
+        let file_id: i64 = row.try_get("file_id").unwrap_or(0);
+        let file_path: String = row.try_get("file_path").unwrap_or_default();
+        let db_comment: Option<String> = row.try_get("comment").ok();
+
+        if file_id == 0 || file_path.is_empty() || seen.contains(&file_id) {
+            continue;
+        }
+        seen.insert(file_id);
+
+        // Read actual comment from the file on disk
+        match read_comment_from_file(&file_path).await {
+            Ok(disk_comment) => {
+                let disk_str = disk_comment.as_deref().unwrap_or("");
+                let db_str = db_comment.as_deref().unwrap_or("");
+                if disk_str != db_str {
+                    if let Err(e) =
+                        crate::db::update_file_comment(&state.db, file_id, disk_str).await
+                    {
+                        tracing::warn!("Failed to update DB comment for file #{}: {}", file_id, e);
+                    } else {
+                        refreshed += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read comment from '{}': {}", file_path, e);
+            }
+        }
+    }
+
+    Json(ApiResponse {
+        data: TracksRefreshCommentsResponse {
+            refreshed_count: refreshed,
+            file_count: seen.len(),
         },
     })
     .into_response()
@@ -4910,13 +5122,9 @@ async fn spotify_refresh_playlist_handler(
             return internal_error(format!("DB connection error: {}", e)).into_response();
         }
     };
-    if let Err(e) = crate::db::update_playlist_fetch_tracking(
-        &mut conn,
-        "spotify",
-        &playlist_id,
-        new_total,
-    )
-    .await
+    if let Err(e) =
+        crate::db::update_playlist_fetch_tracking(&mut conn, "spotify", &playlist_id, new_total)
+            .await
     {
         return internal_error(format!("Failed to update: {}", e)).into_response();
     }

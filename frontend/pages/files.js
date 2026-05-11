@@ -1345,6 +1345,9 @@ function wireContentEvents(container, signal, state) {
   const contentEl = container.querySelector("#files-content");
   if (!contentEl) return;
 
+  // Avoid { signal: null } — Safari throws TypeError on addEventListener
+  const listenerOpts = signal != null ? { signal } : undefined;
+
   // ── Refresh button ──
   const refreshBtn = contentEl.querySelector("#files-refresh");
   if (refreshBtn) {
@@ -1354,7 +1357,7 @@ function wireContentEvents(container, signal, state) {
         updateHash("files", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
       },
-      { signal },
+      listenerOpts,
     );
   }
 
@@ -1380,7 +1383,7 @@ function wireContentEvents(container, signal, state) {
         updateHash("files", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
       },
-      { signal },
+      listenerOpts,
     );
   }
 
@@ -1396,7 +1399,7 @@ function wireContentEvents(container, signal, state) {
           fetchAndRender(container, signal, state);
         }
       },
-      { signal },
+      listenerOpts,
     );
   }
 
@@ -1409,7 +1412,7 @@ function wireContentEvents(container, signal, state) {
         updateHash("files", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
       },
-      { signal },
+      listenerOpts,
     );
   }
 
@@ -1429,7 +1432,7 @@ function wireContentEvents(container, signal, state) {
         showSimilarTracks(id);
       }
     },
-    { signal },
+    listenerOpts,
   );
 
   // ── Column resize, reorder, config modal ──
@@ -1455,7 +1458,7 @@ function wireContentEvents(container, signal, state) {
         updateHash("files", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
       },
-      { signal },
+      listenerOpts,
     );
   }
 

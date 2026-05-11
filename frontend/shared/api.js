@@ -11,10 +11,16 @@ export const API_BASE = window.location.origin;
  */
 export async function fetchJSON(url, options = {}) {
   const fullUrl = url.startsWith("http") ? url : `${API_BASE}${url}`;
-  const res = await fetch(fullUrl, {
-    headers: { "Content-Type": "application/json", ...options.headers },
-    ...options,
-  });
+  // Destructure so we can strip null signal (fetch() throws TypeError on null)
+  // and keep optHeaders separate so ...rest doesn't overwrite them.
+  const { signal, headers: optHeaders, ...rest } = options;
+  const fetchOpts = {
+    headers: { "Content-Type": "application/json", ...optHeaders },
+    ...rest,
+  };
+  if (signal != null) fetchOpts.signal = signal;
+
+  const res = await fetch(fullUrl, fetchOpts);
   if (!res.ok) {
     let detail = res.statusText;
     try {

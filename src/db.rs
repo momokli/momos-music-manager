@@ -1664,30 +1664,65 @@ pub async fn update_file_comment(pool: &Pool<Sqlite>, file_id: i64, comment: &st
     Ok(())
 }
 
-/// Write comment to file using exiftool.
-///
-/// Uses the appropriate exiftool tag based on file type:
-/// - FLAC files: `-flac:comment=` (Vorbis comment)
-/// - All other files: `-comment=` (generic)
-pub async fn write_comment_to_file(file_path: &str, comment: &str) -> Result<()> {
+/// Read the comment tag from a file on disk using exiftool.
+/// Returns `None` if the file has no comment tag.
+pub async fn read_comment_from_file(file_path: &str) -> Result<Option<String>> {
     use std::process::Command;
 
-    // FLAC uses Vorbis comments — exiftool's generic `-comment` tag doesn't work
-    let comment_tag = if file_path.to_lowercase().ends_with(".flac") {
-        format!("-flac:comment={}", comment)
-    } else {
-        format!("-comment={}", comment)
-    };
-
     let output = Command::new("exiftool")
-        .arg("-overwrite_original")
-        .arg(&comment_tag)
+        .arg("-json")
+        .arg("-Comment")
         .arg(file_path)
         .output()?;
 
     if !output.status.success() {
-        let error = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!("Failed to write comment: {}", error));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("exiftool failed: {}", stderr));
+    }
+
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&json_str)?;
+
+    let comment = json[0]
+        .get("Comment")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    Ok(comment)
+}
+
+/// Write comment to file using exiftool.
+///
+/// FLAC files use `metaflac` because the macOS build of exiftool does
+/// not include FLAC write support.  All other formats use exiftool.
+pub async fn write_comment_to_file(file_path: &str, comment: &str) -> Result<()> {
+    use std::process::Command;
+
+    let is_flac = file_path.to_lowercase().ends_with(".flac");
+
+    if is_flac {
+        let output = Command::new("metaflac")
+            .arg("--set-tag")
+            .arg(format!("COMMENT={}", comment))
+            .arg(file_path)
+            .output()?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("Failed to write FLAC comment: {}", error));
+        }
+    } else {
+        let comment_tag = format!("-Comment={}", comment);
+        let output = Command::new("exiftool")
+            .arg("-overwrite_original")
+            .arg(&comment_tag)
+            .arg(file_path)
+            .output()?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("Failed to write comment: {}", error));
+        }
     }
 
     Ok(())
@@ -2132,15 +2167,13 @@ pub async fn bulk_categorize_tags(
     let mut tx = pool.begin().await?;
     let mut count: u64 = 0;
     for &tag_id in tag_ids {
-        let rows = sqlx::query(
-            "UPDATE tags SET category_id = ?, reviewed_at = ? WHERE id = ?",
-        )
-        .bind(category_id)
-        .bind(now)
-        .bind(tag_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+        let rows = sqlx::query("UPDATE tags SET category_id = ?, reviewed_at = ? WHERE id = ?")
+            .bind(category_id)
+            .bind(now)
+            .bind(tag_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
         count += rows;
     }
     tx.commit().await?;

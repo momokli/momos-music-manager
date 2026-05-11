@@ -80,6 +80,30 @@ pub struct DumpTagEnergyLevel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DumpTagParent {
+    #[serde(default)]
+    pub id: i64,
+    #[serde(default)]
+    pub tag_id: i64,
+    #[serde(default)]
+    pub parent_tag_id: i64,
+    #[serde(default)]
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DumpTagSimilarity {
+    #[serde(default)]
+    pub tag_a_id: i64,
+    #[serde(default)]
+    pub tag_b_id: i64,
+    #[serde(default)]
+    pub similarity: f64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DumpFolder {
     #[serde(default)]
     pub id: i64,
@@ -181,6 +205,12 @@ pub struct DumpServicePlaylist {
     pub imported_at: i64,
     #[serde(default)]
     pub updated_at: i64,
+    #[serde(default)]
+    pub last_fetched_at: Option<i64>,
+    #[serde(default)]
+    pub remote_track_count: i64,
+    #[serde(default)]
+    pub remote_unique_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,6 +354,10 @@ pub struct DataDump {
     #[serde(default)]
     pub tag_energy_levels: Vec<DumpTagEnergyLevel>,
     #[serde(default)]
+    pub tag_parents: Vec<DumpTagParent>,
+    #[serde(default)]
+    pub tag_similarities: Vec<DumpTagSimilarity>,
+    #[serde(default)]
     pub folders: Vec<DumpFolder>,
     #[serde(default)]
     pub service_config: Vec<DumpServiceConfig>,
@@ -357,6 +391,8 @@ pub async fn export_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
         tags: export_tags(pool).await?,
         tag_embeddings: export_tag_embeddings(pool).await?,
         tag_energy_levels: export_tag_energy_levels(pool).await?,
+        tag_parents: export_tag_parents(pool).await?,
+        tag_similarities: export_tag_similarities(pool).await?,
         folders: export_folders(pool).await?,
         service_config: export_service_config(pool).await?,
         service_tracks: export_service_tracks(pool).await?,
@@ -378,6 +414,8 @@ pub async fn export_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
         + dump.tags.len()
         + dump.tag_embeddings.len()
         + dump.tag_energy_levels.len()
+        + dump.tag_parents.len()
+        + dump.tag_similarities.len()
         + dump.folders.len()
         + dump.service_config.len()
         + dump.service_tracks.len()
@@ -387,7 +425,7 @@ pub async fn export_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
         + dump.playlist_subscriptions.len()
         + dump.deemix_downloads.len();
 
-    info!("Export complete: {total} rows across 12 tables -> {dump_path}");
+    info!("Export complete: {total} rows across 14 tables -> {dump_path}");
     Ok(())
 }
 
@@ -401,6 +439,8 @@ pub async fn export_dump_json(pool: &Pool<Sqlite>) -> Result<Vec<u8>> {
         tags: export_tags(pool).await?,
         tag_embeddings: export_tag_embeddings(pool).await?,
         tag_energy_levels: export_tag_energy_levels(pool).await?,
+        tag_parents: export_tag_parents(pool).await?,
+        tag_similarities: export_tag_similarities(pool).await?,
         folders: export_folders(pool).await?,
         service_config: export_service_config(pool).await?,
         service_tracks: export_service_tracks(pool).await?,
@@ -479,6 +519,38 @@ async fn export_tag_energy_levels(pool: &Pool<Sqlite>) -> Result<Vec<DumpTagEner
                 tag_id: r.get("tag_id"),
                 energy_level: r.get("energy_level"),
                 created_at: r.get("created_at"),
+            })
+        })
+        .collect()
+}
+
+async fn export_tag_parents(pool: &Pool<Sqlite>) -> Result<Vec<DumpTagParent>> {
+    let rows = sqlx::query("SELECT * FROM tag_parents ORDER BY id")
+        .fetch_all(pool)
+        .await?;
+    rows.iter()
+        .map(|r| {
+            Ok(DumpTagParent {
+                id: r.get("id"),
+                tag_id: r.get("tag_id"),
+                parent_tag_id: r.get("parent_tag_id"),
+                created_at: r.get("created_at"),
+            })
+        })
+        .collect()
+}
+
+async fn export_tag_similarities(pool: &Pool<Sqlite>) -> Result<Vec<DumpTagSimilarity>> {
+    let rows = sqlx::query("SELECT * FROM tag_similarities ORDER BY tag_a_id, tag_b_id")
+        .fetch_all(pool)
+        .await?;
+    rows.iter()
+        .map(|r| {
+            Ok(DumpTagSimilarity {
+                tag_a_id: r.get("tag_a_id"),
+                tag_b_id: r.get("tag_b_id"),
+                similarity: r.get("similarity"),
+                updated_at: r.get("updated_at"),
             })
         })
         .collect()
@@ -571,6 +643,9 @@ async fn export_service_playlists(pool: &Pool<Sqlite>) -> Result<Vec<DumpService
                 metadata_json: r.get("metadata_json"),
                 imported_at: r.get("imported_at"),
                 updated_at: r.get("updated_at"),
+                last_fetched_at: r.get("last_fetched_at"),
+                remote_track_count: r.get("remote_track_count"),
+                remote_unique_count: r.get("remote_unique_count"),
             })
         })
         .collect()
@@ -729,6 +804,8 @@ pub async fn import_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
         "service_config",
         "folders",
         "tags",
+        "tag_parents",
+        "tag_similarities",
         "playlist_subscriptions",
         "tag_categories",
         "deemix_downloads",
@@ -775,6 +852,14 @@ pub async fn import_dump(pool: &Pool<Sqlite>, dump_path: &str) -> Result<()> {
     try_import!(
         "tag_energy_levels",
         import_tag_energy_levels(&mut tx, &dump.tag_energy_levels)
+    );
+    try_import!(
+        "tag_parents",
+        import_tag_parents(&mut tx, &dump.tag_parents)
+    );
+    try_import!(
+        "tag_similarities",
+        import_tag_similarities(&mut tx, &dump.tag_similarities)
     );
     try_import!("folders", import_folders(&mut tx, &dump.folders));
     try_import!(
@@ -831,6 +916,8 @@ fn parse_dump_resilient(json: &str) -> Result<DataDump> {
         tags: Vec::new(),
         tag_embeddings: Vec::new(),
         tag_energy_levels: Vec::new(),
+        tag_parents: Vec::new(),
+        tag_similarities: Vec::new(),
         folders: Vec::new(),
         service_config: Vec::new(),
         service_tracks: Vec::new(),
@@ -859,6 +946,8 @@ fn parse_dump_resilient(json: &str) -> Result<DataDump> {
     extract_table!(tags, DumpTag, "tags");
     extract_table!(tag_embeddings, DumpTagEmbedding, "tag_embeddings");
     extract_table!(tag_energy_levels, DumpTagEnergyLevel, "tag_energy_levels");
+    extract_table!(tag_parents, DumpTagParent, "tag_parents");
+    extract_table!(tag_similarities, DumpTagSimilarity, "tag_similarities");
     extract_table!(folders, DumpFolder, "folders");
     extract_table!(service_config, DumpServiceConfig, "service_config");
     extract_table!(service_tracks, DumpServiceTrack, "service_tracks");
@@ -968,6 +1057,52 @@ async fn import_tag_energy_levels(
     Ok(count)
 }
 
+async fn import_tag_parents(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    rows: &[DumpTagParent],
+) -> Result<usize> {
+    let mut count = 0;
+    for r in rows {
+        match sqlx::query(
+            "INSERT INTO tag_parents (id, tag_id, parent_tag_id, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(r.id)
+        .bind(r.tag_id)
+        .bind(r.parent_tag_id)
+        .bind(r.created_at)
+        .execute(&mut **tx)
+        .await
+        {
+            Ok(_) => count += 1,
+            Err(e) => warn!("    tag_parents row id={}: {e}", r.id),
+        }
+    }
+    Ok(count)
+}
+
+async fn import_tag_similarities(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    rows: &[DumpTagSimilarity],
+) -> Result<usize> {
+    let mut count = 0;
+    for r in rows {
+        match sqlx::query(
+            "INSERT INTO tag_similarities (tag_a_id, tag_b_id, similarity, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(r.tag_a_id)
+        .bind(r.tag_b_id)
+        .bind(r.similarity)
+        .bind(r.updated_at)
+        .execute(&mut **tx)
+        .await
+        {
+            Ok(_) => count += 1,
+            Err(e) => warn!("    tag_similarities ({}, {}): {e}", r.tag_a_id, r.tag_b_id),
+        }
+    }
+    Ok(count)
+}
+
 async fn import_folders(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     rows: &[DumpFolder],
@@ -1040,10 +1175,11 @@ async fn import_service_playlists(
     let mut count = 0;
     for r in rows {
         match sqlx::query(
-            "INSERT INTO service_playlists (id, service, playlist_id, name, description, metadata_json, imported_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO service_playlists (id, service, playlist_id, name, description, metadata_json, imported_at, updated_at, last_fetched_at, remote_track_count, remote_unique_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(r.id).bind(&r.service).bind(&r.playlist_id).bind(&r.name)
         .bind(&r.description).bind(&r.metadata_json).bind(r.imported_at).bind(r.updated_at)
+        .bind(r.last_fetched_at).bind(r.remote_track_count).bind(r.remote_unique_count)
         .execute(&mut **tx).await
         {
             Ok(_) => count += 1,
