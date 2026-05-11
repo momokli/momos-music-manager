@@ -23,6 +23,7 @@
 use anyhow::{Context, Result};
 use rspotify::model::PlayableItem;
 use rspotify::prelude::Id;
+
 use sqlx::{Pool, Sqlite};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -221,22 +222,32 @@ async fn poll_subscribed_playlist(
             }
         };
 
-        // Only handle real tracks; skip episodes / placeholders.
-        let track = match item.track {
-            Some(PlayableItem::Track(track)) => track,
+        // Handle tracks and episodes (store both so counts match).
+        let (track_info, is_episode) = match item.track {
+            Some(PlayableItem::Track(track)) => (TrackInfo::from(&track), false),
+            Some(PlayableItem::Episode(episode)) => (TrackInfo {
+                id: episode.id.id().to_string(),
+                name: episode.name.clone(),
+                artists: episode.show.name.clone(),
+                album: Some(episode.show.name.clone()),
+                isrc: None,
+                duration_ms: episode.duration.num_milliseconds(),
+                track_number: None,
+                disc_number: None,
+                explicit: episode.explicit,
+                popularity: None,
+            }, true),
             _ => continue,
         };
 
-        position += 1;
+        // Skip items with empty IDs
+        if track_info.id.is_empty() {
+            debug!("Item '{}' has no Spotify ID, skipping", track_info.name);
+            continue;
+        }
+        let track_service_id = track_info.id.clone();
 
-        // Extract the Spotify track ID string.
-        let track_service_id = match track.id.as_ref() {
-            Some(id) => id.id().to_string(),
-            None => {
-                debug!("Track '{}' has no Spotify ID, skipping", track.name);
-                continue;
-            }
-        };
+        position += 1;
 
         // Check whether this track is already linked to the DB playlist.
         let already_exists: bool = {
@@ -257,31 +268,26 @@ async fn poll_subscribed_playlist(
 
         if already_exists {
             debug!(
-                "Track '{}' already in playlist '{}', skipping",
-                track.name, playlist_name,
+                "Item '{}' already in playlist '{}', skipping",
+                track_info.name, playlist_name,
             );
             continue;
         }
 
-        // -- New track – store and link ------------------------------------
+        // -- New item – store and link ------------------------------------
         let added_at: Option<i64> = item.added_at.map(|dt| dt.timestamp());
-        let db_track_id = store_track_and_add_to_playlist_simple_with_added_at(
+        let db_track_id = store_track_info_and_add_to_playlist(
             db,
-            &track,
+            &track_info,
             &subscription.playlist_id,
             position,
             added_at,
         )
         .await
-        .context("Failed to store track and add to playlist")?;
+        .context("Failed to store item and add to playlist")?;
 
-        // Build artist string for logging.
-        let artists: String = track
-            .artists
-            .iter()
-            .map(|a| a.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
+        // Build artist string for logging (already a comma-separated string from TrackInfo).
+        let artists = track_info.artists.clone();
 
         // Find *other* playlists that already contain this track (i.e. all
         // associations except the one we just created).
@@ -299,13 +305,14 @@ async fn poll_subscribed_playlist(
 
         if other_playlists.is_empty() {
             info!(
-                "New track '{}' by {} added to '{}'",
-                track.name, artists, playlist_name,
+                "New {} '{}' by {} added to '{}'",
+                if is_episode { "episode" } else { "track" }, track_info.name, artists, playlist_name,
             );
         } else {
             info!(
-                "New track '{}' by {} added to '{}' (also in: {})",
-                track.name,
+                "New {} '{}' by {} added to '{}' (also in: {})",
+                if is_episode { "episode" } else { "track" },
+                track_info.name,
                 artists,
                 playlist_name,
                 other_playlists.join(", "),
@@ -316,37 +323,18 @@ async fn poll_subscribed_playlist(
     Ok(())
 }
 
-/// Simplified version of [`SpotifySyncWorker::store_track_and_add_to_playlist`].
-///
-/// 1. Serialises the track metadata to JSON.
-/// 2. Starts a transaction.
-/// 3. Upserts the track into `service_tracks`.
-/// 4. Looks up the local playlist row for the given Spotify `playlist_id`.
-/// 5. Links the track to the playlist via `service_playlist_tracks`.
-/// 6. Commits the transaction.
-/// 7. Returns the DB-internal `id` of the track.
-#[allow(dead_code)]
-async fn store_track_and_add_to_playlist_simple(
+/// Store a TrackInfo (track or episode) and link it to a playlist.
+/// Works with both tracks and episodes — the TrackInfo already encapsulates
+/// all the metadata.
+async fn store_track_info_and_add_to_playlist(
     db: &Pool<Sqlite>,
-    track: &rspotify::model::track::FullTrack,
-    playlist_id: &str,
-    position: i64,
-) -> Result<i64> {
-    store_track_and_add_to_playlist_simple_with_added_at(db, track, playlist_id, position, None)
-        .await
-}
-
-/// Same as `store_track_and_add_to_playlist_simple` but with an explicit `added_at` timestamp.
-async fn store_track_and_add_to_playlist_simple_with_added_at(
-    db: &Pool<Sqlite>,
-    track: &rspotify::model::track::FullTrack,
+    track_info: &TrackInfo,
     playlist_id: &str,
     position: i64,
     added_at: Option<i64>,
 ) -> Result<i64> {
-    let track_info = TrackInfo::from(track);
     let metadata_json =
-        serde_json::to_string(&track_info).context("Failed to serialise track metadata")?;
+        serde_json::to_string(track_info).context("Failed to serialise track metadata")?;
 
     let mut tx = db.begin().await.context("Failed to begin transaction")?;
 

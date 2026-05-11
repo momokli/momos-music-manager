@@ -307,40 +307,50 @@ async function renderBrowseTable(container) {
   const wrap = getEl("cur-browse-table-wrap", container);
   if (!wrap) return;
   const loading = getEl("cur-browse-loading", container);
-  if (loading) loading.style.display = "block";
+  if (loading) loading.style.display = "none";
 
-  try {
-    const params = new URLSearchParams();
-    if (state.browseSearch) params.set("search", state.browseSearch);
-    if (state.browseSort) params.set("sort", state.browseSort);
-    if (state.browseOrder) params.set("order", state.browseOrder);
-    if (state.browseHasParents && state.browseHasParents !== "any") {
-      params.set("has_parents", state.browseHasParents);
+  // Filter and sort state.queue locally (max 500 items — instant)
+  let items = [...state.queue];
+
+  if (state.browseSearch) {
+    const q = state.browseSearch.toLowerCase();
+    items = items.filter((t) => t.name.toLowerCase().includes(q));
+  }
+
+  if (state.browseHasParents === "yes") {
+    items = items.filter((t) => t.parentCount > 0);
+  } else if (state.browseHasParents === "no") {
+    items = items.filter((t) => t.parentCount === 0);
+  }
+
+  // Sort
+  const col = state.browseSort || "length";
+  const asc = state.browseOrder === "asc";
+  items.sort((a, b) => {
+    let va, vb;
+    switch (col) {
+      case "name": va = a.name.toLowerCase(); vb = b.name.toLowerCase(); break;
+      case "files": va = a.fileCount; vb = b.fileCount; break;
+      case "parents": va = a.parentCount; vb = b.parentCount; break;
+      default: va = a.name.length; vb = b.name.length; break;
     }
-    params.set("limit", "200");
+    if (va < vb) return asc ? -1 : 1;
+    if (va > vb) return asc ? 1 : -1;
+    return 0;
+  });
 
-    const resp = await fetchJSON(`/api/tags/curation-queue?${params.toString()}`);
-    const items = resp.data || [];
+  items = items.slice(0, 200);
 
-    // Update count
-    const countEl = getEl("cur-browse-count", container);
-    if (countEl) countEl.textContent = `${items.length} tags`;
+  // Update count
+  const countEl = getEl("cur-browse-count", container);
+  if (countEl) countEl.textContent = `${items.length} tags`;
 
-    if (items.length === 0) {
-      wrap.innerHTML = `<div style="text-align:center;padding:var(--space-6);color:var(--text-muted);font-size:0.85rem;">No matching tags</div>`;
-      return;
-    }
+  if (items.length === 0) {
+    wrap.innerHTML = `<div style="text-align:center;padding:var(--space-6);color:var(--text-muted);font-size:0.85rem;">No matching tags</div>`;
+    return;
+  }
 
-    // Sort locally for length sort
-    let sorted = [...items];
-    if (state.browseSort === "length") {
-      sorted.sort((a, b) => {
-        const diff = a.name.length - b.name.length;
-        return state.browseOrder === "asc" ? diff : -diff;
-      });
-    }
-
-    const rowsHtml = sorted
+  const rowsHtml = items
       .map(
         (item) => `
       <tr class="browse-tag-row" data-tag-id="${item.id}" style="cursor:pointer;">
@@ -375,12 +385,6 @@ async function renderBrowseTable(container) {
         jumpToTag(tagId, container);
       });
     });
-  } catch (err) {
-    if (err.name === "AbortError") return;
-    if (wrap) {
-      wrap.innerHTML = `<div style="text-align:center;padding:var(--space-6);color:var(--red);font-size:0.85rem;">Failed to load: ${escapeHtml(err.message)}</div>`;
-    }
-  }
 }
 
 function jumpToTag(tagId, container) {
@@ -409,27 +413,34 @@ function getCurrentParentIds() {
 
 async function addParent(tag, container) {
   if (state.parents.some((p) => p.id === tag.id)) return;
+  const previous = [...state.parents];
   state.parents.push(tag);
-  await persistParents(container);
+  try {
+    await persistParents(container);
+  } catch (err) {
+    state.parents = previous;
+    showToast(`Failed to save parents: ${err.message}`, "error");
+  }
   renderParentChips(container);
   clearDropdown();
 }
 
 async function removeParent(parentId, container) {
+  const previous = [...state.parents];
   state.parents = state.parents.filter((p) => p.id !== parentId);
-  await persistParents(container);
+  try {
+    await persistParents(container);
+  } catch (err) {
+    state.parents = previous;
+    showToast(`Failed to remove parent: ${err.message}`, "error");
+  }
   renderParentChips(container);
 }
 
 async function persistParents(container) {
   if (!state.currentTag) return;
   const parentIds = getCurrentParentIds();
-  try {
-    await saveParents(state.currentTag.id, parentIds);
-    // No toast on success — silent is fine
-  } catch (err) {
-    showToast(`Failed to save parents: ${err.message}`, "error");
-  }
+  await saveParents(state.currentTag.id, parentIds);
 }
 
 function renderParentChips(container) {
@@ -499,6 +510,7 @@ async function renderCurrentTag(container) {
   `;
 
   wireEvents(container);
+  renderParentChips(container);
   renderBrowseTable(container);
 }
 

@@ -213,6 +213,7 @@ function actions(r) {
 
   return (
     b +
+    `<button class="btn btn-sm" data-act="refresh" data-id="${r.id}" data-service="${r.svc}" data-playlist-id="${r.playlistId}" title="Refresh remote count (fast)"><i class="fas fa-eye"></i></button>` +
     `<button class="btn btn-sm" data-act="sync" data-id="${r.id}" data-service="${r.svc}" data-playlist-id="${r.playlistId}" title="Sync now"><i class="fas fa-sync"></i></button>`
   );
 }
@@ -225,8 +226,9 @@ const PLAYLISTS_CELL_RENDERERS = {
   name: (r) => escapeHtml(r.name),
   service: (r) => sBadge(r.svc),
   tracks: (r) => {
-    const mismatch = r.l !== r.r;
-    return `<span class="${mismatch ? "diff-badge" : "font-mono"}" title="Local: ${r.l} • Remote: ${r.r}${mismatch ? " (mismatch)" : ""}">${r.l} / ${r.r}</span>`;
+    const mismatch = r.l !== r.u;
+    const noise = r.r - r.u;
+    return `<span class="${mismatch ? "diff-badge" : "font-mono"}" title="Local: ${r.l} • Unique: ${r.u} • Total: ${r.r}${noise > 0 ? " (" + noise + " dupe/ep)" : ""}">${r.l} / ${r.u} / ${r.r}</span>`;
   },
   imported: (r) =>
     r.importedAt
@@ -253,6 +255,7 @@ function renderToolbar(state) {
       ${renderSearchInput("playlists", state.search)}
       <button class="btn btn-primary" id="playlists-create-tag"><i class="fas fa-tag"></i> Create Tags</button>
       <button class="btn btn-sm" id="playlists-sync-stale" title="Sync playlists where local ≠ remote track count"><i class="fas fa-sync-alt"></i> Sync Stale</button>
+      <button class="btn btn-sm" id="playlists-refresh-all" title="Refresh remote counts for mismatched playlists (fast)"><i class="fas fa-eye"></i> Refresh All</button>
       <button class="btn btn-sm" id="playlists-sync-recent" title="Sync playlists not fetched in 15+ minutes"><i class="fas fa-clock"></i> Sync Recent</button>
       <button class="filter-panel-toggle" id="playlists-filter-toggle" title="Toggle filters">
         <i class="fas fa-chevron-up chevron"></i>
@@ -312,7 +315,7 @@ function renderBody(data, state) {
 
   const rowsHtml = playlists
     .map((r) => {
-      const mismatch = r.l !== r.r;
+      const mismatch = r.l !== r.u;
       return `<tr class="${mismatch ? "row-mismatch" : ""}" ${mismatch ? 'title="Local vs Remote differ"' : ""}>
         ${renderColumnCells(config, PLAYLISTS_COLUMNS, PLAYLISTS_CELL_RENDERERS, r)}
       </tr>`;
@@ -450,6 +453,7 @@ async function fetchAndRender(container, signal, state) {
         sub: subLookup[key] || null,
         l: p.localTrackCount ?? p.trackCount ?? 0,
         r: p.remoteTrackCount ?? 0,
+        u: p.remoteUniqueCount ?? 0,
         sync: p.lastFetchedAt || null,
         tag: p.tagName || null,
         deemixStatus: p.deemixStatus || null,
@@ -782,6 +786,43 @@ function wireContentEvents(container, signal, state) {
             b.disabled = false;
             b.innerHTML = '<i class="fas fa-sync"></i>';
           }
+        } else if (act === "refresh") {
+          const svc = b.dataset.service;
+          const plId = b.dataset.playlistId;
+          if (!plId) {
+            showToast("No playlist ID", "error");
+            return;
+          }
+          if (svc !== "spotify") {
+            showToast("Refresh only supported for Spotify", "info");
+            return;
+          }
+          b.disabled = true;
+          b.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+          try {
+            const resp = await fetchJSON(
+              `/api/services/spotify/refresh-playlist/${plId}`,
+              { method: "POST" },
+            );
+            const info = resp.data || {};
+            if (info.changed) {
+              showToast(
+                `Remote count changed: ${info.oldRemoteCount} → ${info.newRemoteCount} (${info.localCount} local)`,
+                "info",
+              );
+            } else {
+              showToast(
+                `Up to date: ${info.newRemoteCount} remote, ${info.localCount} local`,
+                "success",
+              );
+            }
+            updateHash("playlists", state, HASH_DEFAULTS);
+            fetchAndRender(container, signal, state);
+          } catch (err) {
+            showToast(`Refresh failed: ${err.message}`, "error");
+            b.disabled = false;
+            b.innerHTML = '<i class="fas fa-eye"></i>';
+          }
         } else if (act === "deemix-add") {
           const url = `https://open.spotify.com/playlist/${b.dataset.playlistId}`;
           const name = b.dataset.name;
@@ -1011,6 +1052,79 @@ export async function init(container, signal, hashParams) {
           }
         } catch (err) {
           showToast(`Sync stale failed: ${err.message}`, "error");
+        }
+      },
+      { signal },
+    );
+  }
+
+  // Refresh All — quick metadata refresh for playlists with row-mismatch
+  const refreshAllBtn = container.querySelector("#playlists-refresh-all");
+  if (refreshAllBtn) {
+    refreshAllBtn.addEventListener(
+      "click",
+      async () => {
+        refreshAllBtn.disabled = true;
+        const icon = refreshAllBtn.querySelector("i");
+        const origHTML = refreshAllBtn.innerHTML;
+        refreshAllBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Refreshing…';
+
+        // Find all playlist rows with mismatch (from the currently rendered table)
+        const allRows = container.querySelectorAll("tbody tr");
+        const btns = [];
+        for (const row of allRows) {
+          const refreshBtn = row.querySelector('[data-act="refresh"]');
+          if (refreshBtn) btns.push(refreshBtn);
+        }
+
+        if (btns.length === 0) {
+          showToast("No playlists to refresh", "info");
+          refreshAllBtn.disabled = false;
+          refreshAllBtn.innerHTML = origHTML;
+          return;
+        }
+
+        let changed = 0;
+        let unchanged = 0;
+        let failed = 0;
+
+        for (const b of btns) {
+          const plId = b.dataset.playlistId;
+          if (!plId) continue;
+          try {
+            const resp = await fetchJSON(
+              `/api/services/spotify/refresh-playlist/${plId}`,
+              { method: "POST" },
+            );
+            if ((resp.data || {}).changed) {
+              changed++;
+              // Flash the row green briefly
+              const row = b.closest("tr");
+              if (row) {
+                row.style.transition = "background 0.3s";
+                row.style.background = "rgba(34,197,94,0.15)";
+                setTimeout(() => { row.style.background = ""; }, 1200);
+              }
+            } else {
+              unchanged++;
+            }
+          } catch {
+            failed++;
+          }
+        }
+
+        const parts = [];
+        if (changed > 0) parts.push(`${changed} changed`);
+        if (unchanged > 0) parts.push(`${unchanged} unchanged`);
+        if (failed > 0) parts.push(`${failed} failed`);
+        showToast(`Refresh done: ${parts.join(", ")}`, changed > 0 ? "info" : "success");
+
+        refreshAllBtn.disabled = false;
+        refreshAllBtn.innerHTML = origHTML;
+
+        if (changed > 0) {
+          updateHash("playlists", state, HASH_DEFAULTS);
+          fetchAndRender(container, signal, state);
         }
       },
       { signal },

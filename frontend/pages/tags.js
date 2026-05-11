@@ -40,7 +40,7 @@ import {
   wireColumnDragReorder,
   wireConfigTrigger,
 } from "../shared/column-config.js";
-import { renderActionsPanel } from "../shared/actions-panel.js";
+import { renderActionsPanel, updateSelectionCount } from "../shared/actions-panel.js";
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                         */
@@ -202,10 +202,25 @@ function renderBody(data, state, totalCount) {
   const config = loadColumnConfig("tags", TAGS_COLUMNS);
   const visibleCount = config.filter((c) => c.visible).length;
 
+  // Checkbox column
+  const selectedSet = state.selectedTagIds || new Set();
+  const allOnPageSelected = data.length > 0 && data.every((t) => selectedSet.has(t.id));
+  const checkboxHeader =
+    '<th class="col-checkbox"><input type="checkbox" class="tags-select-all" id="tags-select-all"' +
+    (allOnPageSelected ? " checked" : "") +
+    "></th>";
+
   const rows = data
     .map((t) => {
+      const checked = selectedSet.has(t.id) ? " checked" : "";
+      const cb =
+        '<td class="col-checkbox"><input type="checkbox" class="tags-row-checkbox" data-tag-id="' +
+        t.id +
+        '"' +
+        checked +
+        "></td>";
       const cells = renderColumnCells(config, TAGS_COLUMNS, TAGS_CELL_RENDERERS, t);
-      return `<tr>${cells}</tr>`;
+      return `<tr>${cb}${cells}</tr>`;
     })
     .join("");
 
@@ -234,10 +249,11 @@ function renderBody(data, state, totalCount) {
       <table class="data-table" id="tags-table">
         <thead>
           <tr>
+            ${checkboxHeader}
             ${renderColumnHeaders(config, TAGS_COLUMNS, state, sortableTh)}
           </tr>
         </thead>
-        <tbody>${rows || `<tr><td colspan="${visibleCount}" class="text-center text-subtle" style="padding:32px">No tags match your filters</td></tr>`}</tbody>
+        <tbody>${rows || `<tr><td class="col-checkbox"></td><td colspan="${visibleCount}" class="text-center text-subtle" style="padding:32px">No tags match your filters</td></tr>`}</tbody>
       </table>
     </div>
     <div class="pagination" id="tags-pagination">
@@ -278,6 +294,7 @@ async function fetchAndRender(container, signal, state) {
 
     // Wire events after content render
     wireContentEvents(container, signal, state);
+    updateSelectionUI(container, state);
   } catch (err) {
     if (err.name === "AbortError") return;
     content.innerHTML = renderErrorBlock({
@@ -293,6 +310,38 @@ async function fetchAndRender(container, signal, state) {
 /* ------------------------------------------------------------------ */
 
 function wireContentEvents(container, signal, state) {
+  // ── Checkbox selection ──
+  const selectAllCb = container.querySelector("#tags-select-all");
+  if (selectAllCb) {
+    selectAllCb.onclick = () => {
+      const checked = selectAllCb.checked;
+      const rowCbs = container.querySelectorAll(".tags-row-checkbox");
+      rowCbs.forEach((cb) => {
+        const tagId = parseInt(cb.dataset.tagId, 10);
+        if (checked) state.selectedTagIds.add(tagId);
+        else state.selectedTagIds.delete(tagId);
+        cb.checked = checked;
+      });
+      updateSelectionUI(container, state);
+    };
+  }
+
+  const rowCbs = container.querySelectorAll(".tags-row-checkbox");
+  rowCbs.forEach((cb) => {
+    cb.onclick = () => {
+      const tagId = parseInt(cb.dataset.tagId, 10);
+      if (cb.checked) state.selectedTagIds.add(tagId);
+      else state.selectedTagIds.delete(tagId);
+      const allCb = container.querySelector("#tags-select-all");
+      if (allCb) {
+        const allRowCbs = container.querySelectorAll(".tags-row-checkbox");
+        allCb.checked =
+          allRowCbs.length > 0 && Array.from(allRowCbs).every((rc) => rc.checked);
+      }
+      updateSelectionUI(container, state);
+    };
+  });
+
   const table = container.querySelector("#tags-table");
   if (table) {
     wireSortableHeaders(table, state, () => {
@@ -684,6 +733,80 @@ function wireParentTypeahead(tagId, initialParents) {
   });
 }
 
+/* ------------------------------------------------------------------ */
+/*  Selection + Bulk Actions                                           */
+/* ------------------------------------------------------------------ */
+
+function updateSelectionUI(container, state) {
+  const count = state.selectedTagIds.size;
+  updateSelectionCount(container, "tags", count);
+  const btn = container.querySelector("#tags-actions-categorize");
+  if (btn) {
+    btn.disabled = count === 0;
+  }
+}
+
+async function showCategorizeModal(container, state, signal) {
+  // Fetch categories for the dropdown
+  let categories = [];
+  try {
+    const resp = await fetchJSON("/api/tag-categories", { signal });
+    categories = resp.data || [];
+  } catch (_) { return; }
+
+  const catOptions = categories
+    .map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`)
+    .join("");
+
+  const tagCount = state.selectedTagIds.size;
+
+  showModal({
+    title: `Change Category (${tagCount} tag${tagCount !== 1 ? "s" : ""})`,
+    bodyHtml: `
+      <div style="padding:var(--space-6);">
+        <p style="color:var(--text-muted);margin-bottom:var(--space-4);">
+          Change the category for ${tagCount} selected tag${tagCount !== 1 ? "s" : ""}.
+        </p>
+        <div class="form-group">
+          <label>New Category</label>
+          <select class="input-text w-full" id="bulk-categorize-category">
+            ${catOptions}
+          </select>
+        </div>
+      </div>
+      <div class="modal-actions" style="padding:0 var(--space-6) var(--space-6)">
+        <button class="btn" data-modal-action="close">Cancel</button>
+        <button class="btn btn-primary" data-modal-action="apply">Apply</button>
+      </div>
+    `,
+    onAction: async (action, close) => {
+      if (action !== "apply") return;
+      const categoryId = parseInt(
+        document.getElementById("bulk-categorize-category")?.value,
+        10,
+      );
+      if (!categoryId) {
+        showToast("Please select a category", "error");
+        return;
+      }
+      const tagIds = Array.from(state.selectedTagIds);
+      try {
+        const resp = await fetchJSON("/api/tags/bulk-categorize", {
+          method: "POST",
+          body: JSON.stringify({ tagIds, categoryId }),
+        });
+        const updated = resp.data?.updated || 0;
+        showToast(`${updated} tag${updated !== 1 ? "s" : ""} updated`, "success");
+        state.selectedTagIds.clear();
+        close();
+        fetchAndRender(container, signal, state);
+      } catch (err) {
+        showToast(`Failed: ${err.message}`, "error");
+      }
+    },
+  });
+}
+
 async function deleteTag(tagId, tagName, reloadFn) {
   if (!confirm(`Delete tag "${tagName}"? This cannot be undone.`)) return;
 
@@ -721,6 +844,7 @@ export async function init(container, signal, hashParams) {
     state.selectedCategories = [];
   }
   state.layoutMode = false;
+  state.selectedTagIds = new Set();
 
   // Reset layout mode on page entry
   document.body.classList.remove("layout-mode");
@@ -740,16 +864,27 @@ export async function init(container, signal, hashParams) {
     <div style="display:flex;flex-direction:column;gap:var(--space-4);">
       <div style="display:flex;gap:var(--space-4);align-items:flex-start;">
         <div style="flex:4;min-width:0;">${renderToolbar(state)}</div>
-        <div class="actions-panel" style="flex:1;min-width:180px;max-width:220px;">
-          <div class="actions-panel-header">
-            <span><i class="fas fa-bolt"></i> Actions</span>
-            <span class="actions-sel-count" id="tags-sel-count">0</span>
-          </div>
-          <button class="btn btn-sm" id="tags-actions-refresh"><i class="fas fa-rotate"></i> Refresh</button>
-        </div>
+        ${renderActionsPanel("tags", [
+        { id: "categorize", label: "CHANGE CATEGORY", icon: "fas fa-tag", cls: "btn-primary", action: "categorize" },
+      ])}
       </div>
       <div id="tags-content" style="min-height:200px;">${renderLoading("Loading tags…")}</div>
     </div>`;
+
+  // Wire actions panel
+  import("../shared/actions-panel.js").then(({ wireActionsRefresh }) => {
+    wireActionsRefresh(container, "tags", () => {
+      state.page = 0;
+      return fetchAndRender(container, signal, state);
+    });
+  });
+
+  // Wire CHANGE CATEGORY button in actions panel
+  const catBtn = container.querySelector("#tags-actions-categorize");
+  if (catBtn) {
+    catBtn.onclick = () => showCategorizeModal(container, state, signal);
+    catBtn.disabled = true;
+  }
 
   // Wire toolbar events (search + filter)
   const toolbar = container.querySelector("#tags-filter-panel");

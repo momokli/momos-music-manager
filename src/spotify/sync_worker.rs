@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use rspotify::ClientError;
 use rspotify::model::{PlayableItem, SimplifiedPlaylist, track::FullTrack};
+use rspotify::prelude::Id;
 use sqlx::{Pool, Sqlite};
 use std::time::Duration;
 use tokio_stream::StreamExt;
@@ -432,6 +433,22 @@ impl SpotifySyncWorker {
                 }
             }
 
+            // ── Update per-playlist fetch tracking (also needed for replay) ───
+            // In replay mode we don't have the Spotify API total, so use
+            // the streamed count as a best-effort estimate.
+            if let Ok(mut conn) = self.db.acquire().await {
+                if let Err(e) = crate::db::update_playlist_fetch_tracking(
+                    &mut conn,
+                    "spotify",
+                    playlist_id,
+                    track_count as i64,
+                )
+                .await
+                {
+                    error!("REPLAY: Failed to update fetch tracking: {:?}", e);
+                }
+            }
+
             {
                 let mut progress = self.progress.write().await;
                 progress.total_tracks = Some(track_count);
@@ -504,6 +521,27 @@ impl SpotifySyncWorker {
 
         let playlist_name = playlist.name.clone();
 
+        // ── CLEANUP: delete all existing track links for this playlist ──
+        // We're about to re-populate from the Spotify stream, so any tracks
+        // no longer in the playlist will be naturally removed.
+        if let Ok(Some((pl_id,))) = sqlx::query_as::<_, (i64,)>(
+            "SELECT id FROM service_playlists WHERE service = 'spotify' AND playlist_id = ?",
+        )
+        .bind(playlist_id)
+        .fetch_optional(&self.db)
+        .await
+        {
+            if let Err(e) = sqlx::query(
+                "DELETE FROM service_playlist_tracks WHERE playlist_id = ?",
+            )
+            .bind(pl_id)
+            .execute(&self.db)
+            .await
+            {
+                error!("Failed to cleanup playlist {} before sync: {:?}", playlist_name, e);
+            }
+        }
+
         // Get tracks for this playlist
         let mut tracks_stream = self.spotify_client.get_playlist_tracks(playlist_id).await?;
         let mut track_count = 0;
@@ -531,62 +569,114 @@ impl SpotifySyncWorker {
                         })
                         .unwrap_or_else(|| "None".to_string());
 
-                    // Extract track from playlist item
-                    if let Some(track) = item.track
-                        && let PlayableItem::Track(track) = track
-                        && let Some(_track_id) = &track.id
-                    {
-                        track_count += 1;
-                        position += 1;
-                        track_names.push(track.name.clone());
+                    // Extract track or episode from playlist item
+                    match item.track {
+                        Some(PlayableItem::Track(track)) if track.id.is_some() => {
+                            track_count += 1;
+                            position += 1;
+                            track_names.push(track.name.clone());
 
-                        // Update progress every 10 tracks
-                        if track_count % 10 == 0 || track_count == 1 {
-                            self.update_track_progress(
-                                track_count,
-                                None,
-                                &track.name,
-                                &playlist_name,
-                            )
-                            .await;
+                            // Update progress every 10 tracks
+                            if track_count % 10 == 0 || track_count == 1 {
+                                self.update_track_progress(
+                                    track_count,
+                                    None,
+                                    &track.name,
+                                    &playlist_name,
+                                )
+                                .await;
+                            }
+
+                            debug!(
+                                "Processing track {}/?: {} - {}",
+                                track_count, track.name, playlist_name
+                            );
+
+
+
+                            // Extract added_at from Spotify's playlist item
+                            let added_at: Option<i64> = item.added_at.map(|dt| dt.timestamp());
+
+                            // Store track and add to playlist
+                            if let Err(e) = self
+                                .store_track_and_add_to_playlist_with_added_at(
+                                    &track,
+                                    playlist_id,
+                                    position as i64,
+                                    added_at,
+                                )
+                                .await
+                            {
+                                error!("Failed to store track {}: {:?}", track.name, e);
+                            }
+
+                            // In record mode, also buffer for cache
+                            if self.cache_mode.should_record() {
+                                cached_tracks.push(CachedTrackEntry {
+                                    track: TrackInfo::from(&track),
+                                    position: position as i64,
+                                    added_at,
+                                });
+                            }
                         }
+                        Some(PlayableItem::Episode(episode)) => {
+                            // Store episodes too so playlist track counts match
+                            // Spotify's tracks.total (which includes episodes).
+                            track_count += 1;
+                            position += 1;
+                            track_names.push(format!("[Episode] {}", episode.name));
 
-                        debug!(
-                            "Processing track {}/?: {} - {}",
-                            track_count, track.name, playlist_name
-                        );
+                            if track_count % 10 == 0 || track_count == 1 {
+                                self.update_track_progress(
+                                    track_count,
+                                    None,
+                                    &format!("[Episode] {}", episode.name),
+                                    &playlist_name,
+                                )
+                                .await;
+                            }
 
-                        // Extract added_at from Spotify's playlist item
-                        let added_at: Option<i64> = item.added_at.map(|dt| dt.timestamp());
+                            debug!(
+                                "Storing episode {}/?: {} - {}",
+                                track_count, episode.name, playlist_name
+                            );
 
-                        // Store track and add to playlist
-                        if let Err(e) = self
-                            .store_track_and_add_to_playlist_with_added_at(
-                                &track,
-                                playlist_id,
-                                position as i64,
-                                added_at,
-                            )
-                            .await
-                        {
-                            error!("Failed to store track {}: {:?}", track.name, e);
-                            // Continue with next track
+
+                            let added_at: Option<i64> = item.added_at.map(|dt| dt.timestamp());
+                            let episode_info = TrackInfo {
+                                id: episode.id.id().to_string(),
+                                name: episode.name.clone(),
+                                artists: episode.show.name.clone(),
+                                album: Some(episode.show.name.clone()),
+                                isrc: None,
+                                duration_ms: episode.duration.num_milliseconds(),
+                                track_number: None,
+                                disc_number: None,
+                                explicit: episode.explicit,
+                                popularity: None,
+                            };
+                            if let Err(e) = self
+                                .store_track_core_with_added_at(
+                                    &episode_info,
+                                    playlist_id,
+                                    position as i64,
+                                    added_at,
+                                )
+                                .await
+                            {
+                                error!(
+                                    "Failed to store episode {}: {:?}",
+                                    episode.name, e
+                                );
+                            }
                         }
-
-                        // In record mode, also buffer for cache
-                        if self.cache_mode.should_record() {
-                            cached_tracks.push(CachedTrackEntry {
-                                track: TrackInfo::from(&track),
-                                position: position as i64,
-                                added_at,
-                            });
+                        _ => {
+                            // Log skipped items: unknown/malformed items
+                            warn!(
+                                "Skipping unknown item in '{}': {}",
+                                playlist_name, item_desc
+                            );
                         }
-                    } else {
-                        // Log skipped items: metadata total may include non-track content
-                        warn!(
-                            "Skipping non-track item in '{}': {}",
-                            playlist_name, item_desc
-                        );
                     }
                 }
                 Err(e) => {
@@ -625,11 +715,15 @@ impl SpotifySyncWorker {
                 )));
             }
         };
+        // Record the Spotify playlist total as remote_track_count.
+        // This may differ from the local count when the playlist contains
+        // episodes, unavailable tracks, or items not yet synced.
+        let remote_total = playlist.tracks.total as i64;
         if let Err(e) = crate::db::update_playlist_fetch_tracking(
             &mut conn,
             "spotify",
             playlist_id,
-            track_count as i64, // use actual fetched count, not metadata total (may include non-track items)
+            remote_total,
         )
         .await
         {
@@ -637,20 +731,31 @@ impl SpotifySyncWorker {
         }
         drop(conn);
 
+        // Log a warning if the streamed count differs from Spotify's total
+        if track_count as i64 != remote_total {
+            warn!(
+                "Track count mismatch for '{}': streamed={}, Spotify-total={} ({} items may be episodes, unavailable, or failed to store)",
+                playlist_name,
+                track_count,
+                remote_total,
+                (remote_total - track_count as i64).abs()
+            );
+        }
+
         // Update final progress
         {
             let mut progress = self.progress.write().await;
             progress.total_tracks = Some(track_count);
             progress.status = TaskStatus::Completed;
             progress.add_log(format!(
-                "Sync completed for {}: {} tracks",
-                playlist_name, track_count
+                "Sync completed for {}: {} tracks (Spotify total: {})",
+                playlist_name, track_count, remote_total
             ));
         }
 
         info!(
-            "Track sync completed for playlist {}: {} tracks",
-            playlist_name, track_count
+            "Track sync completed for playlist {}: {} tracks (Spotify total: {})",
+            playlist_name, track_count, remote_total
         );
 
         Ok(SyncResult::success(

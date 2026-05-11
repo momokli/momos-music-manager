@@ -155,3 +155,4 @@ impl From<&rspotify::model::track::FullTrack> for TrackInfo {
         }
     }
 }
+

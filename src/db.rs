@@ -65,6 +65,7 @@ pub struct ServicePlaylist {
     pub updated_at: i64,
     pub last_fetched_at: Option<i64>,
     pub remote_track_count: i64,
+    pub remote_unique_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -1820,7 +1821,11 @@ pub async fn upsert_service_playlist(
 }
 
 /// Update per-playlist fetch tracking after a successful sync.
-/// Sets `last_fetched_at` to now and records the remote track count.
+/// Update per-playlist fetch tracking after a successful sync.
+/// Sets `last_fetched_at` to now, `remote_track_count` from Spotify's
+/// `tracks.total` (all items including duplicates/episodes), and
+/// `remote_unique_count` computed from the actual stored track count
+/// (unique tracks only).
 pub async fn update_playlist_fetch_tracking(
     conn: &mut SqliteConnection,
     service: &str,
@@ -1828,21 +1833,40 @@ pub async fn update_playlist_fetch_tracking(
     remote_track_count: i64,
 ) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
+
+    // Compute unique count from the DB (after sync, this equals distinct
+    // tracks in the stream — INSERT OR IGNORE filters out duplicates)
+    let unique_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM service_playlist_tracks spt
+        JOIN service_playlists sp ON sp.id = spt.playlist_id
+        WHERE sp.service = ?1 AND sp.playlist_id = ?2
+        "#,
+    )
+    .bind(service)
+    .bind(playlist_id)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap_or(0);
+
     sqlx::query(
         r#"
         UPDATE service_playlists
-        SET last_fetched_at = ?,
-            remote_track_count = ?,
-            updated_at = ?
-        WHERE service = ? AND playlist_id = ?
+        SET last_fetched_at = ?1,
+            remote_track_count = ?2,
+            remote_unique_count = ?3,
+            updated_at = ?4
+        WHERE service = ?5 AND playlist_id = ?6
         "#,
     )
     .bind(now)
     .bind(remote_track_count)
+    .bind(unique_count)
     .bind(now)
     .bind(service)
     .bind(playlist_id)
-    .execute(conn)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }
@@ -2092,6 +2116,35 @@ pub async fn categorize_tag(pool: &Pool<Sqlite>, tag_id: i64, category_id: i64) 
     .fetch_one(pool)
     .await?;
     Ok(tag)
+}
+
+/// Bulk-update category_id + reviewed_at for multiple tags in a single transaction.
+/// Returns the number of tags updated.
+pub async fn bulk_categorize_tags(
+    pool: &Pool<Sqlite>,
+    tag_ids: &[i64],
+    category_id: i64,
+) -> Result<u64> {
+    if tag_ids.is_empty() {
+        return Ok(0);
+    }
+    let now = chrono::Utc::now().timestamp();
+    let mut tx = pool.begin().await?;
+    let mut count: u64 = 0;
+    for &tag_id in tag_ids {
+        let rows = sqlx::query(
+            "UPDATE tags SET category_id = ?, reviewed_at = ? WHERE id = ?",
+        )
+        .bind(category_id)
+        .bind(now)
+        .bind(tag_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        count += rows;
+    }
+    tx.commit().await?;
+    Ok(count)
 }
 
 /// Get a single tag embedding from the cache
@@ -2497,19 +2550,7 @@ pub async fn get_curation_queue(
             tc.id AS category_id,
             tc.name AS category,
             tc.icon AS category_icon,
-            COALESCE(
-                (SELECT json_group_array(json_object(
-                    'id', pt.id,
-                    'name', pt.name,
-                    'category', ptc.name,
-                    'categoryIcon', ptc.icon
-                ))
-                 FROM tag_parents tp
-                 JOIN tags pt ON pt.id = tp.parent_tag_id
-                 JOIN tag_categories ptc ON ptc.id = pt.category_id
-                 WHERE tp.tag_id = t.id),
-                '[]'
-            ) AS parents_json
+            COALESCE(pj.parents_json, '[]') AS parents_json
         FROM tags t
         JOIN tag_categories tc ON tc.id = t.category_id
         LEFT JOIN v_tag_file_counts vfc ON vfc.tag_id = t.id
@@ -2518,6 +2559,18 @@ pub async fn get_curation_queue(
             FROM tag_parents
             GROUP BY tag_id
         ) tp_count ON tp_count.tag_id = t.id
+        LEFT JOIN (
+            SELECT tp.tag_id, json_group_array(json_object(
+                'id', pt.id,
+                'name', pt.name,
+                'category', ptc.name,
+                'categoryIcon', ptc.icon
+            )) AS parents_json
+            FROM tag_parents tp
+            JOIN tags pt ON pt.id = tp.parent_tag_id
+            JOIN tag_categories ptc ON ptc.id = pt.category_id
+            GROUP BY tp.tag_id
+        ) pj ON pj.tag_id = t.id
         WHERE tc.name = 'Setlist'
         "#,
     );

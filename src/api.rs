@@ -25,8 +25,8 @@ use crate::AppState;
 use crate::config::ServiceCredentials;
 #[allow(unused_imports)]
 use crate::db::{
-    CurationTag, File, Folder, ServiceConfig, ServiceConnections, ServiceTrack, bulk_check_tags,
-    bulk_create_tags, bulk_review_tags, bulk_update_tags, categorize_tag as db_categorize_tag,
+    CurationTag, File, Folder, ServiceConfig, ServiceConnections, ServiceTrack, bulk_categorize_tags,
+    bulk_check_tags, bulk_create_tags, bulk_review_tags, bulk_update_tags, categorize_tag as db_categorize_tag,
     clear_all_embeddings, compute_target_comment, create_tag, create_tag_category,
     create_tags_from_playlists, delete_folder, delete_tag, delete_tag_category,
     find_tag_similar_tracks, get_all_embeddings, get_curation_queue, get_embeddings_by_category,
@@ -135,6 +135,13 @@ pub struct CategorySuggestionResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CategorizeRequest {
+    pub category_id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkCategorizeRequest {
+    pub tag_ids: Vec<i64>,
     pub category_id: i64,
 }
 
@@ -536,6 +543,7 @@ pub struct Playlist {
     pub description: Option<String>,
     pub track_count: i64,
     pub remote_track_count: i64,
+    pub remote_unique_count: i64,
     pub last_fetched_at: Option<i64>,
     pub imported_at: i64,
     pub updated_at: i64,
@@ -982,6 +990,7 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/tags/{id}/children", get(tag_children_handler))
         .route("/api/embeddings/status", get(embeddings_status_handler))
+        .route("/api/tags/bulk-categorize", post(bulk_categorize_handler))
         .route("/api/tags/bulk-import", post(bulk_import_handler))
         .route("/api/tags/bulk-resolve", post(bulk_resolve_handler))
         .route(
@@ -1067,6 +1076,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/services/spotify/sync/playlists/{playlist_id}/tracks",
             post(spotify_sync_playlist_tracks_handler),
+        )
+        .route(
+            "/api/services/spotify/refresh-playlist/{playlist_id}",
+            post(spotify_refresh_playlist_handler),
         )
         .route(
             "/api/services/spotify/sync/{task_id}",
@@ -2650,6 +2663,30 @@ async fn categorize_tag_handler(
                     .into_response(),
             }
         }
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+/// POST /api/tags/bulk-categorize
+/// Bulk-update category_id for multiple tags.
+async fn bulk_categorize_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<BulkCategorizeRequest>,
+) -> impl IntoResponse {
+    if request.tag_ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "tagIds must not be empty".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    match bulk_categorize_tags(&state.db, &request.tag_ids, request.category_id).await {
+        Ok(count) => Json(ApiResponse {
+            data: serde_json::json!({ "updated": count }),
+        })
+        .into_response(),
         Err(e) => internal_error(e).into_response(),
     }
 }
@@ -4808,6 +4845,98 @@ async fn spotify_sync_playlist_tracks_handler(
     }
 }
 
+/// Refresh a single playlist's remote track count from Spotify metadata.
+/// Fast: only 1 API call, no track streaming. Returns old and new counts.
+async fn spotify_refresh_playlist_handler(
+    State(state): State<Arc<AppState>>,
+    Path(playlist_id): Path<String>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    if !state.config.is_spotify_configured() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                data: "Spotify not configured",
+            }),
+        )
+            .into_response();
+    }
+
+    let client = match crate::spotify::client::SpotifyClient::from_stored_tokens(
+        state.db.clone(),
+        &state.config,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return internal_error(format!("Failed to create Spotify client: {}", e))
+                .into_response();
+        }
+    };
+
+    // Get the old remote count
+    let old_remote: Option<i64> =
+        sqlx::query_scalar("SELECT remote_track_count FROM service_playlists WHERE service = 'spotify' AND playlist_id = ?")
+            .bind(&playlist_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+
+    // Fetch playlist metadata from Spotify (1 API call, no track streaming)
+    let playlist = match client.get_playlist(&playlist_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            return internal_error(format!("Failed to fetch playlist: {}", e)).into_response();
+        }
+    };
+
+    let new_total = playlist.tracks.total as i64;
+    let playlist_name = playlist.name.clone();
+    let local_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM service_playlist_tracks spt JOIN service_playlists sp ON sp.id = spt.playlist_id WHERE sp.service = 'spotify' AND sp.playlist_id = ?",
+    )
+    .bind(&playlist_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+
+    // Update remote_track_count
+    let mut conn = match state.db.acquire().await {
+        Ok(c) => c,
+        Err(e) => {
+            return internal_error(format!("DB connection error: {}", e)).into_response();
+        }
+    };
+    if let Err(e) = crate::db::update_playlist_fetch_tracking(
+        &mut conn,
+        "spotify",
+        &playlist_id,
+        new_total,
+    )
+    .await
+    {
+        return internal_error(format!("Failed to update: {}", e)).into_response();
+    }
+    drop(conn);
+
+    let changed = old_remote.map_or(true, |o| o != new_total);
+
+    Json(ApiResponse {
+        data: serde_json::json!({
+            "playlistId": playlist_id,
+            "name": playlist_name,
+            "oldRemoteCount": old_remote,
+            "newRemoteCount": new_total,
+            "localCount": local_count,
+            "changed": changed,
+        }),
+    })
+    .into_response()
+}
+
 /// Batch sync: fetch tracks for multiple playlists matching a criterion.
 /// `mode`: "stale" (local != remote) or "recent" (not fetched in 15+ min).
 #[derive(Debug, Clone, Deserialize)]
@@ -5218,6 +5347,7 @@ async fn playlists_handler(
                 "trackCount": p.track_count,
                 "localTrackCount": p.track_count,
                 "remoteTrackCount": p.remote_track_count,
+                "remoteUniqueCount": p.remote_unique_count,
                 "lastFetchedAt": p.last_fetched_at,
                 "importedAt": p.imported_at,
                 "updatedAt": p.updated_at,
