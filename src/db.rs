@@ -1078,6 +1078,27 @@ pub async fn set_tag_parents(
         }
     }
 
+    // Validate: parent tags must not be Setlist (only P/M/V/E categories)
+    // Setlist parents create indirection without resolution — just another
+    // long name that would itself need parents.
+    if !parent_tag_ids.is_empty() {
+        let placeholders: Vec<String> = parent_tag_ids.iter().map(|_| "?".to_string()).collect();
+        let sql = format!(
+            "SELECT t.name FROM tags t JOIN tag_categories tc ON tc.id = t.category_id WHERE t.id IN ({}) AND tc.name = 'Setlist' LIMIT 1",
+            placeholders.join(",")
+        );
+        let mut q = sqlx::query_scalar::<_, String>(&sql);
+        for id in parent_tag_ids {
+            q = q.bind(id);
+        }
+        if let Ok(Some(name)) = q.fetch_optional(pool).await {
+            return Err(anyhow::anyhow!(
+                "Parent tag '{}' is a Setlist tag. Parent tags must be from Phase, Mood, Vibe, or Merkmal categories, not Setlist.",
+                name
+            ));
+        }
+    }
+
     // Delete existing parents and insert new ones in a transaction
     let mut tx = pool.begin().await?;
 

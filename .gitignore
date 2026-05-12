@@ -11,3 +11,4 @@ app.db*
 frontend/node_modules/
 frontend/dist/
 frontend/*.log
+prod.db*
