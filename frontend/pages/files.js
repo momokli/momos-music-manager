@@ -1217,6 +1217,7 @@ function wireToolbarEvents(container, signal, state) {
         } else {
           state.selectedServices.push(value);
         }
+        btn.classList.toggle("active");
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
@@ -1245,6 +1246,7 @@ function wireToolbarEvents(container, signal, state) {
             .forEach((b) => b.classList.remove("active"));
           state.pmvCategories.push(val);
         }
+        btn.classList.toggle("active");
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
@@ -1272,6 +1274,7 @@ function wireToolbarEvents(container, signal, state) {
             .forEach((b) => b.classList.remove("active"));
           state.pmvAggregate = val;
         }
+        btn.classList.toggle("active");
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
@@ -1295,6 +1298,7 @@ function wireToolbarEvents(container, signal, state) {
         } else {
           state.commentStatuses.push(value);
         }
+        btn.classList.toggle("active");
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
@@ -1318,6 +1322,7 @@ function wireToolbarEvents(container, signal, state) {
         } else {
           state.fileTypes.push(value);
         }
+        btn.classList.toggle("active");
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
@@ -1558,7 +1563,6 @@ function wireContentEvents(container, signal, state) {
       injectSelectAllBanner(container, state);
     };
   });
-
 }
 
 /* ------------------------------------------------------------------ */
@@ -1594,14 +1598,16 @@ function injectSelectAllBanner(container, state) {
         injectSelectAllBanner(container, state);
         const selectAllCb = container.querySelector("#files-select-all");
         if (selectAllCb) selectAllCb.checked = false;
-        rowCbs.forEach(cb => { cb.checked = false; });
+        rowCbs.forEach((cb) => {
+          cb.checked = false;
+        });
       };
     }
   } else if (
     !state.selectAllMode &&
     pageCount > 0 &&
     total > pageSize &&
-    Array.from(rowCbs).every(cb => cb.checked)
+    Array.from(rowCbs).every((cb) => cb.checked)
   ) {
     banner.innerHTML = `<span>All <strong>${pageCount}</strong> files on this page are selected.</span>
       <button class="btn btn-sm btn-primary" id="files-select-all-pages">Select all <strong>${total}</strong> files matching current filters</button>`;
@@ -1614,7 +1620,9 @@ function injectSelectAllBanner(container, state) {
         state.selectAllTotal = total;
         updateSelectionUI(container, state);
         injectSelectAllBanner(container, state);
-        rowCbs.forEach(cb => { cb.checked = true; });
+        rowCbs.forEach((cb) => {
+          cb.checked = true;
+        });
         const selectAllCb = container.querySelector("#files-select-all");
         if (selectAllCb) selectAllCb.checked = true;
       };

@@ -6685,7 +6685,13 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
         ],
         "id",
     );
-    sql.push_str(" LIMIT ? OFFSET ?");
+
+    // When comment_statuses filter is active, we must apply it in Rust BEFORE pagination.
+    // So we fetch ALL rows without LIMIT/OFFSET, compute needs_update, filter, then slice.
+    let has_comment_filter = query.comment_statuses.is_some();
+    if !has_comment_filter {
+        sql.push_str(" LIMIT ? OFFSET ?");
+    }
 
     // Build query with bind parameters
     let mut q = sqlx::query_as::<_, File>(&sql);
@@ -6738,9 +6744,79 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
         }
     }
 
-    q = q.bind(limit).bind(offset);
+    if !has_comment_filter {
+        q = q.bind(limit).bind(offset);
+    }
 
-    let files = q.fetch_all(pool).await?;
+    let files: Vec<File>;
+    // Cache for pre-computed target comments when comment_statuses is active
+    // to avoid re-computing in the downstream loop
+    let mut target_comments: std::collections::HashMap<i64, String> =
+        std::collections::HashMap::new();
+    if has_comment_filter {
+        // Fetch ALL matching files (no LIMIT/OFFSET) to apply comment status filter before pagination
+        let all_files = q.fetch_all(pool).await?;
+
+        if all_files.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Compute comment_needs_update for all files and cache target comments
+        let mut with_status: Vec<(File, bool)> = Vec::with_capacity(all_files.len());
+        for file in all_files {
+            match compute_target_comment(pool, file.id).await {
+                Ok(target_comment) => {
+                    let needs_update = file.comment.as_ref() != Some(&target_comment);
+                    target_comments.insert(file.id, target_comment);
+                    with_status.push((file, needs_update));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to compute target comment for file {}: {}",
+                        file.id,
+                        e
+                    );
+                    with_status.push((file, false));
+                }
+            }
+        }
+
+        // Filter by comment status
+        let statuses: Vec<&str> = query
+            .comment_statuses
+            .as_ref()
+            .unwrap()
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !statuses.is_empty() {
+            with_status.retain(|(_, needs_update)| {
+                let mut keep = false;
+                if statuses.contains(&"needs_update") && *needs_update {
+                    keep = true;
+                }
+                if statuses.contains(&"uptodate") && !*needs_update {
+                    keep = true;
+                }
+                keep
+            });
+        }
+
+        // Apply paging in Rust
+        let start = offset as usize;
+        let end = (start + limit as usize).min(with_status.len());
+        files = if start < with_status.len() {
+            with_status[start..end]
+                .iter()
+                .map(|(f, _)| f.clone())
+                .collect()
+        } else {
+            vec![]
+        };
+    } else {
+        files = q.fetch_all(pool).await?;
+    }
 
     if files.is_empty() {
         return Ok(vec![]);
@@ -6780,6 +6856,7 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
     }
 
     // Convert files to ApiFile with target comment computation
+    // Use cached target_comments when pre-computed (comment_statuses filter path)
     let mut api_files = Vec::new();
     for file in files {
         let mut api_file = ApiFile::from(file);
@@ -6789,49 +6866,33 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
             api_file.matched_services = services;
         }
 
-        // Compute target comment
-        match compute_target_comment(pool, api_file.id).await {
-            Ok(target_comment) => {
-                api_file.comment_target = target_comment;
-                // Determine if comment needs update
-                api_file.comment_needs_update =
-                    api_file.comment.as_ref() != Some(&api_file.comment_target);
-            }
-            Err(e) => {
-                // Log error but continue - don't fail the entire request
-                tracing::warn!(
-                    "Failed to compute target comment for file {}: {}",
-                    api_file.id,
-                    e
-                );
-                api_file.comment_target = String::new();
-                api_file.comment_needs_update = false;
+        // Compute target comment (use cache from comment status filter if available)
+        if let Some(cached_target) = target_comments.remove(&api_file.id) {
+            api_file.comment_target = cached_target;
+            api_file.comment_needs_update =
+                api_file.comment.as_ref() != Some(&api_file.comment_target);
+        } else {
+            match compute_target_comment(pool, api_file.id).await {
+                Ok(target_comment) => {
+                    api_file.comment_target = target_comment;
+                    // Determine if comment needs update
+                    api_file.comment_needs_update =
+                        api_file.comment.as_ref() != Some(&api_file.comment_target);
+                }
+                Err(e) => {
+                    // Log error but continue - don't fail the entire request
+                    tracing::warn!(
+                        "Failed to compute target comment for file {}: {}",
+                        api_file.id,
+                        e
+                    );
+                    api_file.comment_target = String::new();
+                    api_file.comment_needs_update = false;
+                }
             }
         }
 
         api_files.push(api_file);
-    }
-
-    // Apply comment status filter in Rust (since comment_needs_update is computed)
-    if let Some(ref cs_str) = query.comment_statuses {
-        let statuses: Vec<&str> = cs_str
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !statuses.is_empty() {
-            api_files.retain(|f| {
-                let needs_update = f.comment_needs_update;
-                let mut keep = false;
-                if statuses.contains(&"needs_update") && needs_update {
-                    keep = true;
-                }
-                if statuses.contains(&"uptodate") && !needs_update {
-                    keep = true;
-                }
-                keep
-            });
-        }
     }
 
     Ok(api_files)
