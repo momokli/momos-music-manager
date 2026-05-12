@@ -41,7 +41,7 @@
 use std::path::PathBuf;
 
 use serde::Deserialize;
-use tracing::warn;
+use tracing::{info, warn};
 
 // ── TOML config file structure ─────────────────────────────────────────────
 
@@ -57,13 +57,11 @@ struct TomlConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 struct DatabaseToml {
     url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 struct ServerToml {
     host: Option<String>,
     port: Option<u16>,
@@ -71,7 +69,6 @@ struct ServerToml {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 struct SpotifyToml {
     client_id: Option<String>,
     client_secret: Option<String>,
@@ -79,14 +76,12 @@ struct SpotifyToml {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 struct SoundcloudToml {
     api_key: Option<String>,
     user_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 struct YoutubeToml {
     api_key: Option<String>,
     playlist_id: Option<String>,
@@ -138,32 +133,54 @@ impl ServiceCredentials {
     /// To avoid surprises, either omit the variable from `.env` or use a
     /// non-empty value.
     pub fn load() -> Self {
-        let toml_path = Self::config_path();
-        let toml_config = Self::load_toml(&toml_path);
+        let toml_config = Self::load_toml();
+
+        let has_toml_spotify = toml_config.spotify.is_some();
+
+        let spotify_id = env_or_toml_opt(
+            "SPOTIFY_CLIENT_ID",
+            toml_config
+                .spotify
+                .as_ref()
+                .and_then(|s| s.client_id.clone()),
+        );
+        let spotify_secret = env_or_toml_opt(
+            "SPOTIFY_CLIENT_SECRET",
+            toml_config
+                .spotify
+                .as_ref()
+                .and_then(|s| s.client_secret.clone()),
+        );
+        let spotify_redirect = env_or_toml(
+            "SPOTIFY_REDIRECT_URI",
+            toml_config
+                .spotify
+                .as_ref()
+                .and_then(|s| s.redirect_uri.clone()),
+        )
+        .unwrap_or_else(|| "http://localhost:3000/callback".to_string());
+
+        // Log where each Spotify credential came from
+        let sid_src =
+            Self::credential_source("SPOTIFY_CLIENT_ID", spotify_id.as_deref(), has_toml_spotify);
+        let ssec_src = Self::credential_source(
+            "SPOTIFY_CLIENT_SECRET",
+            spotify_secret.as_deref(),
+            has_toml_spotify,
+        );
+        let sredir_src = Self::credential_source(
+            "SPOTIFY_REDIRECT_URI",
+            Some(&spotify_redirect),
+            has_toml_spotify,
+        );
+        info!(
+            "Spotify config: client-id={sid_src}, client-secret={ssec_src}, redirect-uri={sredir_src}"
+        );
 
         Self {
-            spotify_client_id: env_or_toml_opt(
-                "SPOTIFY_CLIENT_ID",
-                toml_config
-                    .spotify
-                    .as_ref()
-                    .and_then(|s| s.client_id.clone()),
-            ),
-            spotify_client_secret: env_or_toml_opt(
-                "SPOTIFY_CLIENT_SECRET",
-                toml_config
-                    .spotify
-                    .as_ref()
-                    .and_then(|s| s.client_secret.clone()),
-            ),
-            spotify_redirect_uri: env_or_toml(
-                "SPOTIFY_REDIRECT_URI",
-                toml_config
-                    .spotify
-                    .as_ref()
-                    .and_then(|s| s.redirect_uri.clone()),
-            )
-            .unwrap_or_else(|| "http://localhost:3000/callback".to_string()),
+            spotify_client_id: spotify_id,
+            spotify_client_secret: spotify_secret,
+            spotify_redirect_uri: spotify_redirect,
 
             soundcloud_api_key: env_or_toml_opt(
                 "SOUNDCLOUD_API_KEY",
@@ -249,37 +266,74 @@ impl ServiceCredentials {
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
-    /// Full path to `config.toml`.
-    fn config_path() -> PathBuf {
-        // ~/.config/momos-music-manager/config.toml
-        let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-        base.join("momos-music-manager").join("config.toml")
+    /// Log-friendly label showing where a credential came from.
+    fn credential_source(env_name: &str, value: Option<&str>, has_toml: bool) -> &'static str {
+        if std::env::var(env_name).map_or(false, |v| !v.is_empty()) {
+            return "env";
+        }
+        if value.is_some() && has_toml {
+            return "toml";
+        }
+        if value.is_some() {
+            return "default";
+        }
+        "missing"
+    }
+
+    /// Returns candidate config paths in priority order:
+    /// 1. `~/.config/momos-music-manager/config.toml` (XDG convention)
+    /// 2. `{dirs::config_dir()}/momos-music-manager/config.toml` (OS-native, e.g. macOS Library)
+    fn config_paths() -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+
+        // 1. XDG-style ~/.config/ (what most users actually use)
+        if let Some(home) = dirs::home_dir() {
+            paths.push(
+                home.join(".config")
+                    .join("momos-music-manager")
+                    .join("config.toml"),
+            );
+        }
+
+        // 2. OS-native config dir (e.g. ~/Library/Application Support/ on macOS)
+        if let Some(base) = dirs::config_dir() {
+            let os_path = base.join("momos-music-manager").join("config.toml");
+            // Avoid duplicate if ~/.config/ happens to resolve to the same path
+            if !paths.contains(&os_path) {
+                paths.push(os_path);
+            }
+        }
+
+        paths
     }
 
     /// Try to parse the TOML file. Returns an empty config on error/missing.
-    fn load_toml(path: &PathBuf) -> TomlConfig {
-        if !path.exists() {
-            return TomlConfig::default();
-        }
-        match std::fs::read_to_string(path) {
-            Ok(content) => match toml::from_str(&content) {
-                Ok(cfg) => cfg,
+    /// Checks candidate paths in priority order; first readable file wins.
+    fn load_toml() -> TomlConfig {
+        for path in &Self::config_paths() {
+            if !path.exists() {
+                continue;
+            }
+            match std::fs::read_to_string(path) {
+                Ok(content) => match toml::from_str::<TomlConfig>(&content) {
+                    Ok(cfg) => {
+                        info!("Loaded config from {}", path.display());
+                        return cfg;
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse {}: {e} — trying next path", path.display());
+                    }
+                },
                 Err(e) => {
-                    warn!(
-                        "Failed to parse {}: {e} — falling back to env vars",
-                        path.display()
-                    );
-                    TomlConfig::default()
+                    warn!("Failed to read {}: {e} — trying next path", path.display());
                 }
-            },
-            Err(e) => {
-                warn!(
-                    "Failed to read {}: {e} — falling back to env vars",
-                    path.display()
-                );
-                TomlConfig::default()
             }
         }
+
+        warn!(
+            "No config.toml found at ~/.config/momos-music-manager/config.toml or OS config dir — using env vars / defaults"
+        );
+        TomlConfig::default()
     }
 
     // ── Service status checks (unchanged) ────────────────────────────────
