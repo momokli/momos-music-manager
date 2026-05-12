@@ -271,6 +271,71 @@ struct FilesBulkWriteCommentsResponse {
     pub file_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileDebugCommentResponse {
+    pub file_id: i64,
+    pub title: String,
+    pub artist: String,
+    pub tag_rows: Vec<DebugTagRow>,
+    pub pmv: DebugPmv,
+    pub generated_comment: String,
+    pub current_comment: Option<String>,
+    pub playlists: Vec<DebugPlaylist>,
+    pub matched_tags: Vec<DebugMatchedTag>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DebugTagRow {
+    pub tag_name: String,
+    pub prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DebugPmv {
+    pub phase: bool,
+    pub mood: bool,
+    pub vibe: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DebugPlaylist {
+    pub name: String,
+    pub service: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DebugMatchedTag {
+    pub tag_id: i64,
+    pub tag_name: String,
+    pub category_name: String,
+    pub has_parents: bool,
+}
+
+/// Filter params for "select all" operations — same filters as FilesQuery
+/// but without pagination/sort. Sent as JSON body via POST.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesFilterAll {
+    pub search: Option<String>,
+    pub bpm_min: Option<f64>,
+    pub bpm_max: Option<f64>,
+    pub key: Option<String>,
+    pub tags: Option<String>,
+    pub linked_only: Option<bool>,
+    pub unlinked: Option<bool>,
+    pub non_default_only: Option<bool>,
+    pub selected_services: Option<String>,
+    pub pmv_categories: Option<String>,
+    pub pmv_aggregate: Option<String>,
+    pub file_types: Option<String>,
+    pub comment_statuses: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NeedsUpdateCountQuery {
@@ -956,6 +1021,10 @@ pub fn router() -> Router<Arc<AppState>> {
             "/api/files/{id}/similar-tracks",
             get(find_tag_similar_tracks_handler),
         )
+        .route(
+            "/api/files/{id}/debug-comment",
+            get(file_debug_comment_handler),
+        )
         .route("/api/files/bulk-sync", post(bulk_sync_handler))
         .route("/api/files/write-comments", post(bulk_sync_handler))
         .route(
@@ -965,6 +1034,14 @@ pub fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/files/write-comments-by-ids",
             post(files_write_comments_by_ids_handler),
+        )
+        .route(
+            "/api/files/needs-comment-count-all",
+            post(files_needs_comment_count_all_handler),
+        )
+        .route(
+            "/api/files/write-comments-all",
+            post(files_write_comments_all_handler),
         )
         .route("/api/tracks", get(tracks_handler))
         .route("/api/tracks/count", get(tracks_count_handler))
@@ -1570,6 +1647,317 @@ async fn files_write_comments_by_ids_handler(
     let mut q = sqlx::query_as::<_, crate::db::File>(&sql);
     for id in &body.file_ids {
         q = q.bind(id);
+    }
+
+    let files = match q.fetch_all(&state.db).await {
+        Ok(f) => f,
+        Err(e) => {
+            return internal_error(format!("Failed to fetch files: {}", e)).into_response();
+        }
+    };
+
+    // Filter to only files that need an update
+    let mut needs_update: Vec<i64> = Vec::new();
+    for file in &files {
+        match compute_target_comment(&state.db, file.id).await {
+            Ok(target) => {
+                if file.comment.as_deref() != Some(&target) {
+                    needs_update.push(file.id);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Could not compute target for file {}: {}", file.id, e);
+                needs_update.push(file.id);
+            }
+        }
+    }
+
+    if needs_update.is_empty() {
+        return Json(ApiResponse {
+            data: FilesBulkWriteCommentsResponse {
+                task_id: String::new(),
+                file_count: 0,
+            },
+        })
+        .into_response();
+    }
+
+    let file_count = needs_update.len();
+    let task_id =
+        crate::tasks::start_write_comment_task(&state.task_manager, &state.db, needs_update).await;
+
+    Json(ApiResponse {
+        data: FilesBulkWriteCommentsResponse {
+            task_id,
+            file_count,
+        },
+    })
+    .into_response()
+}
+
+/// Build the WHERE clause for file filters. Returns (sql_fragment, param_values).
+/// Shared by the "select all" handlers to avoid duplicating filter logic.
+fn build_files_filter_sql(filter: &FilesFilterAll) -> String {
+    let mut sql = String::from("SELECT * FROM files WHERE 1=1");
+
+    if let Some(ref search) = filter.search
+        && !search.is_empty()
+    {
+        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ?)");
+    }
+
+    if filter.bpm_min.is_some() {
+        sql.push_str(" AND bpm >= ?");
+    }
+
+    if filter.bpm_max.is_some() {
+        sql.push_str(" AND bpm <= ?");
+    }
+
+    if let Some(ref key_str) = filter.key {
+        let keys: Vec<&str> = key_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !keys.is_empty() {
+            let placeholders: Vec<String> = keys.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(" AND musical_key IN ({})", placeholders.join(",")));
+        }
+    }
+
+    if filter.linked_only.unwrap_or(false) {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.file_id = files.id)");
+    }
+
+    if filter.unlinked.unwrap_or(false) {
+        sql.push_str(
+            " AND NOT EXISTS (SELECT 1 FROM v_file_track_link v WHERE v.file_id = files.id)",
+        );
+    }
+
+    if filter.non_default_only.unwrap_or(false) {
+        sql.push_str(
+            " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND ft.is_default = FALSE)",
+        );
+    }
+
+    // Service filter
+    if let Some(ref services_str) = filter.selected_services {
+        let services: Vec<&str> = services_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !services.is_empty() {
+            let placeholders: Vec<String> = services.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM v_file_track_link vf JOIN service_tracks st ON st.id = vf.track_id WHERE vf.file_id = files.id AND st.service IN ({}))",
+                placeholders.join(",")
+            ));
+        }
+    }
+
+    // PMV filter
+    if let Some(ref pmv_cats) = filter.pmv_categories {
+        let cats: Vec<String> = pmv_cats
+            .split(',')
+            .map(|s| s.trim().to_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !cats.is_empty() {
+            let mut pmv_clauses: Vec<String> = Vec::new();
+            for c in &cats {
+                let ch = c.chars().next().unwrap();
+                pmv_clauses.push(format!(
+                    "(SUBSTR(files.comment, 2, 1) = '{c}' OR SUBSTR(files.comment, 3, 1) = '{c}' OR SUBSTR(files.comment, 4, 1) = '{c}')",
+                    c = ch
+                ));
+            }
+            sql.push_str(&format!(
+                " AND (files.comment IS NOT NULL AND files.comment LIKE '[___]%' AND ({}))",
+                pmv_clauses.join(" OR ")
+            ));
+        }
+    } else if let Some(ref pmv_agg) = filter.pmv_aggregate {
+        match pmv_agg.as_str() {
+            "full" | "partial" => {
+                sql.push_str(
+                    " AND (files.comment IS NOT NULL AND files.comment LIKE '[___]%' AND \
+                     (SUBSTR(files.comment, 2, 1) IN ('P','M','V') OR \
+                      SUBSTR(files.comment, 3, 1) IN ('P','M','V') OR \
+                      SUBSTR(files.comment, 4, 1) IN ('P','M','V')))",
+                );
+            }
+            "none" => {
+                sql.push_str(
+                    " AND (files.comment IS NULL OR files.comment NOT LIKE '[___]%' OR \
+                     (SUBSTR(files.comment, 2, 1) NOT IN ('P','M','V') AND \
+                      SUBSTR(files.comment, 3, 1) NOT IN ('P','M','V') AND \
+                      SUBSTR(files.comment, 4, 1) NOT IN ('P','M','V')))",
+                );
+            }
+            _ => {}
+        }
+    }
+
+    // File type filter
+    if let Some(ref ft_str) = filter.file_types {
+        let types: Vec<&str> = ft_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !types.is_empty() {
+            let placeholders: Vec<String> = types.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(" AND file_type IN ({})", placeholders.join(",")));
+        }
+    }
+
+    sql
+}
+
+/// POST /api/files/needs-comment-count-all
+/// Accepts filter params and returns how many matching files need comment updates.
+/// Used by the "Select all N files" feature.
+async fn files_needs_comment_count_all_handler(
+    State(state): State<Arc<AppState>>,
+    Json(filter): Json<FilesFilterAll>,
+) -> impl IntoResponse {
+    let sql = build_files_filter_sql(&filter);
+
+    let mut q = sqlx::query_as::<_, crate::db::File>(&sql);
+
+    if let Some(ref search) = filter.search
+        && !search.is_empty()
+    {
+        q = q.bind(format!("%{}%", search));
+        q = q.bind(format!("%{}%", search));
+        q = q.bind(format!("%{}%", search));
+    }
+
+    if let Some(bpm_min) = filter.bpm_min {
+        q = q.bind(bpm_min);
+    }
+
+    if let Some(bpm_max) = filter.bpm_max {
+        q = q.bind(bpm_max);
+    }
+
+    if let Some(ref key_str) = filter.key {
+        for k in key_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(k);
+        }
+    }
+
+    if let Some(ref services_str) = filter.selected_services {
+        for s in services_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(s);
+        }
+    }
+
+    if let Some(ref ft_str) = filter.file_types {
+        for t in ft_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(t);
+        }
+    }
+
+    let files = match q.fetch_all(&state.db).await {
+        Ok(f) => f,
+        Err(e) => {
+            return internal_error(format!("Failed to fetch files: {}", e)).into_response();
+        }
+    };
+
+    let mut files_needing_update = 0usize;
+    for file in &files {
+        match compute_target_comment(&state.db, file.id).await {
+            Ok(target) => {
+                if file.comment.as_deref() != Some(&target) {
+                    files_needing_update += 1;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Could not compute target for file {}: {}", file.id, e);
+                files_needing_update += 1;
+            }
+        }
+    }
+
+    Json(ApiResponse {
+        data: FilesBulkCommentCountResponse {
+            total_files: files.len(),
+            files_needing_update,
+        },
+    })
+    .into_response()
+}
+
+/// POST /api/files/write-comments-all
+async fn files_write_comments_all_handler(
+    State(state): State<Arc<AppState>>,
+    Json(filter): Json<FilesFilterAll>,
+) -> impl IntoResponse {
+    let sql = build_files_filter_sql(&filter);
+
+    let mut q = sqlx::query_as::<_, crate::db::File>(&sql);
+
+    if let Some(ref search) = filter.search
+        && !search.is_empty()
+    {
+        q = q.bind(format!("%{}%", search));
+        q = q.bind(format!("%{}%", search));
+        q = q.bind(format!("%{}%", search));
+    }
+
+    if let Some(bpm_min) = filter.bpm_min {
+        q = q.bind(bpm_min);
+    }
+
+    if let Some(bpm_max) = filter.bpm_max {
+        q = q.bind(bpm_max);
+    }
+
+    if let Some(ref key_str) = filter.key {
+        for k in key_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(k);
+        }
+    }
+
+    if let Some(ref services_str) = filter.selected_services {
+        for s in services_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(s);
+        }
+    }
+
+    if let Some(ref ft_str) = filter.file_types {
+        for t in ft_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(t);
+        }
     }
 
     let files = match q.fetch_all(&state.db).await {
@@ -5330,12 +5718,13 @@ async fn playlists_handler(
     let service_filter = query.service.clone();
 
     // Build main query with bind parameters (no string interpolation)
-    // LEFT JOIN v_tag_playlist for tag matching (tags.name is UNIQUE, so at most one match)
+    // LEFT JOIN v_tag_playlist with DISTINCT subquery to avoid cartesian product
+    // when multiple tags match the same playlist via case-insensitive name matching.
     let mut main_builder = QueryBuilder::new(
         "SELECT sp.*, COUNT(spt.track_id) as track_count, vtp.tag_name
          FROM service_playlists sp
          LEFT JOIN service_playlist_tracks spt ON sp.id = spt.playlist_id
-         LEFT JOIN v_tag_playlist vtp ON vtp.playlist_id = sp.id",
+         LEFT JOIN (SELECT DISTINCT playlist_id, tag_name FROM v_tag_playlist) vtp ON vtp.playlist_id = sp.id",
     );
 
     let mut count_builder =
@@ -8047,6 +8436,150 @@ async fn find_tag_similar_tracks_handler(
         Ok(results) => Json(ApiResponse { data: results }).into_response(),
         Err(e) => internal_error(e).into_response(),
     }
+}
+
+/// GET /api/files/{id}/debug-comment
+/// Returns the full comment resolution chain for a file, for debugging.
+async fn file_debug_comment_handler(
+    Path(id): Path<i64>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let db = &state.db;
+
+    // 1. Fetch the file
+    let file = match sqlx::query_as::<_, crate::db::File>("SELECT * FROM files WHERE id = ?")
+        .bind(id)
+        .fetch_optional(db)
+        .await
+    {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("File with id {} not found", id),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    let title = file
+        .title
+        .clone()
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let artist = file
+        .artist
+        .clone()
+        .unwrap_or_else(|| "(unknown)".to_string());
+
+    // 2. Get all playlists linked via v_file_track_link
+    let playlists = match sqlx::query_as::<_, (String, String)>(
+        "SELECT sp.name, sp.service
+         FROM service_playlists sp
+         JOIN service_playlist_tracks spt ON spt.playlist_id = sp.id
+         JOIN v_file_track_link v ON v.track_id = spt.track_id
+         WHERE v.file_id = ?",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|(name, service)| DebugPlaylist { name, service })
+            .collect::<Vec<_>>(),
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    // 3. Get all matched tags (tags matching playlist names)
+    let matched_tags = match sqlx::query_as::<_, (i64, String, String, bool)>(
+        "SELECT DISTINCT t.id, t.name, tc.name AS category_name,
+                EXISTS (SELECT 1 FROM tag_parents tp WHERE tp.tag_id = t.id) AS has_parents
+         FROM tags t
+         JOIN tag_categories tc ON tc.id = t.category_id
+         JOIN service_playlists sp ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
+         JOIN service_playlist_tracks spt ON spt.playlist_id = sp.id
+         JOIN v_file_track_link v ON v.track_id = spt.track_id
+         WHERE v.file_id = ?",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(
+                |(tag_id, tag_name, category_name, has_parents)| DebugMatchedTag {
+                    tag_id,
+                    tag_name,
+                    category_name,
+                    has_parents,
+                },
+            )
+            .collect::<Vec<_>>(),
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    // 4. Get resolved tag rows from v_file_resolved_tags
+    let tag_rows = match sqlx::query_as::<_, (String, String)>(
+        "SELECT frt.tag_name, frt.prefix
+         FROM v_file_resolved_tags frt
+         WHERE frt.file_id = ?",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|(tag_name, prefix)| DebugTagRow { tag_name, prefix })
+            .collect::<Vec<_>>(),
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    // 5. Compute PMV presence from tag rows
+    let has_phase = tag_rows.iter().any(|r| r.prefix.eq_ignore_ascii_case("p"));
+    let has_mood = tag_rows.iter().any(|r| r.prefix.eq_ignore_ascii_case("m"));
+    let has_vibe = tag_rows.iter().any(|r| r.prefix.eq_ignore_ascii_case("v"));
+    let pmv = DebugPmv {
+        phase: has_phase,
+        mood: has_mood,
+        vibe: has_vibe,
+    };
+
+    // 6. Generate the target comment using the same tag rows
+    let phase_char = if has_phase { 'P' } else { '-' };
+    let mood_char = if has_mood { 'M' } else { '-' };
+    let vibe_char = if has_vibe { 'V' } else { '-' };
+    let tag_name_refs: Vec<String> = tag_rows.iter().map(|r| r.tag_name.clone()).collect();
+    let generated_comment = crate::comment::generate_target_comment(
+        phase_char,
+        mood_char,
+        vibe_char,
+        &tag_name_refs,
+        file.spotify_id.as_deref(),
+        file.soundcloud_id.as_deref(),
+        file.youtube_id.as_deref(),
+    );
+
+    let response = FileDebugCommentResponse {
+        file_id: file.id,
+        title,
+        artist,
+        tag_rows,
+        pmv,
+        generated_comment,
+        current_comment: file.comment,
+        playlists,
+        matched_tags,
+    };
+
+    Json(ApiResponse {
+        data: Some(response),
+    })
+    .into_response()
 }
 
 // ─── Tag Parents / Children Handlers ─────────────────────────────────────────

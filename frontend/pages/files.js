@@ -616,17 +616,20 @@ function renderBody(data, state) {
 
   // Checkbox column (select-all header, per-row checkboxes)
   const selectedSet = state.selectedFileIds || new Set();
+  const inAllMode = state.selectAllMode;
   const allOnPageSelected =
-    data.files.length > 0 && data.files.every((f) => selectedSet.has(f.id));
+    inAllMode ||
+    (data.files.length > 0 && data.files.every((f) => selectedSet.has(f.id)));
+  const checkboxChecked = inAllMode || allOnPageSelected;
   const checkboxHeader =
     '<th class="col-checkbox"><input type="checkbox" class="files-select-all" id="files-select-all"' +
-    (allOnPageSelected ? " checked" : "") +
+    (checkboxChecked ? " checked" : "") +
     "></th>";
   const headers = checkboxHeader + dataHeaders;
 
   const rowsHtml = data.files
     .map((f) => {
-      const checked = selectedSet.has(f.id);
+      const checked = inAllMode || selectedSet.has(f.id);
       const cb =
         '<td class="col-checkbox"><input type="checkbox" class="files-row-checkbox" data-file-id="' +
         f.id +
@@ -651,6 +654,7 @@ function renderBody(data, state) {
         }
       </div>
     </div>
+    <div id="files-select-all-banner" class="select-all-banner" style="display:none"></div>
     <div class="table-wrap"><table class="data-table">
       <thead><tr>${headers}</tr></thead>
       <tbody>${rowsHtml}</tbody>
@@ -703,6 +707,33 @@ function buildParams(state) {
   return params;
 }
 
+/**
+ * Build a plain filter-params object (no pagination/sort) for the
+ * "select all" endpoints that accept JSON filter bodies.
+ */
+function buildFilterParams(state) {
+  const f = {};
+  if (state.search) f.search = state.search;
+  if (state.bpmMin > 0) f.bpmMin = state.bpmMin;
+  if (state.bpmMax < BPM_MAX) f.bpmMax = state.bpmMax;
+  if (state.keys && state.keys.length > 0) f.key = state.keys.join(",");
+  if (state.selectedTags && state.selectedTags.length > 0)
+    f.tags = state.selectedTags.join(",");
+  if (state.linkedOnly) f.linkedOnly = true;
+  if (state.unlinked) f.unlinked = true;
+  if (state.nonDefaultOnly) f.nonDefaultOnly = true;
+  if (state.selectedServices && state.selectedServices.length > 0)
+    f.selectedServices = state.selectedServices.join(",");
+  if (state.pmvCategories && state.pmvCategories.length > 0)
+    f.pmvCategories = state.pmvCategories.join(",");
+  if (state.pmvAggregate) f.pmvAggregate = state.pmvAggregate;
+  if (state.fileTypes && state.fileTypes.length > 0)
+    f.fileTypes = state.fileTypes.join(",");
+  if (state.commentStatuses && state.commentStatuses.length > 0)
+    f.commentStatuses = state.commentStatuses.join(",");
+  return f;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Fetch + Render cycle                                               */
 /* ------------------------------------------------------------------ */
@@ -723,6 +754,12 @@ async function fetchAndRender(container, signal, state) {
 
     const files = (filesResp.data || []).map(adaptFile);
     const total = countResp.data;
+    state._lastTotal = total;
+
+    // Keep selectAllTotal in sync with the actual total when in "all" mode
+    if (state.selectAllMode) {
+      state.selectAllTotal = total;
+    }
 
     if (files.length === 0 && total === 0) {
       contentEl.innerHTML = renderEmptyBody();
@@ -732,6 +769,7 @@ async function fetchAndRender(container, signal, state) {
 
     wireContentEvents(container, signal, state);
     updateSelectionUI(container, state);
+    injectSelectAllBanner(container, state);
   } catch (err) {
     if (err.name === "AbortError") return;
     contentEl.innerHTML = renderErrorBlock({
@@ -1467,6 +1505,21 @@ function wireContentEvents(container, signal, state) {
   const selectAllCb = container.querySelector("#files-select-all");
   if (selectAllCb) {
     selectAllCb.onclick = () => {
+      // In select-all mode, clicking the header checkbox exits all-mode and deselects everything
+      if (state.selectAllMode) {
+        state.selectAllMode = false;
+        state.selectAllTotal = 0;
+        state.selectedFileIds.clear();
+        selectAllCb.checked = false;
+        const rowCbs = container.querySelectorAll(".files-row-checkbox");
+        rowCbs.forEach((cb) => {
+          cb.checked = false;
+        });
+        updateSelectionUI(container, state);
+        injectSelectAllBanner(container, state);
+        return;
+      }
+
       const checked = selectAllCb.checked;
       const rowCbs = container.querySelectorAll(".files-row-checkbox");
       rowCbs.forEach((cb) => {
@@ -1476,6 +1529,7 @@ function wireContentEvents(container, signal, state) {
         cb.checked = checked;
       });
       updateSelectionUI(container, state);
+      injectSelectAllBanner(container, state);
     };
   }
 
@@ -1483,6 +1537,14 @@ function wireContentEvents(container, signal, state) {
   const rowCbs = container.querySelectorAll(".files-row-checkbox");
   rowCbs.forEach((cb) => {
     cb.onclick = () => {
+      // In select-all mode, clicking a row checkbox exits all-mode
+      // and selects only the clicked file
+      if (state.selectAllMode) {
+        state.selectAllMode = false;
+        state.selectAllTotal = 0;
+        state.selectedFileIds.clear();
+      }
+
       const fileId = parseInt(cb.dataset.fileId, 10);
       if (cb.checked) state.selectedFileIds.add(fileId);
       else state.selectedFileIds.delete(fileId);
@@ -1493,16 +1555,78 @@ function wireContentEvents(container, signal, state) {
           allRowCbs.length > 0 && Array.from(allRowCbs).every((rc) => rc.checked);
       }
       updateSelectionUI(container, state);
+      injectSelectAllBanner(container, state);
     };
   });
+
 }
 
 /* ------------------------------------------------------------------ */
 /*  Selection + Bulk Actions                                           */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Inject or remove the "Select all N" banner into the DOM without re-rendering.
+ * Reads total count from state._lastTotal and file count from DOM.
+ */
+function injectSelectAllBanner(container, state) {
+  const banner = container.querySelector("#files-select-all-banner");
+  if (!banner) return;
+
+  const rowCbs = container.querySelectorAll(".files-row-checkbox");
+  const pageCount = rowCbs.length;
+  const total = state._lastTotal || 0;
+  const pageSize = state.pageSize || 50;
+
+  if (state.selectAllMode && state.selectAllTotal > 0) {
+    banner.innerHTML = `<span>All <strong>${state.selectAllTotal}</strong> files are selected.</span>
+      <button class="btn btn-sm" id="files-clear-selection">Clear selection</button>`;
+    banner.style.display = "";
+    // Wire the clear button
+    const clearBtn = banner.querySelector("#files-clear-selection");
+    if (clearBtn) {
+      clearBtn.onclick = () => {
+        state.selectAllMode = false;
+        state.selectAllTotal = 0;
+        state.selectedFileIds.clear();
+        state.needsCommentCount = 0;
+        updateSelectionUI(container, state);
+        injectSelectAllBanner(container, state);
+        const selectAllCb = container.querySelector("#files-select-all");
+        if (selectAllCb) selectAllCb.checked = false;
+        rowCbs.forEach(cb => { cb.checked = false; });
+      };
+    }
+  } else if (
+    !state.selectAllMode &&
+    pageCount > 0 &&
+    total > pageSize &&
+    Array.from(rowCbs).every(cb => cb.checked)
+  ) {
+    banner.innerHTML = `<span>All <strong>${pageCount}</strong> files on this page are selected.</span>
+      <button class="btn btn-sm btn-primary" id="files-select-all-pages">Select all <strong>${total}</strong> files matching current filters</button>`;
+    banner.style.display = "";
+    // Wire the select-all-pages button
+    const allBtn = banner.querySelector("#files-select-all-pages");
+    if (allBtn) {
+      allBtn.onclick = () => {
+        state.selectAllMode = true;
+        state.selectAllTotal = total;
+        updateSelectionUI(container, state);
+        injectSelectAllBanner(container, state);
+        rowCbs.forEach(cb => { cb.checked = true; });
+        const selectAllCb = container.querySelector("#files-select-all");
+        if (selectAllCb) selectAllCb.checked = true;
+      };
+    }
+  } else {
+    banner.style.display = "none";
+    banner.innerHTML = "";
+  }
+}
+
 function updateSelectionUI(container, state) {
-  const count = state.selectedFileIds.size;
+  const count = state.selectAllMode ? state.selectAllTotal : state.selectedFileIds.size;
   updateSelectionCount(container, "files", count);
   computeNeedsCount(container, state);
 }
@@ -1511,8 +1635,8 @@ async function computeNeedsCount(container, state) {
   const btn = container.querySelector("#files-actions-write-comments");
   if (!btn) return;
 
-  const selectedIds = Array.from(state.selectedFileIds);
-  if (selectedIds.length === 0) {
+  const hasSelection = state.selectAllMode || state.selectedFileIds.size > 0;
+  if (!hasSelection) {
     btn.innerHTML = '<i class="fas fa-pen"></i> WRITE COMMENTS';
     state.needsCommentCount = 0;
     return;
@@ -1522,23 +1646,34 @@ async function computeNeedsCount(container, state) {
   btn.disabled = true;
 
   try {
-    const resp = await fetchJSON("/api/files/needs-comment-count", {
-      method: "POST",
-      body: JSON.stringify({ fileIds: selectedIds }),
-    });
+    let resp;
+    if (state.selectAllMode) {
+      // Use filter-based endpoint for "select all" mode
+      const filterParams = buildFilterParams(state);
+      resp = await fetchJSON("/api/files/needs-comment-count-all", {
+        method: "POST",
+        body: JSON.stringify(filterParams),
+      });
+    } else {
+      const selectedIds = Array.from(state.selectedFileIds);
+      resp = await fetchJSON("/api/files/needs-comment-count", {
+        method: "POST",
+        body: JSON.stringify({ fileIds: selectedIds }),
+      });
+    }
     state.needsCommentCount = resp.data.filesNeedingUpdate || 0;
     btn.innerHTML = `<i class="fas fa-pen"></i> WRITE COMMENTS (${state.needsCommentCount})`;
   } catch (err) {
     console.warn("Failed to compute needs-comment count:", err);
     btn.innerHTML = '<i class="fas fa-pen"></i> WRITE COMMENTS';
   } finally {
-    btn.disabled = state.selectedFileIds.size === 0;
+    btn.disabled = !(state.selectAllMode || state.selectedFileIds.size > 0);
   }
 }
 
 async function writeCommentsForSelected(container, state) {
-  const selectedIds = Array.from(state.selectedFileIds);
-  if (selectedIds.length === 0) {
+  const hasSelection = state.selectAllMode || state.selectedFileIds.size > 0;
+  if (!hasSelection) {
     showToast("No files selected.", "warning");
     return;
   }
@@ -1550,10 +1685,20 @@ async function writeCommentsForSelected(container, state) {
   }
 
   try {
-    const resp = await fetchJSON("/api/files/write-comments-by-ids", {
-      method: "POST",
-      body: JSON.stringify({ fileIds: selectedIds }),
-    });
+    let resp;
+    if (state.selectAllMode) {
+      const filterParams = buildFilterParams(state);
+      resp = await fetchJSON("/api/files/write-comments-all", {
+        method: "POST",
+        body: JSON.stringify(filterParams),
+      });
+    } else {
+      const selectedIds = Array.from(state.selectedFileIds);
+      resp = await fetchJSON("/api/files/write-comments-by-ids", {
+        method: "POST",
+        body: JSON.stringify({ fileIds: selectedIds }),
+      });
+    }
     const data = resp.data;
     if (data.fileCount > 0) {
       showToast(
@@ -1564,6 +1709,8 @@ async function writeCommentsForSelected(container, state) {
       showToast("All comments are up to date", "info");
     }
     state.selectedFileIds.clear();
+    state.selectAllMode = false;
+    state.selectAllTotal = 0;
     state.needsCommentCount = 0;
     updateSelectionUI(container, state);
     fetchAndRender(container, null, state);
@@ -1619,6 +1766,9 @@ export async function init(container, signal, hashParams) {
     fileTypeEnabled: true,
     layoutMode: false,
     selectedFileIds: new Set(),
+    selectAllMode: false,
+    selectAllTotal: 0,
+    _lastTotal: 0,
     needsCommentCount: 0,
   };
 

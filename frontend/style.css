@@ -3463,3 +3463,23 @@ th.drop-target {
     cursor: pointer;
     accent-color: var(--accent);
 }
+
+/* Select-all banner (Gmail-style "Select all N" bar) */
+.select-all-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-3);
+    margin: 0 0 var(--space-2) 0;
+    background: var(--surface-hover);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    font-size: 0.875rem;
+    gap: var(--space-3);
+}
+.select-all-banner span {
+    color: var(--text-muted);
+}
+.select-all-banner strong {
+    color: var(--text);
+}
