@@ -1064,9 +1064,9 @@ Fix two bugs with the Files page filter toolbar buttons:
 
 ## Plan: tracks-playlist-filter
 
-**Status**: proposed
-**Branch**: `feat/tracks-playlist-filter`
-**Ready for review**: no
+**Status**: done ✅
+**Branch**: `feat/playlist-sync-enhancements`
+**Ready for review**: yes
 **Depends on**: nothing
 **Migration needed**: no
 
@@ -1178,17 +1178,17 @@ Include playlist chip container + typeahead in filter UI state syncing.
 
 ### Acceptance Criteria
 
-- [ ] Playlist typeahead appears in LEFT column between Tags and Date
-- [ ] Typing searches playlists via `/api/playlists?search=...` with debounce
-- [ ] Dropdown shows matching playlist names; keyboard nav works
-- [ ] Clicking a dropdown item adds a playlist chip and filters tracks server-side
-- [ ] Multiple chips supported (OR logic — tracks in any selected playlist)
-- [ ] Removing a chip removes the filter and refreshes
-- [ ] Playlist filter is toggleable (collapsible, localStorage persistence)
-- [ ] Pagination works correctly with playlist filter active
-- [ ] Count query matches filtered result count
-- [ ] When playlist filter is active, the single-playlist context badge is cleared
-- [ ] No regressions: tags, PMV, type, date, service filters still work
-- [ ] No regressions: sort, pagination, column config, layout mode, bulk comments
-- [ ] Backend compiles (`cargo build`)
-- [ ] Test with `curl` first
+- [x] Playlist typeahead appears in LEFT column between Tags and Date
+- [x] Typing searches playlists via `/api/playlists?search=...` with debounce
+- [x] Dropdown shows matching playlist names; keyboard nav works
+- [x] Clicking a dropdown item adds a playlist chip and filters tracks server-side
+- [x] Multiple chips supported (OR logic — tracks in any selected playlist)
+- [x] Removing a chip removes the filter and refreshes
+- [x] Playlist filter is toggleable (collapsible, localStorage persistence)
+- [x] Pagination works correctly with playlist filter active
+- [x] Count query matches filtered result count
+- [x] When playlist filter is active, the single-playlist context badge is cleared
+- [x] No regressions: tags, PMV, type, date, service filters still work
+- [x] No regressions: sort, pagination, column config, layout mode, bulk comments
+- [x] Backend compiles (`cargo build`)
+- [x] Test with `curl` first
