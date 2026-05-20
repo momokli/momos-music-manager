@@ -240,6 +240,13 @@ function renderToolbar(search, state) {
     )
     .join("");
 
+  const playlistChipsHtml = (state.selectedPlaylists || [])
+    .map(
+      (p) =>
+        `<span class="tag-chip" data-playlist="${p}">${escapeHtml(p)} <i class="fas fa-times tag-chip-x"></i></span>`,
+    )
+    .join("");
+
   return `<div class="filter-panel" id="tracks-filter-panel">
     <div class="filter-panel-header">
       ${renderSearchInput("tracks", search)}
@@ -266,6 +273,20 @@ function renderToolbar(search, state) {
               </div>
             </div>
             <div class="tag-chips" id="tracks-tag-chips">${chipsHtml}</div>
+          </div>
+
+          <!-- Playlists filter (typeahead + chips) -->
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="playlist">Playlists</span>
+            <div class="typeahead-wrap" style="flex:1">
+              <div class="tag-search-wrap">
+                <i class="fas fa-list"></i>
+                <input type="text" class="input-text input-search" id="tracks-playlist-search"
+                       placeholder="filter by PLAYLIST" autocomplete="off">
+                <div class="tag-dropdown" id="tracks-playlist-dropdown"></div>
+              </div>
+            </div>
+            <div class="tag-chips" id="tracks-playlist-chips">${playlistChipsHtml}</div>
           </div>
 
           <!-- Date filter -->
@@ -485,6 +506,9 @@ function buildParams(state) {
   if (state.order) params.set("order", state.order);
   if (state.search) params.set("search", state.search);
   if (state.playlistId) params.set("playlistId", String(state.playlistId));
+  if (state.selectedPlaylists && state.selectedPlaylists.length > 0) {
+    params.set("playlists", state.selectedPlaylists.join(","));
+  }
   // Server-side filters
   if (state.selectedServices && state.selectedServices.length > 0) {
     params.set("services", state.selectedServices.join(","));
@@ -910,6 +934,305 @@ function wireToolbarEvents(container, signal, state) {
         const tag = chip.dataset.tag;
         state.selectedTags = state.selectedTags.filter((t) => t !== tag);
         state.page = 0;
+        updateHash("tracks", state, {
+          sort: "",
+          order: "asc",
+          search: "",
+          selectedServices: [],
+          selectedTags: [],
+          pmvCategories: [],
+          pmvAggregate: "",
+          fileTypes: [],
+          fileTypeAgg: "",
+          importedMode: "",
+          importedNum: null,
+          importedUnit: "days",
+          addedMode: "",
+          addedNum: null,
+          addedUnit: "days",
+          page: 0,
+        });
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // ── Playlist search input with keyboard navigation ──
+  const playlistSearch = container.querySelector("#tracks-playlist-search");
+  const playlistDropdown = container.querySelector("#tracks-playlist-dropdown");
+  if (playlistSearch && playlistDropdown) {
+    let timer;
+    let selectedIndex = -1;
+
+    function updatePlaylistSelection() {
+      const items = playlistDropdown.querySelectorAll(".tag-dropdown-item");
+      items.forEach((item, i) => {
+        item.classList.toggle("selected", i === selectedIndex);
+      });
+      const selected = items[selectedIndex];
+      if (selected) {
+        selected.scrollIntoView({ block: "nearest" });
+      }
+    }
+
+    function addSelectedPlaylist() {
+      const items = playlistDropdown.querySelectorAll(".tag-dropdown-item");
+      const selected = items[selectedIndex];
+      if (!selected) return;
+      const name = selected.dataset.name;
+      if (!name) return;
+      if (!state.selectedPlaylists.includes(name)) {
+        state.selectedPlaylists.push(name);
+        state.page = 0;
+      }
+      // Clear single-playlist context when multi-filter is active
+      state.playlistId = null;
+      state.playlistName = null;
+      playlistSearch.value = "";
+      playlistDropdown.classList.remove("open");
+      playlistDropdown.innerHTML = "";
+      playlistDropdown.style.position = "";
+      playlistDropdown.style.top = "";
+      playlistDropdown.style.left = "";
+      playlistDropdown.style.width = "";
+      playlistDropdown.style.zIndex = "";
+      selectedIndex = -1;
+      renderPlaylistChips();
+      updatePlaylistBadge();
+      updateHash("tracks", state, {
+        sort: "",
+        order: "asc",
+        search: "",
+        selectedServices: [],
+        selectedTags: [],
+        pmvCategories: [],
+        pmvAggregate: "",
+        fileTypes: [],
+        fileTypeAgg: "",
+        importedMode: "",
+        importedNum: null,
+        importedUnit: "days",
+        addedMode: "",
+        addedNum: null,
+        addedUnit: "days",
+        page: 0,
+      });
+      fetchAndRender(container, signal, state);
+    }
+
+    playlistSearch.addEventListener(
+      "input",
+      () => {
+        clearTimeout(timer);
+        selectedIndex = -1;
+        const q = playlistSearch.value.trim();
+        if (!q) {
+          playlistDropdown.classList.remove("open");
+          playlistDropdown.innerHTML = "";
+          playlistDropdown.style.position = "";
+          playlistDropdown.style.top = "";
+          playlistDropdown.style.left = "";
+          playlistDropdown.style.width = "";
+          playlistDropdown.style.zIndex = "";
+          return;
+        }
+        timer = setTimeout(async () => {
+          try {
+            const resp = await fetchJSON(
+              `/api/playlists?search=${encodeURIComponent(q)}&page_size=20`,
+            );
+            const playlists = resp.data || [];
+            if (playlists.length === 0) {
+              playlistDropdown.innerHTML =
+                '<div class="tag-dropdown-empty">No playlists found</div>';
+              selectedIndex = -1;
+            } else {
+              playlistDropdown.innerHTML = playlists
+                .map(
+                  (pl, i) =>
+                    `<div class="tag-dropdown-item${i === 0 ? " selected" : ""}" data-name="${pl.name}">
+                      <span class="tag-dropdown-name">${escapeHtml(pl.name)}</span>
+                      <span class="tag-dropdown-cat">${escapeHtml(pl.service || "")}</span>
+                    </div>`,
+                )
+                .join("");
+              selectedIndex = 0;
+            }
+            const rect = playlistSearch.getBoundingClientRect();
+            playlistDropdown.style.position = "fixed";
+            playlistDropdown.style.top = rect.bottom + 2 + "px";
+            playlistDropdown.style.left = rect.left + "px";
+            playlistDropdown.style.width = rect.width + "px";
+            playlistDropdown.style.zIndex = "200";
+            playlistDropdown.classList.add("open");
+          } catch {
+            // ignore errors during search
+          }
+        }, 150);
+      },
+      { signal },
+    );
+
+    playlistDropdown.addEventListener(
+      "click",
+      (e) => {
+        const item = e.target.closest(".tag-dropdown-item");
+        if (!item) return;
+        const name = item.dataset.name;
+        if (!name) return;
+        if (!state.selectedPlaylists.includes(name)) {
+          state.selectedPlaylists.push(name);
+          state.page = 0;
+        }
+        state.playlistId = null;
+        state.playlistName = null;
+        playlistSearch.value = "";
+        playlistDropdown.classList.remove("open");
+        playlistDropdown.innerHTML = "";
+        playlistDropdown.style.position = "";
+        playlistDropdown.style.top = "";
+        playlistDropdown.style.left = "";
+        playlistDropdown.style.width = "";
+        playlistDropdown.style.zIndex = "";
+        selectedIndex = -1;
+        renderPlaylistChips();
+        updatePlaylistBadge();
+        updateHash("tracks", state, {
+          sort: "",
+          order: "asc",
+          search: "",
+          selectedServices: [],
+          selectedTags: [],
+          pmvCategories: [],
+          pmvAggregate: "",
+          fileTypes: [],
+          fileTypeAgg: "",
+          importedMode: "",
+          importedNum: null,
+          importedUnit: "days",
+          addedMode: "",
+          addedNum: null,
+          addedUnit: "days",
+          page: 0,
+        });
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+
+    playlistSearch.addEventListener(
+      "keydown",
+      (e) => {
+        if (!playlistDropdown.classList.contains("open")) return;
+        const items = playlistDropdown.querySelectorAll(".tag-dropdown-item");
+        switch (e.key) {
+          case "ArrowDown":
+            e.preventDefault();
+            if (items.length === 0) return;
+            selectedIndex = Math.min(selectedIndex + 1, items.length - 1);
+            updatePlaylistSelection();
+            break;
+          case "ArrowUp":
+            e.preventDefault();
+            if (items.length === 0) return;
+            selectedIndex = Math.max(selectedIndex - 1, 0);
+            updatePlaylistSelection();
+            break;
+          case "Enter":
+            e.preventDefault();
+            addSelectedPlaylist();
+            break;
+          case "Escape":
+            playlistDropdown.classList.remove("open");
+            playlistDropdown.innerHTML = "";
+            playlistDropdown.style.position = "";
+            playlistDropdown.style.top = "";
+            playlistDropdown.style.left = "";
+            playlistDropdown.style.width = "";
+            playlistDropdown.style.zIndex = "";
+            selectedIndex = -1;
+            playlistSearch.blur();
+            break;
+        }
+      },
+      { signal },
+    );
+
+    // Close dropdown on outside click
+    document.addEventListener(
+      "click",
+      (e) => {
+        const wrap = container
+          .querySelector("#tracks-playlist-search")
+          ?.closest(".tag-search-wrap");
+        if (!wrap || wrap.contains(e.target)) return;
+        if (playlistDropdown) {
+          playlistDropdown.classList.remove("open");
+          playlistDropdown.innerHTML = "";
+          playlistDropdown.style.position = "";
+          playlistDropdown.style.top = "";
+          playlistDropdown.style.left = "";
+          playlistDropdown.style.width = "";
+          playlistDropdown.style.zIndex = "";
+          selectedIndex = -1;
+        }
+      },
+      { signal },
+    );
+
+    // Reposition dropdown on scroll/resize while open
+    function repositionPlaylistDropdown() {
+      if (!playlistDropdown.classList.contains("open")) return;
+      const rect = playlistSearch.getBoundingClientRect();
+      playlistDropdown.style.top = rect.bottom + 2 + "px";
+      playlistDropdown.style.left = rect.left + "px";
+      playlistDropdown.style.width = rect.width + "px";
+    }
+    window.addEventListener("scroll", repositionPlaylistDropdown, {
+      signal,
+      passive: true,
+    });
+    window.addEventListener("resize", repositionPlaylistDropdown, {
+      signal,
+      passive: true,
+    });
+  }
+
+  // ── Update playlist context badge visibility ──
+  function updatePlaylistBadge() {
+    const badge = container.querySelector(".playlist-context-badge");
+    if (!badge) return;
+    const hasFilter = (state.selectedPlaylists || []).length > 0;
+    badge.style.display = hasFilter ? "none" : "";
+  }
+
+  // ── Playlist chip rendering helper ──
+  function renderPlaylistChips() {
+    const chipsContainer = container.querySelector("#tracks-playlist-chips");
+    if (!chipsContainer) return;
+    chipsContainer.innerHTML = state.selectedPlaylists
+      .map(
+        (p) =>
+          `<span class="tag-chip" data-playlist="${p}">${escapeHtml(p)} <i class="fas fa-times tag-chip-x"></i></span>`,
+      )
+      .join("");
+  }
+
+  // ── Playlist chip removal (delegated) ──
+  const playlistChipsContainer = container.querySelector("#tracks-playlist-chips");
+  if (playlistChipsContainer) {
+    playlistChipsContainer.addEventListener(
+      "click",
+      (e) => {
+        const x = e.target.closest(".tag-chip-x");
+        if (!x) return;
+        const chip = x.closest(".tag-chip");
+        if (!chip) return;
+        const name = chip.dataset.playlist;
+        state.selectedPlaylists = state.selectedPlaylists.filter((p) => p !== name);
+        state.page = 0;
+        updatePlaylistBadge();
         updateHash("tracks", state, {
           sort: "",
           order: "asc",
@@ -1721,6 +2044,7 @@ export async function init(container, signal, hashParams) {
     order: hashParams?.order || "asc",
     selectedServices: parseCSV(hashParams?.selectedServices),
     selectedTags: parseCSV(hashParams?.selectedTags),
+    selectedPlaylists: parseCSV(hashParams?.selectedPlaylists),
     pmvCategories: parseCSV(hashParams?.pmvCategories),
     pmvAggregate: hashParams?.pmvAggregate || "",
     fileTypes: parseCSV(hashParams?.fileTypes),
@@ -1734,6 +2058,7 @@ export async function init(container, signal, hashParams) {
     playlistId: hashParams?.playlistId ? parseInt(hashParams.playlistId) : null,
     playlistName: hashParams?.playlistName || null,
     tagEnabled: true,
+    playlistEnabled: true,
     serviceEnabled: true,
     pmvEnabled: true,
     typeEnabled: true,

@@ -669,6 +669,7 @@ pub struct TracksQuery {
     pub file_type_agg: Option<String>,
     pub search: Option<String>,
     pub playlist_id: Option<i64>,
+    pub playlists: Option<String>,
     pub tags: Option<String>,
     pub pmv_categories: Option<String>,
     pub pmv_aggregate: Option<String>,
@@ -7292,6 +7293,7 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         }
     });
     let playlist_id_filter = query.playlist_id;
+    let playlists_filter = query.playlists.clone();
     let tags_filter = query.tags.clone();
     let pmv_categories_filter = query.pmv_categories.clone();
     let pmv_aggregate_filter = query.pmv_aggregate.clone();
@@ -7300,8 +7302,11 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     let added_after_days_filter = query.added_after_days;
     let added_before_days_filter = query.added_before_days;
 
-    // If filtering by playlist, use DISTINCT to avoid duplicates from the JOIN
-    let mut sql = if playlist_id_filter.is_some() {
+    // If filtering by playlist (multi-name takes precedence over single ID),
+    // use DISTINCT to avoid duplicates from the JOIN
+    let mut sql = if playlists_filter.is_some() {
+        "SELECT DISTINCT st.* FROM service_tracks st JOIN service_playlist_tracks spt ON spt.track_id = st.id JOIN service_playlists sp ON sp.id = spt.playlist_id WHERE 1=1".to_string()
+    } else if playlist_id_filter.is_some() {
         "SELECT DISTINCT st.* FROM service_tracks st JOIN service_playlist_tracks spt ON spt.track_id = st.id WHERE 1=1"
             .to_string()
     } else {
@@ -7357,8 +7362,24 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         }
     }
 
-    if playlist_id_filter.is_some() {
+    if playlist_id_filter.is_some() && playlists_filter.is_none() {
         sql.push_str(" AND spt.playlist_id = ?");
+    }
+
+    // Playlists filter (multi-name, OR logic)
+    if let Some(ref pl_names) = playlists_filter {
+        let pl_list: Vec<&str> = pl_names
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !pl_list.is_empty() {
+            let placeholders: Vec<String> = pl_list.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND LOWER(sp.name) IN ({})",
+                placeholders.join(",")
+            ));
+        }
     }
 
     // Tags filter
@@ -7461,7 +7482,20 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     }
 
     if let Some(pid) = playlist_id_filter {
-        query_builder = query_builder.bind(pid);
+        if playlists_filter.is_none() {
+            query_builder = query_builder.bind(pid);
+        }
+    }
+
+    // Playlists filter binds
+    if let Some(ref pl_names) = playlists_filter {
+        for name in pl_names
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            query_builder = query_builder.bind(name);
+        }
     }
 
     // Tags filter binds
@@ -7651,6 +7685,7 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
         }
     });
     let playlist_id_filter = query.playlist_id;
+    let playlists_filter = query.playlists.clone();
     let tags_filter = query.tags.clone();
     let pmv_categories_filter = query.pmv_categories.clone();
     let pmv_aggregate_filter = query.pmv_aggregate.clone();
@@ -7659,7 +7694,9 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
     let added_after_days_filter = query.added_after_days;
     let added_before_days_filter = query.added_before_days;
 
-    let mut sql = if playlist_id_filter.is_some() {
+    let mut sql = if playlists_filter.is_some() {
+        "SELECT COUNT(DISTINCT st.id) as count FROM service_tracks st JOIN service_playlist_tracks spt ON spt.track_id = st.id JOIN service_playlists sp ON sp.id = spt.playlist_id WHERE 1=1".to_string()
+    } else if playlist_id_filter.is_some() {
         "SELECT COUNT(DISTINCT st.id) as count FROM service_tracks st JOIN service_playlist_tracks spt ON spt.track_id = st.id WHERE 1=1"
             .to_string()
     } else {
@@ -7715,8 +7752,24 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
         }
     }
 
-    if playlist_id_filter.is_some() {
+    if playlist_id_filter.is_some() && playlists_filter.is_none() {
         sql.push_str(" AND spt.playlist_id = ?");
+    }
+
+    // Playlists filter (multi-name, OR logic)
+    if let Some(ref pl_names) = playlists_filter {
+        let pl_list: Vec<&str> = pl_names
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !pl_list.is_empty() {
+            let placeholders: Vec<String> = pl_list.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND LOWER(sp.name) IN ({})",
+                placeholders.join(",")
+            ));
+        }
     }
 
     // Tags filter
@@ -7801,7 +7854,20 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
     }
 
     if let Some(pid) = playlist_id_filter {
-        query_builder = query_builder.bind(pid);
+        if playlists_filter.is_none() {
+            query_builder = query_builder.bind(pid);
+        }
+    }
+
+    // Playlists filter binds
+    if let Some(ref pl_names) = playlists_filter {
+        for name in pl_names
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            query_builder = query_builder.bind(name);
+        }
     }
 
     // Tags filter binds
