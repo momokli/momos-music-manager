@@ -948,3 +948,42 @@ For shipping a Release Candidate, the friction of the two-process setup was the 
 **Decision**: New `#tag-curation` page with a sequential workflow (prev/next with keyboard shortcuts ←/→ or p/n, progress bar), a tag card showing the full name + metadata, a parent chip editor with typeahead search, and an inline "Create & Add" flow (pick category → create new tag → immediately add as parent). A collapsible "Browse All" mini table supports search, has_parents filter, sort (name/length/files/parents), and click-to-jump. Auto-save: every add/remove immediately PUTs parents to the API; navigation waits for in-flight saves. Backend endpoint: `GET /api/tags/curation-queue` with filtering/sorting params.
 
 **Consequences**: Efficient batch curation. No manual save button needed — changes persist immediately. Keyboard shortcuts speed up navigation. The "Create & Add" flow eliminates the need to pre-create parent tags.
+
+---
+
+## ADR-046: Incremental Folder Scan
+
+**Date**: 2026-05-20
+**Status**: Accepted (implemented)
+
+**Context**: Full folder rescans reprocessed every file on every scan, which was slow for large libraries. Users needed a faster option that only picked up new or changed files.
+
+**Decision**: New `ScanMode` enum with `Full` and `Incremental { since: Option<i64> }` variants. Incremental mode checks file mtimes against the folder's `last_scanned` timestamp — files older than the cutoff are skipped. On first scan (no `last_scanned`), falls back to full scan. FolderWatcher auto-starts in `serve()` with a 5-minute polling interval using incremental mode. Frontend: two scan buttons — Quick Scan (⚡ incremental) and Full Rescan (🔄). API: `POST /api/folders/{id}/scan?mode=full|incremental`.
+
+**Consequences**: Subsequent scans are dramatically faster — only new/changed files are processed. Zero configuration needed for users. The FolderWatcher runs automatically on server start. First scan is always full.
+
+---
+
+## ADR-047: Tracks Playlist Filter
+
+**Date**: 2026-05-20
+**Status**: Accepted (implemented)
+
+**Context**: Users wanted to view all tracks belonging to a specific playlist (or multiple playlists) directly from the Tracks page. Previously, the only way was to navigate to a playlist and view its tracks there.
+
+**Decision**: Add a playlist typeahead filter to the Tracks page toolbar (LEFT column, between Tags and Date), following the same pattern as the existing Tags typeahead. The user types a playlist name, gets suggestions from `/api/playlists?search=...`, clicks to add chips, and the track list filters server-side. Multiple playlists are OR'd together (tracks in ANY selected playlist). Backend: new `playlists` param on `TracksQuery` → `SELECT DISTINCT st.* JOIN service_playlist_tracks JOIN service_playlists WHERE LOWER(sp.name) IN (LOWER(?),...)`. Case-insensitive matching. When multi-playlist filter is active, the single-playlist context badge is hidden.
+
+**Consequences**: Fast, intuitive playlist-based track filtering. Reuses the familiar typeahead + chips UI pattern. Server-side filtering ensures correct pagination. Works with all other filters (tags, PMV, type, date, service) simultaneously.
+
+---
+
+## ADR-048: New Playlists Sync & Remote Count Tracking
+
+**Date**: 2026-05-20
+**Status**: Accepted (implemented)
+
+**Context**: Syncing all playlists was slow when only a few new playlists needed to be discovered. Additionally, remote track counts were not updated during playlist-list sync or polling, causing stale stats on the Playlists page.
+
+**Decision**: New `SyncType::NewPlaylists` — fetches the full playlist list from Spotify, diffs against existing DB playlist IDs, and only syncs metadata + tracks for playlists that don't yet exist. "Sync New" button on the Playlists page. Remote track counts are now updated in two places: during playlist-list sync (from `SimplifiedPlaylist.tracks.total`) via `update_playlist_remote_count()`, and during subscription polling (after streaming all tracks) via `update_playlist_fetch_tracking()`. A new "Stale" filter on the Playlists page shows playlists where `localTrackCount ≠ remoteTrackCount`.
+
+**Consequences**: Discovering new playlists is much faster — only net-new playlists get full track syncs. Playlist stats stay accurate without a full rescan. The Stale filter helps users quickly find playlists that need attention.

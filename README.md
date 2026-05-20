@@ -200,7 +200,7 @@ Open Traktor → run "Consistency Check" over all tracks → Comments visible �
 | ------------------ | -------------------------- | ---------------------------------------- |
 | `#dashboard`       | `pages/dashboard.js`       | Stats + Services dashboard               |
 | `#files`           | `pages/files.js`           | Local files with BPM/Key, comment status |
-| `#tracks`          | `pages/tracks.js`          | Service tracks (Spotify)                 |
+| `#tracks`          | `pages/tracks.js`          | Service tracks, playlist/tag/PMV filter  |
 | `#playlists`       | `pages/playlists.js`       | All service playlists                    |
 | `#tags`            | `pages/tags.js`            | Tags (paginated list)                    |
 | `#tag-categories`  | `pages/tag-categories.js`  | Tag categories                           |
@@ -228,6 +228,7 @@ Open Traktor → run "Consistency Check" over all tracks → Comments visible �
 | Tasks     | `GET/DELETE /api/tasks`                 |
 | Data      | `GET /api/dump`, `POST /api/restore`    |
 | Curation  | `GET /api/tags/curation-queue`          |
+| Version   | `GET /api/version`                      |
 | Parents   | `GET/PUT /api/tags/{id}/parents`        |
 | Digging   | `GET/POST /api/digging/...`             |
 | Health    | `GET /api/health`                       |
@@ -298,7 +299,10 @@ momos-music-manager/
 │       └── traktor-import.js
 ├── migrations/
 │   ├── 001_initial_schema.sql             # Initial schema
-│   └── 002_playlist_fetch_tracking.sql    # Playlist sync tracking + tag parent resolution
+│   ├── 002_playlist_fetch_tracking.sql    # Playlist sync tracking + tag parent resolution
+│   ├── 003_remote_unique_count.sql        # Remote unique track count column
+│   ├── 004_unique_tags_nocase.sql         # Case-insensitive unique constraint on tags
+│   └── 005_v_playlist_tag_category.sql   # Playlist→tag→category resolution view
 └── docs/
     ├── ARCHITECTURE.md     # System architecture
     ├── COMMENT_SYSTEM.md   # Comment format spec
@@ -313,7 +317,7 @@ momos-music-manager/
 - **Delete old DB files** after schema changes: `rm -f app.db*`
 - **Column config**: uses `columnConfig_v2_` localStorage key (pixel-based); old percentage-based config is ignored
 - If you see "migration 27" errors: delete all DB files and restart
-- Migrations are additive (`001_initial_schema.sql`, `002_playlist_fetch_tracking.sql`)
+- Migrations are additive (`001_initial_schema.sql` through `005_v_playlist_tag_category.sql`)
 - SoundCloud and YouTube OAuth are not yet implemented
 - Playlist subscriptions poll every 30 seconds in the background
 - The digging page (`digging.html`) is a standalone page, not part of the SPA

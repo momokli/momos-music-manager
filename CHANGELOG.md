@@ -4,9 +4,23 @@ All notable changes to Momo's Music Manager.
 
 ---
 
-## [0.2.0] — Unreleased
+## [0.2.0] — 2026-05-20
 
 ### Added
+
+- **Tracks Playlist Filter**: New playlist typeahead + chips on the Tracks page (LEFT column, between Tags and Date). Type a playlist name, get suggestions from `/api/playlists`, click to add chips, and the track list filters to tracks belonging to any selected playlist (OR logic). Multiple playlists supported. Case-insensitive matching.
+
+- **Incremental Folder Scan**: New `ScanMode` enum (Full/Incremental). Incremental mode checks file mtimes and skips unchanged files. FolderWatcher now auto-starts in `serve()` with a 5-minute polling interval. Folders page has two scan buttons: Quick Scan (⚡ incremental, new/changed files only) and Full Rescan (🔄 reprocess all).
+
+- **New Playlists Sync**: `SyncType::NewPlaylists` — fetches the full playlist list from Spotify, diffs against existing DB entries, and only syncs metadata + tracks for playlists that don't yet exist. "Sync New" button on the Playlists page.
+
+- **Playlist Stale Filter**: New "Stale" toggle on the Playlists page filter panel — shows only playlists where `localTrackCount ≠ remoteTrackCount`.
+
+- **Remote Track Count Tracking**: Remote track counts are now updated during playlist-list sync (from `SimplifiedPlaylist.tracks.total`) and during subscription polling (after streaming all tracks). Keeps the playlist page stats accurate.
+
+- **Playlist Category ID Filtering**: Category filter on Playlists page switched from prefix letters (`p,m,v,e,s`) to category IDs. Backed by new `v_playlist_tag_category` view (migration 005). Category buttons are rendered dynamically from the tag-categories table.
+
+- **App Version Embedding**: Version from `Cargo.toml` is now displayed in the CLI (`--version`), available via `GET /api/version`, and shown as a subtle `v0.2.0` badge in the web UI's top navigation bar.
 
 - **Tag Parent Resolution**: Setlist-category tags can now have "parent" tags that replace them in file comments. A long Setlist tag like `Dark Techno/2026/Hardtechno/...` resolves to shorter parent tags (`dark`, `techno`, `hard`) with their own categories (Mood, Vibe, Merkmal). Comments use parent tag names and categories instead of the original. Backed by new `tag_parents` table + `v_resolved_tags` / `v_file_resolved_tags` views.
 
@@ -44,7 +58,7 @@ All notable changes to Momo's Music Manager.
 
 ### Migration Notes
 
-- **New migration**: `002_playlist_fetch_tracking.sql` (playlist sync tracking columns + tag_parents table + resolved-tag views).
+- **New migrations**: `002_playlist_fetch_tracking.sql` (playlist sync tracking columns + tag_parents table + resolved-tag views), `003_remote_unique_count.sql`, `004_unique_tags_nocase.sql`, `005_v_playlist_tag_category.sql` (playlist→tag→category resolution view).
 - Delete old `app.db*` files and restart to run migrations from scratch.
 - Column config localStorage uses `columnConfig_v2_` prefix — old percentage-based config is ignored.
 

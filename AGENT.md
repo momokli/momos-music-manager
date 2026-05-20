@@ -1,6 +1,6 @@
 # Momo's Music Manager — Agent Guidance
 
-> **Last Updated**: 2026-05-11 — v0.2.0 released
+> **Last Updated**: 2026-05-20 — v0.2.0 released
 
 ---
 
@@ -330,7 +330,7 @@ Add web UI wrapping CLI `dump`/`restore` commands. Backend: `GET /api/dump` (dow
 - [ ] Frontend Import: file picker → preview (row counts per table, timestamp) → confirm → restore → redirect to dashboard
 - [ ] Warning banner on import section: "⚠️ This will replace ALL existing data"
 - [ ] Destructive button styled red
-- [ ] Backend compiles (`cargo build`)
+- [x] Backend compiles (`cargo build`)
 - [ ] Tested with `curl` first
 
 ---
@@ -362,7 +362,7 @@ Move client-side filters on Tracks and Files pages to server-side to fix paginat
 - [ ] Files page filters (PMV, file type, comment status) moved to server
 - [ ] Pagination works correctly when filters are active (total count matches filtered set)
 - [ ] No `applyClientFilters` remains in either page (or only for truly client-only concerns)
-- [ ] Backend compiles (`cargo build`)
+- [x] Backend compiles (`cargo build`)
 
 ---
 
@@ -393,7 +393,7 @@ All 27 files that had uncommitted changes + deleted modules (`src/scan_cache.rs`
 
 ## Plan: incremental-folder-scan
 
-**Status**: in-progress 🚧
+**Status**: done ✅
 **Branch**: `feat/incremental-folder-scan`
 **Ready for review**: no
 **Depends on**: nothing
@@ -435,14 +435,14 @@ Add incremental "Quick Scan" mode to folder scanning — only process files whos
 
 ### Acceptance Criteria
 
-- [ ] Quick Scan skips files with mtime ≤ folder.last_scanned
-- [ ] Fresh folder (last_scanned = NULL) does full scan regardless of mode
-- [ ] Full scan preserves current behavior
-- [ ] FolderWatcher starts at boot, polls active folders every 5 min
-- [ ] FolderWatcher uses incremental mode for its polls
-- [ ] Two buttons in UI: Quick Scan (bolt) + Full Rescan (sync)
-- [ ] Backend compiles (`cargo build`)
-- [ ] Tested with curl
+- [x] Quick Scan skips files with mtime ≤ folder.last_scanned
+- [x] Fresh folder (last_scanned = NULL) does full scan regardless of mode
+- [x] Full scan preserves current behavior
+- [x] FolderWatcher starts at boot, polls active folders every 5 min
+- [x] FolderWatcher uses incremental mode for its polls
+- [x] Two buttons in UI: Quick Scan (bolt) + Full Rescan (sync)
+- [x] Backend compiles (`cargo build`)
+- [x] Tested with curl
 
 ---
 
@@ -647,7 +647,7 @@ Add all new filter params to the query string:
 - [ ] Hash URL syncs all filter state
 - [ ] 2-column filter-panel layout matches Files page
 - [ ] No regressions: sort, pagination, column config, layout mode, playlist scoping
-- [ ] Backend compiles (`cargo build`)
+- [x] Backend compiles (`cargo build`)
 - [ ] Test with `curl` first
 
 ---
@@ -777,8 +777,8 @@ Files already return `needsUpdate` from the API. We _could_ compute X client-sid
 - [ ] Clicking button queues write-comment task for selected files that need updates
 - [ ] Toast notifications for success/error/up-to-date
 - [ ] Selection cleared after successful write
-- [ ] Backend compiles (`cargo build`)
-- [ ] Tested with curl
+- [x] Backend compiles (`cargo build`)
+- [x] Tested with curl
 
 ---
 
@@ -845,7 +845,7 @@ We can downcast to `reqwest::Response` to read the header. This is already possi
 - [ ] Max 3 retries per playlist, then moves on (no infinite loops)
 - [ ] 300ms delay between successful playlist syncs to avoid hitting the limit
 - [ ] Non-429 errors still fail immediately
-- [ ] Backend compiles (`cargo build`)
+- [x] Backend compiles (`cargo build`)
 - [ ] Batch sync runs without `429 Too Many Requests` failures (tested against Spotify)
 
 ---
@@ -1022,7 +1022,7 @@ Playlist page: "Groovy" shows 530 tracks ✅ (was 1060)
 - [x] Playlists page shows 530 tracks for "Groovy" playlist (not 1060)
 - [ ] All other `v_tag_playlist` consumers produce identical results
 - [ ] Tag "groovy" (id 286) deleted from tags table
-- [ ] Backend compiles (`cargo build`)
+- [x] Backend compiles (`cargo build`)
 - [ ] Fresh DB: migrations 001→002→003 run cleanly
 - [ ] Existing DB: migration 003 applies without errors
 
