@@ -165,7 +165,8 @@ const FOLDERS_CELL_RENDERERS = {
   actions: (f) => `
     <div style="display:flex;gap:4px;flex-wrap:nowrap">
       <button class="btn btn-sm btn-primary" data-folder-action="edit" data-id="${f.id}" title="Edit folder"><i class="fas fa-pen"></i></button>
-      <button class="btn btn-sm" data-folder-action="rescan" data-id="${f.id}" title="Rescan folder"><i class="fas fa-sync"></i></button>
+      <button class="btn btn-sm btn-yellow" data-folder-action="quick-scan" data-id="${f.id}" title="Quick Scan — only new/changed files"><i class="fas fa-bolt"></i></button>
+      <button class="btn btn-sm" data-folder-action="rescan" data-id="${f.id}" title="Full Rescan — reprocess all files"><i class="fas fa-sync"></i></button>
       <button class="btn btn-sm ${f.watch ? "btn-yellow" : ""}" data-folder-action="toggle-watch" data-id="${f.id}" title="${f.watch ? "Pause watching" : "Start watching"}">
         <i class="fas ${f.watch ? "fa-pause" : "fa-play"}"></i>
       </button>
@@ -420,19 +421,23 @@ async function deleteFolder(id, path) {
   }
 }
 
-async function scanFolder(id, btnEl) {
+async function scanFolder(id, btnEl, mode) {
   if (btnEl) {
     btnEl.disabled = true;
     btnEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
   }
   try {
-    await fetchJSON(`/api/folders/${id}/scan`, { method: "POST" });
+    await fetchJSON(`/api/folders/${id}/scan?mode=${mode}`, { method: "POST" });
     showToast("Scan started", "success");
   } catch (err) {
     showToast(`Scan failed: ${err.message}`, "error");
     if (btnEl) {
       btnEl.disabled = false;
-      btnEl.innerHTML = '<i class="fas fa-sync"></i>';
+      // Reset icon based on mode
+      btnEl.innerHTML =
+        mode === "incremental"
+          ? '<i class="fas fa-bolt"></i>'
+          : '<i class="fas fa-sync"></i>';
     }
   }
 }
@@ -734,8 +739,11 @@ function wireDelegation() {
           deleteFolder(id, path);
           break;
         }
+        case "quick-scan":
+          scanFolder(id, btn, "incremental");
+          break;
         case "rescan":
-          scanFolder(id, btn);
+          scanFolder(id, btn, "full");
           break;
         case "toggle-watch":
           toggleWatch(id);

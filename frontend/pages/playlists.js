@@ -73,7 +73,7 @@ const HASH_DEFAULTS = {
   service: "all",
   page: 0,
   untaggedOnly: false,
-  mismatchOnly: false,
+  staleOnly: false,
   selectedServices: [],
   categories: [],
   subscribed: false,
@@ -86,7 +86,7 @@ const HASH_SCHEMA = {
   order: { type: "string", default: "asc" },
   service: { type: "string", default: "all" },
   untaggedOnly: { type: "boolean", default: false },
-  mismatchOnly: { type: "boolean", default: false },
+  staleOnly: { type: "boolean", default: false },
   selectedServices: { type: "array", default: [] },
   categories: { type: "array", default: [] },
   subscribed: { type: "boolean", default: false },
@@ -257,6 +257,9 @@ function renderToolbar(state) {
       <button class="btn btn-sm" id="playlists-sync-stale" title="Sync playlists where local ≠ remote track count"><i class="fas fa-sync-alt"></i> Sync Stale</button>
       <button class="btn btn-sm" id="playlists-refresh-all" title="Refresh remote counts for mismatched playlists (fast)"><i class="fas fa-eye"></i> Refresh All</button>
       <button class="btn btn-sm" id="playlists-sync-recent" title="Sync playlists not fetched in 15+ minutes"><i class="fas fa-clock"></i> Sync Recent</button>
+      <button class="btn btn-sm btn-green" id="playlists-sync-new" title="Discover and sync new playlists from Spotify (metadata + tracks)">
+        <i class="fas fa-plus"></i> Sync New
+      </button>
       <button class="filter-panel-toggle" id="playlists-filter-toggle" title="Toggle filters">
         <i class="fas fa-chevron-up chevron"></i>
       </button>
@@ -269,6 +272,12 @@ function renderToolbar(state) {
             <span class="filter-row-label toggleable" data-filter="sub">Subscription</span>
             <div class="filter-group">
               <button class="filter-btn${state.subscribed ? " active" : ""}" data-value="subscribed"><i class="fas fa-bell"></i> Subscribed</button>
+            </div>
+          </div>
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="stale">Sync Status</span>
+            <div class="filter-group">
+              <button class="filter-btn${state.staleOnly ? " active" : ""}" data-value="stale"><i class="fas fa-triangle-exclamation"></i> Stale</button>
             </div>
           </div>
         </div>
@@ -286,11 +295,13 @@ function renderToolbar(state) {
           <div class="filter-row">
             <span class="filter-row-label toggleable" data-filter="category">Category</span>
             <div class="filter-group" id="playlists-category-btns" style="flex-wrap:wrap">
-              <button class="filter-btn${(state.categories || []).includes("p") ? " active" : ""}" data-value="p" title="Phase">Phase</button>
-              <button class="filter-btn${(state.categories || []).includes("m") ? " active" : ""}" data-value="m" title="Mood">Mood</button>
-              <button class="filter-btn${(state.categories || []).includes("v") ? " active" : ""}" data-value="v" title="Vibe">Vibe</button>
-              <button class="filter-btn${(state.categories || []).includes("e") ? " active" : ""}" data-value="e" title="Merkmal">Merkmal</button>
-              <button class="filter-btn${(state.categories || []).includes("s") ? " active" : ""}" data-value="s" title="Setlist">Setlist</button>
+              ${(state.categoriesAll || [])
+                .map(
+                  (cat) => `
+                <button class="filter-btn${(state.categories || []).includes(cat.id) ? " active" : ""}" data-value="${cat.id}" title="${escapeHtml(cat.name)}">${escapeHtml(cat.name)}</button>
+              `,
+                )
+                .join("")}
             </div>
           </div>
         </div>
@@ -391,7 +402,7 @@ function buildParams(state) {
   if (state.service && state.service !== "all") params.set("service", state.service);
   if (state.search) params.set("search", state.search);
   if (state.untaggedOnly) params.set("untagged", "true");
-  if (state.mismatchOnly) params.set("mismatch", "true");
+  if (state.staleOnly) params.set("stale", "true");
   if (state.categories && state.categories.length > 0) {
     params.set("categories", state.categories.join(","));
   }
@@ -544,7 +555,10 @@ function wireToolbarEvents(container, signal, state) {
   function syncCategoryFilterUI() {
     if (categoryEl) {
       categoryEl.querySelectorAll(".filter-btn").forEach((btn) => {
-        btn.classList.toggle("active", state.categories.includes(btn.dataset.value));
+        btn.classList.toggle(
+          "active",
+          state.categories.includes(Number(btn.dataset.value)),
+        );
       });
     }
   }
@@ -555,7 +569,7 @@ function wireToolbarEvents(container, signal, state) {
       (e) => {
         const btn = e.target.closest(".filter-btn");
         if (!btn) return;
-        const v = btn.dataset.value;
+        const v = Number(btn.dataset.value);
         const i = state.categories.indexOf(v);
         if (i >= 0) state.categories.splice(i, 1);
         else state.categories.push(v);
@@ -579,6 +593,24 @@ function wireToolbarEvents(container, signal, state) {
         state.subscribed = !state.subscribed;
         state.page = 0;
         btn.classList.toggle("active", state.subscribed);
+        updateHash("playlists", state, HASH_DEFAULTS);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // Stale toggle (single button, on/off)
+  const staleRow = container.querySelector(".filter-row:has([data-filter=stale])");
+  if (staleRow) {
+    staleRow.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn[data-value=stale]");
+        if (!btn) return;
+        state.staleOnly = !state.staleOnly;
+        state.page = 0;
+        btn.classList.toggle("active", state.staleOnly);
         updateHash("playlists", state, HASH_DEFAULTS);
         fetchAndRender(container, signal, state);
       },
@@ -943,18 +975,32 @@ export async function init(container, signal, hashParams) {
     order: parsed.order,
     service: parsed.service,
     untaggedOnly: parsed.untaggedOnly,
-    mismatchOnly: parsed.mismatchOnly,
+    staleOnly: parsed.staleOnly,
     selectedServices: parsed.selectedServices || [],
-    categories: parsed.categories || [],
+    categories: (parsed.categories || []).map(Number).filter((id) => !isNaN(id)),
+    categoriesAll: [],
     subscribed: parsed.subscribed || false,
     serviceEnabled: true,
     categoryEnabled: true,
     subEnabled: true,
+    staleEnabled: true,
     layoutMode: false,
   };
 
   // Reset layout mode on page entry
   document.body.classList.remove("layout-mode");
+
+  // Load categories BEFORE rendering toolbar so filter buttons are populated
+  try {
+    const catResp = await fetchJSON("/api/tag-categories");
+    if (catResp && catResp.data) {
+      state.categoriesAll = Array.isArray(catResp.data)
+        ? catResp.data
+        : catResp.data.categories || [];
+    }
+  } catch (_err) {
+    // Non-critical; category filter buttons just won't render
+  }
 
   // Render stable toolbar + actions panel + content wrapper ONCE
   container.innerHTML = `
@@ -1058,73 +1104,26 @@ export async function init(container, signal, hashParams) {
     );
   }
 
-  // Refresh All — quick metadata refresh for playlists with row-mismatch
+  // Refresh All — trigger a single streaming pass to update remote track counts
   const refreshAllBtn = container.querySelector("#playlists-refresh-all");
   if (refreshAllBtn) {
     refreshAllBtn.addEventListener(
       "click",
       async () => {
         refreshAllBtn.disabled = true;
-        const icon = refreshAllBtn.querySelector("i");
         const origHTML = refreshAllBtn.innerHTML;
         refreshAllBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Refreshing…';
-
-        // Find all playlist rows with mismatch (from the currently rendered table)
-        const allRows = container.querySelectorAll("tbody tr");
-        const btns = [];
-        for (const row of allRows) {
-          const refreshBtn = row.querySelector('[data-act="refresh"]');
-          if (refreshBtn) btns.push(refreshBtn);
-        }
-
-        if (btns.length === 0) {
-          showToast("No playlists to refresh", "info");
+        try {
+          const resp = await fetchJSON("/api/services/spotify/sync/playlists", {
+            method: "POST",
+          });
+          showToast("Playlist refresh started — check progress in Tasks", "success");
+          setTimeout(() => fetchAndRender(container, signal, state), 2000);
+        } catch (err) {
+          showToast(`Refresh failed: ${err.message}`, "error");
+        } finally {
           refreshAllBtn.disabled = false;
           refreshAllBtn.innerHTML = origHTML;
-          return;
-        }
-
-        let changed = 0;
-        let unchanged = 0;
-        let failed = 0;
-
-        for (const b of btns) {
-          const plId = b.dataset.playlistId;
-          if (!plId) continue;
-          try {
-            const resp = await fetchJSON(
-              `/api/services/spotify/refresh-playlist/${plId}`,
-              { method: "POST" },
-            );
-            if ((resp.data || {}).changed) {
-              changed++;
-              // Flash the row green briefly
-              const row = b.closest("tr");
-              if (row) {
-                row.style.transition = "background 0.3s";
-                row.style.background = "rgba(34,197,94,0.15)";
-                setTimeout(() => { row.style.background = ""; }, 1200);
-              }
-            } else {
-              unchanged++;
-            }
-          } catch {
-            failed++;
-          }
-        }
-
-        const parts = [];
-        if (changed > 0) parts.push(`${changed} changed`);
-        if (unchanged > 0) parts.push(`${unchanged} unchanged`);
-        if (failed > 0) parts.push(`${failed} failed`);
-        showToast(`Refresh done: ${parts.join(", ")}`, changed > 0 ? "info" : "success");
-
-        refreshAllBtn.disabled = false;
-        refreshAllBtn.innerHTML = origHTML;
-
-        if (changed > 0) {
-          updateHash("playlists", state, HASH_DEFAULTS);
-          fetchAndRender(container, signal, state);
         }
       },
       { signal },
@@ -1155,6 +1154,32 @@ export async function init(container, signal, hashParams) {
           }
         } catch (err) {
           showToast(`Sync recent failed: ${err.message}`, "error");
+        }
+      },
+      { signal },
+    );
+  }
+
+  // Sync New — discover and sync new playlists from Spotify
+  const syncNewBtn = container.querySelector("#playlists-sync-new");
+  if (syncNewBtn) {
+    syncNewBtn.addEventListener(
+      "click",
+      async () => {
+        syncNewBtn.disabled = true;
+        const origHTML = syncNewBtn.innerHTML;
+        syncNewBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Syncing…';
+        try {
+          const resp = await fetchJSON("/api/services/spotify/sync/new-playlists", {
+            method: "POST",
+          });
+          showToast("New playlist sync started — check progress in Tasks", "success");
+          setTimeout(() => fetchAndRender(container, signal, state), 3000);
+        } catch (err) {
+          showToast(`Sync new failed: ${err.message}`, "error");
+        } finally {
+          syncNewBtn.disabled = false;
+          syncNewBtn.innerHTML = origHTML;
         }
       },
       { signal },

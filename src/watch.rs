@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Folder watcher module for monitoring and scanning directories
 //!
 //! This module provides a simple polling-based folder watcher that scans
@@ -164,7 +162,13 @@ impl FolderWatcher {
         for folder in active_folders {
             info!("Scanning folder: {}", folder.folder_path);
 
-            match db::scan_folder(pool, folder.id).await {
+            match db::scan_folder(
+                pool,
+                folder.id,
+                crate::db::ScanMode::Incremental { since: None },
+            )
+            .await
+            {
                 Ok(file_count) => {
                     info!(
                         "Scanned {} files from folder: {}",

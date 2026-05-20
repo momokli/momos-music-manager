@@ -225,18 +225,21 @@ async fn poll_subscribed_playlist(
         // Handle tracks and episodes (store both so counts match).
         let (track_info, is_episode) = match item.track {
             Some(PlayableItem::Track(track)) => (TrackInfo::from(&track), false),
-            Some(PlayableItem::Episode(episode)) => (TrackInfo {
-                id: episode.id.id().to_string(),
-                name: episode.name.clone(),
-                artists: episode.show.name.clone(),
-                album: Some(episode.show.name.clone()),
-                isrc: None,
-                duration_ms: episode.duration.num_milliseconds(),
-                track_number: None,
-                disc_number: None,
-                explicit: episode.explicit,
-                popularity: None,
-            }, true),
+            Some(PlayableItem::Episode(episode)) => (
+                TrackInfo {
+                    id: episode.id.id().to_string(),
+                    name: episode.name.clone(),
+                    artists: episode.show.name.clone(),
+                    album: Some(episode.show.name.clone()),
+                    isrc: None,
+                    duration_ms: episode.duration.num_milliseconds(),
+                    track_number: None,
+                    disc_number: None,
+                    explicit: episode.explicit,
+                    popularity: None,
+                },
+                true,
+            ),
             _ => continue,
         };
 
@@ -306,7 +309,10 @@ async fn poll_subscribed_playlist(
         if other_playlists.is_empty() {
             info!(
                 "New {} '{}' by {} added to '{}'",
-                if is_episode { "episode" } else { "track" }, track_info.name, artists, playlist_name,
+                if is_episode { "episode" } else { "track" },
+                track_info.name,
+                artists,
+                playlist_name,
             );
         } else {
             info!(
@@ -316,6 +322,35 @@ async fn poll_subscribed_playlist(
                 artists,
                 playlist_name,
                 other_playlists.join(", "),
+            );
+        }
+    }
+
+    // -- Update the playlist's remote track counts -----------------------
+    // After streaming all tracks, update the remote_track_count so the
+    // frontend displays accurate "local / unique / total" stats.
+    match db.acquire().await {
+        Ok(mut conn) => {
+            let remote_count = playlist.tracks.total as i64;
+            if let Err(e) = crate::db::update_playlist_fetch_tracking(
+                &mut conn,
+                "spotify",
+                &subscription.playlist_id,
+                remote_count,
+            )
+            .await
+            {
+                warn!(
+                    "Subscription poller: failed to update fetch tracking for playlist '{}' \
+                     (playlist_id={}): {:#}",
+                    playlist_name, subscription.playlist_id, e,
+                );
+            }
+        }
+        Err(e) => {
+            warn!(
+                "Subscription poller: failed to acquire DB connection for fetch tracking update: {:#}",
+                e,
             );
         }
     }

@@ -109,6 +109,7 @@ impl SpotifySyncWorker {
         let sync_type = self.sync_type.clone();
         match sync_type {
             SyncType::Playlists => self.sync_playlists_only().await,
+            SyncType::NewPlaylists => self.sync_new_playlists().await,
             SyncType::TracksForPlaylist(playlist_id) => {
                 self.sync_tracks_for_playlist(&playlist_id).await
             }
@@ -309,6 +310,25 @@ impl SpotifySyncWorker {
                         // Continue with next playlist
                     }
 
+                    // Update remote_track_count from the playlist list (SimplifiedPlaylist has tracks.total)
+                    let remote_total = playlist.tracks.total as i64;
+                    let pid = playlist.id.id().to_string();
+                    if let Ok(mut conn) = self.db.acquire().await {
+                        if let Err(e) = crate::db::update_playlist_remote_count(
+                            &mut conn,
+                            "spotify",
+                            &pid,
+                            remote_total,
+                        )
+                        .await
+                        {
+                            error!(
+                                "Failed to update remote count for {}: {:?}",
+                                playlist.name, e
+                            );
+                        }
+                    }
+
                     // In record mode, also buffer for cache
                     if self.cache_mode.should_record() {
                         cached_playlists.push(PlaylistInfo::from(&playlist));
@@ -356,6 +376,201 @@ impl SpotifySyncWorker {
             0,
             playlist_names,
             Vec::new(),
+        ))
+    }
+
+    /// Sync only playlists that don't yet exist in the database (metadata + tracks).
+    /// Fetches the full playlist list from Spotify, diffs against existing DB entries,
+    /// and only syncs metadata + tracks for playlists that are new.
+    async fn sync_new_playlists(&mut self) -> Result<SyncResult> {
+        if self.cache_mode.should_replay() {
+            info!(
+                "REPLAY: New-playlist sync not supported in replay mode — falling back to full playlist sync"
+            );
+            return self.sync_playlists_only().await;
+        }
+
+        info!("Starting new-playlist sync");
+
+        {
+            let mut progress = self.progress.write().await;
+            progress.status = TaskStatus::Running;
+            progress.add_log("Fetching playlist list from Spotify…".to_string());
+        }
+
+        // 1. Bulk-load existing playlist IDs from DB (no self.spotify_client borrow)
+        let existing_ids: std::collections::HashSet<String> = {
+            let rows: Vec<(String,)> = sqlx::query_as(
+                "SELECT playlist_id FROM service_playlists WHERE service = 'spotify'",
+            )
+            .fetch_all(&self.db)
+            .await?;
+            rows.into_iter().map(|(id,)| id).collect()
+        };
+        let existing_count = existing_ids.len();
+
+        info!("Found {existing_count} existing playlists in DB");
+
+        // 2. Fetch ALL playlists from Spotify, stream and diff — all in one block.
+        //    The stream borrows self.spotify_client, so the entire block must complete
+        //    before we call &mut self methods (sync_tracks_for_playlist).
+        let (total_scanned, new_playlist_ids) = {
+            let mut playlists_stream = {
+                let mut attempt = 0;
+                loop {
+                    match self.spotify_client.get_user_playlists().await {
+                        Ok(stream) => break stream,
+                        Err(e) => {
+                            if let Some(secs) = extract_retry_after_secs(&e) {
+                                attempt += 1;
+                                if attempt >= 3 {
+                                    error!(
+                                        "Failed to get playlist stream after {attempt} retries: {e:?}",
+                                    );
+                                    return Err(e);
+                                }
+                                let sleep_secs = secs + 1;
+                                warn!(
+                                    "Spotify rate limited, attempt {attempt}/3, sleeping {sleep_secs}s",
+                                );
+                                tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+                            } else {
+                                error!("Failed to get playlists stream: {e:?}");
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
+            };
+
+            let mut total_scanned = 0usize;
+            let mut new_playlist_ids: Vec<(String, String)> = Vec::new();
+
+            while let Some(result) = playlists_stream.next().await {
+                if self.is_cancelled() {
+                    info!("New-playlist sync cancelled after {total_scanned} scanned");
+                    return Ok(SyncResult::failed("Sync cancelled".to_string()));
+                }
+
+                let playlist = match result {
+                    Ok(p) => p,
+                    Err(e) => {
+                        if let Some(secs) = extract_retry_after_secs(&e) {
+                            tokio::time::sleep(Duration::from_secs(secs + 1)).await;
+                        } else {
+                            error!("Failed to fetch playlist in stream: {e:?}");
+                        }
+                        continue;
+                    }
+                };
+
+                total_scanned += 1;
+                let pid = playlist.id.id().to_string();
+
+                {
+                    let mut progress = self.progress.write().await;
+                    progress.add_log(format!(
+                        "Checking {total_scanned}: {} ({pid})",
+                        playlist.name
+                    ));
+                }
+
+                if existing_ids.contains(&pid) {
+                    continue;
+                }
+
+                info!("New playlist found: {} ({pid})", playlist.name);
+
+                {
+                    let mut progress = self.progress.write().await;
+                    progress.add_log(format!("Storing new playlist {} ({pid})", playlist.name));
+                }
+
+                if let Err(e) = self.store_playlist(&playlist).await {
+                    error!("Failed to store new playlist {}: {e:?}", playlist.name);
+                    continue;
+                }
+
+                // Update remote track count from the playlist list
+                let remote_total = playlist.tracks.total as i64;
+                if let Ok(mut conn) = self.db.acquire().await {
+                    let _ = crate::db::update_playlist_remote_count(
+                        &mut conn,
+                        "spotify",
+                        &pid,
+                        remote_total,
+                    )
+                    .await;
+                }
+
+                new_playlist_ids.push((pid, playlist.name.clone()));
+            }
+
+            // playlists_stream is dropped here — borrow on self.spotify_client released
+            (total_scanned, new_playlist_ids)
+        };
+
+        // 3. Sync tracks for each new playlist (stream is dropped, so &mut self is safe)
+        let new_count = new_playlist_ids.len();
+        let mut new_track_count = 0usize;
+        let mut new_playlist_names = Vec::new();
+        let mut new_track_names = Vec::new();
+
+        for (i, (pid, name)) in new_playlist_ids.into_iter().enumerate() {
+            if self.is_cancelled() {
+                info!("New-playlist sync cancelled after syncing {i}/{new_count} playlists");
+                return Ok(SyncResult::success(
+                    i,
+                    new_track_count,
+                    new_playlist_names,
+                    new_track_names,
+                ));
+            }
+
+            info!(
+                "Syncing tracks for new playlist {}/{}: {name} ({pid})",
+                i + 1,
+                new_count
+            );
+            new_playlist_names.push(name.clone());
+
+            {
+                let mut progress = self.progress.write().await;
+                progress.add_log(format!(
+                    "Syncing tracks for new playlist {}/{}: {name}",
+                    i + 1,
+                    new_count
+                ));
+            }
+
+            match self.sync_tracks_for_playlist(&pid).await {
+                Ok(result) => {
+                    new_track_count += result.track_count;
+                    new_track_names.extend(result.track_names);
+                }
+                Err(e) => {
+                    error!("Failed to sync tracks for new playlist {name}: {e:?}");
+                }
+            }
+        }
+
+        info!(
+            "New-playlist sync done: {total_scanned} scanned, {new_count} new, {new_track_count} tracks",
+        );
+
+        {
+            let mut progress = self.progress.write().await;
+            progress.status = TaskStatus::Completed;
+            progress.add_log(format!(
+                "Done: {total_scanned} playlists scanned, {new_count} new playlists synced with {new_track_count} tracks",
+            ));
+        }
+
+        Ok(SyncResult::success(
+            new_count,
+            new_track_count,
+            new_playlist_names,
+            new_track_names,
         ))
     }
 
@@ -531,14 +746,15 @@ impl SpotifySyncWorker {
         .fetch_optional(&self.db)
         .await
         {
-            if let Err(e) = sqlx::query(
-                "DELETE FROM service_playlist_tracks WHERE playlist_id = ?",
-            )
-            .bind(pl_id)
-            .execute(&self.db)
-            .await
+            if let Err(e) = sqlx::query("DELETE FROM service_playlist_tracks WHERE playlist_id = ?")
+                .bind(pl_id)
+                .execute(&self.db)
+                .await
             {
-                error!("Failed to cleanup playlist {} before sync: {:?}", playlist_name, e);
+                error!(
+                    "Failed to cleanup playlist {} before sync: {:?}",
+                    playlist_name, e
+                );
             }
         }
 
@@ -592,8 +808,6 @@ impl SpotifySyncWorker {
                                 track_count, track.name, playlist_name
                             );
 
-
-
                             // Extract added_at from Spotify's playlist item
                             let added_at: Option<i64> = item.added_at.map(|dt| dt.timestamp());
 
@@ -641,7 +855,6 @@ impl SpotifySyncWorker {
                                 track_count, episode.name, playlist_name
                             );
 
-
                             let added_at: Option<i64> = item.added_at.map(|dt| dt.timestamp());
                             let episode_info = TrackInfo {
                                 id: episode.id.id().to_string(),
@@ -664,10 +877,7 @@ impl SpotifySyncWorker {
                                 )
                                 .await
                             {
-                                error!(
-                                    "Failed to store episode {}: {:?}",
-                                    episode.name, e
-                                );
+                                error!("Failed to store episode {}: {:?}", episode.name, e);
                             }
                         }
                         _ => {

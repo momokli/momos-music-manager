@@ -21,6 +21,8 @@ use std::sync::Arc;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
+use std::collections::HashMap;
+
 use crate::AppState;
 use crate::config::ServiceCredentials;
 #[allow(unused_imports)]
@@ -689,8 +691,9 @@ pub struct PlaylistsQuery {
     pub sort: Option<String>,
     pub order: Option<String>,
     pub page_size: Option<i64>,
-    pub categories: Option<String>, // comma-separated lowercase prefixes: p,m,v,e,s
+    pub categories: Option<String>, // comma-separated category IDs: 1,2,3,4,5
     pub subscribed: Option<bool>,   // true = only subscribed, false = only unsubscribed
+    pub stale: Option<bool>,        // true = only playlists where local < remote_unique
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1162,6 +1165,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/services/spotify/sync/playlists",
             post(spotify_sync_playlists_handler),
+        )
+        .route(
+            "/api/services/spotify/sync/new-playlists",
+            post(spotify_sync_new_playlists_handler),
         )
         .route(
             "/api/services/spotify/sync/playlists/batch",
@@ -5368,6 +5375,48 @@ async fn spotify_sync_playlists_handler(State(state): State<Arc<AppState>>) -> i
     }
 }
 
+/// Start a new-playlist sync: fetch playlist list from Spotify, diff against DB,
+/// only sync metadata + tracks for playlists that don't yet exist.
+async fn spotify_sync_new_playlists_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    // Check if Spotify is configured in .env
+    if !state.config.is_spotify_configured() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                data: "Spotify not configured. Add SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET to .env file"
+                    .to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    // Start new-playlists sync using TaskManager
+    match crate::tasks::start_spotify_sync_task(
+        &state.task_manager,
+        &state.db,
+        &state.config,
+        SyncType::NewPlaylists,
+    )
+    .await
+    {
+        Ok(task_id) => Json(ApiResponse { data: task_id }).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to start new-playlist sync: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    data: format!("Failed to start sync: {}", e),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// Sync tracks for all playlists
 async fn spotify_sync_tracks_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use axum::http::StatusCode;
@@ -5760,36 +5809,36 @@ async fn playlists_handler(
         has_where = true;
     }
 
-    // Category filter using v_playlist_tag_category view
+    // Category filter using v_playlist_tag_category view (category IDs)
     // NOTE: push() treats ? as literal SQL, NOT as a bind placeholder.
     // We push the prefix + paren, then push_bind each value (which emits its own ?),
     // then close the paren. See commit 44ca2b8 for the same fix on PMV filter.
     if let Some(ref cats) = query.categories {
-        let cat_list: Vec<String> = cats
+        let cat_ids: Vec<i64> = cats
             .split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.trim().parse::<i64>().ok())
+            .filter(|id| *id > 0)
             .collect();
-        if !cat_list.is_empty() {
+        if !cat_ids.is_empty() {
             main_builder
                 .push(" LEFT JOIN v_playlist_tag_category vptc ON vptc.playlist_id = sp.id");
             count_builder
                 .push(" LEFT JOIN v_playlist_tag_category vptc ON vptc.playlist_id = sp.id");
 
             let clause = if has_where {
-                " AND LOWER(vptc.prefix) IN ("
+                " AND vptc.category_id IN ("
             } else {
-                " WHERE LOWER(vptc.prefix) IN ("
+                " WHERE vptc.category_id IN ("
             };
             main_builder.push(clause);
             count_builder.push(clause);
-            for (i, cat) in cat_list.iter().enumerate() {
+            for (i, id) in cat_ids.iter().enumerate() {
                 if i > 0 {
                     main_builder.push(", ");
                     count_builder.push(", ");
                 }
-                main_builder.push_bind(cat.clone());
-                count_builder.push_bind(cat.clone());
+                main_builder.push_bind(*id);
+                count_builder.push_bind(*id);
             }
             main_builder.push(")");
             count_builder.push(")");
@@ -5810,6 +5859,14 @@ async fn playlists_handler(
             count_builder.push(format!("{}{}", clause, sub));
         }
         has_where = true;
+    }
+
+    // Stale filter: local track count < remote_unique_count
+    if let Some(true) = query.stale {
+        let stale_clause = if has_where { " AND " } else { " WHERE " };
+        let stale_sub = "(SELECT COUNT(*) FROM service_playlist_tracks spt2 WHERE spt2.playlist_id = sp.id) < sp.remote_unique_count";
+        main_builder.push(format!("{}{}", stale_clause, stale_sub));
+        count_builder.push(format!("{}{}", stale_clause, stale_sub));
     }
 
     main_builder.push(" GROUP BY sp.id");
@@ -6425,8 +6482,15 @@ async fn delete_folder_handler(
 async fn scan_folder_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     use axum::http::StatusCode;
+
+    // Determine scan mode from query param (default: incremental)
+    let scan_mode = match params.get("mode").map(|s| s.as_str()) {
+        Some("full") => crate::db::ScanMode::Full,
+        _ => crate::db::ScanMode::Incremental { since: None },
+    };
 
     // First check if folder exists
     match get_folder_by_id(&state.db, id).await {
@@ -6434,7 +6498,7 @@ async fn scan_folder_handler(
             // Folder exists, spawn a background task for folder scanning
             let db = state.db.clone();
             tokio::spawn(async move {
-                match scan_folder(&db, id).await {
+                match scan_folder(&db, id, scan_mode).await {
                     Ok(file_count) => {
                         tracing::info!("Scanned {} files in folder {}", file_count, id);
                     }

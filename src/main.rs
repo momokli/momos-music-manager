@@ -305,6 +305,9 @@ async fn serve(
     // Clone for subscription poller (background task needs own ownership)
     let poller_db = db.clone();
     let poller_config = config.clone();
+
+    // Clone for folder watcher (needs own pool before db is moved into AppState)
+    let watcher_db = db.clone();
     let poller_cancel = tokio_util::sync::CancellationToken::new();
 
     let pruner_tm = task_manager.clone();
@@ -347,6 +350,17 @@ async fn serve(
             pruner_tm.prune_old_tasks(prune_age).await;
         }
     });
+
+    // Start folder watcher — polls active folders every 5 minutes
+    let mut folder_watcher =
+        crate::watch::FolderWatcher::new(watcher_db, crate::watch::FolderWatcherConfig::default());
+    if let Err(e) = folder_watcher.start() {
+        tracing::error!("Failed to start folder watcher: {}", e);
+    } else {
+        tracing::info!("Folder watcher started");
+    }
+    // Keep alive for server lifetime
+    let _folder_watcher = folder_watcher;
 
     // Build our application with routes.
     // API routes take priority; the catch-all {*path} handles everything else

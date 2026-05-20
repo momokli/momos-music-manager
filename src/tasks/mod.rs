@@ -51,6 +51,8 @@ pub enum TaskType {
 pub enum SyncOperation {
     /// Sync only playlist metadata (no tracks)
     Playlists,
+    /// Sync only playlists that don't yet exist in the database (metadata + tracks)
+    NewPlaylists,
     /// Sync tracks for a specific playlist
     TracksForPlaylist(String),
     /// Sync tracks for a list of playlist IDs (batch operation)
@@ -81,6 +83,7 @@ impl From<SyncType> for SyncConfig {
     fn from(sync_type: SyncType) -> Self {
         match sync_type {
             SyncType::Playlists => SyncConfig::Playlists,
+            SyncType::NewPlaylists => SyncConfig::Playlists,
             SyncType::TracksForPlaylist(id) => SyncConfig::TracksForPlaylist(id),
             SyncType::TracksForPlaylistList(ids) => {
                 SyncConfig::TracksForPlaylist(ids.first().cloned().unwrap_or_default())
@@ -120,6 +123,7 @@ impl SyncOperation {
     pub fn to_sync_type(&self) -> SyncType {
         match self {
             SyncOperation::Playlists => SyncType::Playlists,
+            SyncOperation::NewPlaylists => SyncType::NewPlaylists,
             SyncOperation::TracksForPlaylist(id) => SyncType::TracksForPlaylist(id.clone()),
             SyncOperation::TracksForPlaylistList(ids) => {
                 SyncType::TracksForPlaylistList(ids.clone())
@@ -265,7 +269,7 @@ impl SyncProgress {
     /// Calculate progress percentage (0-100)
     pub fn percentage(&self) -> Option<f32> {
         match self.sync_type {
-            SyncType::Playlists => {
+            SyncType::Playlists | SyncType::NewPlaylists => {
                 if let (Some(current), Some(total)) = (self.current_playlist, self.total_playlists)
                     && total > 0
                 {
@@ -839,6 +843,7 @@ pub fn task_type_label(task_type: &TaskType) -> String {
         TaskType::ServiceSync { service, operation } => {
             let op_label = match operation {
                 SyncOperation::Playlists => "playlists",
+                SyncOperation::NewPlaylists => "new playlists",
                 SyncOperation::TracksForPlaylist(_) => "tracks (single playlist)",
                 SyncOperation::TracksForPlaylistList(ids) => {
                     if ids.len() == 1 {
@@ -1433,6 +1438,7 @@ pub async fn start_scan_folder_task(
     task_manager: &TaskManager,
     db: &sqlx::Pool<sqlx::Sqlite>,
     folder_id: i64,
+    scan_mode: crate::db::ScanMode,
 ) -> anyhow::Result<String> {
     let task = Task::new(TaskType::ScanFolder { folder_id }, Some("scan".to_string()));
     let task_id = task.id.clone();
@@ -1531,6 +1537,7 @@ pub async fn start_scan_folder_task(
             fixed_extensions,
             file_extensions,
             max_depth,
+            scan_mode,
         )
         .await
         {

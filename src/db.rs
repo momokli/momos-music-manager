@@ -13,6 +13,16 @@ use sqlx::{FromRow, Pool, Row, Sqlite, SqliteConnection, SqlitePool};
 use tracing::{debug, info, warn};
 
 // ============================================================================
+// Scan Mode
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub enum ScanMode {
+    Full,
+    Incremental { since: Option<i64> },
+}
+
+// ============================================================================
 // Database Models (8-table schema)
 // ============================================================================
 
@@ -709,7 +719,16 @@ pub async fn scan_and_store_file(pool: &Pool<Sqlite>, path: &Path) -> Result<Fil
 
 pub async fn scan_directory(pool: &Pool<Sqlite>, dir_path: &Path) -> Result<usize> {
     // Use default configuration: recursive, all audio extensions
-    scan_directory_with_config(pool, dir_path, true, false, String::new(), 0).await
+    scan_directory_with_config(
+        pool,
+        dir_path,
+        true,
+        false,
+        String::new(),
+        0,
+        ScanMode::Full,
+    )
+    .await
 }
 
 pub async fn scan_directory_with_config(
@@ -719,6 +738,7 @@ pub async fn scan_directory_with_config(
     fixed_extensions: bool,
     file_extensions: String,
     max_depth: i32,
+    scan_mode: ScanMode,
 ) -> Result<usize> {
     use walkdir::WalkDir;
 
@@ -737,6 +757,15 @@ pub async fn scan_directory_with_config(
         max_depth,
         dir_path.display()
     );
+    match &scan_mode {
+        ScanMode::Full => info!("Scan mode: full — scanning all files"),
+        ScanMode::Incremental { since: Some(ts) } => {
+            info!("Scan mode: incremental — skipping files older than {}", ts)
+        }
+        ScanMode::Incremental { since: None } => {
+            info!("Scan mode: incremental — no previous scan, doing full scan")
+        }
+    }
 
     // Parse allowed extensions if fixed_extensions is true
     let allowed_extensions = if fixed_extensions && !file_extensions.trim().is_empty() {
@@ -791,6 +820,26 @@ pub async fn scan_directory_with_config(
             };
 
             if should_process {
+                // Check if we can skip this file (incremental scan)
+                if let ScanMode::Incremental {
+                    since: Some(cutoff),
+                } = &scan_mode
+                {
+                    if let Ok(metadata) = entry.metadata() {
+                        if let Ok(modified) = metadata.modified() {
+                            let mtime = modified
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs() as i64)
+                                .unwrap_or(0);
+                            if mtime <= *cutoff {
+                                // File hasn't changed since last scan, skip it
+                                skipped_files += 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
+
                 match scan_and_store_file(pool, path).await {
                     Ok(_) => {
                         count += 1;
@@ -1597,13 +1646,31 @@ pub async fn delete_folder(pool: &Pool<Sqlite>, id: i64) -> Result<()> {
 }
 
 /// Scan a folder and return number of files processed
-pub async fn scan_folder(pool: &Pool<Sqlite>, folder_id: i64) -> Result<usize> {
+pub async fn scan_folder(
+    pool: &Pool<Sqlite>,
+    folder_id: i64,
+    scan_mode: ScanMode,
+) -> Result<usize> {
     // Get folder path
     let folder = get_folder_by_id(pool, folder_id)
         .await?
         .ok_or_else(|| anyhow!("Folder not found with id: {}", folder_id))?;
 
     let path = std::path::Path::new(&folder.folder_path);
+
+    // Determine effective scan mode based on folder's last_scanned
+    let effective_mode = match &scan_mode {
+        ScanMode::Full => ScanMode::Full,
+        ScanMode::Incremental { .. } => {
+            if let Some(ts) = folder.last_scanned {
+                ScanMode::Incremental { since: Some(ts) }
+            } else {
+                // Never scanned before, do full scan
+                ScanMode::Full
+            }
+        }
+    };
+
     let file_count = scan_directory_with_config(
         pool,
         path,
@@ -1611,6 +1678,7 @@ pub async fn scan_folder(pool: &Pool<Sqlite>, folder_id: i64) -> Result<usize> {
         folder.fixed_extensions,
         folder.file_extensions,
         folder.max_depth,
+        effective_mode,
     )
     .await?;
 
@@ -1923,6 +1991,33 @@ pub async fn update_playlist_fetch_tracking(
     .bind(service)
     .bind(playlist_id)
     .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Update only the remote_track_count for a playlist (no last_fetched_at or unique_count).
+/// Used by the playlist-list sync where we get counts from SimplifiedPlaylist.tracks.total
+/// but haven't actually fetched tracks yet.
+pub async fn update_playlist_remote_count(
+    conn: &mut SqliteConnection,
+    service: &str,
+    playlist_id: &str,
+    remote_track_count: i64,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        r#"
+        UPDATE service_playlists
+        SET remote_track_count = ?1,
+            updated_at = ?2
+        WHERE service = ?3 AND playlist_id = ?4
+        "#,
+    )
+    .bind(remote_track_count)
+    .bind(now)
+    .bind(service)
+    .bind(playlist_id)
+    .execute(conn)
     .await?;
     Ok(())
 }
