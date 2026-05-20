@@ -924,6 +924,13 @@ pub struct ErrorResponse {
 }
 
 /// Helper that returns a 500 Internal Server Error JSON response from any Display error.
+/// GET /api/version — returns the application version from Cargo.toml
+async fn version_handler() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
 fn internal_error<E: std::fmt::Display>(e: E) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1001,6 +1008,7 @@ pub fn apply_sort(
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .without_v07_checks()
+        .route("/api/version", get(version_handler))
         .route("/api/tag-energy-levels", get(tag_energy_levels_handler))
         .route(
             "/api/tag-energy-levels/batch",

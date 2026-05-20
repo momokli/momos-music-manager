@@ -128,6 +128,15 @@ export function init() {
   const initialPage = getPageIdFromHash();
   renderNav(initialPage);
 
+  // Fetch and display app version (non-critical, fire-and-forget)
+  fetch("/api/version")
+    .then((r) => r.json())
+    .then((data) => {
+      const el = document.getElementById("app-version");
+      if (el && data.version) el.textContent = `v${data.version}`;
+    })
+    .catch(() => {});
+
   // Listen for hash changes
   window.addEventListener("hashchange", onHashChange);
 

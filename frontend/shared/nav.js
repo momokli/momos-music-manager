@@ -70,6 +70,7 @@ export function renderNav(currentPageId) {
       ${sectionsHtml}
       ${toolsHtml}
     </div>
+    <span class="topnav-version" id="app-version"></span>
   `;
 
   // Wire up dropdown toggle clicks

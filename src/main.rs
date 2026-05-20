@@ -44,7 +44,7 @@ mod launch_agent;
 #[derive(Parser)]
 #[command(name = "momos-music-manager")]
 #[command(about = "Momo's Music Manager - Multi-service library sync for DJs")]
-#[command(version = "0.1.0")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
