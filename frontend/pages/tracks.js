@@ -1042,7 +1042,7 @@ function wireToolbarEvents(container, signal, state) {
             const resp = await fetchJSON(
               `/api/playlists?search=${encodeURIComponent(q)}&page_size=20`,
             );
-            const playlists = resp.data || [];
+            const playlists = resp?.data?.playlists || [];
             if (playlists.length === 0) {
               playlistDropdown.innerHTML =
                 '<div class="tag-dropdown-empty">No playlists found</div>';
