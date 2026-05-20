@@ -7374,11 +7374,8 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
             .filter(|s| !s.is_empty())
             .collect();
         if !pl_list.is_empty() {
-            let placeholders: Vec<String> = pl_list.iter().map(|_| "?".to_string()).collect();
-            sql.push_str(&format!(
-                " AND LOWER(sp.name) IN ({})",
-                placeholders.join(",")
-            ));
+            let lowered: Vec<String> = pl_list.iter().map(|_| "LOWER(?)".to_string()).collect();
+            sql.push_str(&format!(" AND LOWER(sp.name) IN ({})", lowered.join(",")));
         }
     }
 
@@ -7764,11 +7761,8 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
             .filter(|s| !s.is_empty())
             .collect();
         if !pl_list.is_empty() {
-            let placeholders: Vec<String> = pl_list.iter().map(|_| "?".to_string()).collect();
-            sql.push_str(&format!(
-                " AND LOWER(sp.name) IN ({})",
-                placeholders.join(",")
-            ));
+            let lowered: Vec<String> = pl_list.iter().map(|_| "LOWER(?)".to_string()).collect();
+            sql.push_str(&format!(" AND LOWER(sp.name) IN ({})", lowered.join(",")));
         }
     }
 
