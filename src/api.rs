@@ -5208,26 +5208,7 @@ async fn deemix_delete_handler(
 
 /// Helper: load a DeemixClient from the database config.
 async fn load_deemix_client_from_db(db: &Pool<Sqlite>) -> Option<DeemixClient> {
-    let config = sqlx::query_as::<_, crate::db::ServiceConfig>(
-        "SELECT * FROM service_config WHERE service = 'deemix'",
-    )
-    .fetch_optional(db)
-    .await
-    .ok()??;
-
-    if !config.is_connected {
-        return None;
-    }
-
-    // Parse host from metadata_json, fall back to default
-    let host = config
-        .metadata_json
-        .as_deref()
-        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-        .and_then(|v| v.get("host").and_then(|h| h.as_str().map(String::from)))
-        .unwrap_or_else(|| "http://localhost:6595".to_string());
-
-    Some(DeemixClient::new(&host, db.clone()))
+    DeemixClient::from_db(db.clone()).await
 }
 
 async fn spotify_sync_handler(state: Arc<AppState>, service: String) -> impl IntoResponse {
@@ -6660,6 +6641,27 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
         );
     }
 
+    // Tag filter: files that have any of the selected tags
+    // Store tag names separately for binding (Vec<String> instead of &str references).
+    let mut tag_param_values: Vec<String> = Vec::new();
+    if let Some(ref tags_str) = query.tags
+        && !tags_str.is_empty()
+    {
+        let lowered: Vec<String> = tags_str
+            .split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if !lowered.is_empty() {
+            let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND LOWER(TRIM(ft.tag_name)) IN ({}))",
+                placeholders.join(",")
+            ));
+            tag_param_values = lowered;
+        }
+    }
+
     // Service filter: files linked to a service track with matching service
     if let Some(ref services_str) = query.selected_services {
         let services: Vec<&str> = services_str
@@ -6804,6 +6806,11 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
         {
             q = q.bind(s);
         }
+    }
+
+    // Bind params for tag filter
+    for tag in &tag_param_values {
+        q = q.bind(tag.as_str());
     }
 
     // Bind params for file type filter
@@ -7017,6 +7024,26 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
         );
     }
 
+    // Tag filter: files that have any of the selected tags
+    let mut tag_param_values: Vec<String> = Vec::new();
+    if let Some(ref tags_str) = query.tags
+        && !tags_str.is_empty()
+    {
+        let lowered: Vec<String> = tags_str
+            .split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if !lowered.is_empty() {
+            let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND LOWER(TRIM(ft.tag_name)) IN ({}))",
+                placeholders.join(",")
+            ));
+            tag_param_values = lowered;
+        }
+    }
+
     // Service filter
     if let Some(ref services_str) = query.selected_services {
         let services: Vec<&str> = services_str
@@ -7126,6 +7153,11 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
         {
             q = q.bind(s);
         }
+    }
+
+    // Bind params for tag filter
+    for tag in &tag_param_values {
+        q = q.bind(tag.as_str());
     }
 
     // Bind params for file type filter

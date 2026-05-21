@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use reqwest::Method;
+use serde_json;
 use sqlx::{Pool, Row, Sqlite};
 use tracing::info;
 
@@ -87,6 +88,31 @@ impl DeemixClient {
         })
     }
 
+    /// Create a DeemixClient by reading config from the `service_config` DB table.
+    /// Returns None if deemix is not configured or not connected.
+    pub async fn from_db(pool: Pool<Sqlite>) -> Option<Self> {
+        let config = sqlx::query_as::<_, crate::db::ServiceConfig>(
+            "SELECT * FROM service_config WHERE service = 'deemix'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .ok()??;
+
+        if !config.is_connected {
+            return None;
+        }
+
+        // Parse host from metadata_json, fall back to default
+        let host = config
+            .metadata_json
+            .as_deref()
+            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+            .and_then(|v| v.get("host").and_then(|h| h.as_str().map(String::from)))
+            .unwrap_or_else(|| "http://localhost:6595".to_string());
+
+        Some(DeemixClient::new(&host, pool.clone()))
+    }
+
     /// Test the connection to deemix.
     ///
     /// GET `/api/getQueue` — returns `true` if the response is 200 OK.
@@ -153,6 +179,24 @@ impl DeemixClient {
             .await?;
         info!("Retried download in deemix queue: {}", uuid);
         Ok(())
+    }
+
+    /// Ensure a Spotify playlist URL is queued for download.
+    ///
+    /// If the playlist is already in the deemix queue (any status), re-triggers
+    /// via `retry_download` to re-scan for new tracks. If not found, adds it
+    /// fresh via `add_to_queue`.
+    pub async fn ensure_queued(&self, spotify_url: &str) -> Result<()> {
+        let queue = self.get_queue().await?;
+
+        for (uuid, item) in &queue {
+            let item_url = format!("https://open.spotify.com/playlist/{}", item.id);
+            if item_url == spotify_url {
+                return self.retry_download(uuid).await;
+            }
+        }
+
+        self.add_to_queue(spotify_url).await
     }
 
     // ── Internal helpers ──────────────────────────────────────────────

@@ -208,7 +208,7 @@ function actions(r) {
   if (r.sub) {
     b += `<button class="btn btn-sm btn-red" data-act="unsubscribe" data-sub-id="${r.sub.id}" data-id="${r.id}" title="Unsubscribe"><i class="fas fa-bell-slash"></i></button> `;
   } else {
-    b += `<button class="btn btn-sm" data-act="subscribe" data-id="${r.id}" data-service="${r.svc}" data-playlist-id="${r.playlistId}" title="Subscribe (poll for changes)"><i class="fas fa-bell"></i></button> `;
+    b += `<button class="btn btn-sm" data-act="subscribe" data-id="${r.id}" data-service="${r.svc}" data-playlist-id="${r.playlistId}" title="Subscribe (poll + auto-download new tracks via deemix)"><i class="fas fa-bell"></i></button> `;
   }
 
   return (

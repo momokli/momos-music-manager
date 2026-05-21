@@ -31,6 +31,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::ServiceCredentials;
 use crate::db;
+use crate::deemix::DeemixClient;
 use crate::spotify::client::SpotifyClient;
 use crate::spotify::models::TrackInfo;
 
@@ -209,6 +210,7 @@ async fn poll_subscribed_playlist(
     tokio::pin!(track_stream);
 
     let mut position: i64 = 0;
+    let mut new_tracks_found = false;
 
     while let Some(item_result) = track_stream.next().await {
         let item = match item_result {
@@ -289,6 +291,8 @@ async fn poll_subscribed_playlist(
         .await
         .context("Failed to store item and add to playlist")?;
 
+        new_tracks_found = true;
+
         // Build artist string for logging (already a comma-separated string from TrackInfo).
         let artists = track_info.artists.clone();
 
@@ -323,6 +327,54 @@ async fn poll_subscribed_playlist(
                 playlist_name,
                 other_playlists.join(", "),
             );
+        }
+    }
+
+    // -- Auto-download via deemix on first poll or new tracks -----------
+    if subscription.last_polled_at.is_none() || new_tracks_found {
+        match DeemixClient::from_db(db.clone()).await {
+            Some(client) => {
+                let url = format!(
+                    "https://open.spotify.com/playlist/{}",
+                    subscription.playlist_id
+                );
+                match client.ensure_queued(&url).await {
+                    Ok(()) => {
+                        // Insert/update local deemix_downloads table so the
+                        // Playlists page shows the correct status immediately
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        let _ = sqlx::query(
+                            "INSERT INTO deemix_downloads (spotify_playlist_url, status, created_at, updated_at)
+                             VALUES (?, 'queued', ?, ?)
+                             ON CONFLICT(spotify_playlist_url) DO UPDATE SET
+                                 status = 'queued',
+                                 error_message = NULL,
+                                 updated_at = excluded.updated_at"
+                        )
+                        .bind(&url)
+                        .bind(now)
+                        .bind(now)
+                        .execute(db)
+                        .await;
+
+                        info!(
+                            "Subscription poller: auto-download triggered for '{}'",
+                            playlist_name,
+                        );
+                    }
+                    Err(e) => warn!(
+                        "Subscription poller: failed to trigger deemix download for '{}': {:#}",
+                        playlist_name, e,
+                    ),
+                }
+            }
+            None => debug!(
+                "Subscription poller: deemix not configured, skipping auto-download for '{}'",
+                playlist_name,
+            ),
         }
     }
 
