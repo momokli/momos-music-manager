@@ -4,6 +4,39 @@ All notable changes to Momo's Music Manager.
 
 ---
 
+## [0.3.2] — 2026-05-22
+
+### Changed
+
+- **Rate-Limit Retry (Phase 2)**: Extracted shared `extract_retry_after_secs` into `src/spotify/retry.rs`, used by sync worker, subscription poller, and global poller. Fixed global poller's broken string-parsing implementation that mistook HTTP status `429` for 429 seconds of backoff.
+
+### Fixed
+
+- **Subscription poller 429 loop**: Added retry logic (3 attempts, proper `Retry-After` backoff) for `get_playlist` and `get_playlist_tracks` calls. Spotify client now reused across subscriptions in a cycle (eliminates unnecessary token refresh calls). 300ms inter-subscription delay prevents burst traffic.
+- **Global poller 429 loop**: Added retry logic (3 attempts) for `get_user_playlists` call. Uses proper header-parsing instead of string-scraping.
+
+### Migration Notes
+
+- Migrations 006 and 007 consolidated into a single `006_local_service.sql` (includes `snapshot_id` column for global poller). If upgrading from 0.3.1, delete `app.db` and re-run.
+
+---
+
+## [0.3.0] — 2026-05-21
+
+### Added
+
+- **Digging Multi-Seed Engine**: New `POST /api/digging/suggest` endpoint with BPM outlier detection, Camelot compatibility, ISRC dedup, and scored suggestions. Audio streaming via `GET /api/files/{id}/stream` with Range header support.
+- **Digging Frontend** (`#digging` page): Split-panel workflow with tag-based seed selection, scored suggestion cards, embedded `<audio>` player with waveform visualization, staging area, and key coverage indicator.
+- **Local Playlists**: `service='local'` playlists persist digging sessions without Spotify API calls. Automatic Setlist tag creation via `v_tag_playlist`. New `POST /api/playlists/local` endpoint.
+- **Global Playlist Poller**: Background task that checks ALL Spotify playlists via snapshot-based change detection (default 15min interval). Auto-discovers new playlists, detects deleted ones.
+- **Auto-Deemix Subscriptions**: Subscription poller automatically triggers deemix downloads on first poll and when new tracks are found.
+
+### Changed
+
+- Consolidated migrations 006 + 007 into `006_local_service.sql`.
+
+---
+
 ## [0.2.0] — 2026-05-20
 
 ### Added

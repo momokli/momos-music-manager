@@ -2,6 +2,7 @@
 /dev-data/
 .env
 app.db*
+library.db
 *.db-shm
 *.db-wal
 *.log

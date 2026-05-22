@@ -914,14 +914,18 @@ For shipping a Release Candidate, the friction of the two-process setup was the 
 
 ## ADR-043: Spotify Rate-Limit Retry
 
-**Date**: 2026-06-10
-**Status**: Accepted (implemented)
+**Date**: 2026-05-22
+**Status**: Accepted (implemented, expanded in 0.3.2)
 
-**Context**: Spotify's API returns HTTP 429 with a `Retry-After` header when rate limits are exceeded. The sync worker was firing all playlist syncs in a tight loop with no delay or retry, causing failures during large sync batches.
+**Context**: Spotify's API returns HTTP 429 with a `Retry-After` header when rate limits are exceeded. The sync worker was firing all playlist syncs in a tight loop with no delay or retry, causing failures during large sync batches. Additionally, the subscription and global pollers had no retry logic — every 429 was an instant failure, creating a feedback loop of burst requests hitting the rate limit persistently.
 
-**Decision**: Parse the `Retry-After` header from 429 responses by walking the error chain (`rspotify::ClientError::Http` → `ReqwestError::StatusCode(response)`). Wrap API calls in a retry loop (max 3 attempts per playlist) with the `Retry-After` duration + 1s sleep. Add 300ms `tokio::sleep` between successful playlist syncs to stay under Spotify's soft rate limit (~3 req/s). Non-429 errors fail immediately.
+**Decision**: Two phases:
 
-**Consequences**: Reliable batch syncs without manual intervention. `warn!` logging on each retry with the `Retry-After` duration. Max 3 retries prevents infinite loops on persistent rate limits.
+_Phase 1 (v0.3.0)_: Parse the `Retry-After` header from 429 responses by walking the error chain (`rspotify::ClientError::Http` → `ReqwestError::StatusCode(response)`). Wrap API calls in a retry loop (max 3 attempts per playlist) with the `Retry-After` duration + 1s sleep. Add 300ms `tokio::sleep` between successful playlist syncs. Non-429 errors fail immediately.
+
+_Phase 2 (v0.3.2)_: Extract `extract_retry_after_secs` and `client_error_retry_after_secs` into a shared `src/spotify/retry.rs` module used by all three consumers (sync worker, subscription poller, global poller). Fix the global poller which had a broken string-parsing implementation that read the HTTP status code `429` as the retry duration. Add retry loops to the subscription poller (for both `get_playlist` and `get_playlist_tracks`) and the global poller (for `get_user_playlists`). Reuse the Spotify client across all subscriptions within a poll cycle (eliminating unnecessary token refresh calls). Add 300ms inter-subscription delay to prevent burst traffic.
+
+**Consequences**: All Spotify API consumers now use the same reliable retry logic. Persistent 429 feedback loops are broken by proper backoff and client reuse. `warn!` logging on each retry with the actual `Retry-After` duration. Max 3 retries prevents infinite loops on persistent rate limits.
 
 ---
 
@@ -987,3 +991,55 @@ For shipping a Release Candidate, the friction of the two-process setup was the 
 **Decision**: New `SyncType::NewPlaylists` — fetches the full playlist list from Spotify, diffs against existing DB playlist IDs, and only syncs metadata + tracks for playlists that don't yet exist. "Sync New" button on the Playlists page. Remote track counts are now updated in two places: during playlist-list sync (from `SimplifiedPlaylist.tracks.total`) via `update_playlist_remote_count()`, and during subscription polling (after streaming all tracks) via `update_playlist_fetch_tracking()`. A new "Stale" filter on the Playlists page shows playlists where `localTrackCount ≠ remoteTrackCount`.
 
 **Consequences**: Discovering new playlists is much faster — only net-new playlists get full track syncs. Playlist stats stay accurate without a full rescan. The Stale filter helps users quickly find playlists that need attention.
+
+---
+
+## ADR-049: Digging Multi-Seed Suggestion Engine
+
+**Date**: 2026-05-22
+**Status**: Accepted (implemented)
+
+**Context**: ADR-015 described a single-seed digging workflow, but users needed to seed suggestions from an entire tag (multiple tracks) to explore a curated musical space. A single seed track is too narrow — suggestions vary wildly between seeds from the same tag.
+
+**Decision**: New `POST /api/digging/suggest` endpoint accepting either `seedFileIds` or `seedTag` to resolve multiple seeds. Algorithm: resolve seeds → detect BPM outliers (deviation >20 from median) → compute BPM range [min(bpm)-range, max(bpm)+range] from non-outliers → query eligible files within BPM range → filter by Camelot compatibility against any seed (OR logic) → score each candidate (play_count, recency, BPM diff, Camelot bonus, shared tag bonus) → deduplicate by ISRC (prefer stem.m4a over flac) → sort by score ascending. Response includes seed metadata, BPM range, suggestions with `score_breakdown`, and `candidatesConsidered`. New `GET /api/files/{id}/stream` endpoint for browser-native audio playback with Range header support (HTTP 206 partial content).
+
+**Consequences**: Multi-seed suggestions produce much more relevant results than single-seed. Outlier detection prevents far-off-BPM tracks from polluting the pool. ISRC dedup ensures unique suggestions. Scoring transparency helps users understand why a suggestion was made.
+
+---
+
+## ADR-050: Digging Frontend (Audio Player + Staging Area)
+
+**Date**: 2026-05-22
+**Status**: Accepted (implemented)
+
+**Context**: The digging workflow needed a visual interface for seed selection, suggestion browsing, and session building. Users needed to audition tracks and accumulate candidates before committing.
+
+**Decision**: New `#digging` SPA page with a split-panel layout: LEFT panel (40%) for tag-based seed selection + track cards + config (BPM range slider, Camelot jump toggles), RIGHT panel (60%) for scored suggestions with embedded `<audio>` players using Web Audio API waveform visualization. Staging area accumulates tracks across multiple "Find Similar" rounds — clicking "Add" moves a suggestion to staging, and a "Refine" button re-seeds from the original seeds + all staged tracks, creating an expanding seed pool. Key coverage indicator shows which Camelot keys are covered in the staging area. "Save as Playlist" persists staging as a local playlist via `POST /api/playlists/local`. Audio player: single active stream, waveform rendered client-side from PCM peaks, seekable progress bar.
+
+**Consequences**: Iterative exploration — each refinement round expands the seed pool and narrows suggestions toward the target musical space. The staging area avoids premature commitment. Key coverage helps DJs visualize harmonic gaps.
+
+---
+
+## ADR-051: Local Playlists (Digging Persistence)
+
+**Date**: 2026-05-22
+**Status**: Accepted (implemented)
+
+**Context**: Saving digging sessions required creating new playlist entities that could store any service track (Spotify, local, YouTube). Existing service_playlists required a valid service type. The user needed a lightweight way to persist discovered tracks without creating Spotify playlists.
+
+**Decision**: Add `'local'` as a valid service value in the `service_tracks` CHECK constraint (migration 006). A local playlist is a `service_playlists(service='local')` containing any `service_tracks` — including Spotify tracks identified by ISRC. `v_file_track_link` extended to match `service='local' AND service_id = CAST(f.id AS TEXT)`. New `POST /api/playlists/local` endpoint: for each file ID, finds or creates a `service_track(service='local', service_id=file.id)`, creates a playlist with the given name, and links all resolved tracks. Existing `v_tag_playlist` automatically creates a Setlist tag from the playlist name, making new local playlists immediately available as tags for filtering and comment writing.
+
+**Consequences**: Digging sessions persist immediately as playlists (and thus tags). No Spotify API calls needed. The automatic tag creation feeds into the existing comment-writing pipeline. Future feature: mirror local playlists to Spotify via the existing OAuth flow.
+
+---
+
+## ADR-052: Global Playlist Polling
+
+**Date**: 2026-05-22
+**Status**: Accepted (implemented)
+
+**Context**: The subscription poller only covers explicitly-subscribed playlists. Unsubscribed playlists go stale until a manual full sync. With 200+ playlists, users needed automatic change detection for all playlists without fetching every playlist's tracks every cycle.
+
+**Decision**: New `src/global_poller.rs` background task running at a configurable interval (default 900s/15min). Uses Spotify's `snapshot_id` for cheap change detection: fetches all user playlists (paginated), compares each `snapshot_id` against the stored DB value, and only fetches tracks for playlists where the snapshot changed or the playlist is new. New `snapshot_id` column on `service_playlists` (migration 006, consolidated). Configurable via `[polling].global_interval_secs` in `config.toml` or `MOMOS_GLOBAL_POLL_INTERVAL_SECS` env var (0 = disabled). Detects deleted playlists and logs them with `warn!`. 429 rate limits handled with retry + backoff. 200ms delay between playlist syncs.
+
+**Consequences**: All playlists stay up-to-date automatically. Snapshot-based detection minimizes API traffic (~14 calls per cycle for 200 playlists with 5 changes). New playlists are auto-discovered. Deleted playlists are detected and logged. Rate-limit safe by design.
