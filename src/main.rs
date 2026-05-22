@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+type CategoryMeans = HashMap<i64, (String, Vec<f32>)>;
+
 use anyhow::Result;
 use axum::{
     Router,
@@ -102,7 +104,7 @@ struct AppState {
     config: crate::config::ServiceCredentials,
     task_manager: crate::tasks::TaskManager,
     embeddings: Mutex<Option<crate::embeddings::EmbeddingModel>>,
-    category_means: tokio::sync::Mutex<Option<HashMap<i64, (String, Vec<f32>)>>>,
+    category_means: tokio::sync::Mutex<Option<CategoryMeans>>,
     public_url: Option<String>,
 }
 

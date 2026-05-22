@@ -824,9 +824,8 @@ pub async fn scan_directory_with_config(
                 if let ScanMode::Incremental {
                     since: Some(cutoff),
                 } = &scan_mode
-                {
-                    if let Ok(metadata) = entry.metadata() {
-                        if let Ok(modified) = metadata.modified() {
+                    && let Ok(metadata) = entry.metadata()
+                        && let Ok(modified) = metadata.modified() {
                             let mtime = modified
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_secs() as i64)
@@ -837,8 +836,6 @@ pub async fn scan_directory_with_config(
                                 continue;
                             }
                         }
-                    }
-                }
 
                 match scan_and_store_file(pool, path).await {
                     Ok(_) => {

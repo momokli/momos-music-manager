@@ -2133,24 +2133,22 @@ async fn tracks_needs_comment_count_handler(
                     // Re-check from the map
                     if let Some(file) = file_map.get(file_id) {
                         let current = file.comment.as_deref().unwrap_or("");
-                        if let Ok(target) = compute_target_comment(&state.db, *file_id).await {
-                            if current != target {
+                        if let Ok(target) = compute_target_comment(&state.db, *file_id).await
+                            && current != target {
                                 track_needs = true;
                                 // files_needing_update is deduped by checked_files below
                             }
-                        }
                     }
                     continue;
                 }
                 checked_files.insert(*file_id);
                 if let Some(file) = file_map.get(file_id) {
                     let current = file.comment.as_deref().unwrap_or("");
-                    if let Ok(target) = compute_target_comment(&state.db, *file_id).await {
-                        if current != target {
+                    if let Ok(target) = compute_target_comment(&state.db, *file_id).await
+                        && current != target {
                             files_needing_update += 1;
                             track_needs = true;
                         }
-                    }
                 }
             }
             if track_needs {
@@ -5581,7 +5579,7 @@ async fn spotify_refresh_playlist_handler(
     }
     drop(conn);
 
-    let changed = old_remote.map_or(true, |o| o != new_total);
+    let changed = old_remote != Some(new_total);
 
     Json(ApiResponse {
         data: serde_json::json!({
@@ -7685,11 +7683,10 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         }
     }
 
-    if let Some(pid) = playlist_id_filter {
-        if playlists_filter.is_none() {
+    if let Some(pid) = playlist_id_filter
+        && playlists_filter.is_none() {
             query_builder = query_builder.bind(pid);
         }
-    }
 
     // Playlists filter binds
     if let Some(ref pl_names) = playlists_filter {
@@ -8054,11 +8051,10 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
         }
     }
 
-    if let Some(pid) = playlist_id_filter {
-        if playlists_filter.is_none() {
+    if let Some(pid) = playlist_id_filter
+        && playlists_filter.is_none() {
             query_builder = query_builder.bind(pid);
         }
-    }
 
     // Playlists filter binds
     if let Some(ref pl_names) = playlists_filter {
@@ -9027,8 +9023,8 @@ async fn file_stream_handler(
 
     if let Some(range_str) = range_header {
         // Parse "bytes=start-end"
-        if let Some(range_val) = range_str.strip_prefix("bytes=") {
-            if let Some((start_str, end_str)) = range_val.split_once('-') {
+        if let Some(range_val) = range_str.strip_prefix("bytes=")
+            && let Some((start_str, end_str)) = range_val.split_once('-') {
                 let start: u64 = start_str.parse().unwrap_or(0);
                 let end: u64 = end_str.parse().unwrap_or(file_size - 1);
                 let end = end.min(file_size - 1);
@@ -9062,7 +9058,6 @@ async fn file_stream_handler(
 
                 return (StatusCode::PARTIAL_CONTENT, headers, buf).into_response();
             }
-        }
     }
 
     // 5. Full-file response (no Range header)

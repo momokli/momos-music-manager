@@ -284,8 +284,8 @@ impl SpotifySyncWorker {
                     // Update remote_track_count from the playlist list (SimplifiedPlaylist has tracks.total)
                     let remote_total = playlist.tracks.total as i64;
                     let pid = playlist.id.id().to_string();
-                    if let Ok(mut conn) = self.db.acquire().await {
-                        if let Err(e) = crate::db::update_playlist_remote_count(
+                    if let Ok(mut conn) = self.db.acquire().await
+                        && let Err(e) = crate::db::update_playlist_remote_count(
                             &mut conn,
                             "spotify",
                             &pid,
@@ -298,7 +298,6 @@ impl SpotifySyncWorker {
                                 playlist.name, e
                             );
                         }
-                    }
 
                     // In record mode, also buffer for cache
                     if self.cache_mode.should_record() {
@@ -622,8 +621,8 @@ impl SpotifySyncWorker {
             // ── Update per-playlist fetch tracking (also needed for replay) ───
             // In replay mode we don't have the Spotify API total, so use
             // the streamed count as a best-effort estimate.
-            if let Ok(mut conn) = self.db.acquire().await {
-                if let Err(e) = crate::db::update_playlist_fetch_tracking(
+            if let Ok(mut conn) = self.db.acquire().await
+                && let Err(e) = crate::db::update_playlist_fetch_tracking(
                     &mut conn,
                     "spotify",
                     playlist_id,
@@ -633,7 +632,6 @@ impl SpotifySyncWorker {
                 {
                     error!("REPLAY: Failed to update fetch tracking: {:?}", e);
                 }
-            }
 
             {
                 let mut progress = self.progress.write().await;
@@ -716,8 +714,7 @@ impl SpotifySyncWorker {
         .bind(playlist_id)
         .fetch_optional(&self.db)
         .await
-        {
-            if let Err(e) = sqlx::query("DELETE FROM service_playlist_tracks WHERE playlist_id = ?")
+            && let Err(e) = sqlx::query("DELETE FROM service_playlist_tracks WHERE playlist_id = ?")
                 .bind(pl_id)
                 .execute(&self.db)
                 .await
@@ -727,7 +724,6 @@ impl SpotifySyncWorker {
                     playlist_name, e
                 );
             }
-        }
 
         // Get tracks for this playlist
         let mut tracks_stream = self.spotify_client.get_playlist_tracks(playlist_id).await?;

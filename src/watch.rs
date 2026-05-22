@@ -19,6 +19,7 @@ pub struct FolderWatcherConfig {
     /// Interval between scans in seconds (default: 300 = 5 minutes)
     pub scan_interval_seconds: u64,
     /// Whether to start the watcher automatically
+    #[allow(dead_code)]
     pub auto_start: bool,
 }
 
@@ -39,6 +40,7 @@ pub struct FolderWatcher {
     shutdown_sender: Option<oneshot::Sender<()>>,
 }
 
+#[allow(dead_code)]
 impl FolderWatcher {
     /// Create a new folder watcher
     pub fn new(db_pool: Pool<Sqlite>, config: FolderWatcherConfig) -> Self {

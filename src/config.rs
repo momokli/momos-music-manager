@@ -299,7 +299,7 @@ impl ServiceCredentials {
 
     /// Log-friendly label showing where a credential came from.
     fn credential_source(env_name: &str, value: Option<&str>, has_toml: bool) -> &'static str {
-        if std::env::var(env_name).map_or(false, |v| !v.is_empty()) {
+        if std::env::var(env_name).is_ok_and(|v| !v.is_empty()) {
             return "env";
         }
         if value.is_some() && has_toml {

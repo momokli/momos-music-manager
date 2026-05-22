@@ -765,7 +765,7 @@ pub async fn get_multi_seed_suggestions(
     let valid_seed_ids: Vec<i64> = seeds
         .iter()
         .filter(|s| {
-            s.bpm.map_or(false, |bpm| (bpm - median_bpm).abs() <= 15.0) && s.musical_key.is_some()
+            s.bpm.is_some_and(|bpm| (bpm - median_bpm).abs() <= 15.0) && s.musical_key.is_some()
         })
         .map(|s| s.id)
         .collect();

@@ -9,15 +9,12 @@ use rspotify::ClientError;
 /// Extract the Retry-After duration from a Spotify 429 rate-limit error.
 /// Works directly on an rspotify::ClientError.
 pub fn client_error_retry_after_secs(err: &ClientError) -> Option<u64> {
-    if let ClientError::Http(http_err) = err {
-        if let rspotify::http::HttpError::StatusCode(response) = http_err.as_ref() {
-            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                if let Some(retry_after) = response.headers().get("retry-after") {
+    if let ClientError::Http(http_err) = err
+        && let rspotify::http::HttpError::StatusCode(response) = http_err.as_ref()
+            && response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                && let Some(retry_after) = response.headers().get("retry-after") {
                     return retry_after.to_str().ok()?.parse::<u64>().ok();
                 }
-            }
-        }
-    }
     None
 }
 
@@ -26,11 +23,10 @@ pub fn client_error_retry_after_secs(err: &ClientError) -> Option<u64> {
 /// containing a 429 StatusCode with a retry-after header.
 pub fn extract_retry_after_secs(err: &anyhow::Error) -> Option<u64> {
     for cause in err.chain() {
-        if let Some(client_err) = cause.downcast_ref::<ClientError>() {
-            if let Some(secs) = client_error_retry_after_secs(client_err) {
+        if let Some(client_err) = cause.downcast_ref::<ClientError>()
+            && let Some(secs) = client_error_retry_after_secs(client_err) {
                 return Some(secs);
             }
-        }
     }
     None
 }
