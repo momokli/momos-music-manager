@@ -36,6 +36,7 @@ use crate::db;
 use crate::spotify::client::SpotifyClient;
 use crate::spotify::models::TrackInfo;
 use crate::spotify::retry::extract_retry_after_secs;
+use crate::spotify::retry::format_duration;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -135,8 +136,8 @@ async fn run_poll_cycle(
                         }
                         let sleep_secs = secs + 1;
                         warn!(
-                            "Global poller: rate limited fetching playlist list. Retry-After: {}s, attempt {}/3, waiting {}s",
-                            secs, attempt, sleep_secs,
+                            "Global poller: rate limited fetching playlist list. Retry-After: {} ({secs}s), attempt {attempt}/3, waiting {sleep_secs}s",
+                            format_duration(secs),
                         );
                         tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
                     } else {
@@ -332,8 +333,9 @@ async fn fetch_and_store_playlist_tracks(
             Err(e) => {
                 if let Some(secs) = extract_retry_after_secs(&e) {
                     warn!(
-                        "Global poller: rate limited on '{}' tracks. Retry-After: {}s",
-                        playlist.name, secs
+                        "Global poller: rate limited on '{}' tracks. Retry-After: {} ({secs}s)",
+                        playlist.name,
+                        format_duration(secs),
                     );
                     tokio::time::sleep(Duration::from_secs(secs + 1)).await;
                     continue;
