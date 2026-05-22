@@ -2981,6 +2981,59 @@ pub async fn find_tag_similar_tracks(
     Ok(results)
 }
 
+// ============================================================================
+// Global Poller Helpers
+// ============================================================================
+
+/// Get all Spotify playlists with their DB id, playlist_id, and snapshot_id
+/// for comparison against the Spotify API response.
+pub async fn get_spotify_playlist_snapshots(
+    pool: &Pool<Sqlite>,
+) -> Result<Vec<(i64, String, Option<String>)>> {
+    let rows = sqlx::query_as::<_, (i64, String, Option<String>)>(
+        "SELECT id, playlist_id, snapshot_id FROM service_playlists WHERE service = 'spotify'",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Update the snapshot_id for a playlist identified by its service and playlist_id.
+pub async fn update_playlist_snapshot(
+    pool: &Pool<Sqlite>,
+    playlist_id: &str,
+    snapshot_id: &str,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        "UPDATE service_playlists SET snapshot_id = ?1, updated_at = ?2 \
+         WHERE service = 'spotify' AND playlist_id = ?3",
+    )
+    .bind(snapshot_id)
+    .bind(now)
+    .bind(playlist_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Mark a playlist as deleted from Spotify (set snapshot_id to NULL so the
+/// global poller knows this playlist no longer exists on the service).
+pub async fn mark_playlist_inactive(
+    pool: &Pool<Sqlite>,
+    db_id: i64,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        "UPDATE service_playlists SET snapshot_id = NULL, updated_at = ?1 WHERE id = ?2",
+    )
+    .bind(now)
+    .bind(db_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

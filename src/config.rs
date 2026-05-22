@@ -54,6 +54,7 @@ struct TomlConfig {
     youtube: Option<YoutubeToml>,
     database: Option<DatabaseToml>,
     server: Option<ServerToml>,
+    polling: Option<PollingToml>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -87,6 +88,11 @@ struct YoutubeToml {
     playlist_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct PollingToml {
+    global_interval_secs: Option<u64>,
+}
+
 // ── Runtime representation ─────────────────────────────────────────────────
 
 /// Service credentials used throughout the application.
@@ -118,6 +124,9 @@ pub struct ServiceCredentials {
     pub server_port: u16,
     #[allow(dead_code)]
     pub server_public_url: Option<String>,
+
+    // Polling configuration
+    pub global_poll_interval_secs: u64,
 }
 
 impl ServiceCredentials {
@@ -177,7 +186,7 @@ impl ServiceCredentials {
             "Spotify config: client-id={sid_src}, client-secret={ssec_src}, redirect-uri={sredir_src}"
         );
 
-        Self {
+        let credentials = Self {
             spotify_client_id: spotify_id,
             spotify_client_secret: spotify_secret,
             spotify_redirect_uri: spotify_redirect,
@@ -235,7 +244,26 @@ impl ServiceCredentials {
                     .as_ref()
                     .and_then(|s| s.public_url.clone()),
             ),
-        }
+
+            // Polling config: env var > config.toml > built-in default
+            global_poll_interval_secs: std::env::var("MOMOS_GLOBAL_POLL_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .or_else(|| {
+                    toml_config
+                        .polling
+                        .as_ref()
+                        .and_then(|p| p.global_interval_secs)
+                })
+                .unwrap_or(900), // 15 minutes default
+        };
+
+        info!(
+            "Polling config: global_interval={}s",
+            credentials.global_poll_interval_secs,
+        );
+
+        credentials
     }
 
     /// Load credentials exclusively from environment variables (legacy path).
@@ -261,6 +289,9 @@ impl ServiceCredentials {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3000),
             server_public_url: env_var_optional("PUBLIC_URL"),
+            global_poll_interval_secs: env_var_optional("MOMOS_GLOBAL_POLL_INTERVAL_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(900),
         }
     }
 

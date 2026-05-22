@@ -490,6 +490,8 @@ pub struct DiggingSuggestRequest {
     pub camelot_jumps: Option<Vec<String>>,
     pub limit: Option<i64>,
     pub dedup_by_isrc: Option<bool>,
+    /// Boost tracks that are well-tagged across many categories (Phase, Mood, Vibe, Merkmal).
+    pub prefer_tag_richness: Option<bool>,
 }
 
 /// A resolved seed file with its tags.
@@ -555,6 +557,10 @@ pub struct ScoreBreakdown {
     pub bpm_score: f64,
     pub camelot_bonus: f64,
     pub tag_match_bonus: f64,
+    /// Bonus for tracks with tags across many distinct categories.
+    pub tag_richness_bonus: f64,
+    /// Bonus for tracks sharing categories with the matched seed.
+    pub category_overlap_bonus: f64,
 }
 
 /// Response from the multi-seed suggestion engine.
@@ -657,6 +663,7 @@ pub async fn get_multi_seed_suggestions(
     let bpm_range = req.bpm_range.unwrap_or(8.0).clamp(1.0, 30.0);
     let limit = (req.limit.unwrap_or(20) as usize).clamp(1, 50);
     let dedup = req.dedup_by_isrc.unwrap_or(true);
+    let prefer_tag_richness = req.prefer_tag_richness.unwrap_or(false);
 
     let active_jumps: Vec<String> = if let Some(ref jumps) = req.camelot_jumps {
         if jumps.is_empty() {
@@ -880,8 +887,33 @@ pub async fn get_multi_seed_suggestions(
                     .collect();
                 let tag_match_bonus = -(shared.len() as f64) * 5.0;
 
-                let total_score =
-                    play_count_score + recency_score + bpm_score + camelot_bonus + tag_match_bonus;
+                // Tag richness & category overlap bonuses
+                let (tag_richness_bonus, category_overlap_bonus) = if prefer_tag_richness {
+                    // 1. Tag richness: how many distinct categories does this candidate have?
+                    let candidate_categories: std::collections::HashSet<&str> = candidate_tags
+                        .iter()
+                        .map(|t| t.category_name.as_str())
+                        .collect();
+                    let richness = -(candidate_categories.len() as f64) * 8.0;
+
+                    // 2. Category overlap: how many categories are shared with this seed?
+                    let seed_categories: std::collections::HashSet<&str> =
+                        seed.tags.iter().map(|t| t.category_name.as_str()).collect();
+                    let shared = seed_categories.intersection(&candidate_categories).count();
+                    let overlap = -(shared as f64) * 5.0;
+
+                    (richness, overlap)
+                } else {
+                    (0.0, 0.0)
+                };
+
+                let total_score = play_count_score
+                    + recency_score
+                    + bpm_score
+                    + camelot_bonus
+                    + tag_match_bonus
+                    + tag_richness_bonus
+                    + category_overlap_bonus;
 
                 // Determine if this seed is a better match than the current best
                 let is_better = match best_seed_id {
@@ -919,6 +951,8 @@ pub async fn get_multi_seed_suggestions(
                         bpm_score,
                         camelot_bonus,
                         tag_match_bonus,
+                        tag_richness_bonus,
+                        category_overlap_bonus,
                     });
                 }
             }

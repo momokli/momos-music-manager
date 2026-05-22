@@ -6,7 +6,6 @@
 //! with progress tracking, cancellation support, and error resilience.
 
 use anyhow::{Context, Result};
-use rspotify::ClientError;
 use rspotify::model::{PlayableItem, SimplifiedPlaylist, track::FullTrack};
 use rspotify::prelude::Id;
 use sqlx::{Pool, Sqlite};
@@ -19,36 +18,8 @@ use crate::db::{upsert_service_playlist, upsert_service_track};
 use crate::spotify::client::SpotifyClient;
 use crate::spotify::models::{PlaylistInfo, TrackInfo};
 use crate::spotify::replay::{self, CacheMode, CachedTrackEntry};
+use crate::spotify::retry::extract_retry_after_secs;
 use crate::tasks::{SyncProgress, SyncResult, SyncType, TaskStatus};
-
-/// Extract the Retry-After duration from a Spotify 429 rate-limit error.
-/// Works directly on an rspotify::ClientError.
-fn client_error_retry_after_secs(err: &ClientError) -> Option<u64> {
-    if let ClientError::Http(http_err) = err {
-        if let rspotify::http::HttpError::StatusCode(response) = http_err.as_ref() {
-            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                if let Some(retry_after) = response.headers().get("retry-after") {
-                    return retry_after.to_str().ok()?.parse::<u64>().ok();
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Extract the Retry-After duration from a Spotify 429 rate-limit error.
-/// Walks the anyhow error chain looking for rspotify::ClientError::Http
-/// containing a 429 StatusCode with a retry-after header.
-fn extract_retry_after_secs(err: &anyhow::Error) -> Option<u64> {
-    for cause in err.chain() {
-        if let Some(client_err) = cause.downcast_ref::<ClientError>() {
-            if let Some(secs) = client_error_retry_after_secs(client_err) {
-                return Some(secs);
-            }
-        }
-    }
-    None
-}
 
 /// Spotify sync worker that performs background sync operations
 pub struct SpotifySyncWorker {

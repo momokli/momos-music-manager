@@ -31,6 +31,7 @@ mod deemix;
 mod digging;
 mod dump;
 mod embeddings;
+mod global_poller;
 mod poller;
 mod scan_cache;
 mod spotify;
@@ -310,6 +311,12 @@ async fn serve(
     let watcher_db = db.clone();
     let poller_cancel = tokio_util::sync::CancellationToken::new();
 
+    // Clone for global poller
+    let global_poller_db = db.clone();
+    let global_poller_config = config.clone();
+    let global_interval = config.global_poll_interval_secs;
+    let global_cancel = poller_cancel.clone();
+
     let pruner_tm = task_manager.clone();
 
     let state = Arc::new(AppState {
@@ -359,6 +366,28 @@ async fn serve(
     } else {
         tracing::info!("Folder watcher started");
     }
+    // Spawn global playlist poller — checks ALL playlists via snapshot_id comparison
+    if global_interval > 0 && global_poller_config.is_spotify_configured() {
+        tokio::spawn(async move {
+            crate::global_poller::start_global_poller(
+                global_poller_db,
+                global_poller_config,
+                global_interval,
+                global_cancel,
+            )
+            .await;
+        });
+        info!(
+            "Global playlist poller started (interval: {}s)",
+            global_interval
+        );
+    } else {
+        info!(
+            "Global playlist poller disabled (interval={} or Spotify not configured)",
+            global_interval
+        );
+    }
+
     // Keep alive for server lifetime
     let _folder_watcher = folder_watcher;
 

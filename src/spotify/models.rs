@@ -64,6 +64,8 @@ pub struct PlaylistInfo {
     pub name: String,
     /// Playlist description
     pub description: Option<String>,
+    /// Snapshot ID for change detection (global poller)
+    pub snapshot_id: String,
     /// Number of tracks in the playlist
     pub track_count: usize,
     /// Whether the playlist is collaborative
@@ -108,6 +110,7 @@ impl From<&rspotify::model::SimplifiedPlaylist> for PlaylistInfo {
             id: playlist.id.id().to_string(),
             name: playlist.name.clone(),
             description: None, // SimplifiedPlaylist doesn't have description
+            snapshot_id: playlist.snapshot_id.clone(),
             track_count: playlist.tracks.total as usize,
             collaborative: playlist.collaborative,
             public: playlist.public.unwrap_or(false),
@@ -155,4 +158,3 @@ impl From<&rspotify::model::track::FullTrack> for TrackInfo {
         }
     }
 }
-

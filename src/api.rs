@@ -21,6 +21,7 @@ use std::io::Write;
 use std::sync::Arc;
 use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::process::Command as TokioCommand;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
@@ -5865,7 +5866,7 @@ async fn create_local_playlist_handler(
     // Generate a unique playlist_id since local playlists have no service-side ID
     let playlist_id_str = format!("local-{}", Uuid::new_v4());
     let playlist_result = sqlx::query(
-        "INSERT INTO service_playlists (service, playlist_id, name, created_at, updated_at) VALUES ('local', ?, ?, unixepoch(), unixepoch())"
+        "INSERT INTO service_playlists (service, playlist_id, name, imported_at, updated_at) VALUES ('local', ?, ?, unixepoch(), unixepoch())"
     )
     .bind(&playlist_id_str)
     .bind(&request.name)
@@ -8995,7 +8996,9 @@ async fn file_stream_handler(
     };
 
     // 2. Determine content type from extension
-    let content_type = match file.file_type.to_lowercase().as_str() {
+    let file_type_lower = file.file_type.to_lowercase();
+    let is_stem_m4a = file_type_lower == "stem.m4a" || file_type_lower == "m4a";
+    let content_type = match file_type_lower.as_str() {
         "flac" => "audio/flac",
         "m4a" | "stem.m4a" => "audio/mp4",
         "mp3" | "mpeg" => "audio/mpeg",
@@ -9062,7 +9065,81 @@ async fn file_stream_handler(
         }
     }
 
-    // 5. No Range header — stream entire file
+    // 5. Full-file response (no Range header)
+    // For stem.m4a files, intelligently extract the master mix.
+    // If the first audio stream is stereo (2ch), use it directly.
+    // If it's mono (1ch), it's a stem — mix ALL streams together.
+    if is_stem_m4a {
+        let stream0_channels: Option<u32> = TokioCommand::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=channels",
+                "-of",
+                "csv=p=0",
+                file_path,
+            ])
+            .output()
+            .await
+            .ok()
+            .and_then(|out| {
+                if out.status.success() {
+                    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+                } else {
+                    None
+                }
+            });
+
+        let is_master_at_0 = stream0_channels == Some(2);
+
+        let mut cmd = TokioCommand::new("ffmpeg");
+        cmd.args(["-i", file_path]);
+
+        if is_master_at_0 {
+            // Standard NI Stems: master is stream 0, stereo
+            cmd.args(["-map", "0:a:0", "-c:a", "pcm_s16le", "-f", "wav"]);
+        } else {
+            // Non-standard: stem at stream 0, mix all 5 streams
+            cmd.args([
+                "-filter_complex",
+                "[0:a]amix=inputs=5:duration=longest",
+                "-ac",
+                "2",
+                "-c:a",
+                "pcm_s16le",
+                "-f",
+                "wav",
+            ]);
+        }
+        cmd.arg("pipe:1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+
+        match cmd.output().await {
+            Ok(output) if output.status.success() => {
+                let headers = [
+                    (header::CONTENT_TYPE, "audio/wav"),
+                    (header::CONTENT_LENGTH, &output.stdout.len().to_string()),
+                    (header::ACCEPT_RANGES, "none"),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ];
+                return (StatusCode::OK, headers, output.stdout).into_response();
+            }
+            _ => {
+                tracing::warn!(
+                    "ffmpeg failed for stem.m4a file {} (id={}), serving raw",
+                    file_path,
+                    id
+                );
+                // Fall through to raw file serving below
+            }
+        }
+    }
+
+    // Serve raw file
     let mut file = match TokioFile::open(file_path).await {
         Ok(f) => f,
         Err(_) => {

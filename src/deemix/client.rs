@@ -181,17 +181,32 @@ impl DeemixClient {
         Ok(())
     }
 
+    /// Status values that mean deemix is still actively working on a download.
+    /// When found, we skip retry to avoid interrupting the download.
+    const ACTIVE_DOWNLOAD_STATUSES: &'static [&'static str] =
+        &["queued", "downloading", "processing"];
+
     /// Ensure a Spotify playlist URL is queued for download.
     ///
-    /// If the playlist is already in the deemix queue (any status), re-triggers
-    /// via `retry_download` to re-scan for new tracks. If not found, adds it
-    /// fresh via `add_to_queue`.
+    /// - **Already in queue + actively downloading** (`queued`, `downloading`, `processing`): skip entirely
+    ///   to avoid stopping an in-progress download via retry.
+    /// - **Already in queue + terminal** (`finished`, `failed`, `error`, `cancelled`): call
+    ///   `retry_download` to re-scan for new tracks.
+    /// - **Not in queue**: adds it fresh via `add_to_queue`.
     pub async fn ensure_queued(&self, spotify_url: &str) -> Result<()> {
         let queue = self.get_queue().await?;
 
         for (uuid, item) in &queue {
             let item_url = format!("https://open.spotify.com/playlist/{}", item.id);
             if item_url == spotify_url {
+                let status = item.status.to_lowercase();
+                if Self::ACTIVE_DOWNLOAD_STATUSES.contains(&status.as_str()) {
+                    info!(
+                        "Deemix download already in progress for {} (status: {}), skipping",
+                        spotify_url, item.status,
+                    );
+                    return Ok(());
+                }
                 return self.retry_download(uuid).await;
             }
         }

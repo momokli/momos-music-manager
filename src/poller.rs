@@ -34,6 +34,9 @@ use crate::db;
 use crate::deemix::DeemixClient;
 use crate::spotify::client::SpotifyClient;
 use crate::spotify::models::TrackInfo;
+use crate::spotify::retry::extract_retry_after_secs;
+
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -92,26 +95,24 @@ pub async fn start_subscription_poller(
             due_count
         );
 
+        // -- Create Spotify client once per cycle -----------------------------
+        let spotify_client = match SpotifyClient::from_stored_tokens(db.clone(), &credentials).await
+        {
+            Ok(client) => client,
+            Err(e) => {
+                error!(
+                    "Subscription poller: failed to create Spotify client, skipping cycle: {:#}",
+                    e,
+                );
+                continue;
+            }
+        };
+
         // -- Poll each due subscription ------------------------------------
         for subscription in &subscriptions {
             if cancel_token.is_cancelled() {
                 break;
             }
-
-            // Create a Spotify client from the persisted OAuth tokens.
-            let spotify_client = match SpotifyClient::from_stored_tokens(db.clone(), &credentials)
-                .await
-            {
-                Ok(client) => client,
-                Err(e) => {
-                    error!(
-                        "Subscription poller: failed to create Spotify client for subscription {} \
-                         (playlist_id={}): {:#}",
-                        subscription.id, subscription.playlist_id, e,
-                    );
-                    continue;
-                }
-            };
 
             if let Err(e) = poll_subscribed_playlist(&db, &spotify_client, subscription).await {
                 error!(
@@ -129,6 +130,9 @@ pub async fn start_subscription_poller(
                     subscription.id, e,
                 );
             }
+
+            // Small delay between subscriptions to avoid rate limit bursts
+            tokio::time::sleep(Duration::from_millis(300)).await;
         }
 
         info!(
@@ -158,11 +162,33 @@ async fn poll_subscribed_playlist(
     spotify_client: &SpotifyClient,
     subscription: &db::PlaylistSubscription,
 ) -> Result<()> {
-    // -- Fetch playlist metadata -------------------------------------------
-    let playlist = spotify_client
-        .get_playlist(&subscription.playlist_id)
-        .await
-        .context("Failed to fetch playlist from Spotify")?;
+    // -- Fetch playlist metadata (with retry) -------------------------------
+    let playlist = {
+        let mut attempt = 0;
+        loop {
+            match spotify_client.get_playlist(&subscription.playlist_id).await {
+                Ok(p) => break p,
+                Err(e) => {
+                    if let Some(secs) = extract_retry_after_secs(&e) {
+                        attempt += 1;
+                        if attempt >= 3 {
+                            return Err(e)
+                                .context("Failed to fetch playlist from Spotify after 3 retries");
+                        }
+                        let sleep_secs = secs + 1;
+                        warn!(
+                            "Subscription poller: rate limited fetching playlist '{}'. \
+                             Retry-After: {}s, attempt {}/3, waiting {}s",
+                            subscription.playlist_id, secs, attempt, sleep_secs,
+                        );
+                        tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+                    } else {
+                        return Err(e).context("Failed to fetch playlist from Spotify");
+                    }
+                }
+            }
+        }
+    };
 
     let playlist_name = &playlist.name;
     let playlist_description = playlist.description.as_deref();
@@ -201,11 +227,35 @@ async fn poll_subscribed_playlist(
             .context("Failed to update subscription playlist_id")?;
     }
 
-    // -- Stream tracks from Spotify and store new ones ---------------------
-    let track_stream = spotify_client
-        .get_playlist_tracks(&subscription.playlist_id)
-        .await
-        .context("Failed to get playlist tracks stream")?;
+    // -- Stream tracks from Spotify and store new ones (with retry) --------
+    let track_stream = {
+        let mut attempt = 0;
+        loop {
+            match spotify_client
+                .get_playlist_tracks(&subscription.playlist_id)
+                .await
+            {
+                Ok(s) => break s,
+                Err(e) => {
+                    if let Some(secs) = extract_retry_after_secs(&e) {
+                        attempt += 1;
+                        if attempt >= 3 {
+                            return Err(e).context("Failed to get playlist tracks after 3 retries");
+                        }
+                        let sleep_secs = secs + 1;
+                        warn!(
+                            "Subscription poller: rate limited fetching tracks for playlist '{}'. \
+                             Retry-After: {}s, attempt {}/3, waiting {}s",
+                            subscription.playlist_id, secs, attempt, sleep_secs,
+                        );
+                        tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+                    } else {
+                        return Err(e).context("Failed to get playlist tracks");
+                    }
+                }
+            }
+        }
+    };
 
     tokio::pin!(track_stream);
 
