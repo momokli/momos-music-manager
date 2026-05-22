@@ -169,20 +169,4 @@ SELECT CASE
     THEN 'OK' ELSE 'FAIL'
 END AS check_v_tag_file_counts;
 
--- ============================================================
--- Step 8: Add snapshot_id to service_playlists for global poller
--- ============================================================
-
-ALTER TABLE service_playlists ADD COLUMN snapshot_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_service_playlists_snapshot ON service_playlists(service, snapshot_id);
-
--- ============================================================
--- Verification
--- ============================================================
-
-SELECT CASE
-    WHEN (SELECT COUNT(*) FROM pragma_table_info('service_playlists') WHERE name = 'snapshot_id') = 1
-    THEN 'OK' ELSE 'FAIL'
-END AS check_snapshot_id_column;
-
-SELECT 'Migration 006 applied: local service support + snapshot_id for global poller' as status;
+SELECT 'Migration 006 applied: local service support' as status;
