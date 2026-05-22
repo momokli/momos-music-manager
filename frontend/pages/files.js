@@ -950,37 +950,35 @@ function wireToolbarEvents(container, signal, state) {
           tagDropdown.style.zIndex = "";
           return;
         }
-        timer = setTimeout(async () => {
-          try {
-            const resp = await fetchJSON(`/api/tags?search=${encodeURIComponent(q)}`);
-            const tags = resp.data || [];
-            if (tags.length === 0) {
-              tagDropdown.innerHTML = `<div class="tag-dropdown-empty">No tags found</div>`;
-              selectedIndex = -1;
-            } else {
-              tagDropdown.innerHTML = tags
-                .map(
-                  (t, i) =>
-                    `<div class="tag-dropdown-item${i === 0 ? " selected" : ""}" data-tag="${t.name}">
-                      <span class="tag-dropdown-name">${t.name}</span>
-                      ${t.category ? `<span class="tag-dropdown-cat">${t.category}</span>` : ""}
-                    </div>`,
-                )
-                .join("");
-              selectedIndex = 0;
-            }
-            // Position dropdown relative to viewport to escape overflow clipping
-            const rect = tagSearch.getBoundingClientRect();
-            tagDropdown.style.position = "fixed";
-            tagDropdown.style.top = rect.bottom + 2 + "px";
-            tagDropdown.style.left = rect.left + "px";
-            tagDropdown.style.width = rect.width + "px";
-            tagDropdown.style.zIndex = "200";
-            tagDropdown.classList.add("open");
-          } catch {
-            // ignore errors during search
+        timer = setTimeout(() => {
+          const qLower = q.toLowerCase();
+          const filtered = (state.allTags || [])
+            .filter((t) => t.name.toLowerCase().includes(qLower))
+            .slice(0, 50);
+          if (filtered.length === 0) {
+            tagDropdown.innerHTML = `<div class="tag-dropdown-empty">No tags found</div>`;
+            selectedIndex = -1;
+          } else {
+            tagDropdown.innerHTML = filtered
+              .map(
+                (t, i) =>
+                  `<div class="tag-dropdown-item${i === 0 ? " selected" : ""}" data-tag="${t.name}">
+                    <span class="tag-dropdown-name">${t.name}</span>
+                    ${t.category ? `<span class="tag-dropdown-cat">${t.category}</span>` : ""}
+                  </div>`,
+              )
+              .join("");
+            selectedIndex = 0;
           }
-        }, 150);
+          // Position dropdown relative to viewport to escape overflow clipping
+          const rect = tagSearch.getBoundingClientRect();
+          tagDropdown.style.position = "fixed";
+          tagDropdown.style.top = rect.bottom + 2 + "px";
+          tagDropdown.style.left = rect.left + "px";
+          tagDropdown.style.width = rect.width + "px";
+          tagDropdown.style.zIndex = "200";
+          tagDropdown.classList.add("open");
+        }, 50);
       },
       { signal },
     );
@@ -1778,7 +1776,17 @@ export async function init(container, signal, hashParams) {
     selectAllTotal: 0,
     _lastTotal: 0,
     needsCommentCount: 0,
+    allTags: [], // pre-fetched at page load for typeahead
   };
+
+  // Pre-fetch all tags once for client-side typeahead filtering
+  fetchJSON("/api/tags?page_size=10000")
+    .then((resp) => {
+      state.allTags = resp.data || [];
+    })
+    .catch(() => {
+      state.allTags = [];
+    });
 
   // Reset layout mode on page entry
   document.body.classList.remove("layout-mode");
