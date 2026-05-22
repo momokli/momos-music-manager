@@ -239,7 +239,7 @@ impl SpotifyClient {
             }
             Err(e) => {
                 error!("Failed to fetch playlist: {}", e);
-                Err(anyhow::anyhow!("Spotify API error: {}", e))
+                Err(anyhow::Error::from(e)).context("Spotify API error")
             }
         }))
     }
@@ -254,7 +254,7 @@ impl SpotifyClient {
         self.spotify
             .playlist(playlist_id, None, None)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch playlist: {}", e))
+            .context("Failed to fetch playlist")
     }
 
     /// Get tracks from a playlist (streaming)
@@ -281,7 +281,7 @@ impl SpotifyClient {
             Ok(item) => Ok(item),
             Err(e) => {
                 error!("Failed to fetch playlist track: {}", e);
-                Err(anyhow::anyhow!("Spotify API error: {}", e))
+                Err(anyhow::Error::from(e)).context("Spotify API error")
             }
         }))
     }
@@ -297,7 +297,7 @@ impl SpotifyClient {
         self.spotify
             .track(track_id, None)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch track: {}", e))
+            .context("Failed to fetch track")
     }
 
     /// Get the current user's profile
