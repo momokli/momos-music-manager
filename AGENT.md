@@ -1227,3 +1227,601 @@ Include playlist chip container + typeahead in filter UI state syncing.
 - [x] No regressions: sort, pagination, column config, layout mode, bulk comments
 - [x] Backend compiles (`cargo build`)
 - [x] Test with `curl` first
+
+---
+
+## Plan: digging-multi-seed
+
+**Status**: done ✅
+**Branch**: `feat/digging-multi-seed`
+**Ready for review**: yes
+**Depends on**: nothing
+**Migration needed**: no
+
+### Description
+
+Build the core multi-seed suggestion engine for the Digging/Curator workflow. Given a set of seed files (loaded by tag name or file IDs), find similar tracks from the local library using Camelot harmonic mixing + BPM proximity, scored and ranked. Deduplicate by ISRC. This is the backend engine — Phase 1 of 5.
+
+### Design Decisions (from user)
+
+1. **Embedded player**: browser-native `<audio>` — stem.m4a + FLAC both play natively in modern browsers, just need Range-request streaming
+2. **ISRC dedup**: one suggestion per ISRC, prefer stem.m4a (plays in browser) — both versions stay in DB
+3. **Outlier handling**: BPM range computed from seed cluster, tracks outside range excluded entirely
+
+### Real Data (from production DB)
+
+Tag "Collapse-capital" (id 434):
+
+| File ID | ISRC         | Title             | Artist                    | BPM   | Key |
+| ------- | ------------ | ----------------- | ------------------------- | ----- | --- |
+| 4042    | US7NS2500009 | Games People Play | Paula van Klar            | 140.0 | 3m  |
+| 4362    | US7NS2500009 | Games People Play | Paula van Klar            | 139.0 | 3m  |
+| 4196    | QZ5FN2650988 | The Void          | Maite Dedecker            | 141.0 | 8m  |
+| 4428    | QZ5FN2650988 | The Void          | Maite Dedecker            | 140.0 | 8m  |
+| 5757    | DGA0H2483973 | This Summer       | Anna Reusch               | 140.0 | 6m  |
+| 5769    | DGA0H2483973 | This Summer       | Anna Reusch               | 139.0 | 6m  |
+| 3904    | ?            | Mean One          | Elon Bass Luciano Bradini | 160.0 | 1m  |
+| 4538    | ?            | Mean One          | Elon Bass                 | 160.0 | 1m  |
+
+BPM cluster of the 3 target tracks: 139–141. "Mean One" at 160 is an outlier, falls outside default ±8 range.
+Eligible pool: 2184 files with BPM+Key, 1728 unique ISRCs.
+
+### Backend Changes
+
+#### 1. `src/digging.rs` — New types
+
+```rust
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiggingSuggestRequest {
+    /// Seed files: either provide file IDs directly...
+    pub seed_file_ids: Option<Vec<i64>>,
+    /// ...or a tag name whose files become the seeds
+    pub seed_tag: Option<String>,
+    /// BPM tolerance (± from seed BPM range boundaries)
+    pub bpm_range: Option<f64>,  // default 8.0
+    /// Active Camelot jumps
+    pub camelot_jumps: Option<Vec<String>>,
+    /// Max suggestions to return
+    pub limit: Option<i64>,  // default 20, max 50
+    /// Deduplicate suggestions by ISRC
+    pub dedup_by_isrc: Option<bool>,  // default true
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiggingSeed {
+    pub id: i64,
+    pub title: String,
+    pub artist: String,
+    pub bpm: Option<f64>,
+    pub musical_key: Option<String>,
+    pub genre: Option<String>,
+    pub isrc: Option<String>,
+    pub file_path: String,
+    pub file_type: String,  // "flac", "stem.m4a", etc.
+    pub play_count: i32,
+    pub last_played: Option<i64>,
+    pub duration_ms: Option<i64>,
+    /// Tags on this file (from v_file_resolved_tags)
+    pub tags: Vec<DiggingTag>,
+    /// Whether this seed was excluded as a BPM outlier
+    pub excluded_as_outlier: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiggingTag {
+    pub id: i64,
+    pub name: String,
+    pub category_name: String,
+    pub prefix: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiggingSuggestion {
+    pub file_id: i64,
+    pub title: String,
+    pub artist: String,
+    pub bpm: Option<f64>,
+    pub musical_key: Option<String>,
+    pub genre: Option<String>,
+    pub isrc: Option<String>,
+    pub file_path: String,
+    pub file_type: String,
+    pub play_count: i32,
+    pub last_played: Option<i64>,
+    pub duration_ms: Option<i64>,
+    /// Which of the seeds this suggestion best matches
+    pub matching_seed_id: i64,
+    /// Camelot compatibility: "perfect", "good", "ok"
+    pub camelot_compatibility: String,
+    /// BPM difference from best-matching seed
+    pub bpm_diff: Option<f64>,
+    /// Tags shared with the best-matching seed
+    pub shared_tags: Vec<String>,
+    /// Scoring details (for transparency)
+    pub score_breakdown: ScoreBreakdown,
+    /// Combined score (lower = better)
+    pub score: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScoreBreakdown {
+    pub play_count_score: f64,
+    pub recency_score: f64,
+    pub bpm_score: f64,
+    pub camelot_bonus: f64,
+    pub tag_match_bonus: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiggingSuggestResponse {
+    /// The seed tracks used (including excluded outliers)
+    pub seeds: Vec<DiggingSeed>,
+    /// The BPM range used for candidate search
+    pub bpm_min: f64,
+    pub bpm_max: f64,
+    /// Scored + ranked suggestions
+    pub suggestions: Vec<DiggingSuggestion>,
+    /// Total candidates considered before ranking
+    pub candidates_considered: usize,
+}
+```
+
+#### 2. `src/digging.rs` — `get_multi_seed_suggestions()`
+
+```rust
+pub async fn get_multi_seed_suggestions(
+    pool: &Pool<Sqlite>,
+    req: &DiggingSuggestRequest,
+) -> Result<DiggingSuggestResponse>
+```
+
+**Algorithm:**
+
+1. **Resolve seeds**: if `seed_tag` is set, query `v_file_tags` for all files with that tag. Otherwise use `seed_file_ids`. Load full File rows + resolved tags.
+
+2. **Outlier detection**: compute median BPM of seeds, exclude any seed whose BPM deviates >20 from median. Mark excluded seeds with `excluded_as_outlier: true`. Compute BPM range from non-excluded seeds: `[min(bpm) - range, max(bpm) + range]`.
+
+3. **Candidate query**: fetch all files (not in seed set) within BPM range, that have both BPM and key:
+
+   ```sql
+   SELECT * FROM files
+   WHERE id NOT IN (?,?,...)
+     AND bpm IS NOT NULL
+     AND musical_key IS NOT NULL
+     AND bpm >= ? AND bpm <= ?
+   ORDER BY play_count ASC, COALESCE(last_played, 0) ASC
+   LIMIT ?  -- fetch 5x limit for scoring pool
+   ```
+
+4. **Camelot filtering**: for each candidate, parse its `musical_key` as Camelot. Check compatibility against each non-excluded seed using `are_keys_compatible()`. If compatible with at least one seed, keep. Track which seed was the best match.
+
+5. **Scoring** (per candidate, best seed match):
+   - `play_count_score = min(play_count, 100) * 2.0` — fresher tracks preferred
+   - `recency_score = (1000 - min(days_since_played, 1000)) * 0.5` — unplayed = 0, recent = high
+   - If never played: `recency_bonus = -50.0`
+   - `bpm_score = |candidate_bpm - seed_bpm| * 1.5`
+   - `camelot_bonus`: perfect = -30, good = -15, ok = 0
+   - `tag_match_bonus`: count shared resolved tags with the matching seed, -5 per shared tag
+   - `total_score = play_count_score + recency_score + bpm_score + camelot_bonus + tag_match_bonus`
+
+6. **ISRC dedup**: if `dedup_by_isrc` is true, group candidates by ISRC. For each ISRC group, keep the one with the lowest score. If ISRC is NULL, treat each as unique. Prefer `stem.m4a` over `flac` when scores tie.
+
+7. **Sort + limit**: sort by score ascending, truncate to `limit`.
+
+8. **Load tags**: for each suggestion, load resolved tags via `v_file_resolved_tags` for the `shared_tags` field (intersection with matching seed's tags).
+
+#### 3. `src/api.rs` — Handler + Route
+
+**Route**: `.route("/api/digging/suggest", post(digging_suggest_handler))`
+
+**Handler**:
+
+```rust
+async fn digging_suggest_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<DiggingSuggestRequest>,
+) -> impl IntoResponse {
+    match crate::digging::get_multi_seed_suggestions(&state.db, &request).await {
+        Ok(response) => Json(ApiResponse { data: response }).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+```
+
+Validation:
+
+- Either `seed_file_ids` or `seed_tag` must be provided (400 if neither)
+- At least 1 seed file must be found (404 if tag resolves to no files)
+- `limit` clamped to 1..50, default 20
+- `bpm_range` clamped to 1..30, default 8.0
+- `camelot_jumps` defaults to all jumps if not provided
+
+#### 4. `src/api.rs` — Audio Streaming Endpoint
+
+**Route**: `.route("/api/files/{id}/stream", get(file_stream_handler))`
+
+**Handler**:
+
+```rust
+async fn file_stream_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    request: axum::http::Request<Body>,
+) -> impl IntoResponse
+```
+
+- Look up file by ID, get `file_path`
+- Open file, get size
+- Support `Range` header for seeking (HTTP 206 Partial Content)
+- Content-Type based on extension: `.flac` → `audio/flac`, `.m4a` → `audio/mp4`, `.mp3` → `audio/mpeg`, `.wav` → `audio/wav`, `.aif`/`.aiff` → `audio/aiff`
+- Accept-Ranges: bytes
+- Without Range header: stream entire file (HTTP 200)
+- Security: only serve files that are in the `files` table (no arbitrary path traversal)
+
+#### 5. `src/digging.rs` — Audio format preference for dedup
+
+```rust
+/// When deduplicating by ISRC, prefer formats that play in browsers.
+/// stem.m4a > mp3 > flac > wav > aiff > other
+fn audio_format_preference(file_type: &str) -> u8 {
+    match file_type.to_lowercase().as_str() {
+        "stem.m4a" | "m4a" => 0,
+        "mp3" | "mpeg" => 1,
+        "flac" => 2,
+        "wav" | "wave" => 3,
+        "aif" | "aiff" => 4,
+        _ => 5,
+    }
+}
+```
+
+### Existing code to reference
+
+- `src/digging.rs`: `CamelotKey`, `parse_camelot_key()`, `are_keys_compatible()`, `ScoredTrack`, `get_suggestions()` (single-seed — can borrow scoring logic)
+- `src/api.rs`: `get_tags_for_file()` in db.rs returns resolved tags via `v_file_resolved_tags`
+- `migrations/001_initial_schema.sql`: `v_file_resolved_tags` view (in migration 002)
+- `frontend/shared/utils.js`: `fetchJSON()` for API calls
+
+### Files to modify
+
+- `src/digging.rs` — new types + `get_multi_seed_suggestions()` + ISRC dedup helper
+- `src/api.rs` — `digging_suggest_handler` + `file_stream_handler` + routes
+
+### Acceptance Criteria
+
+- [x] `POST /api/digging/suggest` with tag name resolves seed files from `v_file_tags`
+- [x] `POST /api/digging/suggest` with seed file IDs works directly
+- [x] BPM outlier detection excludes "Mean One" (160 BPM) when seeds are the 3 collapse-capital tracks at 139-141
+- [x] BPM range computed as [min(bpm)-range, max(bpm)+range] from non-outlier seeds only
+- [x] Candidates filtered to BPM range, must have BPM + key
+- [x] Camelot compatibility checked against all non-excluded seeds (OR logic)
+- [x] Scoring: play_count, recency, bpm_diff, camelot_bonus, tag_match_bonus all contribute correctly
+- [x] ISRC dedup: same ISRC appears only once, stem.m4a preferred over flac
+- [x] NULL ISRC files treated as unique (not deduplicated)
+- [x] Response includes `seeds` array with outlier flags, `bpm_min`/`bpm_max`, `suggestions` with score_breakdown
+- [x] `GET /api/files/{id}/stream` returns audio with correct Content-Type
+- [x] `GET /api/files/{id}/stream` supports Range header (HTTP 206) for seeking
+- [x] `GET /api/files/{id}/stream` returns 404 for non-existent file or file not in DB
+- [x] 400 if neither seed_file_ids nor seed_tag provided
+- [x] 404 if seed_tag resolves to no files
+- [x] Backend compiles (`cargo build`)
+- [x] Test with curl against real data: `curl -X POST localhost:3000/api/digging/suggest -H 'Content-Type: application/json' -d '{"seedTag":"Collapse-capital","limit":10}'`
+
+---
+
+## Plan: digging-frontend
+
+**Status**: done ✅
+**Branch**: `feat/digging-frontend`
+**Ready for review**: yes
+**Depends on**: `feat/digging-multi-seed` (Phase 1)
+**Migration needed**: no
+
+### Description
+
+Build the `#digging` SPA page — a split-view Digging/Curator workflow. Left panel: tag-based seed selection with track cards showing BPM/Key/tags, config controls (BPM range, Camelot jumps). Right panel: scored & ranked suggestions with embedded `<audio>` players, tag overview, and action buttons (add to tag).
+
+### Design
+
+```
+┌─────────────────────────────────────────────────────┐
+│ DIGGING                                    [Config]│
+├───────────────────────┬─────────────────────────────┤
+│ SEEDS                 │ SUGGESTIONS                 │
+│                       │                             │
+│ [Collapse-capital  ✕] │ +-+ +-+ +-+ +-+ +-+ +-+  │
+│ [Find Similar]        │ |#1| | Games People Play |  │
+│                       │ |  | | Paula van Klar    |  │
+│ Config:               │ |  | | 140BPM 3m perfect |  │
+│ BPM: [====8====] ±8   │ |  | | [+▶] [+ Add]     |  │
+│ Jumps: [+1][-1][+2]   │ +-+ +-+ +-+ +-+ +-+ +-+  │
+│        [-2][+7][A↔B]  │                             │
+│                       │ +-+ +-+ +-+ +-+ +-+ +-+  │
+│ +-+ +-+ +-+ +-+     │ |#2| | The Void          |  │
+│ | Games People Play  | │ |  | | Maite Dedecker    |  │
+│ | Paula van Klar    | │ |  | | 141BPM 8m perfect |  │
+│ | 140 BPM · 3m      | │ |  | | [+▶] [+ Add]     |  │
+│ | ⚠ OUTLIER         | │ +-+ +-+ +-+ +-+ +-+ +-+  │
+│ +-+ +-+ +-+ +-+     │                             │
+│                       │ [Load More]                 │
+└───────────────────────┴─────────────────────────────┘
+```
+
+### Frontend: `frontend/pages/digging.js`
+
+#### State
+
+```javascript
+const state = {
+  selectedTag: null, // { id, name }
+  seeds: [], // DiggingSeed[]
+  bpmRange: 8,
+  camelotJumps: {
+    "+1": true,
+    "-1": true,
+    "+2": true,
+    "-2": true,
+    "+7": true,
+    "-7": true,
+    a_to_b: true,
+    same: true,
+  },
+  limit: 10,
+  suggestions: [],
+  bpmMin: null,
+  bpmMax: null,
+  candidatesConsidered: 0,
+  loading: false,
+  configOpen: false,
+  activeAudio: null,
+};
+```
+
+#### Functions
+
+| Function                        | Purpose                                              |
+| ------------------------------- | ---------------------------------------------------- |
+| `init(container)`               | Entry point: renders layout + wires events           |
+| `renderLayout(container)`       | Renders split-panel HTML                             |
+| `renderSeeds(container)`        | Renders seed cards into `#digging-seeds`             |
+| `renderSuggestions(container)`  | Renders suggestion cards into `#digging-suggestions` |
+| `wireEvents(container)`         | Wires all click/keyboard events                      |
+| `buildRequest()`                | Builds `POST /api/digging/suggest` body from state   |
+| `doSearch(container)`           | Calls API, updates state, re-renders suggestions     |
+| `setupAudioPlayers(container)`  | Wires Play/Pause for `<audio>` elements              |
+| `loadConfig()` / `saveConfig()` | localStorage persistence                             |
+
+#### Audio Player
+
+- One `<audio>` element per suggestion card pointing to `/api/files/{id}/stream`
+- Clicking Play stops any currently playing audio, starts new one
+- Button toggles ▶ / ⏸
+- `onended` resets button
+
+### Files to modify
+
+- `frontend/pages/digging.js` — new file (~400 lines)
+- `frontend/app.js` — register `"digging": "digging"` in PAGE_MAP
+- `frontend/shared/nav.js` — add `{ href: "#digging", icon: "fa-magnifying-glass", label: "Digging" }` to TOOLS_ITEMS
+- `frontend/style.css` — digging-specific styles (~100 lines)
+
+### CSS (key classes to add)
+
+```css
+.digging-layout {
+  display: flex;
+  gap: 1.5rem;
+  height: calc(100vh - 180px);
+}
+.digging-seeds {
+  width: 40%;
+  overflow-y: auto;
+}
+.digging-suggestions {
+  width: 60%;
+  overflow-y: auto;
+}
+.seed-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+}
+.seed-card.outlier {
+  opacity: 0.5;
+  border-style: dashed;
+}
+.suggestion-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+.sugg-rank {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--muted);
+  min-width: 2rem;
+  text-align: center;
+}
+.sugg-body {
+  flex: 1;
+}
+.badge.camelot.perfect {
+  background: #2e7d32;
+  color: #fff;
+}
+.badge.camelot.good {
+  background: #1565c0;
+  color: #fff;
+}
+.badge.camelot.ok {
+  background: #666;
+  color: #fff;
+}
+.btn-play {
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  flex-shrink: 0;
+}
+.digging-config {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+.jump-toggle {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  background: var(--bg);
+}
+.jump-toggle.active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+```
+
+### Acceptance Criteria
+
+- [x] `#digging` route loads the digging page
+- [x] Nav link "Digging" in TOOLS section
+- [x] Tag typeahead finds tags from `/api/tags?search=...`
+- [x] Selecting a tag enables "Find Similar" button
+- [x] "Find Similar" calls `POST /api/digging/suggest`, renders results
+- [x] Seeds render as cards with BPM/Key/outlier warning
+- [x] Suggestions render as ranked cards with score breakdown
+- [x] Camelot compatibility badge (perfect=green, good=blue, ok=grey)
+- [x] `<audio>` player: Play/Pause works, only one plays at a time
+- [x] BPM range slider (2–20) triggers re-fetch
+- [x] Camelot jump toggles trigger re-fetch
+- [x] Config persists in localStorage
+- [x] Loading spinner during API calls
+- [ ] Error states: toast for API errors, empty state when no tag selected
+- [x] Responsive: stacks vertically on narrow screens
+- [x] No regressions: other pages still load and function
+- [ ] Frontend compiles (ES modules load without errors)
+
+---
+
+## Plan: local-playlists
+
+**Status**: done ✅
+**Branch**: `feat/local-playlists`
+**Ready for review**: yes
+**Depends on**: `feat/digging-multi-seed` (Phase 1)
+**Migration needed**: yes — `005_local_service.sql`
+
+### Description
+
+Add "local" as a first-class service source. A local playlist can contain any `service_track` (Spotify, YouTube, or newly created `local` tracks). The playlist→tag chain works automatically via existing `v_tag_playlist`. This enables the Digging workflow: save suggestions as a persistent local playlist, which creates a Setlist tag, which can be written into file comments.
+
+### Why no new tables
+
+- `service_playlists(service='local')` — already works, no FK constraint on service values
+- `service_tracks(service='local')` — already works, `service_id` can be any string
+- `service_playlist_tracks` — already works, any track can be in any playlist
+- Only needed change: `v_file_track_link` view to match `service='local'` on `service_id = CAST(f.id AS TEXT)`
+
+### Migration: `migrations/005_local_service.sql`
+
+Recreate `v_file_track_link` with the local service match:
+
+```sql
+DROP VIEW IF EXISTS v_file_track_link;
+CREATE VIEW v_file_track_link AS
+SELECT f.id AS file_id, st.id AS track_id
+FROM files f
+JOIN service_tracks st ON (
+    st.isrc = f.isrc
+    OR (st.service = 'spotify' AND st.service_id = f.spotify_id)
+    OR (st.service = 'soundcloud' AND st.service_id = f.soundcloud_id)
+    OR (st.service = 'youtube' AND st.service_id = f.youtube_id)
+    OR (st.service = 'local' AND st.service_id = CAST(f.id AS TEXT))
+);
+```
+
+Also update `v_file_tags` and `v_file_resolved_tags` (in 001/002/004) — they reference `v_file_track_link` indirectly via service_playlist_tracks, so just re-running `DROP VIEW IF EXISTS ... CREATE VIEW ...` for those dependent views is needed. Or simpler: the migration just drops and recreates all affected views.
+
+### Backend: `src/api.rs` — New endpoint
+
+**Route**: `.route("/api/playlists/local", post(create_local_playlist_handler))`
+
+**Request**:
+
+```json
+{
+  "name": "collapse-capital-v2",
+  "fileIds": [4042, 4196, 5757, 65, 831]
+}
+```
+
+**Handler logic**:
+
+```rust
+async fn create_local_playlist_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CreateLocalPlaylistRequest>,
+) -> impl IntoResponse {
+    // 1. Für jedes File: service_track existiert? (via ISRC oder local service_id)
+    //    Ja → dessen ID merken
+    //    Nein → INSERT service_track(service='local', service_id=CAST(file.id AS TEXT),
+    //                                title, artist, isrc=file.isrc)
+    // 2. INSERT service_playlists(service='local', name=request.name)
+    // 3. INSERT service_playlist_tracks(playlist_id, track_id) für alle resolved tracks
+    // 4. Return { playlistId, trackCount, newTrackCount }
+}
+```
+
+### Frontend Integration (in Phase 2)
+
+The digging page's "Save as ..." button calls this endpoint. User types a playlist name, clicks save.
+
+### What happens automatically after save
+
+1. `v_tag_playlist` matches playlist name → creates tag (via `create_tags_from_playlists` or on next poll)
+2. `v_file_tags` shows all saved files under the new tag
+3. User goes to Files page, filters by the tag, clicks "Write Comments"
+4. Files now have `[PMV] tags collapse-capital-v2` in their comment
+
+### Future: mirror to Spotify
+
+Because local playlist contains Spotify-track IDs, we can later:
+
+1. `POST /api/services/spotify/create-playlist` → creates Spotify playlist
+2. `POST /api/services/spotify/add-tracks` → adds tracks by Spotify ID
+3. Update `service_playlists` with Spotify ID → subscription poller picks it up
+
+### Acceptance Criteria
+
+- [x] `v_file_track_link` matches `service='local'` on `service_id = CAST(f.id AS TEXT)`
+- [x] `POST /api/playlists/local` creates playlist + ensures service_tracks + adds track entries
+- [x] Creating a local playlist automatically creates a Setlist tag via name match
+- [x] Files appear under the tag in `v_file_tags`
+- [x] `v_file_resolved_tags` works for local playlists (tag parents supported)
+- [x] Duplicate service_tracks not created (ISRC match reuses existing Spotify track)
+- [x] No regressions: `v_file_track_link` still matches Spotify/SoundCloud/YouTube correctly
+- [x] Backend compiles (`cargo build`)
+- [ ] Fresh DB: all migrations run cleanly (001→002→003→004→005→006)
+- [ ] Test with curl: create playlist, verify tag auto-created, verify file-tag-link

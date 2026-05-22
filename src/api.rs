@@ -5,9 +5,10 @@
 use anyhow::Result;
 use axum::{
     Json, Router,
+    body::Body,
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
-    http::{StatusCode, header},
-    response::{IntoResponse, Redirect},
+    http::{Request, StatusCode, header},
+    response::{IntoResponse, Redirect, Response},
     routing::{delete, get, post, put},
 };
 use chrono::{DateTime, Duration};
@@ -18,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Pool, Row, Sqlite};
 use std::io::Write;
 use std::sync::Arc;
+use tokio::fs::File as TokioFile;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
@@ -44,8 +47,8 @@ use crate::deemix::{
     DeemixAuthRequest, DeemixClient, DeemixCombinedQueueItem, DeemixEnqueueRequest,
 };
 use crate::digging::{
-    TagReorderItem, delete_tag_energy_level, get_tag_energy_levels, reorder_tags_batch,
-    set_tag_energy_level,
+    DiggingSuggestRequest, TagReorderItem, delete_tag_energy_level, get_multi_seed_suggestions,
+    get_tag_energy_levels, reorder_tags_batch, set_tag_energy_level,
 };
 use crate::embeddings::{
     EmbeddingModel, compute_tag_similarities, deserialize_embedding, mean_embedding,
@@ -551,6 +554,13 @@ pub struct ExplorerPreset {
     pub last_used: i64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateLocalPlaylistRequest {
+    pub name: String,
+    pub file_ids: Vec<i64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceConnection {
@@ -1037,6 +1047,7 @@ pub fn router() -> Router<Arc<AppState>> {
             "/api/files/{id}/debug-comment",
             get(file_debug_comment_handler),
         )
+        .route("/api/files/{id}/stream", get(file_stream_handler))
         .route("/api/files/bulk-sync", post(bulk_sync_handler))
         .route("/api/files/write-comments", post(bulk_sync_handler))
         .route(
@@ -1171,6 +1182,7 @@ pub fn router() -> Router<Arc<AppState>> {
             "/api/playlists/comment-diff-stats",
             get(playlist_comment_diff_stats_handler),
         )
+        .route("/api/playlists/local", post(create_local_playlist_handler))
         .route(
             "/api/services/spotify/sync/playlists",
             post(spotify_sync_playlists_handler),
@@ -1228,6 +1240,7 @@ pub fn router() -> Router<Arc<AppState>> {
             "/api/restore",
             post(restore_handler).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
         )
+        .route("/api/digging/suggest", post(digging_suggest_handler))
         .route(
             "/api/folders",
             get(folders_handler).post(add_folder_handler),
@@ -2645,6 +2658,16 @@ async fn bulk_sync_handler(
         data: serde_json::json!({ "taskId": task_id }),
     })
     .into_response()
+}
+
+async fn digging_suggest_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<DiggingSuggestRequest>,
+) -> impl IntoResponse {
+    match get_multi_seed_suggestions(&state.db, &request).await {
+        Ok(response) => Json(ApiResponse { data: response }).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
 }
 
 async fn explorer_seeds_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -5743,6 +5766,149 @@ async fn spotify_sync_full_handler(State(state): State<Arc<AppState>>) -> impl I
     }
 }
 
+async fn create_local_playlist_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CreateLocalPlaylistRequest>,
+) -> impl IntoResponse {
+    use serde_json::json;
+
+    let pool = &state.db;
+
+    // Validate
+    if request.name.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Playlist name cannot be empty"
+            })),
+        )
+            .into_response();
+    }
+    if request.file_ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "At least one file ID required"
+            })),
+        )
+            .into_response();
+    }
+
+    // 1. Ensure a service_track exists for each file
+    let mut track_ids: Vec<i64> = Vec::with_capacity(request.file_ids.len());
+    let mut new_tracks: i64 = 0;
+
+    for &file_id in &request.file_ids {
+        // Look up the file
+        let file = match sqlx::query_as::<_, crate::db::File>("SELECT * FROM files WHERE id = ?")
+            .bind(file_id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(Some(f)) => f,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::error!("DB error looking up file {}: {}", file_id, e);
+                continue;
+            }
+        };
+
+        // Try to find existing service_track (ISRC match or previous local track)
+        let existing_track: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM service_tracks WHERE (service = 'local' AND service_id = CAST(? AS TEXT)) OR (isrc IS NOT NULL AND isrc = ?) LIMIT 1"
+        )
+        .bind(file_id)
+        .bind(&file.isrc)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+        if let Some(track_id) = existing_track {
+            track_ids.push(track_id);
+        } else {
+            let title = file.title.as_deref().unwrap_or("Unknown");
+            let artist = file.artist.as_deref().unwrap_or("Unknown");
+            let result = sqlx::query(
+                "INSERT INTO service_tracks (service, service_id, title, artist, isrc, imported_at) VALUES ('local', ?, ?, ?, ?, unixepoch())"
+            )
+            .bind(file_id.to_string())
+            .bind(title)
+            .bind(artist)
+            .bind(&file.isrc)
+            .execute(pool)
+            .await;
+
+            match result {
+                Ok(r) => {
+                    track_ids.push(r.last_insert_rowid());
+                    new_tracks += 1;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create local track for file {}: {}", file_id, e);
+                    continue;
+                }
+            }
+        }
+    }
+
+    if track_ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "No valid files could be added"
+            })),
+        )
+            .into_response();
+    }
+
+    // 2. Create the local playlist
+    // Generate a unique playlist_id since local playlists have no service-side ID
+    let playlist_id_str = format!("local-{}", Uuid::new_v4());
+    let playlist_result = sqlx::query(
+        "INSERT INTO service_playlists (service, playlist_id, name, created_at, updated_at) VALUES ('local', ?, ?, unixepoch(), unixepoch())"
+    )
+    .bind(&playlist_id_str)
+    .bind(&request.name)
+    .execute(pool)
+    .await;
+
+    let playlist_id = match playlist_result {
+        Ok(r) => r.last_insert_rowid(),
+        Err(e) => {
+            tracing::error!("Failed to create playlist: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Failed to create playlist"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // 3. Add tracks to playlist
+    for track_id in &track_ids {
+        if let Err(e) = sqlx::query(
+            "INSERT OR IGNORE INTO service_playlist_tracks (playlist_id, track_id, added_at) VALUES (?, ?, unixepoch())"
+        )
+        .bind(playlist_id)
+        .bind(track_id)
+        .execute(pool)
+        .await
+        {
+            tracing::error!("Failed to add track {} to playlist {}: {}", track_id, playlist_id, e);
+        }
+    }
+
+    let response = json!({
+        "playlistId": playlist_id,
+        "trackCount": track_ids.len(),
+        "newTrackCount": new_tracks,
+    });
+
+    (StatusCode::OK, Json(ApiResponse { data: response })).into_response()
+}
+
 // Get paginated playlists from all services
 async fn playlists_handler(
     State(state): State<Arc<AppState>>,
@@ -8805,6 +8971,118 @@ async fn file_debug_comment_handler(
         data: Some(response),
     })
     .into_response()
+}
+
+async fn file_stream_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    request: Request<Body>,
+) -> Response {
+    // 1. Look up file in DB
+    let file = match sqlx::query_as::<_, crate::db::File>("SELECT * FROM files WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+    {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, "File not found").into_response();
+        }
+        Err(e) => {
+            tracing::error!("DB error looking up file {}: {}", id, e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
+        }
+    };
+
+    // 2. Determine content type from extension
+    let content_type = match file.file_type.to_lowercase().as_str() {
+        "flac" => "audio/flac",
+        "m4a" | "stem.m4a" => "audio/mp4",
+        "mp3" | "mpeg" => "audio/mpeg",
+        "wav" | "wave" => "audio/wav",
+        "aif" | "aiff" => "audio/aiff",
+        "ogg" => "audio/ogg",
+        "wma" => "audio/x-ms-wma",
+        _ => "application/octet-stream",
+    };
+
+    // 3. Open file
+    let file_path = &file.file_path;
+    let metadata = match tokio::fs::metadata(file_path).await {
+        Ok(m) => m,
+        Err(_) => {
+            return (StatusCode::NOT_FOUND, "File not found on disk").into_response();
+        }
+    };
+    let file_size = metadata.len();
+
+    // 4. Parse Range header
+    let range_header = request
+        .headers()
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok());
+
+    if let Some(range_str) = range_header {
+        // Parse "bytes=start-end"
+        if let Some(range_val) = range_str.strip_prefix("bytes=") {
+            if let Some((start_str, end_str)) = range_val.split_once('-') {
+                let start: u64 = start_str.parse().unwrap_or(0);
+                let end: u64 = end_str.parse().unwrap_or(file_size - 1);
+                let end = end.min(file_size - 1);
+                let length = end - start + 1;
+
+                // Open file and seek
+                let mut file = match TokioFile::open(file_path).await {
+                    Ok(f) => f,
+                    Err(_) => {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "Cannot open file")
+                            .into_response();
+                    }
+                };
+
+                let mut buf = vec![0u8; length as usize];
+                if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Seek error").into_response();
+                }
+                if file.read_exact(&mut buf).await.is_err() {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Read error").into_response();
+                }
+
+                let content_range = format!("bytes {}-{}/{}", start, end, file_size);
+                let headers = [
+                    (header::CONTENT_TYPE, content_type),
+                    (header::CONTENT_RANGE, content_range.as_str()),
+                    (header::CONTENT_LENGTH, &length.to_string()),
+                    (header::ACCEPT_RANGES, "bytes"),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ];
+
+                return (StatusCode::PARTIAL_CONTENT, headers, buf).into_response();
+            }
+        }
+    }
+
+    // 5. No Range header — stream entire file
+    let mut file = match TokioFile::open(file_path).await {
+        Ok(f) => f,
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Cannot open file").into_response();
+        }
+    };
+
+    let mut buf = Vec::with_capacity(file_size as usize);
+    if file.read_to_end(&mut buf).await.is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Read error").into_response();
+    }
+
+    let headers = [
+        (header::CONTENT_TYPE, content_type),
+        (header::CONTENT_LENGTH, &file_size.to_string()),
+        (header::ACCEPT_RANGES, "bytes"),
+        (header::CACHE_CONTROL, "no-cache"),
+    ];
+
+    (StatusCode::OK, headers, buf).into_response()
 }
 
 // ─── Tag Parents / Children Handlers ─────────────────────────────────────────
