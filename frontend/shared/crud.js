@@ -137,10 +137,16 @@ export function wireSortableHeaders(tableEl, state, onChange) {
  * @param {string} pageId — URL page identifier (e.g. "files", "tracks")
  * @param {object} state — the current CRUD state object
  * @param {object} [defaults] — default values to skip (e.g. { sort: "", order: "asc" })
+ * @param {object} [schema] — HASH_SCHEMA to whitelist keys; when provided, only schema keys are serialized
  */
-export function updateHash(pageId, state, defaults = {}) {
+export function updateHash(pageId, state, defaults = {}, schema = null) {
   const params = new URLSearchParams();
-  for (const [key, val] of Object.entries(state)) {
+  // When a schema is provided, only serialize keys declared in it.
+  // This prevents internal/UI-only state (allTags, *_enabled toggles,
+  // layoutMode, etc.) from leaking into bookmarkable URLs.
+  const keys = schema ? Object.keys(schema) : Object.keys(state);
+  for (const key of keys) {
+    const val = state[key];
     if (key === "pageSize") continue; // global, not in hash
     if (val instanceof Set) continue; // Sets are not hash-serializable
     if (val === defaults[key] || val === undefined || val === null) continue;

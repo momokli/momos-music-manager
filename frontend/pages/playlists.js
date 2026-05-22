@@ -515,7 +515,7 @@ function wireToolbarEvents(container, signal, state) {
   // Unified search + filter wiring (debounced)
   if (filterPanel) {
     wireSearchFilter(filterPanel, state, () => {
-      updateHash("playlists", state, HASH_DEFAULTS);
+      updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     });
   }
@@ -542,7 +542,7 @@ function wireToolbarEvents(container, signal, state) {
         else state.selectedServices.push(v);
         state.page = 0;
         syncServiceFilterUI();
-        updateHash("playlists", state, HASH_DEFAULTS);
+        updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -575,7 +575,7 @@ function wireToolbarEvents(container, signal, state) {
         else state.categories.push(v);
         state.page = 0;
         syncCategoryFilterUI();
-        updateHash("playlists", state, HASH_DEFAULTS);
+        updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -593,7 +593,7 @@ function wireToolbarEvents(container, signal, state) {
         state.subscribed = !state.subscribed;
         state.page = 0;
         btn.classList.toggle("active", state.subscribed);
-        updateHash("playlists", state, HASH_DEFAULTS);
+        updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -611,7 +611,7 @@ function wireToolbarEvents(container, signal, state) {
         state.staleOnly = !state.staleOnly;
         state.page = 0;
         btn.classList.toggle("active", state.staleOnly);
-        updateHash("playlists", state, HASH_DEFAULTS);
+        updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -638,7 +638,7 @@ function wireToolbarEvents(container, signal, state) {
       else state[key] = false;
       state.page = 0;
       updateUI();
-      updateHash("playlists", state, HASH_DEFAULTS);
+      updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     });
     updateUI();
@@ -658,7 +658,7 @@ function wireToolbarEvents(container, signal, state) {
     const inputs = row.querySelectorAll("select, input, button, .filter-group");
     for (const el of inputs) el.classList.remove("filter-disabled");
     state.page = 0;
-    updateHash("playlists", state, HASH_DEFAULTS);
+    updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
     fetchAndRender(container, signal, state);
   });
 }
@@ -672,7 +672,7 @@ function wireContentEvents(container, signal, state) {
   const refreshBtn = container.querySelector("#playlists-refresh");
   if (refreshBtn) {
     refreshBtn.onclick = () => {
-      updateHash("playlists", state, HASH_DEFAULTS);
+      updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     };
   }
@@ -681,14 +681,14 @@ function wireContentEvents(container, signal, state) {
   const tbl = container.querySelector("#pl-tbl");
   if (tbl) {
     wireSortableHeaders(tbl, state, () => {
-      updateHash("playlists", state, HASH_DEFAULTS);
+      updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     });
   }
 
   // Page size selector
   wirePageSizeSelector(container, state, () => {
-    updateHash("playlists", state, HASH_DEFAULTS);
+    updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
     fetchAndRender(container, signal, state);
   });
 
@@ -698,7 +698,7 @@ function wireContentEvents(container, signal, state) {
     prevBtn.onclick = () => {
       if (state.page > 0) {
         state.page--;
-        updateHash("playlists", state, HASH_DEFAULTS);
+        updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       }
     };
@@ -709,7 +709,7 @@ function wireContentEvents(container, signal, state) {
   if (nextBtn) {
     nextBtn.onclick = () => {
       state.page++;
-      updateHash("playlists", state, HASH_DEFAULTS);
+      updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     };
   }
@@ -747,7 +747,7 @@ function wireContentEvents(container, signal, state) {
               body: JSON.stringify({ name: pl.name, categoryId: defaultCat.id }),
             });
             showToast(`Tag "${pl.name}" created`, "success");
-            updateHash("playlists", state, HASH_DEFAULTS);
+            updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
             fetchAndRender(container, signal, state);
           } catch (err) {
             showToast(`Failed to create tag: ${err.message}`, "error");
@@ -769,7 +769,7 @@ function wireContentEvents(container, signal, state) {
               body: JSON.stringify({ service: svc, playlistId: plId }),
             });
             showToast("Subscribed", "success");
-            updateHash("playlists", state, HASH_DEFAULTS);
+            updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
             fetchAndRender(container, signal, state);
           } catch (err) {
             showToast(`Subscribe failed: ${err.message}`, "error");
@@ -786,7 +786,7 @@ function wireContentEvents(container, signal, state) {
               method: "DELETE",
             });
             showToast("Unsubscribed", "success");
-            updateHash("playlists", state, HASH_DEFAULTS);
+            updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
             fetchAndRender(container, signal, state);
           } catch (err) {
             showToast(`Unsubscribe failed: ${err.message}`, "error");
@@ -810,7 +810,7 @@ function wireContentEvents(container, signal, state) {
             await fetchJSON(svcEndpoint, { method: "POST" });
             showToast("Sync started", "success");
             setTimeout(() => {
-              updateHash("playlists", state, HASH_DEFAULTS);
+              updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
               fetchAndRender(container, signal, state);
             }, 2000);
           } catch (err) {
@@ -848,7 +848,7 @@ function wireContentEvents(container, signal, state) {
                 "success",
               );
             }
-            updateHash("playlists", state, HASH_DEFAULTS);
+            updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
             fetchAndRender(container, signal, state);
           } catch (err) {
             showToast(`Refresh failed: ${err.message}`, "error");
@@ -867,7 +867,7 @@ function wireContentEvents(container, signal, state) {
             });
             showToast(`Added "${name}" to Deemix download queue`, "success");
             setTimeout(() => {
-              updateHash("playlists", state, HASH_DEFAULTS);
+              updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
               fetchAndRender(container, signal, state);
             }, 1500);
           } catch (err) {
@@ -894,7 +894,7 @@ function wireContentEvents(container, signal, state) {
             }
             showToast(`Re-download triggered for "${name}"`, "success");
             setTimeout(() => {
-              updateHash("playlists", state, HASH_DEFAULTS);
+              updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
               fetchAndRender(container, signal, state);
             }, 1500);
           } catch (err) {
@@ -913,7 +913,7 @@ function wireContentEvents(container, signal, state) {
             });
             showToast(`Retrying download for "${name}"`, "success");
             setTimeout(() => {
-              updateHash("playlists", state, HASH_DEFAULTS);
+              updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
               fetchAndRender(container, signal, state);
             }, 1500);
           } catch (err) {
@@ -932,12 +932,12 @@ function wireContentEvents(container, signal, state) {
   if (state.layoutMode) {
     wireColumnResize(container, "playlists", PLAYLISTS_COLUMNS, colConfig);
     wireColumnDragReorder(container, "playlists", PLAYLISTS_COLUMNS, colConfig, () => {
-      updateHash("playlists", state, HASH_DEFAULTS);
+      updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     });
   }
   wireConfigTrigger(container, "playlists", PLAYLISTS_COLUMNS, colConfig, () => {
-    updateHash("playlists", state, HASH_DEFAULTS);
+    updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
     fetchAndRender(container, signal, state);
   });
 
@@ -947,7 +947,7 @@ function wireContentEvents(container, signal, state) {
     layoutBtn.onclick = () => {
       state.layoutMode = !state.layoutMode;
       document.body.classList.toggle("layout-mode", state.layoutMode);
-      updateHash("playlists", state, HASH_DEFAULTS);
+      updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     };
   }
@@ -1065,7 +1065,7 @@ export async function init(container, signal, hashParams) {
           } else {
             showToast("All playlists already have tags", "info");
           }
-          updateHash("playlists", state, HASH_DEFAULTS);
+          updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
           fetchAndRender(container, signal, state);
         } catch (err) {
           showToast(`Failed to create tags: ${err.message}`, "error");

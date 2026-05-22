@@ -790,7 +790,7 @@ function wireToolbarEvents(container, signal, state) {
   // ── Unified search + filter wiring (debounced) ──
   if (filterPanel) {
     wireSearchFilter(filterPanel, state, () => {
-      updateHash("files", state, HASH_DEFAULTS);
+      updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     });
   }
@@ -870,7 +870,7 @@ function wireToolbarEvents(container, signal, state) {
               break;
           }
           state.page = 0;
-          updateHash("files", state, HASH_DEFAULTS);
+          updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
           fetchAndRender(container, signal, state);
           return;
         }
@@ -885,7 +885,7 @@ function wireToolbarEvents(container, signal, state) {
           state.keys.push(dbVal);
         }
         state.page = 0;
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -930,7 +930,7 @@ function wireToolbarEvents(container, signal, state) {
       tagDropdown.style.zIndex = "";
       selectedIndex = -1;
       renderTagChips();
-      updateHash("files", state, HASH_DEFAULTS);
+      updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     }
 
@@ -1004,7 +1004,7 @@ function wireToolbarEvents(container, signal, state) {
         tagDropdown.style.zIndex = "";
         selectedIndex = -1;
         renderTagChips();
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1105,7 +1105,7 @@ function wireToolbarEvents(container, signal, state) {
         const tag = chip.dataset.tag;
         state.selectedTags = state.selectedTags.filter((t) => t !== tag);
         state.page = 0;
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1126,7 +1126,7 @@ function wireToolbarEvents(container, signal, state) {
           state.unlinked = false;
         }
         state.page = 0;
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1143,7 +1143,7 @@ function wireToolbarEvents(container, signal, state) {
           state.linkedOnly = false;
         }
         state.page = 0;
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1158,7 +1158,7 @@ function wireToolbarEvents(container, signal, state) {
       () => {
         state.nonDefaultOnly = !state.nonDefaultOnly;
         state.page = 0;
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1217,7 +1217,7 @@ function wireToolbarEvents(container, signal, state) {
         }
         btn.classList.toggle("active");
         state.page = 0;
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1246,7 +1246,7 @@ function wireToolbarEvents(container, signal, state) {
         }
         btn.classList.toggle("active");
         state.page = 0;
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1274,7 +1274,7 @@ function wireToolbarEvents(container, signal, state) {
         }
         btn.classList.toggle("active");
         state.page = 0;
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1298,7 +1298,7 @@ function wireToolbarEvents(container, signal, state) {
         }
         btn.classList.toggle("active");
         state.page = 0;
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1322,7 +1322,7 @@ function wireToolbarEvents(container, signal, state) {
         }
         btn.classList.toggle("active");
         state.page = 0;
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1349,7 +1349,7 @@ function wireToolbarEvents(container, signal, state) {
       state[key] = state[key] === false ? true : false;
       state.page = 0;
       updateFilterUI();
-      updateHash("files", state, HASH_DEFAULTS);
+      updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     });
     updateFilterUI();
@@ -1373,7 +1373,7 @@ function wireToolbarEvents(container, signal, state) {
         "select, input, button, .filter-group, .tag-chips, .dual-range-wrap, .key-grid-wrap, .typeahead-wrap",
       )
       .forEach((el) => el.classList.remove("filter-disabled"));
-    updateHash("files", state, HASH_DEFAULTS);
+    updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
     fetchAndRender(container, signal, state);
   });
 }
@@ -1395,7 +1395,7 @@ function wireContentEvents(container, signal, state) {
     refreshBtn.addEventListener(
       "click",
       () => {
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       listenerOpts,
@@ -1406,7 +1406,7 @@ function wireContentEvents(container, signal, state) {
   const tableEl = contentEl.querySelector(".data-table");
   if (tableEl) {
     wireSortableHeaders(tableEl, state, () => {
-      updateHash("files", state, HASH_DEFAULTS);
+      updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     });
   }
@@ -1421,7 +1421,7 @@ function wireContentEvents(container, signal, state) {
         localStorage.setItem("crudPageSize", String(val));
         state.pageSize = val;
         state.page = 0;
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       listenerOpts,
@@ -1436,7 +1436,7 @@ function wireContentEvents(container, signal, state) {
       () => {
         if (state.page > 0) {
           state.page--;
-          updateHash("files", state, HASH_DEFAULTS);
+          updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
           fetchAndRender(container, signal, state);
         }
       },
@@ -1450,7 +1450,7 @@ function wireContentEvents(container, signal, state) {
       "click",
       () => {
         state.page++;
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       listenerOpts,
@@ -1496,7 +1496,7 @@ function wireContentEvents(container, signal, state) {
       () => {
         state.layoutMode = !state.layoutMode;
         document.body.classList.toggle("layout-mode", state.layoutMode);
-        updateHash("files", state, HASH_DEFAULTS);
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       listenerOpts,

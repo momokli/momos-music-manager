@@ -85,6 +85,56 @@ const TRACKS_COLUMNS = [
   },
 ];
 
+/**
+ * Default values for URL hash params — any filter matching its default is omitted.
+ */
+const HASH_DEFAULTS = {
+  sort: "",
+  order: "asc",
+  search: "",
+  selectedServices: [],
+  selectedTags: [],
+  selectedPlaylists: [],
+  pmvCategories: [],
+  pmvAggregate: "",
+  fileTypes: [],
+  fileTypeAgg: "",
+  importedMode: "",
+  importedNum: null,
+  importedUnit: "days",
+  addedMode: "",
+  addedNum: null,
+  addedUnit: "days",
+  page: 0,
+};
+
+/**
+ * Whitelist of keys allowed in the URL hash.
+ * Prevents internal/UI-only state (allTags, *_enabled toggles, layoutMode, etc.)
+ * from leaking into bookmarkable URLs.
+ */
+const HASH_SCHEMA = {
+  page: true,
+  search: true,
+  sort: true,
+  order: true,
+  selectedServices: true,
+  selectedTags: true,
+  selectedPlaylists: true,
+  pmvCategories: true,
+  pmvAggregate: true,
+  fileTypes: true,
+  fileTypeAgg: true,
+  importedMode: true,
+  importedNum: true,
+  importedUnit: true,
+  addedMode: true,
+  addedNum: true,
+  addedUnit: true,
+  playlistId: true,
+  playlistName: true,
+};
+
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
@@ -569,24 +619,7 @@ function setContent(html) {
  */
 async function fetchAndRender(container, signal, state) {
   // Sync hash before fetching so URL reflects current state
-  updateHash("tracks", state, {
-    sort: "",
-    order: "asc",
-    search: "",
-    selectedServices: [],
-    selectedTags: [],
-    pmvCategories: [],
-    pmvAggregate: "",
-    fileTypes: [],
-    fileTypeAgg: "",
-    importedMode: "",
-    importedNum: null,
-    importedUnit: "days",
-    addedMode: "",
-    addedNum: null,
-    addedUnit: "days",
-    page: 0,
-  });
+  updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
   setContent(renderLoading("Loading tracks…"));
 
   try {
@@ -661,24 +694,7 @@ function wireToolbarEvents(container, signal, state) {
           btn.classList.add("active");
         }
         state.page = 0;
-        updateHash("tracks", state, {
-          sort: "",
-          order: "asc",
-          search: "",
-          selectedServices: [],
-          selectedTags: [],
-          pmvCategories: [],
-          pmvAggregate: "",
-          fileTypes: [],
-          fileTypeAgg: "",
-          importedMode: "",
-          importedNum: null,
-          importedUnit: "days",
-          addedMode: "",
-          addedNum: null,
-          addedUnit: "days",
-          page: 0,
-        });
+        updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -723,24 +739,7 @@ function wireToolbarEvents(container, signal, state) {
       tagDropdown.style.zIndex = "";
       selectedIndex = -1;
       renderTagChips();
-      updateHash("tracks", state, {
-        sort: "",
-        order: "asc",
-        search: "",
-        selectedServices: [],
-        selectedTags: [],
-        pmvCategories: [],
-        pmvAggregate: "",
-        fileTypes: [],
-        fileTypeAgg: "",
-        importedMode: "",
-        importedNum: null,
-        importedUnit: "days",
-        addedMode: "",
-        addedNum: null,
-        addedUnit: "days",
-        page: 0,
-      });
+      updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     }
 
@@ -816,24 +815,7 @@ function wireToolbarEvents(container, signal, state) {
         tagDropdown.style.zIndex = "";
         selectedIndex = -1;
         renderTagChips();
-        updateHash("tracks", state, {
-          sort: "",
-          order: "asc",
-          search: "",
-          selectedServices: [],
-          selectedTags: [],
-          pmvCategories: [],
-          pmvAggregate: "",
-          fileTypes: [],
-          fileTypeAgg: "",
-          importedMode: "",
-          importedNum: null,
-          importedUnit: "days",
-          addedMode: "",
-          addedNum: null,
-          addedUnit: "days",
-          page: 0,
-        });
+        updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -934,24 +916,7 @@ function wireToolbarEvents(container, signal, state) {
         const tag = chip.dataset.tag;
         state.selectedTags = state.selectedTags.filter((t) => t !== tag);
         state.page = 0;
-        updateHash("tracks", state, {
-          sort: "",
-          order: "asc",
-          search: "",
-          selectedServices: [],
-          selectedTags: [],
-          pmvCategories: [],
-          pmvAggregate: "",
-          fileTypes: [],
-          fileTypeAgg: "",
-          importedMode: "",
-          importedNum: null,
-          importedUnit: "days",
-          addedMode: "",
-          addedNum: null,
-          addedUnit: "days",
-          page: 0,
-        });
+        updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1000,24 +965,7 @@ function wireToolbarEvents(container, signal, state) {
       selectedIndex = -1;
       renderPlaylistChips();
       updatePlaylistBadge();
-      updateHash("tracks", state, {
-        sort: "",
-        order: "asc",
-        search: "",
-        selectedServices: [],
-        selectedTags: [],
-        pmvCategories: [],
-        pmvAggregate: "",
-        fileTypes: [],
-        fileTypeAgg: "",
-        importedMode: "",
-        importedNum: null,
-        importedUnit: "days",
-        addedMode: "",
-        addedNum: null,
-        addedUnit: "days",
-        page: 0,
-      });
+      updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     }
 
@@ -1098,24 +1046,7 @@ function wireToolbarEvents(container, signal, state) {
         selectedIndex = -1;
         renderPlaylistChips();
         updatePlaylistBadge();
-        updateHash("tracks", state, {
-          sort: "",
-          order: "asc",
-          search: "",
-          selectedServices: [],
-          selectedTags: [],
-          pmvCategories: [],
-          pmvAggregate: "",
-          fileTypes: [],
-          fileTypeAgg: "",
-          importedMode: "",
-          importedNum: null,
-          importedUnit: "days",
-          addedMode: "",
-          addedNum: null,
-          addedUnit: "days",
-          page: 0,
-        });
+        updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1233,24 +1164,7 @@ function wireToolbarEvents(container, signal, state) {
         state.selectedPlaylists = state.selectedPlaylists.filter((p) => p !== name);
         state.page = 0;
         updatePlaylistBadge();
-        updateHash("tracks", state, {
-          sort: "",
-          order: "asc",
-          search: "",
-          selectedServices: [],
-          selectedTags: [],
-          pmvCategories: [],
-          pmvAggregate: "",
-          fileTypes: [],
-          fileTypeAgg: "",
-          importedMode: "",
-          importedNum: null,
-          importedUnit: "days",
-          addedMode: "",
-          addedNum: null,
-          addedUnit: "days",
-          page: 0,
-        });
+        updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1280,24 +1194,7 @@ function wireToolbarEvents(container, signal, state) {
           btn.classList.add("active");
         }
         state.page = 0;
-        updateHash("tracks", state, {
-          sort: "",
-          order: "asc",
-          search: "",
-          selectedServices: [],
-          selectedTags: [],
-          pmvCategories: [],
-          pmvAggregate: "",
-          fileTypes: [],
-          fileTypeAgg: "",
-          importedMode: "",
-          importedNum: null,
-          importedUnit: "days",
-          addedMode: "",
-          addedNum: null,
-          addedUnit: "days",
-          page: 0,
-        });
+        updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1329,24 +1226,7 @@ function wireToolbarEvents(container, signal, state) {
           btn.classList.add("active");
         }
         state.page = 0;
-        updateHash("tracks", state, {
-          sort: "",
-          order: "asc",
-          search: "",
-          selectedServices: [],
-          selectedTags: [],
-          pmvCategories: [],
-          pmvAggregate: "",
-          fileTypes: [],
-          fileTypeAgg: "",
-          importedMode: "",
-          importedNum: null,
-          importedUnit: "days",
-          addedMode: "",
-          addedNum: null,
-          addedUnit: "days",
-          page: 0,
-        });
+        updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1376,24 +1256,7 @@ function wireToolbarEvents(container, signal, state) {
           btn.classList.add("active");
         }
         state.page = 0;
-        updateHash("tracks", state, {
-          sort: "",
-          order: "asc",
-          search: "",
-          selectedServices: [],
-          selectedTags: [],
-          pmvCategories: [],
-          pmvAggregate: "",
-          fileTypes: [],
-          fileTypeAgg: "",
-          importedMode: "",
-          importedNum: null,
-          importedUnit: "days",
-          addedMode: "",
-          addedNum: null,
-          addedUnit: "days",
-          page: 0,
-        });
+        updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1425,24 +1288,7 @@ function wireToolbarEvents(container, signal, state) {
           btn.classList.add("active");
         }
         state.page = 0;
-        updateHash("tracks", state, {
-          sort: "",
-          order: "asc",
-          search: "",
-          selectedServices: [],
-          selectedTags: [],
-          pmvCategories: [],
-          pmvAggregate: "",
-          fileTypes: [],
-          fileTypeAgg: "",
-          importedMode: "",
-          importedNum: null,
-          importedUnit: "days",
-          addedMode: "",
-          addedNum: null,
-          addedUnit: "days",
-          page: 0,
-        });
+        updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1464,24 +1310,7 @@ function wireToolbarEvents(container, signal, state) {
         () => {
           state.importedMode = importedMode.value;
           state.page = 0;
-          updateHash("tracks", state, {
-            sort: "",
-            order: "asc",
-            search: "",
-            selectedServices: [],
-            selectedTags: [],
-            pmvCategories: [],
-            pmvAggregate: "",
-            fileTypes: [],
-            fileTypeAgg: "",
-            importedMode: "",
-            importedNum: null,
-            importedUnit: "days",
-            addedMode: "",
-            addedNum: null,
-            addedUnit: "days",
-            page: 0,
-          });
+          updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
           fetchAndRender(container, signal, state);
         },
         { signal },
@@ -1494,24 +1323,7 @@ function wireToolbarEvents(container, signal, state) {
           const val = importedNum.value.trim();
           state.importedNum = val ? parseInt(val, 10) : null;
           state.page = 0;
-          updateHash("tracks", state, {
-            sort: "",
-            order: "asc",
-            search: "",
-            selectedServices: [],
-            selectedTags: [],
-            pmvCategories: [],
-            pmvAggregate: "",
-            fileTypes: [],
-            fileTypeAgg: "",
-            importedMode: "",
-            importedNum: null,
-            importedUnit: "days",
-            addedMode: "",
-            addedNum: null,
-            addedUnit: "days",
-            page: 0,
-          });
+          updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
           fetchAndRender(container, signal, state);
         },
         { signal },
@@ -1523,24 +1335,7 @@ function wireToolbarEvents(container, signal, state) {
         () => {
           state.importedUnit = importedUnit.value;
           state.page = 0;
-          updateHash("tracks", state, {
-            sort: "",
-            order: "asc",
-            search: "",
-            selectedServices: [],
-            selectedTags: [],
-            pmvCategories: [],
-            pmvAggregate: "",
-            fileTypes: [],
-            fileTypeAgg: "",
-            importedMode: "",
-            importedNum: null,
-            importedUnit: "days",
-            addedMode: "",
-            addedNum: null,
-            addedUnit: "days",
-            page: 0,
-          });
+          updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
           fetchAndRender(container, signal, state);
         },
         { signal },
@@ -1552,24 +1347,7 @@ function wireToolbarEvents(container, signal, state) {
         () => {
           state.addedMode = addedMode.value;
           state.page = 0;
-          updateHash("tracks", state, {
-            sort: "",
-            order: "asc",
-            search: "",
-            selectedServices: [],
-            selectedTags: [],
-            pmvCategories: [],
-            pmvAggregate: "",
-            fileTypes: [],
-            fileTypeAgg: "",
-            importedMode: "",
-            importedNum: null,
-            importedUnit: "days",
-            addedMode: "",
-            addedNum: null,
-            addedUnit: "days",
-            page: 0,
-          });
+          updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
           fetchAndRender(container, signal, state);
         },
         { signal },
@@ -1582,24 +1360,7 @@ function wireToolbarEvents(container, signal, state) {
           const val = addedNum.value.trim();
           state.addedNum = val ? parseInt(val, 10) : null;
           state.page = 0;
-          updateHash("tracks", state, {
-            sort: "",
-            order: "asc",
-            search: "",
-            selectedServices: [],
-            selectedTags: [],
-            pmvCategories: [],
-            pmvAggregate: "",
-            fileTypes: [],
-            fileTypeAgg: "",
-            importedMode: "",
-            importedNum: null,
-            importedUnit: "days",
-            addedMode: "",
-            addedNum: null,
-            addedUnit: "days",
-            page: 0,
-          });
+          updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
           fetchAndRender(container, signal, state);
         },
         { signal },
@@ -1611,24 +1372,7 @@ function wireToolbarEvents(container, signal, state) {
         () => {
           state.addedUnit = addedUnit.value;
           state.page = 0;
-          updateHash("tracks", state, {
-            sort: "",
-            order: "asc",
-            search: "",
-            selectedServices: [],
-            selectedTags: [],
-            pmvCategories: [],
-            pmvAggregate: "",
-            fileTypes: [],
-            fileTypeAgg: "",
-            importedMode: "",
-            importedNum: null,
-            importedUnit: "days",
-            addedMode: "",
-            addedNum: null,
-            addedUnit: "days",
-            page: 0,
-          });
+          updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
           fetchAndRender(container, signal, state);
         },
         { signal },
@@ -1659,24 +1403,7 @@ function wireToolbarEvents(container, signal, state) {
         state[key] = state[key] === false ? true : false;
         state.page = 0;
         updateFilterUI();
-        updateHash("tracks", state, {
-          sort: "",
-          order: "asc",
-          search: "",
-          selectedServices: [],
-          selectedTags: [],
-          pmvCategories: [],
-          pmvAggregate: "",
-          fileTypes: [],
-          fileTypeAgg: "",
-          importedMode: "",
-          importedNum: null,
-          importedUnit: "days",
-          addedMode: "",
-          addedNum: null,
-          addedUnit: "days",
-          page: 0,
-        });
+        updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       },
       { signal },
@@ -1704,24 +1431,7 @@ function wireToolbarEvents(container, signal, state) {
           "select, input, button, .filter-group, .tag-chips, .typeahead-wrap",
         )
         .forEach((el) => el.classList.remove("filter-disabled"));
-      updateHash("tracks", state, {
-        sort: "",
-        order: "asc",
-        search: "",
-        selectedServices: [],
-        selectedTags: [],
-        pmvCategories: [],
-        pmvAggregate: "",
-        fileTypes: [],
-        fileTypeAgg: "",
-        importedMode: "",
-        importedNum: null,
-        importedUnit: "days",
-        addedMode: "",
-        addedNum: null,
-        addedUnit: "days",
-        page: 0,
-      });
+      updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     },
     { signal },

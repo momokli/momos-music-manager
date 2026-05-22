@@ -345,13 +345,13 @@ function wireContentEvents(container, signal, state) {
   const table = container.querySelector("#tags-table");
   if (table) {
     wireSortableHeaders(table, state, () => {
-      updateHash("tags", state, HASH_DEFAULTS);
+      updateHash("tags", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     });
   }
 
   wirePageSizeSelector(container, state, () => {
-    updateHash("tags", state, HASH_DEFAULTS);
+    updateHash("tags", state, HASH_DEFAULTS, HASH_SCHEMA);
     fetchAndRender(container, signal, state);
   });
 
@@ -373,7 +373,7 @@ function wireContentEvents(container, signal, state) {
     layoutBtn.addEventListener("click", () => {
       state.layoutMode = !state.layoutMode;
       document.body.classList.toggle("layout-mode", state.layoutMode);
-      updateHash("tags", state, HASH_DEFAULTS);
+      updateHash("tags", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     });
   }
@@ -385,7 +385,7 @@ function wireContentEvents(container, signal, state) {
     prevBtn.addEventListener("click", () => {
       if (state.page > 0) {
         state.page--;
-        updateHash("tags", state, HASH_DEFAULTS);
+        updateHash("tags", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       }
     });
@@ -393,7 +393,7 @@ function wireContentEvents(container, signal, state) {
   if (nextBtn) {
     nextBtn.addEventListener("click", () => {
       state.page++;
-      updateHash("tags", state, HASH_DEFAULTS);
+      updateHash("tags", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     });
   }
@@ -890,7 +890,7 @@ export async function init(container, signal, hashParams) {
   const toolbar = container.querySelector("#tags-filter-panel");
   if (toolbar) {
     wireSearchFilter(toolbar, state, () => {
-      updateHash("tags", state, HASH_DEFAULTS);
+      updateHash("tags", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     });
 
@@ -932,7 +932,7 @@ export async function init(container, signal, hashParams) {
         }
         state.page = 0;
         syncCategoryFilterUI();
-        updateHash("tags", state, HASH_DEFAULTS);
+        updateHash("tags", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       });
     }
@@ -957,7 +957,7 @@ export async function init(container, signal, hashParams) {
         state[key] = state[key] === false ? true : false;
         state.page = 0;
         updateFilterUI();
-        updateHash("tags", state, HASH_DEFAULTS);
+        updateHash("tags", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
       });
       updateFilterUI();
@@ -981,7 +981,7 @@ export async function init(container, signal, hashParams) {
           "select, input, button, .filter-group, .tag-chips, .dual-range-wrap, .key-grid-wrap, .typeahead-wrap",
         )
         .forEach((el) => el.classList.remove("filter-disabled"));
-      updateHash("tags", state, HASH_DEFAULTS);
+      updateHash("tags", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
     });
   }
@@ -1061,6 +1061,6 @@ export async function init(container, signal, hashParams) {
   });
 
   // Initial data fetch
-  updateHash("tags", state, HASH_DEFAULTS);
+  updateHash("tags", state, HASH_DEFAULTS, HASH_SCHEMA);
   await fetchAndRender(container, signal, state);
 }
