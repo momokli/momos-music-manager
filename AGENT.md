@@ -1,6 +1,6 @@
 # Momo's Music Manager — Agent Guidance
 
-> **Last Updated**: 2026-05-22 — v0.3.2
+> **Last Updated**: 2026-05-23 — v0.4.0
 
 ---
 
