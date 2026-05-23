@@ -4142,3 +4142,12 @@ th.drop-target {
 .detail-file-card .detail-kv th {
     width: 30%;
 }
+
+/* Archive toggle button for playlist-track-archive */
+.archive-toggle-btn {
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+}
+.archive-toggle-btn:hover {
+    opacity: 0.8;
+}

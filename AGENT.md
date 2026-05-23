@@ -1,6 +1,6 @@
 # Momo's Music Manager — Agent Guidance
 
-> **Last Updated**: 2026-05-23 — v0.4.0
+> **Last Updated**: 2026-05-23 — v0.5.0
 
 ---
 
@@ -84,6 +84,55 @@ Dev-only env vars (not in config.toml):
 
 ---
 
+## Agent Workflow: Before You Code
+
+**Always get ground truth from the codebase — don't rely on this document alone.**
+Documents rot; the filesystem and compiler don't.
+
+### Quick Orientation (run these first)
+
+```bash
+# 1. Establish build baseline (catches compilation errors immediately)
+cargo build 2>&1 | tail -5
+
+# 2. Get the CURRENT database schema (one command, no migration archaeology)
+rm -f /tmp/agent_app.db
+DATABASE_URL=sqlite:/tmp/agent_app.db cargo run -- serve --host 127.0.0.1 --port 3001 &
+sleep 2
+sqlite3 /tmp/agent_app.db ".schema" | head -200
+kill %1 2>/dev/null; rm -f /tmp/agent_app.db
+
+# 3. List actual source modules (not what this doc says)
+ls src/*.rs src/*/mod.rs | sort
+
+# 4. List actual frontend pages (the PAGE_MAP in app.js is authoritative)
+ls frontend/pages/*.js | sort
+
+# 5. Check current git branch + dirty state
+git branch --show-current && git status --short | head -20
+```
+
+### Schema Rules
+
+- **Never reconstruct the schema from migration files.** Migrations 001–007 have
+  overlapping view definitions, ALTER TABLEs, and DROP+RECREATE cycles. Reading them
+  sequentially is error-prone. Always query the live DB or do the dry-run above.
+- The `sqlite3 app.db ".schema"` output IS the canonical schema. Trust it over any
+  plan's embedded SQL snippets.
+- The schema includes views (`v_file_track_link`, `v_file_tags`, `v_file_resolved_tags`,
+  `v_tag_playlist`, `v_tag_file_counts`, `v_resolved_tags`, `v_tag_categories`,
+  `v_tags_with_categories`, `unified_tracks`, `v_subscriptions`, `v_playlist_tag_category`).
+  Query `.schema` or `.tables` to see them all.
+
+### Frontend Rules
+
+- The `PAGE_MAP` object in `frontend/app.js` is the **authoritative** list of pages.
+  If a page isn't there, it won't load. The table below is a convenience reference only.
+- The `NAV_SECTIONS` and `TOOLS_ITEMS` arrays in `frontend/shared/nav.js` control
+  what shows in the nav bar. New pages must be added to both app.js and nav.js.
+
+---
+
 ## Dev Commands
 
 ```bash
@@ -108,20 +157,48 @@ cargo run -- dump
 # Restore DB from JSON dump
 cargo run -- restore
 
+# Dump current schema from a live DB (canonical truth, beats reading migrations)
+sqlite3 app.db ".schema"
+
+# Quick schema overview (tables + indexes, no view SQL)
+sqlite3 app.db ".schema" | grep -E "CREATE TABLE|CREATE INDEX"
+
+# List all views in the DB
+sqlite3 app.db ".tables" | tr ' ' '\n' | grep '^v_'
+
 # Import Traktor collection.nml
 cargo run -- serve  # then use the Traktor import page in the frontend
 ```
 
 ---
 
+## Current Migration Map (001–007)
+
+Use this as a quick index. For actual SQL, query the live DB with `sqlite3 app.db ".schema"`.
+
+| File                              | What it does                                                                                                                                         |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `001_initial_schema.sql`          | 13 tables + 9 views + seed data (tag categories, phase tags, energy levels)                                                                          |
+| `002_playlist_fetch_tracking.sql` | Adds `last_fetched_at` + `remote_track_count` to `service_playlists`; creates `tag_parents` table + `v_resolved_tags` + `v_file_resolved_tags` views |
+| `003_remote_unique_count.sql`     | Adds `remote_unique_count` to `service_playlists`                                                                                                    |
+| `004_unique_tags_nocase.sql`      | Rebuilds `tags` with `UNIQUE COLLATE NOCASE`, deduplicates case-variant tags, remaps FKs, recreates all dependent views                              |
+| `005_v_playlist_tag_category.sql` | Creates `v_playlist_tag_category` view for category-ID-based playlist filtering                                                                      |
+| `006_local_service.sql`           | Adds `'local'` to `service_tracks` CHECK constraint, updates `v_file_track_link` for local service matching, recreates dependent views               |
+| `007_playlist_snapshot.sql`       | Adds `snapshot_id` to `service_playlists` for global poller change detection                                                                         |
+
+---
+
 ## Important Gotchas
 
-- **Migrations are additive** — never edit `001_initial_schema.sql`. Create `002_xxx.sql` etc.
-- **To reset a dirty migration state**: delete `app.db` and re-run — migrations run 001→002→003 from scratch.
+- **Migrations are additive** — never edit `001_initial_schema.sql`. Create a new migration file instead.
+- **To reset a dirty migration state**: delete `app.db` and re-run — all 7 migrations run sequentially from scratch.
+- **Schema truth is in the DB, not the migration files.** Migrations recreate views and tables, so earlier files contain stale SQL. Always query `sqlite3 app.db ".schema"` for the current schema.
 - **Frontend is an SPA** — modular vanilla JS with ES modules in `frontend/`. Hash-based router (`app.js`), shared modules in `shared/`, pages in `pages/`. Serve embedded via `rust-embed`, no separate dev server needed.
-- **digging.html** is a standalone HTML page (not part of the SPA) for the digging/curation workflow
-- **Playlist subscriptions** poll every 30s in the background — managed in `poller.rs`
-- **No SoundCloud/YouTube OAuth yet** — framework is ready, actual flow not implemented
+- **`digging.html`** is a standalone HTML page (not part of the SPA) for the digging/curation workflow.
+- **The `#digging` SPA page** (`frontend/pages/digging.js`) is a different interface — the full-featured Digging Curator with multi-seed suggestions and audio players.
+- **Playlist subscriptions** poll every 30s in the background — managed in `poller.rs`.
+- **Global playlist poller** checks ALL Spotify playlists every 15 min via snapshot-based detection — managed in `global_poller.rs`.
+- **No SoundCloud/YouTube OAuth yet** — framework is ready, actual flow not implemented.
 - **Docker** was removed — will be recreated later. Use `cargo run` for now.
 
 ---
@@ -140,49 +217,67 @@ cargo run -- serve  # then use the Traktor import page in the frontend
 
 ## Source Modules
 
+> Run `ls src/*.rs src/*/mod.rs | sort` for the authoritative list.
+
 ```
 src/
 ├── main.rs              # CLI, router, server start
 ├── api.rs               # All API endpoints
+├── audio_extensions.rs  # AudioExtension enum
+├── comment.rs           # Comment parsing/generation
 ├── config.rs            # Config.toml + env var loading
 ├── db.rs                # Database queries, scanning, comment computation
-├── comment.rs           # Comment parsing/generation
-├── audio_extensions.rs  # AudioExtension enum
+├── deemix/              # Deemix download integration
+│   ├── mod.rs
+│   ├── cli.rs           # CLI subcommands for deemix
+│   ├── client.rs        # HTTP client for deemix-pyweb API
+│   └── models.rs        # Deemix queue/status types
 ├── digging.rs           # Curator/session-builder for track discovery
 ├── dump.rs              # DB dump/restore (JSON)
 ├── embeddings.rs        # Semantic tag embeddings (candle/ML)
+├── global_poller.rs     # Global playlist poller (all Spotify playlists, snapshot-based)
+├── launch_agent.rs      # macOS launch agent integration
 ├── poller.rs            # Playlist subscription background poller
+├── scan_cache.rs        # File scan result caching
 ├── spotify/
 │   ├── mod.rs
 │   ├── client.rs        # Spotify OAuth client
-│   ├── models.rs        # PlaylistInfo, TrackInfo
+│   ├── models.rs        # PlaylistInfo, TrackInfo, AudioFeatures
 │   └── sync_worker.rs   # Background sync worker
 ├── tasks/
 │   └── mod.rs           # TaskManager (generic) + task workers
 ├── traktor.rs           # Traktor collection.nml parser
-└── watch.rs             # Folder watcher (optional, not auto-started)
+└── watch.rs             # Folder watcher (auto-started on boot, polls active folders)
 ```
 
 ---
 
 ## Frontend Pages (SPA)
 
-| Route              | Module                              | Description                        |
-| ------------------ | ----------------------------------- | ---------------------------------- |
-| `#dashboard`       | `frontend/pages/dashboard.js`       | Stats cards + recent activity      |
-| `#files`           | `frontend/pages/files.js`           | Local files table + comment status |
-| `#tracks`          | `frontend/pages/tracks.js`          | Service tracks table               |
-| `#playlists`       | `frontend/pages/playlists.js`       | All playlists                      |
-| `#services`        | `frontend/pages/services.js`        | Service status/config              |
-| `#tags`            | `frontend/pages/tags.js`            | Tags table                         |
-| `#tag-categories`  | `frontend/pages/tag-categories.js`  | Tag categories                     |
-| `#folders`         | `frontend/pages/folders.js`         | Folder management                  |
-| `#tasks`           | `frontend/pages/tasks.js`           | Task manager UI                    |
-| `#auto-categorize` | `frontend/pages/auto-categorize.js` | AI tag categorization wizard       |
-| `#traktor`         | `frontend/pages/traktor-import.js`  | Traktor collection import          |
-| `#data`            | `frontend/pages/data.js`            | Import/export database             |
-| `#tag-curation`    | `frontend/pages/tag-curation.js`    | Tag parent curation workflow       |
-| `digging.html`     | (standalone HTML)                   | Curator/session-builder page       |
+> **Authoritative source**: `PAGE_MAP` in `frontend/app.js`. Run `ls frontend/pages/*.js | sort` to verify.
+> Nav visibility is controlled by `NAV_SECTIONS` + `TOOLS_ITEMS` in `frontend/shared/nav.js`.
+
+| Route              | Module                              | Nav Section | Description                                                      |
+| ------------------ | ----------------------------------- | ----------- | ---------------------------------------------------------------- |
+| `#dashboard`       | `frontend/pages/dashboard.js`       | Overview    | Stats cards + recent activity                                    |
+| `#files`           | `frontend/pages/files.js`           | Library     | Local files table + comment status                               |
+| `#tracks`          | `frontend/pages/tracks.js`          | Library     | Service tracks table                                             |
+| `#playlists`       | `frontend/pages/playlists.js`       | Library     | All playlists                                                    |
+| `#tags`            | `frontend/pages/tags.js`            | Library     | Tags table                                                       |
+| `#tag-categories`  | `frontend/pages/tag-categories.js`  | Library     | Tag categories                                                   |
+| `#services`        | `frontend/pages/services.js`        | Services    | Service status/config                                            |
+| `#tasks`           | `frontend/pages/tasks.js`           | Services    | Task manager UI                                                  |
+| `#folders`         | `frontend/pages/folders.js`         | Services    | Folder management                                                |
+| `#deemix-queue`    | `frontend/pages/deemix-queue.js`    | Services    | Deemix download queue                                            |
+| `#traktor`         | `frontend/pages/traktor-import.js`  | Services    | Traktor collection import                                        |
+| `#tag-curation`    | `frontend/pages/tag-curation.js`    | Tools       | Tag parent curation workflow                                     |
+| `#auto-categorize` | `frontend/pages/auto-categorize.js` | Tools       | AI tag categorization wizard                                     |
+| `#digging`         | `frontend/pages/digging.js`         | Tools       | Digging Curator (multi-seed suggestions, audio players, staging) |
+| `#data`            | `frontend/pages/data.js`            | Tools       | Import/export database                                           |
+| `#key-comparison`  | `frontend/pages/key-comparison.js`  | Tools       | Traktor vs Spotify BPM/Key comparison                            |
+| `#track-detail`    | `frontend/pages/track-detail.js`    | (linked)    | Single track metadata detail                                     |
+| `#file-detail`     | `frontend/pages/file-detail.js`     | (linked)    | Single file metadata detail                                      |
+| `digging.html`     | (standalone HTML)                   | —           | Legacy curator/session-builder page                              |
 
 ---
 
@@ -2184,3 +2279,347 @@ Each suggestion/staging card gets a mini player:
 - [ ] Time display shows current/total
 - [ ] No regressions: Add, Remove, Refine, Save, key coverage still work
 - [ ] Backend unchanged
+
+---
+
+## Plan: playlist-track-archive
+
+**Status**: done ✅
+**Branch**: `feat/playlist-track-archive`
+**Ready for review**: no
+**Depends on**: nothing
+**Migration needed**: yes — `008_playlist_track_archive.sql`
+
+### Description
+
+Instead of hard-deleting tracks from `service_playlist_tracks` when they're removed from a Spotify playlist, soft-delete them with a `deleted_at` timestamp. Add a per-playlist `archive_deleted` toggle that controls whether deleted tracks are still treated as active for tag resolution (comment writing, digging, filtering). Followed/subscribed playlists default to `archive_deleted = true` (collect all ever-added entries), personal playlists default to `archive_deleted = false` (respect deletions).
+
+### Why
+
+- Followed playlists like "Beatport Top 100 - Tech House" rotate tracks frequently — users want to keep all historical entries for tagging
+- Personal playlists should reflect real state — when you remove a track, it should stop being tagged
+- Spotify Discover Weekly / Release Radar are "followed" type — keep all ever as active
+- Users can toggle per-playlist if the default doesn't match their intent
+
+### Schema Changes
+
+#### Migration 008 (`migrations/008_playlist_track_archive.sql`)
+
+1. Add `deleted_at INTEGER` to `service_playlist_tracks` (NULL = active, timestamp = deleted)
+2. Add `archive_deleted BOOLEAN NOT NULL DEFAULT 0` to `service_playlists`
+3. Set `archive_deleted = 1` for all playlists that have a subscription (followed playlists)
+4. Drop + recreate all views that depend on `service_playlist_tracks`:
+   - `v_file_tags` — add filter: `AND (sp.archive_deleted = 1 OR spt.deleted_at IS NULL)`
+   - `v_file_resolved_tags` — same filter
+   - `v_tag_file_counts` — already depends on `v_file_tags`, automatically updated
+
+```sql
+-- Step 1: Add deleted_at to service_playlist_tracks
+ALTER TABLE service_playlist_tracks ADD COLUMN deleted_at INTEGER;
+
+-- Step 2: Add archive_deleted to service_playlists
+ALTER TABLE service_playlists ADD COLUMN archive_deleted BOOLEAN NOT NULL DEFAULT 0;
+
+-- Step 3: Set archive_deleted = 1 for subscribed playlists
+UPDATE service_playlists SET archive_deleted = 1
+WHERE EXISTS (
+    SELECT 1 FROM playlist_subscriptions ps
+    WHERE ps.service = service_playlists.service
+      AND ps.playlist_id = service_playlists.playlist_id
+);
+
+-- Step 4: Drop dependent views
+DROP VIEW IF EXISTS v_tag_file_counts;
+DROP VIEW IF EXISTS v_file_resolved_tags;
+DROP VIEW IF EXISTS v_file_tags;
+
+-- Step 5: Recreate v_file_tags with archive_deleted filter
+CREATE VIEW v_file_tags AS
+SELECT DISTINCT f.id AS file_id,
+       t.id AS tag_id, t.name AS tag_name,
+       t.sort_order, t.created_at,
+       tc.id AS category_id, tc.name AS category_name,
+       tc.is_default, tc.prefix
+FROM files f
+JOIN v_file_track_link v ON v.file_id = f.id
+JOIN service_playlist_tracks spt ON spt.track_id = v.track_id
+JOIN service_playlists sp ON sp.id = spt.playlist_id
+JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
+JOIN tag_categories tc ON tc.id = t.category_id
+WHERE sp.archive_deleted = 1 OR spt.deleted_at IS NULL;
+
+-- Step 6: Recreate v_file_resolved_tags with archive_deleted filter
+CREATE VIEW v_file_resolved_tags AS
+SELECT DISTINCT
+    f.id AS file_id,
+    rt.tag_id,
+    rt.tag_name,
+    rt.sort_order,
+    rt.created_at,
+    rt.category_id,
+    rt.category_name,
+    rt.prefix
+FROM files f
+JOIN v_file_track_link v ON v.file_id = f.id
+JOIN service_playlist_tracks spt ON spt.track_id = v.track_id
+JOIN service_playlists sp ON sp.id = spt.playlist_id
+JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
+JOIN v_resolved_tags rt ON rt.source_tag_id = t.id
+WHERE sp.archive_deleted = 1 OR spt.deleted_at IS NULL;
+
+-- Step 7: Recreate v_tag_file_counts
+CREATE VIEW v_tag_file_counts AS
+SELECT vft.tag_id, COUNT(DISTINCT vft.file_id) AS file_count
+FROM v_file_tags vft
+GROUP BY vft.tag_id;
+
+SELECT 'Migration 008 applied: soft-delete playlist tracks + archive_deleted toggle' as status;
+```
+
+### Backend Changes
+
+#### 1. `src/db.rs` — `ServicePlaylistTrack` struct
+
+Add `deleted_at: Option<i64>` field.
+
+#### 2. `src/db.rs` — `add_track_to_playlist_with_added_at()`
+
+Change from `INSERT OR IGNORE` to `INSERT ... ON CONFLICT(playlist_id, track_id) DO UPDATE`:
+
+```rust
+sqlx::query(
+    r#"
+    INSERT INTO service_playlist_tracks (playlist_id, track_id, position, added_at, deleted_at)
+    VALUES (?, ?, ?, ?, NULL)
+    ON CONFLICT(playlist_id, track_id) DO UPDATE SET
+        position = excluded.position,
+        added_at = excluded.added_at,
+        deleted_at = NULL
+    "#,
+)
+```
+
+This handles re-adds: a track that was previously soft-deleted gets `deleted_at = NULL` (re-activated).
+
+#### 3. `src/db.rs` — New functions
+
+```rust
+/// Mark all tracks in a playlist as deleted (used before re-syncing from Spotify)
+pub async fn mark_playlist_tracks_deleted(
+    conn: &mut SqliteConnection,
+    playlist_id: i64,
+) -> Result<u64> {
+    let now = chrono::Utc::now().timestamp();
+    let rows = sqlx::query(
+        "UPDATE service_playlist_tracks SET deleted_at = ? WHERE playlist_id = ? AND deleted_at IS NULL"
+    )
+    .bind(now)
+    .bind(playlist_id)
+    .execute(conn)
+    .await?;
+    Ok(rows.rows_affected())
+}
+
+/// Toggle archive_deleted for a playlist
+pub async fn set_playlist_archive_deleted(
+    pool: &Pool<Sqlite>,
+    playlist_id: i64,
+    archive: bool,
+) -> Result<()> {
+    sqlx::query("UPDATE service_playlists SET archive_deleted = ? WHERE id = ?")
+        .bind(archive)
+        .bind(playlist_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+```
+
+#### 4. `src/db.rs` — `ServicePlaylist` struct
+
+Add `archive_deleted: bool` field.
+
+#### 5. `src/db.rs` — `update_playlist_fetch_tracking()`
+
+The unique count query currently counts all `service_playlist_tracks` rows. When `archive_deleted = true`, we want the count to reflect ALL tracks (including soft-deleted). When `archive_deleted = false`, only active tracks. For consistency, keep counting all rows (the unique count is about what's stored, not what's active). The views handle the filtering.
+
+Actually, we should count active-only for `remote_unique_count` comparison purposes. Let `remote_unique_count` reflect only active (non-deleted) tracks to match the frontend display. Update the count query:
+
+```sql
+SELECT COUNT(*) FROM service_playlist_tracks spt
+JOIN service_playlists sp ON sp.id = spt.playlist_id
+WHERE sp.service = ? AND sp.playlist_id = ? AND spt.deleted_at IS NULL
+```
+
+#### 6. `src/spotify/sync_worker.rs` — `sync_tracks_for_playlist()`
+
+Replace the `DELETE FROM service_playlist_tracks WHERE playlist_id = ?` with:
+
+```rust
+// Soft-delete: mark all existing tracks as deleted, then re-insert from stream.
+// Re-added tracks will get deleted_at = NULL via ON CONFLICT DO UPDATE.
+if let Ok(Some((pl_id,))) = sqlx::query_as::<_, (i64,)>(
+    "SELECT id FROM service_playlists WHERE service = 'spotify' AND playlist_id = ?",
+)
+.bind(playlist_id)
+.fetch_optional(&self.db)
+.await
+{
+    let deleted_count = crate::db::mark_playlist_tracks_deleted(&mut *self.db.acquire().await?, pl_id).await.unwrap_or(0);
+    if deleted_count > 0 {
+        debug!("Soft-deleted {} track(s) from playlist '{}'", deleted_count, playlist_name);
+    }
+}
+```
+
+When `archive_deleted = false`, the views will exclude these soft-deleted tracks. When `archive_deleted = true`, they remain visible.
+
+Optionally, if the playlist has `archive_deleted = false`, we could still do a hard delete for efficiency. But soft-delete is simpler and consistent.
+
+#### 7. `src/api.rs` — `Playlist` response struct
+
+Add `archive_deleted: bool` field.
+
+#### 8. `src/api.rs` — `playlists_handler()`
+
+Add `sp.archive_deleted` to the SELECT:
+
+```sql
+SELECT sp.*, COUNT(spt.track_id) as track_count, vtp.tag_name, sp.archive_deleted
+FROM service_playlists sp ...
+```
+
+When `archive_deleted = false`, the `track_count` should only count active tracks. Currently it's `COUNT(spt.track_id)`. Update to:
+
+```sql
+COUNT(CASE WHEN spt.deleted_at IS NULL THEN 1 END) as track_count
+```
+
+For playlists with `archive_deleted = true`, we might want to show both active and total. That's a UI consideration.
+
+#### 9. `src/api.rs` — New endpoint: toggle archive
+
+**Route**: `.route("/api/playlists/{id}/archive", put(toggle_playlist_archive_handler))`
+
+**Request**: `{ archiveDeleted: true }`
+
+**Handler**:
+
+```rust
+async fn toggle_playlist_archive_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let archive = body.get("archiveDeleted").and_then(|v| v.as_bool()).unwrap_or(false);
+    match crate::db::set_playlist_archive_deleted(&state.db, id, archive).await {
+        Ok(()) => Json(json!({"data": {"id": id, "archiveDeleted": archive}})).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+```
+
+#### 10. `src/api.rs` — `PlaylistsQuery`
+
+Add `archive: Option<String>` filter (`"archived"` / `"active"` / `"all"`).
+
+### Frontend Changes (`frontend/pages/playlists.js`)
+
+#### 1. Add `archiveDeleted` to the adapted playlist object
+
+```javascript
+archiveDeleted: p.archiveDeleted ?? p.archive_deleted ?? false,
+```
+
+#### 2. Add Archive toggle button in each row
+
+Add to `PLAYLISTS_COLUMNS`:
+
+```javascript
+{ id: "archive", label: "Archive", sortable: false, defaultWidth: 60 },
+```
+
+Add renderer in `PLAYLISTS_CELL_RENDERERS`:
+
+```javascript
+archive(r) {
+  const icon = r.archiveDeleted ? "fa-archive" : "fa-box-open";
+  const title = r.archiveDeleted
+    ? "Archiving: deleted tracks remain active for tagging"
+    : "Active: deleted tracks are removed from tagging";
+  return `<button class="btn btn-sm btn-icon archive-toggle-btn"
+    data-id="${r.id}" data-archive="${r.archiveDeleted ? "1" : "0"}"
+    title="${title}">
+    <i class="fas ${icon}"></i>
+  </button>`;
+}
+```
+
+#### 3. Wire archive toggle click
+
+In `wireContentEvents`, delegate click on `.archive-toggle-btn`:
+
+- Toggle the boolean
+- `PUT /api/playlists/{id}/archive` with `{ archiveDeleted: !current }`
+- Update button icon + tooltip inline (no full re-render needed)
+- Toast: "Archive mode {enabled/disabled} for '{playlistName}'"
+
+#### 4. Add Archive filter to toolbar
+
+In the RIGHT column (Classification section), add a filter row:
+
+```html
+<div class="filter-row">
+  <span class="filter-row-label toggleable" data-filter="archive">Archive</span>
+  <div class="filter-group">
+    <button class="filter-btn" data-value="archived">
+      <i class="fas fa-archive"></i> Archiving
+    </button>
+    <button class="filter-btn" data-value="active">
+      <i class="fas fa-box-open"></i> Active
+    </button>
+    <button class="filter-btn active" data-value="all">All</button>
+  </div>
+</div>
+```
+
+Add `archive: "all"` to state and hash schema.
+
+#### 5. Track count display
+
+When `archiveDeleted = true`, show both active + total in the Tracks column:
+
+```
+142 / 287
+```
+
+(active / total including soft-deleted). When `archiveDeleted = false`, just show the active count.
+
+### Files to modify
+
+- `migrations/008_playlist_track_archive.sql` — new migration
+- `src/db.rs` — `ServicePlaylistTrack` + `ServicePlaylist` structs, `add_track_to_playlist_with_added_at`, new `mark_playlist_tracks_deleted` + `set_playlist_archive_deleted` functions
+- `src/spotify/sync_worker.rs` — replace DELETE with soft-delete in `sync_tracks_for_playlist()`
+- `src/api.rs` — `Playlist` struct + `playlists_handler` query + `toggle_playlist_archive_handler` endpoint + `PlaylistsQuery` archive filter
+- `frontend/pages/playlists.js` — archive column + toggle button + wire click + toolbar filter + track count display
+- `frontend/style.css` — `.archive-toggle-btn` styles
+
+### Acceptance Criteria
+
+- [ ] Migration 008 runs cleanly on fresh DB (001→008)
+- [ ] Migration 008 runs cleanly on existing DB with data
+- [ ] Subscribed playlists default to `archive_deleted = true`
+- [ ] Non-subscribed playlists default to `archive_deleted = false`
+- [ ] Full sync marks removed tracks with `deleted_at` instead of deleting
+- [ ] Re-added tracks get `deleted_at = NULL` (re-activated)
+- [ ] When `archive_deleted = true`: `v_file_tags` + `v_file_resolved_tags` include all tracks regardless of `deleted_at`
+- [ ] When `archive_deleted = false`: only active (non-deleted) tracks appear in tag resolution
+- [ ] Toggle button in playlist row switches between archive/active modes
+- [ ] PUT `/api/playlists/{id}/archive` toggles the flag
+- [ ] Archive filter in toolbar works (archived/active/all)
+- [ ] Track count column shows active/total for archiving playlists
+- [ ] `compute_target_comment()` correctly resolves tags based on archive status (via updated views)
+- [ ] Digging suggestions respect archive status (via updated views)
+- [ ] No regressions: subscription poller + global poller still work (they only add, don't delete)
+- [ ] Backend compiles (`cargo build`)
+- [ ] Test with curl: toggle archive, verify `v_file_tags` returns correct counts

@@ -77,6 +77,7 @@ const HASH_DEFAULTS = {
   selectedServices: [],
   categories: [],
   subscribed: false,
+  archive: "all",
 };
 
 const HASH_SCHEMA = {
@@ -90,6 +91,7 @@ const HASH_SCHEMA = {
   selectedServices: { type: "array", default: [] },
   categories: { type: "array", default: [] },
   subscribed: { type: "boolean", default: false },
+  archive: { type: "string", default: "all" },
 };
 
 /* ------------------------------------------------------------------ */
@@ -112,6 +114,7 @@ const PLAYLISTS_COLUMNS = [
     sortKey: "track_count",
     defaultWidth: 80,
   },
+  { id: "archive", label: "Archive", sortable: false, defaultWidth: 60 },
   {
     id: "imported",
     label: "Imported",
@@ -226,6 +229,9 @@ const PLAYLISTS_CELL_RENDERERS = {
   name: (r) => escapeHtml(r.name),
   service: (r) => sBadge(r.svc),
   tracks: (r) => {
+    if (r.archiveDeleted && r.totalTrackCount != null && r.totalTrackCount !== r.l) {
+      return `<span class="font-mono" title="Active: ${r.l} • Total (incl. soft-deleted): ${r.totalTrackCount}">${r.l} / ${r.totalTrackCount}</span>`;
+    }
     const mismatch = r.l !== r.u;
     const noise = r.r - r.u;
     return `<span class="${mismatch ? "diff-badge" : "font-mono"}" title="Local: ${r.l} • Unique: ${r.u} • Total: ${r.r}${noise > 0 ? " (" + noise + " dupe/ep)" : ""}">${r.l} / ${r.u} / ${r.r}</span>`;
@@ -242,6 +248,13 @@ const PLAYLISTS_CELL_RENDERERS = {
   deemix: (r) => deemixCell(r),
   sync: (r) => syncCell(r.sync),
   subscribe: (r) => subCell(r.sub),
+  archive: (r) => {
+    const icon = r.archiveDeleted ? "fa-archive" : "fa-box-open";
+    const title = r.archiveDeleted
+      ? "Archiving: deleted tracks remain active for tagging"
+      : "Active: deleted tracks are removed from tagging";
+    return `<button class="btn btn-sm btn-icon archive-toggle-btn" data-id="${r.id}" data-archive="${r.archiveDeleted ? "1" : "0"}" title="${title}"><i class="fas ${icon}"></i></button>`;
+  },
   view: (r) => viewTracksCell(r),
   actions: (r) => actions(r),
 };
@@ -302,6 +315,14 @@ function renderToolbar(state) {
               `,
                 )
                 .join("")}
+            </div>
+          </div>
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="archive">Archive</span>
+            <div class="filter-group">
+              <button class="filter-btn${state.archive === "archived" ? " active" : ""}" data-value="archived"><i class="fas fa-archive"></i> Archiving</button>
+              <button class="filter-btn${state.archive === "active" ? " active" : ""}" data-value="active"><i class="fas fa-box-open"></i> Active</button>
+              <button class="filter-btn${state.archive === "all" ? " active" : ""}" data-value="all">All</button>
             </div>
           </div>
         </div>
@@ -407,6 +428,7 @@ function buildParams(state) {
     params.set("categories", state.categories.join(","));
   }
   if (state.subscribed) params.set("subscribed", "true");
+  if (state.archive && state.archive !== "all") params.set("archive", state.archive);
   return params;
 }
 
@@ -471,6 +493,8 @@ async function fetchAndRender(container, signal, state) {
         deemixId: p.deemixId || null,
         importedAt: p.importedAt || p.imported_at || null,
         updatedAt: p.updatedAt || p.updated_at || null,
+        archiveDeleted: p.archiveDeleted ?? false,
+        totalTrackCount: p.totalTrackCount ?? p.trackCount ?? 0,
       };
     });
 
@@ -598,6 +622,31 @@ function wireToolbarEvents(container, signal, state) {
       },
       { signal },
     );
+  }
+
+  // Archive filter (single-select: archived / active / all)
+  const archiveRow = container.querySelector(".filter-row:has([data-filter=archive])");
+  if (archiveRow) {
+    const archiveGroup = archiveRow.querySelector(".filter-group");
+    if (archiveGroup) {
+      archiveGroup.addEventListener(
+        "click",
+        (e) => {
+          const btn = e.target.closest(".filter-btn");
+          if (!btn) return;
+          const v = btn.dataset.value;
+          archiveGroup
+            .querySelectorAll(".filter-btn")
+            .forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+          state.archive = v;
+          state.page = 0;
+          updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
+          fetchAndRender(container, signal, state);
+        },
+        { signal },
+      );
+    }
   }
 
   // Stale toggle (single button, on/off)
@@ -941,6 +990,53 @@ function wireContentEvents(container, signal, state) {
     fetchAndRender(container, signal, state);
   });
 
+  // Archive toggle button (delegated)
+  container.addEventListener(
+    "click",
+    (e) => {
+      const btn = e.target.closest(".archive-toggle-btn");
+      if (!btn) return;
+      e.preventDefault();
+
+      const id = parseInt(btn.dataset.id, 10);
+      const currentArchive = btn.dataset.archive === "1";
+      const newArchive = !currentArchive;
+
+      // Optimistic UI: toggle icon + dataset
+      btn.dataset.archive = newArchive ? "1" : "0";
+      const icon = btn.querySelector("i");
+      if (icon) {
+        icon.className = "fas " + (newArchive ? "fa-archive" : "fa-box-open");
+      }
+      btn.title = newArchive
+        ? "Archiving: deleted tracks remain active for tagging"
+        : "Active: deleted tracks are removed from tagging";
+
+      fetchJSON(`/api/playlists/${id}/archive`, {
+        method: "PUT",
+        body: JSON.stringify({ archiveDeleted: newArchive }),
+      })
+        .then(() => {
+          showToast(
+            newArchive ? "Archive mode enabled" : "Archive mode disabled",
+            "success",
+          );
+        })
+        .catch((err) => {
+          // Revert on error
+          btn.dataset.archive = currentArchive ? "1" : "0";
+          if (icon) {
+            icon.className = "fas " + (currentArchive ? "fa-archive" : "fa-box-open");
+          }
+          btn.title = currentArchive
+            ? "Archiving: deleted tracks remain active for tagging"
+            : "Active: deleted tracks are removed from tagging";
+          showToast(`Failed to toggle archive: ${err.message}`, "error");
+        });
+    },
+    { signal },
+  );
+
   // Layout mode toggle
   const layoutBtn = container.querySelector("#playlists-layout-btn");
   if (layoutBtn) {
@@ -980,10 +1076,12 @@ export async function init(container, signal, hashParams) {
     categories: (parsed.categories || []).map(Number).filter((id) => !isNaN(id)),
     categoriesAll: [],
     subscribed: parsed.subscribed || false,
+    archive: parsed.archive || "all",
     serviceEnabled: true,
     categoryEnabled: true,
     subEnabled: true,
     staleEnabled: true,
+    archiveEnabled: true,
     layoutMode: false,
   };
 

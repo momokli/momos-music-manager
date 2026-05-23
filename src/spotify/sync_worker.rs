@@ -705,24 +705,36 @@ impl SpotifySyncWorker {
 
         let playlist_name = playlist.name.clone();
 
-        // ── CLEANUP: delete all existing track links for this playlist ──
-        // We're about to re-populate from the Spotify stream, so any tracks
-        // no longer in the playlist will be naturally removed.
+        // ── CLEANUP: soft-delete existing track links for this playlist ──
+        // We're about to re-populate from the Spotify stream. Any tracks no longer
+        // in the playlist get marked as deleted (deleted_at = now).
+        // Re-added tracks will get deleted_at = NULL via ON CONFLICT DO UPDATE.
         if let Ok(Some((pl_id,))) = sqlx::query_as::<_, (i64,)>(
             "SELECT id FROM service_playlists WHERE service = 'spotify' AND playlist_id = ?",
         )
         .bind(playlist_id)
         .fetch_optional(&self.db)
         .await
-            && let Err(e) = sqlx::query("DELETE FROM service_playlist_tracks WHERE playlist_id = ?")
-                .bind(pl_id)
-                .execute(&self.db)
-                .await
         {
-            error!(
-                "Failed to cleanup playlist {} before sync: {:?}",
-                playlist_name, e
-            );
+            match self.db.acquire().await {
+                Ok(mut conn) => {
+                    let deleted_count = crate::db::mark_playlist_tracks_deleted(&mut conn, pl_id)
+                        .await
+                        .unwrap_or(0);
+                    if deleted_count > 0 {
+                        debug!(
+                            "Soft-deleted {} track(s) from playlist '{}'",
+                            deleted_count, playlist_name
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to acquire connection for soft-delete tracks of '{}': {:?}",
+                        playlist_name, e
+                    );
+                }
+            }
         }
 
         // Get tracks for this playlist
@@ -1380,5 +1392,4 @@ impl SpotifySyncWorker {
         self.store_track_core_with_added_at(&info, playlist_id, position, added_at)
             .await
     }
-
 }

@@ -646,6 +646,8 @@ pub struct Playlist {
     pub updated_at: i64,
     pub metadata_json: Option<String>,
     pub tag_name: Option<String>,
+    pub archive_deleted: bool,
+    pub total_track_count: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -708,6 +710,7 @@ pub struct PlaylistsQuery {
     pub categories: Option<String>, // comma-separated category IDs: 1,2,3,4,5
     pub subscribed: Option<bool>,   // true = only subscribed, false = only unsubscribed
     pub stale: Option<bool>,        // true = only playlists where local < remote_unique
+    pub archive: Option<String>,    // archived/active/all
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1188,6 +1191,10 @@ pub fn router() -> Router<Arc<AppState>> {
             get(playlist_comment_diff_stats_handler),
         )
         .route("/api/playlists/local", post(create_local_playlist_handler))
+        .route(
+            "/api/playlists/{id}/archive",
+            put(toggle_playlist_archive_handler),
+        )
         .route(
             "/api/services/spotify/sync/playlists",
             post(spotify_sync_playlists_handler),
@@ -5967,6 +5974,25 @@ async fn create_local_playlist_handler(
     (StatusCode::OK, Json(ApiResponse { data: response })).into_response()
 }
 
+/// Toggle the archive_deleted flag for a playlist.
+/// When enabled, deleted tracks are still considered active for tag resolution.
+async fn toggle_playlist_archive_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use serde_json::json;
+
+    let archive = body
+        .get("archiveDeleted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    match crate::db::set_playlist_archive_deleted(&state.db, id, archive).await {
+        Ok(()) => Json(json!({"data": {"id": id, "archiveDeleted": archive}})).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
 // Get paginated playlists from all services
 async fn playlists_handler(
     State(state): State<Arc<AppState>>,
@@ -5984,10 +6010,7 @@ async fn playlists_handler(
     // LEFT JOIN v_tag_playlist with DISTINCT subquery to avoid cartesian product
     // when multiple tags match the same playlist via case-insensitive name matching.
     let mut main_builder = QueryBuilder::new(
-        "SELECT sp.*, COUNT(spt.track_id) as track_count, vtp.tag_name
-         FROM service_playlists sp
-         LEFT JOIN service_playlist_tracks spt ON sp.id = spt.playlist_id
-         LEFT JOIN (SELECT DISTINCT playlist_id, tag_name FROM v_tag_playlist) vtp ON vtp.playlist_id = sp.id",
+        "SELECT sp.*, \n               COUNT(CASE WHEN spt.deleted_at IS NULL THEN 1 END) as track_count, \n               COUNT(spt.track_id) as total_track_count,\n               vtp.tag_name\n         FROM service_playlists sp\n         LEFT JOIN service_playlist_tracks spt ON sp.id = spt.playlist_id\n         LEFT JOIN (SELECT DISTINCT playlist_id, tag_name FROM v_tag_playlist) vtp ON vtp.playlist_id = sp.id",
     );
 
     let mut count_builder =
@@ -6081,6 +6104,22 @@ async fn playlists_handler(
         let stale_sub = "(SELECT COUNT(*) FROM service_playlist_tracks spt2 WHERE spt2.playlist_id = sp.id) < sp.remote_unique_count";
         main_builder.push(format!("{}{}", stale_clause, stale_sub));
         count_builder.push(format!("{}{}", stale_clause, stale_sub));
+    }
+
+    // Archive filter: archived (archive_deleted = true), active (archive_deleted = false), all
+    if let Some(ref archive_filter) = query.archive {
+        let clause = if has_where { " AND " } else { " WHERE " };
+        match archive_filter.as_str() {
+            "archived" => {
+                main_builder.push(format!("{}sp.archive_deleted = 1", clause));
+                count_builder.push(format!("{}sp.archive_deleted = 1", clause));
+            }
+            "active" => {
+                main_builder.push(format!("{}sp.archive_deleted = 0", clause));
+                count_builder.push(format!("{}sp.archive_deleted = 0", clause));
+            }
+            _ => {} // "all" — no filter
+        }
     }
 
     main_builder.push(" GROUP BY sp.id");
@@ -6214,6 +6253,7 @@ async fn playlists_handler(
                 "description": p.description,
                 "trackCount": p.track_count,
                 "localTrackCount": p.track_count,
+                "totalTrackCount": p.total_track_count,
                 "remoteTrackCount": p.remote_track_count,
                 "remoteUniqueCount": p.remote_unique_count,
                 "lastFetchedAt": p.last_fetched_at,
@@ -6221,6 +6261,7 @@ async fn playlists_handler(
                 "updatedAt": p.updated_at,
                 "metadataJson": p.metadata_json,
                 "tagName": p.tag_name,
+                "archiveDeleted": p.archive_deleted,
                 "deemixStatus": deemix_status,
                 "deemixId": deemix_id,
             })

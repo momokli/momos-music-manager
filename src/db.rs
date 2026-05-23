@@ -76,6 +76,7 @@ pub struct ServicePlaylist {
     pub last_fetched_at: Option<i64>,
     pub remote_track_count: i64,
     pub remote_unique_count: i64,
+    pub archive_deleted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -84,6 +85,7 @@ pub struct ServicePlaylistTrack {
     pub track_id: i64,
     pub position: Option<i32>,
     pub added_at: i64,
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -1963,7 +1965,7 @@ pub async fn update_playlist_fetch_tracking(
         SELECT COUNT(*)
         FROM service_playlist_tracks spt
         JOIN service_playlists sp ON sp.id = spt.playlist_id
-        WHERE sp.service = ?1 AND sp.playlist_id = ?2
+        WHERE sp.service = ?1 AND sp.playlist_id = ?2 AND spt.deleted_at IS NULL
         "#,
     )
     .bind(service)
@@ -2090,8 +2092,12 @@ pub async fn add_track_to_playlist_with_added_at(
 
     sqlx::query(
         r#"
-        INSERT OR IGNORE INTO service_playlist_tracks (playlist_id, track_id, position, added_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO service_playlist_tracks (playlist_id, track_id, position, added_at, deleted_at)
+        VALUES (?, ?, ?, ?, NULL)
+        ON CONFLICT(playlist_id, track_id) DO UPDATE SET
+            position = excluded.position,
+            added_at = excluded.added_at,
+            deleted_at = NULL
         "#,
     )
     .bind(playlist_id)
@@ -2101,6 +2107,39 @@ pub async fn add_track_to_playlist_with_added_at(
     .execute(conn)
     .await?;
 
+    Ok(())
+}
+
+/// Mark all active tracks in a playlist as soft-deleted.
+/// Used before re-syncing from Spotify — tracks no longer in the stream remain deleted.
+pub async fn mark_playlist_tracks_deleted(
+    conn: &mut SqliteConnection,
+    playlist_id: i64,
+) -> Result<u64> {
+    let now = chrono::Utc::now().timestamp();
+    let rows = sqlx::query(
+        "UPDATE service_playlist_tracks SET deleted_at = ? WHERE playlist_id = ? AND deleted_at IS NULL"
+    )
+    .bind(now)
+    .bind(playlist_id)
+    .execute(conn)
+    .await?;
+    Ok(rows.rows_affected())
+}
+
+/// Toggle the archive_deleted flag for a playlist.
+/// When true: deleted tracks remain active for tag resolution.
+/// When false: deleted tracks are excluded from tag resolution.
+pub async fn set_playlist_archive_deleted(
+    pool: &Pool<Sqlite>,
+    playlist_id: i64,
+    archive: bool,
+) -> Result<()> {
+    sqlx::query("UPDATE service_playlists SET archive_deleted = ? WHERE id = ?")
+        .bind(archive)
+        .bind(playlist_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
