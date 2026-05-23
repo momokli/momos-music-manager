@@ -126,6 +126,7 @@ async fn run_poll_cycle(
                 Ok(stream) => break stream,
                 Err(e) => {
                     if let Some(secs) = extract_retry_after_secs(&e) {
+                        let clamped = secs.min(300);
                         attempt += 1;
                         if attempt >= 3 {
                             error!(
@@ -134,9 +135,9 @@ async fn run_poll_cycle(
                             );
                             return Err(e);
                         }
-                        let sleep_secs = secs + 1;
+                        let sleep_secs = clamped + 1;
                         warn!(
-                            "Global poller: rate limited fetching playlist list. Retry-After: {} ({secs}s), attempt {attempt}/3, waiting {sleep_secs}s",
+                            "Global poller: rate limited fetching playlist list. Retry-After: {} ({secs}s total, clamped to {clamped}s), attempt {attempt}/3, waiting {sleep_secs}s",
                             format_duration(secs),
                         );
                         tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
@@ -332,12 +333,13 @@ async fn fetch_and_store_playlist_tracks(
             Ok(item) => item,
             Err(e) => {
                 if let Some(secs) = extract_retry_after_secs(&e) {
+                    let clamped = secs.min(300);
                     warn!(
-                        "Global poller: rate limited on '{}' tracks. Retry-After: {} ({secs}s)",
+                        "Global poller: rate limited on '{}' tracks. Retry-After: {} ({secs}s total, clamped to {clamped}s)",
                         playlist.name,
                         format_duration(secs),
                     );
-                    tokio::time::sleep(Duration::from_secs(secs + 1)).await;
+                    tokio::time::sleep(Duration::from_secs(clamped + 1)).await;
                     continue;
                 }
                 warn!(

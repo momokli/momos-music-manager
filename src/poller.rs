@@ -34,7 +34,7 @@ use crate::db;
 use crate::deemix::DeemixClient;
 use crate::spotify::client::SpotifyClient;
 use crate::spotify::models::TrackInfo;
-use crate::spotify::retry::{extract_retry_after_clamped, format_duration};
+use crate::spotify::retry::{extract_retry_after_secs, format_duration};
 
 use std::time::Duration;
 
@@ -169,16 +169,17 @@ async fn poll_subscribed_playlist(
             match spotify_client.get_playlist(&subscription.playlist_id).await {
                 Ok(p) => break p,
                 Err(e) => {
-                    if let Some(raw_secs) = extract_retry_after_clamped(&e) {
+                    if let Some(raw_secs) = extract_retry_after_secs(&e) {
+                        let clamped = raw_secs.min(300);
                         attempt += 1;
                         if attempt >= 3 {
                             return Err(e)
                                 .context("Failed to fetch playlist from Spotify after 3 retries");
                         }
-                        let sleep_secs = raw_secs + 1;
+                        let sleep_secs = clamped + 1;
                         warn!(
                             "Subscription poller: rate limited fetching playlist '{}'. \
-                             Retry-After: {} ({raw_secs}s), attempt {attempt}/3, waiting {sleep_secs}s",
+                             Retry-After: {} ({raw_secs}s total, clamped to {clamped}s), attempt {attempt}/3, waiting {sleep_secs}s",
                             subscription.playlist_id,
                             format_duration(raw_secs),
                         );
@@ -238,15 +239,16 @@ async fn poll_subscribed_playlist(
             {
                 Ok(s) => break s,
                 Err(e) => {
-                    if let Some(raw_secs) = extract_retry_after_clamped(&e) {
+                    if let Some(raw_secs) = extract_retry_after_secs(&e) {
+                        let clamped = raw_secs.min(300);
                         attempt += 1;
                         if attempt >= 3 {
                             return Err(e).context("Failed to get playlist tracks after 3 retries");
                         }
-                        let sleep_secs = raw_secs + 1;
+                        let sleep_secs = clamped + 1;
                         warn!(
                             "Subscription poller: rate limited fetching tracks for playlist '{}'. \
-                             Retry-After: {} ({raw_secs}s), attempt {attempt}/3, waiting {sleep_secs}s",
+                             Retry-After: {} ({raw_secs}s total, clamped to {clamped}s), attempt {attempt}/3, waiting {sleep_secs}s",
                             subscription.playlist_id,
                             format_duration(raw_secs),
                         );
