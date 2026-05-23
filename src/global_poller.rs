@@ -107,9 +107,14 @@ async fn run_poll_cycle(
     }
 
     // ── Step 1: Fetch stored snapshots from DB ───────────────────────────
-    let db_snapshots: std::collections::HashMap<String, Option<String>> =
+    // Store (db_id, snapshot_id) so we can query track counts for staleness
+    // checks when the snapshot matches.
+    let db_snapshots: std::collections::HashMap<String, (i64, Option<String>)> =
         match db::get_spotify_playlist_snapshots(db).await {
-            Ok(rows) => rows.into_iter().map(|(_, pid, sid)| (pid, sid)).collect(),
+            Ok(rows) => rows
+                .into_iter()
+                .map(|(db_id, pid, sid)| (pid, (db_id, sid)))
+                .collect(),
             Err(e) => {
                 error!("Global poller: failed to query stored snapshots: {:#}", e);
                 return Err(e);
@@ -193,11 +198,11 @@ async fn run_poll_cycle(
             break;
         }
 
-        let stored_snapshot = db_snapshots.get(&sp.id);
+        let stored_info = db_snapshots.get(&sp.id);
 
-        match stored_snapshot {
+        match stored_info {
             None => {
-                // New playlist
+                // New playlist — not in DB at all
                 new_playlists += 1;
                 match fetch_and_store_playlist_tracks(db, &spotify_client, sp, cancel_token).await {
                     Ok(track_count) => {
@@ -215,8 +220,74 @@ async fn run_poll_cycle(
                     }
                 }
             }
-            Some(Some(stored_sid)) if stored_sid == &sp.snapshot_id => {
-                skipped_playlists += 1;
+            Some((db_id, Some(stored_sid))) if stored_sid == &sp.snapshot_id => {
+                // Snapshot matches — check if stale or cold-start
+                match db::get_playlist_staleness(db, *db_id).await {
+                    Ok((local_count, remote_unique_count, remote_track_count, last_fetched_at)) => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+
+                        let is_stale = local_count < remote_unique_count;
+                        let is_cold_start = local_count == 0
+                            && remote_track_count > 0
+                            && !last_fetched_at
+                                .map(|ts| now - ts <= config.cold_start_threshold_secs as i64)
+                                .unwrap_or(false);
+
+                        if is_stale || is_cold_start {
+                            changed_playlists += 1;
+                            match fetch_and_store_playlist_tracks(
+                                db,
+                                &spotify_client,
+                                sp,
+                                cancel_token,
+                            )
+                            .await
+                            {
+                                Ok(count) => {
+                                    new_tracks_total += count;
+                                    info!(
+                                        "Global poller: {} playlist '{}' healed, {} new track(s)",
+                                        if is_stale { "stale" } else { "cold-start" },
+                                        sp.name,
+                                        count,
+                                    );
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Global poller: failed to heal {} playlist '{}': {:#}",
+                                        if is_stale { "stale" } else { "cold-start" },
+                                        sp.name,
+                                        e,
+                                    );
+                                }
+                            }
+                        } else {
+                            skipped_playlists += 1;
+                            let reason = if local_count == 0 && remote_track_count == 0 {
+                                "empty playlist".to_string()
+                            } else {
+                                format!(
+                                    "local={}, remote_unique={}",
+                                    local_count, remote_unique_count
+                                )
+                            };
+                            debug!(
+                                "Global poller: skipping '{}' — snapshot matches, {}",
+                                sp.name, reason,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "Global poller: failed to check staleness for '{}': {:#}",
+                            sp.name, e,
+                        );
+                        skipped_playlists += 1;
+                    }
+                }
             }
             Some(_) => {
                 // Snapshot differs or was NULL — changed

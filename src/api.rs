@@ -2134,10 +2134,11 @@ async fn tracks_needs_comment_count_handler(
                     if let Some(file) = file_map.get(file_id) {
                         let current = file.comment.as_deref().unwrap_or("");
                         if let Ok(target) = compute_target_comment(&state.db, *file_id).await
-                            && current != target {
-                                track_needs = true;
-                                // files_needing_update is deduped by checked_files below
-                            }
+                            && current != target
+                        {
+                            track_needs = true;
+                            // files_needing_update is deduped by checked_files below
+                        }
                     }
                     continue;
                 }
@@ -2145,10 +2146,11 @@ async fn tracks_needs_comment_count_handler(
                 if let Some(file) = file_map.get(file_id) {
                     let current = file.comment.as_deref().unwrap_or("");
                     if let Ok(target) = compute_target_comment(&state.db, *file_id).await
-                        && current != target {
-                            files_needing_update += 1;
-                            track_needs = true;
-                        }
+                        && current != target
+                    {
+                        files_needing_update += 1;
+                        track_needs = true;
+                    }
                 }
             }
             if track_needs {
@@ -5622,13 +5624,15 @@ async fn spotify_sync_playlists_batch_handler(
     // Query for matching Spotify playlists based on mode
     let playlist_ids: Vec<String> = match body.mode.as_str() {
         "stale" => {
-            // Playlists where local != remote (any mismatch)
+            // Playlists where local < remote_unique (missing tracks).
+            // Uses remote_unique_count instead of remote_track_count to avoid
+            // false positives from episodes/duplicates that don't map to tracks.
             match sqlx::query_scalar::<_, String>(
                 r#"
                 SELECT sp.playlist_id
                 FROM service_playlists sp
                 WHERE sp.service = 'spotify'
-                  AND (SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id) != sp.remote_track_count
+                  AND (SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id) < sp.remote_unique_count
                 "#,
             )
             .fetch_all(&state.db)
@@ -7684,9 +7688,10 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     }
 
     if let Some(pid) = playlist_id_filter
-        && playlists_filter.is_none() {
-            query_builder = query_builder.bind(pid);
-        }
+        && playlists_filter.is_none()
+    {
+        query_builder = query_builder.bind(pid);
+    }
 
     // Playlists filter binds
     if let Some(ref pl_names) = playlists_filter {
@@ -8052,9 +8057,10 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
     }
 
     if let Some(pid) = playlist_id_filter
-        && playlists_filter.is_none() {
-            query_builder = query_builder.bind(pid);
-        }
+        && playlists_filter.is_none()
+    {
+        query_builder = query_builder.bind(pid);
+    }
 
     // Playlists filter binds
     if let Some(ref pl_names) = playlists_filter {
@@ -9024,40 +9030,40 @@ async fn file_stream_handler(
     if let Some(range_str) = range_header {
         // Parse "bytes=start-end"
         if let Some(range_val) = range_str.strip_prefix("bytes=")
-            && let Some((start_str, end_str)) = range_val.split_once('-') {
-                let start: u64 = start_str.parse().unwrap_or(0);
-                let end: u64 = end_str.parse().unwrap_or(file_size - 1);
-                let end = end.min(file_size - 1);
-                let length = end - start + 1;
+            && let Some((start_str, end_str)) = range_val.split_once('-')
+        {
+            let start: u64 = start_str.parse().unwrap_or(0);
+            let end: u64 = end_str.parse().unwrap_or(file_size - 1);
+            let end = end.min(file_size - 1);
+            let length = end - start + 1;
 
-                // Open file and seek
-                let mut file = match TokioFile::open(file_path).await {
-                    Ok(f) => f,
-                    Err(_) => {
-                        return (StatusCode::INTERNAL_SERVER_ERROR, "Cannot open file")
-                            .into_response();
-                    }
-                };
-
-                let mut buf = vec![0u8; length as usize];
-                if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "Seek error").into_response();
+            // Open file and seek
+            let mut file = match TokioFile::open(file_path).await {
+                Ok(f) => f,
+                Err(_) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Cannot open file").into_response();
                 }
-                if file.read_exact(&mut buf).await.is_err() {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "Read error").into_response();
-                }
+            };
 
-                let content_range = format!("bytes {}-{}/{}", start, end, file_size);
-                let headers = [
-                    (header::CONTENT_TYPE, content_type),
-                    (header::CONTENT_RANGE, content_range.as_str()),
-                    (header::CONTENT_LENGTH, &length.to_string()),
-                    (header::ACCEPT_RANGES, "bytes"),
-                    (header::CACHE_CONTROL, "no-cache"),
-                ];
-
-                return (StatusCode::PARTIAL_CONTENT, headers, buf).into_response();
+            let mut buf = vec![0u8; length as usize];
+            if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Seek error").into_response();
             }
+            if file.read_exact(&mut buf).await.is_err() {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Read error").into_response();
+            }
+
+            let content_range = format!("bytes {}-{}/{}", start, end, file_size);
+            let headers = [
+                (header::CONTENT_TYPE, content_type),
+                (header::CONTENT_RANGE, content_range.as_str()),
+                (header::CONTENT_LENGTH, &length.to_string()),
+                (header::ACCEPT_RANGES, "bytes"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ];
+
+            return (StatusCode::PARTIAL_CONTENT, headers, buf).into_response();
+        }
     }
 
     // 5. Full-file response (no Range header)

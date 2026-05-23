@@ -825,17 +825,18 @@ pub async fn scan_directory_with_config(
                     since: Some(cutoff),
                 } = &scan_mode
                     && let Ok(metadata) = entry.metadata()
-                        && let Ok(modified) = metadata.modified() {
-                            let mtime = modified
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs() as i64)
-                                .unwrap_or(0);
-                            if mtime <= *cutoff {
-                                // File hasn't changed since last scan, skip it
-                                skipped_files += 1;
-                                continue;
-                            }
-                        }
+                    && let Ok(modified) = metadata.modified()
+                {
+                    let mtime = modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    if mtime <= *cutoff {
+                        // File hasn't changed since last scan, skip it
+                        skipped_files += 1;
+                        continue;
+                    }
+                }
 
                 match scan_and_store_file(pool, path).await {
                     Ok(_) => {
@@ -3014,20 +3015,62 @@ pub async fn update_playlist_snapshot(
     Ok(())
 }
 
+/// Get playlist staleness info by DB id.
+/// Returns (local_count, remote_unique_count, remote_track_count, last_fetched_at).
+pub async fn get_playlist_staleness(
+    pool: &Pool<Sqlite>,
+    db_playlist_id: i64,
+) -> Result<(i64, i64, i64, Option<i64>)> {
+    let row = sqlx::query_as::<_, (i64, i64, i64, Option<i64>)>(
+        r#"
+        SELECT
+            COALESCE((SELECT COUNT(*) FROM service_playlist_tracks WHERE playlist_id = ?), 0) AS local_count,
+            COALESCE(remote_unique_count, 0),
+            COALESCE(remote_track_count, 0),
+            last_fetched_at
+        FROM service_playlists
+        WHERE id = ?
+        "#,
+    )
+    .bind(db_playlist_id)
+    .bind(db_playlist_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
+/// Get snapshot and remote info for a subscription's linked service_playlist.
+/// Returns (snapshot_id, remote_unique_count, remote_track_count, last_fetched_at).
+pub async fn get_subscription_playlist_info(
+    pool: &Pool<Sqlite>,
+    service_playlist_id: i64,
+) -> Result<(Option<String>, i64, i64, Option<i64>)> {
+    let row = sqlx::query_as::<_, (Option<String>, i64, i64, Option<i64>)>(
+        r#"
+        SELECT
+            snapshot_id,
+            COALESCE(remote_unique_count, 0),
+            COALESCE(remote_track_count, 0),
+            last_fetched_at
+        FROM service_playlists
+        WHERE id = ?
+        "#,
+    )
+    .bind(service_playlist_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
 /// Mark a playlist as deleted from Spotify (set snapshot_id to NULL so the
 /// global poller knows this playlist no longer exists on the service).
-pub async fn mark_playlist_inactive(
-    pool: &Pool<Sqlite>,
-    db_id: i64,
-) -> Result<()> {
+pub async fn mark_playlist_inactive(pool: &Pool<Sqlite>, db_id: i64) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
-    sqlx::query(
-        "UPDATE service_playlists SET snapshot_id = NULL, updated_at = ?1 WHERE id = ?2",
-    )
-    .bind(now)
-    .bind(db_id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE service_playlists SET snapshot_id = NULL, updated_at = ?1 WHERE id = ?2")
+        .bind(now)
+        .bind(db_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

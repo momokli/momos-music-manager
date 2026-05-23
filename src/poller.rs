@@ -229,6 +229,62 @@ async fn poll_subscribed_playlist(
             .context("Failed to update subscription playlist_id")?;
     }
 
+    // ── Snapshot-based skip: skip track fetch if unchanged ────────────────
+    // If the subscription already points to a service_playlist record, check
+    // the stored snapshot_id. If it matches the current one AND the local
+    // track count meets or exceeds our stored remote_unique_count, the
+    // playlist hasn't changed — no need to fetch tracks, which saves N
+    // paginated API calls per poll cycle.
+    if subscription.service_playlist_id == Some(db_playlist_id) {
+        match db::get_subscription_playlist_info(db, db_playlist_id).await {
+            Ok((stored_snapshot, remote_unique_count, _, _)) => {
+                let local_count = subscription.track_count;
+                let snapshot_matches = stored_snapshot.as_deref() == Some(&playlist.snapshot_id);
+
+                if snapshot_matches && local_count >= remote_unique_count {
+                    debug!(
+                        "Subscription poller: skipping track fetch for '{}' — \
+                         snapshot unchanged, local={}, remote_unique={}",
+                        playlist_name, local_count, remote_unique_count,
+                    );
+                    // Update remote_track_count from metadata so it stays current
+                    let remote_count = playlist.tracks.total as i64;
+                    if let Ok(mut conn) = db.acquire().await {
+                        let _ = db::update_playlist_remote_count(
+                            &mut conn,
+                            "spotify",
+                            &subscription.playlist_id,
+                            remote_count,
+                        )
+                        .await;
+                    }
+                    return Ok(());
+                }
+
+                if !snapshot_matches {
+                    debug!(
+                        "Subscription poller: polling '{}' — snapshot changed \
+                         (was {:?}, now {})",
+                        playlist_name, stored_snapshot, playlist.snapshot_id,
+                    );
+                } else {
+                    debug!(
+                        "Subscription poller: polling '{}' — stale: local={}, remote_unique={}",
+                        playlist_name, local_count, remote_unique_count,
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Subscription poller: failed to query snapshot info for subscription {} \
+                     (playlist_id={}): {:#}",
+                    subscription.id, subscription.playlist_id, e,
+                );
+                // Fall through to normal track fetch
+            }
+        }
+    }
+
     // -- Stream tracks from Spotify and store new ones (with retry) --------
     let track_stream = {
         let mut attempt = 0;

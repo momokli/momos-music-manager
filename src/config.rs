@@ -91,6 +91,7 @@ struct YoutubeToml {
 #[derive(Debug, Clone, Deserialize)]
 struct PollingToml {
     global_interval_secs: Option<u64>,
+    cold_start_threshold_secs: Option<u64>,
 }
 
 // ── Runtime representation ─────────────────────────────────────────────────
@@ -127,6 +128,7 @@ pub struct ServiceCredentials {
 
     // Polling configuration
     pub global_poll_interval_secs: u64,
+    pub cold_start_threshold_secs: u64,
 }
 
 impl ServiceCredentials {
@@ -256,11 +258,22 @@ impl ServiceCredentials {
                         .and_then(|p| p.global_interval_secs)
                 })
                 .unwrap_or(900), // 15 minutes default
+
+            cold_start_threshold_secs: std::env::var("MOMOS_COLD_START_THRESHOLD_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .or_else(|| {
+                    toml_config
+                        .polling
+                        .as_ref()
+                        .and_then(|p| p.cold_start_threshold_secs)
+                })
+                .unwrap_or(86400), // 24 hours default
         };
 
         info!(
-            "Polling config: global_interval={}s",
-            credentials.global_poll_interval_secs,
+            "Polling config: global_interval={}s, cold_start_threshold={}s",
+            credentials.global_poll_interval_secs, credentials.cold_start_threshold_secs,
         );
 
         credentials
@@ -292,6 +305,9 @@ impl ServiceCredentials {
             global_poll_interval_secs: env_var_optional("MOMOS_GLOBAL_POLL_INTERVAL_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(900),
+            cold_start_threshold_secs: env_var_optional("MOMOS_COLD_START_THRESHOLD_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(86400),
         }
     }
 
