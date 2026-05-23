@@ -281,7 +281,7 @@ function renderRows(files) {
         : `<div class="diff-line-old"><span class="diff-sign minus">−</span>${escapeHtml(f.diffOld)}</div>
            <div class="diff-line-new"><span class="diff-sign plus">+</span>${escapeHtml(f.diffNew)}</div>`;
       return `<tr>
-        <td>${escapeHtml(f.title)}</td>
+        <td><a href="#file-detail?id=${f.id}" class="track-title-link">${escapeHtml(f.title)}</a></td>
         <td>${escapeHtml(f.artist)}</td>
         <td>${f.bpm ? formatBPM(f.bpm) : ""}</td>
         <td>${renderKeyBadge(f.key)}</td>
@@ -320,32 +320,7 @@ async function writeComment(id) {
 }
 
 async function viewFile(id) {
-  try {
-    const resp = await fetchJSON(`/api/files/${id}`);
-    const f = adaptFile(resp.data);
-    const detailsHtml = `
-      <div style="display:grid;grid-template-columns:auto 1fr;gap:8px 16px;font-size:0.9rem;">
-        <strong>ID:</strong><span>${f.id}</span>
-        <strong>Title:</strong><span>${escapeHtml(f.title)}</span>
-        <strong>Artist:</strong><span>${escapeHtml(f.artist)}</span>
-        <strong>BPM:</strong><span>${f.bpm ? formatBPM(f.bpm) : "—"}</span>
-        <strong>Key:</strong><span>${renderKeyBadge(f.key)}</span>
-        <strong>Linked:</strong><span>${renderLinkBadge(f.matchedServices)}</span>
-        <strong>Plays:</strong><span>${f.playCount ?? 0}</span>
-        <strong>Last played:</strong><span>${f.lastPlayed || "—"}</span>
-        ${f.diffOld ? `<strong>Comment (current):</strong><span class="diff-line-old">${escapeHtml(f.diffOld)}</span>` : ""}
-        ${f.diffNew ? `<strong>Comment (target):</strong><span class="diff-line-new">${escapeHtml(f.diffNew)}</span>` : ""}
-        ${f.commentUnchanged ? `<strong>Comment:</strong><span>${escapeHtml(f.comment)}</span>` : ""}
-      </div>`;
-
-    showModal({
-      title: escapeHtml(f.title),
-      bodyHtml: `<div style="padding:16px">${detailsHtml}</div>`,
-      width: "600px",
-    });
-  } catch (err) {
-    showToast(`Failed to load file details: ${err.message}`, "error");
-  }
+  window.location.hash = `#file-detail?id=${id}`;
 }
 
 async function showSimilarTracks(id) {

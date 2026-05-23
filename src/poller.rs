@@ -355,7 +355,6 @@ async fn poll_subscribed_playlist(
             _ => continue,
         };
 
-        // Skip items with empty IDs
         if track_info.id.is_empty() {
             debug!("Item '{}' has no Spotify ID, skipping", track_info.name);
             continue;

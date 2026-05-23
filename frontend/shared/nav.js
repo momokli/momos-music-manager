@@ -40,6 +40,7 @@ const TOOLS_ITEMS = [
   { id: "auto-categorize", label: "Auto-Categorize", icon: "fa-brain" },
   { id: "digging", label: "Digging Curator", icon: "fa-bullseye" },
   { id: "data", label: "Import/Export", icon: "fa-database" },
+  { id: "key-comparison", label: "Key Comparison", icon: "fa-scale-balanced" },
 ];
 
 /** @type {string | null} - id of the currently open dropdown section, if any */

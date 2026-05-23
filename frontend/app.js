@@ -28,6 +28,9 @@ const PAGE_MAP = {
   "deemix-queue": "deemix-queue",
   data: "data",
   "tag-curation": "tag-curation",
+  "key-comparison": "key-comparison",
+  "track-detail": "track-detail",
+  "file-detail": "file-detail",
 };
 
 let currentPageId = null;

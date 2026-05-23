@@ -31,17 +31,19 @@ use crate::AppState;
 use crate::config::ServiceCredentials;
 #[allow(unused_imports)]
 use crate::db::{
-    CurationTag, File, Folder, ServiceConfig, ServiceConnections, ServiceTrack,
-    bulk_categorize_tags, bulk_check_tags, bulk_create_tags, bulk_review_tags, bulk_update_tags,
-    categorize_tag as db_categorize_tag, clear_all_embeddings, compute_target_comment, create_tag,
-    create_tag_category, create_tags_from_playlists, delete_folder, delete_tag,
-    delete_tag_category, find_tag_similar_tracks, get_all_embeddings, get_curation_queue,
-    get_embeddings_by_category, get_folder_by_id, get_folder_file_count,
-    get_folders as db_get_folders, get_playlists_without_tags, get_service_config,
-    get_tag_categories, get_tag_category_by_id, get_tag_children, get_tag_embedding,
-    get_tag_parents, get_tag_review_counts, get_tags_for_file, get_unreviewed_tags,
-    list_subscriptions, read_comment_from_file, scan_folder, set_tag_parents, update_folder_active,
-    update_folder_with_config, update_service_connection_status, update_service_tokens, update_tag,
+    CurationTag, File, FileDetail, FileDetailPlaylist, FileDetailTag, Folder, KeyComparisonRow,
+    KeyComparisonSummary, LinkedTrack, ServiceConfig, ServiceConnections, ServiceTrack,
+    TrackDetail, TrackDetailFile, bulk_categorize_tags, bulk_check_tags, bulk_create_tags,
+    bulk_review_tags, bulk_update_tags, categorize_tag as db_categorize_tag, clear_all_embeddings,
+    compute_target_comment, create_tag, create_tag_category, create_tags_from_playlists,
+    delete_folder, delete_tag, delete_tag_category, find_tag_similar_tracks, get_all_embeddings,
+    get_curation_queue, get_embeddings_by_category, get_file_detail, get_folder_by_id,
+    get_folder_file_count, get_folders as db_get_folders, get_key_comparison,
+    get_playlists_without_tags, get_service_config, get_tag_categories, get_tag_category_by_id,
+    get_tag_children, get_tag_embedding, get_tag_parents, get_tag_review_counts, get_tags_for_file,
+    get_track_detail, get_unreviewed_tags, list_subscriptions, read_comment_from_file, scan_folder,
+    set_tag_parents, update_folder_active, update_folder_with_config,
+    update_service_connection_status, update_service_tokens, update_tag,
     update_tag_category_metadata, upsert_tag_embedding,
 };
 use crate::deemix::{
@@ -1038,6 +1040,7 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/files/service-links", get(files_service_links_handler))
         .route("/api/files/{id}", get(file_handler))
+        .route("/api/files/{id}/detail", get(file_detail_handler))
         .route("/api/files/{id}/sync-comment", post(sync_comment_handler))
         .route("/api/files/{id}/write-comment", post(sync_comment_handler))
         .route(
@@ -1086,6 +1089,7 @@ pub fn router() -> Router<Arc<AppState>> {
             post(tracks_refresh_comments_handler),
         )
         .route("/api/tracks/{id}", get(track_handler))
+        .route("/api/tracks/{id}/detail", get(track_detail_handler))
         .route("/api/tags", get(tags_handler).post(create_tag_handler))
         .route("/api/tags/count", get(tags_count_handler))
         .route("/api/tags/curation-queue", get(curation_queue_handler))
@@ -1242,6 +1246,7 @@ pub fn router() -> Router<Arc<AppState>> {
             post(restore_handler).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
         )
         .route("/api/digging/suggest", post(digging_suggest_handler))
+        .route("/api/files/key-comparison", get(key_comparison_handler))
         .route(
             "/api/folders",
             get(folders_handler).post(add_folder_handler),
@@ -2526,6 +2531,56 @@ async fn file_handler(
         Ok(file) => Json(ApiResponse { data: file }).into_response(),
         Err(e) => (
             StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/files/{id}/detail — Rich detail view with Traktor metadata,
+/// linked Spotify track, audio features, tags, and playlists.
+async fn file_detail_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match get_file_detail(&state.db, id).await {
+        Ok(Some(detail)) => Json(ApiResponse { data: detail }).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "File not found".to_string(),
+            }),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/tracks/{id}/detail — Rich detail for a single service track:
+/// track metadata + audio features + linked files + tags + playlists.
+async fn track_detail_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match get_track_detail(&state.db, id).await {
+        Ok(Some(detail)) => Json(ApiResponse { data: detail }).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Track not found".to_string(),
+            }),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 error: e.to_string(),
             }),
@@ -6753,6 +6808,42 @@ async fn add_track_to_playlist_handler(
     .into_response()
 }
 
+/// Query params for the key comparison endpoint.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyComparisonQuery {
+    /// Filter by tag name (optional — returns all linked files if omitted)
+    tag: Option<String>,
+    /// Max results (default 500)
+    limit: Option<i64>,
+}
+
+/// Compare Traktor vs Spotify BPM/Key for linked files.
+///
+/// GET /api/files/key-comparison?tag=Collapse-capital&limit=100
+///
+/// Returns side-by-side comparison with match/mismatch summary.
+async fn key_comparison_handler(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<KeyComparisonQuery>,
+) -> impl IntoResponse {
+    match get_key_comparison(&state.db, q.tag.as_deref(), q.limit).await {
+        Ok((rows, summary)) => {
+            let response = serde_json::json!({
+                "data": {
+                    "files": rows,
+                    "summary": summary
+                }
+            });
+            Json(response).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Key comparison failed: {e:?}");
+            internal_error(e).into_response()
+        }
+    }
+}
+
 async fn ws_handler() -> impl IntoResponse {
     // TODO: Implement WebSocket handler — for real-time task progress updates to frontend
     "WebSocket endpoint".into_response()
@@ -7519,7 +7610,7 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         "SELECT DISTINCT st.* FROM service_tracks st JOIN service_playlist_tracks spt ON spt.track_id = st.id WHERE 1=1"
             .to_string()
     } else {
-        "SELECT * FROM service_tracks WHERE 1=1".to_string()
+        "SELECT * FROM service_tracks st WHERE 1=1".to_string()
     };
 
     if search_pattern.is_some() {

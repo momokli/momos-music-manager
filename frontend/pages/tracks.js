@@ -150,7 +150,8 @@ function formatTimestamp(ts) {
  * Each function receives a track object and returns HTML for the <td>.
  */
 const TRACKS_CELL_RENDERERS = {
-  title: (t) => escapeHtml(t.title),
+  title: (t) =>
+    `<a href="#track-detail?id=${t.id}" class="track-title-link">${escapeHtml(t.title)}</a>`,
   artist: (t) => escapeHtml(t.artist),
   service: (t) =>
     `<span class="service-badge ${t.service}"><i class="fab fa-${t.service}"></i> ${t.service.charAt(0).toUpperCase() + t.service.slice(1)}</span>`,

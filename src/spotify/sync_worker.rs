@@ -292,12 +292,12 @@ impl SpotifySyncWorker {
                             remote_total,
                         )
                         .await
-                        {
-                            error!(
-                                "Failed to update remote count for {}: {:?}",
-                                playlist.name, e
-                            );
-                        }
+                    {
+                        error!(
+                            "Failed to update remote count for {}: {:?}",
+                            playlist.name, e
+                        );
+                    }
 
                     // In record mode, also buffer for cache
                     if self.cache_mode.should_record() {
@@ -629,9 +629,9 @@ impl SpotifySyncWorker {
                     track_count as i64,
                 )
                 .await
-                {
-                    error!("REPLAY: Failed to update fetch tracking: {:?}", e);
-                }
+            {
+                error!("REPLAY: Failed to update fetch tracking: {:?}", e);
+            }
 
             {
                 let mut progress = self.progress.write().await;
@@ -718,12 +718,12 @@ impl SpotifySyncWorker {
                 .bind(pl_id)
                 .execute(&self.db)
                 .await
-            {
-                error!(
-                    "Failed to cleanup playlist {} before sync: {:?}",
-                    playlist_name, e
-                );
-            }
+        {
+            error!(
+                "Failed to cleanup playlist {} before sync: {:?}",
+                playlist_name, e
+            );
+        }
 
         // Get tracks for this playlist
         let mut tracks_stream = self.spotify_client.get_playlist_tracks(playlist_id).await?;
@@ -1380,4 +1380,5 @@ impl SpotifySyncWorker {
         self.store_track_core_with_added_at(&info, playlist_id, position, added_at)
             .await
     }
+
 }

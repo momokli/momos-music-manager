@@ -2776,6 +2776,555 @@ pub async fn get_tags_for_file(pool: &Pool<Sqlite>, file_id: i64) -> Result<Vec<
     Ok(tags)
 }
 
+/// Comparison row: side-by-side Traktor vs Spotify BPM/Key for a linked file.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyComparisonRow {
+    pub file_id: i64,
+    pub title: String,
+    pub artist: Option<String>,
+    /// Traktor BPM (from files.bpm tag)
+    pub traktor_bpm: Option<f64>,
+    /// Traktor key in Camelot notation (from files.musical_key tag, e.g. "3m")
+    pub traktor_key: Option<String>,
+    /// Spotify BPM (from audio features tempo)
+    pub spotify_bpm: Option<f64>,
+    /// Spotify key converted to Camelot notation
+    pub spotify_key: Option<String>,
+    /// Spotify raw key (0=C..11=B)
+    pub spotify_key_raw: Option<i32>,
+    /// Spotify mode (0=minor, 1=major)
+    pub spotify_mode: Option<i32>,
+    /// Do Traktor and Spotify agree on BPM? (±1 BPM tolerance)
+    pub bpm_match: Option<bool>,
+    /// Do Traktor and Spotify agree on Camelot key?
+    pub key_match: Option<bool>,
+    /// Audio features: danceability
+    pub spotify_danceability: Option<f64>,
+    /// Audio features: energy
+    pub spotify_energy: Option<f64>,
+    /// Audio features: valence
+    pub spotify_valence: Option<f64>,
+}
+
+/// Comparison summary: aggregated statistics from a key comparison.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyComparisonSummary {
+    pub total_compared: usize,
+    pub bpm_match_count: usize,
+    pub bpm_mismatch_count: usize,
+    pub key_match_count: usize,
+    pub key_mismatch_count: usize,
+}
+
+/// Rich detail view for a single file: Traktor metadata + linked Spotify track
+/// with audio features + tags + playlists.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDetail {
+    // ── File (Traktor) ──
+    pub id: i64,
+    pub file_path: String,
+    pub file_type: String,
+    pub file_size: i64,
+    pub isrc: Option<String>,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub genre: Option<String>,
+    pub year: Option<i32>,
+    pub duration_ms: Option<i64>,
+    pub bitrate: Option<i32>,
+    pub sample_rate: Option<i32>,
+    pub channels: Option<i32>,
+    pub bpm: Option<f64>,
+    pub musical_key: Option<String>,
+    pub comment: Option<String>,
+    pub rating: Option<i32>,
+    pub play_count: Option<i32>,
+    pub last_played: Option<i64>,
+    // ── ALL linked tracks (not just Spotify) ──
+    pub tracks: Vec<LinkedTrack>,
+    // ── Tags ──
+    pub tags: Vec<FileDetailTag>,
+    // ── Playlists ──
+    pub playlists: Vec<FileDetailPlaylist>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedTrack {
+    pub id: i64,
+    pub service: String,
+    pub service_id: String,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub isrc: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub popularity: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackDetail {
+    pub id: i64,
+    pub service: String,
+    pub service_id: String,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub isrc: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub popularity: Option<i32>,
+    // Linked files + tags + playlists
+    pub files: Vec<TrackDetailFile>,
+    pub tags: Vec<FileDetailTag>,
+    pub playlists: Vec<FileDetailPlaylist>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackDetailFile {
+    pub id: i64,
+    pub file_path: String,
+    pub file_type: String,
+    pub file_size: i64,
+    pub isrc: Option<String>,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub bpm: Option<f64>,
+    pub musical_key: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub bitrate: Option<i32>,
+    pub sample_rate: Option<i32>,
+    pub channels: Option<i32>,
+    pub comment: Option<String>,
+    pub rating: Option<i32>,
+    pub play_count: Option<i32>,
+    pub last_played: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDetailTag {
+    pub id: i64,
+    pub name: String,
+    pub category_name: String,
+    pub prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDetailPlaylist {
+    pub id: i64,
+    pub name: String,
+    pub service: String,
+}
+
+/// Fetch rich detail for a single file: Traktor metadata + ALL linked tracks
+/// (via v_file_track_link) with audio features + tags + playlists.
+pub async fn get_file_detail(pool: &Pool<Sqlite>, file_id: i64) -> Result<Option<FileDetail>> {
+    // 1. Fetch the file
+    let file = sqlx::query_as::<_, File>("SELECT * FROM files WHERE id = ?")
+        .bind(file_id)
+        .fetch_optional(pool)
+        .await?;
+
+    let Some(file) = file else {
+        return Ok(None);
+    };
+
+    // 2. Fetch ALL linked tracks via v_file_track_link
+    #[derive(Debug, FromRow)]
+    struct TrackRow {
+        id: i64,
+        service: String,
+        service_id: String,
+        title: String,
+        artist: String,
+        album: Option<String>,
+        isrc: Option<String>,
+        duration_ms: Option<i64>,
+        metadata_json: Option<String>,
+    }
+
+    let track_rows: Vec<TrackRow> = sqlx::query_as(
+        r#"
+        SELECT st.id, st.service, st.service_id, st.title, st.artist, st.album,
+               st.isrc, st.duration_ms, st.metadata_json
+        FROM v_file_track_link v
+        JOIN service_tracks st ON st.id = v.track_id
+        WHERE v.file_id = ?
+        "#,
+    )
+    .bind(file_id)
+    .fetch_all(pool)
+    .await?;
+
+    let tracks: Vec<LinkedTrack> = track_rows
+        .into_iter()
+        .map(|r| {
+            let popularity = r
+                .metadata_json
+                .as_ref()
+                .and_then(|json_str| {
+                    serde_json::from_str::<serde_json::Value>(json_str)
+                        .ok()
+                        .and_then(|v| v.get("popularity").and_then(|p| p.as_i64()))
+                })
+                .map(|p| p as i32);
+
+            LinkedTrack {
+                id: r.id,
+                service: r.service,
+                service_id: r.service_id,
+                title: r.title,
+                artist: r.artist,
+                album: r.album,
+                isrc: r.isrc,
+                duration_ms: r.duration_ms,
+                popularity,
+            }
+        })
+        .collect();
+
+    // 3. Fetch tags via v_file_resolved_tags
+    let tags: Vec<FileDetailTag> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT rt.tag_id as id, rt.tag_name as name,
+               rt.category_name, rt.prefix
+        FROM v_file_resolved_tags rt
+        WHERE rt.file_id = ?
+        ORDER BY rt.category_name, rt.tag_name
+        "#,
+    )
+    .bind(file_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    // 4. Fetch linked playlists
+    let playlists: Vec<FileDetailPlaylist> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT sp.id, sp.name, sp.service
+        FROM v_file_track_link v
+        JOIN service_playlist_tracks spt ON spt.track_id = v.track_id
+        JOIN service_playlists sp ON sp.id = spt.playlist_id
+        WHERE v.file_id = ?
+        ORDER BY sp.name
+        "#,
+    )
+    .bind(file_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    Ok(Some(FileDetail {
+        id: file.id,
+        file_path: file.file_path,
+        file_type: file.file_type,
+        file_size: file.file_size,
+        isrc: file.isrc,
+        title: file.title,
+        artist: file.artist,
+        album: file.album,
+        genre: file.genre,
+        year: file.year,
+        duration_ms: file.duration_ms,
+        bitrate: file.bitrate,
+        sample_rate: file.sample_rate,
+        channels: file.channels,
+        bpm: file.bpm,
+        musical_key: file.musical_key,
+        comment: file.comment,
+        rating: if file.rating > 0 {
+            Some(file.rating)
+        } else {
+            None
+        },
+        play_count: Some(file.play_count),
+        last_played: file.last_played,
+        tracks,
+        tags,
+        playlists,
+    }))
+}
+
+/// Fetch rich detail for a single service track: track metadata + audio features
+/// + ALL linked files (via v_file_track_link) + tags + playlists.
+pub async fn get_track_detail(pool: &Pool<Sqlite>, track_id: i64) -> Result<Option<TrackDetail>> {
+    // 1. Fetch the service track
+    #[derive(Debug, FromRow)]
+    struct TrackRow {
+        id: i64,
+        service: String,
+        service_id: String,
+        title: String,
+        artist: String,
+        album: Option<String>,
+        isrc: Option<String>,
+        duration_ms: Option<i64>,
+        metadata_json: Option<String>,
+        imported_at: i64,
+        updated_at: i64,
+    }
+
+    let track = sqlx::query_as::<_, TrackRow>(
+        r#"SELECT id, service, service_id, title, artist, album,
+                  isrc, duration_ms, metadata_json, imported_at, updated_at
+           FROM service_tracks WHERE id = ?"#,
+    )
+    .bind(track_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(track) = track else {
+        return Ok(None);
+    };
+
+    let popularity = track
+        .metadata_json
+        .as_ref()
+        .and_then(|json_str| {
+            serde_json::from_str::<serde_json::Value>(json_str)
+                .ok()
+                .and_then(|v| v.get("popularity").and_then(|p| p.as_i64()))
+        })
+        .map(|p| p as i32);
+
+    // 2. Fetch ALL linked files via v_file_track_link
+    let files: Vec<TrackDetailFile> = sqlx::query_as(
+        r#"
+        SELECT f.id, f.file_path, f.file_type, f.file_size, f.isrc,
+               f.title, f.artist, f.album, f.bpm, f.musical_key,
+               f.duration_ms, f.bitrate, f.sample_rate, f.channels,
+               f.comment, f.rating, f.play_count, f.last_played
+        FROM v_file_track_link v
+        JOIN files f ON f.id = v.file_id
+        WHERE v.track_id = ?
+        ORDER BY f.file_path
+        "#,
+    )
+    .bind(track_id)
+    .fetch_all(pool)
+    .await?;
+
+    // 3. Fetch tags for this track (via playlist→tag→v_resolved_tags chain)
+    let tags: Vec<FileDetailTag> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT rt.tag_id as id, rt.tag_name as name,
+               rt.category_name, rt.prefix
+        FROM service_playlist_tracks spt
+        JOIN service_playlists sp ON sp.id = spt.playlist_id
+        JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
+        JOIN v_resolved_tags rt ON rt.source_tag_id = t.id
+        WHERE spt.track_id = ?
+        ORDER BY rt.category_name, rt.tag_name
+        "#,
+    )
+    .bind(track_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    // 4. Fetch linked playlists
+    let playlists: Vec<FileDetailPlaylist> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT sp.id, sp.name, sp.service
+        FROM service_playlist_tracks spt
+        JOIN service_playlists sp ON sp.id = spt.playlist_id
+        WHERE spt.track_id = ?
+        ORDER BY sp.name
+        "#,
+    )
+    .bind(track_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    Ok(Some(TrackDetail {
+        id: track.id,
+        service: track.service,
+        service_id: track.service_id,
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        isrc: track.isrc,
+        duration_ms: track.duration_ms,
+        popularity,
+        files,
+        tags,
+        playlists,
+    }))
+}
+
+/// Compare Traktor vs Spotify BPM/Key for files linked to Spotify tracks.
+///
+/// Filters by tag name (resolved via v_file_resolved_tags) and returns
+/// side-by-side comparison with match/mismatch stats.
+pub async fn get_key_comparison(
+    pool: &Pool<Sqlite>,
+    tag: Option<&str>,
+    limit: Option<i64>,
+) -> Result<(Vec<KeyComparisonRow>, KeyComparisonSummary)> {
+    let limit = limit.unwrap_or(500);
+
+    // Query: join files → v_file_track_link → service_tracks, optionally filter by tag
+    let rows = if let Some(tag_name) = tag {
+        sqlx::query_as::<
+            _,
+            (
+                i64,
+                String,
+                Option<String>,
+                Option<f64>,
+                Option<String>,
+                Option<f64>,
+                Option<String>,
+                Option<i32>,
+                Option<i32>,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+            ),
+        >(
+            r#"
+            SELECT DISTINCT
+                f.id, COALESCE(f.title, '') as title, f.artist,
+                f.bpm, f.musical_key,
+                st.spotify_tempo, st.spotify_key_camelot,
+                st.spotify_key_raw, st.spotify_mode,
+                st.spotify_danceability, st.spotify_energy, st.spotify_valence
+            FROM files f
+            JOIN v_file_resolved_tags vft ON vft.file_id = f.id AND vft.tag_name = ?
+            JOIN v_file_track_link v ON v.file_id = f.id
+            JOIN service_tracks st ON st.id = v.track_id AND st.service = 'spotify'
+            ORDER BY f.title
+            LIMIT ?
+            "#,
+        )
+        .bind(tag_name)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<
+            _,
+            (
+                i64,
+                String,
+                Option<String>,
+                Option<f64>,
+                Option<String>,
+                Option<f64>,
+                Option<String>,
+                Option<i32>,
+                Option<i32>,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+            ),
+        >(
+            r#"
+            SELECT DISTINCT
+                f.id, COALESCE(f.title, '') as title, f.artist,
+                f.bpm, f.musical_key,
+                st.spotify_tempo, st.spotify_key_camelot,
+                st.spotify_key_raw, st.spotify_mode,
+                st.spotify_danceability, st.spotify_energy, st.spotify_valence
+            FROM files f
+            JOIN v_file_track_link v ON v.file_id = f.id
+            JOIN service_tracks st ON st.id = v.track_id AND st.service = 'spotify'
+            ORDER BY f.title
+            LIMIT ?
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    };
+
+    let mut results = Vec::with_capacity(rows.len());
+    let mut bpm_match_count = 0usize;
+    let mut bpm_mismatch_count = 0usize;
+    let mut key_match_count = 0usize;
+    let mut key_mismatch_count = 0usize;
+
+    for (
+        file_id,
+        title,
+        artist,
+        traktor_bpm,
+        traktor_key,
+        spotify_bpm,
+        spotify_key,
+        spotify_key_raw,
+        spotify_mode,
+        spotify_danceability,
+        spotify_energy,
+        spotify_valence,
+    ) in rows
+    {
+        // Compare BPM: match if within ±1
+        let bpm_match = match (traktor_bpm, spotify_bpm) {
+            (Some(t), Some(s)) => {
+                let m = (t - s).abs() <= 1.0;
+                if m {
+                    bpm_match_count += 1;
+                } else {
+                    bpm_mismatch_count += 1;
+                }
+                Some(m)
+            }
+            _ => None,
+        };
+
+        // Compare key: match if Camelot notation identical
+        let key_match = match (&traktor_key, &spotify_key) {
+            (Some(t), Some(s)) => {
+                let m = t == s;
+                if m {
+                    key_match_count += 1;
+                } else {
+                    key_mismatch_count += 1;
+                }
+                Some(m)
+            }
+            _ => None,
+        };
+
+        results.push(KeyComparisonRow {
+            file_id,
+            title,
+            artist,
+            traktor_bpm,
+            traktor_key,
+            spotify_bpm,
+            spotify_key,
+            spotify_key_raw,
+            spotify_mode,
+            bpm_match,
+            key_match,
+            spotify_danceability,
+            spotify_energy,
+            spotify_valence,
+        });
+    }
+
+    let summary = KeyComparisonSummary {
+        total_compared: results.len(),
+        bpm_match_count,
+        bpm_mismatch_count,
+        key_match_count,
+        key_mismatch_count,
+    };
+
+    Ok((results, summary))
+}
+
 /// Find tracks with semantically similar tags.
 ///
 /// Returns Vec of (file_id, title, artist, bpm, key, similarity_score, matched_tags_json)
