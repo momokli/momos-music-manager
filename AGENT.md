@@ -1,6 +1,6 @@
 # Momo's Music Manager — Agent Guidance
 
-> **Last Updated**: 2026-05-23 — v0.5.0
+> **Last Updated**: 2026-05-24 — v0.6.0
 
 ---
 
@@ -2914,7 +2914,7 @@ mod soundcloud;
 
 ## Plan: file-lifecycle-management
 
-**Status**: in-progress 🔄
+**Status**: done ✅
 **Branch**: `feat/file-lifecycle-management`
 **Ready for review**: no
 **Depends on**: nothing
@@ -3367,12 +3367,11 @@ Both pages have `[data-filter]` toggle labels (Service, Category, etc.) whose en
 - [ ] No regressions: sort, pagination, search, column config, layout mode, bulk comments still work
 - [ ] `cargo build` passes (no backend changes unless service filter chosen as option B)
 
-
 ---
 
 ## Plan: auto-backup
 
-**Status**: proposed
+**Status**: done ✅
 **Branch**: `feat/auto-backup`
 **Ready for review**: no
 **Depends on**: `feat/file-lifecycle-management` (already merged)
@@ -3384,11 +3383,11 @@ Auto-backup: when a folder has a `backup_path` configured, it automatically reco
 
 ### Current State
 
-| What we have | What's missing |
-|---|---|
-| Reconcile + rsync via "Backup" button | No periodic auto-trigger |
-| Auto-reconcile on server startup | Only runs once at boot |
-| Folder watcher (scans every 5 min) | Watcher only scans, doesn't backup |
+| What we have                          | What's missing                     |
+| ------------------------------------- | ---------------------------------- |
+| Reconcile + rsync via "Backup" button | No periodic auto-trigger           |
+| Auto-reconcile on server startup      | Only runs once at boot             |
+| Folder watcher (scans every 5 min)    | Watcher only scans, doesn't backup |
 
 ### Design
 
@@ -3438,7 +3437,7 @@ tokio::spawn(async move {
         let folders: Vec<crate::db::Folder> = sqlx::query_as::<_, crate::db::Folder>(
             "SELECT * FROM folders WHERE auto_backup = 1 AND backup_path IS NOT NULL AND backup_path != ''"
         ).fetch_all(&auto_db).await.unwrap_or_default();
-        
+
         for folder in folders {
             let unbacked = crate::db::get_unbacked_up_files(&auto_db, folder.id).await.unwrap_or_default();
             if !unbacked.is_empty() {
@@ -3451,6 +3450,7 @@ tokio::spawn(async move {
 ```
 
 This runs every 10 minutes. For each folder with `auto_backup=true`:
+
 - Checks if unbacked files exist
 - If yes, triggers backup task (reconcile first, then rsync only new files)
 - If no, skips (minimal overhead: one lightweight SQL query)
