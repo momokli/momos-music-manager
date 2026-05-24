@@ -2623,3 +2623,868 @@ When `archiveDeleted = true`, show both active + total in the Tracks column:
 - [ ] No regressions: subscription poller + global poller still work (they only add, don't delete)
 - [ ] Backend compiles (`cargo build`)
 - [ ] Test with curl: toggle archive, verify `v_file_tags` returns correct counts
+
+---
+
+## Plan: soundcloud-integration
+
+**Status**: proposed
+**Branch**: `feat/soundcloud-integration`
+**Ready for review**: no
+**Depends on**: nothing
+**Migration needed**: no (SoundCloud already in schema since 001)
+
+### Description
+
+Implement SoundCloud as a first-class service — full playlist + track sync, matching the Spotify integration pattern. The `soundcloud-rs` crate (v0.14.0) is already a dependency. SoundCloud uses a simpler authentication model (no OAuth — auto-discovers `client_id` from their site, or uses a provided `api_key`), so the implementation is simpler than Spotify: no token refresh, no subscription poller needed for v1.
+
+### Current State (already wired)
+
+- **Schema**: `service_tracks` CHECK includes `'soundcloud'`, `files.soundcloud_id` column, `v_file_track_link` matches `service='soundcloud' AND service_id = f.soundcloud_id`, index on `idx_files_soundcloud_id`
+- **Config**: `SoundcloudToml` + `ServiceCredentials.soundcloud_api_key` + `is_soundcloud_configured()`
+- **Frontend**: `services.js` has SoundCloud service meta (name, icon, color `#ff5500`)
+- **API stubs**: `service_sync_handler` returns "not yet implemented", `service_auth_handler` returns "not yet implemented"
+- **Dependency**: `soundcloud-rs = "0.14.0"` in Cargo.toml (already compiles)
+
+### What `soundcloud-rs` provides
+
+| Method                                   | Returns                       | Notes                                          |
+| ---------------------------------------- | ----------------------------- | ---------------------------------------------- |
+| `Client::new()`                          | `Client`                      | Auto-discovers SC `client_id` from site        |
+| `get_user(Identifier)`                   | `User`                        | Full user profile                              |
+| `get_user_playlists(id, Option<Paging>)` | `Playlists(PagingCollection)` | Paginated playlist list                        |
+| `get_playlist(Identifier)`               | `Playlist`                    | Single playlist including `tracks: Vec<Track>` |
+| `health_check()`                         | `bool`                        | `/me` endpoint check                           |
+
+Key models:
+
+- **Playlist**: `id (i32)`, `title`, `track_count`, `tracks: Vec<Track>`, `user (UserSummary)`, `urn`, `permalink_url`, `description`
+- **Track**: `id (i64)`, `title`, `isrc`, `bpm (f64)`, `genre`, `duration (i64 ms)`, `user (UserSummary)`, `urn`, `permalink_url`, `artwork_url`
+- **UserSummary**: `id`, `username`, `permalink_url`, `avatar_url`
+- **Paging**: `limit`, `offset`, `linked_partitioning`
+- **PagingCollection<T>**: `collection: Vec<T>` (note: the crate bundles ALL pages into one collection for `get_user_playlists` — no manual pagination needed)
+
+### Auth model
+
+SoundCloud has **no OAuth**. The `soundcloud-rs` crate auto-discovers a public `client_id` by:
+
+1. Fetching `soundcloud.com` HTML
+2. Extracting JS script URLs
+3. Searching each script for a 32-char `client_id` pattern
+
+If the auto-discovery fails (SC changes their site), the user can provide their own `client_id` via `config.toml`:
+
+```toml
+[soundcloud]
+api_key = "your_client_id_here"  # Falls back to auto-discovery if not set
+user_id = "12345"                 # SoundCloud user ID (numeric or permalink)
+```
+
+The `user_id` is required — this is whose playlists/likes we sync.
+
+### Backend Changes
+
+#### 1. New module: `src/soundcloud/`
+
+```
+src/soundcloud/
+├── mod.rs          # Module declarations + re-exports
+├── client.rs       # ScClient wrapper (thin wrapper over soundcloud_rs::Client)
+├── models.rs       # ScPlaylistInfo, ScTrackInfo (our own types for DB)
+└── sync_worker.rs  # ScSyncWorker (background sync with task tracking)
+```
+
+#### 1a. `src/soundcloud/models.rs` — Our internal types
+
+```rust
+/// Our internal playlist info (separate from soundcloud_rs::Playlist)
+#[derive(Debug, Clone)]
+pub struct ScPlaylistInfo {
+    pub id: i32,
+    pub title: String,
+    pub description: Option<String>,
+    pub track_count: i32,
+    pub urn: Option<String>,
+    pub permalink_url: Option<String>,
+    pub user_id: Option<i64>,
+    pub username: Option<String>,
+}
+
+/// Our internal track info (separate from soundcloud_rs::Track)
+#[derive(Debug, Clone)]
+pub struct ScTrackInfo {
+    pub id: i64,
+    pub title: String,
+    pub artist: String,       // from user.username on the track
+    pub isrc: Option<String>,
+    pub bpm: Option<f64>,
+    pub genre: Option<String>,
+    pub duration_ms: i64,
+    pub urn: Option<String>,
+    pub permalink_url: Option<String>,
+}
+```
+
+Conversions from `soundcloud_rs` types:
+
+- `From<&Playlist>` → `ScPlaylistInfo`
+- `From<&Track>` → `ScTrackInfo`
+
+#### 1b. `src/soundcloud/client.rs` — SC client wrapper
+
+```rust
+pub struct ScClient {
+    client: soundcloud_rs::Client,
+    user_id: String,  // from config
+}
+
+impl ScClient {
+    /// Create client. If api_key is provided, use it directly.
+    /// Otherwise, auto-discover via soundcloud_rs.
+    pub async fn new(config: &ServiceCredentials) -> Result<Self>;
+
+    /// Health check
+    pub async fn health_check(&self) -> bool;
+
+    /// Get the user's playlists (paginated collection)
+    pub async fn get_user_playlists(&self) -> Result<Vec<ScPlaylistInfo>>;
+
+    /// Get a single playlist with its tracks
+    pub async fn get_playlist(&self, playlist_id: i32) -> Result<(ScPlaylistInfo, Vec<ScTrackInfo>)>;
+
+    /// Sync playlists only (metadata, no tracks)
+    pub async fn sync_playlists_only(&self) -> Result<Vec<ScPlaylistInfo>>;
+
+    /// Get user ID as Identifier
+    fn user_identifier(&self) -> Identifier;
+}
+```
+
+The `api_key` config field should allow injection: when provided, we can construct the `Client` with that key directly (instead of auto-discovery). This requires checking how `soundcloud_rs::Client` stores the `client_id` — it's in `RwLock<String>`, so we can set it after construction.
+
+#### 1c. `src/soundcloud/sync_worker.rs` — Background sync
+
+Follow the Spotify `SyncWorker` pattern:
+
+```rust
+pub struct ScSyncWorker {
+    db: Pool<Sqlite>,
+    sc_client: ScClient,
+    task_id: String,
+    sync_type: SyncType,
+    cancel_token: CancellationToken,
+    progress: Arc<RwLock<SyncProgress>>,
+}
+
+impl ScSyncWorker {
+    pub fn new(db, sc_client, task_id, sync_type, cancel_token) -> Self;
+
+    /// Run the sync operation
+    pub async fn run(&self) -> Result<SyncResult>;
+
+    /// Sync all playlists (metadata only — no tracks)
+    async fn sync_playlists(&self) -> Result<usize>;
+
+    /// Sync tracks for a single playlist
+    async fn sync_playlist_tracks(&self, playlist_id: i32, playlist_name: &str) -> Result<usize>;
+
+    /// Full sync: playlists + all tracks
+    async fn sync_full(&self) -> Result<(usize, usize)>;
+}
+```
+
+**Sync flow (full sync)**:
+
+1. Create task in TaskManager with `SyncType::Full`
+2. Fetch user playlists via `get_user_playlists()`
+3. For each playlist: upsert into `service_playlists` (service='soundcloud')
+4. For each playlist: fetch full playlist with tracks via `get_playlist(id)`
+5. For each track: upsert into `service_tracks` (service='soundcloud', service_id=track.id)
+6. Link tracks to playlists in `service_playlist_tracks`
+7. Update task progress after each playlist
+
+**Sync modes** (same as Spotify):
+
+- `SyncType::PlaylistsOnly` — just playlist metadata
+- `SyncType::Full` — playlists + all tracks
+- `SyncType::SinglePlaylist` — one specific playlist
+
+**Rate limiting**: SoundCloud doesn't have documented rate limits, but we should add a 200ms delay between playlist detail fetches to be safe.
+
+#### 2. `src/db.rs` — DB functions
+
+Reuse existing functions (no new ones needed):
+
+- `upsert_service_playlist()` — already handles any service
+- `upsert_service_track()` — already handles `service='soundcloud'` via CHECK constraint
+- `get_service_config()` / `update_service_config()` — already works for 'soundcloud'
+- `add_track_to_playlist_with_added_at()` — already generic
+
+The `service_tracks` table stores BPM in `metadata_json` (since only `files` has `bpm`/`musical_key` columns). For SC tracks, store BPM via `metadata_json`:
+
+```json
+{ "bpm": 128.0, "genre": "Techno" }
+```
+
+#### 3. `src/api.rs` — Endpoints
+
+**New routes** (following Spotify pattern):
+
+```rust
+.route("/api/services/soundcloud/sync/playlists", post(sc_sync_playlists_handler))
+.route("/api/services/soundcloud/sync/full", post(sc_sync_full_handler))
+.route("/api/services/soundcloud/sync/playlists/{playlist_id}/tracks", post(sc_sync_playlist_tracks_handler))
+.route("/api/services/soundcloud/sync/{task_id}", get(sc_sync_task_handler).delete(sc_sync_cancel_handler))
+```
+
+**Modify existing handlers**:
+
+- `service_sync_handler` — route `"soundcloud"` to SC handlers instead of returning "not yet implemented"
+- `service_auth_handler` — for SC, just validate the config (no OAuth flow needed), set `is_connected = true` in `service_config`
+- `service_callback_handler` — return 200 for SC (no callback needed)
+
+**SC-specific handlers**:
+
+```rust
+async fn sc_sync_playlists_handler(State, Json) -> impl IntoResponse;
+async fn sc_sync_full_handler(State, Json) -> impl IntoResponse;
+async fn sc_sync_playlist_tracks_handler(State, Path, Json) -> impl IntoResponse;
+async fn sc_sync_task_handler(State, Path) -> impl IntoResponse;
+async fn sc_sync_cancel_handler(State, Path) -> impl IntoResponse;
+```
+
+Each handler:
+
+1. Validates SC is configured
+2. Creates `ScClient`
+3. Spawns `ScSyncWorker` via TaskManager
+4. Returns `{ taskId, status }`
+
+#### 4. `src/main.rs` — Module declaration
+
+```rust
+mod soundcloud;
+```
+
+### Files to create
+
+- `src/soundcloud/mod.rs` — module declarations + re-exports
+- `src/soundcloud/models.rs` — `ScPlaylistInfo`, `ScTrackInfo` + `From` impls
+- `src/soundcloud/client.rs` — `ScClient` wrapper
+- `src/soundcloud/sync_worker.rs` — `ScSyncWorker`
+
+### Files to modify
+
+- `src/main.rs` — add `mod soundcloud;`
+- `src/api.rs` — add SC sync routes + handlers; update `service_sync_handler`/`service_auth_handler`/`service_callback_handler` for SC
+- `frontend/pages/services.js` — enable Sync button for SoundCloud (remove "not implemented" handling)
+
+### Acceptance Criteria
+
+- [ ] `ScClient::new()` creates a working client (auto-discover or api_key)
+- [ ] `ScClient::health_check()` returns true when SC is reachable
+- [ ] `GET /api/services/soundcloud/sync/playlists` fetches user's playlists into DB
+- [ ] `GET /api/services/soundcloud/sync/full` fetches playlists + all tracks into DB
+- [ ] `GET /api/services/soundcloud/sync/playlists/{id}/tracks` fetches tracks for one playlist
+- [ ] SoundCloud tracks appear on Tracks page (filterable by `service=soundcloud`)
+- [ ] SoundCloud playlists appear on Playlists page
+- [ ] Tag matching: playlist names auto-create tags via `v_tag_playlist`
+- [ ] Files linked via `soundcloud_id` column match SC tracks in `v_file_track_link`
+- [ ] BPM stored in `metadata_json` for SC tracks (no DB column needed)
+- [ ] Sync progress visible in Tasks page
+- [ ] Cancel works via task cancellation token
+- [ ] Config override: `api_key` in config.toml takes priority over auto-discovery
+- [ ] Services page shows SoundCloud as "Configured" / "Connected" after auth
+- [ ] Sync button on Services page triggers SC sync (not "not yet implemented")
+- [ ] No regressions: Spotify sync, local playlists, digging, comments all unchanged
+- [x] Backend compiles (`cargo build`)
+- [ ] Test with `curl` against real SoundCloud API
+- [ ] Fresh DB: all migrations run cleanly (no new migration needed)
+
+### Out of scope (v2)
+
+- Subscription poller for SC (Spotify-only for now — SC doesn't have a subscription concept)
+- Global poller for SC (SC playlists don't have snapshot-based change detection)
+- Automatic SC playlist creation from local playlists
+- SC audio streaming in the digging page (different API for stream URLs)
+- SC track search in digging suggestions
+- SC user likes/reposts syncing
+
+---
+
+## Plan: file-lifecycle-management
+
+**Status**: in-progress 🔄
+**Branch**: `feat/file-lifecycle-management`
+**Ready for review**: no
+**Depends on**: nothing
+**Migration needed**: yes — `009_file_lifecycle.sql`
+
+### Description
+
+File lifecycle management system. Three pillars:
+
+1. **WAV source indexing** — Track nuo-stems WAV source files in the DB, back them up to NAS, delete locally
+2. **Tag-based file presence** — "Follow" a tag → its files stay local. "Backpack" tag for quick-add from Tracks page
+3. **Backup + prune** — Copy files to NAS via SSH/SCP, verify, then safely prune local copies that are backed up and not "followed"
+
+### Data Model
+
+#### Migration 009: `migrations/009_file_lifecycle.sql`
+
+```sql
+-- file_locations: tracks where a file physically exists
+CREATE TABLE IF NOT EXISTS file_locations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    location_type TEXT NOT NULL CHECK (location_type IN ('local', 'backup')),
+    path TEXT NOT NULL,
+    file_size INTEGER,
+    last_verified INTEGER,
+    created_at INTEGER DEFAULT (unixepoch()),
+    UNIQUE(file_id, location_type)
+);
+
+-- tags: add followed flag
+ALTER TABLE tags ADD COLUMN followed BOOLEAN NOT NULL DEFAULT 0;
+-- Default follow for "backpack" tag (created on first use if not present)
+
+-- files: add source_of for WAV→stem parent linking
+ALTER TABLE files ADD COLUMN source_of INTEGER REFERENCES files(id);
+
+-- folders: add scan_sources + backup_path
+ALTER TABLE folders ADD COLUMN scan_sources BOOLEAN NOT NULL DEFAULT 0;
+ALTER TABLE folders ADD COLUMN backup_path TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_file_locations_file_id ON file_locations(file_id);
+CREATE INDEX IF NOT EXISTS idx_file_locations_type ON file_locations(location_type);
+CREATE INDEX IF NOT EXISTS idx_files_source_of ON files(source_of);
+CREATE INDEX IF NOT EXISTS idx_tags_followed ON tags(followed);
+
+SELECT 'Migration 009 applied: file lifecycle management' as status;
+```
+
+### Rust Types
+
+New types in `src/db.rs`:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct FileLocation {
+    pub id: i64,
+    pub file_id: i64,
+    pub location_type: String,  // 'local' | 'backup'
+    pub path: String,
+    pub file_size: Option<i64>,
+    pub last_verified: Option<i64>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PruneCandidate {
+    pub file_id: i64,
+    pub file_path: String,
+    pub file_type: String,
+    pub file_size: i64,
+    pub title: String,
+    pub artist: String,
+    pub isrc: Option<String>,
+    pub reason: String,  // "flac_with_stem" | "wav_backed_up" | "not_followed"
+    pub backup_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageStatus {
+    pub local_file_count: i64,
+    pub local_size_bytes: i64,
+    pub local_stems: i64,
+    pub local_flacs: i64,
+    pub backup_count: i64,
+    pub wav_source_dirs: i64,
+    pub prune_candidate_count: i64,
+    pub prune_candidate_bytes: i64,
+}
+```
+
+### DB Functions (in `src/db.rs`)
+
+```rust
+// ─── Tag following ─────────────────────────────────────────────
+pub async fn set_tag_followed(pool: &Pool<Sqlite>, tag_id: i64, followed: bool) -> Result<()>
+pub async fn get_followed_tags(pool: &Pool<Sqlite>) -> Result<Vec<Tag>>
+pub async fn get_backpack_tag(pool: &Pool<Sqlite>) -> Result<Option<Tag>>
+pub async fn ensure_backpack_tag(pool: &Pool<Sqlite>) -> Result<Tag>
+pub async fn is_file_followed(pool: &Pool<Sqlite>, file_id: i64) -> Result<bool>
+
+// ─── File locations ────────────────────────────────────────────
+pub async fn set_file_location(pool: &Pool<Sqlite>, file_id: i64, location_type: &str, path: &str, file_size: i64) -> Result<()>
+pub async fn remove_file_location(pool: &Pool<Sqlite>, file_id: i64, location_type: &str) -> Result<()>
+pub async fn get_file_locations(pool: &Pool<Sqlite>, file_id: i64) -> Result<Vec<FileLocation>>
+pub async fn get_unbacked_up_files(pool: &Pool<Sqlite>, folder_id: i64) -> Result<Vec<File>>
+pub async fn record_backup_result(pool: &Pool<Sqlite>, file_id: i64, success: bool, file_size: i64, backup_path: &str) -> Result<()>
+pub async fn clear_backup_status(pool: &Pool<Sqlite>, folder_id: i64) -> Result<()>
+
+// ─── Source-of (WAV→stem linking) ─────────────────────────────
+pub async fn get_wav_source_subdirs(pool: &Pool<Sqlite>, folder_id: i64) -> Result<Vec<String>>
+pub async fn set_file_source_of(pool: &Pool<Sqlite>, file_id: i64, source_file_id: i64) -> Result<()>
+pub async fn get_files_by_source(pool: &Pool<Sqlite>, source_file_id: i64) -> Result<Vec<File>>
+
+// ─── Pruning ──────────────────────────────────────────────────
+pub async fn get_prune_candidates(pool: &Pool<Sqlite>) -> Result<Vec<PruneCandidate>>
+pub async fn delete_local_file_by_id(pool: &Pool<Sqlite>, file_id: i64) -> Result<bool>
+
+// ─── Storage status ───────────────────────────────────────────
+pub async fn get_storage_status(pool: &Pool<Sqlite>) -> Result<StorageStatus>
+
+// ─── Folder backup config ─────────────────────────────────────
+pub async fn update_folder_backup_config(pool: &Pool<Sqlite>, folder_id: i64, backup_path: Option<&str>, scan_sources: Option<bool>) -> Result<()>
+```
+
+### Backup Engine (`src/backup/mod.rs`)
+
+New module with SSH-based backup:
+
+```rust
+pub struct BackupEngine {
+    ssh_host: String,
+    ssh_key_path: Option<String>,
+}
+
+impl BackupEngine {
+    pub fn new(ssh_host: String) -> Self;
+
+    /// Copy a local file to the backup destination. Returns (success, remote_size).
+    pub async fn copy_file(
+        &self,
+        local_path: &Path,
+        remote_path: &str,
+    ) -> Result<(bool, i64)>;
+
+    /// Verify a file exists on backup with matching size.
+    pub async fn verify_file(
+        &self,
+        remote_path: &str,
+        expected_size: i64,
+    ) -> Result<bool>;
+
+    /// Get size of a remote file (None if doesn't exist).
+    pub async fn remote_file_size(&self, remote_path: &str) -> Result<Option<i64>>;
+
+    /// List files in a remote directory.
+    pub async fn list_remote_files(&self, remote_dir: &str) -> Result<Vec<String>>;
+
+    /// Run rsync in dry-run mode to show what would be transferred.
+    pub async fn dry_run_sync(&self, local_dir: &str, remote_dir: &str) -> Result<Vec<String>>;
+}
+```
+
+The engine shells out to `scp` and `ssh` commands using `tokio::process::Command`, reading `~/.ssh/config` for host resolution. The `backup` host is passed as `ssh_host` (your `~/.ssh/config` maps `backup` → your NAS).
+
+### API Endpoints (in `src/api.rs`)
+
+```
+GET    /api/storage/status               → StorageStatus
+POST   /api/storage/backup/{folder_id}   → BackupResult { copied: usize, verified: usize, errors: usize }
+POST   /api/storage/prune-preview        → [PruneCandidate]
+POST   /api/storage/prune                → PruneResult { deleted: usize, freedBytes: i64 }
+PUT    /api/tags/{id}/follow             → { followed: bool }
+POST   /api/tracks/{id}/backpack          → { inBackpack: bool }
+GET    /api/files/{id}/backup-status      → { backedUp: bool, locations: [FileLocation] }
+PUT    /api/folders/{id}/backup           → { backupPath: string, scanSources: bool }
+POST   /api/folders/{id}/scan-sources     → { wavIndexed: usize, linkedToStems: usize }
+POST   /api/storage/backup-wavs/{folder_id} → { wavDirsBackedUp: usize, localWavsDeleted: usize }
+```
+
+### Frontend
+
+#### Tags page (`frontend/pages/tags.js`)
+
+- New column: "Follow" with toggle button per row
+- Calls `PUT /api/tags/{id}/follow` to toggle
+- Shows "Backpack" icon for tracks with backpack tag
+- Followed tags show a filled 👁 or pinned icon
+- Followed state included in API tag response
+
+#### Tracks page (`frontend/pages/tracks.js`)
+
+- New column: "Backpack" with toggle button per row (like subscribe bell on playlists)
+- Click toggles the "backpack" Setlist tag on the track via `POST /api/tracks/{id}/backpack`
+- Shows filled/empty backpack icon based on whether the track has the "backpack" tag
+
+#### Storage page (`frontend/pages/storage.js`) — NEW
+
+- Storage status cards (local vs backup)
+- Backup buttons per folder (stems, flacs)
+- WAV backup + cleanup button
+- Prune preview table with checkboxes + execute button
+- Dry-run before any destructive action
+
+#### Folders page (`frontend/pages/folders.js`)
+
+- Edit folder modal: add "Backup Path" text input + "Scan Sources" checkbox
+- Show backup status per folder in table
+
+### Files to modify
+
+- `migrations/009_file_lifecycle.sql` — new migration
+- `src/db.rs` — FileLocation, PruneCandidate, StorageStatus types + 15 new functions
+- `src/backup/mod.rs` — BackupEngine (new module)
+- `src/api.rs` — 10 new handler functions + routes
+- `src/main.rs` — add `mod backup;`
+- `frontend/pages/tags.js` — Follow toggle column
+- `frontend/pages/tracks.js` — Backpack toggle column
+- `frontend/pages/storage.js` — new page module
+- `frontend/pages/folders.js` — Backup Path + Scan Sources fields
+- `frontend/app.js` — register storage page
+- `frontend/shared/nav.js` — add Storage nav link
+- `frontend/style.css` — storage page styles
+
+### Acceptance Criteria
+
+- [ ] Migration 009 runs cleanly on fresh DB (001→009)
+- [ ] Migration 009 runs cleanly on existing DB with data
+- [ ] Tags page shows Follow toggle; clicking it persists and filters correctly
+- [ ] Tracks page shows Backpack toggle; clicking adds/removes "backpack" tag
+- [ ] Following a tag prevents its files from being pruned
+- [ ] Storage page shows local vs backup stats
+- [ ] Backup folder operation copies unbacked-up files via SCP, verifies
+- [ ] WAV backup operation indexes subdirectories, backs up WAVs, records locations
+- [ ] Prune preview shows candidates with reasons (flac_with_stem, wav_backed_up, not_followed)
+- [ ] Prune execute deletes local files only if they have confirmed backup
+- [ ] Folders page lets you set backup_path and scan_sources
+- [ ] `cargo build` passes
+- [ ] Frontend loads without errors
+
+---
+
+## Plan: storage-holistic-cleanup
+
+**Status**: proposed
+**Branch**: `fix/storage-holistic-cleanup`
+**Ready for review**: no
+**Depends on**: `feat/file-lifecycle-management` (already merged)
+**Migration needed**: no
+
+### Audit: Current state
+
+| Data point           | Value                                           |
+| -------------------- | ----------------------------------------------- |
+| Total files          | 5,006 (1,770 stems + 2,104 FLACs + 1,132 WAVs)  |
+| Total size           | 196.8 GB                                        |
+| Backed up            | 3,167 files (1,762 stems + 1,405 FLACs)         |
+| ISRCs with stem+FLAC | 682 (redundant FLACs ~60 GB)                    |
+| WAVs from subdirs    | 1,132 indexed, 0 backed up, 0 with source_of    |
+| Prune candidates     | 2,962 (too high — includes 682 redundant FLACs) |
+
+### Problem #1: No format preference for pruning
+
+When a track (same ISRC) has a `.stem.m4a` version, other formats (FLAC, MP3, WAV) are redundant locally. The nuo-stems workflow is: convert FLAC to stem, keep stem, archive FLAC to NAS. Currently 682 FLACs have a corresponding stem but both count as "kept".
+
+**Fix**: Global "Prefer stem files" toggle in Storage page. When on, the prune query excludes FLACs/MP3s/WAVs whose same-ISRC stem exists. This converts 682 redundant FLACs into valid prune candidates.
+
+**Storage**: Toggle persisted as `stem_preferred` in a config store (service_config table or new column on Settings).
+
+**Prune query change** — add AND NOT clause:
+
+```
+AND NOT (
+    f.file_type != 'stem.m4a'
+    AND EXISTS (
+        SELECT 1 FROM files f2
+        WHERE f2.isrc = f.isrc AND f2.isrc IS NOT NULL
+        AND f2.file_type = 'stem.m4a'
+    )
+)
+```
+
+### Problem #2: WAV source tracking incomplete
+
+1,132 WAVs are indexed (from subdirs, since scan_recursive=true reached them), but:
+
+- `source_of` is never populated (no linking to parent stem)
+- `wav_source_dirs` in StorageStatus counts 0 because it queries `source_of IS NOT NULL`
+- WAVs aren't tracked as source files vs independent files
+
+**Fix**: After scanner indexes WAVs from subdirs, post-process to set `source_of`. Match: directory name (without extension) → stem filename in parent dir.
+
+### Problem #3: Storage page layout is messy
+
+Current layout mixes file types oddly (FLACs as subtitle of Stems card), WAV Sources card is confusing, and there's no size breakdown per file type.
+
+**Fix**: Clean card layout:
+
+- Row 1: Local Files | Backed Up | Prune Candidates (summary)
+- Row 2: Per-type breakdown with sizes (stems, FLACs, WAVs, MP3s)
+- Stem preference toggle section
+- Folders section (keep as-is, already nice)
+
+Add size fields to StorageStatus: `local_stems_size`, `local_flacs_size`, `local_wavs_size`, `local_mp3s_size`.
+
+### Files to modify
+
+- `src/db.rs` — add `stem_preferred` config, per-type size fields, update prune query, fix wav_source_dirs
+- `src/api.rs` — add `GET/PUT /api/storage/settings`, update StorageStatus construction
+- `frontend/pages/storage.js` — overhaul layout, stem preference toggle, per-type sizes
+- `frontend/style.css` — storage layout styles
+
+### Acceptance Criteria
+
+- [ ] Stem preference toggle shows in Storage page, persists correctly
+- [ ] With stem_preferred=true, 682 FLACs with same-ISRC stem become prune candidates
+- [ ] With stem_preferred=false, current behavior preserved
+- [ ] WAV source_of populated by scanner for subdir WAVs
+- [ ] StorageStatus includes per-type size breakdown
+- [ ] Clean card layout — no format treated as subtitle
+- [ ] `cargo build` passes
+- [ ] No regression to backup/reconcile/prune
+
+### Problem #4: Tag file counts don't include parent-resolved files
+
+`v_tag_file_counts` uses `v_file_tags` (direct tag→playlist matching). But `v_file_resolved_tags` already exists and correctly resolves parent tags. The fix: either update `v_tag_file_counts` to use `v_file_resolved_tags`, or create a new `v_resolved_tag_file_counts` view and use it in the Tags page.
+
+Similarly, `get_tags_count` and `get_all_tags` use `v_tag_file_counts`. Change to `v_file_resolved_tags`.
+
+**Example**: "Droid House" has parent "house". Currently "house" shows 0 files. After fix: "house" shows 571+ files (sum of all child tags).
+
+**Fix**:
+
+- Create or update `v_tag_file_counts` to join through `v_file_resolved_tags`
+- Update `get_all_tags` SQL to use the new count source
+
+### Problem #5: Tag edit modal doesn't show parent tags
+
+The modal in the Tags page (tag edit flow) only shows name + category selector. It should also show:
+
+- Current parent tags as chips with category badges
+- Button to navigate to Tag Curation page for full parent management
+
+**Fix**: Add parent tag chips section to `showEditTagModal`, populated from `GET /api/tags/{id}/parents`.
+
+---
+
+## Plan: fix-filter-visual-feedback
+
+**Status**: done ✅
+**Branch**: `fix/filter-visual-feedback`
+**Ready for review**: no
+**Depends on**: nothing
+**Migration needed**: no
+
+### Description
+
+Fix filter button visual feedback bugs across all CRUD pages. The root cause is the "render toolbar once, patch DOM imperatively" pattern: when an event handler mutates state but forgets to toggle `.active` on the button, the button appears frozen. Additionally, some filters never reach the backend (placebo buttons), and some UI elements (playlist badge, Create Tags spinner) have lifecycle bugs.
+
+### Architecture context
+
+All four CRUD pages use the same pattern:
+
+- `renderToolbar(state)` generates HTML with `${condition ? " active" : ""}` inline — runs **once** in `init()`
+- `fetchAndRender()` only replaces `#page-content` div, NOT the toolbar
+- Event handlers must imperatively update DOM (`.classList.toggle`, `.innerHTML`, `.style.display`)
+- If a handler mutates state but skips DOM update → visual freeze
+
+### Issues found
+
+#### A. files.js — 3 button groups with no visual toggle
+
+| Button group                  | Lines     | Symptom                                                                                      |
+| ----------------------------- | --------- | -------------------------------------------------------------------------------------------- |
+| Key buttons (24 Camelot keys) | 823–866   | `state.keys` mutates, `.active` never toggled. ALL/NONE actions also skip `.active` updates. |
+| Linked / Unlinked toggle      | 1091–1125 | `state.linkedOnly`/`state.unlinked` mutate, buttons never toggle.                            |
+| Non-Default Only toggle       | 1129–1141 | `state.nonDefaultOnly` toggles, button never updates.                                        |
+
+**Fix for key buttons**: Add `btn.classList.toggle("active")` in the regular key toggle handler. For ALL/NONE actions, re-sync all 24 button classes from `state.keys`.
+
+**Fix for Linked/Unlinked**: Add `linkedBtn.classList.toggle("active", state.linkedOnly)` and `unlinkedBtn.classList.toggle("active", state.unlinked)` in each handler. Also update the sibling button (mutual exclusion).
+
+**Fix for Non-Default Only**: Add `btn.classList.toggle("active", state.nonDefaultOnly)`.
+
+#### B. tracks.js — Playlist context badge doesn't disappear
+
+| Element                         | Lines     | Symptom                                                                                                                         |
+| ------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Playlist context badge × button | 1838–1843 | `state.playlistId = null`, navigate to `#tracks`, `fetchAndRender` called — but toolbar was rendered once, badge HTML persists. |
+
+**Fix**: Add DOM manipulation in the clear handler: `badge.style.display = "none"` or `badge.remove()`. Also, the `updatePlaylistBadge()` function at line 1132-1140 already exists and hides the badge when `selectedPlaylists` has items — extend it to also hide when `playlistId` is null.
+
+#### C. playlists.js — Service filter is placebo (never sent to backend)
+
+| Element                      | Lines            | Symptom                                                                                                                                                             |
+| ---------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Multi-select service buttons | 548–572, 418–434 | `state.selectedServices` toggles correctly, `syncServiceFilterUI()` works, but `buildParams()` never sends it and backend `PlaylistsQuery` has no `services` field. |
+
+**Fix (option A, simpler)**: Convert to single-select using the existing `state.service` + `service` param. Change the multi-select button group to radio-style (only one active at a time).
+
+**Fix (option B, more work)**: Add `services: Option<String>` to `PlaylistsQuery`, implement SQL `IN` filter in `playlists_handler`, add to `buildParams()`. Worth it if multi-service filtering is genuinely useful.
+
+**Recommendation**: Option A (single-select). The existing `service` dropdown in the filter panel already provides single-service filtering. The multi-select buttons are redundant and broken.
+
+#### D. playlists.js — "Create Tags" button stays spinning
+
+| Element            | Lines     | Symptom                                                                                      |
+| ------------------ | --------- | -------------------------------------------------------------------------------------------- |
+| Create Tags button | 1147–1172 | On success, button HTML is set to spinner but never restored. Only re-enabled on error path. |
+
+**Fix**: Add `finally` block that always restores the button: `createTagsBtn.disabled = false; createTagsBtn.innerHTML = '<i class="fas fa-tag"></i> Create Tags';`.
+
+### Additional minor fixes
+
+#### E. files.js — Filter panel collapse not persisted
+
+Lines 774–787: The collapse toggle works but never calls `localStorage.setItem()`. Add it (pattern already exists in tracks.js and tags.js).
+
+#### F. tags.js — Duplicate `wireActionsRefresh` call
+
+Lines 895–902 and 1025–1032: Called twice. Second overwrites first. Delete the first instance (the second has the `refresh` button comment).
+
+#### G. playlists.js + tags.js — Filter row toggle states not persisted
+
+Both pages have `[data-filter]` toggle labels (Service, Category, etc.) whose enabled/disabled state resets on page re-entry. Add `localStorage` read on init + write on toggle. Pattern: `filterRowState_{page}_{filterName}`.
+
+#### H. files.js + playlists.js — `untaggedOnly` has no UI button
+
+`untaggedOnly` exists in `HASH_DEFAULTS`, `HASH_SCHEMA`, and `buildParams()` on playlists.js, but `renderToolbar()` has no button for it. Either add a button or remove the dead state.
+
+### Files to modify
+
+- `frontend/pages/files.js` — Key buttons `.active` toggle, Linked/Unlinked `.active`, Non-Default `.active`, filter collapse localStorage
+- `frontend/pages/tracks.js` — Playlist badge clear DOM update
+- `frontend/pages/playlists.js` — Service filter (convert to single-select), Create Tags `finally` block, filter row toggle localStorage, untaggedOnly UI
+- `frontend/pages/tags.js` — Remove duplicate wireActionsRefresh, filter row toggle localStorage
+
+### Acceptance Criteria
+
+- [ ] Key buttons toggle `.active` visually on click
+- [ ] ALL m / NONE m / ALL d / NONE d actions update all 24 key button states
+- [ ] Linked/Unlinked buttons show active state, mutual exclusion works
+- [ ] Non-Default Only button shows active state
+- [ ] Playlist context badge disappears when × is clicked
+- [ ] Service filter on playlists page actually filters results
+- [ ] Create Tags button re-enables after success
+- [ ] Filter panel collapse state persists across page navigations (files.js)
+- [ ] No duplicate wireActionsRefresh in tags.js
+- [ ] Filter row toggle states persist across page navigations (playlists.js, tags.js)
+- [ ] No regressions: sort, pagination, search, column config, layout mode, bulk comments still work
+- [ ] `cargo build` passes (no backend changes unless service filter chosen as option B)
+
+
+---
+
+## Plan: auto-backup
+
+**Status**: proposed
+**Branch**: `feat/auto-backup`
+**Ready for review**: no
+**Depends on**: `feat/file-lifecycle-management` (already merged)
+**Migration needed**: yes — `010_auto_backup.sql`
+
+### Description
+
+Auto-backup: when a folder has a `backup_path` configured, it automatically reconciles and rsyncs new files without manual intervention. Enabled by default, toggleable per folder.
+
+### Current State
+
+| What we have | What's missing |
+|---|---|
+| Reconcile + rsync via "Backup" button | No periodic auto-trigger |
+| Auto-reconcile on server startup | Only runs once at boot |
+| Folder watcher (scans every 5 min) | Watcher only scans, doesn't backup |
+
+### Design
+
+#### Migration 010: `migrations/010_auto_backup.sql`
+
+```sql
+ALTER TABLE folders ADD COLUMN auto_backup BOOLEAN NOT NULL DEFAULT 1;
+
+SELECT 'Migration 010 applied: auto_backup column on folders' as status;
+```
+
+#### Folder struct update
+
+Add `auto_backup: bool` to `Folder` in `src/db.rs`.
+
+#### API: toggle auto_backup
+
+Extend `PUT /api/folders/{id}/backup` (already exists for backup_path + scan_sources) to also accept `autoBackup: bool`.
+
+Or add a new simpler endpoint:
+
+```rust
+.route("/api/folders/{id}/auto-backup", put(folder_auto_backup_handler))
+```
+
+```rust
+async fn folder_auto_backup_handler(...) -> impl IntoResponse {
+    // Toggle auto_backup
+    sqlx::query("UPDATE folders SET auto_backup = ? WHERE id = ?")
+        .bind(auto_backup).bind(id).execute(&state.db).await?;
+    Json(ApiResponse { data: json!({ "autoBackup": auto_backup }) })
+}
+```
+
+#### Auto-backup background task
+
+In `src/main.rs` `serve()`, alongside the folder watcher, add an **auto-backup poller**:
+
+```rust
+// Auto-backup poller: periodically reconcile+backup folders with auto_backup enabled
+let auto_db = state.db.clone();
+let auto_tm = state.task_manager.clone();
+tokio::spawn(async move {
+    let interval = std::time::Duration::from_secs(600); // 10 minutes
+    loop {
+        tokio::time::sleep(interval).await;
+        let folders: Vec<crate::db::Folder> = sqlx::query_as::<_, crate::db::Folder>(
+            "SELECT * FROM folders WHERE auto_backup = 1 AND backup_path IS NOT NULL AND backup_path != ''"
+        ).fetch_all(&auto_db).await.unwrap_or_default();
+        
+        for folder in folders {
+            let unbacked = crate::db::get_unbacked_up_files(&auto_db, folder.id).await.unwrap_or_default();
+            if !unbacked.is_empty() {
+                tracing::info!("Auto-backup: folder '{}' has {} unbacked files", folder.folder_path, unbacked.len());
+                crate::tasks::start_backup_folder_task(&auto_tm, &auto_db, folder.id).await;
+            }
+        }
+    }
+});
+```
+
+This runs every 10 minutes. For each folder with `auto_backup=true`:
+- Checks if unbacked files exist
+- If yes, triggers backup task (reconcile first, then rsync only new files)
+- If no, skips (minimal overhead: one lightweight SQL query)
+
+#### Frontend
+
+**Folder edit modal** — add a checkbox:
+
+```html
+<label class="checkbox-label">
+  <input type="checkbox" id="edit-folder-auto-backup" ${f.autoBackup ? "checked" : ""}>
+  Auto-backup new files
+</label>
+<span class="help-text">Automatically reconcile and sync new files to the backup destination</span>
+```
+
+**Storage page folder cards** — show auto-backup status with a green dot when enabled.
+
+### Files to modify
+
+- `migrations/010_auto_backup.sql` — new migration
+- `src/db.rs` — add `auto_backup` to `Folder` struct
+- `src/api.rs` — add `folder_auto_backup_handler` + route
+- `src/main.rs` — add auto-backup poller
+- `frontend/pages/folders.js` — add checkbox to edit modal
+- `frontend/pages/storage.js` — show auto-backup status on folder cards
+
+### Acceptance Criteria
+
+- [ ] Migration 010 applies cleanly (001→010)
+- [ ] New folders default to `auto_backup = true`
+- [ ] Folder edit modal has auto-backup checkbox
+- [ ] Storage page shows auto-backup status per folder
+- [ ] Auto-backup poller runs every 10 minutes
+- [ ] Poller only triggers backup when unbacked files exist
+- [ ] No manual intervention needed: files appear → auto-reconciled → auto-rsynced
+- [ ] `cargo build` passes

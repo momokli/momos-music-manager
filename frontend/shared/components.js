@@ -259,3 +259,32 @@ export function showModal({ title, bodyHtml, width, onClose, onAction }) {
 
   return cleanup;
 }
+
+/**
+ * Show a confirm dialog that returns a Promise<boolean>.
+ * Resolves true when the user clicks the confirm button, false on cancel/close.
+ */
+export function showConfirmModal(title, messageHtml, confirmLabel, confirmColor) {
+  return new Promise((resolve) => {
+    const isRed = confirmColor === "red";
+    const btnClass = isRed ? "btn btn-red" : "btn btn-primary";
+    const bodyHtml = `
+      <div class="modal-body">
+        <p>${messageHtml}</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" data-modal-action="cancel">Cancel</button>
+        <button class="${btnClass}" data-modal-action="confirm">${escapeHtml(confirmLabel || "Confirm")}</button>
+      </div>
+    `;
+    const cleanup = showModal({
+      title,
+      bodyHtml,
+      onAction: (action, close) => {
+        resolve(action === "confirm");
+        close();
+      },
+      onClose: () => resolve(false),
+    });
+  });
+}

@@ -83,6 +83,7 @@ const TRACKS_COLUMNS = [
     sortable: false,
     defaultWidth: 80,
   },
+  { id: "backpack", label: "🎒", sortable: false, defaultWidth: 50 },
 ];
 
 /**
@@ -168,6 +169,20 @@ const TRACKS_CELL_RENDERERS = {
     t.importedAt ? formatTimestamp(t.importedAt) : '<span class="text-muted">—</span>',
   latestAdded: (t) =>
     t.maxAddedAt ? formatTimestamp(t.maxAddedAt) : '<span class="text-muted">—</span>',
+  backpack: (t) => {
+    const inBackpack =
+      t.playlistTags &&
+      t.playlistTags.some((pt) => pt.tagName && pt.tagName.toLowerCase() === "backpack");
+    const displayIcon = inBackpack ? "fa-box" : "fa-box-open";
+    const title = inBackpack
+      ? "In backpack \u2014 kept locally"
+      : "Not in backpack \u2014 may be pruned";
+    return `<button class="btn btn-sm btn-icon backpack-toggle-btn"
+      data-track-id="${t.id}" data-in-backpack="${inBackpack ? "1" : "0"}"
+      title="${title}">
+      <i class="fas ${displayIcon}" style="${inBackpack ? "color:var(--green)" : "color:var(--text-muted)"}"></i>
+    </button>`;
+  },
 };
 
 /**
@@ -1135,8 +1150,8 @@ function wireToolbarEvents(container, signal, state) {
   function updatePlaylistBadge() {
     const badge = container.querySelector(".playlist-context-badge");
     if (!badge) return;
-    const hasFilter = (state.selectedPlaylists || []).length > 0;
-    badge.style.display = hasFilter ? "none" : "";
+    const shouldShow = (state.selectedPlaylists || []).length === 0 && state.playlistId;
+    badge.style.display = shouldShow ? "" : "none";
   }
 
   // ── Playlist chip rendering helper ──
@@ -1843,6 +1858,8 @@ export async function init(container, signal, hashParams) {
     clearBtn.onclick = () => {
       state.playlistId = null;
       state.playlistName = null;
+      const badge = container.querySelector(".playlist-context-badge");
+      if (badge) badge.style.display = "none";
       window.location.hash = "#tracks";
       fetchAndRender(container, signal, state);
     };
@@ -1863,6 +1880,33 @@ export async function init(container, signal, hashParams) {
       );
     });
   }
+
+  // Backpack toggle delegation
+  container.addEventListener("click", async (e) => {
+    const backpackBtn = e.target.closest(".backpack-toggle-btn");
+    if (!backpackBtn) return;
+
+    const trackId = parseInt(backpackBtn.dataset.trackId, 10);
+    const inBackpack = backpackBtn.dataset.inBackpack === "1";
+    const add = !inBackpack;
+
+    backpackBtn.disabled = true;
+    backpackBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+
+    try {
+      await fetchJSON(`/api/tracks/${trackId}/backpack`, {
+        method: "POST",
+        body: JSON.stringify({ add }),
+      });
+      fetchAndRender(container, signal, state);
+    } catch (err) {
+      showToast(`Backpack toggle failed: ${err.message}`, "error");
+      backpackBtn.disabled = false;
+      const icon = inBackpack ? "fa-box" : "fa-box-open";
+      backpackBtn.innerHTML = `<i class="fas ${icon}"></i>`;
+      backpackBtn.dataset.inBackpack = inBackpack ? "1" : "0";
+    }
+  });
 
   // Fetch initial data
   await fetchAndRender(container, signal, state);

@@ -774,10 +774,18 @@ function wireToolbarEvents(container, signal, state) {
   const panelToggle = container.querySelector("#files-filter-toggle");
   const panel = container.querySelector("#files-filter-panel");
   if (panelToggle && panel) {
+    // Restore saved collapse state
+    if (localStorage.getItem("filterPanelCollapsed_files") === "true") {
+      panel.classList.add("collapsed");
+    }
     panelToggle.addEventListener(
       "click",
       () => {
         panel.classList.toggle("collapsed");
+        localStorage.setItem(
+          "filterPanelCollapsed_files",
+          panel.classList.contains("collapsed"),
+        );
         const icon = panelToggle.querySelector(".chevron");
         if (icon) {
           icon.classList.toggle("fa-chevron-up");
@@ -847,6 +855,10 @@ function wireToolbarEvents(container, signal, state) {
           state.page = 0;
           updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
           fetchAndRender(container, signal, state);
+          // Re-sync all 24 key button active states
+          container.querySelectorAll(".key-btn[data-key]").forEach((kb) => {
+            kb.classList.toggle("active", state.keys.includes(kb.dataset.key));
+          });
           return;
         }
 
@@ -859,6 +871,7 @@ function wireToolbarEvents(container, signal, state) {
         } else {
           state.keys.push(dbVal);
         }
+        btn.classList.toggle("active");
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
@@ -1100,6 +1113,8 @@ function wireToolbarEvents(container, signal, state) {
           state.linkedOnly = true;
           state.unlinked = false;
         }
+        linkedBtn.classList.toggle("active", state.linkedOnly);
+        if (unlinkedBtn) unlinkedBtn.classList.toggle("active", state.unlinked);
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
@@ -1117,6 +1132,8 @@ function wireToolbarEvents(container, signal, state) {
           state.unlinked = true;
           state.linkedOnly = false;
         }
+        unlinkedBtn.classList.toggle("active", state.unlinked);
+        if (linkedBtn) linkedBtn.classList.toggle("active", state.linkedOnly);
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);
@@ -1132,6 +1149,7 @@ function wireToolbarEvents(container, signal, state) {
       "click",
       () => {
         state.nonDefaultOnly = !state.nonDefaultOnly;
+        nonDefaultBtn.classList.toggle("active", state.nonDefaultOnly);
         state.page = 0;
         updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
         fetchAndRender(container, signal, state);

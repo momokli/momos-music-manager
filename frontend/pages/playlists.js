@@ -226,7 +226,8 @@ function actions(r) {
 /* ------------------------------------------------------------------ */
 
 const PLAYLISTS_CELL_RENDERERS = {
-  name: (r) => escapeHtml(r.name),
+  name: (r) =>
+    `<a href="#tracks?playlistId=${r.id}&playlistName=${encodeURIComponent(r.name)}" class="track-title-link">${escapeHtml(r.name)}</a>`,
   service: (r) => sBadge(r.svc),
   tracks: (r) => {
     if (r.archiveDeleted && r.totalTrackCount != null && r.totalTrackCount !== r.l) {
@@ -293,16 +294,22 @@ function renderToolbar(state) {
               <button class="filter-btn${state.staleOnly ? " active" : ""}" data-value="stale"><i class="fas fa-triangle-exclamation"></i> Stale</button>
             </div>
           </div>
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="untagged">Tags</span>
+            <div class="filter-group">
+              <button class="filter-btn${state.untaggedOnly ? " active" : ""}" data-untagged="true"><i class="fas fa-tag-slash"></i> Untagged Only</button>
+            </div>
+          </div>
         </div>
         <div>
           <div class="filter-section-header" style="margin-top:0"><i class="fas fa-tag"></i> Classification</div>
           <div class="filter-row">
             <span class="filter-row-label toggleable" data-filter="service">Service</span>
             <div class="filter-group service-filter-group">
-              <button class="filter-btn${(state.selectedServices || []).includes("spotify") ? " active" : ""}" data-value="spotify"><i class="fab fa-spotify"></i></button>
-              <button class="filter-btn${(state.selectedServices || []).includes("soundcloud") ? " active" : ""}" data-value="soundcloud"><i class="fab fa-soundcloud"></i></button>
-              <button class="filter-btn${(state.selectedServices || []).includes("youtube") ? " active" : ""}" data-value="youtube"><i class="fab fa-youtube"></i></button>
-              <button class="filter-btn${(state.selectedServices || []).includes("deemix") ? " active" : ""}" data-value="deemix"><i class="fas fa-download"></i></button>
+              <button class="filter-btn${state.service === "spotify" ? " active" : ""}" data-value="spotify"><i class="fab fa-spotify"></i></button>
+              <button class="filter-btn${state.service === "soundcloud" ? " active" : ""}" data-value="soundcloud"><i class="fab fa-soundcloud"></i></button>
+              <button class="filter-btn${state.service === "youtube" ? " active" : ""}" data-value="youtube"><i class="fab fa-youtube"></i></button>
+              <button class="filter-btn${state.service === "deemix" ? " active" : ""}" data-value="deemix"><i class="fas fa-download"></i></button>
             </div>
           </div>
           <div class="filter-row">
@@ -544,13 +551,13 @@ function wireToolbarEvents(container, signal, state) {
     });
   }
 
-  // Multi-select service filter
+  // Single-select service filter
   const svcGroup = container.querySelector(".service-filter-group");
 
   function syncServiceFilterUI() {
     if (!svcGroup) return;
     svcGroup.querySelectorAll(".filter-btn").forEach((btn) => {
-      btn.classList.toggle("active", state.selectedServices.includes(btn.dataset.value));
+      btn.classList.toggle("active", state.service === btn.dataset.value);
     });
   }
 
@@ -561,9 +568,8 @@ function wireToolbarEvents(container, signal, state) {
         const btn = e.target.closest(".filter-btn");
         if (!btn) return;
         const v = btn.dataset.value;
-        const i = state.selectedServices.indexOf(v);
-        if (i >= 0) state.selectedServices.splice(i, 1);
-        else state.selectedServices.push(v);
+        if (state.service === v) state.service = "all";
+        else state.service = v;
         state.page = 0;
         syncServiceFilterUI();
         updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
@@ -667,6 +673,24 @@ function wireToolbarEvents(container, signal, state) {
     );
   }
 
+  // Untagged toggle (single button, on/off)
+  const untaggedRow = container.querySelector(".filter-row:has([data-untagged])");
+  if (untaggedRow) {
+    untaggedRow.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".filter-btn[data-untagged]");
+        if (!btn) return;
+        state.untaggedOnly = !state.untaggedOnly;
+        state.page = 0;
+        btn.classList.toggle("active", state.untaggedOnly);
+        updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
   // Generic toggle for data-filter labels
   const labels = filterPanel.querySelectorAll("[data-filter]");
   for (const label of labels) {
@@ -686,6 +710,10 @@ function wireToolbarEvents(container, signal, state) {
       if (state[key] === false) state[key] = true;
       else state[key] = false;
       state.page = 0;
+      localStorage.setItem(
+        "filterRowState_playlists_" + label.dataset.filter,
+        state[key],
+      );
       updateUI();
       updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
       fetchAndRender(container, signal, state);
@@ -1077,11 +1105,14 @@ export async function init(container, signal, hashParams) {
     categoriesAll: [],
     subscribed: parsed.subscribed || false,
     archive: parsed.archive || "all",
-    serviceEnabled: true,
-    categoryEnabled: true,
-    subEnabled: true,
-    staleEnabled: true,
-    archiveEnabled: true,
+    serviceEnabled: localStorage.getItem("filterRowState_playlists_service") !== "false",
+    categoryEnabled:
+      localStorage.getItem("filterRowState_playlists_category") !== "false",
+    subEnabled: localStorage.getItem("filterRowState_playlists_sub") !== "false",
+    staleEnabled: localStorage.getItem("filterRowState_playlists_stale") !== "false",
+    archiveEnabled: localStorage.getItem("filterRowState_playlists_archive") !== "false",
+    untaggedEnabled:
+      localStorage.getItem("filterRowState_playlists_untagged") !== "false",
     layoutMode: false,
   };
 
@@ -1167,6 +1198,7 @@ export async function init(container, signal, hashParams) {
           fetchAndRender(container, signal, state);
         } catch (err) {
           showToast(`Failed to create tags: ${err.message}`, "error");
+        } finally {
           createTagsBtn.disabled = false;
           createTagsBtn.innerHTML = '<i class="fas fa-tag"></i> Create Tags';
         }

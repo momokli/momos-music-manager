@@ -119,6 +119,9 @@ const FOLDERS_COLUMNS = [
     sortKey: "last_scanned",
     defaultWidth: 120,
   },
+  { id: "backupPath", label: "Backup Path", sortable: false, defaultWidth: 120 },
+  { id: "scanSources", label: "Sources", sortable: false, defaultWidth: 60 },
+  { id: "autoBackup", label: "Auto", sortable: false, defaultWidth: 60 },
   { id: "actions", label: "Actions", sortable: false, defaultWidth: 250 },
 ];
 
@@ -128,7 +131,7 @@ const FOLDERS_COLUMNS = [
 
 const FOLDERS_CELL_RENDERERS = {
   path: (f) =>
-    `<code class="font-mono" style="font-size:0.8rem">${escapeHtml(f.path)}</code>`,
+    `<a href="#folder-detail?id=${f.id}" class="detail-link"><code class="font-mono" style="font-size:0.8rem">${escapeHtml(f.path)}</code></a>`,
   files: (f) => `<strong style="font-size:0.9rem">${f.files}</strong>`,
   watch: (f) =>
     f.watch
@@ -162,6 +165,21 @@ const FOLDERS_CELL_RENDERERS = {
     f.lastScanned
       ? `<span style="color:var(--text-muted);font-size:0.75rem">${new Date(f.lastScanned * 1000).toLocaleString()}</span>`
       : '<span class="status-badge pending">Never</span>',
+  backupPath: (r) => {
+    return r.backupPath
+      ? `<code style="font-size:0.8rem">${escapeHtml(r.backupPath)}</code>`
+      : '<span class="text-muted">—</span>';
+  },
+  scanSources: (r) => {
+    return r.scanSources
+      ? '<i class="fas fa-check" style="color:var(--green)" title="Scans WAV subdirs"></i>'
+      : '<span class="text-muted" title="Not scanning WAV subdirs">—</span>';
+  },
+  autoBackup: (r) => {
+    return r.autoBackup
+      ? '<span title="Auto-backup enabled"><i class="fas fa-sync" style="color:var(--green)"></i></span>'
+      : '<span title="Auto-backup disabled" class="text-muted"><i class="fas fa-times"></i></span>';
+  },
   actions: (f) => `
     <div style="display:flex;gap:4px;flex-wrap:nowrap">
       <button class="btn btn-sm btn-primary" data-folder-action="edit" data-id="${f.id}" title="Edit folder"><i class="fas fa-pen"></i></button>
@@ -192,6 +210,9 @@ function adaptFolder(f) {
     fileExtensions: f.fileExtensions ?? f.file_extensions ?? "",
     maxDepth: f.maxDepth ?? f.max_depth ?? 1,
     lastScanned: f.lastScanned ?? f.last_scanned ?? null,
+    backupPath: f.backupPath ?? f.backup_path ?? "",
+    scanSources: f.scanSources ?? f.scan_sources ?? false,
+    autoBackup: f.autoBackup ?? f.auto_backup ?? true,
   };
 }
 
@@ -228,6 +249,13 @@ function renderFolderModal(folder) {
         fileExtensions: "mp3,m4a,flac,wav,aiff",
         maxDepth: 1,
       };
+
+  // Parse backup path into host:path components
+  const fullBackupPath = f.backupPath || "";
+  const colonIdx = fullBackupPath.indexOf(":");
+  const parsedHost =
+    colonIdx >= 0 ? fullBackupPath.substring(0, colonIdx) : fullBackupPath;
+  const parsedPath = colonIdx >= 0 ? fullBackupPath.substring(colonIdx + 1) : "";
 
   return `
     <div class="modal open" id="folder-modal">
@@ -272,6 +300,60 @@ function renderFolderModal(folder) {
             </label>
             <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">
               ${renderExtensionCheckboxes(f.fileExtensions)}
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Backup Configuration</label>
+            <div class="backup-config">
+              <div class="backup-config-row">
+                <select class="input-text" id="backup-conn-type" style="width:120px">
+                  <option value="ssh">SSH</option>
+                </select>
+                <input type="text" class="input-text backup-host-input" id="backup-host"
+                       value="${escapeHtml(parsedHost)}" placeholder="e.g. backup" />
+                <button type="button" class="btn btn-sm" id="backup-test-host" title="Test SSH connection">
+                  <i class="fas fa-plug"></i> Test
+                </button>
+                <span id="backup-host-status" class="backup-status-indicator"></span>
+              </div>
+              <div class="help-text" style="margin-top:4px">Uses ~/.ssh/config for host resolution</div>
+
+              <div class="backup-config-row" style="margin-top:8px">
+                <input type="text" class="input-text backup-path-input" id="backup-path"
+                       value="${escapeHtml(parsedPath)}" placeholder="/volume1/media/stems"
+                       style="flex:1" />
+                <span id="backup-path-status" class="backup-status-indicator"></span>
+                <button type="button" class="btn btn-sm" id="backup-browse" title="Browse remote directories">
+                  <i class="fas fa-folder-open"></i> Browse
+                </button>
+              </div>
+
+              <div id="backup-tree-container" style="display:none;margin-top:8px">
+                <div class="backup-tree-header">
+                  <span class="text-muted text-xs">Remote Browser</span>
+                  <button type="button" class="btn btn-xs" id="backup-tree-close"><i class="fas fa-times"></i></button>
+                </div>
+                <div id="backup-tree" class="backup-tree"></div>
+                <div class="backup-tree-footer">
+                  <button type="button" class="btn btn-xs" id="backup-tree-select" disabled>Select this path</button>
+                </div>
+              </div>
+
+              <div class="form-group" style="margin-top:12px;margin-bottom:0">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="edit-folder-scan-sources" ${f.scanSources ? "checked" : ""}>
+                  Scan WAV Source Subdirectories
+                </label>
+                <span class="help-text" style="font-size:0.75rem;color:var(--text-muted);display:block;margin-top:0.25rem">Index nuo-stems .wav source files in subdirectories</span>
+              </div>
+
+              <div class="form-group" style="margin-top:12px;margin-bottom:0">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="edit-folder-auto-backup" ${(f.autoBackup ?? true) ? "checked" : ""}>
+                  Auto-backup new files
+                </label>
+                <span class="help-text" style="font-size:0.75rem;color:var(--text-muted);display:block;margin-top:0.25rem">Automatically reconcile and sync new files to backup destination</span>
+              </div>
             </div>
           </div>
           <div class="modal-actions">
@@ -383,16 +465,82 @@ function wireModalEvents(folderId) {
 
       try {
         if (folderId) {
+          const backupHost = document.getElementById("backup-host")?.value?.trim() || "";
+          const backupPathVal =
+            document.getElementById("backup-path")?.value?.trim() || "";
+          const backupPath =
+            backupHost && backupPathVal ? `${backupHost}:${backupPathVal}` : "";
+          const scanSources =
+            document.getElementById("edit-folder-scan-sources")?.checked || false;
+
           await fetchJSON(`/api/folders/${folderId}`, {
             method: "PUT",
             body: JSON.stringify(data),
           });
+
+          // Save backup config separately
+          try {
+            await fetchJSON(`/api/folders/${folderId}/backup`, {
+              method: "PUT",
+              body: JSON.stringify({ backupPath, scanSources }),
+            });
+          } catch (backupErr) {
+            console.warn("Backup config save failed:", backupErr);
+          }
+
+          // Save auto-backup preference
+          try {
+            const autoBackup =
+              document.getElementById("edit-folder-auto-backup")?.checked ?? true;
+            await fetchJSON(`/api/folders/${folderId}/auto-backup`, {
+              method: "PUT",
+              body: JSON.stringify({ autoBackup }),
+            });
+          } catch (backupErr) {
+            console.warn("Auto-backup config save failed:", backupErr);
+          }
+
           showToast("Folder updated successfully", "success");
         } else {
-          await fetchJSON("/api/folders", {
+          const backupHost = document.getElementById("backup-host")?.value?.trim() || "";
+          const backupPathVal =
+            document.getElementById("backup-path")?.value?.trim() || "";
+          const backupPath =
+            backupHost && backupPathVal ? `${backupHost}:${backupPathVal}` : "";
+          const scanSources =
+            document.getElementById("edit-folder-scan-sources")?.checked || false;
+
+          const resp = await fetchJSON("/api/folders", {
             method: "POST",
             body: JSON.stringify(data),
           });
+
+          const newFolderId = resp.data?.id;
+          if (newFolderId && (backupPath || scanSources)) {
+            try {
+              await fetchJSON(`/api/folders/${newFolderId}/backup`, {
+                method: "PUT",
+                body: JSON.stringify({ backupPath, scanSources }),
+              });
+            } catch (backupErr) {
+              console.warn("Backup config save failed:", backupErr);
+            }
+          }
+
+          // Save auto-backup preference for new folder
+          if (newFolderId) {
+            try {
+              const autoBackup =
+                document.getElementById("edit-folder-auto-backup")?.checked ?? true;
+              await fetchJSON(`/api/folders/${newFolderId}/auto-backup`, {
+                method: "PUT",
+                body: JSON.stringify({ autoBackup }),
+              });
+            } catch (backupErr) {
+              console.warn("Auto-backup config save failed:", backupErr);
+            }
+          }
+
           showToast("Folder added successfully", "success");
         }
         doClose();
@@ -403,6 +551,210 @@ function wireModalEvents(folderId) {
         saveBtn.innerHTML = originalHtml;
       }
     });
+  }
+
+  // Wire backup config UI
+  wireBackupConfigEvents(modal);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Backup config UI handlers                                          */
+/* ------------------------------------------------------------------ */
+
+let _currentTreePath = null;
+
+function wireBackupConfigEvents(modal) {
+  const hostInput = modal.querySelector("#backup-host");
+  const testBtn = modal.querySelector("#backup-test-host");
+  const hostStatus = modal.querySelector("#backup-host-status");
+  const pathInput = modal.querySelector("#backup-path");
+  const pathStatus = modal.querySelector("#backup-path-status");
+  const browseBtn = modal.querySelector("#backup-browse");
+  const treeContainer = modal.querySelector("#backup-tree-container");
+  const treeEl = modal.querySelector("#backup-tree");
+  const treeSelectBtn = modal.querySelector("#backup-tree-select");
+  const treeClose = modal.querySelector("#backup-tree-close");
+
+  let verifiedHost = false;
+  let treeLoaded = false;
+
+  // Test host connection
+  const doTestHost = async () => {
+    const host = hostInput.value.trim();
+    if (!host) {
+      hostStatus.innerHTML =
+        '<span class="status-dot status-red" title="Enter a host"></span>';
+      verifiedHost = false;
+      return;
+    }
+    hostStatus.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+    try {
+      const resp = await fetchJSON(`/api/backup/test?host=${encodeURIComponent(host)}`);
+      if (resp.data?.ok) {
+        hostStatus.innerHTML =
+          '<span class="status-dot status-green" title="Connected"></span>';
+        verifiedHost = true;
+        // Auto-verify path if already entered
+        if (pathInput.value.trim()) doVerifyPath();
+      } else {
+        hostStatus.innerHTML =
+          '<span class="status-dot status-red" title="Connection failed"></span>';
+        verifiedHost = false;
+      }
+    } catch {
+      hostStatus.innerHTML = '<span class="status-dot status-red" title="Error"></span>';
+      verifiedHost = false;
+    }
+  };
+
+  if (testBtn) {
+    testBtn.addEventListener("click", doTestHost);
+  }
+  if (hostInput) {
+    hostInput.addEventListener("change", doTestHost);
+    // Auto-test on load if host is pre-filled
+    if (hostInput.value.trim()) {
+      setTimeout(doTestHost, 500);
+    }
+  }
+
+  // Verify path writability
+  const doVerifyPath = async () => {
+    const path = pathInput.value.trim();
+    if (!path || !verifiedHost) {
+      pathStatus.innerHTML = "";
+      return;
+    }
+    pathStatus.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+    try {
+      const resp = await fetchJSON(
+        `/api/backup/explore?host=${encodeURIComponent(hostInput.value.trim())}&path=${encodeURIComponent(path)}`,
+      );
+      if (resp.data?.writable) {
+        pathStatus.innerHTML =
+          '<span class="status-dot status-green" title="Writable"></span>';
+      } else {
+        pathStatus.innerHTML =
+          '<span class="status-dot status-yellow" title="Not writable or does not exist"></span>';
+      }
+    } catch {
+      pathStatus.innerHTML =
+        '<span class="status-dot status-red" title="Verify failed"></span>';
+    }
+  };
+
+  if (pathInput) {
+    pathInput.addEventListener("change", doVerifyPath);
+    if (pathInput.value.trim() && hostInput.value.trim()) {
+      setTimeout(doVerifyPath, 1000);
+    }
+  }
+
+  // Browse remote tree
+  if (browseBtn) {
+    browseBtn.addEventListener("click", async () => {
+      if (!verifiedHost) {
+        showToast("Test the SSH connection first", "warning");
+        return;
+      }
+      treeContainer.style.display = "block";
+      if (!treeLoaded) {
+        await loadTreeLevel(hostInput.value.trim(), "/", treeEl);
+        treeLoaded = true;
+        _currentTreePath = "/";
+      }
+    });
+  }
+
+  if (treeClose) {
+    treeClose.addEventListener("click", () => {
+      treeContainer.style.display = "none";
+    });
+  }
+
+  if (treeSelectBtn) {
+    treeSelectBtn.addEventListener("click", () => {
+      if (_currentTreePath) {
+        pathInput.value = _currentTreePath;
+        doVerifyPath();
+        treeContainer.style.display = "none";
+      }
+    });
+  }
+}
+
+async function loadTreeLevel(host, path, containerEl) {
+  containerEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading...';
+
+  try {
+    const fullUrl = `/api/backup/explore?host=${encodeURIComponent(host)}&path=${encodeURIComponent(path)}`;
+    const resp = await fetchJSON(fullUrl);
+    const dirs = resp.data?.dirs || [];
+
+    // If this is root and no dirs were found, show the path itself
+    if (dirs.length === 0 && (path === "/" || path === "")) {
+      _currentTreePath = path;
+      containerEl.innerHTML = `<div class="backup-tree-item" data-path="${escapeHtml(path)}">
+        <i class="fas fa-folder"></i> <span>${escapeHtml(path || "/")}</span>
+      </div>`;
+      return;
+    }
+
+    let html = "";
+    for (const dir of dirs) {
+      const fullPath = path === "/" ? `/${dir}` : `${path}/${dir}`;
+      html += `<div class="backup-tree-item" data-path="${escapeHtml(fullPath)}">
+        <i class="fas fa-chevron-right tree-expander" style="cursor:pointer;width:14px;font-size:0.7rem;color:var(--text-muted)"></i>
+        <i class="fas fa-folder" style="color:var(--yellow)"></i>
+        <span>${escapeHtml(dir)}</span>
+      </div>`;
+    }
+    containerEl.innerHTML = html;
+
+    // Wire expanders and selection
+    containerEl.querySelectorAll(".backup-tree-item").forEach((item) => {
+      const expander = item.querySelector(".tree-expander");
+      const itemPath = item.dataset.path;
+
+      // Click to select
+      item.addEventListener("click", (e) => {
+        if (e.target.closest(".tree-expander")) return;
+        containerEl
+          .querySelectorAll(".backup-tree-item")
+          .forEach((el) => el.classList.remove("selected"));
+        item.classList.add("selected");
+        _currentTreePath = itemPath;
+        const selectBtn = document.getElementById("backup-tree-select");
+        if (selectBtn) selectBtn.disabled = false;
+      });
+
+      // Expand
+      if (expander) {
+        expander.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const existingChild = containerEl.querySelector(
+            `[data-parent-path="${itemPath}"]`,
+          );
+          if (existingChild) {
+            existingChild.style.display =
+              existingChild.style.display === "none" ? "block" : "none";
+            expander.classList.toggle("fa-chevron-right");
+            expander.classList.toggle("fa-chevron-down");
+            return;
+          }
+
+          expander.className = "fas fa-spinner fa-spin tree-expander";
+          const childContainer = document.createElement("div");
+          childContainer.dataset.parentPath = itemPath;
+          item.after(childContainer);
+          await loadTreeLevel(host, itemPath, childContainer);
+          expander.className = "fas fa-chevron-down tree-expander";
+        });
+      }
+    });
+  } catch {
+    containerEl.innerHTML =
+      '<span class="text-muted text-xs">Failed to load directory</span>';
   }
 }
 
@@ -732,6 +1084,9 @@ function wireDelegation() {
             maxDepth: parseInt(btn.dataset.maxDepth, 10) || 1,
             lastScanned: parseInt(btn.dataset.lastScanned, 10) || null,
             files: parseInt(btn.dataset.files, 10) || 0,
+            backupPath: btn.dataset.backupPath || "",
+            scanSources: btn.dataset.scanSources === "true",
+            autoBackup: btn.dataset.autoBackup === "true",
           });
           break;
         case "remove": {
@@ -808,6 +1163,9 @@ function stashFolderData(contentEl, folders) {
         btn.dataset.maxDepth = String(f.maxDepth);
         btn.dataset.lastScanned = String(f.lastScanned ?? "");
         btn.dataset.files = String(f.files);
+        btn.dataset.backupPath = f.backupPath ?? "";
+        btn.dataset.scanSources = String(f.scanSources ?? false);
+        btn.dataset.autoBackup = String(f.autoBackup ?? true);
       });
   }
 }

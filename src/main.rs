@@ -26,6 +26,7 @@ use tracing::info;
 
 mod api;
 mod audio_extensions;
+mod backup;
 mod comment;
 mod config;
 mod db;
@@ -392,6 +393,82 @@ async fn serve(
 
     // Keep alive for server lifetime
     let _folder_watcher = folder_watcher;
+
+    // Auto-reconcile on startup: for each folder with a backup_path,
+    // trigger a backup task to reconcile files already on NAS.
+    let recon_db = state.db.clone();
+    let recon_tm = state.task_manager.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let folders: Vec<crate::db::Folder> = sqlx::query_as::<_, crate::db::Folder>(
+            "SELECT * FROM folders WHERE backup_path IS NOT NULL AND backup_path != '' AND auto_backup = 1",
+        )
+        .fetch_all(&recon_db)
+        .await
+        .unwrap_or_default();
+        for folder in folders {
+            let unbacked = crate::db::get_unbacked_up_files(&recon_db, folder.id)
+                .await
+                .unwrap_or_default();
+            if !unbacked.is_empty() {
+                tracing::info!(
+                    "Auto-reconcile: folder '{}' has {} unbacked files - starting reconcile",
+                    folder.folder_path,
+                    unbacked.len()
+                );
+                crate::tasks::start_backup_folder_task(&recon_tm, &recon_db, folder.id).await;
+            } else {
+                tracing::info!(
+                    "Auto-reconcile: folder '{}' already fully backed up",
+                    folder.folder_path
+                );
+            }
+        }
+    });
+
+    // Auto-backup poller: every 10 min, check folders with auto_backup enabled
+    // and trigger backup if unbacked files exist.
+    let auto_db = state.db.clone();
+    let auto_tm = state.task_manager.clone();
+    tokio::spawn(async move {
+        let interval = std::time::Duration::from_secs(600);
+        loop {
+            tokio::time::sleep(interval).await;
+            let folders: Vec<crate::db::Folder> = match sqlx::query_as::<_, crate::db::Folder>(
+                "SELECT * FROM folders WHERE auto_backup = 1 AND backup_path IS NOT NULL AND backup_path != ''"
+            )
+            .fetch_all(&auto_db)
+            .await
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!("Auto-backup: failed to query folders: {}", e);
+                    continue;
+                }
+            };
+            for folder in &folders {
+                let unbacked = match crate::db::get_unbacked_up_files(&auto_db, folder.id).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Auto-backup: failed to check files for folder {}: {}",
+                            folder.id,
+                            e
+                        );
+                        continue;
+                    }
+                };
+                if !unbacked.is_empty() {
+                    tracing::info!(
+                        "Auto-backup: folder '{}' has {} unbacked files — starting backup task",
+                        folder.folder_path,
+                        unbacked.len()
+                    );
+                    crate::tasks::start_backup_folder_task(&auto_tm, &auto_db, folder.id).await;
+                }
+            }
+        }
+    });
 
     // Build our application with routes.
     // API routes take priority; the catch-all {*path} handles everything else

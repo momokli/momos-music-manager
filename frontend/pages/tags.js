@@ -82,6 +82,7 @@ const TAGS_COLUMNS = [
     sortKey: "created_at",
     defaultWidth: 150,
   },
+  { id: "follow", label: "Follow", sortable: false, defaultWidth: 60 },
   { id: "actions", label: "Actions", sortable: false, defaultWidth: 100 },
 ];
 
@@ -94,9 +95,21 @@ const TAGS_CELL_RENDERERS = {
   files: (t) =>
     `<span class="font-mono" style="text-align:right">${(t.fileCount || 0).toLocaleString()}</span>`,
   created: (t) => {
-    if (!t.createdAt) return '<span class="text-muted">\u2014</span>';
+    if (!t.createdAt) return '<span class="text-muted">—</span>';
     const d = new Date(t.createdAt * 1000);
     return `<span class="font-mono text-xs">${d.toLocaleDateString()}</span>`;
+  },
+  follow: (t) => {
+    const followed = t.followed ? true : false;
+    const icon = followed ? "fa-eye" : "fa-eye-slash";
+    const title = followed
+      ? "Followed \u2014 files with this tag are kept locally"
+      : "Not followed \u2014 files may be pruned if backed up";
+    return `<button class="btn btn-sm btn-icon follow-toggle-btn"
+      data-id="${t.id}" data-followed="${followed ? "1" : "0"}"
+      title="${title}">
+      <i class="fas ${icon}" style="${followed ? "color:var(--green)" : "color:var(--text-muted)"}"></i>
+    </button>`;
   },
   actions: (t) => {
     const edit = `<button class="btn btn-sm btn-edit-tag" data-id="${t.id}" data-tag="${escapeHtml(t.name)}" title="Edit tag"><i class="fas fa-pencil-alt"></i></button>`;
@@ -133,6 +146,7 @@ function adaptTag(t) {
     categoryIcon: t.categoryIcon,
     fileCount: t.fileCount || 0,
     createdAt: t.createdAt,
+    followed: t.followed || false,
   };
 }
 
@@ -752,7 +766,9 @@ async function showCategorizeModal(container, state, signal) {
   try {
     const resp = await fetchJSON("/api/tag-categories", { signal });
     categories = resp.data || [];
-  } catch (_) { return; }
+  } catch (_) {
+    return;
+  }
 
   const catOptions = categories
     .map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`)
@@ -836,7 +852,7 @@ export async function init(container, signal, hashParams) {
     sort: "",
     order: "asc",
     selectedCategories: hashCats,
-    categoryEnabled: true,
+    categoryEnabled: localStorage.getItem("filterRowState_tags_category") !== "false",
     ...parsed,
   };
   // Ensure selectedCategories is always an array
@@ -865,19 +881,17 @@ export async function init(container, signal, hashParams) {
       <div style="display:flex;gap:var(--space-4);align-items:flex-start;">
         <div style="flex:4;min-width:0;">${renderToolbar(state)}</div>
         ${renderActionsPanel("tags", [
-        { id: "categorize", label: "CHANGE CATEGORY", icon: "fas fa-tag", cls: "btn-primary", action: "categorize" },
-      ])}
+          {
+            id: "categorize",
+            label: "CHANGE CATEGORY",
+            icon: "fas fa-tag",
+            cls: "btn-primary",
+            action: "categorize",
+          },
+        ])}
       </div>
       <div id="tags-content" style="min-height:200px;">${renderLoading("Loading tags…")}</div>
     </div>`;
-
-  // Wire actions panel
-  import("../shared/actions-panel.js").then(({ wireActionsRefresh }) => {
-    wireActionsRefresh(container, "tags", () => {
-      state.page = 0;
-      return fetchAndRender(container, signal, state);
-    });
-  });
 
   // Wire CHANGE CATEGORY button in actions panel
   const catBtn = container.querySelector("#tags-actions-categorize");
@@ -955,6 +969,7 @@ export async function init(container, signal, hashParams) {
       label.addEventListener("click", () => {
         const key = label.dataset.filter + "Enabled";
         state[key] = state[key] === false ? true : false;
+        localStorage.setItem("filterRowState_tags_" + label.dataset.filter, state[key]);
         state.page = 0;
         updateFilterUI();
         updateHash("tags", state, HASH_DEFAULTS, HASH_SCHEMA);
@@ -973,6 +988,7 @@ export async function init(container, signal, hashParams) {
       if (state[key] !== false) return;
       if (e.target.closest("[data-filter]")) return;
       state[key] = true;
+      localStorage.setItem("filterRowState_tags_" + label.dataset.filter, state[key]);
       state.page = 0;
       label.classList.add("active");
       label.classList.remove("off");
@@ -1056,6 +1072,34 @@ export async function init(container, signal, hashParams) {
       deleteTag(id, name, () => {
         fetchAndRender(container, signal, state);
       });
+      return;
+    }
+
+    const followBtn = e.target.closest(".follow-toggle-btn");
+    if (followBtn) {
+      const tagId = parseInt(followBtn.dataset.id, 10);
+      const currentFollowed = followBtn.dataset.followed === "1";
+      const newFollowed = !currentFollowed;
+
+      followBtn.disabled = true;
+      followBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+
+      (async () => {
+        try {
+          await fetchJSON(`/api/tags/${tagId}/follow`, {
+            method: "PUT",
+            body: JSON.stringify({ followed: newFollowed }),
+          });
+          updateHash("tags", state, HASH_DEFAULTS, HASH_SCHEMA);
+          fetchAndRender(container, signal, state);
+        } catch (err) {
+          showToast(`Follow toggle failed: ${err.message}`, "error");
+          followBtn.disabled = false;
+          const icon = currentFollowed ? "fa-eye" : "fa-eye-slash";
+          followBtn.innerHTML = `<i class="fas ${icon}"></i>`;
+          followBtn.dataset.followed = currentFollowed ? "1" : "0";
+        }
+      })();
       return;
     }
   });

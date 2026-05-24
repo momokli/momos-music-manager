@@ -1815,6 +1815,15 @@ th:not(.sort-asc):not(.sort-desc) i.fa-sort {
     font-size: 1.1rem;
 }
 
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: var(--space-4);
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--border);
+}
+
 .close-btn {
     background: none;
     border: none;
@@ -4150,4 +4159,441 @@ th.drop-target {
 }
 .archive-toggle-btn:hover {
     opacity: 0.8;
+}
+
+/* ========================================================================== */
+/*  Storage Page                                                              */
+/* ========================================================================== */
+
+#storage-prune-section {
+    margin-top: 2rem;
+}
+
+#storage-prune-section .section-title {
+    margin-bottom: 1rem;
+}
+
+#storage-prune-content .table-wrap {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.storage-folders-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.help-text {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    display: block;
+    margin-top: 0.25rem;
+}
+
+/* ─── Backup Config UI ───────────────────────────────────── */
+
+.backup-config {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+}
+
+.backup-config-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.backup-host-input,
+.backup-path-input {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+}
+
+.backup-status-indicator {
+    min-width: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.status-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+
+.status-green {
+    background: #22c55e;
+    box-shadow: 0 0 4px rgba(34, 197, 94, 0.5);
+}
+
+.status-yellow {
+    background: #eab308;
+    box-shadow: 0 0 4px rgba(234, 179, 8, 0.5);
+}
+
+.status-red {
+    background: #ef4444;
+    box-shadow: 0 0 4px rgba(239, 68, 68, 0.5);
+}
+
+/* ─── Remote Browser Tree ─────────────────────────────────── */
+
+.backup-tree-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+}
+
+.backup-tree {
+    max-height: 250px;
+    overflow-y: auto;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    font-size: 0.85rem;
+    font-family: var(--font-mono);
+}
+
+.backup-tree-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.backup-tree-item:hover {
+    background: var(--surface-hover);
+}
+
+.backup-tree-item.selected {
+    background: rgba(99, 102, 241, 0.15);
+    color: var(--primary);
+}
+
+.backup-tree-footer {
+    display: flex;
+    justify-content: flex-end;
+    padding: 6px 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-top: none;
+    border-radius: 0 0 6px 6px;
+}
+
+/* ─── Text sizes ──────────────────────────────────────────── */
+
+.text-xs {
+    font-size: 0.75rem;
+}
+
+/* ─── Storage Cards ───────────────────────────────────────── */
+
+.storage-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+}
+
+.storage-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    transition: border-color 0.2s;
+}
+
+.storage-card:hover {
+    border-color: var(--border-strong);
+}
+
+.storage-card-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.3rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.storage-card-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.storage-card-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    line-height: 1.2;
+}
+
+.storage-card-label {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+.storage-card-hint {
+    font-size: 0.7rem;
+    color: var(--text-subtle);
+    margin-top: 2px;
+}
+
+/* ─── Folder Cards (Storage Page) ────────────────────────── */
+
+.folder-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 0.75rem;
+}
+
+.folder-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    transition: border-color 0.2s;
+}
+
+.folder-card:hover {
+    border-color: var(--border-strong);
+}
+
+.folder-card.has-backup {
+    border-color: rgba(34, 197, 94, 0.3);
+}
+
+.folder-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+}
+
+.folder-path {
+    font-size: 0.8rem;
+    word-break: break-all;
+    color: var(--text);
+}
+
+.folder-file-count {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    margin-left: 0.5rem;
+}
+
+.folder-card-body {
+    padding: 0.75rem 1rem;
+}
+
+.folder-info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.3rem 0;
+    font-size: 0.85rem;
+}
+
+.folder-info-row + .folder-info-row {
+    border-top: 1px solid var(--border);
+}
+
+.folder-info-label {
+    color: var(--text-muted);
+}
+
+.folder-info-value {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    text-align: right;
+    max-width: 60%;
+    word-break: break-all;
+}
+
+.folder-card-actions {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    border-top: 1px solid var(--border);
+}
+
+/* ─── Section titles with consistent spacing ─────────────── */
+
+.folders-section {
+    margin-bottom: 2rem;
+}
+
+.folders-section .section-title {
+    margin-bottom: 0.75rem;
+}
+
+.section-title {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 0.75rem;
+}
+
+.actions-bar {
+    margin-top: 1rem;
+    display: flex;
+    gap: 0.5rem;
+}
+
+/* ─── Backpack toggle ────────────────────────────────────── */
+
+.backpack-toggle-btn {
+    cursor: pointer;
+    transition: opacity 0.2s;
+}
+
+.backpack-toggle-btn:hover {
+    opacity: 0.7;
+}
+
+/* ─── Detail page links ──────────────────────────────────── */
+
+.detail-link {
+    text-decoration: none;
+    color: inherit;
+}
+
+.detail-link:hover code {
+    color: var(--accent);
+}
+
+/* ─── Storage page cleanup ───────────────────────────── */
+
+.storage-section {
+    margin-bottom: 1.5rem;
+}
+
+.storage-section-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 0.75rem;
+}
+
+.storage-preference-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem;
+}
+
+.preference-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    cursor: pointer;
+}
+
+.preference-toggle input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--primary);
+}
+
+.toggle-label {
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+.preference-hint {
+    margin-top: 0.5rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+
+/* File type breakdown */
+
+.file-type-breakdown {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.75rem 1rem;
+}
+
+.file-type-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.5rem 0;
+}
+
+.file-type-row + .file-type-row {
+    border-top: 1px solid var(--border);
+}
+
+.file-type-name {
+    width: 80px;
+    font-weight: 600;
+    font-size: 0.85rem;
+    flex-shrink: 0;
+}
+
+.file-type-bar-wrap {
+    flex: 1;
+    height: 8px;
+    background: var(--bg);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.file-type-bar {
+    height: 100%;
+    background: var(--primary);
+    border-radius: 4px;
+    transition: width 0.3s;
+    opacity: 0.7;
+}
+
+.file-type-count {
+    width: 60px;
+    text-align: right;
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    flex-shrink: 0;
+}
+
+.file-type-size {
+    width: 80px;
+    text-align: right;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+/* Tag parent chips in edit modal */
+
+.parent-tag-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-bottom: 0.5rem;
 }

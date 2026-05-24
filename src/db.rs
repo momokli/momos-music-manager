@@ -46,6 +46,7 @@ pub struct Tag {
     pub category_id: i64,
     pub sort_order: i64,
     pub created_at: i64,
+    pub followed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -131,6 +132,9 @@ pub struct File {
     pub soundcloud_id: Option<String>,
     pub youtube_id: Option<String>,
 
+    // Source WAV linking (WAV source subdirectory → stem file)
+    pub source_of: Option<i64>,
+
     // Timestamps
     pub created_at: i64,
     pub updated_at: i64,
@@ -166,8 +170,63 @@ pub struct Folder {
     pub file_extensions: String,
     pub max_depth: i32,
     pub last_scanned: Option<i64>,
+    pub scan_sources: bool,
+    pub backup_path: Option<String>,
+    pub auto_backup: bool,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+// ============================================================================
+// File Lifecycle Types
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct FileLocation {
+    pub id: i64,
+    pub file_id: i64,
+    pub location_type: String, // 'local' | 'backup'
+    pub path: String,
+    pub file_size: Option<i64>,
+    pub last_verified: Option<i64>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneCandidate {
+    pub file_id: i64,
+    pub file_path: String,
+    pub file_type: String,
+    pub file_size: i64,
+    pub title: String,
+    pub artist: String,
+    pub isrc: Option<String>,
+    pub reason: String,
+    pub backup_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageStatus {
+    pub local_file_count: i64,
+    pub local_size_bytes: i64,
+    pub local_stems: i64,
+    pub local_flacs: i64,
+    pub local_mp3s: i64,
+    pub local_wavs: i64,
+    pub local_other: i64,
+    pub local_stems_size: i64,
+    pub local_flacs_size: i64,
+    pub local_wavs_size: i64,
+    pub local_mp3s_size: i64,
+    pub backup_count: i64,
+    pub wav_source_dirs: i64,
+    pub prune_candidate_count: i64,
+    pub prune_candidate_bytes: i64,
+    pub wav_indexed: i64,
+    pub wav_backed_up: i64,
 }
 
 // ============================================================================
@@ -374,7 +433,72 @@ fn extract_playback_stats_with_exiftool(path: &Path) -> (Option<i32>, Option<i64
 }
 
 #[allow(clippy::type_complexity)]
+pub async fn extract_minimal_file_metadata(path: &Path) -> Result<File> {
+    let file_type = file_type_from_path(path)
+        .ok_or_else(|| anyhow!("Unsupported file type: {:?}", path.extension()))?
+        .to_string();
+    let metadata = std::fs::metadata(path)?;
+    let file_size = metadata.len() as i64;
+    let last_modified = metadata
+        .modified()
+        .map(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    // WAV source files don't need dedup — skip expensive SHA256
+    let file_hash = format!("wav-{}", file_size);
+    let now = chrono::Utc::now().timestamp();
+
+    Ok(File {
+        id: 0,
+        file_path: path.to_string_lossy().to_string(),
+        file_hash,
+        file_type,
+        file_size,
+        last_modified,
+        isrc: None,
+        last_scanned: now,
+        title: None,
+        artist: None,
+        album: None,
+        album_artist: None,
+        track_number: None,
+        total_tracks: None,
+        disc_number: None,
+        total_discs: None,
+        genre: None,
+        year: None,
+        composer: None,
+        comment: None,
+        duration_ms: None,
+        bitrate: None,
+        sample_rate: None,
+        channels: None,
+        bpm: None,
+        musical_key: None,
+        rating: 0,
+        play_count: 0,
+        last_played: None,
+        spotify_id: None,
+        soundcloud_id: None,
+        youtube_id: None,
+        source_of: None,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
 pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
+    // For WAV files (nuo-stems sources), skip metadata extraction.
+    // These are raw audio stems with no tags — exiftool is unnecessary overhead.
+    let file_type = file_type_from_path(path)
+        .ok_or_else(|| anyhow!("Unsupported file type: {:?}", path.extension()))?;
+
+    if file_type == "wav" {
+        return Ok(extract_minimal_file_metadata(path).await?);
+    }
     // Get file metadata
     let metadata = fs::metadata(path)?;
     let file_size = metadata.len() as i64;
@@ -385,6 +509,7 @@ pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
         .as_secs() as i64;
 
     // Calculate file hash
+    // WAV source files don't need dedup — skip expensive SHA256
     let file_hash = calculate_file_hash(path)?;
 
     // ── CACHE CHECK ──────────────────────────────────────────────────────────
@@ -621,6 +746,7 @@ pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
         spotify_id: None,
         soundcloud_id: None,
         youtube_id: None,
+        source_of: None,
         created_at: now,
         updated_at: now,
     };
@@ -1346,6 +1472,20 @@ pub async fn get_service_config(
     Ok(config)
 }
 
+/// Update or insert a storage settings row in service_config.
+/// Uses the 'storage' service key to store JSON metadata (e.g. stem_preferred).
+pub async fn update_storage_setting(pool: &Pool<Sqlite>, meta_json: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO service_config (service, metadata_json, is_connected)
+         VALUES ('storage', ?, 1)
+         ON CONFLICT(service) DO UPDATE SET metadata_json = excluded.metadata_json, updated_at = unixepoch()"
+    )
+    .bind(meta_json)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn update_service_config(
     pool: &Pool<Sqlite>,
     service: &str,
@@ -1585,6 +1725,15 @@ pub async fn update_folder_with_config(
         .bind(id)
         .fetch_one(pool)
         .await?;
+
+        // If scan config changed, reset last_scanned to force a full rescan
+        if scan_recursive.is_some() || max_depth.is_some() || file_extensions.is_some() {
+            sqlx::query("UPDATE folders SET last_scanned = NULL WHERE id = ?")
+                .bind(id)
+                .execute(pool)
+                .await?;
+        }
+
         Ok(folder)
     } else if active.is_some()
         || scan_recursive.is_some()
@@ -1615,6 +1764,15 @@ pub async fn update_folder_with_config(
         .bind(id)
         .fetch_one(pool)
         .await?;
+
+        // If scan config changed, reset last_scanned to force a full rescan
+        if scan_recursive.is_some() || max_depth.is_some() || file_extensions.is_some() {
+            sqlx::query("UPDATE folders SET last_scanned = NULL WHERE id = ?")
+                .bind(id)
+                .execute(pool)
+                .await?;
+        }
+
         Ok(folder)
     } else {
         // Nothing to update
@@ -3660,6 +3818,698 @@ pub async fn mark_playlist_inactive(pool: &Pool<Sqlite>, db_id: i64) -> Result<(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+// ============================================================================
+// File Lifecycle Functions
+// ============================================================================
+
+// ─── Tag following ──────────────────────────────────────────────────────────
+
+/// Set whether a tag is "followed" — files with this tag are kept locally
+pub async fn set_tag_followed(pool: &Pool<Sqlite>, tag_id: i64, followed: bool) -> Result<()> {
+    sqlx::query("UPDATE tags SET followed = ? WHERE id = ?")
+        .bind(followed)
+        .bind(tag_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Get all followed tags
+pub async fn get_followed_tags(pool: &Pool<Sqlite>) -> Result<Vec<Tag>> {
+    let tags = sqlx::query_as::<_, Tag>("SELECT * FROM tags WHERE followed = 1")
+        .fetch_all(pool)
+        .await?;
+    Ok(tags)
+}
+
+/// Find the "backpack" tag (a Setlist tag named "backpack")
+pub async fn get_backpack_tag(pool: &Pool<Sqlite>) -> Result<Option<Tag>> {
+    let tag = sqlx::query_as::<_, Tag>(
+        "SELECT t.* FROM tags t JOIN tag_categories tc ON t.category_id = tc.id WHERE LOWER(t.name) = 'backpack' AND tc.name = 'Setlist'"
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(tag)
+}
+
+/// Ensure the "backpack" tag exists, create it if missing, then return it
+pub async fn ensure_backpack_tag(pool: &Pool<Sqlite>) -> Result<Tag> {
+    if let Some(tag) = get_backpack_tag(pool).await? {
+        return Ok(tag);
+    }
+    // Find Setlist category
+    let cat_id: i64 = sqlx::query_scalar("SELECT id FROM tag_categories WHERE name = 'Setlist'")
+        .fetch_one(pool)
+        .await?;
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        "INSERT INTO tags (name, category_id, created_at, followed) VALUES ('backpack', ?, ?, 1)",
+    )
+    .bind(cat_id)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(get_backpack_tag(pool).await?.unwrap())
+}
+
+/// Check if a file has ANY followed tag
+pub async fn is_file_followed(pool: &Pool<Sqlite>, file_id: i64) -> Result<bool> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT vft.tag_id) FROM v_file_tags vft
+         JOIN tags t ON t.id = vft.tag_id
+         WHERE vft.file_id = ? AND t.followed = 1",
+    )
+    .bind(file_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(count > 0)
+}
+
+// ─── File locations ─────────────────────────────────────────────────────────
+
+/// Record or update a file's location (local or backup)
+pub async fn set_file_location(
+    pool: &Pool<Sqlite>,
+    file_id: i64,
+    location_type: &str,
+    path: &str,
+    file_size: i64,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        "INSERT INTO file_locations (file_id, location_type, path, file_size, last_verified, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(file_id, location_type) DO UPDATE SET
+            path = excluded.path,
+            file_size = excluded.file_size,
+            last_verified = excluded.last_verified"
+    )
+    .bind(file_id)
+    .bind(location_type)
+    .bind(path)
+    .bind(file_size)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Remove a file location entry (e.g. after local file deletion)
+pub async fn remove_file_location(
+    pool: &Pool<Sqlite>,
+    file_id: i64,
+    location_type: &str,
+) -> Result<()> {
+    sqlx::query("DELETE FROM file_locations WHERE file_id = ? AND location_type = ?")
+        .bind(file_id)
+        .bind(location_type)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Get all locations for a file
+pub async fn get_file_locations(pool: &Pool<Sqlite>, file_id: i64) -> Result<Vec<FileLocation>> {
+    let locations = sqlx::query_as::<_, FileLocation>(
+        "SELECT * FROM file_locations WHERE file_id = ? ORDER BY location_type",
+    )
+    .bind(file_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(locations)
+}
+
+/// Get files in a folder that have no backup location recorded
+pub async fn get_unbacked_up_files(pool: &Pool<Sqlite>, folder_id: i64) -> Result<Vec<File>> {
+    let files = sqlx::query_as::<_, File>(
+        "SELECT f.* FROM files f
+         JOIN folders fol ON fol.folder_path = substr(f.file_path, 1, length(fol.folder_path))
+         WHERE fol.id = ?
+           AND f.id NOT IN (
+               SELECT file_id FROM file_locations WHERE location_type = 'backup'
+           )
+         ORDER BY f.file_path",
+    )
+    .bind(folder_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(files)
+}
+
+/// Record a successful backup result
+pub async fn record_backup_result(
+    pool: &Pool<Sqlite>,
+    file_id: i64,
+    success: bool,
+    file_size: i64,
+    backup_path: &str,
+) -> Result<()> {
+    if success {
+        set_file_location(pool, file_id, "backup", backup_path, file_size).await?;
+    }
+    Ok(())
+}
+
+/// Clear all backup locations for files in a folder (for re-backup)
+pub async fn clear_backup_status(pool: &Pool<Sqlite>, folder_id: i64) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM file_locations WHERE location_type = 'backup' AND file_id IN (
+            SELECT f.id FROM files f
+            JOIN folders fol ON fol.folder_path = substr(f.file_path, 1, length(fol.folder_path))
+            WHERE fol.id = ?
+        )",
+    )
+    .bind(folder_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ─── Source-of (WAV \u2192 stem linking) ────────────────────────────────────
+
+/// Get subdirectory names under the stems folder (WAV source dirs)
+pub async fn get_wav_source_subdirs(pool: &Pool<Sqlite>, folder_id: i64) -> Result<Vec<String>> {
+    // Get the folder path, then scan for subdirectories with WAV files
+    let folder_path: String = sqlx::query_scalar("SELECT folder_path FROM folders WHERE id = ?")
+        .bind(folder_id)
+        .fetch_one(pool)
+        .await?;
+
+    let mut subdirs = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&folder_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Check if it contains .wav files
+                if let Ok(dir_entries) = std::fs::read_dir(&path) {
+                    let has_wav = dir_entries.flatten().any(|e| {
+                        e.path()
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .map(|ext| ext.eq_ignore_ascii_case("wav"))
+                            .unwrap_or(false)
+                    });
+                    if has_wav {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            subdirs.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(subdirs)
+}
+
+/// Link a WAV source file to its parent stem file
+pub async fn set_file_source_of(
+    pool: &Pool<Sqlite>,
+    file_id: i64,
+    source_file_id: i64,
+) -> Result<()> {
+    sqlx::query("UPDATE files SET source_of = ? WHERE id = ?")
+        .bind(source_file_id)
+        .bind(file_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Get all files whose source_of points to a given file (i.e. WAVs for a stem)
+pub async fn get_files_by_source(pool: &Pool<Sqlite>, source_file_id: i64) -> Result<Vec<File>> {
+    let files = sqlx::query_as::<_, File>("SELECT * FROM files WHERE source_of = ?")
+        .bind(source_file_id)
+        .fetch_all(pool)
+        .await?;
+    Ok(files)
+}
+
+// ─── Pruning ─────────────────────────────────────────────────────────────────
+
+/// Get all files eligible for local deletion.
+/// A file is prune-able if: it has a backup location recorded AND
+/// it is NOT a stem AND it is NOT in any followed tag (or has no tags at all).
+pub async fn get_prune_candidates(
+    pool: &Pool<Sqlite>,
+    stem_preferred: bool,
+) -> Result<Vec<PruneCandidate>> {
+    // Two-step approach to avoid the expensive v_file_tags view:
+    // 1. Get all backed-up non-WAV file IDs (fast, uses indexes)
+    // 2. Get all file IDs with followed tags (simple query)
+    // 3. Subtract in Rust, then fetch details for remaining candidates
+
+    // Step 1: backed-up file IDs (fast — file_locations has indexes)
+    let mut backed_up: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT fl.file_id FROM file_locations fl
+         JOIN files f ON f.id = fl.file_id
+         WHERE fl.location_type = 'backup' AND f.file_type != 'wav'",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if backed_up.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Stem preference filter: exclude FLACs/MP3s/WAVs that have a same-ISRC stem.m4a
+    if stem_preferred {
+        let backed_up_set: std::collections::HashSet<i64> = backed_up.into_iter().collect();
+        let placeholders: Vec<String> = backed_up_set.iter().map(|_| "?".to_string()).collect();
+        let sql = format!(
+            "SELECT f.id FROM files f
+             WHERE f.id IN ({})
+             AND f.file_type != 'stem.m4a'
+             AND EXISTS (
+                 SELECT 1 FROM files f2
+                 WHERE f2.isrc = f.isrc AND f2.isrc IS NOT NULL
+                 AND f2.file_type = 'stem.m4a'
+             )",
+            placeholders.join(",")
+        );
+        let mut q = sqlx::query_scalar(&sql);
+        for id in &backed_up_set {
+            q = q.bind(id);
+        }
+        let redundant_ids: std::collections::HashSet<i64> =
+            q.fetch_all(pool).await?.into_iter().collect();
+        let filtered: Vec<i64> = backed_up_set.difference(&redundant_ids).copied().collect();
+        backed_up = filtered;
+        if backed_up.is_empty() {
+            return Ok(vec![]);
+        }
+    }
+
+    // Step 2: file IDs with any followed tag (simple EXISTS query)
+    let followed: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT vft.file_id FROM v_file_tags vft
+         JOIN tags t ON t.id = vft.tag_id
+         WHERE t.followed = 1",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // Build HashSet for fast lookup
+    let followed_set: std::collections::HashSet<i64> = followed.into_iter().collect();
+
+    // Step 3: filter in Rust — candidates = backed_up minus followed
+    let candidate_ids: Vec<i64> = backed_up
+        .into_iter()
+        .filter(|id| !followed_set.contains(id))
+        .collect();
+
+    if candidate_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Step 4: fetch full file details for candidates (limit to avoid over-fetching)
+    // Build IN clause dynamically — SQLx doesn't support arrays, so use placeholders
+    let placeholders: Vec<String> = candidate_ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT f.id, f.file_path, f.file_type, f.file_size,
+                COALESCE(f.title, '') as title, COALESCE(f.artist, '') as artist,
+                f.isrc, fl.path as backup_path
+         FROM files f
+         JOIN file_locations fl ON fl.file_id = f.id AND fl.location_type = 'backup'
+         WHERE f.id IN ({})
+         ORDER BY f.file_type, f.file_path",
+        placeholders.join(",")
+    );
+
+    let mut query = sqlx::query(&sql);
+    for id in &candidate_ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        let reason = "not_followed".to_string();
+        candidates.push(PruneCandidate {
+            file_id: row.try_get("id")?,
+            file_path: row.try_get("file_path")?,
+            file_type: row.try_get("file_type")?,
+            file_size: row.try_get("file_size")?,
+            title: row.try_get("title")?,
+            artist: row.try_get("artist")?,
+            isrc: row.try_get("isrc")?,
+            reason,
+            backup_path: row.try_get("backup_path")?,
+        });
+    }
+
+    Ok(candidates)
+}
+
+/// Delete a local file and remove its 'local' file_location entry.
+/// Returns true if the file was actually deleted from disk.
+pub async fn delete_local_file_by_id(pool: &Pool<Sqlite>, file_id: i64) -> Result<bool> {
+    // Get file path
+    let file_path: Option<String> = sqlx::query_scalar("SELECT file_path FROM files WHERE id = ?")
+        .bind(file_id)
+        .fetch_optional(pool)
+        .await?;
+
+    if let Some(path) = file_path {
+        let path_ref = std::path::Path::new(&path);
+        if path_ref.exists() {
+            std::fs::remove_file(path_ref)?;
+            tracing::info!("Deleted local file: {}", path);
+        }
+        // Remove local location record
+        sqlx::query("DELETE FROM file_locations WHERE file_id = ? AND location_type = 'local'")
+            .bind(file_id)
+            .execute(pool)
+            .await?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+// ─── Storage status ─────────────────────────────────────────────────────────
+
+/// Get aggregate storage statistics
+pub async fn get_storage_status(pool: &Pool<Sqlite>) -> Result<StorageStatus> {
+    let local_file_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let local_size_bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(file_size), 0) FROM files")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let local_stems: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE file_type = 'stem.m4a'")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+    let local_flacs: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE file_type = 'flac'")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+    let local_mp3s: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE file_type = 'mp3'")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let local_wavs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE file_type = 'wav'")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let local_other: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM files WHERE file_type NOT IN ('stem.m4a','flac','mp3','wav')",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let local_stems_size: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(file_size), 0) FROM files WHERE file_type = 'stem.m4a'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let local_flacs_size: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(file_size), 0) FROM files WHERE file_type = 'flac'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let local_wavs_size: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(file_size), 0) FROM files WHERE file_type = 'wav'")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+    let local_mp3s_size: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(file_size), 0) FROM files WHERE file_type = 'mp3'")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+    let backup_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT file_id) FROM file_locations WHERE location_type = 'backup'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let wav_source_dirs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM files WHERE file_type = 'wav' AND source_of IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    // Prune candidates count & size
+    // Default to stem_preferred=false for status count — frontend toggles the setting
+    let candidates = get_prune_candidates(pool, false).await?;
+    let prune_candidate_count = candidates.len() as i64;
+    let prune_candidate_bytes = candidates.iter().map(|c| c.file_size).sum();
+
+    let wav_indexed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE file_type = 'wav'")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
+    let wav_backed_up: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT fl.file_id) FROM file_locations fl
+         JOIN files f ON f.id = fl.file_id
+         WHERE f.file_type = 'wav' AND fl.location_type = 'backup'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    Ok(StorageStatus {
+        local_file_count,
+        local_size_bytes,
+        local_stems,
+        local_flacs,
+        local_mp3s,
+        local_wavs,
+        local_other,
+        local_stems_size,
+        local_flacs_size,
+        local_wavs_size,
+        local_mp3s_size,
+        backup_count,
+        wav_source_dirs,
+        prune_candidate_count,
+        prune_candidate_bytes,
+        wav_indexed,
+        wav_backed_up,
+    })
+}
+
+// ─── Folder backup config ───────────────────────────────────────────────────
+
+/// Update a folder's backup path and/or scan_sources flag
+pub async fn update_folder_backup_config(
+    pool: &Pool<Sqlite>,
+    folder_id: i64,
+    backup_path: Option<&str>,
+    scan_sources: Option<bool>,
+) -> Result<()> {
+    if let Some(bp) = backup_path {
+        sqlx::query("UPDATE folders SET backup_path = ? WHERE id = ?")
+            .bind(bp)
+            .bind(folder_id)
+            .execute(pool)
+            .await?;
+    }
+    if let Some(ss) = scan_sources {
+        sqlx::query("UPDATE folders SET scan_sources = ? WHERE id = ?")
+            .bind(ss)
+            .bind(folder_id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Folder Stats
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderStats {
+    pub id: i64,
+    pub folder_path: String,
+    pub backup_path: Option<String>,
+    pub scan_sources: bool,
+    /// Total files in this folder
+    pub total_files: i64,
+    /// Total size of all files in this folder (bytes)
+    pub total_size_bytes: i64,
+    /// File counts by type
+    pub stems: i64,
+    pub flacs: i64,
+    pub wavs: i64,
+    pub mp3s: i64,
+    pub other: i64,
+    /// Number of files backed up (have a backup file_locations entry)
+    pub backed_up: i64,
+    /// Total size of backed up files (bytes)
+    pub backed_up_size_bytes: i64,
+    /// Number of WAV source subdirectories found
+    pub wav_source_dirs: i64,
+    /// Number of WAV files indexed from sources
+    pub wav_source_files: i64,
+    /// Number of WAV files that are backed up
+    pub wav_backed_up: i64,
+    /// When the folder was last scanned
+    pub last_scanned: Option<i64>,
+    /// Whether folder watching is active
+    pub watch_enabled: bool,
+    /// Scan config
+    pub scan_recursive: bool,
+    pub max_depth: i32,
+}
+
+pub async fn get_folder_stats(pool: &Pool<Sqlite>, folder_id: i64) -> Result<FolderStats> {
+    let folder = get_folder_by_id(pool, folder_id)
+        .await?
+        .ok_or_else(|| anyhow!("Folder not found"))?;
+
+    let folder_path_prefix = format!("{}%", folder.folder_path);
+
+    // Total files
+    let total_files: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE file_path LIKE ?")
+        .bind(&folder_path_prefix)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
+    // Total size
+    let total_size_bytes: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(file_size), 0) FROM files WHERE file_path LIKE ?")
+            .bind(&folder_path_prefix)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+
+    // By type
+    let stems: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM files WHERE file_path LIKE ? AND file_type = 'stem.m4a'",
+    )
+    .bind(&folder_path_prefix)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let flacs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM files WHERE file_path LIKE ? AND file_type = 'flac'",
+    )
+    .bind(&folder_path_prefix)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let wavs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM files WHERE file_path LIKE ? AND file_type = 'wav'",
+    )
+    .bind(&folder_path_prefix)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let mp3s: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM files WHERE file_path LIKE ? AND file_type = 'mp3'",
+    )
+    .bind(&folder_path_prefix)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let other: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM files WHERE file_path LIKE ? AND file_type NOT IN ('stem.m4a','flac','wav','mp3')"
+    )
+    .bind(&folder_path_prefix)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    // Backed up files (have backup location)
+    let backed_up: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT fl.file_id) FROM file_locations fl
+         JOIN files f ON f.id = fl.file_id
+         WHERE f.file_path LIKE ? AND fl.location_type = 'backup'",
+    )
+    .bind(&folder_path_prefix)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    // Backed up size
+    let backed_up_size_bytes: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(f.file_size), 0) FROM files f
+         JOIN file_locations fl ON fl.file_id = f.id
+         WHERE f.file_path LIKE ? AND fl.location_type = 'backup'",
+    )
+    .bind(&folder_path_prefix)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    // WAV source dirs: count subdirs that exist on filesystem
+    let wav_source_dirs = if folder.scan_sources {
+        let subdirs = get_wav_source_subdirs(pool, folder_id)
+            .await
+            .unwrap_or_default();
+        let mut count = 0i64;
+        for subdir in &subdirs {
+            let full_path = format!("{}/{}", folder.folder_path, subdir);
+            let path = std::path::Path::new(&full_path);
+            if path.is_dir() {
+                count += 1;
+            }
+        }
+        count
+    } else {
+        0
+    };
+
+    let wav_source_files: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM files WHERE file_path LIKE ? AND file_type = 'wav'",
+    )
+    .bind(&folder_path_prefix)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let wav_backed_up: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT fl.file_id) FROM file_locations fl
+         JOIN files f ON f.id = fl.file_id
+         WHERE f.file_path LIKE ? AND f.file_type = 'wav' AND fl.location_type = 'backup'",
+    )
+    .bind(&folder_path_prefix)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    Ok(FolderStats {
+        id: folder.id,
+        folder_path: folder.folder_path,
+        backup_path: folder.backup_path,
+        scan_sources: folder.scan_sources,
+        total_files,
+        total_size_bytes,
+        stems,
+        flacs,
+        wavs,
+        mp3s,
+        other,
+        backed_up,
+        backed_up_size_bytes,
+        wav_source_dirs,
+        wav_source_files,
+        wav_backed_up,
+        last_scanned: folder.last_scanned,
+        watch_enabled: folder.active,
+        scan_recursive: folder.scan_recursive,
+        max_depth: folder.max_depth,
+    })
 }
 
 #[cfg(test)]

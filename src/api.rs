@@ -27,23 +27,31 @@ use uuid::Uuid;
 
 use std::collections::HashMap;
 
+use sha2::Digest;
+use tracing::warn;
+
 use crate::AppState;
+use crate::backup::BackupEngine;
 use crate::config::ServiceCredentials;
 #[allow(unused_imports)]
 use crate::db::{
-    CurationTag, File, FileDetail, FileDetailPlaylist, FileDetailTag, Folder, KeyComparisonRow,
-    KeyComparisonSummary, LinkedTrack, ServiceConfig, ServiceConnections, ServiceTrack,
-    TrackDetail, TrackDetailFile, bulk_categorize_tags, bulk_check_tags, bulk_create_tags,
-    bulk_review_tags, bulk_update_tags, categorize_tag as db_categorize_tag, clear_all_embeddings,
-    compute_target_comment, create_tag, create_tag_category, create_tags_from_playlists,
-    delete_folder, delete_tag, delete_tag_category, find_tag_similar_tracks, get_all_embeddings,
-    get_curation_queue, get_embeddings_by_category, get_file_detail, get_folder_by_id,
-    get_folder_file_count, get_folders as db_get_folders, get_key_comparison,
-    get_playlists_without_tags, get_service_config, get_tag_categories, get_tag_category_by_id,
-    get_tag_children, get_tag_embedding, get_tag_parents, get_tag_review_counts, get_tags_for_file,
-    get_track_detail, get_unreviewed_tags, list_subscriptions, read_comment_from_file, scan_folder,
-    set_tag_parents, update_folder_active, update_folder_with_config,
-    update_service_connection_status, update_service_tokens, update_tag,
+    CurationTag, File, FileDetail, FileDetailPlaylist, FileDetailTag, FileLocation, Folder,
+    FolderStats, KeyComparisonRow, KeyComparisonSummary, LinkedTrack, PruneCandidate,
+    ServiceConfig, ServiceConnections, ServiceTrack, StorageStatus, TrackDetail, TrackDetailFile,
+    bulk_categorize_tags, bulk_check_tags, bulk_create_tags, bulk_review_tags, bulk_update_tags,
+    categorize_tag as db_categorize_tag, clear_all_embeddings, compute_target_comment, create_tag,
+    create_tag_category, create_tags_from_playlists, delete_folder, delete_local_file_by_id,
+    delete_tag, delete_tag_category, ensure_backpack_tag, find_tag_similar_tracks,
+    get_all_embeddings, get_backpack_tag, get_curation_queue, get_embeddings_by_category,
+    get_file_detail, get_file_locations, get_folder_by_id, get_folder_file_count, get_folder_stats,
+    get_folders as db_get_folders, get_key_comparison, get_playlists_without_tags,
+    get_prune_candidates, get_service_config, get_storage_status, get_tag_categories,
+    get_tag_category_by_id, get_tag_children, get_tag_embedding, get_tag_parents,
+    get_tag_review_counts, get_tags_for_file, get_track_detail, get_unbacked_up_files,
+    get_unreviewed_tags, get_wav_source_subdirs, list_subscriptions, read_comment_from_file,
+    record_backup_result, scan_folder, set_file_source_of, set_tag_followed, set_tag_parents,
+    update_folder_active, update_folder_backup_config, update_folder_with_config,
+    update_service_connection_status, update_service_tokens, update_storage_setting, update_tag,
     update_tag_category_metadata, upsert_tag_embedding,
 };
 use crate::deemix::{
@@ -57,7 +65,10 @@ use crate::embeddings::{
     EmbeddingModel, compute_tag_similarities, deserialize_embedding, mean_embedding,
     serialize_embedding, suggest_category,
 };
-use crate::tasks::{SyncType, TaskStatus};
+use crate::tasks::{
+    SyncType, TaskStatus, start_backup_folder_task, start_backup_wavs_task,
+    start_scan_wav_sources_task,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -628,6 +639,9 @@ pub struct FolderInfo {
     pub max_depth: i32,
     pub file_count: i64,
     pub last_scanned: Option<i64>,
+    pub backup_path: Option<String>,
+    pub scan_sources: bool,
+    pub auto_backup: bool,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -800,6 +814,7 @@ pub struct ApiTag {
     pub category_id: Option<i64>,
     pub file_count: i64,
     pub created_at: i64,
+    pub followed: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1267,8 +1282,50 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/folders/{id}/watch", post(toggle_watch_handler))
         .route("/api/folders/{id}/scan", post(scan_folder_handler))
+        .route("/api/folders/{id}/stats", get(folder_stats_handler))
         .route("/api/traktor/import", post(traktor_import_handler))
         .route("/api/traktor/status", get(traktor_status_handler))
+        // ─── Storage / Backup / Prune ─────────────────────────────────
+        .route("/api/storage/status", get(storage_status_handler))
+        .route(
+            "/api/storage/settings",
+            get(storage_settings_get_handler).put(storage_settings_put_handler),
+        )
+        .route(
+            "/api/storage/backup/{folder_id}",
+            post(storage_backup_handler),
+        )
+        .route("/api/storage/prune-preview", post(prune_preview_handler))
+        .route("/api/storage/prune", post(prune_execute_handler))
+        .route(
+            "/api/storage/backup-wavs/{folder_id}",
+            post(backup_wavs_handler),
+        )
+        // ─── Tag following ────────────────────────────────────────────
+        .route("/api/tags/{id}/follow", put(tag_follow_handler))
+        // ─── Backpack (track-level) ───────────────────────────────────
+        .route("/api/tracks/{id}/backpack", post(track_backpack_handler))
+        // ─── File backup status ───────────────────────────────────────
+        .route(
+            "/api/files/{id}/backup-status",
+            get(file_backup_status_handler),
+        )
+        // ─── Folder backup config + source scanning ───────────────────
+        .route(
+            "/api/folders/{id}/backup",
+            put(folder_backup_config_handler),
+        )
+        .route(
+            "/api/folders/{id}/auto-backup",
+            put(folder_auto_backup_handler),
+        )
+        .route(
+            "/api/folders/{id}/scan-sources",
+            post(folder_scan_sources_handler),
+        )
+        // ─── Backup test/explore ──────────────────────────────────────
+        .route("/api/backup/test", get(backup_test_handler))
+        .route("/api/backup/explore", get(backup_explore_handler))
         .route("/callback", get(legacy_callback_handler))
         .route("/ws/spotify", get(ws_handler))
 }
@@ -1745,7 +1802,7 @@ fn build_files_filter_sql(filter: &FilesFilterAll) -> String {
     if let Some(ref search) = filter.search
         && !search.is_empty()
     {
-        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ?)");
+        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ? OR genre LIKE ? OR album LIKE ? OR isrc LIKE ? OR comment LIKE ? OR EXISTS (SELECT 1 FROM v_file_resolved_tags vfrt WHERE vfrt.file_id = files.id AND vfrt.tag_name LIKE ?))");
     }
 
     if filter.bpm_min.is_some() {
@@ -1873,9 +1930,10 @@ async fn files_needs_comment_count_all_handler(
     if let Some(ref search) = filter.search
         && !search.is_empty()
     {
-        q = q.bind(format!("%{}%", search));
-        q = q.bind(format!("%{}%", search));
-        q = q.bind(format!("%{}%", search));
+        let pattern = format!("%{}%", search);
+        for _ in 0..8 {
+            q = q.bind(pattern.clone());
+        }
     }
 
     if let Some(bpm_min) = filter.bpm_min {
@@ -1959,9 +2017,10 @@ async fn files_write_comments_all_handler(
     if let Some(ref search) = filter.search
         && !search.is_empty()
     {
-        q = q.bind(format!("%{}%", search));
-        q = q.bind(format!("%{}%", search));
-        q = q.bind(format!("%{}%", search));
+        let pattern = format!("%{}%", search);
+        for _ in 0..8 {
+            q = q.bind(pattern.clone());
+        }
     }
 
     if let Some(bpm_min) = filter.bpm_min {
@@ -6031,18 +6090,25 @@ async fn playlists_handler(
         && !search.trim().is_empty()
     {
         let clause = if has_where {
-            " AND sp.name LIKE "
+            " AND (sp.name LIKE "
         } else {
-            " WHERE sp.name LIKE "
+            " WHERE (sp.name LIKE "
         };
+        let search_pat = format!("%{}%", search);
         main_builder.push(clause);
-        main_builder.push_bind(format!("%{}%", search));
+        main_builder.push_bind(search_pat.clone());
+        main_builder.push(" OR sp.service LIKE ");
+        main_builder.push_bind(search_pat.clone());
+        main_builder.push(")");
         if has_where {
-            count_builder.push(" AND sp.name LIKE ");
+            count_builder.push(" AND (sp.name LIKE ");
         } else {
-            count_builder.push(" WHERE sp.name LIKE ");
+            count_builder.push(" WHERE (sp.name LIKE ");
         }
-        count_builder.push_bind(format!("%{}%", search));
+        count_builder.push_bind(search_pat.clone());
+        count_builder.push(" OR sp.service LIKE ");
+        count_builder.push_bind(search_pat);
+        count_builder.push(")");
         has_where = true;
     }
 
@@ -6580,6 +6646,9 @@ async fn add_folder_handler(
                 max_depth: folder.max_depth,
                 file_count: 0,
                 last_scanned: folder.last_scanned,
+                backup_path: folder.backup_path.clone(),
+                scan_sources: folder.scan_sources,
+                auto_backup: folder.auto_backup,
             };
             Json(ApiResponse { data: folder_info }).into_response()
         }
@@ -6611,6 +6680,9 @@ async fn toggle_watch_handler(
                         max_depth: updated_folder.max_depth,
                         file_count,
                         last_scanned: updated_folder.last_scanned,
+                        backup_path: updated_folder.backup_path.clone(),
+                        scan_sources: updated_folder.scan_sources,
+                        auto_backup: updated_folder.auto_backup,
                     };
                     Json(ApiResponse { data: folder_info }).into_response()
                 }
@@ -6647,6 +6719,9 @@ async fn get_folder_handler(
                 max_depth: folder.max_depth,
                 file_count,
                 last_scanned: folder.last_scanned,
+                backup_path: folder.backup_path.clone(),
+                scan_sources: folder.scan_sources,
+                auto_backup: folder.auto_backup,
             };
             Json(ApiResponse { data: folder_info }).into_response()
         }
@@ -6714,6 +6789,9 @@ async fn update_folder_handler(
                 max_depth: folder.max_depth,
                 file_count,
                 last_scanned: folder.last_scanned,
+                backup_path: folder.backup_path.clone(),
+                scan_sources: folder.scan_sources,
+                auto_backup: folder.auto_backup,
             };
             Json(ApiResponse { data: folder_info }).into_response()
         }
@@ -6777,6 +6855,23 @@ async fn scan_folder_handler(
         )
             .into_response(),
         Err(e) => internal_error(e).into_response(),
+    }
+}
+
+async fn folder_stats_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match get_folder_stats(&state.db, id).await {
+        Ok(stats) => Json(ApiResponse { data: stats }).into_response(),
+        Err(e) => {
+            let msg = format!("{}", e);
+            if msg.contains("not found") {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg })).into_response()
+            } else {
+                internal_error(e).into_response()
+            }
+        }
     }
 }
 
@@ -6900,7 +6995,7 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
     if let Some(ref search) = query.search
         && !search.is_empty()
     {
-        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ?)");
+        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ? OR genre LIKE ? OR album LIKE ? OR isrc LIKE ? OR comment LIKE ? OR EXISTS (SELECT 1 FROM v_file_resolved_tags vfrt WHERE vfrt.file_id = files.id AND vfrt.tag_name LIKE ?))");
     }
 
     if query.bpm_min.is_some() {
@@ -7075,9 +7170,11 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
     if let Some(ref search) = query.search
         && !search.is_empty()
     {
-        q = q.bind(format!("%{}%", search));
-        q = q.bind(format!("%{}%", search));
-        q = q.bind(format!("%{}%", search));
+        let pattern = format!("%{}%", search);
+        // Bind once per LIKE clause (title, artist, file_path, genre, album, isrc, comment, tag name)
+        for _ in 0..8 {
+            q = q.bind(pattern.clone());
+        }
     }
 
     if let Some(bpm_min) = query.bpm_min {
@@ -7286,7 +7383,7 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
     if let Some(ref search) = query.search
         && !search.is_empty()
     {
-        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ?)");
+        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ? OR genre LIKE ? OR album LIKE ? OR isrc LIKE ? OR comment LIKE ? OR EXISTS (SELECT 1 FROM v_file_resolved_tags vfrt WHERE vfrt.file_id = files.id AND vfrt.tag_name LIKE ?))");
     }
 
     if query.bpm_min.is_some() {
@@ -7422,9 +7519,10 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
     if let Some(ref search) = query.search
         && !search.is_empty()
     {
-        q = q.bind(format!("%{}%", search));
-        q = q.bind(format!("%{}%", search));
-        q = q.bind(format!("%{}%", search));
+        let pattern = format!("%{}%", search);
+        for _ in 0..8 {
+            q = q.bind(pattern.clone());
+        }
     }
 
     if let Some(bpm_min) = query.bpm_min {
@@ -7655,7 +7753,7 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     };
 
     if search_pattern.is_some() {
-        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)");
+        sql.push_str(" AND (st.title LIKE ? OR st.artist LIKE ? OR st.album LIKE ? OR st.isrc LIKE ? OR EXISTS (SELECT 1 FROM service_playlist_tracks spt2 JOIN service_playlists sp2 ON sp2.id = spt2.playlist_id WHERE spt2.track_id = st.id AND sp2.name LIKE ?))");
     }
 
     if service_filter.is_some() {
@@ -7796,7 +7894,12 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     let mut query_builder = sqlx::query_as::<_, ServiceTrack>(&sql);
 
     if let Some(ref pattern) = search_pattern {
-        query_builder = query_builder.bind(pattern).bind(pattern).bind(pattern);
+        query_builder = query_builder
+            .bind(pattern)
+            .bind(pattern)
+            .bind(pattern)
+            .bind(pattern)
+            .bind(pattern);
     }
 
     if let Some(service) = &service_filter {
@@ -8042,7 +8145,7 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
     };
 
     if search_pattern.is_some() {
-        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)");
+        sql.push_str(" AND (st.title LIKE ? OR st.artist LIKE ? OR st.album LIKE ? OR st.isrc LIKE ? OR EXISTS (SELECT 1 FROM service_playlist_tracks spt2 JOIN service_playlists sp2 ON sp2.id = spt2.playlist_id WHERE spt2.track_id = st.id AND sp2.name LIKE ?))");
     }
 
     if service_filter.is_some() {
@@ -8165,7 +8268,12 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
     let mut query_builder = sqlx::query(&sql);
 
     if let Some(ref pattern) = search_pattern {
-        query_builder = query_builder.bind(pattern).bind(pattern).bind(pattern);
+        query_builder = query_builder
+            .bind(pattern)
+            .bind(pattern)
+            .bind(pattern)
+            .bind(pattern)
+            .bind(pattern);
     }
 
     if let Some(service) = service_filter.as_ref() {
@@ -8430,10 +8538,15 @@ async fn get_all_tags(pool: &Pool<Sqlite>, query: &TagsQuery) -> Result<Vec<ApiT
     let mut sql = String::from(
         "SELECT t.id, t.name, t.category_id, t.sort_order, t.created_at, t.reviewed_at,
                 tc.name as category, tc.icon as category_icon,
-                COALESCE(vfc.file_count, 0) as file_count
+                COALESCE(vfc.file_count, 0) as file_count,
+                COALESCE(t.followed, 0) as followed
          FROM tags t
          LEFT JOIN tag_categories tc ON t.category_id = tc.id
-         LEFT JOIN v_tag_file_counts vfc ON vfc.tag_id = t.id
+         LEFT JOIN (
+             SELECT vfr.tag_id, COUNT(DISTINCT vfr.file_id) as file_count
+             FROM v_file_resolved_tags vfr
+             GROUP BY vfr.tag_id
+         ) vfc ON vfc.tag_id = t.id
          WHERE 1=1",
     );
 
@@ -8481,6 +8594,7 @@ async fn get_all_tags(pool: &Pool<Sqlite>, query: &TagsQuery) -> Result<Vec<ApiT
             category_id: row.try_get("category_id").ok(),
             file_count: row.try_get("file_count")?,
             created_at: row.try_get::<Option<i64>, _>("created_at")?.unwrap_or(0),
+            followed: row.try_get::<bool, _>("followed").unwrap_or(false),
         });
     }
 
@@ -8657,6 +8771,9 @@ async fn get_folders(pool: &Pool<Sqlite>, query: &FoldersQuery) -> Result<Vec<Fo
             max_depth: folder.max_depth,
             file_count,
             last_scanned: folder.last_scanned,
+            backup_path: folder.backup_path.clone(),
+            scan_sources: folder.scan_sources,
+            auto_backup: folder.auto_backup,
         });
     }
 
@@ -8727,6 +8844,9 @@ pub async fn get_folders_count(pool: &Pool<Sqlite>, query: &FoldersQuery) -> Res
             max_depth: folder.max_depth,
             file_count,
             last_scanned: folder.last_scanned,
+            backup_path: folder.backup_path.clone(),
+            scan_sources: folder.scan_sources,
+            auto_backup: folder.auto_backup,
         });
     }
 
@@ -9377,6 +9497,524 @@ async fn tag_children_handler(
             Json(ApiResponse { data: api_tags }).into_response()
         }
         Err(e) => internal_error(e).into_response(),
+    }
+}
+
+// ─── Storage / Backup / Prune Handlers ──────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupResult {
+    pub copied: usize,
+    pub verified: usize,
+    pub errors: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PruneResult {
+    pub deleted: usize,
+    pub freed_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WavBackupResult {
+    pub wav_dirs_backed_up: usize,
+    pub local_wavs_deleted: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderBackupConfig {
+    pub backup_path: Option<String>,
+    pub scan_sources: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageSettings {
+    pub stem_preferred: bool,
+}
+
+async fn storage_settings_get_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let stem_preferred = match get_service_config(&state.db, "storage").await {
+        Ok(Some(cfg)) => cfg
+            .metadata_json
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("stem_preferred").and_then(|v| v.as_bool()))
+            .unwrap_or(false),
+        _ => false,
+    };
+    Json(ApiResponse {
+        data: StorageSettings { stem_preferred },
+    })
+    .into_response()
+}
+
+async fn storage_settings_put_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<StorageSettings>,
+) -> impl IntoResponse {
+    let meta = serde_json::json!({"stem_preferred": body.stem_preferred}).to_string();
+    update_storage_setting(&state.db, &meta)
+        .await
+        .unwrap_or_default();
+    Json(ApiResponse { data: body }).into_response()
+}
+
+async fn storage_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match get_storage_status(&state.db).await {
+        Ok(status) => Json(ApiResponse { data: status }).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+async fn storage_backup_handler(
+    State(state): State<Arc<AppState>>,
+    Path(folder_id): Path<i64>,
+) -> impl IntoResponse {
+    // Validate folder exists
+    let folder = match get_folder_by_id(&state.db, folder_id).await {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse {
+                    data: serde_json::json!({"error": "Folder not found"}),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    if folder.backup_path.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                data: serde_json::json!({"error": "Folder has no backup_path configured"}),
+            }),
+        )
+            .into_response();
+    }
+
+    let task_id =
+        crate::tasks::start_backup_folder_task(&state.task_manager, &state.db, folder_id).await;
+
+    Json(ApiResponse {
+        data: serde_json::json!({ "taskId": task_id }),
+    })
+    .into_response()
+}
+
+async fn prune_preview_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let stem_preferred = crate::db::get_service_config(&state.db, "storage")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|c| c.metadata_json)
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("stem_preferred").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    match get_prune_candidates(&state.db, stem_preferred).await {
+        Ok(candidates) => Json(ApiResponse { data: candidates }).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+async fn prune_execute_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let stem_preferred = crate::db::get_service_config(&state.db, "storage")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|c| c.metadata_json)
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("stem_preferred").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    let candidates = match get_prune_candidates(&state.db, stem_preferred).await {
+        Ok(c) => c,
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    let mut deleted = 0usize;
+    let mut freed_bytes = 0i64;
+
+    for candidate in &candidates {
+        match delete_local_file_by_id(&state.db, candidate.file_id).await {
+            Ok(true) => {
+                deleted += 1;
+                freed_bytes += candidate.file_size;
+            }
+            _ => {}
+        }
+    }
+
+    Json(ApiResponse {
+        data: PruneResult {
+            deleted,
+            freed_bytes,
+        },
+    })
+    .into_response()
+}
+
+async fn backup_wavs_handler(
+    State(state): State<Arc<AppState>>,
+    Path(folder_id): Path<i64>,
+) -> impl IntoResponse {
+    let folder = match get_folder_by_id(&state.db, folder_id).await {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Folder not found".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    if folder.backup_path.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Folder has no backup_path configured".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let task_id =
+        crate::tasks::start_backup_wavs_task(&state.task_manager, &state.db, folder_id).await;
+
+    Json(ApiResponse {
+        data: serde_json::json!({ "taskId": task_id }),
+    })
+    .into_response()
+}
+
+// ─── Tag follow handler ───────────────────────────────────────────────
+
+async fn tag_follow_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let followed = body
+        .get("followed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    match set_tag_followed(&state.db, id, followed).await {
+        Ok(()) => Json(ApiResponse {
+            data: serde_json::json!({ "followed": followed }),
+        })
+        .into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+// ─── Track backpack handler ────────────────────────────────────────────
+
+async fn track_backpack_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    // Ensure backpack tag exists
+    let _backpack_tag = match ensure_backpack_tag(&state.db).await {
+        Ok(t) => t,
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    // Find playlists matching the backpack tag name (case-insensitive in v_tag_playlist)
+    let playlist = sqlx::query_as::<_, crate::db::ServicePlaylist>(
+        "SELECT s.* FROM service_playlists s WHERE LOWER(TRIM(s.name)) = LOWER(TRIM('backpack')) LIMIT 1",
+    )
+    .fetch_optional(&state.db)
+    .await;
+
+    let playlist_id = match playlist {
+        Ok(Some(p)) => p.id,
+        Ok(None) => {
+            // Create a local playlist for backpack
+            let now = chrono::Utc::now().timestamp();
+            let result = sqlx::query(
+                "INSERT INTO service_playlists (service, playlist_id, name, imported_at, updated_at) VALUES ('local', 'backpack', 'backpack', ?, ?)",
+            )
+            .bind(now)
+            .bind(now)
+            .execute(&state.db)
+            .await;
+
+            match result {
+                Ok(r) => r.last_insert_rowid(),
+                Err(e) => return internal_error(e).into_response(),
+            }
+        }
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    // Check if track is already in backpack playlist
+    let existing = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM service_playlist_tracks WHERE playlist_id = ? AND track_id = ?",
+    )
+    .bind(playlist_id)
+    .bind(id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+
+    let in_backpack = existing > 0;
+
+    if in_backpack {
+        // Remove from backpack
+        let _ = sqlx::query(
+            "DELETE FROM service_playlist_tracks WHERE playlist_id = ? AND track_id = ?",
+        )
+        .bind(playlist_id)
+        .bind(id)
+        .execute(&state.db)
+        .await;
+    } else {
+        // Add to backpack
+        let now = chrono::Utc::now().timestamp();
+        let _ = sqlx::query(
+            "INSERT OR IGNORE INTO service_playlist_tracks (playlist_id, track_id, added_at) VALUES (?, ?, ?)",
+        )
+        .bind(playlist_id)
+        .bind(id)
+        .bind(now)
+        .execute(&state.db)
+        .await;
+    }
+
+    Json(ApiResponse {
+        data: serde_json::json!({ "inBackpack": !in_backpack }),
+    })
+    .into_response()
+}
+
+// ─── File backup status handler ────────────────────────────────────────
+
+async fn file_backup_status_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let locations = match get_file_locations(&state.db, id).await {
+        Ok(l) => l,
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    let backed_up = locations.iter().any(|l| l.location_type == "backup");
+
+    Json(ApiResponse {
+        data: serde_json::json!({
+            "backedUp": backed_up,
+            "locations": locations
+        }),
+    })
+    .into_response()
+}
+
+// ─── Folder auto-backup toggle handler ───────────────────────────────
+
+async fn folder_auto_backup_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let auto_backup = body
+        .get("autoBackup")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    match sqlx::query("UPDATE folders SET auto_backup = ?, updated_at = unixepoch() WHERE id = ?")
+        .bind(auto_backup)
+        .bind(id)
+        .execute(&state.db)
+        .await
+    {
+        Ok(_) => Json(ApiResponse {
+            data: serde_json::json!({ "autoBackup": auto_backup }),
+        })
+        .into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+// ─── Folder backup config handler ──────────────────────────────────────
+
+async fn folder_backup_config_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let backup_path = body.get("backupPath").and_then(|v| v.as_str());
+    let scan_sources = body.get("scanSources").and_then(|v| v.as_bool());
+
+    match update_folder_backup_config(&state.db, id, backup_path, scan_sources).await {
+        Ok(()) => {
+            // Fetch updated folder
+            match get_folder_by_id(&state.db, id).await {
+                Ok(Some(folder)) => Json(ApiResponse {
+                    data: FolderBackupConfig {
+                        backup_path: folder.backup_path.clone(),
+                        scan_sources: folder.scan_sources,
+                    },
+                })
+                .into_response(),
+                _ => Json(ApiResponse {
+                    data: FolderBackupConfig {
+                        backup_path: backup_path.map(|s| s.to_string()),
+                        scan_sources: scan_sources.unwrap_or(false),
+                    },
+                })
+                .into_response(),
+            }
+        }
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+// ─── Folder scan sources handler ────────────────────────────────────────
+
+async fn folder_scan_sources_handler(
+    State(state): State<Arc<AppState>>,
+    Path(folder_id): Path<i64>,
+) -> impl IntoResponse {
+    let folder = match get_folder_by_id(&state.db, folder_id).await {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Folder not found".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    if !folder.scan_sources {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Folder does not have scan_sources enabled".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let task_id =
+        crate::tasks::start_scan_wav_sources_task(&state.task_manager, &state.db, folder_id).await;
+
+    Json(ApiResponse {
+        data: serde_json::json!({ "taskId": task_id }),
+    })
+    .into_response()
+}
+
+// ─── Backup test/explore handlers ──────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupTestResponse {
+    ok: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupExploreResponse {
+    dirs: Vec<String>,
+    writable: bool,
+    error: Option<String>,
+}
+
+async fn backup_test_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let host = match params.get("host") {
+        Some(h) if !h.is_empty() => h,
+        _ => {
+            return Json(ApiResponse {
+                data: BackupTestResponse {
+                    ok: false,
+                    error: Some("Missing 'host' query parameter".to_string()),
+                },
+            })
+            .into_response();
+        }
+    };
+
+    let engine = BackupEngine::new(host.clone());
+    match engine.test_host().await {
+        Ok(true) => Json(ApiResponse {
+            data: BackupTestResponse {
+                ok: true,
+                error: None,
+            },
+        })
+        .into_response(),
+        Ok(false) => Json(ApiResponse {
+            data: BackupTestResponse {
+                ok: false,
+                error: Some(
+                    "Connection failed — host unreachable or SSH key not accepted".to_string(),
+                ),
+            },
+        })
+        .into_response(),
+        Err(e) => Json(ApiResponse {
+            data: BackupTestResponse {
+                ok: false,
+                error: Some(format!("SSH error: {}", e)),
+            },
+        })
+        .into_response(),
+    }
+}
+
+async fn backup_explore_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let host = match params.get("host") {
+        Some(h) if !h.is_empty() => h,
+        _ => {
+            return Json(ApiResponse {
+                data: BackupExploreResponse {
+                    dirs: vec![],
+                    writable: false,
+                    error: Some("Missing 'host' query parameter".to_string()),
+                },
+            })
+            .into_response();
+        }
+    };
+
+    let path = params.get("path").map(|s| s.as_str()).unwrap_or("/");
+    let engine = BackupEngine::new(host.clone());
+
+    match engine.explore_dir(path).await {
+        Ok((dirs, writable)) => Json(ApiResponse {
+            data: BackupExploreResponse {
+                dirs,
+                writable,
+                error: None,
+            },
+        })
+        .into_response(),
+        Err(e) => Json(ApiResponse {
+            data: BackupExploreResponse {
+                dirs: vec![],
+                writable: false,
+                error: Some(format!("Explore failed: {}", e)),
+            },
+        })
+        .into_response(),
     }
 }
 

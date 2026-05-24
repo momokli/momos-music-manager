@@ -31,6 +31,8 @@ const PAGE_MAP = {
   "key-comparison": "key-comparison",
   "track-detail": "track-detail",
   "file-detail": "file-detail",
+  "folder-detail": "folder-detail",
+  storage: "storage",
 };
 
 let currentPageId = null;
