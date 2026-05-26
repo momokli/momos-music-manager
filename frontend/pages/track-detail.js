@@ -192,6 +192,7 @@ function renderFileCard(f, track) {
       <table class="detail-kv">
         <tbody>
           <tr><th>File Path</th><td><code>${escHtml(f.filePath || "—")}</code></td></tr>
+          <tr><th>Backed Up</th><td>${f.backedUp ? '<span style="color:var(--green)">✓ Yes' + (f.backupPath ? ' — ' + escHtml(f.backupPath) : '') + '</span>' : '<span style="color:var(--text-muted)">— No</span>'}</td></tr>
           <tr><th>ISRC</th><td>${escHtml(f.isrc || "—")}</td></tr>
           <tr><th>Album</th><td>${escHtml(f.album || "—")}</td></tr>
           <tr><th>BPM</th><td>${f.bpm != null ? f.bpm.toFixed(1) : "—"}</td></tr>

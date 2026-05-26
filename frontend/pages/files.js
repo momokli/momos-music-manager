@@ -78,6 +78,8 @@ const HASH_SCHEMA = {
   pmvAggregate: { type: "string", default: "" },
   commentStatuses: { type: "array", default: [] },
   fileTypes: { type: "array", default: [] },
+  backedUp: { type: "string", default: null },
+  safeToDelete: { type: "string", default: null },
 };
 
 /**
@@ -99,6 +101,8 @@ const HASH_DEFAULTS = {
   pmvAggregate: "",
   commentStatuses: [],
   fileTypes: [],
+  backedUp: null,
+  safeToDelete: null,
 };
 
 /* ------------------------------------------------------------------ */
@@ -148,6 +152,8 @@ const FILES_COLUMNS = [
     sortKey: "last_played",
     defaultWidth: 80,
   },
+  { id: "backedUp", label: "Backup", sortable: false, defaultWidth: 70 },
+  { id: "safeToDelete", label: "Prune", sortable: false, defaultWidth: 70 },
   { id: "comment", label: "Comment Diff", sortable: false, defaultWidth: 250 },
   { id: "actions", label: "Actions", sortable: false, defaultWidth: 120 },
 ];
@@ -178,6 +184,16 @@ const FILES_CELL_RENDERERS = {
     f.createdAt ? formatTimestamp(f.createdAt) : '<span class="text-muted">—</span>',
   lastPlayed: (f) =>
     f.lastPlayed ? formatTimestamp(f.lastPlayed) : '<span class="text-muted">—</span>',
+  backedUp: (r) => {
+    return r.backedUp
+      ? '<span class="status-badge connected" title="Backed up"><i class="fas fa-cloud"></i></span>'
+      : '<span class="status-badge disconnected" title="Not backed up"><i class="fas fa-cloud"></i></span>';
+  },
+  safeToDelete: (r) => {
+    return r.safeToDelete
+      ? '<span class="status-badge" style="color:var(--red);background:rgba(239,68,68,0.1)" title="Backed up, stem exists — safe to delete locally"><i class="fas fa-trash-alt"></i></span>'
+      : '<span class="text-muted" title="Keep locally">—</span>';
+  },
   comment: (f) => renderCommentDiff(f),
   actions: (f) => renderFileActions(f),
 };
@@ -515,6 +531,21 @@ function renderToolbar(state) {
                 <button class="filter-btn${(state.fileTypes || []).includes("wav") ? " active" : ""}" data-value="wav">WAV</button>
               </div>
             </div>
+            <div class="filter-row" data-filter="backup">
+              <span class="filter-row-label toggleable" data-filter="backup">Backup</span>
+              <div class="filter-group">
+                <button class="filter-btn${!state.backedUp ? " active" : ""}" data-backup-filter="all">All</button>
+                <button class="filter-btn${state.backedUp === true ? " active" : ""}" data-backup-filter="yes"><i class="fas fa-cloud"></i> Yes</button>
+                <button class="filter-btn${state.backedUp === false ? " active" : ""}" data-backup-filter="no"><i class="fas fa-cloud"></i> No</button>
+              </div>
+            </div>
+            <div class="filter-row" data-filter="safe">
+              <span class="filter-row-label toggleable" data-filter="safe">Safe to Delete</span>
+              <div class="filter-group">
+                <button class="filter-btn${!state.safeToDelete ? " active" : ""}" data-safe-filter="all">All</button>
+                <button class="filter-btn${state.safeToDelete === true ? " active" : ""}" data-safe-filter="yes"><i class="fas fa-trash-alt"></i> Yes</button>
+              </div>
+            </div>
           </div>
         </div>
         <div class="filter-row" style="margin-top:var(--space-2)">
@@ -677,6 +708,8 @@ function buildParams(state) {
   if (state.commentStatuses && state.commentStatuses.length > 0) {
     params.set("commentStatuses", state.commentStatuses.join(","));
   }
+  if (state.backedUp !== null) params.set("backedUp", String(state.backedUp));
+  if (state.safeToDelete !== null) params.set("safeToDelete", String(state.safeToDelete));
   if (state.sort) params.set("sort", state.sort);
   if (state.order === "desc") params.set("order", "desc");
   return params;
@@ -706,6 +739,8 @@ function buildFilterParams(state) {
     f.fileTypes = state.fileTypes.join(",");
   if (state.commentStatuses && state.commentStatuses.length > 0)
     f.commentStatuses = state.commentStatuses.join(",");
+  if (state.backedUp !== null) f.backedUp = state.backedUp;
+  if (state.safeToDelete !== null) f.safeToDelete = state.safeToDelete;
   return f;
 }
 
@@ -1322,6 +1357,44 @@ function wireToolbarEvents(container, signal, state) {
     );
   }
 
+  // ── Backup status filter ──
+  filterPanel?.querySelectorAll("[data-backup-filter]").forEach((btn) => {
+    btn.addEventListener(
+      "click",
+      () => {
+        const val = btn.dataset.backupFilter;
+        state.backedUp = val === "all" ? null : val === "yes";
+        state.page = 0;
+        filterPanel
+          .querySelectorAll("[data-backup-filter]")
+          .forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  });
+
+  // ── Safe to delete filter ──
+  filterPanel?.querySelectorAll("[data-safe-filter]").forEach((btn) => {
+    btn.addEventListener(
+      "click",
+      () => {
+        const val = btn.dataset.safeFilter;
+        state.safeToDelete = val === "all" ? null : val === "yes";
+        state.page = 0;
+        filterPanel
+          .querySelectorAll("[data-safe-filter]")
+          .forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  });
+
   // ── Generic toggle for data-filter labels ──
   filterPanel?.querySelectorAll("[data-filter]").forEach((label) => {
     function updateFilterUI() {
@@ -1755,6 +1828,8 @@ export async function init(container, signal, hashParams) {
     pmvAggregate: parsed.pmvAggregate,
     commentStatuses: parsed.commentStatuses,
     fileTypes: parsed.fileTypes,
+    backedUp: parsed.backedUp,
+    safeToDelete: parsed.safeToDelete,
     // Filter section enable/disable flags
     bpmEnabled: true,
     keyEnabled: true,
@@ -1763,6 +1838,8 @@ export async function init(container, signal, hashParams) {
     pmvEnabled: true,
     commentEnabled: true,
     fileTypeEnabled: true,
+    backupEnabled: true,
+    safeEnabled: true,
     layoutMode: false,
     selectedFileIds: new Set(),
     selectAllMode: false,

@@ -3102,6 +3102,8 @@ pub struct TrackDetailFile {
     pub rating: Option<i32>,
     pub play_count: Option<i32>,
     pub last_played: Option<i64>,
+    pub backed_up: bool,
+    pub backup_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -3298,9 +3300,12 @@ pub async fn get_track_detail(pool: &Pool<Sqlite>, track_id: i64) -> Result<Opti
         SELECT f.id, f.file_path, f.file_type, f.file_size, f.isrc,
                f.title, f.artist, f.album, f.bpm, f.musical_key,
                f.duration_ms, f.bitrate, f.sample_rate, f.channels,
-               f.comment, f.rating, f.play_count, f.last_played
+               f.comment, f.rating, f.play_count, f.last_played,
+               COALESCE(fl_backup.id IS NOT NULL, 0) as backed_up,
+               fl_backup.path as backup_path
         FROM v_file_track_link v
         JOIN files f ON f.id = v.file_id
+        LEFT JOIN file_locations fl_backup ON fl_backup.file_id = f.id AND fl_backup.location_type = 'backup'
         WHERE v.track_id = ?
         ORDER BY f.file_path
         "#,

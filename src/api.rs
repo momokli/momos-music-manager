@@ -58,8 +58,10 @@ use crate::deemix::{
     DeemixAuthRequest, DeemixClient, DeemixCombinedQueueItem, DeemixEnqueueRequest,
 };
 use crate::digging::{
-    DiggingSuggestRequest, TagReorderItem, delete_tag_energy_level, get_multi_seed_suggestions,
-    get_tag_energy_levels, reorder_tags_batch, set_tag_energy_level,
+    DiggingSearchQuery, DiggingSuggestRequest, DiggingTracksQuery, LadderSuggestRequest,
+    TagReorderItem, compute_track_energy, delete_tag_energy_level, get_ladder_suggestions,
+    get_multi_seed_suggestions, get_tag_energy_levels, reorder_tags_batch, search_digging_tracks,
+    search_tracks_and_files, set_tag_energy_level,
 };
 use crate::embeddings::{
     EmbeddingModel, compute_tag_similarities, deserialize_embedding, mean_embedding,
@@ -419,6 +421,9 @@ impl From<File> for ApiFile {
             matched_services: vec![],
             comment_target: String::new(),
             comment_needs_update: false,
+            backed_up: false,
+            has_stem: false,
+            safe_to_delete: false,
         }
     }
 }
@@ -441,6 +446,7 @@ impl From<ServiceTrack> for ApiServiceTrack {
             local_files: vec![],
             playlist_names: vec![],
             playlist_tags: vec![],
+            format_info: vec![],
         }
     }
 }
@@ -486,6 +492,9 @@ pub struct ApiFile {
     pub matched_services: Vec<String>,
     pub comment_target: String,
     pub comment_needs_update: bool,
+    pub backed_up: bool,
+    pub has_stem: bool,
+    pub safe_to_delete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -496,6 +505,14 @@ pub struct PlaylistTagInfo {
     pub category: String,
     pub prefix: String,
     pub icon: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackFormatInfo {
+    pub file_type: String,
+    pub local: bool,
+    pub backup: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -522,6 +539,8 @@ pub struct ApiServiceTrack {
     pub playlist_names: Vec<String>,
     #[serde(default)]
     pub playlist_tags: Vec<PlaylistTagInfo>,
+    #[serde(default)]
+    pub format_info: Vec<TrackFormatInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -682,6 +701,8 @@ pub struct FilesQuery {
     pub pmv_aggregate: Option<String>,
     pub file_types: Option<String>,
     pub comment_statuses: Option<String>,
+    pub backed_up: Option<bool>,
+    pub safe_to_delete: Option<bool>,
     pub sort: Option<String>,
     pub order: Option<String>,
     pub page_size: Option<i64>,
@@ -706,6 +727,8 @@ pub struct TracksQuery {
     pub imported_before_days: Option<i64>,
     pub added_after_days: Option<i64>,
     pub added_before_days: Option<i64>,
+    pub has_local: Option<bool>,
+    pub has_backup: Option<bool>,
     pub sort: Option<String>,
     pub order: Option<String>,
     pub page_size: Option<i64>,
@@ -1268,6 +1291,12 @@ pub fn router() -> Router<Arc<AppState>> {
             post(restore_handler).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
         )
         .route("/api/digging/suggest", post(digging_suggest_handler))
+        .route("/api/digging/search", get(digging_search_handler))
+        .route("/api/digging/tracks", get(digging_tracks_handler))
+        .route(
+            "/api/digging/ladder/suggest",
+            post(digging_ladder_suggest_handler),
+        )
         .route("/api/files/key-comparison", get(key_comparison_handler))
         .route(
             "/api/folders",
@@ -2787,6 +2816,54 @@ async fn digging_suggest_handler(
     Json(request): Json<DiggingSuggestRequest>,
 ) -> impl IntoResponse {
     match get_multi_seed_suggestions(&state.db, &request).await {
+        Ok(response) => Json(ApiResponse { data: response }).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+async fn digging_search_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DiggingSearchQuery>,
+) -> impl IntoResponse {
+    // Only return early if ALL filters are empty (no text search + no tags + no BPM filter)
+    let has_any_filter = !query.q.trim().is_empty()
+        || query
+            .tags
+            .as_deref()
+            .map(|t| !t.trim().is_empty())
+            .unwrap_or(false)
+        || query.bpm_min.is_some()
+        || query.bpm_max.is_some()
+        || query.energy_min.is_some()
+        || query.energy_max.is_some();
+
+    if !has_any_filter {
+        return Json(ApiResponse {
+            data: serde_json::json!({"tags": [], "files": []}),
+        })
+        .into_response();
+    }
+    match search_tracks_and_files(&state.db, &query).await {
+        Ok(response) => Json(ApiResponse { data: response }).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+async fn digging_tracks_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DiggingTracksQuery>,
+) -> impl IntoResponse {
+    match search_digging_tracks(&state.db, &query).await {
+        Ok(response) => Json(ApiResponse { data: response }).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+async fn digging_ladder_suggest_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<LadderSuggestRequest>,
+) -> impl IntoResponse {
+    match get_ladder_suggestions(&state.db, &request).await {
         Ok(response) => Json(ApiResponse { data: response }).into_response(),
         Err(e) => internal_error(e).into_response(),
     }
@@ -7138,6 +7215,19 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
         }
     }
 
+    // Backup filter
+    if let Some(true) = query.backed_up {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'backup')");
+    } else if let Some(false) = query.backed_up {
+        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'backup')");
+    }
+
+    if let Some(true) = query.safe_to_delete {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'backup')");
+        sql.push_str(" AND files.file_type != 'stem.m4a'");
+        sql.push_str(" AND EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.file_type = 'stem.m4a')");
+    }
+
     apply_sort(
         &mut sql,
         query.sort.as_deref(),
@@ -7373,6 +7463,52 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
         api_files.push(api_file);
     }
 
+    // Compute backup fields in batch
+    let file_ids: Vec<i64> = api_files.iter().map(|f| f.id).collect();
+    if !file_ids.is_empty() {
+        let backed_up_ids: std::collections::HashSet<i64> = {
+            let placeholders: Vec<String> = file_ids.iter().map(|_| "?".to_string()).collect();
+            let sql2 = format!(
+                "SELECT DISTINCT file_id FROM file_locations WHERE location_type = 'backup' AND file_id IN ({})",
+                placeholders.join(",")
+            );
+            let mut q = sqlx::query_scalar::<_, i64>(&sql2);
+            for id in &file_ids {
+                q = q.bind(id);
+            }
+            q.fetch_all(pool)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        };
+
+        let has_stem_ids: std::collections::HashSet<i64> = {
+            let placeholders: Vec<String> = file_ids.iter().map(|_| "?".to_string()).collect();
+            let sql3 = format!(
+                "SELECT DISTINCT f.id FROM files f WHERE f.isrc IS NOT NULL AND f.isrc != '' AND f.file_type != 'stem.m4a' \
+                 AND EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = f.isrc AND f2.file_type = 'stem.m4a') \
+                 AND f.id IN ({})",
+                placeholders.join(",")
+            );
+            let mut q = sqlx::query_scalar::<_, i64>(&sql3);
+            for id in &file_ids {
+                q = q.bind(id);
+            }
+            q.fetch_all(pool)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        };
+
+        for af in &mut api_files {
+            af.backed_up = backed_up_ids.contains(&af.id);
+            af.has_stem = has_stem_ids.contains(&af.id);
+            af.safe_to_delete = af.backed_up && af.has_stem;
+        }
+    }
+
     Ok(api_files)
 }
 
@@ -7512,6 +7648,19 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
             let placeholders: Vec<String> = types.iter().map(|_| "?".to_string()).collect();
             sql.push_str(&format!(" AND file_type IN ({})", placeholders.join(",")));
         }
+    }
+
+    // Backup filter
+    if let Some(true) = query.backed_up {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'backup')");
+    } else if let Some(false) = query.backed_up {
+        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'backup')");
+    }
+
+    if let Some(true) = query.safe_to_delete {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'backup')");
+        sql.push_str(" AND files.file_type != 'stem.m4a'");
+        sql.push_str(" AND EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.file_type = 'stem.m4a')");
     }
 
     let mut q = sqlx::query(&sql);
@@ -7743,6 +7892,33 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
 
     // If filtering by playlist (multi-name takes precedence over single ID),
     // use DISTINCT to avoid duplicates from the JOIN
+    // Pre-compute track IDs for has_local/has_backup filters (one query, not per-row EXISTS)
+    let backup_track_ids: std::collections::HashSet<i64> = if query.has_backup == Some(true)
+        || query.has_local == Some(true)
+    {
+        sqlx::query_scalar(
+            "SELECT DISTINCT vft.track_id FROM v_file_track_link vft JOIN file_locations fl ON fl.file_id = vft.file_id AND fl.location_type = 'backup'"
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+    } else {
+        Default::default()
+    };
+
+    let local_track_ids: std::collections::HashSet<i64> = if query.has_local == Some(true) {
+        sqlx::query_scalar("SELECT DISTINCT vft.track_id FROM v_file_track_link vft")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    } else {
+        Default::default()
+    };
+
     let mut sql = if playlists_filter.is_some() {
         "SELECT DISTINCT st.* FROM service_tracks st JOIN service_playlist_tracks spt ON spt.track_id = st.id JOIN service_playlists sp ON sp.id = spt.playlist_id WHERE 1=1".to_string()
     } else if playlist_id_filter.is_some() {
@@ -7871,6 +8047,25 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     }
     if added_before_days_filter.is_some() {
         sql.push_str(" AND (SELECT MAX(spt4.added_at) FROM service_playlist_tracks spt4 WHERE spt4.track_id = st.id) <= unixepoch('now', ?)");
+    }
+
+    // Format filter (hasLocal / hasBackup)
+    if let Some(true) = query.has_local {
+        if !local_track_ids.is_empty() {
+            let ids: Vec<String> = local_track_ids.iter().map(|id| id.to_string()).collect();
+            sql.push_str(&format!(" AND st.id IN ({})", ids.join(",")));
+        } else {
+            sql.push_str(" AND 1=0");
+        }
+    }
+    if let Some(true) = query.has_backup {
+        if !backup_track_ids.is_empty() {
+            let ids: Vec<String> = backup_track_ids.iter().map(|id| id.to_string()).collect();
+            sql.push_str(&format!(" AND st.id IN ({})", ids.join(",")));
+        } else {
+            // No tracks have backup files, force empty result
+            sql.push_str(" AND 1=0");
+        }
     }
 
     apply_sort(
@@ -8094,6 +8289,49 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         });
     }
 
+    // Get format info (file type + local/backup status) via ISRC
+    let isrcs: Vec<&str> = tracks
+        .iter()
+        .filter_map(|t| t.isrc.as_deref())
+        .filter(|i| !i.is_empty())
+        .collect();
+
+    let mut formats_by_isrc: std::collections::HashMap<String, Vec<TrackFormatInfo>> =
+        std::collections::HashMap::new();
+
+    if !isrcs.is_empty() {
+        let isrc_placeholders: Vec<String> = isrcs.iter().map(|_| "?".to_string()).collect();
+        let fmt_sql = format!(
+            r#"SELECT f.isrc, f.file_type,
+                      1 as local,
+                      EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = f.id AND fl.location_type = 'backup') as backup
+               FROM files f
+               WHERE f.isrc IN ({})
+               ORDER BY f.isrc, f.file_type"#,
+            isrc_placeholders.join(",")
+        );
+        let mut fmt_q = sqlx::query(&fmt_sql);
+        for isrc in &isrcs {
+            fmt_q = fmt_q.bind(isrc);
+        }
+        if let Ok(format_rows) = fmt_q.fetch_all(pool).await {
+            for row in format_rows {
+                let isrc: String = row.try_get("isrc").unwrap_or_default();
+                let file_type: String = row.try_get("file_type").unwrap_or_default();
+                let local: bool = row.try_get("local").unwrap_or(false);
+                let backup: bool = row.try_get("backup").unwrap_or(false);
+                formats_by_isrc
+                    .entry(isrc)
+                    .or_default()
+                    .push(TrackFormatInfo {
+                        file_type,
+                        local,
+                        backup,
+                    });
+            }
+        }
+    }
+
     Ok(tracks
         .into_iter()
         .map(|t| {
@@ -8106,6 +8344,11 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
             }
             if let Some(playlist_tags) = tag_map.remove(&api_track.id) {
                 api_track.playlist_tags = playlist_tags;
+            }
+            if let Some(ref isrc) = api_track.isrc
+                && let Some(formats) = formats_by_isrc.remove(isrc)
+            {
+                api_track.format_info = formats;
             }
             api_track.max_added_at = max_added_at_map.remove(&api_track.id);
             api_track
@@ -8135,13 +8378,39 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
     let added_after_days_filter = query.added_after_days;
     let added_before_days_filter = query.added_before_days;
 
+    let backup_track_ids: std::collections::HashSet<i64> = if query.has_backup == Some(true)
+        || query.has_local == Some(true)
+    {
+        sqlx::query_scalar(
+            "SELECT DISTINCT vft.track_id FROM v_file_track_link vft JOIN file_locations fl ON fl.file_id = vft.file_id AND fl.location_type = 'backup'"
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+    } else {
+        Default::default()
+    };
+
+    let local_track_ids: std::collections::HashSet<i64> = if query.has_local == Some(true) {
+        sqlx::query_scalar("SELECT DISTINCT vft.track_id FROM v_file_track_link vft")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    } else {
+        Default::default()
+    };
+
     let mut sql = if playlists_filter.is_some() {
         "SELECT COUNT(DISTINCT st.id) as count FROM service_tracks st JOIN service_playlist_tracks spt ON spt.track_id = st.id JOIN service_playlists sp ON sp.id = spt.playlist_id WHERE 1=1".to_string()
     } else if playlist_id_filter.is_some() {
         "SELECT COUNT(DISTINCT st.id) as count FROM service_tracks st JOIN service_playlist_tracks spt ON spt.track_id = st.id WHERE 1=1"
             .to_string()
     } else {
-        "SELECT COUNT(*) as count FROM service_tracks WHERE 1=1".to_string()
+        "SELECT COUNT(*) as count FROM service_tracks st WHERE 1=1".to_string()
     };
 
     if search_pattern.is_some() {
@@ -8263,6 +8532,25 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
     }
     if added_before_days_filter.is_some() {
         sql.push_str(" AND (SELECT MAX(spt4.added_at) FROM service_playlist_tracks spt4 WHERE spt4.track_id = st.id) <= unixepoch('now', ?)");
+    }
+
+    // Format filter (hasLocal / hasBackup)
+    if let Some(true) = query.has_local {
+        if !local_track_ids.is_empty() {
+            let ids: Vec<String> = local_track_ids.iter().map(|id| id.to_string()).collect();
+            sql.push_str(&format!(" AND st.id IN ({})", ids.join(",")));
+        } else {
+            sql.push_str(" AND 1=0");
+        }
+    }
+    if let Some(true) = query.has_backup {
+        if !backup_track_ids.is_empty() {
+            let ids: Vec<String> = backup_track_ids.iter().map(|id| id.to_string()).collect();
+            sql.push_str(&format!(" AND st.id IN ({})", ids.join(",")));
+        } else {
+            // No tracks have backup files, force empty result
+            sql.push_str(" AND 1=0");
+        }
     }
 
     let mut query_builder = sqlx::query(&sql);
@@ -8413,6 +8701,30 @@ async fn get_track_by_id(pool: &Pool<Sqlite>, id: i64) -> Result<ApiServiceTrack
             .fetch_one(pool)
             .await?;
     api_track.max_added_at = max_added_at;
+
+    // Get format info for this track via ISRC
+    if let Some(ref isrc) = api_track.isrc
+        && !isrc.is_empty()
+    {
+        let fmt_sql = r#"SELECT f.file_type,
+                      1 as local,
+                      EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = f.id AND fl.location_type = 'backup') as backup
+               FROM files f
+               WHERE f.isrc = ?
+               ORDER BY f.file_type"#;
+        if let Ok(format_rows) = sqlx::query(fmt_sql).bind(isrc).fetch_all(pool).await {
+            for row in format_rows {
+                let file_type: String = row.try_get("file_type").unwrap_or_default();
+                let local: bool = row.try_get("local").unwrap_or(false);
+                let backup: bool = row.try_get("backup").unwrap_or(false);
+                api_track.format_info.push(TrackFormatInfo {
+                    file_type,
+                    local,
+                    backup,
+                });
+            }
+        }
+    }
 
     Ok(api_track)
 }
@@ -10036,6 +10348,8 @@ impl Default for FilesQuery {
             pmv_aggregate: None,
             file_types: None,
             comment_statuses: None,
+            backed_up: None,
+            safe_to_delete: None,
             sort: None,
             order: None,
             page_size: None,

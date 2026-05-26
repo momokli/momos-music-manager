@@ -1,6 +1,6 @@
 # Momo's Music Manager — Agent Guidance
 
-> **Last Updated**: 2026-05-24 — v0.6.0
+> **Last Updated**: 2026-05-25 — v0.6.0 — digging-flat-ladder in-progress
 
 ---
 
@@ -3487,4 +3487,308 @@ This runs every 10 minutes. For each folder with `auto_backup=true`:
 - [ ] Auto-backup poller runs every 10 minutes
 - [ ] Poller only triggers backup when unbacked files exist
 - [ ] No manual intervention needed: files appear → auto-reconciled → auto-rsynced
+- [ ] `cargo build` passes
+
+---
+
+## Plan: digging-enrichment
+
+**Status**: done ✅
+**Branch**: `feat/digging-enrichment`
+**Ready for review**: no
+**Depends on**: nothing
+**Migration needed**: no
+
+### Description
+
+Enrich the Digging track browser with play count, rating, last played from linked files. Add server-side sorting. Add absolute BPM filter. Auto-load tracks on open.
+
+### Backend: `src/digging.rs`
+
+#### 1. Add play_count, rating, last_played to DiggingTrackResult
+
+```rust
+pub play_count: i32,
+pub rating: i32,
+pub last_played: Option<i64>,
+```
+
+#### 2. Add sort params to DiggingTracksQuery
+
+```rust
+pub sort_by: Option<String>,   // "relevance","playCount","rating","bpm","energy","lastPlayed","tagCount"
+pub sort_order: Option<String>, // "asc" or "desc"
+```
+
+Default sort when no filters: `rating desc → playCount desc`. With filters: `fileMatchCount desc → then rating desc`.
+
+#### 3. Update TrackDiggingRow + SQL
+
+Add subqueries for play_count, rating, last_played from linked files (MAX aggregate). Add tag_category_count computation in Rust.
+
+### Frontend: `frontend/pages/digging.js`
+
+- Add ▶7 plays, ★4 rating, "3d ago" badges to track cards
+- Add sort dropdown (Relevance, Plays, Rating, BPM, Energy, Tags) + ↑/↓ toggle
+- Add BPM from/to number inputs (absolute filter, independent of ladder)
+- Auto-load tracks on page open
+
+### Files to modify
+
+- `src/digging.rs`
+- `frontend/pages/digging.js`
+- `frontend/style.css`
+
+### Acceptance Criteria
+
+- [ ] `playCount`, `rating`, `lastPlayed` in API response
+- [ ] Sort by playCount/rating/bpm/energy/tagCount all work
+- [ ] Default sort (empty page): rating desc, playCount desc
+- [ ] Card badges: plays, rating stars, last played
+- [ ] Sort dropdown + direction toggle in filter bar
+- [ ] BPM from/to inputs work independently
+- [ ] Auto-load on page open
+- [ ] Backend compiles
+
+---
+
+## Plan: digging-flat-ladder
+
+**Status**: done ✅
+**Branch**: `feat/digging-flat-ladder`
+**Ready for review**: no
+**Depends on**: `feat/digging-enrichment`
+**Migration needed**: no
+
+### Description
+
+Redesign the Digging page: swap panes (browser left, ladder right), remove energy curve/steps concept, make the ladder a flat ordered list of identical track cards. Filters derive from ALL ladder tracks (not selected steps). Add drag-to-reorder, session persistence. Unified card design used identically in both panes.
+
+### Layout
+
+```
+┌──────────────────────────────┬───────────────────────────────┐
+│ BROWSER (left, 55%)          │ LADDER (right, 45%)           │
+│                              │                               │
+│ [search]  sort: [▾] ↑↓     │ #1 ██ Full track card         │
+│ BPM from/to inputs           │    with waveform, play, ×    │
+│                              │                               │
+│ Filters (all toggleable):    │ #2 ██ Full track card         │
+│ ☑ ⚡Energy 1-4              │    ...                        │
+│ ☐ 🔑Keys (±1▾)             │                               │
+│ ☐ 🎵BPM (±5▾)              │ #3 ██ Full track card         │
+│ ☑ 🏷️Tags + chips           │    ...                        │
+│                              │                               │
+│ Track cards (paginated)      │ Computed from ladder:         │
+│ ┌──────────────────────────┐│ BPM: 119-133 · Keys: 4m,5m   │
+│ │ ⠿ Title · Artist         ││ Tags: deep, dark, house      │
+│ │ 122BPM·4m·⚡3.2·▶7·★3  ││                              │
+│ │ tags: deep dark house    ││ [Save Session] [Load]        │
+│ │ [▶────waveform────]     ││ [Save as Playlist]           │
+│ │ FLAC ✓ STEM ✓            ││                              │
+│ └──────────────────────────┘│                               │
+│                              │                               │
+│ [Prev] Page N [Next]        │                               │
+└──────────────────────────────┴───────────────────────────────┘
+```
+
+### Key changes from current
+
+| Aspect              | Current                                        | New                                     |
+| ------------------- | ---------------------------------------------- | --------------------------------------- |
+| Panes               | Ladder left, browser right                     | Browser left, ladder right              |
+| Ladder structure    | Energy curve steps (⚡1,⚡2...) with selection | Flat ordered list #1,#2,#3...           |
+| Filter source       | Selected steps' energy/keys                    | ALL ladder tracks combined              |
+| Ladder items        | Minimal text (title, BPM, energy, ×)           | Full track cards (identical to browser) |
+| Reorder             | None                                           | Drag handle to reorder within ladder    |
+| Session persistence | None                                           | Save/Load to localStorage               |
+| Curve selector      | Sawtooth, Peak Hour, etc.                      | Removed                                 |
+
+### Track card (unified, used in both panes)
+
+```
+┌──────────────────────────────────────────────────┐
+│ ⠿  Title                                   [▶]  │
+│    Artist                                        │
+│                                                  │
+│    122 BPM · 4m · ⚡3.2 · ▶7 · ★★★★            │
+│    house  deep  dark  warehouse  +3 more         │
+│                                                  │
+│    ▂▃▄▅▆▇██▇▆▅▄▃▂▁▁▂▃▄▅▆▇██▇▆▅▄▃▂  0:45/5:32  │
+│                                                  │
+│    FLAC ✓(💾)  STEM ✓(💻)  |  Spotify · 3 lists  │
+└──────────────────────────────────────────────────┘
+```
+
+In browser: ⠿ = drag handle (drag to ladder). In ladder: ⠿ = reorder handle.
+
+### Filter logic
+
+When ladder has tracks, filters derive from ALL tracks:
+
+- ⚡Energy: all unique energy levels (±0.5 each), OR'd → `energyLevels=1,3,4`
+- 🔑Key: all keys, expanded by user's range (±1/±2/A↔B) → `keyList=4m,5m,3d&keyRange=+1,-1,same`
+- 🎵BPM: median BPM of all ladder tracks ± user slider → `bpmMin=...&bpmMax=...`
+- 🏷️Tags: all non-Phase tags from ladder (OR) + user chips → `tags=deep,dark,house`
+
+Each filter toggleable independently. Default: Energy ON, Tags ON, Keys OFF, BPM OFF.
+
+### Session persistence
+
+Save/Load to localStorage under key `diggingSession`:
+
+```javascript
+{
+  ladder: [{ id, title, artist, bpm, musicalKey, energyLevel, ... }],
+  filters: { energyEnabled, keyEnabled, bpmEnabled, tagsEnabled, keyRange },
+  bpmRange, sortBy, sortOrder,
+  savedAt: epochMs
+}
+```
+
+Two buttons: "Save Session" (writes), "Load Session" (reads + restores). Auto-save on every change (debounced). Load on page open if session exists.
+
+### Backend
+
+No changes needed. `GET /api/digging/tracks` already supports all filter params.
+
+### Files to modify
+
+- `frontend/pages/digging.js` — major rewrite (~400 lines changed)
+- `frontend/style.css` — layout adjustments
+
+### Acceptance Criteria
+
+- [ ] Browser on left, ladder on right
+- [ ] Ladder is flat numbered list (no energy curve/steps)
+- [ ] Identical track cards in both panes
+- [ ] Drag from browser ⠿ to ladder adds at drop position
+- [ ] Drag ⠿ within ladder reorders
+- [ ] × on ladder card removes from ladder
+- [ ] Filters derive from ALL ladder tracks (not selected steps)
+- [ ] Energy, Key, BPM, Tags filters all toggleable
+- [ ] Key range dropdown (±1, ±2, A↔B, etc.)
+- [ ] BPM range slider adjusts ±N from ladder median
+- [ ] Tag chips work (add/remove, OR with ladder tags)
+- [ ] Search, sort, BPM from/to inputs all work
+- [ ] Save Session / Load Session via localStorage
+- [ ] Auto-save on every change (debounced 2s)
+- [ ] Auto-restore session on page open
+- [ ] Save as Playlist still works (collects all ladder track IDs)
+- [ ] `cargo build` passes (no backend changes)
+
+---
+
+## Plan: digging-filter-row
+
+**Status**: done ✅
+**Branch**: `feat/digging-filter-row`
+**Ready for review**: no
+**Depends on**: `feat/digging-flat-ladder`
+**Migration needed**: no
+
+### Description
+
+Add three persistent filter rows to the browser pane (PMV, KEY, Phase) that filter server-side alongside the ladder-derived toggles. These are independent AND filters — a track must match all active groups.
+
+### Layout
+
+```
+┌─────────────────────────────────────────────────┐
+│ PMV: [P] [M] [V]  |  Full  Partial  None       │
+│ KEY: 1m 2m ... 12m  |  ALL m  NONE m            │
+│      1d 2d ... 12d  |  ALL d  NONE d            │
+│ Phase: End Start Release Build Sustain Peak     │
+├─────────────────────────────────────────────────┤
+│ ☑ ⚡Energy 1-4  ☑ 🔑Ladder keys  ☐ BPM  ☑ Tags │
+└─────────────────────────────────────────────────┘
+```
+
+### Filter details
+
+| Row   | Behavior                                                                                                                     | Backend param                        |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| PMV   | Multi-select P/M/V + single-select Full/Partial/None. Picking category clears aggregate, picking aggregate clears categories | NEW: `pmvCategories`, `pmvAggregate` |
+| KEY   | 24 toggle buttons. ALL m = select all minor. ALL/NONE per mode                                                               | Existing: `keyList`                  |
+| Phase | 6 multi-select buttons. Adds phase tag names to OR tag filter                                                                | Existing: `tags`                     |
+
+### Updated ladder-derived energy
+
+Energy now uses range ±1 from ALL ladder tracks' energy levels:
+
+```
+Ladder: Start(⚡1) + Build(⚡4) + Release(⚡2)
+→ 1±1 = 1,2,3; 4±1 = 3,4,5; 2±1 = 1,2,3
+→ union: 1,2,3,4,5
+→ energyLevels=1,2,3,4,5
+```
+
+### Backend: `src/digging.rs`
+
+Add to `DiggingTracksQuery`:
+
+```rust
+pub pmv_categories: Option<String>,  // comma P,M,V
+pub pmv_aggregate: Option<String>,   // "full", "partial", "none"
+```
+
+Add to `search_digging_tracks`:
+
+- Parse `pmv_categories` into `Vec<String>`
+- PMV category filter (OR): EXISTS subquery joining v_file_tags → tag_categories.prefix IN (...)
+- PMV aggregate full (AND): 3 EXISTS subqueries for p, m, v prefixes
+- PMV aggregate partial (OR): same as categories with all three
+- PMV aggregate none (NOT): NOT EXISTS subquery for any PMV prefix
+
+### Frontend: `frontend/pages/digging.js`
+
+Add three filter rows above the existing toggle bar in `renderFilterBar()`. Update `loadTracks()` to send new params and compute energy range ±1.
+
+### Acceptance Criteria
+
+- [ ] P, M, V buttons multi-select; clicking toggles active
+- [ ] Full/Partial/None mutually exclusive, clear categories on select
+- [ ] KEY: all 24 buttons toggleable, ALL/NONE per mode work
+- [ ] Phase: 6 buttons append Phase tag names to tags param
+- [ ] Energy: ladder-derived now uses ±1 range from each track's energy (union)
+- [ ] Filters compose: PMV AND key AND phase AND ladder-energy AND ladder-tags
+- [ ] Backend compiles
+
+---
+
+## Plan: digging-audit-fixes
+
+**Status**: done ✅
+**Branch**: `fix/digging-audit`
+**Ready for review**: no
+**Depends on**: `feat/digging-filter-row`
+**Migration needed**: no
+
+### Description
+
+Fix issues discovered during digging page audit: playback, card tag display, rating data, filter wiring verification.
+
+### Issue 1: Playback
+
+`pickAudioFile()` only accepted `location === "local"`. All production files are `location: "backup"`. Fixed to accept any file (prefers FLAC > stem.m4a). Verify `/api/files/{id}/stream` works for backup files.
+
+### Issue 2: Card tags
+
+Tags split into PHASE (with ⚡), MOOD, VIBE, TAGS rows by category prefix. Removed playlist badges (duplicated tag names). Removed averaged ⚡ badge.
+
+### Issue 3: Rating
+
+All ratings are 0. Traktor RANKING may not be in collection.nml. Show stars only when > 0.
+
+### Issue 4: Filter wiring audit
+
+Verify all filters (PMV, KEY, Phase, Energy, BPM, Tags, Search, Sort) work end-to-end with curl tests.
+
+### Acceptance Criteria
+
+- [ ] Playback works for tracks with any file (any location)
+- [ ] Card tags organized by category with PHASE/MOOD/VIBE/TAGS rows
+- [ ] No duplicate tag display
+- [ ] Rating stars when > 0
+- [ ] All filters verified end-to-end
 - [ ] `cargo build` passes

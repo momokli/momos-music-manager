@@ -61,7 +61,7 @@ const TRACKS_COLUMNS = [
   },
   { id: "album", label: "Album", sortable: true, sortKey: "album", defaultWidth: 140 },
   { id: "playlists", label: "Playlists", sortable: false, defaultWidth: 180 },
-  { id: "localFiles", label: "Local Files", sortable: false, defaultWidth: 100 },
+  { id: "localFiles", label: "Local Files", sortable: false, defaultWidth: 180 },
   {
     id: "duration",
     label: "Duration",
@@ -106,6 +106,8 @@ const HASH_DEFAULTS = {
   addedMode: "",
   addedNum: null,
   addedUnit: "days",
+  hasLocal: false,
+  hasBackup: false,
   page: 0,
 };
 
@@ -132,6 +134,8 @@ const HASH_SCHEMA = {
   addedMode: true,
   addedNum: true,
   addedUnit: true,
+  hasLocal: true,
+  hasBackup: true,
   playlistId: true,
   playlistName: true,
 };
@@ -158,7 +162,7 @@ const TRACKS_CELL_RENDERERS = {
     `<span class="service-badge ${t.service}"><i class="fab fa-${t.service}"></i> ${t.service.charAt(0).toUpperCase() + t.service.slice(1)}</span>`,
   album: (t) => (t.album ? escapeHtml(t.album) : '<span class="text-muted">—</span>'),
   playlists: (t) => renderPlaylistBadges(t),
-  localFiles: (t) => renderLocalFiles(t),
+  localFiles: (t) => renderFormatBadges(t),
   duration: (t) =>
     `<span class="font-mono">${escapeHtml(formatDuration(t.duration))}</span>`,
   isrc: (t) =>
@@ -234,17 +238,28 @@ function renderPlaylistBadges(t) {
 }
 
 /**
- * Render local file code badges for a track.
- * @param {object} t — adapted track object with files string (space-joined)
+ * Render file format badges for a track.
+ * Shows all file formats associated with this track (by ISRC),
+ * colored green for local, dashed grey for backup-only.
+ * @param {object} t — adapted track object with formatInfo array
  * @returns {string} HTML
  */
-function renderLocalFiles(t) {
-  if (!t.files) return '<span class="text-muted">—</span>';
-  return t.files
-    .split(" ")
-    .map((f) => `<code class="font-mono">${escapeHtml(f)}</code>`)
+function renderFormatBadges(t) {
+  const fmts = t.formatInfo || [];
+  if (fmts.length === 0) return '<span class="text-muted">—</span>';
+
+  return fmts
+    .map((f) => {
+      const type = f.fileType || "?";
+      let cls = "fmt-badge fmt-" + type.replace(".", "-");
+      if (f.local) cls += " fmt-local";
+      else if (f.backup) cls += " fmt-backup";
+      const loc = f.local ? "local" : f.backup ? "backup" : "";
+      return `<span class="${cls}" title="${escapeHtml(type)} (${loc})">${escapeHtml(type)}</span>`;
+    })
     .join(" ");
 }
+
 
 /* ------------------------------------------------------------------ */
 /*  Adapter                                                            */
@@ -271,6 +286,7 @@ function adaptTrack(t) {
     playlistTags: t.playlistTags || [],
     comment: t.comment || null,
     commentTarget: t.commentTarget || null,
+    formatInfo: t.formatInfo || [],
   };
 }
 
@@ -439,10 +455,20 @@ function renderToolbar(search, state) {
             <span class="pmv-sep">|</span>
             <div class="filter-group" id="tracks-filetype-agg-btns" style="flex-wrap:wrap">
               <button class="filter-btn${state.fileTypeAgg === "any" ? " active" : ""}" data-value="any" title="Has at least one local file">Some</button>
-              <button class="filter-btn${state.fileTypeAgg === "none" ? " active" : ""}" data-value="none" title="Has no local file">None</button>
+                <button class="filter-btn${state.fileTypeAgg === "none" ? " active" : ""}" data-value="none" title="Has no local file">None</button>
+              </div>
+            </div>
+
+            <!-- Format (local/backup) filter -->
+            <div class="filter-row">
+              <span class="filter-row-label toggleable" data-filter="format">Local Files</span>
+              <div class="filter-group">
+                <button class="filter-btn${!state.hasLocal && !state.hasBackup ? " active" : ""}" data-format-filter="all">All</button>
+                <button class="filter-btn${state.hasLocal ? " active" : ""}" data-format-filter="local"><i class="fas fa-check"></i> Has Local</button>
+                <button class="filter-btn${state.hasBackup ? " active" : ""}" data-format-filter="backup"><i class="fas fa-cloud"></i> Has Backup</button>
+              </div>
             </div>
           </div>
-        </div>
       </div>
     </div>
   </div>`;
@@ -594,6 +620,8 @@ function buildParams(state) {
   if (state.fileTypeAgg) {
     params.set("fileTypeAgg", state.fileTypeAgg);
   }
+  if (state.hasLocal) params.set("hasLocal", "true");
+  if (state.hasBackup) params.set("hasBackup", "true");
   // Date filters — convert weeks/months to days
   function toDays(num, unit) {
     if (!num || num <= 0) return null;
@@ -1397,6 +1425,43 @@ function wireToolbarEvents(container, signal, state) {
   }
   wireDateFilter();
 
+  // ── Format (local/backup) filter ──
+  const formatBtns = container.querySelectorAll("[data-format-filter]");
+  formatBtns.forEach((btn) => {
+    btn.addEventListener(
+      "click",
+      () => {
+        const val = btn.dataset.formatFilter;
+        if (val === "all") {
+          state.hasLocal = false;
+          state.hasBackup = false;
+        } else if (val === "local") {
+          state.hasLocal = !state.hasLocal;
+          state.hasBackup = false;
+        } else if (val === "backup") {
+          state.hasLocal = false;
+          state.hasBackup = !state.hasBackup;
+        }
+        state.page = 0;
+        formatBtns.forEach((b) => b.classList.remove("active"));
+        if (state.hasLocal) {
+          container
+            .querySelector('[data-format-filter="local"]')
+            ?.classList.add("active");
+        } else if (state.hasBackup) {
+          container
+            .querySelector('[data-format-filter="backup"]')
+            ?.classList.add("active");
+        } else {
+          container.querySelector('[data-format-filter="all"]')?.classList.add("active");
+        }
+        updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  });
+
   // ── Generic toggle for data-filter labels ──
   filterPanel?.querySelectorAll("[data-filter]").forEach((label) => {
     function updateFilterUI() {
@@ -1781,6 +1846,8 @@ export async function init(container, signal, hashParams) {
     addedMode: hashParams?.addedMode || "",
     addedNum: hashParams?.addedNum ? parseInt(hashParams.addedNum) : null,
     addedUnit: hashParams?.addedUnit || "days",
+    hasLocal: hashParams?.hasLocal === "true" || false,
+    hasBackup: hashParams?.hasBackup === "true" || false,
     playlistId: hashParams?.playlistId ? parseInt(hashParams.playlistId) : null,
     playlistName: hashParams?.playlistName || null,
     tagEnabled: true,
@@ -1789,6 +1856,7 @@ export async function init(container, signal, hashParams) {
     pmvEnabled: true,
     typeEnabled: true,
     dateEnabled: true,
+    formatEnabled: true,
     layoutMode: false,
     selectedTrackIds: new Set(),
     needsCommentCount: 0,
