@@ -86,6 +86,14 @@ const STATUS_OPTIONS = [
   { value: "cancelled", label: "Cancelled" },
 ];
 
+const HASH_SCHEMA = {
+  search: { type: "string", default: "" },
+  status: { type: "string", default: "all" },
+  sort: { type: "string", default: "" },
+  order: { type: "string", default: "asc" },
+  page: { type: "number", default: 0 },
+};
+
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
@@ -698,13 +706,18 @@ export async function init(container, signal, hashParams) {
   if (toolbarEl) {
     wireSearchFilter(toolbarEl, state, () => {
       stopPolling(state);
-      updateHash("tasks", state, {
-        sort: "",
-        order: "asc",
-        search: "",
-        status: "all",
-        page: 0,
-      });
+      updateHash(
+        "tasks",
+        state,
+        {
+          sort: "",
+          order: "asc",
+          search: "",
+          status: "all",
+          page: 0,
+        },
+        HASH_SCHEMA,
+      );
       fetchAndRender(container, signal, state);
     });
   }
@@ -728,13 +741,18 @@ export async function init(container, signal, hashParams) {
   await fetchAndRender(container, signal, state);
 
   // Sync hash with initial state
-  updateHash("tasks", state, {
-    sort: "",
-    order: "asc",
-    search: "",
-    status: "all",
-    page: 0,
-  });
+  updateHash(
+    "tasks",
+    state,
+    {
+      sort: "",
+      order: "asc",
+      search: "",
+      status: "all",
+      page: 0,
+    },
+    HASH_SCHEMA,
+  );
 
   // Visibility change — reload when user comes back
   document.addEventListener(

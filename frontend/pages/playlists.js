@@ -206,13 +206,15 @@ function actions(r) {
   if (r.tag)
     b += `<button class="btn btn-sm btn-purple" data-act="edit-tag" data-id="${r.id}" title="Edit tag"><i class="fas fa-pencil-alt"></i></button> `;
   else
-    b += `<button class="btn btn-sm btn-green" data-act="create-tag" data-id="${r.id}" title="Create tag from playlist name"><i class="fas fa-tag"></i></button> `;
+    b += `<button class="btn btn-sm btn-green" data-act="create-tag" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Create tag from playlist name"><i class="fas fa-tag"></i></button> `;
 
   if (r.sub) {
     b += `<button class="btn btn-sm btn-red" data-act="unsubscribe" data-sub-id="${r.sub.id}" data-id="${r.id}" title="Unsubscribe"><i class="fas fa-bell-slash"></i></button> `;
   } else {
     b += `<button class="btn btn-sm" data-act="subscribe" data-id="${r.id}" data-service="${r.svc}" data-playlist-id="${r.playlistId}" title="Subscribe (poll + auto-download new tracks via deemix)"><i class="fas fa-bell"></i></button> `;
   }
+
+  b += `<button class="btn btn-sm btn-delete-playlist" data-act="delete-playlist" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Delete playlist"><i class="fas fa-trash"></i></button> `;
 
   return (
     b +
@@ -869,6 +871,22 @@ function wireContentEvents(container, signal, state) {
             showToast(`Unsubscribe failed: ${err.message}`, "error");
             b.disabled = false;
             b.innerHTML = '<i class="fas fa-bell-slash"></i>';
+          }
+        } else if (act === "delete-playlist") {
+          const name = b.dataset.name;
+          if (!confirm(`Delete playlist "${name}"? This cannot be undone.`)) return;
+          const playlistId = +b.dataset.id;
+          b.disabled = true;
+          b.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+          try {
+            await fetchJSON(`/api/playlists/${playlistId}`, { method: "DELETE" });
+            showToast(`Playlist "${name}" deleted`, "success");
+            updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
+            fetchAndRender(container, signal, state);
+          } catch (err) {
+            showToast(`Delete failed: ${err.message}`, "error");
+            b.disabled = false;
+            b.innerHTML = '<i class="fas fa-trash"></i>';
           }
         } else if (act === "sync") {
           const svc = b.dataset.service;

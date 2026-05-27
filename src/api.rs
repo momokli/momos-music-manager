@@ -41,7 +41,7 @@ use crate::db::{
     bulk_categorize_tags, bulk_check_tags, bulk_create_tags, bulk_review_tags, bulk_update_tags,
     categorize_tag as db_categorize_tag, clear_all_embeddings, compute_target_comment, create_tag,
     create_tag_category, create_tags_from_playlists, delete_folder, delete_local_file_by_id,
-    delete_tag, delete_tag_category, ensure_backpack_tag, find_tag_similar_tracks,
+    delete_playlist, delete_tag, delete_tag_category, ensure_backpack_tag, find_tag_similar_tracks,
     get_all_embeddings, get_backpack_tag, get_curation_queue, get_embeddings_by_category,
     get_file_detail, get_file_locations, get_folder_by_id, get_folder_file_count, get_folder_stats,
     get_folders as db_get_folders, get_key_comparison, get_playlists_without_tags,
@@ -591,7 +591,8 @@ pub struct ExplorerPreset {
 #[serde(rename_all = "camelCase")]
 pub struct CreateLocalPlaylistRequest {
     pub name: String,
-    pub file_ids: Vec<i64>,
+    #[serde(alias = "fileIds")]
+    pub track_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1211,7 +1212,10 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/services/{service}/sync", post(service_sync_handler))
         .route("/api/playlists", get(playlists_handler))
-        .route("/api/playlists/{id}", get(playlist_detail_handler))
+        .route(
+            "/api/playlists/{id}",
+            get(playlist_detail_handler).delete(delete_playlist_handler),
+        )
         .route(
             "/api/playlists/{id}/tracks",
             get(playlist_tracks_handler).post(add_track_to_playlist_handler),
@@ -5985,85 +5989,17 @@ async fn create_local_playlist_handler(
         )
             .into_response();
     }
-    if request.file_ids.is_empty() {
+    if request.track_ids.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
-                "error": "At least one file ID required"
+                "error": "At least one track ID required"
             })),
         )
             .into_response();
     }
 
-    // 1. Ensure a service_track exists for each file
-    let mut track_ids: Vec<i64> = Vec::with_capacity(request.file_ids.len());
-    let mut new_tracks: i64 = 0;
-
-    for &file_id in &request.file_ids {
-        // Look up the file
-        let file = match sqlx::query_as::<_, crate::db::File>("SELECT * FROM files WHERE id = ?")
-            .bind(file_id)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(Some(f)) => f,
-            Ok(None) => continue,
-            Err(e) => {
-                tracing::error!("DB error looking up file {}: {}", file_id, e);
-                continue;
-            }
-        };
-
-        // Try to find existing service_track (ISRC match or previous local track)
-        let existing_track: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM service_tracks WHERE (service = 'local' AND service_id = CAST(? AS TEXT)) OR (isrc IS NOT NULL AND isrc = ?) LIMIT 1"
-        )
-        .bind(file_id)
-        .bind(&file.isrc)
-        .fetch_optional(pool)
-        .await
-        .unwrap_or(None);
-
-        if let Some(track_id) = existing_track {
-            track_ids.push(track_id);
-        } else {
-            let title = file.title.as_deref().unwrap_or("Unknown");
-            let artist = file.artist.as_deref().unwrap_or("Unknown");
-            let result = sqlx::query(
-                "INSERT INTO service_tracks (service, service_id, title, artist, isrc, imported_at) VALUES ('local', ?, ?, ?, ?, unixepoch())"
-            )
-            .bind(file_id.to_string())
-            .bind(title)
-            .bind(artist)
-            .bind(&file.isrc)
-            .execute(pool)
-            .await;
-
-            match result {
-                Ok(r) => {
-                    track_ids.push(r.last_insert_rowid());
-                    new_tracks += 1;
-                }
-                Err(e) => {
-                    tracing::error!("Failed to create local track for file {}: {}", file_id, e);
-                    continue;
-                }
-            }
-        }
-    }
-
-    if track_ids.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "No valid files could be added"
-            })),
-        )
-            .into_response();
-    }
-
-    // 2. Create the local playlist
-    // Generate a unique playlist_id since local playlists have no service-side ID
+    // Create the local playlist
     let playlist_id_str = format!("local-{}", Uuid::new_v4());
     let playlist_result = sqlx::query(
         "INSERT INTO service_playlists (service, playlist_id, name, imported_at, updated_at) VALUES ('local', ?, ?, unixepoch(), unixepoch())"
@@ -6087,8 +6023,8 @@ async fn create_local_playlist_handler(
         }
     };
 
-    // 3. Add tracks to playlist
-    for track_id in &track_ids {
+    // Link tracks to playlist
+    for track_id in &request.track_ids {
         if let Err(e) = sqlx::query(
             "INSERT OR IGNORE INTO service_playlist_tracks (playlist_id, track_id, added_at) VALUES (?, ?, unixepoch())"
         )
@@ -6103,8 +6039,7 @@ async fn create_local_playlist_handler(
 
     let response = json!({
         "playlistId": playlist_id,
-        "trackCount": track_ids.len(),
-        "newTrackCount": new_tracks,
+        "trackCount": request.track_ids.len(),
     });
 
     (StatusCode::OK, Json(ApiResponse { data: response })).into_response()
@@ -6125,6 +6060,26 @@ async fn toggle_playlist_archive_handler(
         .unwrap_or(false);
     match crate::db::set_playlist_archive_deleted(&state.db, id, archive).await {
         Ok(()) => Json(json!({"data": {"id": id, "archiveDeleted": archive}})).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+async fn delete_playlist_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match crate::db::delete_playlist(&state.db, id).await {
+        Ok(true) => Json(ApiResponse {
+            data: serde_json::json!({"deleted": true, "id": id}),
+        })
+        .into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Playlist not found".to_string(),
+            }),
+        )
+            .into_response(),
         Err(e) => internal_error(e).into_response(),
     }
 }

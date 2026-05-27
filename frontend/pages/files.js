@@ -270,14 +270,13 @@ function renderLinkBadge(services) {
 }
 
 function renderCommentDiff(f) {
-  const diffClass = f.commentUnchanged ? "diff-line-unchanged" : "diff-line";
-  if (f.commentUnchanged) {
-    return `<div class="${diffClass}"><span class="diff-sign check">✓</span>${escapeHtml(f.comment)}</div>`;
+  if (f.needsUpdate) {
+    return `<div class="diff-line">
+      <div class="diff-line-old"><span class="diff-sign minus">−</span>${escapeHtml(f.diffOld || "(empty)")}</div>
+      <div class="diff-line-new"><span class="diff-sign plus">+</span>${escapeHtml(f.diffNew)}</div>
+    </div>`;
   }
-  return `<div class="${diffClass}">
-    <div class="diff-line-old"><span class="diff-sign minus">−</span>${escapeHtml(f.diffOld)}</div>
-    <div class="diff-line-new"><span class="diff-sign plus">+</span>${escapeHtml(f.diffNew)}</div>
-  </div>`;
+  return `<div class="diff-line-unchanged"><span class="diff-sign check">✓</span>${f.comment ? escapeHtml(f.comment) : '<span class="text-muted">(empty)</span>'}</div>`;
 }
 
 function renderFileActions(f) {
@@ -288,14 +287,18 @@ function renderFileActions(f) {
   `;
 }
 
+/**
+ * Render table rows with comment diff
+ */
 function renderRows(files) {
   return files
     .map((f) => {
-      const diffClass = f.commentUnchanged ? "diff-line-unchanged" : "diff-line";
-      const diffRow = f.commentUnchanged
-        ? `<span class="diff-sign check">✓</span>${escapeHtml(f.comment)}`
-        : `<div class="diff-line-old"><span class="diff-sign minus">−</span>${escapeHtml(f.diffOld)}</div>
-           <div class="diff-line-new"><span class="diff-sign plus">+</span>${escapeHtml(f.diffNew)}</div>`;
+      const diffRow = f.needsUpdate
+        ? `<div class="diff-line">
+             <div class="diff-line-old"><span class="diff-sign minus">−</span>${escapeHtml(f.diffOld || "(empty)")}</div>
+             <div class="diff-line-new"><span class="diff-sign plus">+</span>${escapeHtml(f.diffNew)}</div>
+           </div>`
+        : `<div class="diff-line-unchanged"><span class="diff-sign check">✓</span>${f.comment ? escapeHtml(f.comment) : '<span class="text-muted">(empty)</span>'}</div>`;
       return `<tr>
         <td><a href="#file-detail?id=${f.id}" class="track-title-link">${escapeHtml(f.title)}</a></td>
         <td>${escapeHtml(f.artist)}</td>

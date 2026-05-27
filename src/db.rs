@@ -2301,6 +2301,21 @@ pub async fn set_playlist_archive_deleted(
     Ok(())
 }
 
+/// Delete a playlist and its track associations (cascade).
+pub async fn delete_playlist(pool: &Pool<Sqlite>, playlist_id: i64) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM service_playlist_tracks WHERE playlist_id = ?")
+        .bind(playlist_id)
+        .execute(&mut *tx)
+        .await?;
+    let result = sqlx::query("DELETE FROM service_playlists WHERE id = ?")
+        .bind(playlist_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Get a service playlist by service and playlist ID
 pub async fn get_service_playlist_by_id(
     pool: &Pool<Sqlite>,

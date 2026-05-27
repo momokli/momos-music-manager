@@ -1745,7 +1745,17 @@ pub async fn start_backup_folder_task(
     let worker_task_id = task_id.clone();
     let cancel_token = task.cancel_token.clone();
 
-    task_manager.start_task(task).await;
+    match task_manager.start_task_unique(task).await {
+        Ok(_) => {}
+        Err(TaskConflictError::AlreadyRunning { conflict_key }) => {
+            tracing::info!(
+                "Backup folder task for folder {} already running (key: {}), skipping",
+                folder_id,
+                conflict_key
+            );
+            return task_id;
+        }
+    }
 
     let tm = task_manager.clone();
     let db_clone = db.clone();
@@ -1845,8 +1855,15 @@ pub async fn start_backup_folder_task(
         .await;
 
         // Match remote scan depth to local folder settings
-        let remote_max_depth = if folder.scan_recursive { folder.max_depth as u32 } else { 1u32 };
-        match engine.list_remote_files_with_depth(&remote_base, remote_max_depth).await {
+        let remote_max_depth = if folder.scan_recursive {
+            folder.max_depth as u32
+        } else {
+            1u32
+        };
+        match engine
+            .list_remote_files_with_depth(&remote_base, remote_max_depth)
+            .await
+        {
             Ok(remote_files) if !remote_files.is_empty() => {
                 let remote_count = remote_files.len();
                 tm.add_log(
@@ -2102,7 +2119,17 @@ pub async fn start_backup_wavs_task(
     let worker_task_id = task_id.clone();
     let cancel_token = task.cancel_token.clone();
 
-    task_manager.start_task(task).await;
+    match task_manager.start_task_unique(task).await {
+        Ok(_) => {}
+        Err(TaskConflictError::AlreadyRunning { conflict_key }) => {
+            tracing::info!(
+                "Backup WAVs task for folder {} already running (key: {}), skipping",
+                folder_id,
+                conflict_key
+            );
+            return task_id;
+        }
+    }
 
     let tm = task_manager.clone();
     let db_clone = db.clone();
@@ -2359,7 +2386,17 @@ pub async fn start_scan_wav_sources_task(
     let worker_task_id = task_id.clone();
     let cancel_token = task.cancel_token.clone();
 
-    task_manager.start_task(task).await;
+    match task_manager.start_task_unique(task).await {
+        Ok(_) => {}
+        Err(TaskConflictError::AlreadyRunning { conflict_key }) => {
+            tracing::info!(
+                "Scan WAV sources task for folder {} already running (key: {}), skipping",
+                folder_id,
+                conflict_key
+            );
+            return task_id;
+        }
+    }
 
     let tm = task_manager.clone();
     let db_clone = db.clone();

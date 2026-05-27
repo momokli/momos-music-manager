@@ -1086,9 +1086,9 @@ async function saveAsPlaylist() {
     return;
   }
 
-  const fileIds = [...new Set(state.ladder.map((t) => t.id))];
+  const trackIds = [...new Set(state.ladder.map((t) => t.id))];
 
-  if (!fileIds.length) {
+  if (!trackIds.length) {
     showToast("No tracks to save", "error");
     return;
   }
@@ -1097,9 +1097,9 @@ async function saveAsPlaylist() {
     await fetchJSON("/api/playlists/local", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, fileIds }),
+      body: JSON.stringify({ name, trackIds }),
     });
-    showToast(`Playlist "${name}" created with ${fileIds.length} tracks`, "success");
+    showToast(`Playlist "${name}" created with ${trackIds.length} tracks`, "success");
     state.showSaveDialog = false;
     state.playlistName = "";
     renderLadderPane();
