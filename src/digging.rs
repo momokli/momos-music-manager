@@ -594,11 +594,11 @@ fn audio_format_preference(file_type: &str) -> u8 {
     }
 }
 
-/// Load resolved tags (with category name + prefix) for a file from `v_file_tags`.
+/// Load resolved tags (with category name + prefix) for a file from `file_resolved_tags`.
 async fn load_file_tags(pool: &Pool<Sqlite>, file_id: i64) -> Result<Vec<DiggingTag>> {
     let rows = sqlx::query(
         r#"SELECT DISTINCT tag_id, tag_name, category_name, prefix
-           FROM v_file_tags
+           FROM file_resolved_tags
            WHERE file_id = ?
            ORDER BY tag_name"#,
     )
@@ -622,14 +622,14 @@ async fn load_file_tags(pool: &Pool<Sqlite>, file_id: i64) -> Result<Vec<Digging
 /// Compute a file's energy level by averaging the energy levels of its Phase tags.
 /// Returns None if the file has no Phase tags with defined energy levels.
 pub async fn compute_track_energy(pool: &Pool<Sqlite>, file_id: i64) -> Result<Option<f64>> {
-    // Use v_file_resolved_tags to pick up parent-resolved Phase tags
+    // Use file_resolved_tags to pick up parent-resolved Phase tags
     let row = sqlx::query(
         r#"SELECT AVG(CAST(tel.energy_level AS REAL)) as avg_energy
            FROM (
-               SELECT DISTINCT vfrt.tag_id
-               FROM v_file_resolved_tags vfrt
-               JOIN tag_energy_levels tel ON tel.tag_id = vfrt.tag_id
-               WHERE vfrt.file_id = ?
+               SELECT DISTINCT frt.tag_id
+               FROM file_resolved_tags frt
+               JOIN tag_energy_levels tel ON tel.tag_id = frt.tag_id
+               WHERE frt.file_id = ?
            ) distinct_tags
            JOIN tag_energy_levels tel ON tel.tag_id = distinct_tags.tag_id"#,
     )
@@ -725,7 +725,7 @@ pub async fn get_multi_seed_suggestions(
     // ---- Step 1: Resolve seed file IDs ----
     let seed_ids: Vec<i64> = if let Some(ref tag) = req.seed_tag {
         sqlx::query_scalar::<_, i64>(
-            "SELECT DISTINCT file_id FROM v_file_tags WHERE LOWER(tag_name) = LOWER(?)",
+            "SELECT DISTINCT file_id FROM file_resolved_tags WHERE LOWER(tag_name) = LOWER(?)",
         )
         .bind(tag)
         .fetch_all(pool)
@@ -1179,6 +1179,52 @@ pub struct DiggingTracksResponse {
     pub page_size: i64,
 }
 
+/// Batch-load tags for multiple track IDs in a single query.
+/// Returns a map from track_id -> Vec<DiggingTag>.
+async fn fetch_tags_for_tracks_batch(
+    pool: &Pool<Sqlite>,
+    track_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Vec<DiggingTag>>> {
+    if track_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let placeholders: Vec<String> = track_ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        r#"SELECT spt.track_id, t.id, t.name, tc.name as category_name, tc.prefix
+           FROM service_playlist_tracks spt
+           JOIN service_playlists sp ON sp.id = spt.playlist_id
+           JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
+           JOIN tag_categories tc ON tc.id = t.category_id
+           WHERE spt.track_id IN ({})
+             AND (sp.archive_deleted = 1 OR spt.deleted_at IS NULL)
+           ORDER BY t.name"#,
+        placeholders.join(",")
+    );
+
+    let mut q = sqlx::query(&sql);
+    for id in track_ids {
+        q = q.bind(id);
+    }
+
+    let rows = q.fetch_all(pool).await?;
+
+    let mut result: std::collections::HashMap<i64, Vec<DiggingTag>> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let track_id: i64 = row.get("track_id");
+        let tag = DiggingTag {
+            id: row.get("id"),
+            name: row.get("name"),
+            category_name: row.get("category_name"),
+            prefix: row.get("prefix"),
+        };
+        result.entry(track_id).or_default().push(tag);
+    }
+
+    Ok(result)
+}
+
 /// Search tracks with optional filters for BPM, key (with Camelot expansion),
 /// energy levels, tags, and text search. Paginated.
 pub async fn search_digging_tracks(
@@ -1330,7 +1376,7 @@ pub async fn search_digging_tracks(
         let placeholders: Vec<String> =
             filter_tags.iter().map(|_| "LOWER(?)".to_string()).collect();
         where_parts.push(format!(
-            "EXISTS (SELECT 1 FROM v_file_tags vft3 WHERE vft3.file_id = f.id AND LOWER(vft3.tag_name) IN ({}))",
+            "EXISTS (SELECT 1 FROM file_resolved_tags frt3 WHERE frt3.file_id = f.id AND LOWER(frt3.tag_name) IN ({}))",
             placeholders.join(",")
         ));
     }
@@ -1374,11 +1420,7 @@ pub async fn search_digging_tracks(
             .map(|_| "LOWER(?)".to_string())
             .collect();
         where_parts.push(format!(
-            "EXISTS (SELECT 1 FROM v_file_tags vft_pmv \
-             JOIN v_file_track_link vftl_pmv ON vftl_pmv.file_id = vft_pmv.file_id \
-             JOIN tag_categories tc_pmv ON tc_pmv.id = vft_pmv.category_id \
-             WHERE vftl_pmv.track_id = st.id \
-               AND LOWER(tc_pmv.prefix) IN ({}))",
+            "EXISTS (SELECT 1 FROM track_resolved_tags trt_pmv WHERE trt_pmv.track_id = st.id AND LOWER(trt_pmv.prefix) IN ({}))",
             pmv_placeholders.join(",")
         ));
     }
@@ -1390,11 +1432,7 @@ pub async fn search_digging_tracks(
                 // Track must have tags in all three PMV categories
                 for prefix in ["p", "m", "v"] {
                     where_parts.push(format!(
-                        "EXISTS (SELECT 1 FROM v_file_tags vft_pa \
-                         JOIN v_file_track_link vftl_pa ON vftl_pa.file_id = vft_pa.file_id \
-                         JOIN tag_categories tc_pa ON tc_pa.id = vft_pa.category_id \
-                         WHERE vftl_pa.track_id = st.id \
-                           AND LOWER(tc_pa.prefix) = '{}')",
+                        "EXISTS (SELECT 1 FROM track_resolved_tags trt_pa WHERE trt_pa.track_id = st.id AND LOWER(trt_pa.prefix) = '{}')",
                         prefix
                     ));
                 }
@@ -1402,22 +1440,14 @@ pub async fn search_digging_tracks(
             Some("partial") => {
                 // Track must have at least one PMV category tag
                 where_parts.push(
-                    "EXISTS (SELECT 1 FROM v_file_tags vft_pp \
-                     JOIN v_file_track_link vftl_pp ON vftl_pp.file_id = vft_pp.file_id \
-                     JOIN tag_categories tc_pp ON tc_pp.id = vft_pp.category_id \
-                     WHERE vftl_pp.track_id = st.id \
-                       AND LOWER(tc_pp.prefix) IN ('p','m','v'))"
+                    "EXISTS (SELECT 1 FROM track_resolved_tags trt_pp WHERE trt_pp.track_id = st.id AND LOWER(trt_pp.prefix) IN ('p','m','v'))"
                         .to_string(),
                 );
             }
             Some("none") => {
                 // Track must have NO PMV tags
                 where_parts.push(
-                    "NOT EXISTS (SELECT 1 FROM v_file_tags vft_pn \
-                     JOIN v_file_track_link vftl_pn ON vftl_pn.file_id = vft_pn.file_id \
-                     JOIN tag_categories tc_pn ON tc_pn.id = vft_pn.category_id \
-                     WHERE vftl_pn.track_id = st.id \
-                       AND LOWER(tc_pn.prefix) IN ('p','m','v'))"
+                    "NOT EXISTS (SELECT 1 FROM track_resolved_tags trt_pn WHERE trt_pn.track_id = st.id AND LOWER(trt_pn.prefix) IN ('p','m','v'))"
                         .to_string(),
                 );
             }
@@ -1501,37 +1531,17 @@ pub async fn search_digging_tracks(
 
     let rows: Vec<TrackDiggingRow> = data_q.fetch_all(pool).await?;
 
+    // ── Batch-load tags for all track IDs (N+1 → 1 query) ──
+    let track_ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    let all_tags = fetch_tags_for_tracks_batch(pool, &track_ids).await?;
+
     // ── Load auxiliary data per track ──
-    // IMPORTANT: Use direct table joins rather than the v_file_tags + v_file_track_link
-    // view chain, which is extremely slow (~500x) in SQLite for large datasets.
+    // Tags are loaded from the materialized file_resolved_tags / track_resolved_tags
+    // tables above. No need for slow view-based lookups.
     let mut results = Vec::with_capacity(rows.len());
     for row in rows {
-        // Load tags via direct table joins (avoids expensive v_file_tags + v_file_track_link views)
-        let tags: Vec<DiggingTag> = {
-            let tag_rows = sqlx::query(
-                r#"SELECT DISTINCT t.id, t.name, tc.name as category_name, tc.prefix
-                   FROM service_playlist_tracks spt
-                   JOIN service_playlists sp ON sp.id = spt.playlist_id
-                   JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
-                   JOIN tag_categories tc ON tc.id = t.category_id
-                   WHERE spt.track_id = ?
-                     AND (sp.archive_deleted = 1 OR spt.deleted_at IS NULL)
-                   ORDER BY t.name"#,
-            )
-            .bind(row.id)
-            .fetch_all(pool)
-            .await?;
-
-            tag_rows
-                .iter()
-                .map(|r| DiggingTag {
-                    id: r.get("id"),
-                    name: r.get("name"),
-                    category_name: r.get("category_name"),
-                    prefix: r.get("prefix"),
-                })
-                .collect()
-        };
+        // Look up tags from the batch-loaded HashMap (no per-row query)
+        let tags = all_tags.get(&row.id).cloned().unwrap_or_default();
 
         // Compute tag_category_count: distinct categories across this track's tags
         let tag_category_count = tags
@@ -1765,10 +1775,10 @@ pub async fn search_tracks_and_files(
     // ── Tags query (unchanged) ──
     let tags: Vec<SearchTagResult> = sqlx::query_as::<_, (i64, String, String, String, i64)>(
         r#"SELECT t.id, t.name, tc.name as category_name, tc.prefix,
-                   COUNT(DISTINCT vft.file_id) as file_count
-            FROM tags t
-            JOIN tag_categories tc ON tc.id = t.category_id
-            LEFT JOIN v_file_tags vft ON vft.tag_id = t.id
+                   COUNT(DISTINCT frt.file_id) as file_count
+                    FROM tags t
+                    JOIN tag_categories tc ON tc.id = t.category_id
+                    LEFT JOIN file_resolved_tags frt ON frt.tag_id = t.id
             WHERE t.name LIKE ?
             GROUP BY t.id
             ORDER BY file_count DESC
@@ -1808,7 +1818,7 @@ pub async fn search_tracks_and_files(
         let placeholders: Vec<String> =
             filter_tags.iter().map(|_| "LOWER(?)".to_string()).collect();
         sql.push_str(&format!(
-            " AND EXISTS (SELECT 1 FROM v_file_tags vft WHERE vft.file_id = f.id AND LOWER(vft.tag_name) IN ({}))",
+            " AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = f.id AND LOWER(frt.tag_name) IN ({}))",
             placeholders.join(",")
         ));
     }

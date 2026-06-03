@@ -35,6 +35,7 @@ mod digging;
 mod dump;
 mod embeddings;
 mod global_poller;
+mod maintainer;
 mod poller;
 mod scan_cache;
 mod spotify;
@@ -322,6 +323,12 @@ async fn serve(
 
     let pruner_tm = task_manager.clone();
 
+    // Extract maintainer config + cancel token before config/poller_cancel are moved
+    let maint_interval = config.maintainer_interval_secs;
+    let maint_full_scan_max_age = config.maintainer_full_scan_max_age_secs;
+    let maint_backup_discovery_interval = config.maintainer_backup_discovery_interval_secs;
+    let maint_cancel = poller_cancel.clone();
+
     let state = Arc::new(AppState {
         db,
         config,
@@ -425,6 +432,24 @@ async fn serve(
             }
         }
     });
+
+    // Start maintainer — background health checks
+    if maint_interval > 0 {
+        let maint_db = state.db.clone();
+        tokio::spawn(async move {
+            crate::maintainer::start_maintainer(
+                maint_db,
+                maint_interval,
+                maint_full_scan_max_age,
+                maint_backup_discovery_interval,
+                maint_cancel,
+            )
+            .await;
+        });
+        info!("Maintainer started (interval: {}s)", maint_interval);
+    } else {
+        info!("Maintainer disabled (interval=0)");
+    }
 
     // Auto-backup poller: every 10 min, check folders with auto_backup enabled
     // and trigger backup if unbacked files exist.

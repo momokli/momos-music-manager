@@ -55,10 +55,14 @@ function renderError(msg) {
 }
 
 function renderPage(d) {
-  const files = d.files || [];
+  const allFiles = d.files || [];
   const tags = d.tags || [];
   const playlists = d.playlists || [];
   const hasAudioFeatures = d.spotifyTempo != null || d.spotifyDanceability != null;
+
+  // Separate primary files (stems, FLACs) from WAV source files (linked via source_of)
+  const primaryFiles = allFiles.filter((f) => !f.stemType);
+  const wavFiles = allFiles.filter((f) => f.stemType);
   const serviceBadgeClass =
     d.service === "spotify"
       ? "spotify"
@@ -84,9 +88,10 @@ function renderPage(d) {
     <div class="detail-grid">
       ${renderSection("🎵 Track Info", renderTrackInfo(d))}
       ${hasAudioFeatures ? renderSection("📊 Audio Features", renderAudioFeatures(d)) : ""}
-      ${files.length > 0 ? renderSection("💾 Linked Files", renderFileCards(files, d)) : ""}
+      ${primaryFiles.length > 0 ? renderSection("💾 Linked Files", renderFileCards(primaryFiles, d)) : ""}
       ${tags.length > 0 ? renderSection("🏷 Tags", renderTags(tags)) : ""}
       ${playlists.length > 0 ? renderSection("📋 Playlists", renderPlaylists(playlists)) : ""}
+      ${wavFiles.length > 0 ? renderSection("🎛 WAV Sources", renderWavSources(wavFiles)) : ""}
     </div>
   `;
 }
@@ -192,7 +197,7 @@ function renderFileCard(f, track) {
       <table class="detail-kv">
         <tbody>
           <tr><th>File Path</th><td><code>${escHtml(f.filePath || "—")}</code></td></tr>
-          <tr><th>Backed Up</th><td>${f.backedUp ? '<span style="color:var(--green)">✓ Yes' + (f.backupPath ? ' — ' + escHtml(f.backupPath) : '') + '</span>' : '<span style="color:var(--text-muted)">— No</span>'}</td></tr>
+          <tr><th>Backed Up</th><td>${f.backedUp ? '<span style="color:var(--green)">✓ Yes' + (f.backupPath ? " — " + escHtml(f.backupPath) : "") + "</span>" : '<span style="color:var(--text-muted)">— No</span>'}</td></tr>
           <tr><th>ISRC</th><td>${escHtml(f.isrc || "—")}</td></tr>
           <tr><th>Album</th><td>${escHtml(f.album || "—")}</td></tr>
           <tr><th>BPM</th><td>${f.bpm != null ? f.bpm.toFixed(1) : "—"}</td></tr>
@@ -229,6 +234,38 @@ function renderTags(tags) {
   `;
 }
 
+/* ------------------------------------------------------------------ */
+/*  WAV Source Variants                                                */
+/* ------------------------------------------------------------------ */
+
+function renderWavSources(wavFiles) {
+  return /* html */ `
+    <div class="variants-list">
+      ${wavFiles.map((w) => renderWavCard(w)).join("")}
+    </div>
+  `;
+}
+
+function renderWavCard(w) {
+  const fileName = (w.filePath || "").split("/").pop() || "";
+  const stemLabel = w.stemType
+    ? w.stemType.charAt(0).toUpperCase() + w.stemType.slice(1)
+    : "";
+  const backupIcon = w.backedUp
+    ? '<span class="variant-backed-up" title="Backed up">&#10003;</span>'
+    : '<span class="variant-not-backed-up" title="Not backed up">&#10007;</span>';
+
+  return /* html */ `
+    <div class="variant-card">
+      <span class="variant-badge variant-badge-wav">WAV</span>
+      <span class="variant-stem-type">${escHtml(stemLabel)}</span>
+      <span class="variant-filename" title="${escHtml(w.filePath)}">${escHtml(fileName)}</span>
+      <span class="variant-size">${formatBytes(w.fileSize)}</span>
+      ${backupIcon}
+    </div>
+  `;
+}
+
 function renderPlaylists(playlists) {
   return /* html */ `
     <div class="detail-playlists">
@@ -249,6 +286,12 @@ function renderPlaylists(playlists) {
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 function renderKvTable(rows) {
   return /* html */ `

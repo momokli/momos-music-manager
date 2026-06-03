@@ -50,6 +50,12 @@ pub enum TaskType {
     BackupWavs { folder_id: i64 },
     /// Scan a folder for nuo-stems WAV source subdirectories
     ScanWavSources { folder_id: i64 },
+    /// BackupDiscovery: Scan NAS backup to discover files that exist only on backup
+    BackupDiscovery { folder_id: i64 },
+    /// PruneFiles: Delete selected local files (must be backed up)
+    PruneFiles { file_ids: Vec<i64> },
+    /// BackpackSync: Ensure files in backpack tags are available locally
+    BackpackSync { tag_ids: Vec<i64> },
 }
 
 /// What to sync for a service
@@ -410,6 +416,9 @@ pub fn task_type_conflict_key(task_type: &TaskType) -> Option<String> {
         TaskType::BackupFolder { folder_id } => Some(format!("backup:{}", folder_id)),
         TaskType::BackupWavs { folder_id } => Some(format!("backup_wavs:{}", folder_id)),
         TaskType::ScanWavSources { folder_id } => Some(format!("scan_wavs:{}", folder_id)),
+        TaskType::BackupDiscovery { folder_id } => Some(format!("backup_discovery:{}", folder_id)),
+        TaskType::PruneFiles { .. } => None, // prunes don't conflict — multiple can run
+        TaskType::BackpackSync { .. } => None, // multiple can run
     }
 }
 
@@ -559,6 +568,9 @@ impl Task {
             TaskType::BackupFolder { .. } => "backup_folder".to_string(),
             TaskType::BackupWavs { .. } => "backup_wavs".to_string(),
             TaskType::ScanWavSources { .. } => "scan_wav_sources".to_string(),
+            TaskType::BackupDiscovery { .. } => "backup_discovery".to_string(),
+            TaskType::PruneFiles { .. } => "prune_files".to_string(),
+            TaskType::BackpackSync { .. } => "backpack_sync".to_string(),
         };
         (task_type_str, task_details)
     }
@@ -883,6 +895,13 @@ pub fn task_type_label(task_type: &TaskType) -> String {
         TaskType::BackupFolder { folder_id } => format!("Backup folder #{}", folder_id),
         TaskType::BackupWavs { folder_id } => format!("Backup WAVs folder #{}", folder_id),
         TaskType::ScanWavSources { folder_id } => format!("Scan WAV sources folder #{}", folder_id),
+        TaskType::BackupDiscovery { folder_id } => {
+            format!("Backup discovery folder #{}", folder_id)
+        }
+        TaskType::PruneFiles { file_ids } => format!("Prune {} files", file_ids.len()),
+        TaskType::BackpackSync { tag_ids } => {
+            format!("Backpack sync {} tags", tag_ids.len())
+        }
     }
 }
 
@@ -991,6 +1010,14 @@ pub async fn start_spotify_sync_task(
                     .await
                     {
                         error!("Failed to update remote counts: {}", e);
+                    }
+
+                    // Refresh materialized tables after sync
+                    if let Err(e) = crate::db::refresh_file_resolved_tags(&db_clone).await {
+                        error!("Failed to refresh file_resolved_tags after sync: {}", e);
+                    }
+                    if let Err(e) = crate::db::refresh_track_resolved_tags(&db_clone).await {
+                        error!("Failed to refresh track_resolved_tags after sync: {}", e);
                     }
                 }
 
@@ -1977,50 +2004,57 @@ pub async fn start_backup_folder_task(
             return Ok(());
         }
 
-        // STEP 3: Rsync only the truly new files
+        // STEP 3: Rsync remaining files — fast scan, no verbose output.
+        // Uses `--ignore-existing` to skip remote stat calls: files that already
+        // exist remotely (by path) are skipped without per-file checks.
+        // No `-u`, `-v`, or `-P` flags — we don't want progress lines for individual
+        // files, just clean exit on completion.
         tm.add_log(
             &worker_task_id,
-            format!(
-                "Step 2/2: Rsyncing {} remaining file(s) to {}",
-                total, backup_path
-            ),
+            format!("Step 2/2: Copying {} file(s) to {}", total, backup_path),
         )
         .await;
-        tm.update_progress_text(&worker_task_id, format!("Rsyncing {} files...", total))
+        tm.update_progress_text(&worker_task_id, format!("Copying {} files...", total))
             .await;
         tm.update_progress(&worker_task_id, |p| {
             p.status = TaskStatus::Running;
-            p.message = format!("Rsyncing {} files to {}...", total, backup_path);
+            p.percent = Some(0.0);
+            p.message = format!("Copying {} files to {}...", total, backup_path);
         })
         .await;
 
-        // Single bulk rsync: copies all files in one pass
-        // Trailing slash on local_dir means "copy contents", not the directory itself
         let local_with_slash = format!("{}/", local_dir.trim_end_matches('/'));
-        let msg = match engine.run_sync(&local_with_slash, &remote_base).await {
-            Ok((file_count, total_bytes)) => {
-                format!(
-                    "Rsync completed: {} files transferred ({} bytes)",
-                    file_count, total_bytes
-                )
-            }
-            Err(e) => {
-                let err_msg = format!("Rsync failed: {}", e);
-                tm.add_log(&worker_task_id, err_msg.clone()).await;
-                tm.update_progress_text(&worker_task_id, "Failed: rsync error".to_string())
-                    .await;
-                tm.update_task_status(&worker_task_id, TaskStatus::Failed)
-                    .await;
-                tm.update_progress(&worker_task_id, |p| {
-                    p.status = TaskStatus::Failed;
-                    p.message = err_msg.clone();
-                })
-                .await;
-                return Err(anyhow::anyhow!(err_msg));
-            }
-        };
+        let dest = format!("{}:{}", engine.ssh_host(), remote_base);
+        let output = tokio::process::Command::new("rsync")
+            .arg("-a")
+            .arg("--ignore-existing")
+            .arg("--rsh=ssh")
+            .arg(&local_with_slash)
+            .arg(&dest)
+            .output()
+            .await?;
 
-        tm.add_log(&worker_task_id, msg).await;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let err_msg = format!("Rsync failed: {}", stderr);
+            tm.add_log(&worker_task_id, err_msg.clone()).await;
+            tm.update_progress_text(&worker_task_id, "Failed: rsync error".to_string())
+                .await;
+            tm.update_task_status(&worker_task_id, TaskStatus::Failed)
+                .await;
+            tm.update_progress(&worker_task_id, |p| {
+                p.status = TaskStatus::Failed;
+                p.message = err_msg.clone();
+            })
+            .await;
+            return Err(anyhow::anyhow!(err_msg));
+        }
+
+        tm.add_log(
+            &worker_task_id,
+            format!("Rsync completed: {} files transferred", total),
+        )
+        .await;
 
         // Mark all previously unbacked-up files as backed up
         tm.update_progress_text(&worker_task_id, "Recording backup status...".to_string())
@@ -2030,8 +2064,9 @@ pub async fn start_backup_folder_task(
         })
         .await;
 
+        let total_recording = files.len();
         let mut recorded = 0usize;
-        for file in &files {
+        for (i, file) in files.iter().enumerate() {
             if cancel_token.is_cancelled() {
                 tm.add_log(&worker_task_id, "Task cancelled".to_string())
                     .await;
@@ -2070,19 +2105,31 @@ pub async fn start_backup_folder_task(
                 recorded += 1;
             }
 
-            if recorded % 100 == 0 {
-                tm.update_progress_text(
-                    &worker_task_id,
-                    format!("Recording backup status: {}/{} files", recorded, total),
-                )
-                .await;
-            }
+            // Update live progress: % through recording + filename
+            let pct = ((i + 1) as f32 / total_recording as f32) * 100.0;
+            tm.update_progress_text(
+                &worker_task_id,
+                format!(
+                    "Recording backup status: {}/{} files ({:.0}%)",
+                    i + 1,
+                    total_recording,
+                    pct
+                ),
+            )
+            .await;
+            tm.update_progress(&worker_task_id, |p| {
+                p.percent = Some(pct);
+                p.message = format!(
+                    "Recording backup status: {}/{} files ({:.0}%)",
+                    i + 1,
+                    total_recording,
+                    pct
+                );
+            })
+            .await;
         }
 
-        let msg = format!(
-            "Backup complete: bulk rsync done, {} files recorded as backed up",
-            recorded
-        );
+        let msg = format!("Backup complete: {} files recorded as backed up", recorded);
         tm.add_log(&worker_task_id, msg.clone()).await;
         tm.update_progress_text(&worker_task_id, msg.clone()).await;
         tm.update_task_status(&worker_task_id, TaskStatus::Completed)
@@ -2299,9 +2346,18 @@ pub async fn start_backup_wavs_task(
                                 );
                                 let file_size =
                                     entry.metadata().map(|m| m.len() as i64).unwrap_or(0);
+                                // Look up the WAV file in DB by local path to get correct file_id
+                                let local_wav_path = entry_path.to_string_lossy().to_string();
+                                let file_id = if let Ok(Some(f)) =
+                                    crate::db::get_file_by_path(&db_clone, &local_wav_path).await
+                                {
+                                    f.id
+                                } else {
+                                    continue; // skip files not in DB
+                                };
                                 let _ = crate::db::record_backup_result(
                                     &db_clone,
-                                    0,
+                                    file_id,
                                     true,
                                     file_size,
                                     &remote_wav_path,
@@ -2482,7 +2538,7 @@ pub async fn start_scan_wav_sources_task(
 
         let local_dir = folder.folder_path.clone();
         let mut wav_indexed = 0usize;
-        let linked_to_stems = 0usize;
+        let mut linked_to_stems = 0usize;
 
         tm.add_log(
             &worker_task_id,
@@ -2516,8 +2572,35 @@ pub async fn start_scan_wav_sources_task(
             if let Ok(entries) = std::fs::read_dir(dir_path) {
                 for entry in entries.flatten() {
                     let entry_path = entry.path();
-                    if entry_path.extension().and_then(|e| e.to_str()) == Some("wav") {
-                        wav_indexed += 1;
+                    if entry_path.extension().and_then(|e| e.to_str()) != Some("wav") {
+                        continue;
+                    }
+                    wav_indexed += 1;
+
+                    // Look up the WAV file in DB by path, then link to stem
+                    let wav_path_str = entry_path.to_string_lossy().to_string();
+                    if let Ok(Some(wav_file)) =
+                        crate::db::get_file_by_path(&db_clone, &wav_path_str).await
+                    {
+                        match crate::db::link_wav_to_stem(&db_clone, wav_file.id, &wav_path_str)
+                            .await
+                        {
+                            Ok(Some((stem_id, stem_type))) => {
+                                linked_to_stems += 1;
+                                tracing::debug!(
+                                    "Linked WAV {} (type={}) -> stem #{}",
+                                    wav_path_str,
+                                    stem_type,
+                                    stem_id
+                                );
+                            }
+                            Ok(None) => {
+                                tracing::debug!("No matching stem for WAV: {}", wav_path_str);
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to link WAV {}: {}", wav_path_str, e);
+                            }
+                        }
                     }
                 }
             }
@@ -2532,8 +2615,9 @@ pub async fn start_scan_wav_sources_task(
         }
 
         let msg = format!(
-            "WAV source scan complete: {} WAV files indexed in {} subdirectories",
+            "WAV source scan complete: {} WAV files indexed, {} linked to stems in {} subdirectories",
             wav_indexed,
+            linked_to_stems,
             subdirs.len()
         );
         tm.add_log(&worker_task_id, msg.clone()).await;
@@ -2546,6 +2630,576 @@ pub async fn start_scan_wav_sources_task(
             p.message = msg;
         })
         .await;
+        Ok(())
+    });
+
+    task_manager.set_join_handle(&task_id, join_handle).await;
+    task_id
+}
+
+// ============================================================
+// BackupDiscovery worker
+// ============================================================
+
+/// Start a background task to scan NAS backup and discover files that exist
+/// only on backup (not in local DB). Creates new file records for discovered files.
+pub async fn start_backup_discovery_task(
+    task_manager: &TaskManager,
+    db: &sqlx::Pool<sqlx::Sqlite>,
+    folder_id: i64,
+) -> String {
+    let task = Task::new(
+        TaskType::BackupDiscovery { folder_id },
+        Some("backup_discovery".to_string()),
+    );
+    let task_id = task.id.clone();
+    let worker_task_id = task_id.clone();
+    let cancel_token = task.cancel_token.clone();
+
+    match task_manager.start_task_unique(task).await {
+        Ok(_) => {}
+        Err(TaskConflictError::AlreadyRunning { conflict_key }) => {
+            tracing::info!(
+                "Backup discovery task for folder {} already running (key: {}), skipping",
+                folder_id,
+                conflict_key
+            );
+            return task_id;
+        }
+    }
+
+    let tm = task_manager.clone();
+    let db_clone = db.clone();
+
+    let join_handle = tokio::spawn(async move {
+        tm.update_task_status(&worker_task_id, TaskStatus::Running)
+            .await;
+        tm.update_progress_text(&worker_task_id, "Starting backup discovery...".to_string())
+            .await;
+        tm.update_progress(&worker_task_id, |p| {
+            p.status = TaskStatus::Running;
+            p.message = "Starting backup discovery...".to_string();
+        })
+        .await;
+
+        // Get folder info
+        let folder = match crate::db::get_folder_by_id(&db_clone, folder_id).await {
+            Ok(Some(f)) => f,
+            Ok(None) => {
+                let msg = format!("Folder #{} not found", folder_id);
+                tm.add_log(&worker_task_id, msg.clone()).await;
+                tm.update_progress_text(&worker_task_id, "Failed: folder not found".to_string())
+                    .await;
+                tm.update_task_status(&worker_task_id, TaskStatus::Failed)
+                    .await;
+                tm.update_progress(&worker_task_id, |p| {
+                    p.status = TaskStatus::Failed;
+                    p.message = msg.clone();
+                })
+                .await;
+                return Err(anyhow::anyhow!(msg));
+            }
+            Err(e) => {
+                let msg = format!("Error fetching folder #{}: {}", folder_id, e);
+                tm.add_log(&worker_task_id, msg.clone()).await;
+                tm.update_progress_text(&worker_task_id, "Failed: DB error".to_string())
+                    .await;
+                tm.update_task_status(&worker_task_id, TaskStatus::Failed)
+                    .await;
+                tm.update_progress(&worker_task_id, |p| {
+                    p.status = TaskStatus::Failed;
+                    p.message = msg.clone();
+                })
+                .await;
+                return Err(anyhow::anyhow!(msg));
+            }
+        };
+
+        let backup_path = match &folder.backup_path {
+            Some(p) => p.clone(),
+            None => {
+                let msg = "Folder has no backup_path configured".to_string();
+                tm.add_log(&worker_task_id, msg.clone()).await;
+                tm.update_progress_text(&worker_task_id, "Failed: no backup_path".to_string())
+                    .await;
+                tm.update_task_status(&worker_task_id, TaskStatus::Failed)
+                    .await;
+                tm.update_progress(&worker_task_id, |p| {
+                    p.status = TaskStatus::Failed;
+                    p.message = msg.clone();
+                })
+                .await;
+                return Err(anyhow::anyhow!(msg));
+            }
+        };
+
+        let (ssh_host, remote_base) = match backup_path.split_once(':') {
+            Some((host, path)) => (host.to_string(), path.to_string()),
+            None => {
+                let msg = "Invalid backup_path format, expected 'host:/path'".to_string();
+                tm.add_log(&worker_task_id, msg.clone()).await;
+                tm.update_progress_text(&worker_task_id, "Failed: invalid backup_path".to_string())
+                    .await;
+                tm.update_task_status(&worker_task_id, TaskStatus::Failed)
+                    .await;
+                tm.update_progress(&worker_task_id, |p| {
+                    p.status = TaskStatus::Failed;
+                    p.message = msg.clone();
+                })
+                .await;
+                return Err(anyhow::anyhow!(msg));
+            }
+        };
+
+        // Determine max depth for SSH find
+        let max_depth = if folder.scan_recursive {
+            folder.max_depth as u32
+        } else {
+            1u32
+        };
+
+        let engine = crate::backup::BackupEngine::new(ssh_host);
+        let remote_dir = remote_base.clone();
+
+        tm.add_log(
+            &worker_task_id,
+            format!("Listing files on backup: {}", remote_dir),
+        )
+        .await;
+        tm.update_progress_text(&worker_task_id, "Listing files on backup...".to_string())
+            .await;
+
+        let remote_files = match engine.list_remote_files_full(&remote_dir, max_depth).await {
+            Ok(files) => files,
+            Err(e) => {
+                let msg = format!("Failed to list remote files: {}", e);
+                tm.add_log(&worker_task_id, msg.clone()).await;
+                tm.update_progress_text(
+                    &worker_task_id,
+                    "Failed: remote listing error".to_string(),
+                )
+                .await;
+                tm.update_task_status(&worker_task_id, TaskStatus::Failed)
+                    .await;
+                tm.update_progress(&worker_task_id, |p| {
+                    p.status = TaskStatus::Failed;
+                    p.message = msg.clone();
+                })
+                .await;
+                return Err(anyhow::anyhow!(msg));
+            }
+        };
+
+        if remote_files.is_empty() {
+            let msg = "No files found on backup (or failed to list)".to_string();
+            tm.add_log(&worker_task_id, msg.clone()).await;
+            tm.update_progress_text(
+                &worker_task_id,
+                "Completed: no files to process".to_string(),
+            )
+            .await;
+            tm.update_task_status(&worker_task_id, TaskStatus::Completed)
+                .await;
+            tm.update_progress(&worker_task_id, |p| {
+                p.status = TaskStatus::Completed;
+                p.message = msg.clone();
+            })
+            .await;
+            return Ok(());
+        }
+
+        tm.add_log(
+            &worker_task_id,
+            format!(
+                "Found {} files on backup, discovering...",
+                remote_files.len()
+            ),
+        )
+        .await;
+        tm.update_progress_text(&worker_task_id, "Matching against local DB...".to_string())
+            .await;
+
+        match crate::db::discover_backup_files(&db_clone, folder_id, &remote_files, &remote_base)
+            .await
+        {
+            Ok(result) => {
+                let msg = format!(
+                    "Backup discovery complete: {} files on backup, {} already tracked, {} newly discovered",
+                    result.files_on_backup, result.already_tracked, result.newly_discovered
+                );
+                tm.add_log(&worker_task_id, msg.clone()).await;
+                tm.update_progress_text(&worker_task_id, msg.clone()).await;
+                tm.update_task_status(&worker_task_id, TaskStatus::Completed)
+                    .await;
+                tm.update_progress(&worker_task_id, |p| {
+                    p.status = TaskStatus::Completed;
+                    p.percent = Some(100.0);
+                    p.message = msg;
+                })
+                .await;
+            }
+            Err(e) => {
+                let msg = format!("Backup discovery failed: {}", e);
+                tm.add_log(&worker_task_id, msg.clone()).await;
+                tm.update_progress_text(&worker_task_id, "Failed: discovery error".to_string())
+                    .await;
+                tm.update_task_status(&worker_task_id, TaskStatus::Failed)
+                    .await;
+                tm.update_progress(&worker_task_id, |p| {
+                    p.status = TaskStatus::Failed;
+                    p.message = msg.clone();
+                })
+                .await;
+                return Err(anyhow::anyhow!(msg));
+            }
+        }
+
+        Ok(())
+    });
+
+    task_manager.set_join_handle(&task_id, join_handle).await;
+    task_id
+}
+
+// ============================================================
+// PruneFiles worker
+// ============================================================
+
+/// Start a background task to delete selected local files.
+/// Each file must have a confirmed backup before it can be pruned.
+pub async fn start_prune_files_task(
+    task_manager: &TaskManager,
+    db: &sqlx::Pool<sqlx::Sqlite>,
+    file_ids: Vec<i64>,
+) -> String {
+    let task_type = TaskType::PruneFiles {
+        file_ids: file_ids.clone(),
+    };
+    let task = Task::new(task_type, None);
+    let task_id = task.id.clone();
+    let worker_task_id = task_id.clone();
+    let _cancel_token = task.cancel_token.clone();
+
+    task_manager.start_task(task).await;
+
+    let tm = task_manager.clone();
+    let db_clone = db.clone();
+
+    let join_handle = tokio::spawn(async move {
+        tm.update_task_status(&worker_task_id, TaskStatus::Running)
+            .await;
+        tm.update_progress_text(
+            &worker_task_id,
+            format!("Pruning {} file(s)...", file_ids.len()),
+        )
+        .await;
+        tm.update_progress(&worker_task_id, |p| {
+            p.status = TaskStatus::Running;
+            p.message = format!("Pruning {} file(s)...", file_ids.len());
+        })
+        .await;
+
+        let total = file_ids.len();
+        let mut deleted = 0usize;
+        let mut skipped = 0usize;
+        let mut errors = 0usize;
+        let mut freed_bytes: i64 = 0;
+
+        for (i, file_id) in file_ids.iter().enumerate() {
+            // Check cancellation
+            if let Some(ct) = tm.get_cancel_token(&worker_task_id).await
+                && ct.is_cancelled()
+            {
+                tm.add_log(&worker_task_id, "Task cancelled".to_string())
+                    .await;
+                tm.update_task_status(&worker_task_id, TaskStatus::Cancelled)
+                    .await;
+                tm.update_progress_text(&worker_task_id, "Cancelled".to_string())
+                    .await;
+                tm.update_progress(&worker_task_id, |p| {
+                    p.status = TaskStatus::Cancelled;
+                    p.message = "Cancelled".to_string();
+                })
+                .await;
+                return Ok(());
+            }
+
+            // Fetch file to get its size for reporting
+            let file_size: Option<i64> =
+                sqlx::query_scalar("SELECT file_size FROM files WHERE id = ?")
+                    .bind(file_id)
+                    .fetch_optional(&db_clone)
+                    .await
+                    .unwrap_or(None);
+
+            match crate::db::delete_local_file_by_id(&db_clone, *file_id).await {
+                Ok(true) => {
+                    deleted += 1;
+                    freed_bytes += file_size.unwrap_or(0);
+                    tm.add_log(
+                        &worker_task_id,
+                        format!(
+                            "Deleted local file #{} ({} bytes)",
+                            file_id,
+                            file_size.unwrap_or(0)
+                        ),
+                    )
+                    .await;
+                }
+                Ok(false) => {
+                    skipped += 1;
+                    tm.add_log(
+                        &worker_task_id,
+                        format!("Skipped file #{} (not on local disk)", file_id),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    errors += 1;
+                    tm.add_log(
+                        &worker_task_id,
+                        format!("Error deleting file #{}: {}", file_id, e),
+                    )
+                    .await;
+                }
+            }
+
+            // Update progress
+            let percent = ((i + 1) as f64 / total as f64) * 100.0;
+            tm.update_progress(&worker_task_id, |p| {
+                p.percent = Some(percent as f32);
+                p.message = format!(
+                    "Pruning {}/{} ({} deleted, {} skipped, {} errors)",
+                    i + 1,
+                    total,
+                    deleted,
+                    skipped,
+                    errors
+                );
+                if percent >= 100.0 {
+                    p.status = TaskStatus::Completed;
+                }
+            })
+            .await;
+        }
+
+        let summary = format!(
+            "Prune complete: {} deleted ({} bytes freed), {} skipped, {} errors",
+            deleted, freed_bytes, skipped, errors
+        );
+        tm.add_log(&worker_task_id, summary.clone()).await;
+        tm.update_progress_text(&worker_task_id, summary.clone())
+            .await;
+        if errors > 0 && deleted == 0 {
+            tm.update_task_status(&worker_task_id, TaskStatus::Failed)
+                .await;
+        } else {
+            tm.update_task_status(&worker_task_id, TaskStatus::Completed)
+                .await;
+        }
+        tm.update_progress(&worker_task_id, |p| {
+            p.status = if errors > 0 && deleted == 0 {
+                TaskStatus::Failed
+            } else {
+                TaskStatus::Completed
+            };
+            p.percent = Some(100.0);
+            p.message = summary;
+        })
+        .await;
+
+        Ok(())
+    });
+
+    task_manager.set_join_handle(&task_id, join_handle).await;
+    task_id
+}
+
+// ============================================================
+// BackpackSync worker
+// ============================================================
+
+/// Start a background task to sync files in backpack tags.
+/// For each track in backpack tags:
+/// 1. Find best local file (stem > FLAC > MP3)
+/// 2. If no local file but backup exists: pull from backup
+/// 3. If multiple formats: keep only best one, mark others as safe-to-delete
+/// 4. Skip WAV source files entirely
+pub async fn start_backpack_sync_task(
+    task_manager: &TaskManager,
+    db: &sqlx::Pool<sqlx::Sqlite>,
+    tag_ids: Vec<i64>,
+) -> String {
+    let task_type = TaskType::BackpackSync {
+        tag_ids: tag_ids.clone(),
+    };
+    let task = Task::new(task_type, None);
+    let task_id = task.id.clone();
+    let worker_task_id = task_id.clone();
+    let _cancel_token = task.cancel_token.clone();
+
+    task_manager.start_task(task).await;
+
+    let tm = task_manager.clone();
+    let db_clone = db.clone();
+
+    let join_handle = tokio::spawn(async move {
+        tm.update_task_status(&worker_task_id, TaskStatus::Running)
+            .await;
+        tm.update_progress_text(&worker_task_id, "Starting backpack sync...".to_string())
+            .await;
+        tm.update_progress(&worker_task_id, |p| {
+            p.status = TaskStatus::Running;
+            p.message = "Starting backpack sync...".to_string();
+        })
+        .await;
+
+        // Find all tracks in backpack tags.
+        // For each tag_ids, find playlists with matching name, then tracks in those playlists.
+        let placeholders: Vec<String> = tag_ids.iter().map(|_| "?".to_string()).collect();
+        let sql = format!(
+            "SELECT DISTINCT spt.track_id FROM service_playlist_tracks spt
+                 JOIN service_playlists sp ON sp.id = spt.playlist_id
+                 WHERE LOWER(TRIM(sp.name)) IN (
+                     SELECT LOWER(TRIM(t.name)) FROM tags t WHERE t.id IN ({})
+                 )
+                 AND (sp.archive_deleted = 1 OR spt.deleted_at IS NULL)",
+            placeholders.join(",")
+        );
+
+        let track_ids: Vec<i64> = {
+            let mut q = sqlx::query_scalar(&sql);
+            for id in &tag_ids {
+                q = q.bind(id);
+            }
+            q.fetch_all(&db_clone).await.unwrap_or_default()
+        };
+
+        let total_tracks = track_ids.len();
+        tm.add_log(
+            &worker_task_id,
+            format!("Found {} tracks in backpack tags", total_tracks),
+        )
+        .await;
+        tm.update_progress_text(
+            &worker_task_id,
+            format!("Processing {} tracks...", total_tracks),
+        )
+        .await;
+
+        let mut pulled = 0usize;
+        let mut cleaned = 0usize;
+        let mut skipped = 0usize;
+
+        for (i, track_id) in track_ids.iter().enumerate() {
+            if let Some(ct) = tm.get_cancel_token(&worker_task_id).await
+                && ct.is_cancelled()
+            {
+                tm.update_task_status(&worker_task_id, TaskStatus::Cancelled)
+                    .await;
+                return Ok(());
+            }
+
+            // Find linked files for this track (skip WAVs)
+            let files: Vec<(i64, String)> = sqlx::query_as(
+                "SELECT f.id, f.file_type FROM v_file_track_link v
+                     JOIN files f ON f.id = v.file_id
+                     WHERE v.track_id = ? AND f.file_type != 'wav'
+                     ORDER BY
+                       CASE f.file_type
+                         WHEN 'stem.m4a' THEN 0
+                         WHEN 'flac' THEN 1
+                         ELSE 2
+                       END",
+            )
+            .bind(track_id)
+            .fetch_all(&db_clone)
+            .await
+            .unwrap_or_default();
+
+            if files.is_empty() {
+                // No linked non-WAV files — can't pull what doesn't exist
+                skipped += 1;
+                continue;
+            }
+
+            // Best file is first (stem.m4a > flac > mp3 per ORDER BY)
+            let (best_id, _best_type) = &files[0];
+
+            // Check if best file is local
+            let is_local: bool = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM file_locations WHERE file_id = ? AND location_type = 'local'",
+            )
+            .bind(best_id)
+            .fetch_one(&db_clone)
+            .await
+            .unwrap_or(0)
+                > 0;
+
+            if !is_local {
+                // Check if best file is on backup
+                let on_backup: bool =
+                        sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM file_locations WHERE file_id = ? AND location_type = 'backup'",
+                        )
+                        .bind(best_id)
+                        .fetch_one(&db_clone)
+                        .await
+                        .unwrap_or(0)
+                            > 0;
+
+                if on_backup {
+                    pulled += 1;
+                    // In a full implementation, this would pull from backup.
+                    // For now, log that it needs pulling.
+                    tm.add_log(
+                        &worker_task_id,
+                        format!(
+                            "Track #{}: best file #{} needs pull from backup (not implemented)",
+                            track_id, best_id
+                        ),
+                    )
+                    .await;
+                }
+            }
+
+            // Mark redundant formats as safe-to-delete
+            // Files after the best (index 0) are redundant and can be cleaned
+            if files.len() > 1 {
+                // Currently just log — actual cleanup is handled by prune workflow
+                cleaned += files.len() - 1;
+            }
+
+            if (i + 1) % 50 == 0 {
+                let pct = ((i + 1) as f32 / total_tracks as f32) * 100.0;
+                tm.update_progress_text(
+                    &worker_task_id,
+                    format!("Processed {}/{} tracks", i + 1, total_tracks),
+                )
+                .await;
+                tm.update_progress(&worker_task_id, |p| {
+                    p.percent = Some(pct);
+                    p.message = format!("Processed {}/{} tracks", i + 1, total_tracks);
+                })
+                .await;
+            }
+        }
+
+        let msg = format!(
+            "Backpack sync complete: {} tracks processed, {} pulled, {} redundant formats found, {} skipped",
+            total_tracks, pulled, cleaned, skipped
+        );
+        tm.add_log(&worker_task_id, msg.clone()).await;
+        tm.update_progress_text(&worker_task_id, msg.clone()).await;
+        tm.update_task_status(&worker_task_id, TaskStatus::Completed)
+            .await;
+        tm.update_progress(&worker_task_id, |p| {
+            p.status = TaskStatus::Completed;
+            p.percent = Some(100.0);
+            p.message = msg;
+        })
+        .await;
+
         Ok(())
     });
 

@@ -32,14 +32,31 @@ export async function init(container, signal) {
 
   container.innerHTML = renderLoading();
 
+  let data;
+  let variants;
+
   try {
     const resp = await fetchJSON(`/api/files/${id}/detail`, { signal: combinedSignal });
-    const data = resp.data || resp;
-    container.innerHTML = renderPage(data);
+    data = resp.data || resp;
   } catch (err) {
     if (combinedSignal.aborted) return;
     container.innerHTML = renderError(`Failed to load: ${err.message}`);
+    return;
   }
+
+  try {
+    if (combinedSignal.aborted) return;
+    const vResp = await fetchJSON(`/api/files/${id}/variants`, {
+      signal: combinedSignal,
+    });
+    variants = vResp.data || vResp;
+  } catch (err) {
+    if (combinedSignal.aborted) return;
+    // Variants are optional — don't fail the page
+    variants = null;
+  }
+
+  container.innerHTML = renderPage(data, variants);
 }
 
 /* ------------------------------------------------------------------ */
@@ -54,7 +71,7 @@ function renderError(msg) {
   return `<div class="detail-error"><i class="fa-solid fa-triangle-exclamation"></i> ${escHtml(msg)}</div>`;
 }
 
-function renderPage(data) {
+function renderPage(data, variants) {
   const f = data.file || data;
   const tracks = data.tracks || [];
   const tags = data.tags || [];
@@ -77,6 +94,7 @@ function renderPage(data) {
       ${tracks.length > 0 ? renderSection("🔗 Linked Tracks", renderTrackCards(tracks, f)) : ""}
       ${tags.length > 0 ? renderSection("🏷 Tags", renderTags(tags)) : ""}
       ${playlists.length > 0 ? renderSection("📋 Playlists", renderPlaylists(playlists)) : ""}
+      ${variants && variants.variants && variants.variants.length > 0 ? renderSection("🎛 Variants", renderVariants(variants.variants)) : ""}
     </div>
   `;
 }
@@ -233,6 +251,50 @@ function renderPlaylists(playlists) {
       `,
         )
         .join("")}
+    </div>
+  `;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Variants                                                            */
+/* ------------------------------------------------------------------ */
+
+function renderVariants(variants) {
+  return /* html */ `
+    <div class="variants-list">
+      ${variants.map((v) => renderVariantCard(v)).join("")}
+    </div>
+  `;
+}
+
+function renderVariantCard(v) {
+  const typeLabel = v.fileType.toUpperCase();
+  const typeBadgeClass =
+    v.fileType === "stem.m4a"
+      ? "variant-badge-stem"
+      : v.fileType === "flac"
+        ? "variant-badge-flac"
+        : v.fileType === "wav"
+          ? "variant-badge-wav"
+          : "variant-badge-other";
+
+  const stemTypeHtml = v.stemType
+    ? `<span class="variant-stem-type">${escHtml(v.stemType)}</span>`
+    : "";
+
+  const backupIcon = v.backedUp
+    ? '<span class="variant-backed-up" title="Backed up">✓</span>'
+    : '<span class="variant-not-backed-up" title="Not backed up">✗</span>';
+
+  const fileName = (v.filePath || "").split("/").pop() || "";
+
+  return /* html */ `
+    <div class="variant-card" data-file-id="${v.id}">
+      <span class="variant-badge ${typeBadgeClass}">${escHtml(typeLabel)}</span>
+      ${stemTypeHtml}
+      <span class="variant-filename" title="${escHtml(v.filePath)}">${escHtml(fileName)}</span>
+      <span class="variant-size">${formatBytes(v.fileSize)}</span>
+      ${backupIcon}
     </div>
   `;
 }

@@ -82,7 +82,7 @@ const TAGS_COLUMNS = [
     sortKey: "created_at",
     defaultWidth: 150,
   },
-  { id: "follow", label: "Follow", sortable: false, defaultWidth: 60 },
+  { id: "backpack", label: "Backpack", sortable: false, defaultWidth: 60 },
   { id: "actions", label: "Actions", sortable: false, defaultWidth: 100 },
 ];
 
@@ -99,16 +99,16 @@ const TAGS_CELL_RENDERERS = {
     const d = new Date(t.createdAt * 1000);
     return `<span class="font-mono text-xs">${d.toLocaleDateString()}</span>`;
   },
-  follow: (t) => {
-    const followed = t.followed ? true : false;
-    const icon = followed ? "fa-eye" : "fa-eye-slash";
-    const title = followed
-      ? "Followed \u2014 files with this tag are kept locally"
-      : "Not followed \u2014 files may be pruned if backed up";
-    return `<button class="btn btn-sm btn-icon follow-toggle-btn"
-      data-id="${t.id}" data-followed="${followed ? "1" : "0"}"
+  backpack: (t) => {
+    const backpack = t.backpack ? true : false;
+    const icon = backpack ? "fa-box" : "fa-box-open";
+    const title = backpack
+      ? "Backpack \u2014 files for this tag are kept offline"
+      : "Not backpack \u2014 files may be pruned if backed up";
+    return `<button class="btn btn-sm btn-icon backpack-toggle-btn"
+      data-id="${t.id}" data-backpack="${backpack ? "1" : "0"}"
       title="${title}">
-      <i class="fas ${icon}" style="${followed ? "color:var(--green)" : "color:var(--text-muted)"}"></i>
+      <i class="fas ${icon}" style="${backpack ? "color:var(--primary)" : "color:var(--text-muted)"}"></i>
     </button>`;
   },
   actions: (t) => {
@@ -146,7 +146,7 @@ function adaptTag(t) {
     categoryIcon: t.categoryIcon,
     fileCount: t.fileCount || 0,
     createdAt: t.createdAt,
-    followed: t.followed || false,
+    backpack: t.backpack || false,
   };
 }
 
@@ -1075,29 +1075,29 @@ export async function init(container, signal, hashParams) {
       return;
     }
 
-    const followBtn = e.target.closest(".follow-toggle-btn");
-    if (followBtn) {
-      const tagId = parseInt(followBtn.dataset.id, 10);
-      const currentFollowed = followBtn.dataset.followed === "1";
-      const newFollowed = !currentFollowed;
+    const backpackBtn = e.target.closest(".backpack-toggle-btn");
+    if (backpackBtn) {
+      const tagId = parseInt(backpackBtn.dataset.id, 10);
+      const currentBackpack = backpackBtn.dataset.backpack === "1";
+      const newBackpack = !currentBackpack;
 
-      followBtn.disabled = true;
-      followBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+      backpackBtn.disabled = true;
+      backpackBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
 
       (async () => {
         try {
-          await fetchJSON(`/api/tags/${tagId}/follow`, {
+          await fetchJSON(`/api/tags/${tagId}/backpack`, {
             method: "PUT",
-            body: JSON.stringify({ followed: newFollowed }),
+            body: JSON.stringify({ backpack: newBackpack }),
           });
           updateHash("tags", state, HASH_DEFAULTS, HASH_SCHEMA);
           fetchAndRender(container, signal, state);
         } catch (err) {
-          showToast(`Follow toggle failed: ${err.message}`, "error");
-          followBtn.disabled = false;
-          const icon = currentFollowed ? "fa-eye" : "fa-eye-slash";
-          followBtn.innerHTML = `<i class="fas ${icon}"></i>`;
-          followBtn.dataset.followed = currentFollowed ? "1" : "0";
+          showToast(`Backpack toggle failed: ${err.message}`, "error");
+          backpackBtn.disabled = false;
+          const icon = currentBackpack ? "fa-box" : "fa-box-open";
+          backpackBtn.innerHTML = `<i class="fas ${icon}"></i>`;
+          backpackBtn.dataset.backpack = currentBackpack ? "1" : "0";
         }
       })();
       return;

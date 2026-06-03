@@ -5231,3 +5231,220 @@ th.drop-target {
     color: var(--text-muted);
     border: 1px dashed rgba(100, 116, 139, 0.4);
 }
+
+/* ─── Variant cards (file-detail page) ───────────────── */
+.variants-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.variant-card {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    transition: background 0.15s;
+}
+
+.variant-card:hover {
+    background: var(--bg-hover);
+}
+
+.variant-badge {
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    flex-shrink: 0;
+}
+
+.variant-badge-stem {
+    background: #7b1fa2;
+    color: #fff;
+}
+
+.variant-badge-flac {
+    background: #1565c0;
+    color: #fff;
+}
+
+.variant-badge-wav {
+    background: #e65100;
+    color: #fff;
+}
+
+.variant-badge-other {
+    background: #555;
+    color: #fff;
+}
+
+.variant-stem-type {
+    font-size: 0.7rem;
+    font-style: italic;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    min-width: 4rem;
+}
+
+.variant-filename {
+    flex: 1;
+    font-size: 0.85rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.variant-size {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.variant-backed-up {
+    color: #4caf50;
+    font-weight: 700;
+    font-size: 1rem;
+}
+
+.variant-not-backed-up {
+    color: #f44336;
+    font-weight: 700;
+    font-size: 1rem;
+}
+
+/* ─── Prune filter toolbar ──────────── */
+.prune-filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.prune-filter-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: var(--text);
+}
+
+.prune-filter-checkbox input[type="checkbox"] {
+    cursor: pointer;
+}
+
+.prune-filter-type {
+    font-size: 0.85rem;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+}
+
+/* ─── Storage warning banner ──────────── */
+.storage-warning {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    background: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffeeba;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+}
+
+body.dark .storage-warning {
+    background: rgba(255, 193, 7, 0.15);
+    color: #ffc107;
+    border-color: rgba(255, 193, 7, 0.3);
+}
+
+.storage-warning i {
+    font-size: 1.1rem;
+    flex-shrink: 0;
+}
+
+.storage-warning .btn {
+    margin-left: auto;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+/* ─── Backpack page ──────────────── */
+.backpack-summary {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.backpack-stat {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.5rem;
+    text-align: center;
+    flex: 1;
+}
+
+.backpack-stat-value {
+    display: block;
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--primary);
+}
+
+.backpack-stat-label {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
+.backpack-tags-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.backpack-tag-card {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    transition: background 0.15s;
+}
+
+.backpack-tag-card:hover {
+    background: var(--bg-hover);
+}
+
+.backpack-tag-icon {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+}
+
+.backpack-tag-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+.backpack-tag-count {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-left: auto;
+}

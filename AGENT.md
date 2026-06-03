@@ -1,6 +1,6 @@
 # Momo's Music Manager — Agent Guidance
 
-> **Last Updated**: 2026-05-25 — v0.6.0 — digging-flat-ladder in-progress
+> **Last Updated**: 2026-06-03 — v0.7.0
 
 ---
 
@@ -43,7 +43,7 @@ When bundling features for a release:
 
 ### Architecture
 
-6. **Schema**: 13 tables — `tag_categories`, `tags`, `service_tracks`, `service_playlists`, `service_playlist_tracks`, `files`, `service_config`, `folders`, `subscriptions`, `tag_embeddings`, `tag_energy_levels`, `tag_similarities`, `tag_parents` (plus views: `unified_tracks`, `v_file_track_link`, `v_tag_playlist`, `v_file_tags`, `v_subscriptions`, `v_tag_categories`, `v_tags_with_categories`, `v_resolved_tags`, `v_file_resolved_tags`)
+6. **Schema**: 14 tables — `tag_categories`, `tags`, `service_tracks`, `service_playlists`, `service_playlist_tracks`, `files`, `service_config`, `folders`, `subscriptions`, `tag_embeddings`, `tag_energy_levels`, `tag_similarities`, `tag_parents`, `file_resolved_tags` (plus views: `unified_tracks`, `v_file_track_link`, `v_tag_playlist`, `v_file_tags`, `v_subscriptions`, `v_tag_categories`, `v_tags_with_categories`, `v_resolved_tags`, `v_file_resolved_tags`)
 7. **Separate Types**: `File` (local files with BPM/Key) vs `ServiceTrack` (service entries, no BPM/Key) — linked via `v_file_track_link` view
 8. **Tags = Playlists**: Via name matching (case-insensitive). Setlist is default category.
 9. **Comment Format**: `[{phase_char}{mood_char}{vibe_char}] {tags} {source_id}` — e.g. `[PMV] build jazzy warehouse sp:xxx`
@@ -114,7 +114,7 @@ git branch --show-current && git status --short | head -20
 
 ### Schema Rules
 
-- **Never reconstruct the schema from migration files.** Migrations 001–007 have
+- **Never reconstruct the schema from migration files.** Migrations 001–011 have
   overlapping view definitions, ALTER TABLEs, and DROP+RECREATE cycles. Reading them
   sequentially is error-prone. Always query the live DB or do the dry-run above.
 - The `sqlite3 app.db ".schema"` output IS the canonical schema. Trust it over any
@@ -172,7 +172,7 @@ cargo run -- serve  # then use the Traktor import page in the frontend
 
 ---
 
-## Current Migration Map (001–007)
+## Current Migration Map (001–016)
 
 Use this as a quick index. For actual SQL, query the live DB with `sqlite3 app.db ".schema"`.
 
@@ -185,13 +185,22 @@ Use this as a quick index. For actual SQL, query the live DB with `sqlite3 app.d
 | `005_v_playlist_tag_category.sql` | Creates `v_playlist_tag_category` view for category-ID-based playlist filtering                                                                      |
 | `006_local_service.sql`           | Adds `'local'` to `service_tracks` CHECK constraint, updates `v_file_track_link` for local service matching, recreates dependent views               |
 | `007_playlist_snapshot.sql`       | Adds `snapshot_id` to `service_playlists` for global poller change detection                                                                         |
+| `008_playlist_track_archive.sql`  | Soft-delete `deleted_at` on `service_playlist_tracks` + `archive_deleted` toggle on `service_playlists`                                              |
+| `009_file_lifecycle.sql`          | `file_locations` table, `followed` on tags, `source_of` on files, folder backup config                                                               |
+| `010_auto_backup.sql`             | `auto_backup` column on `folders`                                                                                                                    |
+| `011_file_resolved_tags.sql`      | Materialized `file_resolved_tags` table, missing indexes for query performance                                                                       |
+| `012_wav_stem_type.sql`           | `stem_type` column on `files` for WAV source component tracking                                                                                      |
+| `013_backup_discovery.sql`        | `last_verified_local` on `files` for local presence tracking                                                                                         |
+| `014_v_track_tags.sql`            | `v_track_tags` view — track→tag resolution via playlist name matching                                                                                |
+| `015_track_resolved_tags.sql`     | Materialized `track_resolved_tags` table for track-level tag query performance                                                                       |
+| `016_backpack_rename.sql`         | Renamed `tags.followed` to `tags.backpack`                                                                                                           |
 
 ---
 
 ## Important Gotchas
 
 - **Migrations are additive** — never edit `001_initial_schema.sql`. Create a new migration file instead.
-- **To reset a dirty migration state**: delete `app.db` and re-run — all 7 migrations run sequentially from scratch.
+- **To reset a dirty migration state**: delete `app.db` and re-run — all 16 migrations run sequentially from scratch.
 - **Schema truth is in the DB, not the migration files.** Migrations recreate views and tables, so earlier files contain stale SQL. Always query `sqlite3 app.db ".schema"` for the current schema.
 - **Frontend is an SPA** — modular vanilla JS with ES modules in `frontend/`. Hash-based router (`app.js`), shared modules in `shared/`, pages in `pages/`. Serve embedded via `rust-embed`, no separate dev server needed.
 - **`digging.html`** is a standalone HTML page (not part of the SPA) for the digging/curation workflow.
@@ -3795,6 +3804,38 @@ Verify all filters (PMV, KEY, Phase, Energy, BPM, Tags, Search, Sort) work end-t
 
 ---
 
+## Plan: query-performance-optimization
+
+**Status**: done ✅
+**Branch**: `feat/query-performance-optimization`
+**Ready for review**: yes
+**Depends on**: nothing
+**Migration needed**: yes — `011_file_resolved_tags.sql`
+
+### Description
+
+Overhaul query performance for files, playlists, and digging pages. Replace the `v_file_resolved_tags` view (5-join chain with unindexable LOWER/TRIM) with a materialized `file_resolved_tags` table. Add batch comment computation. Fix the deemix playlist join to use exact match. Extract FileFilterBuilder to eliminate duplicated filter SQL.
+
+### Files modified
+
+- `migrations/011_file_resolved_tags.sql` — new migration: `file_resolved_tags` table + 4 indexes + 3 missing indexes (`file_locations`, `deemix_downloads`, `spt.deleted_at`)
+- `src/db.rs` — new functions: `compute_target_comments_batch()`, `get_file_resolved_tags_batch()`, `refresh_file_resolved_tags()`
+- `src/api.rs` — replaced all `v_file_resolved_tags`/`v_file_tags` view references with `file_resolved_tags` table; batch comment computation in `get_files()` and `get_files_count()`; fixed deemix `LIKE '%/'` → exact match
+- `src/digging.rs` — batch tag loading in `search_digging_tracks()` instead of per-row N+1 queries
+
+### Acceptance Criteria
+
+- [x] Migration 011 runs cleanly on fresh DB (001→011)
+- [x] Migration 011 runs cleanly on existing DB with data
+- [x] `file_resolved_tags` table populated from `v_file_resolved_tags` view
+- [x] All `v_file_resolved_tags` and `v_file_tags` view references replaced with `file_resolved_tags` table
+- [x] Batch comment computation: `get_files()` with `commentStatuses=needs_update` uses 2 queries instead of N+1
+- [x] Batch tag loading: `search_digging_tracks()` uses 1 query instead of N per-row queries
+- [x] Deemix join uses exact match (`=`) instead of `LIKE '%/'`, indexable
+- [x] New indexes: `idx_frt_tag_name`, `idx_file_locations_file_type`, `idx_deemix_downloads_url`, `idx_spt_deleted`
+- [x] `cargo build` passes
+- [x] No regressions: files, playlists, digging, tracks pages all work
+
 ## Plan: fix-comment-diff-display
 
 **Status**: proposed
@@ -3844,3 +3885,1388 @@ function renderCommentDiff(f) {
 - [ ] Diff view shows `(empty)` for empty old/new lines
 - [ ] No regressions: "Up to Date" filter still works
 - [ ] `cargo build` passes (frontend only change)
+
+---
+
+## Plan: wav-source-linking
+
+**Status**: proposed
+**Branch**: `feat/wav-source-linking`
+**Ready for review**: no
+**Depends on**: `feat/file-lifecycle-management` (already merged)
+**Migration needed**: yes — `012_wav_stem_type.sql`
+
+### Description
+
+Three-phase plan to properly handle nuo-stems WAV source files: link them to parent stems via `source_of`, track which stem part each WAV is (`stem_type`), make backed-up+linked WAVs prunable, and enrich track metadata with file variant information.
+
+### Investigation Results (2026-05-28)
+
+| File Type | Count |   Size | Backed Up | source_of set | stem_type tracked |
+| --------- | ----: | -----: | :-------: | :-----------: | :---------------: |
+| wav       | 6,647 | 277 GB | 6,647 ✅  |     0 ❌      |        ❌         |
+| stem.m4a  | 1,770 |  90 GB |   1,770   |      N/A      |        N/A        |
+| flac      | 2,205 |  64 GB |   1,602   |      N/A      |        N/A        |
+
+**File system layout:**
+
+```
+/Users/momo/Music/stems/
+├── WILL FERRO - Dreams.stem.m4a          ← stem file (top-level)
+├── WILL_FERRO_Dreams/                    ← WAV source subdir (1,330 of these)
+│   ├── WILL FERRO - Dreams_vocals.wav
+│   ├── WILL FERRO - Dreams_bass.wav
+│   ├── WILL FERRO - Dreams_drums.wav
+│   ├── WILL FERRO - Dreams_instrumental.wav
+│   └── WILL FERRO - Dreams_other.wav
+```
+
+**Naming convention discovered:** WAV files follow `{stem_name}_{stem_type}.wav` where `stem_type ∈ {vocals, bass, drums, instrumental, other}`. The stem file is `{stem_name}.stem.m4a` in the parent directory. This is reliably parseable — the stem*type is always the text after the LAST `*`before`.wav`, if it matches the known set.
+
+**What's broken:**
+
+1. `ScanWavSources` worker counts WAVs but never calls `set_file_source_of()` — `linked_to_stems` is declared `0usize` and never incremented (see `src/tasks/mod.rs` lines ~2520-2560)
+2. `BackupWavs` worker passes `file_id=0` to `record_backup_result()` (line 2329), so it can't link backup records to the right files. (Current backup records came from the regular `BackupFolder` task, which passes correct `file.id`.)
+3. `get_prune_candidates()` explicitly excludes WAVs with `f.file_type != 'wav'` — even backed-up + linked WAVs can't be pruned
+4. No `stem_type` column exists — we know a WAV is a source file but not which part it is
+5. No track enrichment — no way to see "this track has FLAC + stem + 5 WAV source files"
+
+### Phase 1: Add stem_type + Populate source_of Linking
+
+#### Migration 012 (`migrations/012_wav_stem_type.sql`)
+
+```sql
+-- Add stem_type column for tracking which nuo-stems part a WAV source file represents
+ALTER TABLE files ADD COLUMN stem_type TEXT CHECK (
+    stem_type IS NULL OR stem_type IN ('vocals', 'bass', 'drums', 'instrumental', 'other')
+);
+
+CREATE INDEX IF NOT EXISTS idx_files_stem_type ON files(stem_type);
+
+SELECT 'Migration 012 applied: stem_type column on files' as status;
+```
+
+Rationale for dedicated column over `metadata_json`:
+
+- `files` already uses dedicated columns for audio metadata (title, artist, genre, bpm, musical_key, etc.) — this fits the pattern
+- CHECK constraint ensures data integrity at DB level
+- Directly queryable: `SELECT * FROM files WHERE stem_type = 'vocals'`
+- No JSON parsing overhead
+- Self-documenting schema
+
+#### Rust: `src/db.rs` — `File` struct
+
+Add `stem_type: Option<String>` field to `File` struct (after `source_of`):
+
+```rust
+// Source WAV linking (WAV source subdirectory → stem file)
+pub source_of: Option<i64>,
+
+// Stem type for WAV source files (vocals, bass, drums, instrumental, other)
+pub stem_type: Option<String>,
+```
+
+Update both `extract_minimal_file_metadata` and `extract_audio_metadata_from_file` to set `stem_type: None`.
+
+#### Rust: `src/db.rs` — Preserve `source_of` and `stem_type` during re-scan
+
+**Critical:** `scan_and_store_file()` (line 762) does INSERT + ON CONFLICT UPDATE without including `source_of` in either clause. If a WAV file is re-scanned (by folder watcher or manual scan), the linkage established by `ScanWavSources` would be silently lost. Same applies to the new `stem_type`.
+
+Fix: add both columns to INSERT and use COALESCE in ON CONFLICT UPDATE to preserve existing values:
+
+```rust
+// In the INSERT column list, add:
+source_of, stem_type,
+
+// In VALUES, add two more bindings:
+.bind(&file.source_of)
+.bind(&file.stem_type)
+
+// In ON CONFLICT DO UPDATE SET, add:
+source_of = COALESCE(excluded.source_of, files.source_of),
+stem_type = COALESCE(excluded.stem_type, files.stem_type),
+```
+
+Using COALESCE ensures: on first insert, values come from the file struct (NULL for both); on re-scan, the previously-set `source_of` and `stem_type` are preserved because the incoming values from `extract_audio_metadata_from_file` are NULL.
+
+#### Rust: `src/db.rs` — `get_file_by_path()`
+
+Note: `get_file_by_path()` already exists at `src/db.rs` line 1016 — no need to create it. Reuse the existing function.
+
+#### Rust: `src/db.rs` — WAV→stem matching
+
+New function `link_wav_to_stem()`:
+
+```rust
+/// Parse a WAV filename and link it to its parent stem file.
+///
+/// Pattern: `{stem_name}_{stem_type}.wav` where stem_type ∈ {vocals,bass,drums,instrumental,other}
+/// The stem file is `{stem_name}.stem.m4a` in the parent of the parent directory.
+///
+/// Returns Some(file_id of stem) on success, None if no matching stem found.
+pub async fn link_wav_to_stem(
+    pool: &Pool<Sqlite>,
+    wav_file_id: i64,
+    wav_file_path: &str,
+) -> Result<Option<(i64, String)>> {
+    let path = std::path::Path::new(wav_file_path);
+    let filename = path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    // Known stem types in nuo-stems
+    const STEM_TYPES: &[&str] = &["vocals", "bass", "drums", "instrumental", "other"];
+
+    // Extract stem_type: text after last '_' before '.wav'
+    let stem_name_no_ext = filename.strip_suffix(".wav").unwrap_or(filename);
+    let (stem_name, stem_type) = if let Some(last_underscore) = stem_name_no_ext.rfind('_') {
+        let candidate = &stem_name_no_ext[last_underscore + 1..];
+        if STEM_TYPES.contains(&candidate) {
+            (&stem_name_no_ext[..last_underscore], candidate.to_string())
+        } else {
+            // Unknown suffix — not a stem part WAV
+            return Ok(None);
+        }
+    } else {
+        // No underscore — not a stem part WAV
+        return Ok(None);
+    };
+
+    // The stem file is in the parent of the parent directory:
+    // /stems/ARTIST_Title/Artist - Title_vocals.wav
+    //   → parent = /stems/ARTIST_Title
+    //   → parent's parent = /stems
+    //   → stem = /stems/Artist - Title.stem.m4a
+    let parent = path.parent();  // /stems/ARTIST_Title
+    let stems_root = parent.and_then(|p| p.parent());  // /stems
+
+    let expected_stem_path = if let Some(root) = stems_root {
+        format!("{}/{}.stem.m4a", root.display(), stem_name)
+    } else {
+        return Ok(None);
+    };
+
+    // Look up the stem file
+    let stem = sqlx::query_as::<_, File>(
+        "SELECT * FROM files WHERE file_path = ? AND file_type = 'stem.m4a'"
+    )
+    .bind(&expected_stem_path)
+    .fetch_optional(pool)
+    .await?;
+
+    match stem {
+        Some(s) => {
+            // Link: set source_of and stem_type
+            sqlx::query("UPDATE files SET source_of = ?, stem_type = ? WHERE id = ?")
+                .bind(s.id)
+                .bind(&stem_type)
+                .bind(wav_file_id)
+                .execute(pool)
+                .await?;
+            Ok(Some((s.id, stem_type)))
+        }
+        None => Ok(None),
+    }
+}
+```
+
+Key design decisions in this algorithm:
+
+- Uses the LAST `_` before `.wav` to find stem*type — works for titles containing `*`(e.g.,`Artist\_-_Title_vocals.wav`)
+- Checks against known stem_type values — silently skips unknown suffixes
+- Uses `file_path = ?` exact match lookup — indexed, fast
+- Stem is in parent-of-parent directory — derived from WAV path structure, no need to guess directory naming
+
+#### Rust: `src/tasks/mod.rs` — Fix `ScanWavSources` worker
+
+Replace the stub counting loop (~lines 2550-2600) with actual linking:
+
+```rust
+let mut wav_indexed = 0usize;
+let mut linked_to_stems = 0usize;  // was: const 0usize
+
+for (i, subdir_name) in subdirs.iter().enumerate() {
+    // ... cancel check ...
+
+    let local_subdir = format!("{}/{}", local_dir.trim_end_matches('/'), subdir_name);
+    let dir_path = std::path::Path::new(&local_subdir);
+
+    if !dir_path.is_dir() { continue; }
+
+    if let Ok(entries) = std::fs::read_dir(dir_path) {
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if entry_path.extension().and_then(|e| e.to_str()) != Some("wav") {
+                continue;
+            }
+            wav_indexed += 1;
+
+            // Look up the WAV file in DB by path
+            let wav_path_str = entry_path.to_string_lossy().to_string();
+            if let Ok(Some(wav_file)) = crate::db::get_file_by_path(&db_clone, &wav_path_str).await {
+                match crate::db::link_wav_to_stem(&db_clone, wav_file.id, &wav_path_str).await {
+                    Ok(Some((stem_id, stem_type))) => {
+                        linked_to_stems += 1;
+                        tracing::debug!(
+                            "Linked WAV {} (type={}) → stem #{}",
+                            wav_path_str, stem_type, stem_id
+                        );
+                    }
+                    Ok(None) => {
+                        tracing::debug!("No matching stem for WAV: {}", wav_path_str);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to link WAV {}: {}", wav_path_str, e);
+                    }
+                }
+            }
+        }
+    }
+    // ... progress update ...
+}
+
+let msg = format!(
+    "WAV source scan complete: {} WAV files indexed, {} linked to stems in {} subdirectories",
+    wav_indexed, linked_to_stems, subdirs.len()
+);
+```
+
+#### Rust: `src/tasks/mod.rs` — Fix `BackupWavs` worker
+
+Replace `crate::db::record_backup_result(&db_clone, 0, true, file_size, &remote_wav_path)` at line 2329 with a proper file lookup:
+
+```rust
+// Look up the WAV file in DB by local path to get correct file_id
+let local_wav_path = entry_path.to_string_lossy().to_string();
+let file_id = if let Ok(Some(f)) = crate::db::get_file_by_path(&db_clone, &local_wav_path).await {
+    f.id
+} else {
+    continue;  // skip files not in DB
+};
+let _ = crate::db::record_backup_result(
+    &db_clone,
+    file_id,
+    true,
+    file_size,
+    &remote_wav_path,
+)
+.await;
+```
+
+### Phase 2: Allow Pruning of Backed-up + Linked WAVs
+
+#### Rust: `src/db.rs` — Modify `get_prune_candidates()`
+
+**Remove** the `f.file_type != 'wav'` exclusion. Replace with conditional logic:
+
+- For **non-WAV** files: same logic as before (backed up + not followed → candidate)
+- For **WAV** files: backed up + `source_of IS NOT NULL` + not followed → candidate with `reason = "wav_backed_up"`
+
+Change the initial fetch from:
+
+```sql
+WHERE fl.location_type = 'backup' AND f.file_type != 'wav'
+```
+
+to:
+
+```sql
+WHERE fl.location_type = 'backup'
+  AND (f.file_type != 'wav' OR (f.file_type = 'wav' AND f.source_of IS NOT NULL))
+```
+
+This ensures:
+
+- WAVs without `source_of` (not yet linked) are NOT prune candidates — we need the metadata first
+- WAVs with `source_of` that are backed up → eligible for pruning
+- Non-WAV files: behavior unchanged
+
+In the reason assignment, add:
+
+```rust
+let reason = if row.file_type == "wav" {
+    "wav_backed_up".to_string()
+} else {
+    "not_followed".to_string()
+};
+```
+
+Also add `reason` to the SQL SELECT, importing the value from the file_type:
+
+```sql
+SELECT f.id, f.file_path, f.file_type, f.file_size, ...
+```
+
+Then in Rust, assign reason based on file_type.
+
+### Phase 3: Track Enrichment API
+
+#### API: `GET /api/files/{id}/variants`
+
+Returns all file variants for a track, grouped by common identity. Groups files by:
+
+- Same ISRC (most reliable)
+- Same `source_of` parent (WAVs belonging to same stem)
+
+Response:
+
+```json
+{
+  "fileId": 4362,
+  "title": "Games People Play",
+  "artist": "Paula van Klar",
+  "isrc": "US7NS2500009",
+  "variants": [
+    {
+      "id": 4362,
+      "fileType": "stem.m4a",
+      "filePath": "...",
+      "fileSize": 12345,
+      "backedUp": true
+    },
+    {
+      "id": 4042,
+      "fileType": "stem.m4a",
+      "filePath": "...",
+      "fileSize": 12345,
+      "backedUp": true
+    },
+    {
+      "id": 9801,
+      "fileType": "flac",
+      "filePath": "...",
+      "fileSize": 45678,
+      "backedUp": true
+    },
+    {
+      "id": 9802,
+      "fileType": "wav",
+      "stemType": "vocals",
+      "filePath": "...",
+      "fileSize": 89012,
+      "backedUp": true
+    },
+    {
+      "id": 9803,
+      "fileType": "wav",
+      "stemType": "bass",
+      "filePath": "...",
+      "fileSize": 89012,
+      "backedUp": true
+    }
+  ]
+}
+```
+
+Implementation in `src/db.rs`:
+
+```rust
+pub async fn get_file_variants(pool: &Pool<Sqlite>, file_id: i64) -> Result<FileVariants> {
+    // First, get the file to find its ISRC
+    let file = get_file_by_id(pool, file_id).await?.ok_or_else(|| anyhow!("File not found"))?;
+
+    // Find all files with same ISRC (if ISRC is not null)
+    let mut variant_ids = std::collections::HashSet::new();
+    variant_ids.insert(file.id);
+
+    if let Some(ref isrc) = file.isrc {
+        let same_isrc: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM files WHERE isrc = ? AND id != ?"
+        )
+        .bind(isrc)
+        .bind(file.id)
+        .fetch_all(pool)
+        .await?;
+        variant_ids.extend(same_isrc);
+    }
+
+    // Also include WAV source files (source_of points to this stem)
+    let wav_sources: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM files WHERE source_of = ? AND file_type = 'wav'"
+    )
+    .bind(file.id)
+    .fetch_all(pool)
+    .await?;
+    variant_ids.extend(wav_sources);
+
+    // If this file is a WAV, include its stem parent and siblings
+    if let Some(source_of) = file.source_of {
+        variant_ids.insert(source_of);
+        let sibling_wavs: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM files WHERE source_of = ? AND id != ?"
+        )
+        .bind(source_of)
+        .bind(file.id)
+        .fetch_all(pool)
+        .await?;
+        variant_ids.extend(sibling_wavs);
+    }
+
+    // Fetch full details for all variants
+    let placeholders: Vec<String> = variant_ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT f.id, f.file_path, f.file_type, f.file_size, f.stem_type,
+                CASE WHEN fl.id IS NOT NULL THEN 1 ELSE 0 END as backed_up
+         FROM files f
+         LEFT JOIN file_locations fl ON fl.file_id = f.id AND fl.location_type = 'backup'
+         WHERE f.id IN ({})
+         ORDER BY f.file_type, f.stem_type",
+        placeholders.join(",")
+    );
+    // ... bind and fetch ...
+}
+```
+
+#### Route
+
+```rust
+.route("/api/files/{id}/variants", get(file_variants_handler))
+```
+
+#### Frontend: File Detail page (`frontend/pages/file-detail.js`)
+
+Add a "Variants" section below the metadata, showing:
+
+- List of all file variants with type badges (stem, flac, wav-vocals, wav-bass, etc.)
+- Backup status per variant (✓ backed up / ✗ local only)
+- File size per variant
+
+### Files to modify
+
+- `migrations/012_wav_stem_type.sql` — new migration
+- `src/db.rs` — `File` struct + `stem_type`, `link_wav_to_stem()`, `get_file_by_path()`, `get_file_variants()`, update `get_prune_candidates()`
+- `src/tasks/mod.rs` — fix `ScanWavSources` worker (actual linking), fix `BackupWavs` worker (correct file_id)
+- `src/api.rs` — add `GET /api/files/{id}/variants` route + handler
+- `frontend/pages/file-detail.js` — variants section
+- `frontend/style.css` — variant badge styles
+
+### Acceptance Criteria
+
+**Phase 1:**
+
+- [ ] Migration 012 runs cleanly on fresh DB (001→012)
+- [ ] Migration 012 runs cleanly on existing DB with data
+- [ ] `stem_type` column added with CHECK constraint
+- [ ] `link_wav_to_stem()` correctly parses: `WILL FERRO - Dreams_vocals.wav` → stem_type=`vocals`, links to `WILL FERRO - Dreams.stem.m4a`
+- [ ] `link_wav_to_stem()` handles edge cases: unknown suffix → skips, no underscore → skips, no matching stem → skips
+- [ ] `link_wav_to_stem()` handles titles with `_` (e.g., `Artist_-_Title_vocals.wav`)
+- [ ] `link_wav_to_stem()` handles names with parentheses (e.g., `Jon.K - Madness (Malandra Jr. Remix)_bass.wav`)
+- [ ] `ScanWavSources` task populates `source_of` and `stem_type` for WAVs with matching stem files (~81% of 6,647 = ~5,405 linked; remaining ~1,242 skipped gracefully)
+- [ ] `ScanWavSources` task logs counts: WAVs indexed, linked to stems, skipped
+- [ ] `BackupWavs` task uses correct file_id in `record_backup_result()`
+- [ ] `scan_and_store_file()` preserves existing `source_of` and `stem_type` on re-scan (COALESCE)
+- [ ] `cargo build` passes
+
+**Phase 2:**
+
+- [ ] Backed-up WAVs with `source_of IS NOT NULL` appear as prune candidates with `reason = "wav_backed_up"`
+- [ ] Backed-up WAVs without `source_of` are NOT prune candidates (not yet linked)
+- [ ] Non-WAV prune behavior unchanged
+- [ ] `cargo build` passes
+
+**Phase 3:**
+
+- [ ] `GET /api/files/{id}/variants` returns all variants grouped by ISRC + source_of
+- [ ] Response includes `fileType`, `stemType` (for WAVs), `fileSize`, `backedUp`
+- [ ] File detail page shows variants section
+- [ ] `cargo build` passes
+
+### One-time operation after deploy
+
+After Phase 1 is deployed, run the `ScanWavSources` task on folder #1 (stems) to populate `source_of` and `stem_type` for all 6,647 existing WAVs. This is a one-time batch — future scans via the folder watcher will pick up new WAVs incrementally.
+
+---
+
+## Plan: backup-as-truth
+
+**Status**: proposed
+**Branch**: `feat/backup-as-truth`
+**Ready for review**: no
+**Depends on**: `feat/wav-source-linking` (Phase 1-2 done, Phase 3 partial)
+**Migration needed**: yes — `013_backup_discovery.sql`
+
+### Description
+
+Rethink the file lifecycle model: treat the NAS backup as the **source of truth** and local disk as a **working cache**. Files flow: NAS → load to local → Traktor scan for BPM/key → write comment → confirm backup → delete local. This requires: tracking local file presence explicitly, discovering backup-only files, enriching track-detail with WAV source variants, and changing the prune criteria to require metadata completeness.
+
+### Investigation Results (2026-05-28)
+
+**Current data model gap:**
+
+| Concept               |       Currently Tracked        | Issue                                                                                                  |
+| --------------------- | :----------------------------: | ------------------------------------------------------------------------------------------------------ |
+| File metadata         |         `files` table          | ✅ OK                                                                                                  |
+| Backup location       | `file_locations` (type=backup) | ✅ OK                                                                                                  |
+| Local presence        |        **Not tracked**         | ❌ Implicit: "being in `files` means local" — but files can be deleted locally and still be in `files` |
+| Backup-only files     |       **Not discovered**       | ❌ Files on NAS with no local DB record are invisible to the app                                       |
+| Metadata completeness |           Partially            | ❌ 10,622 files total, only 3,726 have BPM+Key, 3,849 have comments                                    |
+
+**Key findings:**
+
+- 0 `file_locations` entries with `location_type='local'` — local presence is implicit
+- 10,019 files backed up, 603 not backed up (all FLACs)
+- **track-detail page has NO variant/source integration** — `get_track_detail()` doesn't traverse `source_of`
+- Track #1487 (Boris Brejcha - Black Unicorn) has 2 linked files (FLAC + stem) but 5 WAV sources linked to the stem are invisible
+- WAV linking works in isolation: `GET /api/files/{id}/variants` shows WAV sources when querying the stem file
+
+**The conceptual gap:**
+
+1. `track-detail` → linked files → but stops there, doesn't traverse `source_of` to find WAV sources
+2. `file-detail` → variants → works for the specific file, but the track-detail user never sees this connection
+3. Backup reconciliation only matches REMOTE files against LOCAL files in DB — if a file was deleted locally, it stays in DB but there's no way to know it's no longer on disk
+4. Files on NAS that were NEVER scanned locally are completely invisible
+
+### Part A: Enrich Track Detail with WAV Source Variants
+
+Extend `get_track_detail()` and the track-detail page to show all file variants, not just directly-linked files.
+
+#### Backend: `src/db.rs` — extend `get_track_detail()`
+
+After fetching linked files (step 2), add a step to fetch their WAV source children:
+
+```rust
+// Step 2b: For each linked stem file, fetch WAV source files
+let stem_ids: Vec<i64> = files.iter().map(|f| f.id).collect();
+if !stem_ids.is_empty() {
+    // Find WAV files whose source_of points to any linked file
+    let placeholders: Vec<String> = stem_ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT f.id, f.file_path, f.file_type, f.file_size, f.stem_type, f.isrc,
+                f.title, f.artist, f.bpm, f.musical_key, f.duration_ms,
+                COALESCE(fl_backup.id IS NOT NULL, 0) as backed_up,
+                fl_backup.path as backup_path
+         FROM files f
+         LEFT JOIN file_locations fl_backup ON fl_backup.file_id = f.id AND fl_backup.location_type = 'backup'
+         WHERE f.source_of IN ({}) AND f.file_type = 'wav'
+         ORDER BY f.stem_type",
+        placeholders.join(",")
+    );
+    let mut query = sqlx::query_as::<_, TrackDetailFile>(&sql);
+    for id in &stem_ids {
+        query = query.bind(id);
+    }
+    let wav_files = query.fetch_all(pool).await.unwrap_or_default();
+    files.extend(wav_files);
+}
+```
+
+The WAV files already have `stem_type` set — the frontend can use it to render "WAV (vocals)", "WAV (bass)", etc.
+
+#### Backend: `src/db.rs` — `TrackDetailFile` struct
+
+Add `stem_type: Option<String>` field to `TrackDetailFile`:
+
+```rust
+#[derive(Debug, FromRow, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackDetailFile {
+    pub id: i64,
+    pub file_path: String,
+    pub file_type: String,
+    pub stem_type: Option<String>,  // NEW: for WAV sources
+    // ... existing fields ...
+}
+```
+
+Make sure the SQL queries in `get_track_detail()` include `f.stem_type` in the SELECT.
+
+#### Frontend: `frontend/pages/track-detail.js`
+
+Add variant cards rendering for each linked file. When a file has `stem_type` set, show it as a WAV source badge.
+
+In the renderFileInfo section (or as a new Variants section), iterate `data.files` and show:
+
+- File type badge (FLAC, stem.m4a, or WAV with stem_type label)
+- Backup status indicator
+- File size
+
+Group by `source_of` / file type to make the relationship visible:
+
+```
+stem.m4a (124 BPM, 9m) ✓ backed up
+  ├── WAV vocals    ✓
+  ├── WAV bass      ✓
+  ├── WAV drums     ✓
+  ├── WAV instrumental ✓
+  └── WAV other     ✓
+FLAC                   ✓
+```
+
+### Part B: Track Local File Presence
+
+Add explicit `file_locations` entries with `location_type = 'local'` so we can distinguish "file is on disk" from "file is in DB but deleted."
+
+#### Migration 013 (`migrations/013_backup_discovery.sql`)
+
+```sql
+-- Migration 013: Track local file presence + backup discovery support
+
+-- Add last_verified_local to files for tracking when the file was last confirmed on disk
+-- NULL = never been local (backup-only), timestamp = last confirmed on disk
+ALTER TABLE files ADD COLUMN last_verified_local INTEGER;
+
+-- Note: DO NOT backfill file_locations.local entries here!
+-- The scanner populates them on next scan (see scan_and_store_file changes).
+-- A blind backfill would mark deleted files as "local" — false positives.
+
+SELECT 'Migration 013 applied: local file tracking + backup discovery support' as status;
+```
+
+#### Rust: `src/db.rs` — `File` struct
+
+Add `last_verified_local: Option<i64>` field to `File` struct.
+
+#### Rust: `src/db.rs` — Scanner changes
+
+**`scan_and_store_file()`** already preserves `source_of`/`stem_type` via COALESCE (done in earlier plan). Now also needs to create/update a `file_locations` entry with `location_type = 'local'` after the successful INSERT/UPDATE:
+
+```rust
+// In scan_and_store_file, after successful INSERT/UPDATE (before Ok(row)):
+let _ = sqlx::query(
+    "INSERT INTO file_locations (file_id, location_type, path, file_size, last_verified, created_at)
+     VALUES (?, 'local', ?, ?, unixepoch(), unixepoch())
+     ON CONFLICT(file_id, location_type) DO UPDATE SET
+         file_size = excluded.file_size,
+         last_verified = excluded.last_verified"
+)
+.bind(row.id)
+.bind(&row.file_path)
+.bind(row.file_size)
+.execute(pool)
+.await;
+
+// Also update last_verified_local on the files row
+let _ = sqlx::query("UPDATE files SET last_verified_local = unixepoch() WHERE id = ?")
+    .bind(row.id)
+    .execute(pool)
+    .await;
+```
+
+#### Cleanup of stale local entries
+
+The folder watcher polls active folders every 5 min. When a file that was previously scanned disappears from disk, the scanner correctly skips it (no re-scan). But the `file_locations.local` entry from the previous scan persists forever.
+
+**Fix**: Add this cleanup to `scan_folder()` in `src/db.rs` (called by both manual scans via API and automatic scans via the folder watcher). This ensures stale local entries are purged regardless of scan trigger. After the walk loop, before `Ok(count)`, add:
+
+This mirrors how `scan_and_store_file` works: it UPDATEs `last_scanned` for every file it encounters. Files that weren't encountered keep their old `last_scanned`:
+
+```rust
+// After folder scan completes, remove stale local entries
+let folder_path = /* ... */;
+sqlx::query(
+    "DELETE FROM file_locations WHERE location_type = 'local'
+     AND file_id IN (
+         SELECT f.id FROM files f
+         JOIN folders fol ON fol.folder_path = substr(f.file_path, 1, length(fol.folder_path))
+         WHERE fol.id = ? AND f.last_scanned < ?
+     )"
+)
+.bind(folder_id)
+.bind(scan_start_time)
+.execute(pool)
+.await?;
+```
+
+This ensures `file_locations.local` always reflects reality.
+
+#### Frontend: File detail + Storage page
+
+Show local presence status clearly:
+
+- ✓ Local (verified 2 days ago)
+- ✓ Backed up (verified 2 days ago)
+- ✗ Local (not on disk)
+
+### Part C: Backup-Only File Discovery
+
+Add the ability to scan the NAS and discover files that exist ONLY on backup, not in the local DB. These are files that were backed up through some other process, or backed up and then the DB record was lost.
+
+#### New API endpoint: `POST /api/storage/discover-backup/{folder_id}`
+
+Triggers a background task that:
+
+1. Lists ALL files on the NAS backup destination for a folder with **full remote paths** (not just filenames)
+2. For each remote file, checks if there's a matching entry in the `files` table (by filename match — all 10,622 filenames are currently unique)
+3. For files that EXIST in `files` but NOT on backup: logs warning (removed from NAS?)
+4. For files that exist on backup but NOT in `files`: creates a "backup-only" file record:
+   - Create a `files` row with `file_path` reconstructed from `folder.folder_path` + remote relative path
+   - Create `file_locations` entry with `location_type='backup'`
+   - Mark as `last_verified_local = NULL` (never been local)
+   - **`file_hash`**: `files.file_hash` is `NOT NULL` — use a sentinel like `"backup-only-{file_size}"` for files we can't compute a real hash on.
+
+**Potential fragility**: The current `list_remote_files_with_depth()` in `src/backup/mod.rs` strips paths to basenames only (line 149). For backup discovery + pull-from-backup, we need full remote paths. Create a new method `list_remote_files_full()` that returns paths relative to backup base — keeps the existing function unchanged for reconciliation.
+
+**Filename matching**: Match by reconstructed full path (`folder.folder_path` + remote relative path), not by basename alone. Though all local filenames are currently unique, the NAS can have identically-named files in different subdirectories (e.g., `Artist1/Title_vocals.wav` and `Artist2/Title_vocals.wav`).
+
+```rust
+pub struct BackupDiscoveryResult {
+    pub files_on_backup: usize,       // total files found on NAS
+    pub already_tracked: usize,        // files already in DB with backup record
+    pub newly_discovered: usize,       // files on backup but not in DB → created
+    pub missing_from_backup: Vec<(i64, String)>,  // in DB but not on backup (path, reason)
+}
+```
+
+This gives the app a complete inventory of what's on backup.
+
+### Part D: Metadata Completeness as Prune Gate
+
+Change the prune criteria: being backed up is NOT enough. A file is safe to delete locally only when:
+
+1. ✅ Backed up to NAS (has `file_locations` with `type='backup'`)
+2. ✅ Metadata extracted (has `bpm IS NOT NULL` or `comment IS NOT NULL` — at least one)
+3. ✅ Not followed (not in any followed tag)
+4. ✅ Local presence confirmed (has `file_locations` with `type='local'`)
+
+**Rationale:**
+
+- WAV source files have NO metadata (they're raw audio) — but they're linked to stems. The condition for WAVs should be: `source_of IS NOT NULL` (linked to stem) instead of metadata check.
+- Stems and FLACs should have BPM/key or comment extracted before safe deletion.
+- 603 FLACs lack backup — they should be backed up first.
+
+#### Modified prune query:
+
+```sql
+-- Step 1: backed-up file IDs (now includes WAVs)
+SELECT DISTINCT fl.file_id FROM file_locations fl
+JOIN files f ON f.id = fl.file_id
+WHERE fl.location_type = 'backup'
+  AND (f.file_type != 'wav' OR (f.file_type = 'wav' AND f.source_of IS NOT NULL));
+
+-- Step 2: filter for metadata completeness (for non-WAV files)
+-- Non-WAV: must have bpm or comment
+-- WAV: source_of IS NOT NULL is already checked above
+AND (
+    f.file_type = 'wav'
+    OR f.bpm IS NOT NULL
+    OR (f.comment IS NOT NULL AND f.comment != '')
+);
+
+-- Step 3: not followed (existing filter)
+-- Step 4: has local presence (should be deletable)
+```
+
+### Part F: Replace Format Preference Toggle with Interactive Prune Preview Filters
+
+**Problem with current "Prefer stem files" toggle:**
+
+The existing checkbox in the Storage page suffers from four issues:
+
+1. **Wrong numbers**: The hint says "Currently 2,205 FLACs would become prune candidates" — but that's the total FLAC count, not the actual data-dependent number
+2. **Ambiguous language**: "Prefer stem files" — prefer them for what? Keeping locally? Making others deletable?
+3. **No preview before toggling**: You can't see what will change without toggle + re-preview
+4. **Global, static preference**: A single on/off is too coarse — what if you want to keep stems for one artist and FLACs for another?
+
+**Replace with: Format relationship badges + prune preview filters**
+
+Remove the global toggle and the `stem_preferred` config. Instead, move the logic into the prune preview table where the user can make informed per-file decisions.
+
+#### Backend: `PruneCandidate` struct
+
+Add a `has_stem_variant: bool` field:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneCandidate {
+    pub file_id: i64,
+    pub file_path: String,
+    pub file_type: String,
+    pub file_size: i64,
+    pub title: String,
+    pub artist: String,
+    pub isrc: Option<String>,
+    pub reason: String,      // "not_followed" | "wav_backed_up"
+    pub backup_path: Option<String>,
+    pub has_stem_variant: bool,  // NEW: same-ISRC stem.m4a exists in DB
+}
+```
+
+In `get_prune_candidates()`, compute `has_stem_variant` per candidate:
+
+```rust
+let has_stem: bool = if let Some(ref isrc) = isrc {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM files WHERE isrc = ? AND file_type = 'stem.m4a' AND id != ?"
+    )
+    .bind(isrc)
+    .bind(file_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    count > 0
+} else {
+    false
+};
+```
+
+This is computed per-row (N+1), but prune previews are typically small (bounded to a few thousand). Alternatively, batch-fetch all ISRCs in one query for efficiency.
+
+**Remove `stem_preferred`:**
+
+- Remove the `stem_preferred` parameter from `get_prune_candidates()`
+- Remove `GET/PUT /api/storage/settings` endpoint (or keep it for future settings)
+- Remove the `StemPreference` toggle from Storage page
+- The prune preview now returns ALL backed-up + not-followed files regardless of format
+
+#### Frontend: Prune preview table
+
+Each row shows:
+
+```
+☐  FLAC   Boris Brejcha - Black Unicorn   56 MB   [stem variant ✓]   not_followed
+☐  WAV/vocals  ...                                 [stem variant ✓]   wav_backed_up
+```
+
+Filter toolbar above the table:
+
+```
+☐ Show only files with stem variant    ☐ Show only FLACs    ☐ Show only WAVs
+[Select all with stem variant]  [Deselect all]
+```
+
+Bulk action buttons:
+
+- "Delete Selected" (always visible)
+- "Select all redundant" — selects all files where `has_stem_variant = true`
+
+#### Why this is better
+
+| Aspect              |      Current toggle      |            Proposed filter table            |
+| ------------------- | :----------------------: | :-----------------------------------------: |
+| See what changes    |         ❌ Blind         | ✅ Each file shows `has_stem_variant` badge |
+| Control granularity |     ❌ Global on/off     |            ✅ Per-file checkbox             |
+| Understand impact   | ❌ "Prefer" is ambiguous |      ✅ "Has stem variant" is factual       |
+| Safety              |  ❌ Toggle + re-preview  |        ✅ Deselect individual files         |
+| Adaptable           |       ❌ Hardcoded       |         ✅ Filter by any attribute          |
+
+#### Files to modify
+
+- `src/db.rs` — `PruneCandidate` struct + add `has_stem_variant`, remove `stem_preferred` from `get_prune_candidates()`, update `get_storage_status()`
+- `src/api.rs` — `prune_preview_handler`/`prune_execute_handler` pass `false` (no more setting), optionally remove settings endpoint
+- `frontend/pages/storage.js` — replace toggle with filter toolbar, add `has_stem_variant` column + bulk select, remove `renderStemPreference`
+- `frontend/style.css` — filter toolbar styles
+
+#### Acceptance Criteria
+
+- [ ] `get_prune_candidates()` no longer takes `stem_preferred` parameter
+- [ ] `PruneCandidate` includes `hasStemVariant` field
+- [ ] FLACs with same-ISRC stem.m4a show `hasStemVariant: true`
+- [ ] FLACs without same-ISRC stem.m4a show `hasStemVariant: false`
+- [ ] WAVs with `source_of` show `hasStemVariant: true` (they ARE the stem variant)
+- [ ] Prune preview table has filter: "Show only files with stem variant"
+- [ ] "Select all with stem variant" bulk action works
+- [ ] Old toggle removed, `stem_preferred` config key deprecated
+- [ ] `cargo build` passes
+
+### Part E: Pull-from-Backup Workflow
+
+New API endpoint: `POST /api/files/{id}/pull-from-backup`
+
+Copies a file that exists only on backup back to local disk — into the correct folder.
+
+**Transparent path resolution**: The file goes back where it belongs:
+
+- FLAC backup → local FLAC directory (`/Users/momo/Music/flacs/`)
+- Stem backup → local stem directory (`/Users/momo/Music/stems/`)
+- The local destination is determined by: (a) which folder the file originally belonged to, or (b) if it was never local, matching its remote path to the configured folder's `backup_path`.
+
+**Configurable format preference**: When pulling a backup-only file, the user can specify which format they want via a query parameter `?prefer=stem` or `?prefer=flac`. If the preferred format isn't available, it falls back to whatever exists. This gives the user control — "download the FLAC version" vs "download the stem version".
+
+```rust
+async fn file_pull_from_backup_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Query(params): Query<PullFromBackupParams>,
+) -> impl IntoResponse {
+    // 1. Get the file record
+    // 2. Check it has a backup location
+    // 3. Determine local destination:
+    //    - Find which folder this file path matches (flacs vs stems)
+    //    - Construct local path: folder.folder_path + relative_path
+    // 4. Rsync from backup (NAS) to local
+    // 5. Update file_locations: add 'local' entry
+    // 6. Update last_verified_local
+    // 7. Return success + local path
+}
+```
+
+This completes the cycle: backup → pull → scan → extract metadata → re-backup → delete.
+
+### Files to modify
+
+- `migrations/013_backup_discovery.sql` — new migration
+- `src/db.rs` — `File` struct + `last_verified_local`, `TrackDetailFile` + `stem_type`, extend `get_track_detail()`, scanner lints `file_locations.local`, new `discover_backup_files()`, modified prune logic, `PruneCandidate` + `has_stem_variant`, remove `stem_preferred` param from `get_prune_candidates()`
+- `src/api.rs` — extend `get_track_detail` response, `POST /api/storage/discover-backup/{folder_id}`, `POST /api/files/{id}/pull-from-backup`, route additions, remove/update `GET/PUT /api/storage/settings`
+- `src/tasks/mod.rs` — new `BackupDiscovery` task type + worker
+- `frontend/pages/track-detail.js` — WAV source variants section
+- `frontend/pages/file-detail.js` — local presence indicator (variants section already exists)
+- `frontend/pages/storage.js` — replace stem toggle with filter toolbar, backup discovery button, `has_stem_variant` column + bulk select
+- `frontend/style.css` — filter toolbar styles, variant card styles (reuse from file-detail)
+
+### Acceptance Criteria
+
+**Part A:**
+
+- [ ] `GET /api/tracks/{id}/detail` includes WAV source files (via `source_of`) in the `files` array
+- [ ] WAV files have `stemType` field populated (null for non-WAV)
+- [ ] Track-detail page shows WAV source variants grouped under their parent stem file
+- [ ] Boris Brejcha - Black Unicorn (#1487) shows: 1 stem + 1 FLAC + 5 WAVs (grouped)
+- [ ] `cargo build` passes
+
+**Part B:**
+
+- [ ] Migration 013 backfills `file_locations.local` for all existing files
+- [ ] `scan_and_store_file()` creates/updates `file_locations.local` on scan
+- [ ] `last_verified_local` updated on scan
+- [ ] File detail shows local presence status
+- [ ] `cargo build` passes
+
+**Part C:**
+
+- [ ] `POST /api/storage/discover-backup/{folder_id}` triggers background task
+- [ ] Task lists NAS files, matches against DB, creates records for backup-only files
+- [ ] Result shows: files_on_backup, already_tracked, newly_discovered, missing_from_backup
+- [ ] Newly discovered files get `files` row + `file_locations.backup` entry
+- [ ] `cargo build` passes
+
+**Part D:**
+
+- [ ] Prune candidates require: backed up + (metadata complete OR is linked WAV source) + not followed
+- [ ] Files lacking BPM/key/comment are excluded from prune candidates (even if backed up)
+- [ ] 603 unbacked-up FLACs not in prune (as before)
+- [ ] `cargo build` passes
+
+**Part E:**
+
+- [ ] `POST /api/files/{id}/pull-from-backup` copies file from NAS to local
+- [ ] Updates `file_locations.local` entry
+- [ ] Updates `last_verified_local`
+- [ ] Fails gracefully if no backup location exists
+- [ ] `cargo build` passes
+
+**Part F:**
+
+- [ ] `get_prune_candidates()` no longer takes `stem_preferred` parameter
+- [ ] `PruneCandidate` includes `hasStemVariant` field
+- [ ] FLACs with same-ISRC stem.m4a show `hasStemVariant: true`
+- [ ] FLACs without same-ISRC stem.m4a show `hasStemVariant: false`
+- [ ] WAVs with `source_of` show `hasStemVariant: true` (they ARE the stem variant)
+- [ ] Prune preview table has filter: "Show only files with stem variant"
+- [ ] "Select all with stem variant" bulk action works
+- [ ] Old toggle removed, `stem_preferred` config key deprecated
+- [ ] All prune preview features work without a full page reload
+- [ ] `cargo build` passes
+
+---
+
+## Plan: fix-local-file-tracking
+
+**Status**: done ✅
+**Branch**: `fix/local-file-tracking`
+**Depends on**: `feat/backup-as-truth` (already implemented)
+**Migration needed**: no
+
+### Description
+
+Fix the disconnect between the data model and the UI. The `file_locations` table correctly tracks local vs backup presence, but every page queries `SELECT * FROM files` which counts ALL tracked files (including backup-only ones deleted from disk). The Storage page shows 10,638 "Local Files" when only ~3,361 are actually on disk. The Files page can't distinguish "on disk" from "backup-only". Fix: add `is_local` to every File API response, fix Storage page counts, add local-presence filter to Files page.
+
+### Current State (from investigation 2026-06-03)
+
+| Data point                      | Value                | Source                                                                             |
+| ------------------------------- | -------------------- | ---------------------------------------------------------------------------------- |
+| DB records (`files` table)      | 10,638               | `SELECT COUNT(*) FROM files`                                                       |
+| Actually on disk                | ~3,361               | `ls` + `find` on filesystem                                                        |
+| `file_locations.local` entries  | 8 (should be ~3,361) | Scanner code exists but never populated (incremental scan skipped unchanged files) |
+| `file_locations.backup` entries | 10,019               | Correct ✅                                                                         |
+| Files without backup            | 619 (all FLACs)      | Need backup before pruning                                                         |
+| Prune candidates                | 0                    | Query requires `file_locations.local` → only 8 files have it                       |
+
+**Root cause**: The scanner code to create `file_locations.local` was added (in `backup-as-truth` Part B) but the scanner never ran a full scan since then. The last scan was incremental, skipping all unchanged files. Only 8 files got local entries (presumably new/modified files picked up by the watcher).
+
+**What IS correct**: The data model (`file_locations` with `local`/`backup`) is clean. The UI just queries the wrong data source.
+
+### Backend Changes
+
+#### 1. `src/db.rs` — `get_storage_status()`: count from file_locations.local
+
+Replace `SELECT COUNT(*) FROM files` with counts from `file_locations WHERE location_type = 'local'`:
+
+```rust
+// Before (wrong): counts ALL tracked files
+let local_file_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files")
+    .fetch_one(pool).await.unwrap_or(0);
+
+// After (correct): counts only files currently on disk
+let local_file_count: i64 = sqlx::query_scalar(
+    "SELECT COUNT(DISTINCT file_id) FROM file_locations WHERE location_type = 'local'"
+)
+    .fetch_one(pool).await.unwrap_or(0);
+```
+
+Same change for `local_size_bytes`, and all per-type counts (`local_stems`, `local_flacs`, `local_wavs`, `local_mp3s`). Join through `file_locations` with `location_type = 'local'`.
+
+Add a new field: `tracked_file_count: i64` for the total archive size (`COUNT(*) FROM files`). Rename existing fields for clarity — keep `local_file_count` meaning "on disk" (data source changes from `files` to `file_locations.local`).
+
+#### 2. `src/db.rs` — `get_files()`: add `is_local` field
+
+The `get_files()` function builds dynamic SQL. Add a LEFT JOIN to `file_locations` for local presence:
+
+```sql
+SELECT f.*,
+  COALESCE(fl_backup.id IS NOT NULL, 0) as backed_up,
+  COALESCE(fl_local.id IS NOT NULL, 0) as is_local
+FROM files f
+LEFT JOIN file_locations fl_backup ON fl_backup.file_id = f.id AND fl_backup.location_type = 'backup'
+LEFT JOIN file_locations fl_local ON fl_local.file_id = f.id AND fl_local.location_type = 'local'
+WHERE 1=1 ...
+```
+
+Add an `isLocal` filter to `FilesQuery`:
+
+```rust
+pub is_local: Option<bool>, // Some(true) = only local, Some(false) = only backup-only, None = all
+```
+
+When `is_local = Some(true)`: add `AND fl_local.id IS NOT NULL` — only files on disk.
+When `is_local = Some(false)`: add `AND fl_local.id IS NULL` — only backup-only files.
+
+#### 3. `src/api.rs` — `ApiFile` struct: add `is_local` field
+
+```rust
+pub struct ApiFile {
+    // ... existing fields ...
+    pub backed_up: bool,
+    pub is_local: bool,       // NEW
+    pub has_stem: bool,
+    pub safe_to_delete: bool,
+}
+```
+
+The `backedUp` filter already exists in `FilesQuery`. Keep it. Add the `isLocal` filter alongside it.
+
+### Frontend Changes
+
+#### 4. `frontend/pages/storage.js` — Overhaul Storage cards
+
+Current cards: Local Files | Backed Up | Prune Candidates.
+
+New cards:
+
+```
+On Disk         │ On Backup        │ Tracked
+3,361 files     │ 10,019 files     │ 10,638 files
+70 GB           │                  │ 431.9 GB (archive)
+
+Not Backed Up   │ Prune Candidates
+619 FLACs       │ X files · Y GB can be freed
+64.3 GB         │
+```
+
+All counts come from `StorageStatus` response fields. The frontend already receives the data correctly after the backend fix (step 1).
+
+#### 5. `frontend/pages/files.js` — Add "On Disk" filter button
+
+In the toolbar filter panel (RIGHT column, near the Backup filter), add:
+
+```html
+<div class="filter-row">
+  <span class="filter-row-label toggleable" data-filter="local">On Disk</span>
+  <div class="filter-group">
+    <button class="filter-btn" data-local-filter="all">All</button>
+    <button class="filter-btn" data-local-filter="yes">
+      <i class="fas fa-hdd"></i> Yes
+    </button>
+    <button class="filter-btn" data-local-filter="no">
+      <i class="fas fa-cloud"></i> No
+    </button>
+  </div>
+</div>
+```
+
+Add `isLocal: null` to state and hash. Wire `buildParams` to send `isLocal` and `buildFilterParams` to pass it. The comment writer should show a warning/badge when the file is not local ("Backup only — can't write comment").
+
+### Files to modify
+
+- `src/db.rs` — fix `get_storage_status()` counts, add `is_local` to `get_files()`, add `isLocal` to `FilesQuery`
+- `src/api.rs` — add `is_local: bool` to `ApiFile`, add `isLocal` param support in `files_handler`
+- `frontend/pages/storage.js` — overhaul card layout to 5 cards
+- `frontend/pages/files.js` — add "On Disk" filter button, non-local warning in comment writer
+- `frontend/style.css` — storage card layout adjustments if needed
+
+### Not in this plan
+
+- Running a full scan to populate `file_locations.local` — **CRITICAL**: without this, Storage page shows 0 "On Disk" files (worse than current). Scan trigger MUST be added to this plan.
+- Backing up the 619 unbacked-up FLACs — user triggers manually via Storage page
+
+### Acceptance Criteria
+
+- [ ] `get_storage_status()` counts local files from `file_locations.local`, NOT from `files`
+- [ ] Storage page shows "On Disk" count — with warning when local entries are empty
+- [ ] Storage page shows "Tracked" as total archive size (`COUNT(*) FROM files`)
+- [ ] Storage page shows "Not Backed Up" count (files without backup records)
+- [ ] Full scan trigger on Storage page when `file_locations.local` is empty
+- [ ] `ApiFile` includes `isLocal: bool` field
+- [ ] Files page has "On Disk" filter (All / Yes / No)
+- [ ] Files page shows non-local indicator when file is backup-only
+- [ ] `isLocal` filter included in `get_files_count()` count query
+- [ ] Comment writer deactivated or warns when file is not local
+- [ ] `TracksQuery.has_local` fixed — currently queries `v_file_track_link` without joining `file_locations` for local presence
+- [ ] `ApiFile.safe_to_delete` logic reviewed: currently `backed_up && has_stem` — should also check `is_local`
+- [ ] `cargo build` passes
+- [ ] No regressions: backup/reconcile/prune flows unchanged
+
+### Additional concerns (investigated, not yet planned)
+
+#### Track-centric file view
+
+The user thinks in TRACKS, not files. A track can have multiple file versions: FLAC, stem.m4a, and WAV source parts. The track-detail page (`#track-detail?id=1487`) shows ALL file variants grouped by type:
+
+- **Now working**: API returns 7 files (1 FLAC + 1 stem + 5 WAVs), frontend splits them into "Linked Files" + "WAV Sources" sections
+- **Gap**: The WAV files show `backedUp: true` but are NOT on local disk. The path `/Users/momo/Music/stems/Boris_Brejcha_Black_Unicorn/...` is stale — the directory was deleted locally after backup. Without `is_local`, the UI can't tell the user "this file exists on backup only."
+- Verified: 10+ tracks in the DB have all three types (WAV + FLAC + stem) simultaneously, but many WAVs are backup-only
+
+#### All file versions on backup
+
+619 FLACs are not yet backed up. Every track's file versions should eventually all be on backup. The "Not Backed Up" card on the Storage page shows this count. User should back these up via the Backup button per folder.
+
+#### Conditional local keeping (format preference per-track)
+
+User's rule:
+
+- If a track has a **stem.m4a** locally → the FLAC can be pruned (if backed up)
+- If a track has **only FLAC** (no stem) → keep FLAC locally for offline/Traktor use
+
+The `hasStemVariant` badge on the prune preview already supports this per-file. But the user wants the prune preview organized **by track** — showing "for Track X: stem ✓, FLAC (redundant), WAVs (redundant)" grouped together.
+
+#### Backpack feature for offline availability
+
+The current "Follow" mechanism on Tags and "Backpack" toggle on Tracks are **the same thing** — both set `tags.followed = true` which causes `get_prune_candidates()` to exclude files with that tag. The mechanism is consistent but **passive** — it only prevents deletion, it doesn't actively pull files from backup or ensure the right format is local.
+
+**What the user wants**:
+
+- Rename "Follow" → "Backpack" everywhere (more intuitive: "I want these offline")
+- A track is "in backpack" if EITHER individually tagged OR in a backpack tag
+- Actively pull files from backup when they're not local
+- Prefer format: stem > FLAC > MP3 (exactly one version per track)
+- Clean up redundant formats when a better one exists
+
+**Current flow:** Tag "Backpack" toggled → Files in that tag won't be pruned. That's it.
+
+**Needed flow:** Tag "Backpack" toggled → Background task checks all tracks → pulls missing files from backup → prefers stem over FLAC → ensures exactly one version per track is local.
+
+**UX flow sketch:**
+
+```
+Tags page: toggle "digging-2026-05-26" → Backpack
+    ↓
+Background "Backpack Sync" task starts:
+    For each track in the tag:
+      ├─ stem.m4a on disk? → keep, mark FLAC as safe-to-delete
+      ├─ FLAC on disk (no stem)? → keep
+      ├─ stem on backup only? → pull from backup
+      ├─ Nothing anywhere? → skip (can't pull what doesn't exist)
+    ↓
+Notify: "Backpack sync complete: 5 files pulled, 3 formats cleaned"
+```
+
+**Possible new page**: A dedicated "Backpack" page showing all backpack tracks with their file status — which are local, which are backup-only, which need pulling. Could also show per-track format status (stem ✓, FLAC redundant, etc.).
+
+**Dependencies**: Needs file_locations.local (the Maintainer) and is_local on track-detail before this can be built.
+
+---
+
+## Plan: backpack-system
+
+**Status**: done ✅
+**Branch**: feat/backpack-system
+**Depends on**: fix/local-file-tracking + Maintainer
+**Migration needed**: yes — rename tags.followed to tags.backpack (migration 014)
+
+### Description
+
+Overhaul "follow" into proper "Backpack" system. Rename everywhere (DB column + all code + UI), make tracks inherit backpack status from their tags, add active sync task that pulls missing files from backup and cleans up redundant formats. WAV source files excluded (Ableton only, metadata from linked track).
+
+### Part 1: Rename followed → backpack everywhere
+
+Migration 014: ALTER TABLE tags RENAME COLUMN followed TO backpack.
+
+Rust: Tag.followed → Tag.backpack, set_tag_followed() → set_tag_backpack(), get_followed_tags() → get_backpack_tags(), is_file_followed() → is_in_backpack(). All SQL queries updated. get_prune_candidates() WHERE t.followed = 1 → WHERE t.backpack = 1.
+
+Frontend: Tags page "Follow" → "Backpack", icon fa-eye → fa-backpack. Labels: "files are kept locally" → "files are kept offline".
+
+### Part 2: Track inherits backpack from tags
+
+A track is "in backpack" if ANY of its tags has backpack = true, OR if individually in the "backpack" playlist.
+
+Add pub in_backpack: bool to track API responses (TrackDetail, Tracks list). Tracks page shows backpack icon for in_backpack tracks.
+
+### Part 3: Backpack Sync task
+
+New TaskType: BackpackSync { tag_ids }. When a tag is toggled to backpack, spawns background task:
+
+- For each track in backpack tags: find best local file (stem > FLAC > MP3)
+- If missing: pull from backup
+- If redundant: mark safe-to-delete (stem exists → FLAC can be pruned)
+- Skips WAV source files (Ableton only)
+- Ensures exactly one version per track is local
+
+### Part 4: Backpack Page (new #backpack route)
+
+New SPA page showing: active backpack tags with track counts, per-track file status (stem ✓ / FLAC only / needs pull / nothing available), "Sync All" and "Pull Missing" bulk buttons.
+
+### Files to modify
+
+- migrations/014_backpack_rename.sql — new
+- src/db.rs — rename all followed→backpack, add in_backpack computation, BackpackSync logic
+- src/api.rs — in_backpack on track responses, backpack sync handler
+- src/tasks/mod.rs — new BackpackSync task type + worker
+- frontend/pages/tags.js — Follow→Backpack UI
+- frontend/pages/tracks.js — backpack icon for in_backpack tracks
+- frontend/pages/backpack.js — NEW page
+- frontend/app.js + shared/nav.js — register route
+- frontend/style.css — backpack page styles
+
+### Acceptance Criteria
+
+**Part 1:**
+
+- [ ] Migration 014 runs cleanly (001→014)
+- [ ] All code references: followed → backpack
+- [ ] Tags page shows "Backpack" not "Follow"
+- [ ] cargo build passes
+
+**Part 2:**
+
+- [ ] Track detail + tracks list return inBackpack: bool
+- [ ] Track inherits backpack from tags
+- [ ] Tracks page shows backpack icon
+- [ ] cargo build passes
+
+**Part 3:**
+
+- [ ] BackpackSync task spawns on tag toggle
+- [ ] Pulls missing files (stem > FLAC)
+- [ ] Cleans redundant formats
+- [ ] WAV source files excluded
+- [ ] cargo build passes
+
+**Part 4:**
+
+- [ ] #backpack page renders tags + track status
+- [ ] Sync/Pull buttons work
+- [ ] Registered in app.js + nav.js
+- [ ] cargo build passes
+
+#### Background maintenance scheduler
+
+The current system has multiple polling mechanisms with different intervals:
+
+- Folder watcher: polls active folders every 5 min (incremental scan)
+- Global playlist poller: every 15 min
+- Subscription poller: every 30s
+- Auto-backup poller: every 10 min
+- **No** automatic full scan or stale-local cleanup
+
+But there's no unified "housekeeping" that:
+
+- Triggers a full scan when incremental scans have been running too long (files may have been deleted locally)
+- Automatically cleans up stale `file_locations.local` entries for files no longer on disk
+- Detects unbacked-up files and triggers backup for folders with `auto_backup` enabled
+- Discovers backup-only files (via `discover_backup_files`) on a schedule
+- Keeps all counts (`localFileCount`, `pruneCandidateCount`) current without manual button clicks
+
+**Idea: A `Maintainer` background task** — single loop, configurable interval (default: 1h), does:
+
+1. **Quick health check**: For each active folder, check if `last_scanned` is > 24h old → trigger a full scan
+2. **Stale local cleanup**: For each scanned folder, remove `file_locations.local` for files that disappeared (already implemented in `scan_folder`, but only runs when a scan happens — if no scan triggers, stale entries persist)
+3. **Unbacked-up check**: For folders with `auto_backup = true`, check if any files lack backup → log warning (backup sync is handled by the existing auto-backup poller)
+4. **Backup discovery**: On a longer interval (e.g. weekly), trigger `discover_backup_files` to sync NAS inventory
+
+This would replace the need for a manual "Run Full Scan" button — the maintainer just runs it when needed.
+
+#### Backup-only file metadata extraction
+
+When `discover_backup_files` finds files on the NAS that don't exist in the local DB, it currently creates a bare record with no metadata:
+
+```json
+{ "title": null, "artist": null, "isrc": null, "bpm": null, "fileSize": 0 }
+```
+
+**What the user wants**: Extract metadata (ISRC, title, artist, BPM, file size) directly from the backup location. This enables:
+
+- Matching to service tracks (Spotify/SoundCloud) via ISRC → track-detail shows files even if never local
+- Better prune/discovery workflows — knowing "this backup-only FLAC has ISRC X"
+
+**How to extract remotely**: Via SSH we can run `exiftool` or `ffprobe` on the NAS:
+
+```bash
+ssh backup "ffprobe -v quiet -print_format json -show_format /volume1/media/flacs/Artist - Title.flac"
+```
+
+This returns: duration, format, tags (title, artist, album, ISRC, BPM if embedded). For WAVs there might be no metadata, but for FLACs and stems there usually is.
+
+**What would change**:
+
+- `discover_backup_files()` accepts an optional reference to a BackupEngine (for SSH)
+- For new files, after creating the DB record, SSH to NAS to extract metadata
+- Update the `files` row with: `title`, `artist`, `isrc`, `file_size`, `duration_ms`
+- The `file_hash` stays as sentinel `"backup-only-{size}"` (can't hash remotely easily)
+- **Result**: Track-detail can now show "this track has a FLAC on backup (+ ISRC matched)" even if you've never had the file locally
+
+**Risk**: Running `ffprobe` on 6000+ FLACs over SSH would be slow — should be batched and only for newly discovered files, not on every maintainer cycle.
+
+**TODO**: Decide if this is part of the Maintainer or a separate "enrich backup files" task.
+
+---
+
+## Plan: maintainer
+
+**Status**: done ✅
+**Branch**: feat/maintainer
+**Depends on**: fix/local-file-tracking
+**Migration needed**: no
+
+### Description
+
+Background task that keeps the DB in sync with reality. The system has 4 separate pollers but no coordinator. The Maintainer periodically checks for stale state and triggers corrective actions via existing task workers (ScanFolder, BackupFolder, BackupDiscovery).
+
+### What it does
+
+Single background loop, configurable interval (default 1h, env: MOMOS_MAINTAINER_INTERVAL_SECS):
+
+| #   | Check             | Condition                                 | Action                                                           |
+| --- | ----------------- | ----------------------------------------- | ---------------------------------------------------------------- |
+| 1   | Full scan needed  | last_scanned > 24h for any active folder  | Spawn ScanFolder (populates file_locations.local, stale cleanup) |
+| 2   | Unbacked-up files | auto_backup=true and files without backup | Spawn BackupFolder (reconcile + rsync)                           |
+| 3   | Backup discovery  | Last discovery > 7 days, backup_path set  | Spawn BackupDiscovery (lists NAS, creates DB records)            |
+
+Lightweight coordinator — doesn't do the work itself, only triggers tasks.
+
+Replaces the manual "Run Full Scan" button — Maintainer does it proactively. Button stays as override.
+
+### Config
+
+```toml
+[maintainer]
+interval_secs = 3600          # cycle interval (default 1h)
+full_scan_max_age_secs = 86400 # max age before full scan (default 24h)
+backup_discovery_interval_secs = 604800 # backup discovery interval (default 7d)
+```
+
+### Files to modify
+
+- src/maintainer.rs — NEW module
+- src/main.rs — spawn in serve()
+- src/config.rs — MaintainerConfig section
+
+### Acceptance Criteria
+
+- [ ] Maintainer starts on server boot
+- [ ] Triggers full scan when last_scanned exceeds max age
+- [ ] Triggers backup for auto-backup folders with unbacked-up files
+- [ ] Triggers backup discovery on schedule
+- [ ] Configurable via config.toml + env vars
+- [ ] Cancel token honored for clean shutdown
+- [ ] Zero cost when idle (timestamp checks only)
+- [ ] cargo build passes

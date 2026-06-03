@@ -39,18 +39,19 @@ use crate::db::{
     FolderStats, KeyComparisonRow, KeyComparisonSummary, LinkedTrack, PruneCandidate,
     ServiceConfig, ServiceConnections, ServiceTrack, StorageStatus, TrackDetail, TrackDetailFile,
     bulk_categorize_tags, bulk_check_tags, bulk_create_tags, bulk_review_tags, bulk_update_tags,
-    categorize_tag as db_categorize_tag, clear_all_embeddings, compute_target_comment, create_tag,
-    create_tag_category, create_tags_from_playlists, delete_folder, delete_local_file_by_id,
-    delete_playlist, delete_tag, delete_tag_category, ensure_backpack_tag, find_tag_similar_tracks,
-    get_all_embeddings, get_backpack_tag, get_curation_queue, get_embeddings_by_category,
-    get_file_detail, get_file_locations, get_folder_by_id, get_folder_file_count, get_folder_stats,
-    get_folders as db_get_folders, get_key_comparison, get_playlists_without_tags,
-    get_prune_candidates, get_service_config, get_storage_status, get_tag_categories,
-    get_tag_category_by_id, get_tag_children, get_tag_embedding, get_tag_parents,
-    get_tag_review_counts, get_tags_for_file, get_track_detail, get_unbacked_up_files,
-    get_unreviewed_tags, get_wav_source_subdirs, list_subscriptions, read_comment_from_file,
-    record_backup_result, scan_folder, set_file_source_of, set_tag_followed, set_tag_parents,
-    update_folder_active, update_folder_backup_config, update_folder_with_config,
+    categorize_tag as db_categorize_tag, clear_all_embeddings, compute_target_comment,
+    compute_target_comments_batch, create_tag, create_tag_category, create_tags_from_playlists,
+    delete_folder, delete_local_file_by_id, delete_playlist, delete_tag, delete_tag_category,
+    ensure_backpack_tag, find_tag_similar_tracks, get_all_embeddings, get_backpack_tag,
+    get_curation_queue, get_embeddings_by_category, get_file_detail, get_file_locations,
+    get_folder_by_id, get_folder_file_count, get_folder_stats, get_folders as db_get_folders,
+    get_key_comparison, get_playlists_without_tags, get_prune_candidates, get_service_config,
+    get_storage_status, get_tag_categories, get_tag_category_by_id, get_tag_children,
+    get_tag_embedding, get_tag_parents, get_tag_review_counts, get_tags_for_file, get_track_detail,
+    get_unbacked_up_files, get_unreviewed_tags, get_wav_source_subdirs, list_subscriptions,
+    read_comment_from_file, record_backup_result, refresh_file_resolved_tags,
+    refresh_track_resolved_tags, scan_folder, set_file_source_of, set_tag_backpack,
+    set_tag_parents, update_folder_active, update_folder_backup_config, update_folder_with_config,
     update_service_connection_status, update_service_tokens, update_storage_setting, update_tag,
     update_tag_category_metadata, upsert_tag_embedding,
 };
@@ -68,8 +69,8 @@ use crate::embeddings::{
     serialize_embedding, suggest_category,
 };
 use crate::tasks::{
-    SyncType, TaskStatus, start_backup_folder_task, start_backup_wavs_task,
-    start_scan_wav_sources_task,
+    SyncType, TaskStatus, start_backup_discovery_task, start_backup_folder_task,
+    start_backup_wavs_task, start_prune_files_task, start_scan_wav_sources_task,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -422,6 +423,7 @@ impl From<File> for ApiFile {
             comment_target: String::new(),
             comment_needs_update: false,
             backed_up: false,
+            is_local: false,
             has_stem: false,
             safe_to_delete: false,
         }
@@ -447,6 +449,7 @@ impl From<ServiceTrack> for ApiServiceTrack {
             playlist_names: vec![],
             playlist_tags: vec![],
             format_info: vec![],
+            in_backpack: false,
         }
     }
 }
@@ -493,6 +496,7 @@ pub struct ApiFile {
     pub comment_target: String,
     pub comment_needs_update: bool,
     pub backed_up: bool,
+    pub is_local: bool,
     pub has_stem: bool,
     pub safe_to_delete: bool,
 }
@@ -541,6 +545,8 @@ pub struct ApiServiceTrack {
     pub playlist_tags: Vec<PlaylistTagInfo>,
     #[serde(default)]
     pub format_info: Vec<TrackFormatInfo>,
+    #[serde(default)]
+    pub in_backpack: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -703,6 +709,7 @@ pub struct FilesQuery {
     pub file_types: Option<String>,
     pub comment_statuses: Option<String>,
     pub backed_up: Option<bool>,
+    pub is_local: Option<bool>,
     pub safe_to_delete: Option<bool>,
     pub sort: Option<String>,
     pub order: Option<String>,
@@ -838,7 +845,7 @@ pub struct ApiTag {
     pub category_id: Option<i64>,
     pub file_count: i64,
     pub created_at: i64,
-    pub followed: bool,
+    pub backpack: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1083,6 +1090,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/files/service-links", get(files_service_links_handler))
         .route("/api/files/{id}", get(file_handler))
         .route("/api/files/{id}/detail", get(file_detail_handler))
+        .route("/api/files/{id}/variants", get(file_variants_handler))
         .route("/api/files/{id}/sync-comment", post(sync_comment_handler))
         .route("/api/files/{id}/write-comment", post(sync_comment_handler))
         .route(
@@ -1334,14 +1342,22 @@ pub fn router() -> Router<Arc<AppState>> {
             "/api/storage/backup-wavs/{folder_id}",
             post(backup_wavs_handler),
         )
+        .route(
+            "/api/storage/discover-backup/{folder_id}",
+            post(storage_discover_backup_handler),
+        )
         // ─── Tag following ────────────────────────────────────────────
-        .route("/api/tags/{id}/follow", put(tag_follow_handler))
+        .route("/api/tags/{id}/backpack", put(tag_backpack_handler))
         // ─── Backpack (track-level) ───────────────────────────────────
         .route("/api/tracks/{id}/backpack", post(track_backpack_handler))
         // ─── File backup status ───────────────────────────────────────
         .route(
             "/api/files/{id}/backup-status",
             get(file_backup_status_handler),
+        )
+        .route(
+            "/api/files/{id}/pull-from-backup",
+            post(file_pull_from_backup_handler),
         )
         // ─── Folder backup config + source scanning ───────────────────
         .route(
@@ -1652,7 +1668,7 @@ async fn files_needs_update_count_handler(
         if !lowered.is_empty() {
             let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
             sql.push_str(&format!(
-                    " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND LOWER(TRIM(ft.tag_name)) IN ({}))",
+                    " AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = files.id AND LOWER(TRIM(frt.tag_name)) IN ({}))",
                     placeholders.join(",")
                 ));
             tag_params = lowered;
@@ -1661,7 +1677,7 @@ async fn files_needs_update_count_handler(
 
     if query.non_default_only.unwrap_or(false) {
         sql.push_str(
-            " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND ft.is_default = FALSE)",
+            " AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = files.id AND frt.is_default = FALSE)",
         );
     }
 
@@ -1835,7 +1851,7 @@ fn build_files_filter_sql(filter: &FilesFilterAll) -> String {
     if let Some(ref search) = filter.search
         && !search.is_empty()
     {
-        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ? OR genre LIKE ? OR album LIKE ? OR isrc LIKE ? OR comment LIKE ? OR EXISTS (SELECT 1 FROM v_file_resolved_tags vfrt WHERE vfrt.file_id = files.id AND vfrt.tag_name LIKE ?))");
+        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ? OR genre LIKE ? OR album LIKE ? OR isrc LIKE ? OR comment LIKE ? OR EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = files.id AND frt.tag_name LIKE ?))");
     }
 
     if filter.bpm_min.is_some() {
@@ -1870,7 +1886,7 @@ fn build_files_filter_sql(filter: &FilesFilterAll) -> String {
 
     if filter.non_default_only.unwrap_or(false) {
         sql.push_str(
-            " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND ft.is_default = FALSE)",
+            " AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = files.id AND frt.is_default = FALSE)",
         );
     }
 
@@ -2663,6 +2679,25 @@ async fn file_detail_handler(
     }
 }
 
+/// GET /api/files/{id}/variants — Returns all file variants for a track:
+/// same ISRC files + WAV source files belonging to the same stem.
+async fn file_variants_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match crate::db::get_file_variants(&state.db, id).await {
+        Ok(Some(variants)) => Json(ApiResponse { data: variants }).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "File not found".to_string(),
+            }),
+        )
+            .into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
 /// GET /api/tracks/{id}/detail — Rich detail for a single service track:
 /// track metadata + audio features + linked files + tags + playlists.
 async fn track_detail_handler(
@@ -2759,7 +2794,7 @@ async fn bulk_sync_handler(
         if !lowered.is_empty() {
             let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
             sql.push_str(&format!(
-                    " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND LOWER(TRIM(ft.tag_name)) IN ({}))",
+                    " AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = files.id AND LOWER(TRIM(frt.tag_name)) IN ({}))",
                     placeholders.join(",")
                 ));
             tag_params = lowered;
@@ -2768,7 +2803,7 @@ async fn bulk_sync_handler(
 
     if body.non_default_only.unwrap_or(false) {
         sql.push_str(
-            " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND ft.is_default = FALSE)",
+            " AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = files.id AND frt.is_default = FALSE)",
         );
     }
 
@@ -3930,6 +3965,9 @@ async fn bulk_resolve_handler(
     // Auto-recompute embeddings and similarities if any tags were created
     if any_created {
         crate::tasks::start_recompute_embeddings_task(&state.task_manager, &state.db).await;
+        // Refresh materialized file_resolved_tags since tag→playlist links may have changed
+        let _ = refresh_file_resolved_tags(&state.db).await;
+        let _ = refresh_track_resolved_tags(&state.db).await;
     }
 
     Json(ApiResponse { data: results }).into_response()
@@ -4086,6 +4124,9 @@ async fn create_tags_from_playlists_handler(
             // Auto-recompute embeddings and similarities for new tags
             if created > 0 {
                 crate::tasks::start_recompute_embeddings_task(&state.task_manager, &state.db).await;
+                // Refresh materialized file_resolved_tags since new tag→playlist links were created
+                let _ = refresh_file_resolved_tags(&state.db).await;
+                let _ = refresh_track_resolved_tags(&state.db).await;
             }
             Json(ApiResponse { data: response }).into_response()
         }
@@ -6037,6 +6078,10 @@ async fn create_local_playlist_handler(
         }
     }
 
+    // Refresh materialized tables since new playlist→track links were created
+    let _ = refresh_file_resolved_tags(pool).await;
+    let _ = refresh_track_resolved_tags(pool).await;
+
     let response = json!({
         "playlistId": playlist_id,
         "trackCount": request.track_ids.len(),
@@ -6278,7 +6323,7 @@ async fn playlists_handler(
         let sql = format!(
             "SELECT sp.playlist_id, dd.status, dd.id
              FROM service_playlists sp
-             LEFT JOIN deemix_downloads dd ON dd.spotify_playlist_url LIKE '%/' || sp.playlist_id
+             LEFT JOIN deemix_downloads dd ON dd.spotify_playlist_url = 'https://open.spotify.com/playlist/' || sp.playlist_id
              WHERE sp.playlist_id IN ({})",
             placeholders.join(",")
         );
@@ -7027,7 +7072,7 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
     if let Some(ref search) = query.search
         && !search.is_empty()
     {
-        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ? OR genre LIKE ? OR album LIKE ? OR isrc LIKE ? OR comment LIKE ? OR EXISTS (SELECT 1 FROM v_file_resolved_tags vfrt WHERE vfrt.file_id = files.id AND vfrt.tag_name LIKE ?))");
+        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ? OR genre LIKE ? OR album LIKE ? OR isrc LIKE ? OR comment LIKE ? OR EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = files.id AND frt.tag_name LIKE ?))");
     }
 
     if query.bpm_min.is_some() {
@@ -7065,7 +7110,7 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
     // For nonDefaultOnly (files with at least one tag from a non-default category)
     if query.non_default_only.unwrap_or(false) {
         sql.push_str(
-            " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND ft.is_default = FALSE)",
+            " AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = files.id AND frt.is_default = FALSE)",
         );
     }
 
@@ -7083,7 +7128,7 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
         if !lowered.is_empty() {
             let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
             sql.push_str(&format!(
-                " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND LOWER(TRIM(ft.tag_name)) IN ({}))",
+                " AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = files.id AND LOWER(TRIM(frt.tag_name)) IN ({}))",
                 placeholders.join(",")
             ));
             tag_param_values = lowered;
@@ -7175,6 +7220,13 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
         sql.push_str(" AND EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'backup')");
     } else if let Some(false) = query.backed_up {
         sql.push_str(" AND NOT EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'backup')");
+    }
+
+    // Local presence filter
+    if let Some(true) = query.is_local {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'local')");
+    } else if let Some(false) = query.is_local {
+        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'local')");
     }
 
     if let Some(true) = query.safe_to_delete {
@@ -7285,23 +7337,22 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
         }
 
         // Compute comment_needs_update for all files and cache target comments
+        let file_ids: Vec<i64> = all_files.iter().map(|f| f.id).collect();
+        let batch_targets = match compute_target_comments_batch(pool, &file_ids).await {
+            Ok(map) => map,
+            Err(e) => {
+                tracing::warn!("Failed to compute target comments batch: {}", e);
+                std::collections::HashMap::new()
+            }
+        };
+        target_comments = batch_targets.clone();
         let mut with_status: Vec<(File, bool)> = Vec::with_capacity(all_files.len());
         for file in all_files {
-            match compute_target_comment(pool, file.id).await {
-                Ok(target_comment) => {
-                    let needs_update = file.comment.as_ref() != Some(&target_comment);
-                    target_comments.insert(file.id, target_comment);
-                    with_status.push((file, needs_update));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to compute target comment for file {}: {}",
-                        file.id,
-                        e
-                    );
-                    with_status.push((file, false));
-                }
-            }
+            let needs_update = match batch_targets.get(&file.id) {
+                Some(target_comment) => file.comment.as_ref() != Some(target_comment),
+                None => false,
+            };
+            with_status.push((file, needs_update));
         }
 
         // Filter by comment status
@@ -7438,6 +7489,23 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
                 .collect()
         };
 
+        let local_ids: std::collections::HashSet<i64> = {
+            let placeholders: Vec<String> = file_ids.iter().map(|_| "?".to_string()).collect();
+            let sql_local = format!(
+                "SELECT DISTINCT file_id FROM file_locations WHERE location_type = 'local' AND file_id IN ({})",
+                placeholders.join(",")
+            );
+            let mut q = sqlx::query_scalar::<_, i64>(&sql_local);
+            for id in &file_ids {
+                q = q.bind(id);
+            }
+            q.fetch_all(pool)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        };
+
         let has_stem_ids: std::collections::HashSet<i64> = {
             let placeholders: Vec<String> = file_ids.iter().map(|_| "?".to_string()).collect();
             let sql3 = format!(
@@ -7459,8 +7527,10 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
 
         for af in &mut api_files {
             af.backed_up = backed_up_ids.contains(&af.id);
+            af.is_local = local_ids.contains(&af.id);
             af.has_stem = has_stem_ids.contains(&af.id);
-            af.safe_to_delete = af.backed_up && af.has_stem;
+            af.safe_to_delete =
+                af.is_local && af.backed_up && (af.has_stem || af.file_type == "wav");
         }
     }
 
@@ -7474,7 +7544,7 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
     if let Some(ref search) = query.search
         && !search.is_empty()
     {
-        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ? OR genre LIKE ? OR album LIKE ? OR isrc LIKE ? OR comment LIKE ? OR EXISTS (SELECT 1 FROM v_file_resolved_tags vfrt WHERE vfrt.file_id = files.id AND vfrt.tag_name LIKE ?))");
+        sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR file_path LIKE ? OR genre LIKE ? OR album LIKE ? OR isrc LIKE ? OR comment LIKE ? OR EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = files.id AND frt.tag_name LIKE ?))");
     }
 
     if query.bpm_min.is_some() {
@@ -7509,7 +7579,7 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
 
     if query.non_default_only.unwrap_or(false) {
         sql.push_str(
-            " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND ft.is_default = FALSE)",
+            " AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = files.id AND frt.is_default = FALSE)",
         );
     }
 
@@ -7526,7 +7596,7 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
         if !lowered.is_empty() {
             let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
             sql.push_str(&format!(
-                " AND EXISTS (SELECT 1 FROM v_file_tags ft WHERE ft.file_id = files.id AND LOWER(TRIM(ft.tag_name)) IN ({}))",
+                " AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = files.id AND LOWER(TRIM(frt.tag_name)) IN ({}))",
                 placeholders.join(",")
             ));
             tag_param_values = lowered;
@@ -7610,6 +7680,13 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
         sql.push_str(" AND EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'backup')");
     } else if let Some(false) = query.backed_up {
         sql.push_str(" AND NOT EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'backup')");
+    }
+
+    // Local presence filter
+    if let Some(true) = query.is_local {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'local')");
+    } else if let Some(false) = query.is_local {
+        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'local')");
     }
 
     if let Some(true) = query.safe_to_delete {
@@ -7739,32 +7816,56 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
 
             let ids: Vec<i64> = id_q.fetch_all(pool).await?;
 
+            if ids.is_empty() {
+                return Ok(0);
+            }
+
+            // Batch compute target comments
+            let batch_targets = match compute_target_comments_batch(pool, &ids).await {
+                Ok(map) => map,
+                Err(e) => {
+                    tracing::warn!("Failed to compute target comments batch: {}", e);
+                    std::collections::HashMap::new()
+                }
+            };
+
+            // Fetch all comments in one query
+            let comments: std::collections::HashMap<i64, String> = {
+                let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
+                let sql = format!(
+                    "SELECT id, COALESCE(comment, '') FROM files WHERE id IN ({})",
+                    placeholders.join(",")
+                );
+                let mut q = sqlx::query(&sql);
+                for id in &ids {
+                    q = q.bind(id);
+                }
+                let rows = q.fetch_all(pool).await?;
+                rows.iter()
+                    .map(|row| {
+                        let id: i64 = row.try_get(0).unwrap_or(0);
+                        let comment: String = row.try_get(1).unwrap_or_default();
+                        (id, comment)
+                    })
+                    .collect()
+            };
+
             let mut filtered_count: i64 = 0;
             for file_id in ids {
-                match compute_target_comment(pool, file_id).await {
-                    Ok(target_comment) => {
-                        let comment: Option<String> =
-                            sqlx::query_scalar("SELECT comment FROM files WHERE id = ?")
-                                .bind(file_id)
-                                .fetch_optional(pool)
-                                .await?
-                                .flatten();
-
-                        let needs_update = comment.as_ref() != Some(&target_comment);
-                        let mut keep = false;
-                        if statuses.contains(&"needs_update") && needs_update {
-                            keep = true;
-                        }
-                        if statuses.contains(&"uptodate") && !needs_update {
-                            keep = true;
-                        }
-                        if keep {
-                            filtered_count += 1;
-                        }
-                    }
-                    Err(_) => {
-                        filtered_count += 1;
-                    }
+                let current_comment = comments.get(&file_id).map(|s| s.as_str()).unwrap_or("");
+                let needs_update = match batch_targets.get(&file_id) {
+                    Some(target) => current_comment != target.as_str(),
+                    None => false,
+                };
+                let mut keep = false;
+                if statuses.contains(&"needs_update") && needs_update {
+                    keep = true;
+                }
+                if statuses.contains(&"uptodate") && !needs_update {
+                    keep = true;
+                }
+                if keep {
+                    filtered_count += 1;
                 }
             }
             return Ok(filtered_count);
@@ -7818,6 +7919,42 @@ async fn get_file_by_id(pool: &Pool<Sqlite>, id: i64) -> Result<ApiFile> {
         }
     }
 
+    // Compute backup/stem status from file_locations
+    api_file.backed_up = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT 1 FROM file_locations WHERE file_id = ? AND location_type = 'backup' LIMIT 1",
+    )
+    .bind(api_file.id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+
+    api_file.has_stem = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT 1 FROM files f WHERE f.isrc = (SELECT isrc FROM files WHERE id = ?) AND f.isrc IS NOT NULL AND f.isrc != '' AND f.file_type = 'stem.m4a' AND f.id != ? LIMIT 1"
+    )
+    .bind(api_file.id)
+    .bind(api_file.id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+
+    api_file.is_local = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT 1 FROM file_locations WHERE file_id = ? AND location_type = 'local' LIMIT 1",
+    )
+    .bind(api_file.id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+
+    api_file.safe_to_delete = api_file.is_local
+        && api_file.backed_up
+        && (api_file.has_stem || api_file.file_type == "wav");
+
     Ok(api_file)
 }
 
@@ -7864,7 +8001,7 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     };
 
     let local_track_ids: std::collections::HashSet<i64> = if query.has_local == Some(true) {
-        sqlx::query_scalar("SELECT DISTINCT vft.track_id FROM v_file_track_link vft")
+        sqlx::query_scalar("SELECT DISTINCT vft.track_id FROM v_file_track_link vft JOIN file_locations fl ON fl.file_id = vft.file_id AND fl.location_type = 'local'")
             .fetch_all(pool)
             .await
             .unwrap_or_default()
@@ -7958,7 +8095,7 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
             .collect();
         if !tag_list.is_empty() {
             let placeholders: Vec<String> = tag_list.iter().map(|_| "?".to_string()).collect();
-            sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND vtt.tag_name IN ({}))", placeholders.join(",")));
+            sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM track_resolved_tags trt WHERE trt.track_id = st.id AND trt.tag_name IN ({}))", placeholders.join(",")));
         }
     }
 
@@ -7971,20 +8108,20 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
             .collect();
         if !cat_list.is_empty() {
             let placeholders: Vec<String> = cat_list.iter().map(|_| "?".to_string()).collect();
-            sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) IN ({}))", placeholders.join(",")));
+            sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM track_resolved_tags trt WHERE trt.track_id = st.id AND LOWER(trt.prefix) IN ({}))", placeholders.join(",")));
         }
     } else if let Some(ref pmv_agg) = pmv_aggregate_filter {
         match pmv_agg.as_str() {
             "full" => {
-                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) = 'p')");
-                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) = 'm')");
-                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) = 'v')");
+                sql.push_str(" AND EXISTS (SELECT 1 FROM track_resolved_tags trt WHERE trt.track_id = st.id AND LOWER(trt.prefix) = 'p')");
+                sql.push_str(" AND EXISTS (SELECT 1 FROM track_resolved_tags trt WHERE trt.track_id = st.id AND LOWER(trt.prefix) = 'm')");
+                sql.push_str(" AND EXISTS (SELECT 1 FROM track_resolved_tags trt WHERE trt.track_id = st.id AND LOWER(trt.prefix) = 'v')");
             }
             "partial" => {
-                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) IN ('p','m','v'))");
+                sql.push_str(" AND EXISTS (SELECT 1 FROM track_resolved_tags trt WHERE trt.track_id = st.id AND LOWER(trt.prefix) IN ('p','m','v'))");
             }
             "none" => {
-                sql.push_str(" AND NOT EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) IN ('p','m','v'))");
+                sql.push_str(" AND NOT EXISTS (SELECT 1 FROM track_resolved_tags trt WHERE trt.track_id = st.id AND LOWER(trt.prefix) IN ('p','m','v'))");
             }
             _ => {}
         }
@@ -8287,6 +8424,27 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         }
     }
 
+    // Compute in_backpack for these tracks (batch query)
+    let backpack_sql = format!(
+        "SELECT DISTINCT spt.track_id FROM service_playlist_tracks spt
+         JOIN service_playlists sp ON sp.id = spt.playlist_id
+         LEFT JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
+         WHERE spt.track_id IN ({}) AND (t.backpack = 1 OR LOWER(TRIM(sp.name)) = 'backpack')",
+        ids_list
+    );
+
+    let mut backpack_query = sqlx::query_scalar::<_, i64>(&backpack_sql);
+    for id in &track_ids {
+        backpack_query = backpack_query.bind(id);
+    }
+
+    let backpack_track_ids: std::collections::HashSet<i64> = backpack_query
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
     Ok(tracks
         .into_iter()
         .map(|t| {
@@ -8306,6 +8464,7 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
                 api_track.format_info = formats;
             }
             api_track.max_added_at = max_added_at_map.remove(&api_track.id);
+            api_track.in_backpack = backpack_track_ids.contains(&api_track.id);
             api_track
         })
         .collect())
@@ -8349,7 +8508,7 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
     };
 
     let local_track_ids: std::collections::HashSet<i64> = if query.has_local == Some(true) {
-        sqlx::query_scalar("SELECT DISTINCT vft.track_id FROM v_file_track_link vft")
+        sqlx::query_scalar("SELECT DISTINCT vft.track_id FROM v_file_track_link vft JOIN file_locations fl ON fl.file_id = vft.file_id AND fl.location_type = 'local'")
             .fetch_all(pool)
             .await
             .unwrap_or_default()
@@ -8443,7 +8602,7 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
             .collect();
         if !tag_list.is_empty() {
             let placeholders: Vec<String> = tag_list.iter().map(|_| "?".to_string()).collect();
-            sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND vtt.tag_name IN ({}))", placeholders.join(",")));
+            sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM track_resolved_tags trt WHERE trt.track_id = st.id AND trt.tag_name IN ({}))", placeholders.join(",")));
         }
     }
 
@@ -8456,20 +8615,20 @@ async fn get_tracks_count(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<i6
             .collect();
         if !cat_list.is_empty() {
             let placeholders: Vec<String> = cat_list.iter().map(|_| "?".to_string()).collect();
-            sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) IN ({}))", placeholders.join(",")));
+            sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM track_resolved_tags trt WHERE trt.track_id = st.id AND LOWER(trt.prefix) IN ({}))", placeholders.join(",")));
         }
     } else if let Some(ref pmv_agg) = pmv_aggregate_filter {
         match pmv_agg.as_str() {
             "full" => {
-                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) = 'p')");
-                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) = 'm')");
-                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) = 'v')");
+                sql.push_str(" AND EXISTS (SELECT 1 FROM track_resolved_tags trt WHERE trt.track_id = st.id AND LOWER(trt.prefix) = 'p')");
+                sql.push_str(" AND EXISTS (SELECT 1 FROM track_resolved_tags trt WHERE trt.track_id = st.id AND LOWER(trt.prefix) = 'm')");
+                sql.push_str(" AND EXISTS (SELECT 1 FROM track_resolved_tags trt WHERE trt.track_id = st.id AND LOWER(trt.prefix) = 'v')");
             }
             "partial" => {
-                sql.push_str(" AND EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) IN ('p','m','v'))");
+                sql.push_str(" AND EXISTS (SELECT 1 FROM track_resolved_tags trt WHERE trt.track_id = st.id AND LOWER(trt.prefix) IN ('p','m','v'))");
             }
             "none" => {
-                sql.push_str(" AND NOT EXISTS (SELECT 1 FROM v_track_tags vtt WHERE vtt.track_id = st.id AND LOWER(vtt.prefix) IN ('p','m','v'))");
+                sql.push_str(" AND NOT EXISTS (SELECT 1 FROM track_resolved_tags trt WHERE trt.track_id = st.id AND LOWER(trt.prefix) IN ('p','m','v'))");
             }
             _ => {}
         }
@@ -8806,13 +8965,13 @@ async fn get_all_tags(pool: &Pool<Sqlite>, query: &TagsQuery) -> Result<Vec<ApiT
         "SELECT t.id, t.name, t.category_id, t.sort_order, t.created_at, t.reviewed_at,
                 tc.name as category, tc.icon as category_icon,
                 COALESCE(vfc.file_count, 0) as file_count,
-                COALESCE(t.followed, 0) as followed
+                COALESCE(t.backpack, 0) as backpack
          FROM tags t
          LEFT JOIN tag_categories tc ON t.category_id = tc.id
          LEFT JOIN (
-             SELECT vfr.tag_id, COUNT(DISTINCT vfr.file_id) as file_count
-             FROM v_file_resolved_tags vfr
-             GROUP BY vfr.tag_id
+             SELECT fr.tag_id, COUNT(DISTINCT fr.file_id) as file_count
+             FROM file_resolved_tags fr
+             GROUP BY fr.tag_id
          ) vfc ON vfc.tag_id = t.id
          WHERE 1=1",
     );
@@ -8861,7 +9020,7 @@ async fn get_all_tags(pool: &Pool<Sqlite>, query: &TagsQuery) -> Result<Vec<ApiT
             category_id: row.try_get("category_id").ok(),
             file_count: row.try_get("file_count")?,
             created_at: row.try_get::<Option<i64>, _>("created_at")?.unwrap_or(0),
-            followed: row.try_get::<bool, _>("followed").unwrap_or(false),
+            backpack: row.try_get::<bool, _>("backpack").unwrap_or(false),
         });
     }
 
@@ -9435,10 +9594,10 @@ async fn file_debug_comment_handler(
         Err(e) => return internal_error(e).into_response(),
     };
 
-    // 4. Get resolved tag rows from v_file_resolved_tags
+    // 4. Get resolved tag rows from file_resolved_tags
     let tag_rows = match sqlx::query_as::<_, (String, String)>(
         "SELECT frt.tag_name, frt.prefix
-         FROM v_file_resolved_tags frt
+         FROM file_resolved_tags frt
          WHERE frt.file_id = ?",
     )
     .bind(id)
@@ -9721,6 +9880,10 @@ async fn tag_parents_set_handler(
 ) -> impl IntoResponse {
     match set_tag_parents(&state.db, id, &request.parent_tag_ids).await {
         Ok(parents) => {
+            // Refresh materialized tables since parent resolution changed
+            let _ = refresh_file_resolved_tags(&state.db).await;
+            let _ = refresh_track_resolved_tags(&state.db).await;
+
             let mut api_tags: Vec<Tag> = Vec::new();
             for parent in parents {
                 if let Ok(Some(api_tag)) = get_tag_with_category(&state.db, parent.id).await {
@@ -9777,11 +9940,10 @@ struct BackupResult {
     pub errors: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PruneResult {
-    pub deleted: usize,
-    pub freed_bytes: i64,
+#[derive(Debug, Deserialize)]
+struct PruneRequest {
+    #[serde(default)]
+    file_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -9798,36 +9960,21 @@ struct FolderBackupConfig {
     pub scan_sources: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StorageSettings {
-    pub stem_preferred: bool,
-}
-
-async fn storage_settings_get_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let stem_preferred = match get_service_config(&state.db, "storage").await {
-        Ok(Some(cfg)) => cfg
-            .metadata_json
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| v.get("stem_preferred").and_then(|v| v.as_bool()))
-            .unwrap_or(false),
-        _ => false,
-    };
+async fn storage_settings_get_handler(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(ApiResponse {
-        data: StorageSettings { stem_preferred },
+        data: serde_json::json!({}),
     })
     .into_response()
 }
 
 async fn storage_settings_put_handler(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<StorageSettings>,
+    State(_state): State<Arc<AppState>>,
+    Json(_body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let meta = serde_json::json!({"stem_preferred": body.stem_preferred}).to_string();
-    update_storage_setting(&state.db, &meta)
-        .await
-        .unwrap_or_default();
-    Json(ApiResponse { data: body }).into_response()
+    Json(ApiResponse {
+        data: serde_json::json!({}),
+    })
+    .into_response()
 }
 
 async fn storage_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -9876,52 +10023,30 @@ async fn storage_backup_handler(
 }
 
 async fn prune_preview_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let stem_preferred = crate::db::get_service_config(&state.db, "storage")
-        .await
-        .ok()
-        .flatten()
-        .and_then(|c| c.metadata_json)
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("stem_preferred").and_then(|v| v.as_bool()))
-        .unwrap_or(false);
-    match get_prune_candidates(&state.db, stem_preferred).await {
+    match get_prune_candidates(&state.db).await {
         Ok(candidates) => Json(ApiResponse { data: candidates }).into_response(),
         Err(e) => internal_error(e).into_response(),
     }
 }
 
-async fn prune_execute_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let stem_preferred = crate::db::get_service_config(&state.db, "storage")
-        .await
-        .ok()
-        .flatten()
-        .and_then(|c| c.metadata_json)
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("stem_preferred").and_then(|v| v.as_bool()))
-        .unwrap_or(false);
-    let candidates = match get_prune_candidates(&state.db, stem_preferred).await {
-        Ok(c) => c,
-        Err(e) => return internal_error(e).into_response(),
-    };
-
-    let mut deleted = 0usize;
-    let mut freed_bytes = 0i64;
-
-    for candidate in &candidates {
-        match delete_local_file_by_id(&state.db, candidate.file_id).await {
-            Ok(true) => {
-                deleted += 1;
-                freed_bytes += candidate.file_size;
-            }
-            _ => {}
-        }
+async fn prune_execute_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PruneRequest>,
+) -> impl IntoResponse {
+    if body.file_ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "No file IDs provided".to_string(),
+            }),
+        )
+            .into_response();
     }
 
+    let task_id = start_prune_files_task(&state.task_manager, &state.db, body.file_ids).await;
+
     Json(ApiResponse {
-        data: PruneResult {
-            deleted,
-            freed_bytes,
-        },
+        data: serde_json::json!({ "taskId": task_id }),
     })
     .into_response()
 }
@@ -9963,21 +10088,189 @@ async fn backup_wavs_handler(
     .into_response()
 }
 
-// ─── Tag follow handler ───────────────────────────────────────────────
+// ─── Backup discovery handler ──────────────────────────────────────────
 
-async fn tag_follow_handler(
+/// POST /api/storage/discover-backup/{folder_id}
+/// Triggers a background task to scan NAS backup and discover backup-only files.
+async fn storage_discover_backup_handler(
+    State(state): State<Arc<AppState>>,
+    Path(folder_id): Path<i64>,
+) -> impl IntoResponse {
+    let folder = match get_folder_by_id(&state.db, folder_id).await {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Folder not found".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    if folder.backup_path.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Folder has no backup_path configured".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let task_id =
+        crate::tasks::start_backup_discovery_task(&state.task_manager, &state.db, folder_id).await;
+
+    Json(ApiResponse {
+        data: serde_json::json!({ "taskId": task_id }),
+    })
+    .into_response()
+}
+
+// ─── Pull-from-backup handler ──────────────────────────────────────────
+
+/// POST /api/files/{id}/pull-from-backup
+/// Copies a file from backup (NAS) to local disk.
+async fn file_pull_from_backup_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    // 1. Get the file record
+    let file = match crate::db::get_file_by_id(&state.db, id).await {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "File not found".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    // 2. Check it has a backup location
+    let locations = match crate::db::get_file_locations(&state.db, id).await {
+        Ok(l) => l,
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    let backup_location = locations.iter().find(|l| l.location_type == "backup");
+    let Some(backup_loc) = backup_location else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "File has no backup location".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    // 3. Determine the local path and whether it already exists
+    let local_path = std::path::Path::new(&file.file_path);
+    if local_path.exists() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "File already exists locally".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    // 4. Parse backup path to get SSH host and remote path
+    let (ssh_host, remote_path) = match backup_loc.path.split_once(':') {
+        Some((host, path)) => (host.to_string(), path.to_string()),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid backup path format".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // 5. Ensure local parent directory exists
+    if let Some(parent) = local_path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).unwrap_or_default();
+        }
+    }
+
+    // 6. Rsync from backup to local
+    let dest = format!("{}:{}", ssh_host, remote_path);
+    let output = tokio::process::Command::new("rsync")
+        .arg("-a")
+        .arg("--rsh=ssh")
+        .arg(&dest)
+        .arg(local_path.to_string_lossy().as_ref())
+        .output()
+        .await;
+
+    match output {
+        Ok(out) if out.status.success() => {
+            // 7. Update file_locations: add 'local' entry
+            if let Ok(metadata) = std::fs::metadata(local_path) {
+                let file_size = metadata.len() as i64;
+                let _ = crate::db::set_file_location(
+                    &state.db,
+                    id,
+                    "local",
+                    &file.file_path,
+                    file_size,
+                )
+                .await;
+                // 8. Update last_verified_local
+                let _ =
+                    sqlx::query("UPDATE files SET last_verified_local = unixepoch() WHERE id = ?")
+                        .bind(id)
+                        .execute(&state.db)
+                        .await;
+            }
+
+            Json(ApiResponse {
+                data: serde_json::json!({
+                    "fileId": id,
+                    "localPath": file.file_path,
+                    "status": "downloaded"
+                }),
+            })
+            .into_response()
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Rsync failed: {}", stderr),
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+// ─── Tag backpack handler ──────────────────────────────────────────────
+
+async fn tag_backpack_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let followed = body
-        .get("followed")
+    let backpack = body
+        .get("backpack")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    match set_tag_followed(&state.db, id, followed).await {
+    match set_tag_backpack(&state.db, id, backpack).await {
         Ok(()) => Json(ApiResponse {
-            data: serde_json::json!({ "followed": followed }),
+            data: serde_json::json!({ "backpack": backpack }),
         })
         .into_response(),
         Err(e) => internal_error(e).into_response(),
@@ -10304,6 +10597,7 @@ impl Default for FilesQuery {
             file_types: None,
             comment_statuses: None,
             backed_up: None,
+            is_local: None,
             safe_to_delete: None,
             sort: None,
             order: None,

@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::{HashMap, HashSet};
 use std::{fs, path::Path, time::SystemTime};
 
 use anyhow::{Result, anyhow};
@@ -46,7 +47,7 @@ pub struct Tag {
     pub category_id: i64,
     pub sort_order: i64,
     pub created_at: i64,
-    pub followed: bool,
+    pub backpack: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -135,6 +136,12 @@ pub struct File {
     // Source WAV linking (WAV source subdirectory → stem file)
     pub source_of: Option<i64>,
 
+    // Stem type for WAV source files (vocals, bass, drums, instrumental, other)
+    pub stem_type: Option<String>,
+
+    // Last time this file was verified to exist on local disk
+    pub last_verified_local: Option<i64>,
+
     // Timestamps
     pub created_at: i64,
     pub updated_at: i64,
@@ -205,13 +212,16 @@ pub struct PruneCandidate {
     pub isrc: Option<String>,
     pub reason: String,
     pub backup_path: Option<String>,
+    pub has_stem_variant: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageStatus {
     pub local_file_count: i64,
+    pub tracked_file_count: i64,
     pub local_size_bytes: i64,
+    pub tracked_size_bytes: i64,
     pub local_stems: i64,
     pub local_flacs: i64,
     pub local_mp3s: i64,
@@ -485,6 +495,8 @@ pub async fn extract_minimal_file_metadata(path: &Path) -> Result<File> {
         soundcloud_id: None,
         youtube_id: None,
         source_of: None,
+        stem_type: None,
+        last_verified_local: None,
         created_at: now,
         updated_at: now,
     })
@@ -747,6 +759,8 @@ pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
         soundcloud_id: None,
         youtube_id: None,
         source_of: None,
+        stem_type: None,
+        last_verified_local: None,
         created_at: now,
         updated_at: now,
     };
@@ -768,9 +782,9 @@ pub async fn scan_and_store_file(pool: &Pool<Sqlite>, path: &Path) -> Result<Fil
             title, artist, album, album_artist, track_number, total_tracks, disc_number, total_discs,
             genre, year, composer, comment, duration_ms, bitrate, sample_rate, channels,
             bpm, musical_key, rating, play_count, last_played,
-            spotify_id, soundcloud_id, youtube_id, created_at, updated_at
+            spotify_id, soundcloud_id, youtube_id, source_of, stem_type, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(file_path) DO UPDATE SET
             file_hash = excluded.file_hash,
             file_type = excluded.file_type,
@@ -802,6 +816,8 @@ pub async fn scan_and_store_file(pool: &Pool<Sqlite>, path: &Path) -> Result<Fil
             spotify_id = excluded.spotify_id,
             soundcloud_id = excluded.soundcloud_id,
             youtube_id = excluded.youtube_id,
+            source_of = COALESCE(excluded.source_of, files.source_of),
+            stem_type = COALESCE(excluded.stem_type, files.stem_type),
             updated_at = excluded.updated_at
         RETURNING *
         "#,
@@ -837,10 +853,31 @@ pub async fn scan_and_store_file(pool: &Pool<Sqlite>, path: &Path) -> Result<Fil
     .bind(&file.spotify_id)
     .bind(&file.soundcloud_id)
     .bind(&file.youtube_id)
+    .bind(&file.source_of)
+    .bind(&file.stem_type)
     .bind(file.created_at)
     .bind(file.updated_at)
     .fetch_one(pool)
     .await?;
+
+    // Track local presence
+    let _ = sqlx::query(
+        "INSERT INTO file_locations (file_id, location_type, path, file_size, last_verified, created_at)
+         VALUES (?, 'local', ?, ?, unixepoch(), unixepoch())
+         ON CONFLICT(file_id, location_type) DO UPDATE SET
+             file_size = excluded.file_size,
+             last_verified = excluded.last_verified"
+    )
+    .bind(row.id)
+    .bind(&row.file_path)
+    .bind(row.file_size)
+    .execute(pool)
+    .await;
+
+    let _ = sqlx::query("UPDATE files SET last_verified_local = unixepoch() WHERE id = ?")
+        .bind(row.id)
+        .execute(pool)
+        .await;
 
     Ok(row)
 }
@@ -1816,6 +1853,10 @@ pub async fn scan_folder(
 
     let path = std::path::Path::new(&folder.folder_path);
 
+    // Capture scan start time BEFORE scanning, so we can clean up stale local entries
+    // (files that existed before this scan but weren't encountered).
+    let scan_start = chrono::Utc::now().timestamp();
+
     // Determine effective scan mode based on folder's last_scanned
     let effective_mode = match &scan_mode {
         ScanMode::Full => ScanMode::Full,
@@ -1848,6 +1889,21 @@ pub async fn scan_folder(
         .bind(folder_id)
         .execute(pool)
         .await?;
+
+    // Stale local entry cleanup: remove file_locations.local for files in this folder
+    // that were NOT encountered in this scan (they were deleted from disk).
+    sqlx::query(
+        "DELETE FROM file_locations WHERE location_type = 'local'
+         AND file_id IN (
+             SELECT f.id FROM files f
+             JOIN folders fol ON fol.folder_path = substr(f.file_path, 1, length(fol.folder_path))
+             WHERE fol.id = ? AND f.last_scanned < ?
+         )",
+    )
+    .bind(folder_id)
+    .bind(scan_start)
+    .execute(pool)
+    .await?;
 
     Ok(file_count)
 }
@@ -1993,11 +2049,11 @@ pub async fn compute_target_comment(pool: &Pool<Sqlite>, file_id: i64) -> Result
         .fetch_one(pool)
         .await?;
 
-    // Get all tags for this file with category prefix via v_file_resolved_tags view
-    // This resolves Setlist tags through their parent tags (if any)
+    // Get all tags for this file with category prefix via file_resolved_tags table
+    // (materialized from v_file_resolved_tags view — parent-resolved)
     let tag_rows = sqlx::query(
         "SELECT frt.tag_name, frt.prefix
-         FROM v_file_resolved_tags frt
+         FROM file_resolved_tags frt
          WHERE frt.file_id = ?
          ORDER BY frt.sort_order, frt.tag_name",
     )
@@ -2037,6 +2093,146 @@ pub async fn compute_target_comment(pool: &Pool<Sqlite>, file_id: i64) -> Result
         file.soundcloud_id.as_deref(),
         file.youtube_id.as_deref(),
     ))
+}
+
+/// Batch version of `compute_target_comment`. Fetches ALL resolved tags for ALL given
+/// file IDs in a single query, then computes target comments in Rust.
+pub async fn compute_target_comments_batch(
+    pool: &Pool<Sqlite>,
+    file_ids: &[i64],
+) -> Result<HashMap<i64, String>> {
+    use crate::comment::generate_target_comment;
+
+    if file_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Build parameterized IN clause
+    // We use the QueryBuilder approach for variable-length IN lists
+    let mut file_id_params: Vec<String> = Vec::new();
+    for _ in file_ids {
+        file_id_params.push("?".to_string());
+    }
+    let in_clause = file_id_params.join(", ");
+
+    // 1. Fetch source IDs for all files
+    let files_sql = format!(
+        "SELECT id, spotify_id, soundcloud_id, youtube_id FROM files WHERE id IN ({})",
+        in_clause
+    );
+    let mut files_query =
+        sqlx::query_as::<_, (i64, Option<String>, Option<String>, Option<String>)>(&files_sql);
+    for fid in file_ids {
+        files_query = files_query.bind(fid);
+    }
+    let file_rows: Vec<(i64, Option<String>, Option<String>, Option<String>)> =
+        files_query.fetch_all(pool).await?;
+
+    // 2. Fetch all tags for all file_ids from file_resolved_tags in one query
+    let tags_sql = format!(
+        "SELECT file_id, tag_name, prefix FROM file_resolved_tags WHERE file_id IN ({}) ORDER BY file_id, sort_order, tag_name",
+        in_clause
+    );
+    let mut tags_query = sqlx::query_as::<_, (i64, String, String)>(&tags_sql);
+    for fid in file_ids {
+        tags_query = tags_query.bind(fid);
+    }
+    let tag_rows: Vec<(i64, String, String)> = tags_query.fetch_all(pool).await?;
+
+    // 3. Group tags by file_id
+    let mut tags_by_file: HashMap<i64, Vec<(String, String)>> = HashMap::new();
+    for (file_id, tag_name, prefix) in tag_rows {
+        tags_by_file
+            .entry(file_id)
+            .or_default()
+            .push((tag_name, prefix));
+    }
+
+    // 4. Build file_id → source_ids lookup
+    let mut source_by_file: HashMap<i64, (Option<String>, Option<String>, Option<String>)> =
+        HashMap::new();
+    for (fid, spotify, soundcloud, youtube) in file_rows {
+        source_by_file.insert(fid, (spotify, soundcloud, youtube));
+    }
+
+    // 5. Compute comments for each file
+    let mut results: HashMap<i64, String> = HashMap::new();
+    for fid in file_ids {
+        let tags = match tags_by_file.get(fid) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let sources = match source_by_file.get(fid) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let mut phase_present = false;
+        let mut mood_present = false;
+        let mut vibe_present = false;
+        let mut tag_names: Vec<String> = Vec::new();
+
+        for (tag_name, prefix) in tags {
+            match prefix.as_str() {
+                "P" => phase_present = true,
+                "M" => mood_present = true,
+                "V" => vibe_present = true,
+                _ => {}
+            }
+            tag_names.push(tag_name.clone());
+        }
+
+        let phase_char = if phase_present { 'P' } else { '_' };
+        let mood_char = if mood_present { 'M' } else { '_' };
+        let vibe_char = if vibe_present { 'V' } else { '_' };
+
+        let comment = generate_target_comment(
+            phase_char,
+            mood_char,
+            vibe_char,
+            &tag_names,
+            sources.0.as_deref(),
+            sources.1.as_deref(),
+            sources.2.as_deref(),
+        );
+
+        results.insert(*fid, comment);
+    }
+
+    Ok(results)
+}
+
+/// Fetch raw resolved tag rows for a batch of file IDs. Returns (file_id, tag_name, prefix, category_name, sort_order).
+pub async fn get_file_resolved_tags_batch(
+    pool: &Pool<Sqlite>,
+    file_ids: &[i64],
+) -> Result<Vec<(i64, String, String, String, i64)>> {
+    if file_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut params: Vec<String> = Vec::new();
+    for _ in file_ids {
+        params.push("?".to_string());
+    }
+    let in_clause = params.join(", ");
+
+    let sql = format!(
+        r#"SELECT file_id, tag_name, prefix, category_name, sort_order
+           FROM file_resolved_tags
+           WHERE file_id IN ({})
+           ORDER BY file_id, sort_order, tag_name"#,
+        in_clause
+    );
+
+    let mut query = sqlx::query_as::<_, (i64, String, String, String, i64)>(&sql);
+    for fid in file_ids {
+        query = query.bind(fid);
+    }
+
+    let rows = query.fetch_all(pool).await?;
+    Ok(rows)
 }
 
 /// Get all service tracks from the database
@@ -2431,6 +2627,62 @@ pub async fn ensure_tag_for_playlist_name(pool: &Pool<Sqlite>, playlist_name: &s
     let tag = create_tag(pool, playlist_name, default_category.id).await?;
     debug!("Created tag for playlist name: {}", playlist_name);
     Ok(tag)
+}
+
+/// Truncate and repopulate `file_resolved_tags` from the `v_file_resolved_tags` view.
+/// Call this after any tag/playlist/track sync. Also refresh track_resolved_tags when appropriate.
+/// Returns the number of rows inserted.
+pub async fn refresh_file_resolved_tags(pool: &Pool<Sqlite>) -> Result<u64> {
+    // Truncate the table
+    sqlx::query("DELETE FROM file_resolved_tags")
+        .execute(pool)
+        .await?;
+
+    // Repopulate from the view
+    let changed: i64 = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT OR IGNORE INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at, is_default)
+        SELECT DISTINCT
+            vfr.file_id, vfr.tag_id, vfr.tag_name, vfr.category_id, vfr.category_name, vfr.prefix,
+            vfr.sort_order, vfr.created_at,
+            COALESCE((SELECT tc.is_default FROM tag_categories tc WHERE tc.id = vfr.category_id), 0)
+        FROM v_file_resolved_tags vfr;
+        SELECT CHANGES();
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let count = changed as u64;
+    tracing::info!("Refreshed file_resolved_tags: {} rows", count);
+    Ok(count)
+}
+
+/// Truncate and repopulate `track_resolved_tags` from the `v_track_tags` view.
+/// Call this after any tag/playlist/track sync.
+/// Returns the number of rows inserted.
+pub async fn refresh_track_resolved_tags(pool: &Pool<Sqlite>) -> Result<u64> {
+    // Truncate the table
+    sqlx::query("DELETE FROM track_resolved_tags")
+        .execute(pool)
+        .await?;
+
+    // Repopulate from the view
+    let changed: i64 = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT OR IGNORE INTO track_resolved_tags (track_id, tag_id, tag_name, category_id, category_name, prefix, is_default)
+        SELECT DISTINCT
+            vtt.track_id, vtt.tag_id, vtt.tag_name, vtt.category_id, vtt.category_name, vtt.prefix, vtt.is_default
+        FROM v_track_tags vtt;
+        SELECT CHANGES();
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let count = changed as u64;
+    tracing::info!("Refreshed track_resolved_tags: {} rows", count);
+    Ok(count)
 }
 
 // ─── Embedding & Review Functions ─────────────────────────────────────────────
@@ -2972,13 +3224,13 @@ pub async fn get_curation_queue(
 
 /// Get all tags associated with a file (via service track → playlist → tag matching)
 pub async fn get_tags_for_file(pool: &Pool<Sqlite>, file_id: i64) -> Result<Vec<Tag>> {
-    // Get all tags for this file via v_file_tags view (resolves file→track→playlist→tag)
+    // Get all tags for this file from file_resolved_tags table (materialized)
     let tags = sqlx::query_as::<_, Tag>(
         r#"
-        SELECT DISTINCT ft.tag_id as id, ft.tag_name as name, ft.category_id, ft.sort_order, ft.created_at
-        FROM v_file_tags ft
-        WHERE ft.file_id = ?
-        ORDER BY ft.tag_name
+        SELECT DISTINCT frt.tag_id as id, frt.tag_name as name, frt.category_id, frt.sort_order, frt.created_at
+        FROM file_resolved_tags frt
+        WHERE frt.file_id = ?
+        ORDER BY frt.tag_name
         "#,
     )
     .bind(file_id)
@@ -3094,6 +3346,7 @@ pub struct TrackDetail {
     pub files: Vec<TrackDetailFile>,
     pub tags: Vec<FileDetailTag>,
     pub playlists: Vec<FileDetailPlaylist>,
+    pub in_backpack: bool,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -3102,6 +3355,7 @@ pub struct TrackDetailFile {
     pub id: i64,
     pub file_path: String,
     pub file_type: String,
+    pub stem_type: Option<String>, // For WAV source files
     pub file_size: i64,
     pub isrc: Option<String>,
     pub title: Option<String>,
@@ -3119,6 +3373,7 @@ pub struct TrackDetailFile {
     pub last_played: Option<i64>,
     pub backed_up: bool,
     pub backup_path: Option<String>,
+    pub is_local: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -3205,14 +3460,14 @@ pub async fn get_file_detail(pool: &Pool<Sqlite>, file_id: i64) -> Result<Option
         })
         .collect();
 
-    // 3. Fetch tags via v_file_resolved_tags
+    // 3. Fetch tags via file_resolved_tags
     let tags: Vec<FileDetailTag> = sqlx::query_as(
         r#"
-        SELECT DISTINCT rt.tag_id as id, rt.tag_name as name,
-               rt.category_name, rt.prefix
-        FROM v_file_resolved_tags rt
-        WHERE rt.file_id = ?
-        ORDER BY rt.category_name, rt.tag_name
+        SELECT DISTINCT frt.tag_id as id, frt.tag_name as name,
+               frt.category_name, frt.prefix
+        FROM file_resolved_tags frt
+        WHERE frt.file_id = ?
+        ORDER BY frt.category_name, frt.tag_name
         "#,
     )
     .bind(file_id)
@@ -3267,6 +3522,129 @@ pub async fn get_file_detail(pool: &Pool<Sqlite>, file_id: i64) -> Result<Option
     }))
 }
 
+// ─── File variants ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileVariant {
+    pub id: i64,
+    pub file_type: String,
+    pub stem_type: Option<String>,
+    pub file_path: String,
+    pub file_size: i64,
+    pub backed_up: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileVariants {
+    pub file_id: i64,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub isrc: Option<String>,
+    pub variants: Vec<FileVariant>,
+}
+
+/// Fetch all file variants for a track: same ISRC files + WAV source files
+/// belonging to the same stem.
+pub async fn get_file_variants(pool: &Pool<Sqlite>, file_id: i64) -> Result<Option<FileVariants>> {
+    // 1. Fetch the file
+    let file = sqlx::query_as::<_, File>("SELECT * FROM files WHERE id = ?")
+        .bind(file_id)
+        .fetch_optional(pool)
+        .await?;
+
+    let Some(file) = file else {
+        return Ok(None);
+    };
+
+    // 2. Collect all variant IDs
+    let mut variant_ids = HashSet::new();
+    variant_ids.insert(file.id);
+
+    // Same ISRC (if ISRC is not null)
+    if let Some(ref isrc) = file.isrc {
+        let same_isrc: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM files WHERE isrc = ? AND id != ?")
+                .bind(isrc)
+                .bind(file.id)
+                .fetch_all(pool)
+                .await?;
+        variant_ids.extend(same_isrc);
+    }
+
+    // WAV source files (source_of points to this stem file)
+    let wav_sources: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM files WHERE source_of = ? AND file_type = 'wav'")
+            .bind(file.id)
+            .fetch_all(pool)
+            .await?;
+    variant_ids.extend(wav_sources);
+
+    // If this file is a WAV, include its stem parent and siblings
+    if let Some(source_of) = file.source_of {
+        variant_ids.insert(source_of);
+        let sibling_wavs: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM files WHERE source_of = ? AND id != ?")
+                .bind(source_of)
+                .bind(file.id)
+                .fetch_all(pool)
+                .await?;
+        variant_ids.extend(sibling_wavs);
+    }
+
+    // 3. Fetch variant details
+    let ids: Vec<i64> = variant_ids.into_iter().collect();
+    if ids.is_empty() {
+        return Ok(Some(FileVariants {
+            file_id: file.id,
+            title: file.title,
+            artist: file.artist,
+            isrc: file.isrc,
+            variants: vec![],
+        }));
+    }
+
+    let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT f.id, f.file_path, f.file_type, f.file_size, f.stem_type,
+                CASE WHEN fl.id IS NOT NULL THEN 1 ELSE 0 END as backed_up
+         FROM files f
+         LEFT JOIN file_locations fl ON fl.file_id = f.id AND fl.location_type = 'backup'
+         WHERE f.id IN ({})
+         ORDER BY f.file_type, f.stem_type",
+        placeholders.join(",")
+    );
+
+    let mut query = sqlx::query_as::<_, (i64, String, String, i64, Option<String>, bool)>(&sql);
+    for id in &ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
+
+    let variants: Vec<FileVariant> = rows
+        .into_iter()
+        .map(
+            |(id, file_path, file_type, file_size, stem_type, backed_up)| FileVariant {
+                id,
+                file_type,
+                stem_type,
+                file_path,
+                file_size,
+                backed_up,
+            },
+        )
+        .collect();
+
+    Ok(Some(FileVariants {
+        file_id: file.id,
+        title: file.title,
+        artist: file.artist,
+        isrc: file.isrc,
+        variants,
+    }))
+}
+
 /// Fetch rich detail for a single service track: track metadata + audio features
 /// + ALL linked files (via v_file_track_link) + tags + playlists.
 pub async fn get_track_detail(pool: &Pool<Sqlite>, track_id: i64) -> Result<Option<TrackDetail>> {
@@ -3310,17 +3688,19 @@ pub async fn get_track_detail(pool: &Pool<Sqlite>, track_id: i64) -> Result<Opti
         .map(|p| p as i32);
 
     // 2. Fetch ALL linked files via v_file_track_link
-    let files: Vec<TrackDetailFile> = sqlx::query_as(
+    let mut files: Vec<TrackDetailFile> = sqlx::query_as(
         r#"
-        SELECT f.id, f.file_path, f.file_type, f.file_size, f.isrc,
+        SELECT f.id, f.file_path, f.file_type, f.stem_type, f.file_size, f.isrc,
                f.title, f.artist, f.album, f.bpm, f.musical_key,
                f.duration_ms, f.bitrate, f.sample_rate, f.channels,
                f.comment, f.rating, f.play_count, f.last_played,
                COALESCE(fl_backup.id IS NOT NULL, 0) as backed_up,
-               fl_backup.path as backup_path
+               fl_backup.path as backup_path,
+               COALESCE(fl_local.id IS NOT NULL, 0) as is_local
         FROM v_file_track_link v
         JOIN files f ON f.id = v.file_id
         LEFT JOIN file_locations fl_backup ON fl_backup.file_id = f.id AND fl_backup.location_type = 'backup'
+        LEFT JOIN file_locations fl_local ON fl_local.file_id = f.id AND fl_local.location_type = 'local'
         WHERE v.track_id = ?
         ORDER BY f.file_path
         "#,
@@ -3329,17 +3709,41 @@ pub async fn get_track_detail(pool: &Pool<Sqlite>, track_id: i64) -> Result<Opti
     .fetch_all(pool)
     .await?;
 
+    // Step 2b: For each linked stem file, fetch WAV source files
+    let stem_ids: Vec<i64> = files.iter().map(|f| f.id).collect();
+    if !stem_ids.is_empty() {
+        let placeholders: Vec<String> = stem_ids.iter().map(|_| "?".to_string()).collect();
+        let sql = format!(
+            "SELECT f.id, f.file_path, f.file_type, f.stem_type, f.file_size, f.isrc,
+                    f.title, f.artist, f.album, f.bpm, f.musical_key,
+                    f.duration_ms, f.bitrate, f.sample_rate, f.channels,
+                    f.comment, f.rating, f.play_count, f.last_played,
+                    COALESCE(fl_backup.id IS NOT NULL, 0) as backed_up,
+                    fl_backup.path as backup_path,
+                    COALESCE(fl_local.id IS NOT NULL, 0) as is_local
+             FROM files f
+             LEFT JOIN file_locations fl_backup ON fl_backup.file_id = f.id AND fl_backup.location_type = 'backup'
+             LEFT JOIN file_locations fl_local ON fl_local.file_id = f.id AND fl_local.location_type = 'local'
+             WHERE f.source_of IN ({}) AND f.file_type = 'wav'
+             ORDER BY f.stem_type",
+            placeholders.join(",")
+        );
+        let mut query = sqlx::query_as::<_, TrackDetailFile>(&sql);
+        for id in &stem_ids {
+            query = query.bind(id);
+        }
+        let wav_files = query.fetch_all(pool).await.unwrap_or_default();
+        files.extend(wav_files);
+    }
+
     // 3. Fetch tags for this track (via playlist→tag→v_resolved_tags chain)
     let tags: Vec<FileDetailTag> = sqlx::query_as(
         r#"
-        SELECT DISTINCT rt.tag_id as id, rt.tag_name as name,
-               rt.category_name, rt.prefix
-        FROM service_playlist_tracks spt
-        JOIN service_playlists sp ON sp.id = spt.playlist_id
-        JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
-        JOIN v_resolved_tags rt ON rt.source_tag_id = t.id
-        WHERE spt.track_id = ?
-        ORDER BY rt.category_name, rt.tag_name
+        SELECT DISTINCT trt.tag_id as id, trt.tag_name as name,
+               trt.category_name, trt.prefix
+        FROM track_resolved_tags trt
+        WHERE trt.track_id = ?
+        ORDER BY trt.category_name, trt.tag_name
         "#,
     )
     .bind(track_id)
@@ -3362,6 +3766,32 @@ pub async fn get_track_detail(pool: &Pool<Sqlite>, track_id: i64) -> Result<Opti
     .await
     .unwrap_or_default();
 
+    // 5. Compute in_backpack: track has any tag with backpack=true, OR is in "backpack" playlist
+    let in_backpack: bool = {
+        let tag_backpack: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM service_playlist_tracks spt
+             JOIN service_playlists sp ON sp.id = spt.playlist_id
+             JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
+             WHERE spt.track_id = ? AND t.backpack = 1"#,
+        )
+        .bind(track_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
+        let playlist_backpack: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM service_playlist_tracks spt
+             JOIN service_playlists sp ON sp.id = spt.playlist_id
+             WHERE spt.track_id = ? AND LOWER(TRIM(sp.name)) = 'backpack'"#,
+        )
+        .bind(track_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
+        tag_backpack > 0 || playlist_backpack > 0
+    };
+
     Ok(Some(TrackDetail {
         id: track.id,
         service: track.service,
@@ -3375,12 +3805,13 @@ pub async fn get_track_detail(pool: &Pool<Sqlite>, track_id: i64) -> Result<Opti
         files,
         tags,
         playlists,
+        in_backpack,
     }))
 }
 
 /// Compare Traktor vs Spotify BPM/Key for files linked to Spotify tracks.
 ///
-/// Filters by tag name (resolved via v_file_resolved_tags) and returns
+/// Filters by tag name (resolved via file_resolved_tags) and returns
 /// side-by-side comparison with match/mismatch stats.
 pub async fn get_key_comparison(
     pool: &Pool<Sqlite>,
@@ -3416,7 +3847,7 @@ pub async fn get_key_comparison(
                 st.spotify_key_raw, st.spotify_mode,
                 st.spotify_danceability, st.spotify_energy, st.spotify_valence
             FROM files f
-            JOIN v_file_resolved_tags vft ON vft.file_id = f.id AND vft.tag_name = ?
+            JOIN file_resolved_tags frt ON frt.file_id = f.id AND frt.tag_name = ?
             JOIN v_file_track_link v ON v.file_id = f.id
             JOIN service_tracks st ON st.id = v.track_id AND st.service = 'spotify'
             ORDER BY f.title
@@ -3653,10 +4084,10 @@ pub async fn find_tag_similar_tracks(
     let files_sql = format!(
         r#"
         SELECT DISTINCT f.id, f.title, f.artist, f.bpm, f.musical_key,
-               ft.tag_name, ft.tag_id
+               frt.tag_name, frt.tag_id
         FROM files f
-        JOIN v_file_tags ft ON ft.file_id = f.id
-        WHERE ft.tag_id IN ({})
+        JOIN file_resolved_tags frt ON frt.file_id = f.id
+        WHERE frt.tag_id IN ({})
           AND f.id != ?
         ORDER BY f.id
         "#,
@@ -3846,19 +4277,19 @@ pub async fn mark_playlist_inactive(pool: &Pool<Sqlite>, db_id: i64) -> Result<(
 
 // ─── Tag following ──────────────────────────────────────────────────────────
 
-/// Set whether a tag is "followed" — files with this tag are kept locally
-pub async fn set_tag_followed(pool: &Pool<Sqlite>, tag_id: i64, followed: bool) -> Result<()> {
-    sqlx::query("UPDATE tags SET followed = ? WHERE id = ?")
-        .bind(followed)
+/// Set whether a tag is in the backpack — files with this tag are kept locally
+pub async fn set_tag_backpack(pool: &Pool<Sqlite>, tag_id: i64, backpack: bool) -> Result<()> {
+    sqlx::query("UPDATE tags SET backpack = ? WHERE id = ?")
+        .bind(backpack)
         .bind(tag_id)
         .execute(pool)
         .await?;
     Ok(())
 }
 
-/// Get all followed tags
-pub async fn get_followed_tags(pool: &Pool<Sqlite>) -> Result<Vec<Tag>> {
-    let tags = sqlx::query_as::<_, Tag>("SELECT * FROM tags WHERE followed = 1")
+/// Get all backpack tags
+pub async fn get_backpack_tags(pool: &Pool<Sqlite>) -> Result<Vec<Tag>> {
+    let tags = sqlx::query_as::<_, Tag>("SELECT * FROM tags WHERE backpack = 1")
         .fetch_all(pool)
         .await?;
     Ok(tags)
@@ -3885,7 +4316,7 @@ pub async fn ensure_backpack_tag(pool: &Pool<Sqlite>) -> Result<Tag> {
         .await?;
     let now = chrono::Utc::now().timestamp();
     sqlx::query(
-        "INSERT INTO tags (name, category_id, created_at, followed) VALUES ('backpack', ?, ?, 1)",
+        "INSERT INTO tags (name, category_id, created_at, backpack) VALUES ('backpack', ?, ?, 1)",
     )
     .bind(cat_id)
     .bind(now)
@@ -3894,12 +4325,12 @@ pub async fn ensure_backpack_tag(pool: &Pool<Sqlite>) -> Result<Tag> {
     Ok(get_backpack_tag(pool).await?.unwrap())
 }
 
-/// Check if a file has ANY followed tag
-pub async fn is_file_followed(pool: &Pool<Sqlite>, file_id: i64) -> Result<bool> {
+/// Check if a file has ANY backpack tag
+pub async fn is_in_backpack(pool: &Pool<Sqlite>, file_id: i64) -> Result<bool> {
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT vft.tag_id) FROM v_file_tags vft
-         JOIN tags t ON t.id = vft.tag_id
-         WHERE vft.file_id = ? AND t.followed = 1",
+        "SELECT COUNT(DISTINCT frt.tag_id) FROM file_resolved_tags frt
+         JOIN tags t ON t.id = frt.tag_id
+         WHERE frt.file_id = ? AND t.backpack = 1",
     )
     .bind(file_id)
     .fetch_one(pool)
@@ -3993,6 +4424,110 @@ pub async fn record_backup_result(
     Ok(())
 }
 
+/// Result of a backup discovery scan
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupDiscoveryResult {
+    pub files_on_backup: usize,
+    pub already_tracked: usize,
+    pub newly_discovered: usize,
+    pub missing_from_backup: Vec<(i64, String)>,
+}
+
+/// Discover files that exist on backup (NAS) but not in the local DB.
+/// Called by the BackupDiscovery background task.
+pub async fn discover_backup_files(
+    pool: &Pool<Sqlite>,
+    folder_id: i64,
+    remote_files: &[String], // full relative paths from backup
+    remote_base: &str,
+) -> Result<BackupDiscoveryResult> {
+    // 1. Get the folder's local path
+    let folder_path: String = sqlx::query_scalar("SELECT folder_path FROM folders WHERE id = ?")
+        .bind(folder_id)
+        .fetch_one(pool)
+        .await?;
+
+    let mut result = BackupDiscoveryResult {
+        files_on_backup: remote_files.len(),
+        already_tracked: 0,
+        newly_discovered: 0,
+        missing_from_backup: vec![],
+    };
+
+    for rel_path in remote_files {
+        // Reconstruct local path: folder_path + / + rel_path
+        let local_path = format!("{}/{}", folder_path.trim_end_matches('/'), rel_path);
+
+        // Check if this file exists in DB
+        let existing: Option<File> = sqlx::query_as("SELECT * FROM files WHERE file_path = ?")
+            .bind(&local_path)
+            .fetch_optional(pool)
+            .await?;
+
+        if let Some(_f) = existing {
+            // File exists in DB but may or may not have backup location
+            let has_backup: bool = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM file_locations WHERE file_id = ? AND location_type = 'backup'"
+            )
+            .bind(_f.id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0) > 0;
+
+            if !has_backup {
+                // Create backup location
+                let remote_path = format!("{}/{}", remote_base.trim_end_matches('/'), rel_path);
+                let _ = set_file_location(pool, _f.id, "backup", &remote_path, _f.file_size).await;
+                result.already_tracked += 1;
+            } else {
+                result.already_tracked += 1;
+            }
+        } else {
+            // File on backup but NOT in DB — create backup-only record
+            let path = std::path::Path::new(&local_path);
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let file_type = match ext.to_lowercase().as_str() {
+                "flac" => "flac",
+                "m4a" if filename.ends_with(".stem.m4a") => "stem.m4a",
+                "m4a" => "m4a",
+                "wav" => "wav",
+                "mp3" => "mp3",
+                _ => ext,
+            };
+
+            let file_size: i64 = 0; // Will be updated on first scan
+            let now = chrono::Utc::now().timestamp();
+
+            let _ = sqlx::query(
+                "INSERT INTO files (file_path, file_hash, file_type, file_size, last_modified, last_scanned, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            .bind(&local_path)
+            .bind(format!("backup-only-{}", file_size))  // sentinel hash
+            .bind(file_type)
+            .bind(file_size)
+            .bind(now)  // last_modified = now (unknown)
+            .bind(now)  // last_scanned = now
+            .bind(now)
+            .bind(now)
+            .execute(pool)
+            .await?;
+
+            // Get the new file ID
+            if let Ok(Some(new_file)) = get_file_by_path(pool, &local_path).await {
+                let remote_path = format!("{}/{}", remote_base.trim_end_matches('/'), rel_path);
+                let _ =
+                    set_file_location(pool, new_file.id, "backup", &remote_path, file_size).await;
+                result.newly_discovered += 1;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
 /// Clear all backup locations for files in a folder (for re-backup)
 pub async fn clear_backup_status(pool: &Pool<Sqlite>, folder_id: i64) -> Result<()> {
     sqlx::query(
@@ -4067,25 +4602,101 @@ pub async fn get_files_by_source(pool: &Pool<Sqlite>, source_file_id: i64) -> Re
     Ok(files)
 }
 
+/// Parse a WAV filename and link it to its parent stem file.
+///
+/// Pattern: `{stem_name}_{stem_type}.wav` where stem_type ∈ {vocals,bass,drums,instrumental,other}
+/// The stem file is `{stem_name}.stem.m4a` in the parent of the parent directory.
+///
+/// Returns Some((stem_file_id, stem_type)) on success, None if no matching stem found.
+pub async fn link_wav_to_stem(
+    pool: &Pool<Sqlite>,
+    wav_file_id: i64,
+    wav_file_path: &str,
+) -> Result<Option<(i64, String)>> {
+    let path = std::path::Path::new(wav_file_path);
+    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+    // Known stem types in nuo-stems
+    const STEM_TYPES: &[&str] = &["vocals", "bass", "drums", "instrumental", "other"];
+
+    // Extract stem_type: text after last '_' before '.wav'
+    let stem_name_no_ext = filename.strip_suffix(".wav").unwrap_or(filename);
+    let (stem_name, stem_type) = if let Some(last_underscore) = stem_name_no_ext.rfind('_') {
+        let candidate = &stem_name_no_ext[last_underscore + 1..];
+        if STEM_TYPES.contains(&candidate) {
+            (&stem_name_no_ext[..last_underscore], candidate.to_string())
+        } else {
+            // Unknown suffix — not a stem part WAV
+            return Ok(None);
+        }
+    } else {
+        // No underscore — not a stem part WAV
+        return Ok(None);
+    };
+
+    // The stem file is in the parent of the parent directory:
+    // /stems/ARTIST_Title/Artist - Title_vocals.wav
+    //   → parent = /stems/ARTIST_Title
+    //   → parent's parent = /stems
+    //   → stem = /stems/Artist - Title.stem.m4a
+    let parent = path.parent(); // /stems/ARTIST_Title
+    let stems_root = parent.and_then(|p| p.parent()); // /stems
+
+    let expected_stem_path = if let Some(root) = stems_root {
+        format!("{}/{}.stem.m4a", root.display(), stem_name)
+    } else {
+        return Ok(None);
+    };
+
+    // Look up the stem file
+    let stem = sqlx::query_as::<_, File>(
+        "SELECT * FROM files WHERE file_path = ? AND file_type = 'stem.m4a'",
+    )
+    .bind(&expected_stem_path)
+    .fetch_optional(pool)
+    .await?;
+
+    match stem {
+        Some(s) => {
+            // Link: set source_of and stem_type
+            sqlx::query("UPDATE files SET source_of = ?, stem_type = ? WHERE id = ?")
+                .bind(s.id)
+                .bind(&stem_type)
+                .bind(wav_file_id)
+                .execute(pool)
+                .await?;
+            Ok(Some((s.id, stem_type)))
+        }
+        None => Ok(None),
+    }
+}
+
 // ─── Pruning ─────────────────────────────────────────────────────────────────
 
 /// Get all files eligible for local deletion.
 /// A file is prune-able if: it has a backup location recorded AND
-/// it is NOT a stem AND it is NOT in any followed tag (or has no tags at all).
-pub async fn get_prune_candidates(
-    pool: &Pool<Sqlite>,
-    stem_preferred: bool,
-) -> Result<Vec<PruneCandidate>> {
-    // Two-step approach to avoid the expensive v_file_tags view:
+/// it is NOT a stem AND it is NOT in any backpack tag (or has no tags at all).
+pub async fn get_prune_candidates(pool: &Pool<Sqlite>) -> Result<Vec<PruneCandidate>> {
+    // Two-step approach (file_resolved_tags is already materialized and fast):
     // 1. Get all backed-up non-WAV file IDs (fast, uses indexes)
-    // 2. Get all file IDs with followed tags (simple query)
+    // 2. Get all file IDs with backpack tags via file_resolved_tags
     // 3. Subtract in Rust, then fetch details for remaining candidates
 
     // Step 1: backed-up file IDs (fast — file_locations has indexes)
-    let mut backed_up: Vec<i64> = sqlx::query_scalar(
+    let backed_up: Vec<i64> = sqlx::query_scalar(
         "SELECT DISTINCT fl.file_id FROM file_locations fl
          JOIN files f ON f.id = fl.file_id
-         WHERE fl.location_type = 'backup' AND f.file_type != 'wav'",
+         WHERE fl.location_type = 'backup'
+           AND (f.file_type != 'wav' OR (f.file_type = 'wav' AND f.source_of IS NOT NULL))
+           AND (
+               f.file_type = 'wav'
+               OR f.bpm IS NOT NULL
+               OR (f.comment IS NOT NULL AND f.comment != '')
+           )
+           AND EXISTS (
+               SELECT 1 FROM file_locations fl2
+               WHERE fl2.file_id = f.id AND fl2.location_type = 'local'
+           )",
     )
     .fetch_all(pool)
     .await?;
@@ -4094,50 +4705,22 @@ pub async fn get_prune_candidates(
         return Ok(vec![]);
     }
 
-    // Stem preference filter: exclude FLACs/MP3s/WAVs that have a same-ISRC stem.m4a
-    if stem_preferred {
-        let backed_up_set: std::collections::HashSet<i64> = backed_up.into_iter().collect();
-        let placeholders: Vec<String> = backed_up_set.iter().map(|_| "?".to_string()).collect();
-        let sql = format!(
-            "SELECT f.id FROM files f
-             WHERE f.id IN ({})
-             AND f.file_type != 'stem.m4a'
-             AND EXISTS (
-                 SELECT 1 FROM files f2
-                 WHERE f2.isrc = f.isrc AND f2.isrc IS NOT NULL
-                 AND f2.file_type = 'stem.m4a'
-             )",
-            placeholders.join(",")
-        );
-        let mut q = sqlx::query_scalar(&sql);
-        for id in &backed_up_set {
-            q = q.bind(id);
-        }
-        let redundant_ids: std::collections::HashSet<i64> =
-            q.fetch_all(pool).await?.into_iter().collect();
-        let filtered: Vec<i64> = backed_up_set.difference(&redundant_ids).copied().collect();
-        backed_up = filtered;
-        if backed_up.is_empty() {
-            return Ok(vec![]);
-        }
-    }
-
-    // Step 2: file IDs with any followed tag (simple EXISTS query)
-    let followed: Vec<i64> = sqlx::query_scalar(
-        "SELECT DISTINCT vft.file_id FROM v_file_tags vft
-         JOIN tags t ON t.id = vft.tag_id
-         WHERE t.followed = 1",
+    // Step 2: file IDs with any backpack tag (simple EXISTS query)
+    let backpack: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT frt.file_id FROM file_resolved_tags frt
+         JOIN tags t ON t.id = frt.tag_id
+         WHERE t.backpack = 1",
     )
     .fetch_all(pool)
     .await?;
 
     // Build HashSet for fast lookup
-    let followed_set: std::collections::HashSet<i64> = followed.into_iter().collect();
+    let backpack_set: std::collections::HashSet<i64> = backpack.into_iter().collect();
 
-    // Step 3: filter in Rust — candidates = backed_up minus followed
+    // Step 3: filter in Rust — candidates = backed_up minus backpack
     let candidate_ids: Vec<i64> = backed_up
         .into_iter()
-        .filter(|id| !followed_set.contains(id))
+        .filter(|id| !backpack_set.contains(id))
         .collect();
 
     if candidate_ids.is_empty() {
@@ -4166,17 +4749,58 @@ pub async fn get_prune_candidates(
 
     let mut candidates = Vec::new();
     for row in rows {
-        let reason = "not_followed".to_string();
+        let file_id: i64 = row.try_get("id")?;
+        let ft: String = row.try_get("file_type")?;
+        let isrc: Option<String> = row.try_get("isrc")?;
+        let reason = if ft == "wav" {
+            "wav_backed_up".to_string()
+        } else {
+            "not_followed".to_string()
+        };
+
+        // Compute has_stem_variant:
+        // - For non-stem non-WAV files: check if same-ISRC stem.m4a exists in DB
+        // - For stems themselves: check if they have WAV sources linked
+        // - For WAVs: always true (they are stem variants themselves)
+        let has_stem_variant = if ft == "wav" {
+            true
+        } else if ft != "stem.m4a" {
+            // Non-WAV, non-stem: check for same-ISRC stem.m4a
+            if let Some(ref isrc_val) = isrc {
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM files WHERE isrc = ? AND file_type = 'stem.m4a'",
+                )
+                .bind(isrc_val)
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
+                count > 0
+            } else {
+                false
+            }
+        } else {
+            // Stems: check if they have WAV sources linked
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM files WHERE source_of = ? AND file_type = 'wav'",
+            )
+            .bind(file_id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+            count > 0
+        };
+
         candidates.push(PruneCandidate {
-            file_id: row.try_get("id")?,
+            file_id,
             file_path: row.try_get("file_path")?,
             file_type: row.try_get("file_type")?,
             file_size: row.try_get("file_size")?,
             title: row.try_get("title")?,
             artist: row.try_get("artist")?,
-            isrc: row.try_get("isrc")?,
+            isrc,
             reason,
             backup_path: row.try_get("backup_path")?,
+            has_stem_variant,
         });
     }
 
@@ -4213,60 +4837,107 @@ pub async fn delete_local_file_by_id(pool: &Pool<Sqlite>, file_id: i64) -> Resul
 
 /// Get aggregate storage statistics
 pub async fn get_storage_status(pool: &Pool<Sqlite>) -> Result<StorageStatus> {
-    let local_file_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files")
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
-    let local_size_bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(file_size), 0) FROM files")
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
-    let local_stems: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE file_type = 'stem.m4a'")
-            .fetch_one(pool)
-            .await
-            .unwrap_or(0);
-    let local_flacs: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE file_type = 'flac'")
-            .fetch_one(pool)
-            .await
-            .unwrap_or(0);
-    let local_mp3s: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE file_type = 'mp3'")
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
-    let local_wavs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE file_type = 'wav'")
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
-    let local_other: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM files WHERE file_type NOT IN ('stem.m4a','flac','mp3','wav')",
+    // Local counts: files actually on disk (from file_locations)
+    let local_file_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT file_id) FROM file_locations WHERE location_type = 'local'",
     )
     .fetch_one(pool)
     .await
     .unwrap_or(0);
+    let local_size_bytes: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(f.file_size), 0) FROM files f \
+         JOIN file_locations fl ON fl.file_id = f.id AND fl.location_type = 'local'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    // Tracked counts: ALL files in the DB (including backup-only)
+    let tracked_file_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let tracked_size_bytes: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(file_size), 0) FROM files")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+
+    // Per-type local counts & sizes (from file_locations)
+    let local_stems: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT f.id) FROM files f \
+         JOIN file_locations fl ON fl.file_id = f.id AND fl.location_type = 'local' \
+         WHERE f.file_type = 'stem.m4a'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let local_flacs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT f.id) FROM files f \
+         JOIN file_locations fl ON fl.file_id = f.id AND fl.location_type = 'local' \
+         WHERE f.file_type = 'flac'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let local_mp3s: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT f.id) FROM files f \
+         JOIN file_locations fl ON fl.file_id = f.id AND fl.location_type = 'local' \
+         WHERE f.file_type = 'mp3'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let local_wavs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT f.id) FROM files f \
+         JOIN file_locations fl ON fl.file_id = f.id AND fl.location_type = 'local' \
+         WHERE f.file_type = 'wav'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let local_other: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT f.id) FROM files f \
+         JOIN file_locations fl ON fl.file_id = f.id AND fl.location_type = 'local' \
+         WHERE f.file_type NOT IN ('stem.m4a','flac','mp3','wav')",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    // Per-type local sizes (from file_locations, sum sizes)
     let local_stems_size: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(file_size), 0) FROM files WHERE file_type = 'stem.m4a'",
+        "SELECT COALESCE(SUM(f.file_size), 0) FROM files f \
+         JOIN file_locations fl ON fl.file_id = f.id AND fl.location_type = 'local' \
+         WHERE f.file_type = 'stem.m4a'",
     )
     .fetch_one(pool)
     .await
     .unwrap_or(0);
     let local_flacs_size: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(file_size), 0) FROM files WHERE file_type = 'flac'",
+        "SELECT COALESCE(SUM(f.file_size), 0) FROM files f \
+         JOIN file_locations fl ON fl.file_id = f.id AND fl.location_type = 'local' \
+         WHERE f.file_type = 'flac'",
     )
     .fetch_one(pool)
     .await
     .unwrap_or(0);
-    let local_wavs_size: i64 =
-        sqlx::query_scalar("SELECT COALESCE(SUM(file_size), 0) FROM files WHERE file_type = 'wav'")
-            .fetch_one(pool)
-            .await
-            .unwrap_or(0);
-    let local_mp3s_size: i64 =
-        sqlx::query_scalar("SELECT COALESCE(SUM(file_size), 0) FROM files WHERE file_type = 'mp3'")
-            .fetch_one(pool)
-            .await
-            .unwrap_or(0);
+    let local_wavs_size: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(f.file_size), 0) FROM files f \
+         JOIN file_locations fl ON fl.file_id = f.id AND fl.location_type = 'local' \
+         WHERE f.file_type = 'wav'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let local_mp3s_size: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(f.file_size), 0) FROM files f \
+         JOIN file_locations fl ON fl.file_id = f.id AND fl.location_type = 'local' \
+         WHERE f.file_type = 'mp3'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
     let backup_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT file_id) FROM file_locations WHERE location_type = 'backup'",
     )
@@ -4281,8 +4952,7 @@ pub async fn get_storage_status(pool: &Pool<Sqlite>) -> Result<StorageStatus> {
     .unwrap_or(0);
 
     // Prune candidates count & size
-    // Default to stem_preferred=false for status count — frontend toggles the setting
-    let candidates = get_prune_candidates(pool, false).await?;
+    let candidates = get_prune_candidates(pool).await?;
     let prune_candidate_count = candidates.len() as i64;
     let prune_candidate_bytes = candidates.iter().map(|c| c.file_size).sum();
 
@@ -4302,7 +4972,9 @@ pub async fn get_storage_status(pool: &Pool<Sqlite>) -> Result<StorageStatus> {
 
     Ok(StorageStatus {
         local_file_count,
+        tracked_file_count,
         local_size_bytes,
+        tracked_size_bytes,
         local_stems,
         local_flacs,
         local_mp3s,

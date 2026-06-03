@@ -16,6 +16,11 @@ impl BackupEngine {
         Self { ssh_host }
     }
 
+    /// Return the SSH host this engine connects to.
+    pub fn ssh_host(&self) -> &str {
+        &self.ssh_host
+    }
+
     /// Copy a local file to the backup destination using scp.
     /// Returns (success, remote_file_size_bytes).
     /// On success, the file was copied and verified to exist remotely.
@@ -150,6 +155,46 @@ impl BackupEngine {
             .collect())
     }
 
+    /// List remote files with full relative paths (not stripped to basenames).
+    /// Returns paths relative to the remote_base directory.
+    /// Used for backup discovery where we need to reconstruct local file paths.
+    pub async fn list_remote_files_full(
+        &self,
+        remote_dir: &str,
+        max_depth: u32,
+    ) -> Result<Vec<String>> {
+        // Use find to get full paths, then strip the remote_dir prefix to get relative paths.
+        let output = Command::new("ssh")
+            .arg(&self.ssh_host)
+            .arg("find")
+            .arg(remote_dir)
+            .arg("-maxdepth")
+            .arg(max_depth.to_string())
+            .arg("-type")
+            .arg("f")
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Strip remote_dir prefix: /volume1/media/stems/subdir/file.wav -> subdir/file.wav
+        let base = remote_dir.trim_end_matches('/');
+        Ok(stdout
+            .lines()
+            .filter_map(|line| {
+                let stripped = line.strip_prefix(base)?.strip_prefix('/').unwrap_or(line);
+                if stripped.is_empty() {
+                    None
+                } else {
+                    Some(stripped.to_string())
+                }
+            })
+            .collect())
+    }
+
     /// Run rsync in dry-run mode to show what would be transferred.
     /// Returns a list of file paths that would be copied.
     pub async fn dry_run_sync(&self, local_dir: &str, remote_dir: &str) -> Result<Vec<String>> {
@@ -203,8 +248,67 @@ impl BackupEngine {
         Ok(())
     }
 
+    /// Copy a batch of files using rsync with `--files-from` + `--ignore-existing`.
+    ///
+    /// Unlike `run_sync` (which scans ALL files in a directory), this method takes an explicit
+    /// list of relative paths and only copies those — no stat/scan overhead for already-backed-up files.
+    /// `--ignore-existing` avoids remote stat calls entirely: we already know these files don't exist
+    /// remotely (from the reconcile step), so just copy them.
+    ///
+    /// Returns `Ok(())` on success (rsync exit code 0). On failure, returns the rsync error.
+    pub async fn copy_batch(
+        &self,
+        local_dir: &str,
+        remote_base: &str,
+        rel_paths: &[String],
+    ) -> Result<()> {
+        // Write relative paths to a temp file for --files-from
+        let temp_dir = std::env::temp_dir();
+        let temp_file_path = temp_dir.join(format!("mmm_backup_{}.txt", std::process::id()));
+        {
+            // Scope for file handle — explicit close before rsync
+            let content = rel_paths.join("\n");
+            std::fs::write(&temp_file_path, &content)
+                .map_err(|e| anyhow!("Failed to write --files-from temp file: {}", e))?;
+        }
+
+        let dest = format!("{}:{}", self.ssh_host, remote_base);
+        // Trailing slash means "copy contents", not the directory itself
+        let local_with_slash = format!("{}/", local_dir.trim_end_matches('/'));
+
+        debug!(
+            "Copying batch of {} files from {} to {} via --files-from",
+            rel_paths.len(),
+            local_with_slash,
+            dest
+        );
+
+        let output = Command::new("rsync")
+            .arg("-a")
+            .arg("--ignore-existing")
+            .arg("--rsh=ssh")
+            .arg("--files-from")
+            .arg(temp_file_path.to_string_lossy().as_ref())
+            .arg(&local_with_slash)
+            .arg(&dest)
+            .output()
+            .await?;
+
+        // Clean up temp file
+        let _ = std::fs::remove_file(&temp_file_path);
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("rsync --files-from failed: {}", stderr));
+        }
+
+        Ok(())
+    }
+
     /// Run a full rsync from local to remote (not dry-run).
     /// Returns (files_copied_count, total_bytes).
+    ///
+    /// DEPRECATED: Use `copy_batch` instead for targeted backups.
     pub async fn run_sync(&self, local_dir: &str, remote_dir: &str) -> Result<(usize, i64)> {
         let dest = format!("{}:{}", self.ssh_host, remote_dir);
 

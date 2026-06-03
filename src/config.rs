@@ -55,6 +55,7 @@ struct TomlConfig {
     database: Option<DatabaseToml>,
     server: Option<ServerToml>,
     polling: Option<PollingToml>,
+    maintainer: Option<MaintainerToml>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -94,6 +95,13 @@ struct PollingToml {
     cold_start_threshold_secs: Option<u64>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct MaintainerToml {
+    interval_secs: Option<u64>,
+    full_scan_max_age_secs: Option<u64>,
+    backup_discovery_interval_secs: Option<u64>,
+}
+
 // ── Runtime representation ─────────────────────────────────────────────────
 
 /// Service credentials used throughout the application.
@@ -129,6 +137,11 @@ pub struct ServiceCredentials {
     // Polling configuration
     pub global_poll_interval_secs: u64,
     pub cold_start_threshold_secs: u64,
+
+    // Maintainer configuration
+    pub maintainer_interval_secs: u64,
+    pub maintainer_full_scan_max_age_secs: u64,
+    pub maintainer_backup_discovery_interval_secs: u64,
 }
 
 impl ServiceCredentials {
@@ -269,11 +282,54 @@ impl ServiceCredentials {
                         .and_then(|p| p.cold_start_threshold_secs)
                 })
                 .unwrap_or(86400), // 24 hours default
+
+            // Maintainer config: env var > config.toml > built-in default
+            maintainer_interval_secs: std::env::var("MOMOS_MAINTAINER_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .or_else(|| {
+                    toml_config
+                        .maintainer
+                        .as_ref()
+                        .and_then(|m| m.interval_secs)
+                })
+                .unwrap_or(3600), // 1 hour default
+
+            maintainer_full_scan_max_age_secs: std::env::var("MOMOS_MAINTAINER_FULL_SCAN_MAX_AGE")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .or_else(|| {
+                    toml_config
+                        .maintainer
+                        .as_ref()
+                        .and_then(|m| m.full_scan_max_age_secs)
+                })
+                .unwrap_or(86400), // 24 hours default
+
+            maintainer_backup_discovery_interval_secs: std::env::var(
+                "MOMOS_MAINTAINER_BACKUP_DISCOVERY_INTERVAL",
+            )
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .or_else(|| {
+                toml_config
+                    .maintainer
+                    .as_ref()
+                    .and_then(|m| m.backup_discovery_interval_secs)
+            })
+            .unwrap_or(604800), // 7 days default
         };
 
         info!(
             "Polling config: global_interval={}s, cold_start_threshold={}s",
             credentials.global_poll_interval_secs, credentials.cold_start_threshold_secs,
+        );
+
+        info!(
+            "Maintainer config: interval={}s, full_scan_max_age={}s, backup_discovery_interval={}s",
+            credentials.maintainer_interval_secs,
+            credentials.maintainer_full_scan_max_age_secs,
+            credentials.maintainer_backup_discovery_interval_secs,
         );
 
         credentials
@@ -308,6 +364,19 @@ impl ServiceCredentials {
             cold_start_threshold_secs: env_var_optional("MOMOS_COLD_START_THRESHOLD_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(86400),
+            maintainer_interval_secs: env_var_optional("MOMOS_MAINTAINER_INTERVAL_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3600),
+            maintainer_full_scan_max_age_secs: env_var_optional(
+                "MOMOS_MAINTAINER_FULL_SCAN_MAX_AGE_SECS",
+            )
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(86400),
+            maintainer_backup_discovery_interval_secs: env_var_optional(
+                "MOMOS_MAINTAINER_BACKUP_DISCOVERY_INTERVAL_SECS",
+            )
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(604800),
         }
     }
 

@@ -33,6 +33,7 @@ const PAGE_MAP = {
   "file-detail": "file-detail",
   "folder-detail": "folder-detail",
   storage: "storage",
+  backpack: "backpack",
 };
 
 let currentPageId = null;

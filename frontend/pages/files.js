@@ -78,8 +78,9 @@ const HASH_SCHEMA = {
   pmvAggregate: { type: "string", default: "" },
   commentStatuses: { type: "array", default: [] },
   fileTypes: { type: "array", default: [] },
-  backedUp: { type: "string", default: null },
-  safeToDelete: { type: "string", default: null },
+  backedUp: { type: "boolean", default: null },
+  safeToDelete: { type: "boolean", default: null },
+  isLocal: { type: "boolean", default: null },
 };
 
 /**
@@ -103,6 +104,7 @@ const HASH_DEFAULTS = {
   fileTypes: [],
   backedUp: null,
   safeToDelete: null,
+  isLocal: null,
 };
 
 /* ------------------------------------------------------------------ */
@@ -153,6 +155,7 @@ const FILES_COLUMNS = [
     defaultWidth: 80,
   },
   { id: "backedUp", label: "Backup", sortable: false, defaultWidth: 70 },
+  { id: "isLocal", label: "Local", sortable: false, defaultWidth: 60 },
   { id: "safeToDelete", label: "Prune", sortable: false, defaultWidth: 70 },
   { id: "comment", label: "Comment Diff", sortable: false, defaultWidth: 250 },
   { id: "actions", label: "Actions", sortable: false, defaultWidth: 120 },
@@ -188,6 +191,11 @@ const FILES_CELL_RENDERERS = {
     return r.backedUp
       ? '<span class="status-badge connected" title="Backed up"><i class="fas fa-cloud"></i></span>'
       : '<span class="status-badge disconnected" title="Not backed up"><i class="fas fa-cloud"></i></span>';
+  },
+  isLocal: (r) => {
+    if (r.isLocal)
+      return '<span class="status-badge connected" title="On disk"><i class="fas fa-hdd"></i></span>';
+    return '<span class="status-badge disconnected" title="Backup only"><i class="fas fa-cloud"></i></span>';
   },
   safeToDelete: (r) => {
     return r.safeToDelete
@@ -244,6 +252,10 @@ function adaptFile(f) {
     duration: f.durationMs ? Math.round(f.durationMs / 1000) : 0,
     createdAt: f.createdAt || null,
     fileType: f.fileType || null,
+    backedUp: !!f.backedUp,
+    isLocal: !!f.isLocal,
+    hasStem: !!f.hasStem,
+    safeToDelete: !!f.safeToDelete,
   };
 }
 
@@ -270,6 +282,10 @@ function renderLinkBadge(services) {
 }
 
 function renderCommentDiff(f) {
+  // Backup-only files can't have comments written
+  if (!f.isLocal) {
+    return '<span class="text-muted"><i class="fas fa-cloud"></i> Backup only</span>';
+  }
   if (f.needsUpdate) {
     return `<div class="diff-line">
       <div class="diff-line-old"><span class="diff-sign minus">−</span>${escapeHtml(f.diffOld || "(empty)")}</div>
@@ -542,6 +558,14 @@ function renderToolbar(state) {
                 <button class="filter-btn${state.backedUp === false ? " active" : ""}" data-backup-filter="no"><i class="fas fa-cloud"></i> No</button>
               </div>
             </div>
+            <div class="filter-row" data-filter="local">
+              <span class="filter-row-label toggleable" data-filter="local">On Disk</span>
+              <div class="filter-group">
+                <button class="filter-btn${!state.isLocal ? " active" : ""}" data-local-filter="all">All</button>
+                <button class="filter-btn${state.isLocal === true ? " active" : ""}" data-local-filter="yes"><i class="fas fa-hdd"></i> Yes</button>
+                <button class="filter-btn${state.isLocal === false ? " active" : ""}" data-local-filter="no"><i class="fas fa-cloud"></i> No</button>
+              </div>
+            </div>
             <div class="filter-row" data-filter="safe">
               <span class="filter-row-label toggleable" data-filter="safe">Safe to Delete</span>
               <div class="filter-group">
@@ -713,6 +737,7 @@ function buildParams(state) {
   }
   if (state.backedUp !== null) params.set("backedUp", String(state.backedUp));
   if (state.safeToDelete !== null) params.set("safeToDelete", String(state.safeToDelete));
+  if (state.isLocal !== null) params.set("isLocal", String(state.isLocal));
   if (state.sort) params.set("sort", state.sort);
   if (state.order === "desc") params.set("order", "desc");
   return params;
@@ -744,6 +769,7 @@ function buildFilterParams(state) {
     f.commentStatuses = state.commentStatuses.join(",");
   if (state.backedUp !== null) f.backedUp = state.backedUp;
   if (state.safeToDelete !== null) f.safeToDelete = state.safeToDelete;
+  if (state.isLocal !== null) f.isLocal = state.isLocal;
   return f;
 }
 
@@ -1379,6 +1405,25 @@ function wireToolbarEvents(container, signal, state) {
     );
   });
 
+  // ── On Disk filter ──
+  filterPanel?.querySelectorAll("[data-local-filter]").forEach((btn) => {
+    btn.addEventListener(
+      "click",
+      () => {
+        const val = btn.dataset.localFilter;
+        state.isLocal = val === "all" ? null : val === "yes";
+        state.page = 0;
+        filterPanel
+          .querySelectorAll("[data-local-filter]")
+          .forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  });
+
   // ── Safe to delete filter ──
   filterPanel?.querySelectorAll("[data-safe-filter]").forEach((btn) => {
     btn.addEventListener(
@@ -1832,6 +1877,7 @@ export async function init(container, signal, hashParams) {
     commentStatuses: parsed.commentStatuses,
     fileTypes: parsed.fileTypes,
     backedUp: parsed.backedUp,
+    isLocal: parsed.isLocal,
     safeToDelete: parsed.safeToDelete,
     // Filter section enable/disable flags
     bpmEnabled: true,
@@ -1843,6 +1889,7 @@ export async function init(container, signal, hashParams) {
     fileTypeEnabled: true,
     backupEnabled: true,
     safeEnabled: true,
+    localEnabled: true,
     layoutMode: false,
     selectedFileIds: new Set(),
     selectAllMode: false,
