@@ -17,8 +17,8 @@ use std::sync::Arc;
 use crate::AppState;
 use crate::api::types::{ApiResponse, ErrorResponse, apply_sort, internal_error};
 use crate::db::{
-    compute_target_comment, ensure_backpack_tag, get_track_detail, read_comment_from_file,
-    File, ServicePlaylist, ServiceTrack, update_file_comment,
+    File, ServicePlaylist, ServiceTrack, compute_target_comment, ensure_backpack_tag,
+    get_track_detail, read_comment_from_file, update_file_comment,
 };
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -415,11 +415,10 @@ async fn tracks_write_comments_handler(
         match compute_target_comment(&state.db, *file_id).await {
             Ok(target) => {
                 // Get the current comment
-                let file_result =
-                    sqlx::query_as::<_, File>("SELECT * FROM files WHERE id = ?")
-                        .bind(file_id)
-                        .fetch_one(&state.db)
-                        .await;
+                let file_result = sqlx::query_as::<_, File>("SELECT * FROM files WHERE id = ?")
+                    .bind(file_id)
+                    .fetch_one(&state.db)
+                    .await;
                 if let Ok(file) = file_result {
                     if file.comment.as_deref() != Some(&target) {
                         needs_update.push(*file_id);
@@ -621,9 +620,7 @@ async fn tracks_refresh_comments_handler(
                 let disk_str = disk_comment.as_deref().unwrap_or("");
                 let db_str = db_comment.as_deref().unwrap_or("");
                 if disk_str != db_str {
-                    if let Err(e) =
-                        update_file_comment(&state.db, file_id, disk_str).await
-                    {
+                    if let Err(e) = update_file_comment(&state.db, file_id, disk_str).await {
                         tracing::warn!("Failed to update DB comment for file #{}: {}", file_id, e);
                     } else {
                         refreshed += 1;
@@ -1165,7 +1162,7 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         let isrc_placeholders: Vec<String> = isrcs.iter().map(|_| "?".to_string()).collect();
         let fmt_sql = format!(
             r#"SELECT f.isrc, f.file_type,
-                      1 as local,
+                      EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = f.id AND fl.location_type = 'local') as local,
                       EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = f.id AND fl.location_type = 'backup') as backup
                FROM files f
                WHERE f.isrc IN ({})
@@ -1591,7 +1588,7 @@ async fn get_track_by_id(pool: &Pool<Sqlite>, id: i64) -> Result<ApiServiceTrack
         && !isrc.is_empty()
     {
         let fmt_sql = r#"SELECT f.file_type,
-                      1 as local,
+                      EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = f.id AND fl.location_type = 'local') as local,
                       EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = f.id AND fl.location_type = 'backup') as backup
                FROM files f
                WHERE f.isrc = ?
@@ -1619,10 +1616,22 @@ pub(super) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/tracks", get(tracks_handler))
         .route("/api/tracks/count", get(tracks_count_handler))
-        .route("/api/tracks/needs-comment-count", post(tracks_needs_comment_count_handler))
-        .route("/api/tracks/write-comments", post(tracks_write_comments_handler))
-        .route("/api/tracks/needs-refresh-count", post(tracks_needs_refresh_count_handler))
-        .route("/api/tracks/refresh-comments", post(tracks_refresh_comments_handler))
+        .route(
+            "/api/tracks/needs-comment-count",
+            post(tracks_needs_comment_count_handler),
+        )
+        .route(
+            "/api/tracks/write-comments",
+            post(tracks_write_comments_handler),
+        )
+        .route(
+            "/api/tracks/needs-refresh-count",
+            post(tracks_needs_refresh_count_handler),
+        )
+        .route(
+            "/api/tracks/refresh-comments",
+            post(tracks_refresh_comments_handler),
+        )
         .route("/api/tracks/{id}", get(track_handler))
         .route("/api/tracks/{id}/detail", get(track_detail_handler))
         .route("/api/tracks/{id}/backpack", post(track_backpack_handler))

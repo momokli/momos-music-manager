@@ -217,6 +217,71 @@ pub async fn start_maintainer(
 
             last_backup_discovery = now;
         }
+
+        // ── Check 4: Backpack sync ──────────────────────────────────
+        //
+        // Periodically check if any files in backpack tags are missing
+        // locally and pull them from backup. This ensures files become
+        // available even when the initial auto-pull from the tag toggle
+        // didn't complete (e.g. server was restarted).
+        {
+            match crate::db::get_backpack_pull_candidates(&db).await {
+                Ok(candidates) if !candidates.is_empty() => {
+                    info!(
+                        "Maintainer: {} files in backpack tags need pulling from backup",
+                        candidates.len()
+                    );
+                    let mut pulled = 0usize;
+                    for c in &candidates {
+                        let (ssh_host, remote_path) = match c.backup_path.split_once(':') {
+                            Some((h, p)) => (h, p),
+                            None => {
+                                warn!("Maintainer: invalid backup path for file #{}", c.file_id);
+                                continue;
+                            }
+                        };
+                        let engine = crate::backup::BackupEngine::new(ssh_host.to_string());
+                        let local = std::path::Path::new(&c.local_path);
+                        match engine.pull_file(remote_path, local).await {
+                            Ok((true, size)) => {
+                                pulled += 1;
+                                let _ = crate::db::set_file_location(
+                                    &db,
+                                    c.file_id,
+                                    "local",
+                                    &c.local_path,
+                                    size,
+                                )
+                                .await;
+                                let _ = sqlx::query(
+                                    "UPDATE files SET last_verified_local = unixepoch() WHERE id = ?",
+                                )
+                                .bind(c.file_id)
+                                .execute(&db)
+                                .await;
+                            }
+                            Ok((false, _)) => {
+                                warn!("Maintainer: failed to pull {} from backup", c.local_path);
+                            }
+                            Err(e) => {
+                                warn!("Maintainer: error pulling {}: {}", c.local_path, e);
+                            }
+                        }
+                    }
+                    info!(
+                        "Maintainer: backpack sync pulled {}/{} files",
+                        pulled,
+                        candidates.len()
+                    );
+                }
+                Ok(_) => {
+                    // No candidates — all backpack files are local
+                }
+                Err(e) => {
+                    warn!("Maintainer: failed to get backpack pull candidates: {}", e);
+                }
+            }
+        }
     }
 }
 

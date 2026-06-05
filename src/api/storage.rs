@@ -210,6 +210,145 @@ async fn storage_discover_backup_handler(
     .into_response()
 }
 
+/// Resolve the SSH host from a file's backup path by matching against folder configs.
+/// The backup_path is like "/volume1/media/stems/file.stem.m4a" and we need to
+/// find which folder's backup_path prefix (e.g., "backup:/volume1/media/stems")
+/// matches it and extract "backup" as the SSH host.
+async fn resolve_backup_host(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    backup_path: &str,
+) -> anyhow::Result<(String, String)> {
+    // Get all folders with backup_path configured
+    let folders = sqlx::query_as::<_, crate::db::Folder>(
+        "SELECT * FROM folders WHERE backup_path IS NOT NULL AND backup_path != ''",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for folder in &folders {
+        if let Some(ref bp) = folder.backup_path {
+            // folder.backup_path is like "backup:/volume1/media/stems"
+            if let Some((host, folder_remote_prefix)) = bp.split_once(':') {
+                // Check if backup_path starts with the folder's remote prefix
+                if backup_path.starts_with(folder_remote_prefix) {
+                    return Ok((host.to_string(), backup_path.to_string()));
+                }
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "No matching folder found for backup path: {}",
+        backup_path
+    ))
+}
+
+/// POST /api/storage/sync-backpack
+/// Pulls missing files from backup for all backpack tags.
+/// For each track in a backpack tag, ensures the best format exists locally.
+async fn sync_backpack_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // 1. Get candidates
+    let candidates = match crate::db::get_backpack_pull_candidates(&state.db).await {
+        Ok(c) => c,
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    if candidates.is_empty() {
+        return Json(ApiResponse {
+            data: serde_json::json!({
+                "pulled": 0,
+                "failed": 0,
+                "candidates": []
+            }),
+        })
+        .into_response();
+    }
+
+    // 2. Pull each candidate from backup
+    let mut pulled = 0usize;
+    let mut failed = 0usize;
+    let mut results: Vec<serde_json::Value> = Vec::new();
+
+    for candidate in &candidates {
+        // Resolve SSH host from the folder config.
+        // candidate.backup_path is like "/volume1/media/stems/file.stem.m4a"
+        // We need to find which folder this file belongs to and extract the host
+        // from the folder's backup_path (e.g., "backup:/volume1/media/stems").
+        let (ssh_host, remote_path) =
+            match resolve_backup_host(&state.db, &candidate.backup_path).await {
+                Ok((host, path)) => (host, path),
+                Err(e) => {
+                    failed += 1;
+                    results.push(serde_json::json!({
+                        "fileId": candidate.file_id,
+                        "status": "error",
+                        "error": format!("{}", e)
+                    }));
+                    continue;
+                }
+            };
+
+        let engine = BackupEngine::new(ssh_host.to_string());
+        let local_path = std::path::Path::new(&candidate.local_path);
+        let remote_path = remote_path.to_string();
+
+        match engine.pull_file(&remote_path, local_path).await {
+            Ok((true, file_size)) => {
+                pulled += 1;
+                // Update file_locations: add 'local' entry
+                let _ = set_file_location(
+                    &state.db,
+                    candidate.file_id,
+                    "local",
+                    &candidate.local_path,
+                    file_size,
+                )
+                .await;
+                // Update last_verified_local
+                let _ =
+                    sqlx::query("UPDATE files SET last_verified_local = unixepoch() WHERE id = ?")
+                        .bind(candidate.file_id)
+                        .execute(&state.db)
+                        .await;
+
+                results.push(serde_json::json!({
+                    "fileId": candidate.file_id,
+                    "status": "pulled",
+                    "fileType": candidate.file_type,
+                    "title": candidate.title,
+                    "artist": candidate.artist,
+                    "localPath": candidate.local_path
+                }));
+            }
+            Ok((false, _)) => {
+                failed += 1;
+                results.push(serde_json::json!({
+                    "fileId": candidate.file_id,
+                    "status": "failed",
+                    "error": "rsync reported failure"
+                }));
+            }
+            Err(e) => {
+                failed += 1;
+                results.push(serde_json::json!({
+                    "fileId": candidate.file_id,
+                    "status": "error",
+                    "error": format!("{}", e)
+                }));
+            }
+        }
+    }
+
+    Json(ApiResponse {
+        data: serde_json::json!({
+            "pulled": pulled,
+            "failed": failed,
+            "candidates": results
+        }),
+    })
+    .into_response()
+}
+
 /// POST /api/files/{id}/pull-from-backup
 /// Copies a file from backup (NAS) to local disk.
 async fn file_pull_from_backup_handler(
@@ -458,6 +597,7 @@ pub(super) fn router() -> Router<Arc<AppState>> {
             "/api/storage/discover-backup/{folder_id}",
             post(storage_discover_backup_handler),
         )
+        .route("/api/storage/sync-backpack", post(sync_backpack_handler))
         .route("/api/backup/test", get(backup_test_handler))
         .route("/api/backup/explore", get(backup_explore_handler))
         .route(

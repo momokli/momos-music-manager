@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use lofty::{prelude::*, read_from_path};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Pool, Row, Sqlite};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // Types are re-exported from super via `pub use legacy::*`, which has precedence
 // over types.rs for the same type names (File, Tag, ScanMode, etc.).
@@ -808,6 +808,7 @@ pub async fn scan_directory_with_config(
     let mut count = 0;
     let mut total_files = 0;
     let mut skipped_files = 0;
+    let mut on_disk_paths: Vec<String> = Vec::new();
 
     for entry in walker.follow_links(true).into_iter() {
         let entry = match entry {
@@ -833,6 +834,9 @@ pub async fn scan_directory_with_config(
             };
 
             if should_process {
+                // Track this file as present on disk (for local presence tracking)
+                on_disk_paths.push(path.to_string_lossy().to_string());
+
                 // Check if we can skip this file (incremental scan)
                 if let ScanMode::Incremental {
                     since: Some(cutoff),
@@ -845,7 +849,8 @@ pub async fn scan_directory_with_config(
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
                     if mtime <= *cutoff {
-                        // File hasn't changed since last scan, skip it
+                        // File hasn't changed since last scan, skip metadata re-extraction
+                        // but it's still on disk — file_locations.local is handled below
                         skipped_files += 1;
                         continue;
                     }
@@ -869,6 +874,35 @@ pub async fn scan_directory_with_config(
                 skipped_files += 1;
             }
         }
+    }
+
+    // Batch-ensure file_locations.local for all audio files seen on disk.
+    // This is critical for incremental scans where unchanged files are skipped
+    // above — without this, isLocal returns false for files that ARE on disk.
+    if !on_disk_paths.is_empty() {
+        // Chunk to respect SQLite's max variable binding limit (~999)
+        for chunk in on_disk_paths.chunks(900) {
+            let placeholders: Vec<String> = chunk.iter().map(|_| "?".to_string()).collect();
+            let sql = format!(
+                "INSERT OR IGNORE INTO file_locations (file_id, location_type, path, file_size, last_verified, created_at)
+                 SELECT f.id, 'local', f.file_path, f.file_size, unixepoch(), unixepoch()
+                 FROM files f
+                 WHERE f.file_path IN ({})
+                   AND f.id NOT IN (SELECT file_id FROM file_locations WHERE location_type = 'local')",
+                placeholders.join(",")
+            );
+            let mut query = sqlx::query(&sql);
+            for path in chunk {
+                query = query.bind(path);
+            }
+            if let Err(e) = query.execute(pool).await {
+                warn!("Failed to batch-ensure file_locations.local: {}", e);
+            }
+        }
+        debug!(
+            "Ensured file_locations.local for {} on-disk paths",
+            on_disk_paths.len()
+        );
     }
 
     info!(
@@ -1652,6 +1686,171 @@ pub async fn get_files_by_source(pool: &Pool<Sqlite>, source_file_id: i64) -> Re
     Ok(files)
 }
 
+// ============================================================================
+// Backpack Pull Candidates
+// ============================================================================
+
+/// Format preference for backpack pull: lower = better.
+/// stem.m4a > flac > mp3 > wav > other
+pub fn format_preference(file_type: &str) -> u8 {
+    match file_type {
+        "stem.m4a" => 0,
+        "flac" => 1,
+        "mp3" => 2,
+        "wav" => 3,
+        _ => 4,
+    }
+}
+
+/// Find files that need to be pulled from backup to satisfy backpack tags.
+///
+/// For each track whose tags have `backpack = 1`:
+/// 1. Find all file variants for the track (by ISRC)
+/// 2. Pick the best available format: stem.m4a > flac > mp3 > other (WAVs excluded)
+/// 3. If the best format is on backup but not local, mark it for pull
+///
+/// Returns candidates sorted by file type preference (best formats first).
+pub async fn get_backpack_pull_candidates(
+    pool: &Pool<sqlx::Sqlite>,
+) -> Result<Vec<crate::db::PullCandidate>> {
+    use crate::db::PullCandidate;
+
+    // Step 1: Get all file IDs that are in backpack tags (via file_resolved_tags)
+    // A file is in a backpack tag if any of its resolved tags has backpack = 1.
+    let backpack_file_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT frt.file_id
+         FROM file_resolved_tags frt
+         JOIN tags t ON t.id = frt.tag_id
+         WHERE t.backpack = 1",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if backpack_file_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Step 2: For each backpack file, find all variants sharing the same ISRC.
+    // Build a map: ISRC → Vec<File>. Files without ISRC get their own entry keyed by file_id.
+    let placeholders: Vec<String> = backpack_file_ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT * FROM files WHERE isrc IN (
+             SELECT DISTINCT f2.isrc FROM files f2
+             WHERE f2.id IN ({})
+               AND f2.isrc IS NOT NULL
+         )
+         UNION
+         SELECT * FROM files WHERE id IN ({})
+           AND isrc IS NULL
+         ORDER BY file_type",
+        placeholders.join(","),
+        placeholders.join(",")
+    );
+
+    let mut query = sqlx::query_as::<_, File>(&sql);
+    for id in &backpack_file_ids {
+        query = query.bind(id);
+    }
+    // Second set of bindings for the UNION branch (same IDs)
+    for id in &backpack_file_ids {
+        query = query.bind(id);
+    }
+
+    let all_files: Vec<File> = query.fetch_all(pool).await?;
+
+    // Step 3: Group files by ISRC (or by id if no ISRC)
+    let mut groups: std::collections::HashMap<String, Vec<&File>> =
+        std::collections::HashMap::new();
+    for f in &all_files {
+        let key = f.isrc.as_deref().unwrap_or("").to_string();
+        // Treat files without ISRC individually: use id as key suffix
+        let key = if key.is_empty() {
+            format!("_no_isrc_{}", f.id)
+        } else {
+            key
+        };
+        groups.entry(key).or_default().push(f);
+    }
+
+    // Step 4: For each ISRC group, find the best format and check if it needs pulling
+    let mut candidates: Vec<PullCandidate> = Vec::new();
+
+    // Fetch all file_locations for the relevant files in one query
+    let loc_placeholders: Vec<String> = all_files.iter().map(|_| "?".to_string()).collect();
+    let loc_sql = format!(
+        "SELECT * FROM file_locations WHERE file_id IN ({})",
+        loc_placeholders.join(",")
+    );
+    let mut loc_query = sqlx::query_as::<_, FileLocation>(&loc_sql);
+    for f in &all_files {
+        loc_query = loc_query.bind(f.id);
+    }
+    let all_locations: Vec<FileLocation> = loc_query.fetch_all(pool).await?;
+
+    // Index locations by file_id
+    let mut locs_by_file: std::collections::HashMap<i64, Vec<&FileLocation>> =
+        std::collections::HashMap::new();
+    for loc in &all_locations {
+        locs_by_file.entry(loc.file_id).or_default().push(loc);
+    }
+
+    // Helper: check if a file is local
+    let is_local = |file_id: i64| -> bool {
+        locs_by_file
+            .get(&file_id)
+            .map(|locs| locs.iter().any(|l| l.location_type == "local"))
+            .unwrap_or(false)
+    };
+
+    // Helper: get backup path for a file
+    let get_backup_path = |file_id: i64| -> Option<String> {
+        locs_by_file.get(&file_id).and_then(|locs| {
+            locs.iter()
+                .find(|l| l.location_type == "backup")
+                .map(|l| l.path.clone())
+        })
+    };
+
+    for (_isrc, group) in &groups {
+        // Sort group by format preference (best first), excluding WAVs
+        let mut sorted: Vec<&&File> = group
+            .iter()
+            .filter(|f| f.file_type != "wav") // skip WAV source files
+            .collect();
+        sorted.sort_by_key(|f| format_preference(&f.file_type));
+
+        if sorted.is_empty() {
+            continue;
+        }
+
+        let best = sorted[0];
+
+        // If the best format is already local, nothing to do
+        if is_local(best.id) {
+            continue;
+        }
+
+        // Check if the best format is on backup
+        if let Some(backup_path) = get_backup_path(best.id) {
+            candidates.push(PullCandidate {
+                file_id: best.id,
+                local_path: best.file_path.clone(),
+                backup_path,
+                file_type: best.file_type.clone(),
+                file_size: best.file_size,
+                title: best.title.clone().unwrap_or_default(),
+                artist: best.artist.clone().unwrap_or_default(),
+                isrc: best.isrc.clone(),
+            });
+        }
+    }
+
+    // Sort by format preference (best formats first)
+    candidates.sort_by_key(|c| format_preference(&c.file_type));
+
+    Ok(candidates)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1867,6 +2066,26 @@ mod tests {
         assert_eq!(parse_bpm(""), None);
         assert_eq!(parse_bpm("abc"), None);
         assert_eq!(parse_bpm("128.5.5"), None);
+    }
+
+    #[test]
+    fn test_format_preference_ordering() {
+        // Lower = better. Stem is best.
+        assert!(format_preference("stem.m4a") < format_preference("flac"));
+        assert!(format_preference("flac") < format_preference("mp3"));
+        assert!(format_preference("mp3") < format_preference("wav"));
+        assert!(format_preference("wav") < format_preference("opus"));
+        assert!(format_preference("wav") < format_preference("unknown"));
+    }
+
+    #[test]
+    fn test_format_preference_exact_values() {
+        assert_eq!(format_preference("stem.m4a"), 0);
+        assert_eq!(format_preference("flac"), 1);
+        assert_eq!(format_preference("mp3"), 2);
+        assert_eq!(format_preference("wav"), 3);
+        assert_eq!(format_preference("opus"), 4);
+        assert_eq!(format_preference("aiff"), 4);
     }
 
     // ========================================================================

@@ -26,7 +26,16 @@ impl BackupEngine {
     /// On success, the file was copied and verified to exist remotely.
     pub async fn copy_file(&self, local_path: &Path, remote_path: &str) -> Result<(bool, i64)> {
         let local_str = local_path.to_string_lossy();
-        let dest = format!("{}:{}", self.ssh_host, remote_path);
+        let dest = format!(
+            "{}:{}",
+            self.ssh_host,
+            remote_path
+                .replace(' ', "\\ ")
+                .replace('(', "\\(")
+                .replace(')', "\\)")
+                .replace('&', "\\&")
+                .replace('\'', "\\\'")
+        );
 
         debug!("Copying {} to {}", local_str, dest);
 
@@ -246,6 +255,60 @@ impl BackupEngine {
             ));
         }
         Ok(())
+    }
+
+    /// Pull a file from backup (NAS) to local disk using rsync.
+    /// Returns `(true, file_size)` on success, `(false, 0)` on failure.
+    pub async fn pull_file(&self, remote_path: &str, local_path: &Path) -> Result<(bool, i64)> {
+        let local_str = local_path.to_string_lossy();
+        // Escape special characters in remote path for rsync (spaces, parens, etc.)
+        let escaped_path = remote_path
+            .replace('\\', "\\\\")
+            .replace(' ', "\\ ")
+            .replace('(', "\\(")
+            .replace(')', "\\)")
+            .replace('&', "\\&")
+            .replace('\'', "\\\'");
+        let src = format!("{}:{}", self.ssh_host, escaped_path);
+
+        debug!("Pulling {} -> {}", src, local_str);
+
+        // Ensure local parent directory exists
+        if let Some(parent) = local_path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent).unwrap_or_default();
+            }
+        }
+
+        let output = Command::new("rsync")
+            .arg("-a")
+            .arg("--rsh=ssh")
+            .arg(&src)
+            .arg(&*local_str)
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("rsync pull failed for {}: {}", src, stderr);
+            return Ok((false, 0));
+        }
+
+        // Verify local file exists and get its size
+        match std::fs::metadata(local_path) {
+            Ok(metadata) if metadata.len() > 0 => {
+                let size = metadata.len() as i64;
+                info!("Successfully pulled {} -> {} ({})", src, local_str, size);
+                Ok((true, size))
+            }
+            _ => {
+                warn!(
+                    "Pull completed but local file {} not found or empty",
+                    local_str
+                );
+                Ok((false, 0))
+            }
+        }
     }
 
     /// Copy a batch of files using rsync with `--files-from` + `--ignore-existing`.

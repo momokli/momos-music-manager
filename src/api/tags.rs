@@ -1449,10 +1449,88 @@ async fn tag_backpack_handler(
         .unwrap_or(false);
 
     match set_tag_backpack(&state.db, id, backpack).await {
-        Ok(()) => Json(ApiResponse {
-            data: serde_json::json!({"backpack": backpack}),
-        })
-        .into_response(),
+        Ok(()) => {
+            // When toggling TO backpack, trigger a background sync to pull
+            // missing files from backup so they're available offline.
+            if backpack {
+                let db = state.db.clone();
+                tokio::spawn(async move {
+                    tracing::info!("Backpack toggled on for tag #{}, starting auto-pull...", id);
+                    let candidates = match crate::db::get_backpack_pull_candidates(&db).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::error!("Backpack pull candidate query failed: {}", e);
+                            return;
+                        }
+                    };
+                    if candidates.is_empty() {
+                        tracing::info!("Backpack sync for tag #{}: all files already local", id);
+                        return;
+                    }
+                    tracing::info!(
+                        "Backpack sync for tag #{}: {} files need pulling",
+                        id,
+                        candidates.len()
+                    );
+                    let mut pulled = 0usize;
+                    for c in &candidates {
+                        let (ssh_host, remote_path) = match c.backup_path.split_once(':') {
+                            Some((h, p)) => (h, p),
+                            None => {
+                                tracing::warn!(
+                                    "Invalid backup path for file #{}: {}",
+                                    c.file_id,
+                                    c.backup_path
+                                );
+                                continue;
+                            }
+                        };
+                        let engine = crate::backup::BackupEngine::new(ssh_host.to_string());
+                        let local = std::path::Path::new(&c.local_path);
+                        match engine.pull_file(remote_path, local).await {
+                            Ok((true, size)) => {
+                                pulled += 1;
+                                let _ = crate::db::set_file_location(
+                                    &db,
+                                    c.file_id,
+                                    "local",
+                                    &c.local_path,
+                                    size,
+                                )
+                                .await;
+                                let _ = sqlx::query(
+                                    "UPDATE files SET last_verified_local = unixepoch() WHERE id = ?",
+                                )
+                                .bind(c.file_id)
+                                .execute(&db)
+                                .await;
+                                tracing::debug!(
+                                    "Pulled {} ({}, {} bytes)",
+                                    c.local_path,
+                                    c.file_type,
+                                    size
+                                );
+                            }
+                            Ok((false, _)) => {
+                                tracing::warn!("Failed to pull {} from backup", c.local_path);
+                            }
+                            Err(e) => {
+                                tracing::warn!("Error pulling {}: {}", c.local_path, e);
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        "Backpack sync complete: {}/{} files pulled",
+                        pulled,
+                        candidates.len()
+                    );
+                });
+            }
+            Json(ApiResponse {
+                data: serde_json::json!({"backpack": backpack}),
+            })
+            .into_response()
+        }
         Err(e) => internal_error(e).into_response(),
     }
 }

@@ -42,6 +42,21 @@ pub struct PruneCandidate {
     pub has_stem_variant: bool,
 }
 
+/// A file that should be pulled from backup to local disk.
+/// Used by the backpack sync system to ensure offline availability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullCandidate {
+    pub file_id: i64,
+    pub local_path: String,
+    pub backup_path: String,
+    pub file_type: String,
+    pub file_size: i64,
+    pub title: String,
+    pub artist: String,
+    pub isrc: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageStatus {
