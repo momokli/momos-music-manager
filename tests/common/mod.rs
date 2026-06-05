@@ -46,6 +46,11 @@ pub async fn create_test_db() -> Pool<Sqlite> {
         .await
         .unwrap();
     run_migrations(&pool).await;
+    // Migration 016 is a no-op (rename was applied manually on production DB).
+    // Fresh DBs still have tags.followed and need the rename to tags.backpack.
+    momos_music_manager::db::ensure_backpack_column(&pool)
+        .await
+        .unwrap();
     pool
 }
 
