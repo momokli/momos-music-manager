@@ -495,6 +495,28 @@ impl ServiceCredentials {
             )
         })
     }
+
+    /// Create a default ServiceCredentials for testing (no real credentials).
+    pub fn defaults_for_test() -> Self {
+        Self {
+            spotify_client_id: None,
+            spotify_client_secret: None,
+            spotify_redirect_uri: "http://localhost:3000/callback".to_string(),
+            soundcloud_api_key: None,
+            soundcloud_user_id: None,
+            youtube_api_key: None,
+            youtube_playlist_id: None,
+            database_url: "sqlite::memory:".to_string(),
+            server_host: "127.0.0.1".to_string(),
+            server_port: 3000,
+            server_public_url: None,
+            global_poll_interval_secs: 0,
+            cold_start_threshold_secs: 86400,
+            maintainer_interval_secs: 0,
+            maintainer_full_scan_max_age_secs: 86400,
+            maintainer_backup_discovery_interval_secs: 604800,
+        }
+    }
 }
 
 // ── Helper functions ───────────────────────────────────────────────────────
@@ -543,4 +565,208 @@ fn env_or_toml_port(name: &str, toml_value: Option<u16>) -> Option<u16> {
 fn default_database_url() -> String {
     let expanded = shellexpand::tilde("~/.local/share/momos-music-manager/library.db");
     format!("sqlite:{}", expanded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ServiceCredentials defaults ────────────────────────────────
+
+    #[test]
+    fn test_defaults_for_test() {
+        let creds = ServiceCredentials::defaults_for_test();
+        assert_eq!(creds.server_host, "127.0.0.1");
+        assert_eq!(creds.server_port, 3000);
+        assert_eq!(creds.database_url, "sqlite::memory:");
+        assert_eq!(creds.global_poll_interval_secs, 0);
+        assert_eq!(creds.cold_start_threshold_secs, 86400);
+        assert_eq!(creds.maintainer_interval_secs, 0);
+        assert_eq!(creds.maintainer_full_scan_max_age_secs, 86400);
+        assert_eq!(creds.maintainer_backup_discovery_interval_secs, 604800);
+        assert!(creds.spotify_client_id.is_none());
+        assert!(creds.spotify_client_secret.is_none());
+        assert_eq!(creds.spotify_redirect_uri, "http://localhost:3000/callback");
+        assert!(creds.soundcloud_api_key.is_none());
+        assert!(creds.soundcloud_user_id.is_none());
+        assert!(creds.youtube_api_key.is_none());
+        assert!(creds.youtube_playlist_id.is_none());
+        assert!(creds.server_public_url.is_none());
+    }
+
+    // ── Configured checks ───────────────────────────────────────────
+
+    #[test]
+    fn test_is_spotify_configured_with_id_and_secret() {
+        let creds = ServiceCredentials {
+            spotify_client_id: Some("test-id".to_string()),
+            spotify_client_secret: Some("test-secret".to_string()),
+            ..ServiceCredentials::defaults_for_test()
+        };
+        assert!(creds.is_spotify_configured());
+    }
+
+    #[test]
+    fn test_is_spotify_not_configured_without_secret() {
+        let creds = ServiceCredentials {
+            spotify_client_id: Some("test-id".to_string()),
+            spotify_client_secret: None,
+            ..ServiceCredentials::defaults_for_test()
+        };
+        assert!(!creds.is_spotify_configured());
+    }
+
+    #[test]
+    fn test_is_spotify_not_configured_without_id() {
+        let creds = ServiceCredentials {
+            spotify_client_id: None,
+            ..ServiceCredentials::defaults_for_test()
+        };
+        assert!(!creds.is_spotify_configured());
+    }
+
+    #[test]
+    fn test_is_soundcloud_configured_with_key() {
+        let creds = ServiceCredentials {
+            soundcloud_api_key: Some("sc-key".to_string()),
+            ..ServiceCredentials::defaults_for_test()
+        };
+        assert!(creds.is_soundcloud_configured());
+    }
+
+    #[test]
+    fn test_is_soundcloud_not_configured_without_key() {
+        let creds = ServiceCredentials {
+            soundcloud_api_key: None,
+            ..ServiceCredentials::defaults_for_test()
+        };
+        assert!(!creds.is_soundcloud_configured());
+    }
+
+    #[test]
+    fn test_is_youtube_configured_with_key() {
+        let creds = ServiceCredentials {
+            youtube_api_key: Some("yt-key".to_string()),
+            ..ServiceCredentials::defaults_for_test()
+        };
+        assert!(creds.is_youtube_configured());
+    }
+
+    #[test]
+    fn test_is_youtube_not_configured_without_key() {
+        let creds = ServiceCredentials {
+            youtube_api_key: None,
+            ..ServiceCredentials::defaults_for_test()
+        };
+        assert!(!creds.is_youtube_configured());
+    }
+
+    // ── Helper functions ─────────────────────────────────────────────
+
+    #[test]
+    fn test_env_or_toml_prefers_env() {
+        unsafe { std::env::set_var("TEST_OR_TOML", "from-env") };
+        let result = env_or_toml("TEST_OR_TOML", Some("from-toml".to_string()));
+        unsafe { std::env::remove_var("TEST_OR_TOML") };
+        assert_eq!(result, Some("from-env".to_string()));
+    }
+
+    #[test]
+    fn test_env_or_toml_falls_back_to_toml() {
+        unsafe { std::env::remove_var("TEST_OR_TOML_FALLBACK") };
+        let result = env_or_toml("TEST_OR_TOML_FALLBACK", Some("from-toml".to_string()));
+        assert_eq!(result, Some("from-toml".to_string()));
+    }
+
+    #[test]
+    fn test_env_or_toml_returns_none_when_unset() {
+        unsafe { std::env::remove_var("TEST_OR_TOML_NONE") };
+        let result = env_or_toml("TEST_OR_TOML_NONE", None);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_env_or_toml_empty_env_treated_as_unset() {
+        unsafe { std::env::set_var("TEST_OR_TOML_EMPTY", "") };
+        let result = env_or_toml("TEST_OR_TOML_EMPTY", Some("fallback".to_string()));
+        unsafe { std::env::remove_var("TEST_OR_TOML_EMPTY") };
+        assert_eq!(result, Some("fallback".to_string()));
+    }
+
+    #[test]
+    fn test_env_or_toml_opt_prefers_env() {
+        unsafe { std::env::set_var("TEST_OR_TOML_OPT", "from-env") };
+        let result = env_or_toml_opt("TEST_OR_TOML_OPT", Some("from-toml".to_string()));
+        unsafe { std::env::remove_var("TEST_OR_TOML_OPT") };
+        assert_eq!(result, Some("from-env".to_string()));
+    }
+
+    #[test]
+    fn test_env_or_toml_opt_empty_env_clears() {
+        unsafe { std::env::set_var("TEST_OR_TOML_OPT_CLEAR", "") };
+        let result = env_or_toml_opt("TEST_OR_TOML_OPT_CLEAR", Some("from-toml".to_string()));
+        unsafe { std::env::remove_var("TEST_OR_TOML_OPT_CLEAR") };
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_env_or_toml_port_prefers_env() {
+        unsafe { std::env::set_var("TEST_PORT", "8080") };
+        let result = env_or_toml_port("TEST_PORT", Some(3000));
+        unsafe { std::env::remove_var("TEST_PORT") };
+        assert_eq!(result, Some(8080));
+    }
+
+    #[test]
+    fn test_env_or_toml_port_invalid_env_returns_none() {
+        unsafe { std::env::set_var("TEST_PORT_INVALID", "not-a-port") };
+        let result = env_or_toml_port("TEST_PORT_INVALID", Some(3000));
+        unsafe { std::env::remove_var("TEST_PORT_INVALID") };
+        // Invalid port parse returns None (does not fall back)
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_env_or_toml_port_falls_back() {
+        unsafe { std::env::remove_var("TEST_PORT_FALLBACK") };
+        let result = env_or_toml_port("TEST_PORT_FALLBACK", Some(9000));
+        assert_eq!(result, Some(9000));
+    }
+
+    #[test]
+    fn test_credential_source_env() {
+        unsafe { std::env::set_var("TEST_CRED_SRC", "val") };
+        let src = ServiceCredentials::credential_source("TEST_CRED_SRC", Some("val"), true);
+        unsafe { std::env::remove_var("TEST_CRED_SRC") };
+        assert_eq!(src, "env");
+    }
+
+    #[test]
+    fn test_credential_source_toml() {
+        unsafe { std::env::remove_var("TEST_CRED_SRC_TOML") };
+        let src = ServiceCredentials::credential_source("TEST_CRED_SRC_TOML", Some("val"), true);
+        assert_eq!(src, "toml");
+    }
+
+    #[test]
+    fn test_credential_source_default() {
+        unsafe { std::env::remove_var("TEST_CRED_SRC_DEF") };
+        let src = ServiceCredentials::credential_source("TEST_CRED_SRC_DEF", Some("val"), false);
+        assert_eq!(src, "default");
+    }
+
+    #[test]
+    fn test_credential_source_missing() {
+        unsafe { std::env::remove_var("TEST_CRED_SRC_MISS") };
+        let src = ServiceCredentials::credential_source("TEST_CRED_SRC_MISS", None, false);
+        assert_eq!(src, "missing");
+    }
+
+    #[test]
+    fn test_default_database_url_format() {
+        let url = default_database_url();
+        assert!(url.starts_with("sqlite:"));
+        assert!(url.contains("momos-music-manager"));
+        assert!(url.contains("library.db"));
+    }
 }

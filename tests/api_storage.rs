@@ -1,0 +1,600 @@
+//! Integration tests for `/api/storage*` endpoints.
+//!
+//! Each test creates a fresh in-memory SQLite DB, runs all 16 migrations,
+//! seeds hand-crafted data, and hits the running Axum server with `reqwest`.
+//!
+//! Seed data layout (see `common::seed_basic_data`):
+//!
+//! | File | Type     | ISRC  | BPM  | Key | Title      | Artist   | Local? | Backup? | Tag (backpack) |
+//! |------|----------|-------|------|-----|------------|----------|--------|---------|----------------|
+//! | 1    | flac     | US001 | 128.0| 4m  | Title One  | Artist A | yes    | yes     | Groovy (no)    |
+//! | 2    | stem.m4a | US001 | 128.5| 4m  | Title One  | Artist A | yes    | yes     | Groovy (no)    |
+//! | 3    | flac     | US002 | 140.0| 8m  | Track Two  | Artist B | no     | yes     | Deep (yes)     |
+//!
+//! WAV variant data (see `common::seed_wav_variant_data`, IDs 20-24):
+//! | File | Type | source_of | Local? | Backup? |
+//! |------|------|-----------|--------|---------|
+//! | 20   | wav  | file 2    | no*    | yes     |
+//! | 21   | wav  | file 2    | no*    | yes     |
+//! | 22   | wav  | file 2    | no*    | yes     |
+//! | 23   | wav  | file 2    | no*    | yes     |
+//! | 24   | wav  | file 2    | no*    | yes     |
+//!   * WAVs only get local entries in the `*_wav_variants` test.
+
+mod common;
+
+use momos_music_manager::db::refresh_file_resolved_tags;
+
+// ═════════════════════════════════════════════════════════════════════════
+// /api/storage/status
+// ═════════════════════════════════════════════════════════════════════════
+
+/// Verify that all expected keys are present in the status response.
+#[tokio::test]
+async fn storage_status_has_fields() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/storage/status", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    let data = json["data"].as_object().unwrap();
+
+    // Core counts
+    assert!(
+        data.contains_key("localFileCount"),
+        "missing localFileCount"
+    );
+    assert!(
+        data.contains_key("trackedFileCount"),
+        "missing trackedFileCount"
+    );
+    assert!(data.contains_key("backupCount"), "missing backupCount");
+    assert!(
+        data.contains_key("pruneCandidateCount"),
+        "missing pruneCandidateCount"
+    );
+    assert!(
+        data.contains_key("pruneCandidateBytes"),
+        "missing pruneCandidateBytes"
+    );
+
+    // Size fields
+    assert!(
+        data.contains_key("localSizeBytes"),
+        "missing localSizeBytes"
+    );
+    assert!(
+        data.contains_key("trackedSizeBytes"),
+        "missing trackedSizeBytes"
+    );
+
+    // Per-type local counts
+    assert!(data.contains_key("localStems"), "missing localStems");
+    assert!(data.contains_key("localFlacs"), "missing localFlacs");
+    assert!(data.contains_key("localMp3s"), "missing localMp3s");
+    assert!(data.contains_key("localWavs"), "missing localWavs");
+    assert!(data.contains_key("localOther"), "missing localOther");
+
+    // Per-type local sizes
+    assert!(
+        data.contains_key("localStemsSize"),
+        "missing localStemsSize"
+    );
+    assert!(
+        data.contains_key("localFlacsSize"),
+        "missing localFlacsSize"
+    );
+    assert!(data.contains_key("localWavsSize"), "missing localWavsSize");
+    assert!(data.contains_key("localMp3sSize"), "missing localMp3sSize");
+
+    // WAV tracking
+    assert!(data.contains_key("wavSourceDirs"), "missing wavSourceDirs");
+    assert!(data.contains_key("wavIndexed"), "missing wavIndexed");
+    assert!(data.contains_key("wavBackedUp"), "missing wavBackedUp");
+
+    // Assert exact counts from seed_basic_data
+    // Files 1 and 2 have local entries
+    assert_eq!(
+        data["localFileCount"], 2,
+        "files 1 and 2 have local entries; expected localFileCount=2"
+    );
+    // Files 1, 2, 3, 4 all have backup entries
+    assert_eq!(
+        data["backupCount"], 4,
+        "files 1-4 have backup entries; expected backupCount=4"
+    );
+}
+
+/// Verify exact counts with basic + WAV data.
+///
+/// With basic data (3 files) + WAV data (5 WAVs):
+/// - Files 1 and 2 have `file_locations.local` entries → localFileCount = 2
+/// - All 8 files have `file_locations.backup` entries → backupCount = 8
+/// - 3 basic + 5 WAV = 8 tracked files → trackedFileCount = 8
+/// - Local types: 1 stem.m4a (file 2), 1 flac (file 1), 0 WAVs, 0 MP3s
+#[tokio::test]
+async fn storage_status_counts() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    common::seed_wav_variant_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/storage/status", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    let data = json["data"].as_object().unwrap();
+
+    // Core counts
+    assert_eq!(
+        data["localFileCount"], 2,
+        "files 1 and 2 have local entries; file 3 and WAVs do not"
+    );
+    assert_eq!(
+        data["backupCount"], 9,
+        "all 9 files (1,2,3,4 + 5 WAVs) have backup entries"
+    );
+    assert_eq!(
+        data["trackedFileCount"], 9,
+        "4 basic + 5 WAV files = 9 total"
+    );
+
+    // Per-type local counts
+    assert_eq!(data["localStems"], 1, "file 2 is the only local stem.m4a");
+    assert_eq!(data["localFlacs"], 1, "file 1 is the only local flac");
+    assert_eq!(data["localWavs"], 0, "no WAVs have local entries");
+    assert_eq!(data["localMp3s"], 0, "no MP3s exist in seed data");
+
+    // WAV tracking
+    assert_eq!(data["wavIndexed"], 5, "5 WAV files indexed");
+    assert_eq!(data["wavBackedUp"], 5, "all 5 WAVs are backed up");
+    assert_eq!(
+        data["wavSourceDirs"], 5,
+        "all 5 WAVs have source_of set to file 2"
+    );
+
+    // Sizes (known from seed)
+    //  file 1 FLAC     = 5,000,000
+    //  file 2 stem.m4a = 8,000,000
+    //  local total     = 13,000,000
+    assert_eq!(
+        data["localSizeBytes"], 13_000_000i64,
+        "sum of local file sizes"
+    );
+    assert_eq!(
+        data["localStemsSize"], 8_000_000i64,
+        "local stem.m4a size = file 2"
+    );
+    assert_eq!(
+        data["localFlacsSize"], 5_000_000i64,
+        "local flac size = file 1"
+    );
+    assert_eq!(data["localWavsSize"], 0, "no local WAVs");
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// /api/storage/prune-preview
+// ═════════════════════════════════════════════════════════════════════════
+
+/// Verify the prune preview response shape.
+///
+/// After `seed_basic_data` + refreshing `file_resolved_tags`:
+/// - Files 1 and 2 are backed up, local, have metadata, and are NOT in a backpack tag
+///   (tag "Groovy" has backpack=0) → these are prune candidates.
+/// - File 3 is backed up but has NO local entry → excluded by the SQL EXISTS filter.
+#[tokio::test]
+async fn storage_prune_preview() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Populate file_resolved_tags so the backpack-filter subquery works.
+    refresh_file_resolved_tags(&pool).await.unwrap();
+
+    let resp = client
+        .post(format!("{}/api/storage/prune-preview", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    let candidates = json["data"].as_array().unwrap();
+
+    // Seed produces candidates — files 1 and 2 are backed up, local, not backpacked
+    assert!(
+        !candidates.is_empty(),
+        "prune candidates should not be empty after seed_basic_data"
+    );
+
+    // Every candidate must have all expected fields and valid values
+    for c in candidates {
+        let obj = c.as_object().unwrap();
+        assert!(obj.contains_key("fileId"), "missing fileId in candidate");
+        assert!(
+            obj.contains_key("fileType"),
+            "missing fileType in candidate"
+        );
+        assert!(
+            obj.contains_key("fileSize"),
+            "missing fileSize in candidate"
+        );
+        assert!(obj.contains_key("title"), "missing title in candidate");
+        assert!(obj.contains_key("artist"), "missing artist in candidate");
+        assert!(obj.contains_key("reason"), "missing reason in candidate");
+        assert!(
+            obj.contains_key("hasStemVariant"),
+            "missing hasStemVariant in candidate"
+        );
+        assert!(
+            obj.contains_key("filePath"),
+            "missing filePath in candidate"
+        );
+        assert!(
+            obj.contains_key("backupPath"),
+            "missing backupPath in candidate"
+        );
+
+        // fileSize must be positive
+        let size = c["fileSize"].as_i64().unwrap_or(0);
+        assert!(size > 0, "fileSize must be > 0, got {} for candidate", size);
+    }
+
+    // First candidate must have non-empty fileType and reason
+    let first = &candidates[0];
+    let file_type = first["fileType"].as_str().unwrap_or("");
+    assert!(
+        !file_type.is_empty(),
+        "first candidate should have non-empty fileType"
+    );
+    let reason = first["reason"].as_str().unwrap_or("");
+    assert!(
+        !reason.is_empty(),
+        "first candidate should have non-empty reason"
+    );
+}
+
+/// Verify which files appear as prune candidates and their properties.
+///
+/// Files 1 and 2 should be candidates because they satisfy all conditions:
+/// backed up + local + has metadata + tag "Groovy" has backpack=0.
+///
+/// File 3 should NOT be a candidate because it has no local entry.
+#[tokio::test]
+async fn storage_prune_preview_candidates() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    refresh_file_resolved_tags(&pool).await.unwrap();
+
+    let resp = client
+        .post(format!("{}/api/storage/prune-preview", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    let candidates = json["data"].as_array().unwrap();
+
+    // Collect candidate info
+    let file_ids: Vec<i64> = candidates
+        .iter()
+        .map(|c| c["fileId"].as_i64().unwrap())
+        .collect();
+
+    // Files 1 and 2 are backed up + local + not backpacked → candidates
+    assert!(
+        file_ids.contains(&1),
+        "file 1 (FLAC, backed up + local, tag Groovy(backpack=0)) should be a candidate"
+    );
+    assert!(
+        file_ids.contains(&2),
+        "file 2 (stem.m4a, backed up + local, tag Groovy(backpack=0)) should be a candidate"
+    );
+
+    // File 3 is backed up but has NO local entry → excluded by SQL EXISTS
+    assert!(
+        !file_ids.contains(&3),
+        "file 3 (FLAC, backed up but NOT local) should NOT be a candidate"
+    );
+
+    // Check hasStemVariant per candidate
+    for c in candidates {
+        let fid = c["fileId"].as_i64().unwrap();
+
+        if fid == 1 {
+            // File 1 (FLAC) shares ISRC=US001 with file 2 (stem.m4a) → has stem variant
+            assert_eq!(
+                c["hasStemVariant"], true,
+                "file 1 (FLAC) has same-ISRC stem.m4a (file 2) → hasStemVariant=true"
+            );
+            assert_eq!(
+                c["reason"], "not_followed",
+                "file 1 reason should be 'not_followed'"
+            );
+        } else if fid == 2 {
+            // File 2 (stem.m4a) is itself the stem — no WAV children exist in basic data
+            assert_eq!(
+                c["hasStemVariant"], false,
+                "file 2 (stem.m4a) has no WAV children in basic data → hasStemVariant=false"
+            );
+            assert_eq!(
+                c["reason"], "not_followed",
+                "file 2 reason should be 'not_followed'"
+            );
+        }
+    }
+
+    // Verify file types
+    let f1 = candidates.iter().find(|c| c["fileId"] == 1).unwrap();
+    assert_eq!(f1["fileType"], "flac", "file 1 should be flac");
+    assert_eq!(f1["fileSize"], 5_000_000i64, "file 1 size");
+
+    let f2 = candidates.iter().find(|c| c["fileId"] == 2).unwrap();
+    assert_eq!(f2["fileType"], "stem.m4a", "file 2 should be stem.m4a");
+    assert_eq!(f2["fileSize"], 8_000_000i64, "file 2 size");
+}
+
+/// Verify that, when WAV source files have local presence, they appear in the
+/// prune preview with `hasStemVariant: true` and `reason: "wav_backed_up"`.
+///
+/// The WAV files (IDs 20-24) are backed up and have `source_of=2` (linked to
+/// stem file 2). They also need local entries to satisfy the EXISTS subquery
+/// in `get_prune_candidates` — this test adds those inline after the standard
+/// seeds so WAVs become eligible candidates.
+#[tokio::test]
+async fn storage_prune_preview_wav_variants() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    common::seed_wav_variant_data(&pool).await;
+
+    // WAVs need local entries to appear as prune candidates (the prune query
+    // requires `EXISTS (SELECT 1 FROM file_locations WHERE type='local')`).
+    for wav_id in 20i64..=24 {
+        sqlx::query(
+            r#"INSERT INTO file_locations (file_id, location_type, path, file_size, last_verified)
+               VALUES (?, 'local', ?, 2000000, 1700000000)"#,
+        )
+        .bind(wav_id)
+        .bind(format!(
+            "/test/stems/Artist_Title/Artist - Title_{}.wav",
+            match wav_id {
+                20 => "vocals",
+                21 => "bass",
+                22 => "drums",
+                23 => "instrumental",
+                _ => "other",
+            }
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    refresh_file_resolved_tags(&pool).await.unwrap();
+
+    let resp = client
+        .post(format!("{}/api/storage/prune-preview", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    let candidates = json["data"].as_array().unwrap();
+
+    // Collect WAV candidates
+    let wav_candidates: Vec<&serde_json::Value> = candidates
+        .iter()
+        .filter(|c| c["fileType"] == "wav")
+        .collect();
+
+    assert!(
+        !wav_candidates.is_empty(),
+        "WAV files with local+backup entries should be prune candidates"
+    );
+
+    for w in &wav_candidates {
+        assert_eq!(
+            w["hasStemVariant"], true,
+            "WAV files are stem variants themselves (source_of IS NOT NULL)"
+        );
+        assert_eq!(
+            w["reason"], "wav_backed_up",
+            "WAVs should have reason='wav_backed_up'"
+        );
+    }
+
+    // All 5 WAVs should be candidates
+    let wav_ids: Vec<i64> = wav_candidates
+        .iter()
+        .map(|w| w["fileId"].as_i64().unwrap())
+        .collect();
+
+    for expected_id in 20i64..=24 {
+        assert!(
+            wav_ids.contains(&expected_id),
+            "WAV file {} should be a candidate",
+            expected_id
+        );
+    }
+
+    // Non-WAV candidates should still exist (files 1 and 2)
+    let non_wav: Vec<&serde_json::Value> = candidates
+        .iter()
+        .filter(|c| c["fileType"] != "wav")
+        .collect();
+    assert!(
+        !non_wav.is_empty(),
+        "non-WAV files should still appear as candidates"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// /api/storage/prune — error paths
+// ═════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+/// `POST /api/storage/prune` with empty body `{}` returns 400 because
+/// `PruneRequest.file_ids` is empty (serde default for missing field).
+/// The handler explicitly checks `body.file_ids.is_empty()` and returns
+/// BAD_REQUEST with an error message.
+async fn storage_prune_no_body() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .post(format!("{}/api/storage/prune", base))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+
+    // Empty body triggers "No file IDs provided" → 400
+    assert_eq!(
+        resp.status(),
+        400,
+        "empty body should return 400 (no file IDs), got {}",
+        resp.status()
+    );
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["error"].as_str().is_some(),
+        "error response should have an error field, got: {}",
+        body
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 3 — Settings
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+/// `GET /api/storage/settings` — returns a settings object.
+async fn storage_settings_get() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/storage/settings", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    // settings endpoint returns data as an object (may be empty)
+    assert!(
+        json["data"].is_object() || json["data"].is_null(),
+        "settings should return an object"
+    );
+}
+
+#[tokio::test]
+/// `PUT /api/storage/settings` — updates settings.
+async fn storage_settings_put() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .put(format!("{}/api/storage/settings", base))
+        .json(&serde_json::json!({"someSetting": "value"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        json["data"].is_object() || json["data"].is_null(),
+        "settings put should return an object"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 4 — Backup endpoints (no SSH configured → error)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+/// `POST /api/storage/backup/1` — expects error because folder has no backup_path.
+async fn storage_backup_no_ssh() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .post(format!("{}/api/storage/backup/1", base))
+        .send()
+        .await
+        .unwrap();
+
+    // Folder has no backup_path → 400
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    eprintln!("backup error response: {body}");
+
+    assert!(
+        status == 400 || status == 500,
+        "backup without config should return 400 or 500, got {}",
+        status
+    );
+}
+
+#[tokio::test]
+/// `POST /api/storage/backup-wavs/1` — expects error because folder has no backup_path.
+async fn storage_backup_wavs_no_ssh() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .post(format!("{}/api/storage/backup-wavs/1", base))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    eprintln!("backup-wavs error response: {body}");
+
+    assert!(
+        status == 400 || status == 500,
+        "backup-wavs without config should return 400 or 500, got {}",
+        status
+    );
+}
+
+#[tokio::test]
+/// `POST /api/storage/discover-backup/1` — expects error because folder has no backup_path.
+async fn storage_discover_backup_no_ssh() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .post(format!("{}/api/storage/discover-backup/1", base))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    eprintln!("discover-backup error response: {body}");
+
+    assert!(
+        status == 400 || status == 500,
+        "discover-backup without config should return 400 or 500, got {}",
+        status
+    );
+}

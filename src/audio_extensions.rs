@@ -95,7 +95,7 @@ impl AudioExtension {
     ///
     /// # Examples
     /// ```
-    /// use crate::audio_extensions::AudioExtension;
+    /// use momos_music_manager::audio_extensions::AudioExtension;
     ///
     /// assert!(AudioExtension::StemM4a.matches_file("track.stem.m4a"));
     /// assert!(AudioExtension::StemM4a.matches_file("track.STEM.M4A")); // case-insensitive
@@ -166,7 +166,7 @@ impl AudioExtension {
     ///
     /// # Examples
     /// ```
-    /// use crate::audio_extensions::AudioExtension;
+    /// use momos_music_manager::audio_extensions::AudioExtension;
     ///
     /// let exts = AudioExtension::parse_list("Mp3,StemM4a,Wav").unwrap();
     /// assert_eq!(exts.len(), 3);

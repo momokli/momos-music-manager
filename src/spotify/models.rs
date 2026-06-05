@@ -158,3 +158,78 @@ impl From<&rspotify::model::track::FullTrack> for TrackInfo {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spotify_sync_result_success() {
+        let result = SpotifySyncResult::success(
+            3,
+            45,
+            vec!["Deep House".to_string(), "Tech House".to_string()],
+            vec!["Track A".to_string(), "Track B".to_string()],
+        );
+
+        assert_eq!(result.playlist_count, 3);
+        assert_eq!(result.track_count, 45);
+        assert_eq!(result.playlist_names.len(), 2);
+        assert!(result.playlist_names.contains(&"Deep House".to_string()));
+        assert!(result.track_names.contains(&"Track A".to_string()));
+        assert!(result.error_details.is_none());
+    }
+
+    #[test]
+    fn test_spotify_sync_result_failed() {
+        let result = SpotifySyncResult::failed("Rate limited".to_string());
+
+        assert_eq!(result.playlist_count, 0);
+        assert_eq!(result.track_count, 0);
+        assert!(result.playlist_names.is_empty());
+        assert!(result.track_names.is_empty());
+        assert_eq!(result.error_details, Some("Rate limited".to_string()));
+    }
+
+    #[test]
+    fn test_playlist_info_fields() {
+        let info = PlaylistInfo {
+            id: "37i9dQZEVXcJZyENOWUFo7".to_string(),
+            name: "Top 50 Global".to_string(),
+            description: Some("Global top 50".to_string()),
+            snapshot_id: "snap_abc123".to_string(),
+            track_count: 50,
+            collaborative: false,
+            public: true,
+            owner_id: "spotify".to_string(),
+            owner_name: Some("Spotify".to_string()),
+        };
+
+        assert_eq!(info.id, "37i9dQZEVXcJZyENOWUFo7");
+        assert_eq!(info.name, "Top 50 Global");
+        assert_eq!(info.snapshot_id, "snap_abc123");
+        assert!(!info.collaborative);
+        assert!(info.public);
+    }
+
+    #[test]
+    fn test_track_info_fields() {
+        let info = TrackInfo {
+            id: "7ouMYWpwJ422jRcDASZB7P".to_string(),
+            name: "Strobe".to_string(),
+            artists: "Deadmau5".to_string(),
+            album: Some("For Lack of a Better Name".to_string()),
+            isrc: Some("GBKPL0988224".to_string()),
+            duration_ms: 637733,
+            track_number: Some(5),
+            disc_number: Some(1),
+            explicit: false,
+            popularity: Some(72),
+        };
+
+        assert_eq!(info.id, "7ouMYWpwJ422jRcDASZB7P");
+        assert_eq!(info.name, "Strobe");
+        assert!(info.explicit == false);
+        assert_eq!(info.popularity, Some(72));
+    }
+}

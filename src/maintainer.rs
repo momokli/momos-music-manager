@@ -219,3 +219,100 @@ pub async fn start_maintainer(
         }
     }
 }
+
+/// Determine whether a full scan is needed for a folder.
+///
+/// Returns `true` when:
+/// - The folder was never scanned (`last_scanned` is `None`), or
+/// - The time since the last scan exceeds `max_age_secs`.
+pub fn needs_full_scan(last_scanned: Option<i64>, now: i64, max_age_secs: u64) -> bool {
+    match last_scanned {
+        Some(ts) => (now - ts) as u64 > max_age_secs,
+        None => true,
+    }
+}
+
+/// Parse a backup path in the format `host:/remote/path` into its components.
+pub fn parse_backup_path(backup_path: &str) -> Option<(&str, &str)> {
+    backup_path.split_once(':')
+}
+
+/// Determine whether backup discovery should run, based on the last run timestamp
+/// and the configured interval.
+pub fn should_run_backup_discovery(now: i64, last_run: i64, interval_secs: u64) -> bool {
+    now - last_run > interval_secs as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_needs_full_scan_never_scanned() {
+        assert!(needs_full_scan(None, 1000, 3600));
+    }
+
+    #[test]
+    fn test_needs_full_scan_expired() {
+        assert!(needs_full_scan(Some(0), 10000, 3600));
+    }
+
+    #[test]
+    fn test_needs_full_scan_within_window() {
+        assert!(!needs_full_scan(Some(5000), 6000, 3600));
+    }
+
+    #[test]
+    fn test_needs_full_scan_exactly_at_boundary() {
+        assert!(!needs_full_scan(Some(0), 3600, 3600));
+    }
+
+    #[test]
+    fn test_parse_backup_path_valid() {
+        let result = parse_backup_path("backup:/volume1/media/stems");
+        assert_eq!(result, Some(("backup", "/volume1/media/stems")));
+    }
+
+    #[test]
+    fn test_parse_backup_path_no_colon() {
+        let result = parse_backup_path("invalidpath");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_backup_path_multiple_colons() {
+        let result = parse_backup_path("host:/path/to/dir:extra");
+        assert_eq!(result, Some(("host", "/path/to/dir:extra")));
+    }
+
+    #[test]
+    fn test_should_run_backup_discovery_never_run() {
+        assert!(!should_run_backup_discovery(100000, 0, 604800));
+    }
+
+    #[test]
+    fn test_should_run_backup_discovery_after_interval() {
+        assert!(should_run_backup_discovery(700000, 0, 604800));
+    }
+
+    #[test]
+    fn test_should_run_backup_discovery_within_interval() {
+        assert!(!should_run_backup_discovery(600000, 500000, 604800));
+    }
+
+    #[test]
+    fn test_folder_row_construction() {
+        let row = FolderRow {
+            id: 1,
+            folder_path: "/music/stems".to_string(),
+            backup_path: Some("backup:/volume1/stems".to_string()),
+            last_scanned: Some(1000000),
+            auto_backup: true,
+        };
+
+        assert_eq!(row.id, 1);
+        assert_eq!(row.folder_path, "/music/stems");
+        assert!(row.auto_backup);
+        assert!(row.backup_path.is_some());
+    }
+}

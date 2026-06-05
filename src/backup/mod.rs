@@ -361,7 +361,7 @@ impl BackupEngine {
     }
 
     /// Explore a remote directory: list subdirectories and check if writable.
-    /// Returns (subdirs, is_writable).
+    /// Returns `(subdirs, is_writable)`.
     pub async fn explore_dir(&self, remote_dir: &str) -> Result<(Vec<String>, bool)> {
         // List subdirectories only (ending with /)
         let list_output = Command::new("ssh")
@@ -406,5 +406,132 @@ impl BackupEngine {
         }
 
         Ok((dirs, writable))
+    }
+}
+
+/// Extract the parent directory from a remote path, for use with `mkdir -p`.
+pub fn remote_path_parent(remote_path: &str) -> Result<String> {
+    match remote_path.rsplit_once('/') {
+        Some((dir, _)) => Ok(dir.to_string()),
+        None => Err(anyhow!(
+            "remote_path has no directory component: {}",
+            remote_path
+        )),
+    }
+}
+
+/// Strip a base directory prefix from a full path to get a relative path.
+pub fn strip_remote_prefix(full_path: &str, base: &str) -> Option<String> {
+    let base = base.trim_end_matches('/');
+    let stripped = full_path.strip_prefix(base)?;
+    let path = stripped.strip_prefix('/').unwrap_or(stripped);
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
+/// Extract the basename (filename) from a path string.
+pub fn path_basename(path: &str) -> Option<String> {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+}
+
+/// Parse a remote file size from stdout (e.g. `stat -f "%z"` output).
+pub fn parse_remote_file_size(stdout: &str) -> Option<i64> {
+    stdout.trim().parse::<i64>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backup_engine_creation() {
+        let engine = BackupEngine::new("backup".to_string());
+        assert_eq!(engine.ssh_host(), "backup");
+    }
+
+    #[test]
+    fn test_backup_engine_custom_host() {
+        let engine = BackupEngine::new("my-nas.local".to_string());
+        assert_eq!(engine.ssh_host(), "my-nas.local");
+    }
+
+    #[test]
+    fn test_remote_path_parent_valid() {
+        let parent = remote_path_parent("/volume1/media/stems/file.flac").unwrap();
+        assert_eq!(parent, "/volume1/media/stems");
+    }
+
+    #[test]
+    fn test_remote_path_parent_root() {
+        let parent = remote_path_parent("/file.flac").unwrap();
+        assert_eq!(parent, "");
+    }
+
+    #[test]
+    fn test_remote_path_parent_no_slash() {
+        let result = remote_path_parent("justafilename");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_strip_remote_prefix_basic() {
+        let result = strip_remote_prefix(
+            "/volume1/media/stems/subdir/file.wav",
+            "/volume1/media/stems",
+        );
+        assert_eq!(result, Some("subdir/file.wav".to_string()));
+    }
+
+    #[test]
+    fn test_strip_remote_prefix_no_match() {
+        let result = strip_remote_prefix("/other/path/file.wav", "/volume1/media/stems");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_strip_remote_prefix_exact_match() {
+        let result = strip_remote_prefix("/volume1/media/stems", "/volume1/media/stems");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_path_basename_regular() {
+        let result = path_basename("/volume1/media/stems/file.wav");
+        assert_eq!(result, Some("file.wav".to_string()));
+    }
+
+    #[test]
+    fn test_path_basename_root() {
+        let result = path_basename("/");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_path_basename_just_filename() {
+        let result = path_basename("file.wav");
+        assert_eq!(result, Some("file.wav".to_string()));
+    }
+
+    #[test]
+    fn test_parse_remote_file_size_valid() {
+        let result = parse_remote_file_size("12345\n");
+        assert_eq!(result, Some(12345));
+    }
+
+    #[test]
+    fn test_parse_remote_file_size_invalid() {
+        let result = parse_remote_file_size("not a number");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_remote_file_size_empty() {
+        let result = parse_remote_file_size("");
+        assert_eq!(result, None);
     }
 }

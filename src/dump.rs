@@ -1266,6 +1266,366 @@ async fn import_files(tx: &mut sqlx::Transaction<'_, Sqlite>, rows: &[DumpFile])
     Ok(count)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── DataDump serialization roundtrip ─────────────────────────────
+
+    #[test]
+    fn test_data_dump_roundtrip_empty() {
+        let dump = DataDump {
+            tag_categories: vec![],
+            tags: vec![],
+            tag_embeddings: vec![],
+            tag_energy_levels: vec![],
+            tag_parents: vec![],
+            tag_similarities: vec![],
+            folders: vec![],
+            service_config: vec![],
+            service_tracks: vec![],
+            service_playlists: vec![],
+            service_playlist_tracks: vec![],
+            files: vec![],
+            playlist_subscriptions: vec![],
+            deemix_downloads: vec![],
+            dumped_at: 1234567890,
+        };
+
+        let json = serde_json::to_string(&dump).unwrap();
+        let restored: DataDump = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.dumped_at, 1234567890);
+        assert!(restored.tag_categories.is_empty());
+        assert!(restored.tags.is_empty());
+        assert!(restored.files.is_empty());
+    }
+
+    #[test]
+    fn test_data_dump_roundtrip_with_data() {
+        let dump = DataDump {
+            tag_categories: vec![DumpTagCategory {
+                id: 1,
+                name: "Setlist".to_string(),
+                icon: "fa-list".to_string(),
+                prefix: "S".to_string(),
+                sort_order: 0,
+                is_default: true,
+                created_at: 1000,
+            }],
+            tags: vec![DumpTag {
+                id: 10,
+                name: "Groovy".to_string(),
+                category_id: 1,
+                sort_order: 0,
+                created_at: 1001,
+                reviewed_at: None,
+            }],
+            files: vec![DumpFile {
+                id: 100,
+                file_path: "/music/test.flac".to_string(),
+                file_hash: "abc123".to_string(),
+                file_type: "flac".to_string(),
+                file_size: 12345,
+                last_modified: 1000000,
+                isrc: Some("US1234567890".to_string()),
+                last_scanned: 1000001,
+                title: Some("Test Track".to_string()),
+                artist: Some("Test Artist".to_string()),
+                album: None,
+                album_artist: None,
+                track_number: Some(1),
+                total_tracks: Some(10),
+                disc_number: Some(1),
+                total_discs: Some(1),
+                genre: Some("House".to_string()),
+                year: Some(2024),
+                composer: None,
+                comment: Some("[PMV] house sp:abc".to_string()),
+                duration_ms: Some(300000),
+                bitrate: Some(1411),
+                sample_rate: Some(44100),
+                channels: Some(2),
+                bpm: Some(128.0),
+                musical_key: Some("8A".to_string()),
+                rating: 3,
+                play_count: 42,
+                last_played: Some(2000000),
+                spotify_id: Some("spotify:track:abc".to_string()),
+                soundcloud_id: None,
+                youtube_id: None,
+                created_at: 1000000,
+                updated_at: 1000001,
+            }],
+            tag_embeddings: vec![],
+            tag_energy_levels: vec![],
+            tag_parents: vec![],
+            tag_similarities: vec![],
+            folders: vec![],
+            service_config: vec![],
+            service_tracks: vec![],
+            service_playlists: vec![],
+            service_playlist_tracks: vec![],
+            playlist_subscriptions: vec![],
+            deemix_downloads: vec![],
+            dumped_at: 2000000000,
+        };
+
+        let json = serde_json::to_string_pretty(&dump).unwrap();
+        let restored: DataDump = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.dumped_at, 2000000000);
+        assert_eq!(restored.tag_categories.len(), 1);
+        assert_eq!(restored.tag_categories[0].name, "Setlist");
+        assert_eq!(restored.tags.len(), 1);
+        assert_eq!(restored.tags[0].name, "Groovy");
+        assert_eq!(restored.tags[0].category_id, 1);
+        assert_eq!(restored.files.len(), 1);
+        assert_eq!(restored.files[0].file_path, "/music/test.flac");
+        assert_eq!(restored.files[0].isrc, Some("US1234567890".to_string()));
+        assert_eq!(restored.files[0].bpm, Some(128.0));
+        assert_eq!(restored.files[0].musical_key, Some("8A".to_string()));
+        assert_eq!(restored.files[0].play_count, 42);
+        assert_eq!(
+            restored.files[0].spotify_id,
+            Some("spotify:track:abc".to_string())
+        );
+    }
+
+    #[test]
+    fn test_data_dump_roundtrip_edge_cases() {
+        // Test special characters in strings
+        let dump = DataDump {
+            tag_categories: vec![DumpTagCategory {
+                id: 1,
+                name: "Tag with üñîçödë".to_string(),
+                icon: "fa:heart".to_string(),
+                prefix: "T".to_string(),
+                sort_order: 0,
+                is_default: false,
+                created_at: 0,
+            }],
+            tag_energy_levels: vec![DumpTagEnergyLevel {
+                tag_id: 10,
+                energy_level: 3,
+                created_at: 1000,
+            }],
+            tag_parents: vec![DumpTagParent {
+                id: 1,
+                tag_id: 10,
+                parent_tag_id: 5,
+                created_at: 1000,
+            }],
+            ..DataDump {
+                tag_categories: vec![],
+                tags: vec![],
+                tag_embeddings: vec![],
+                tag_energy_levels: vec![],
+                tag_parents: vec![],
+                tag_similarities: vec![],
+                folders: vec![],
+                service_config: vec![],
+                service_tracks: vec![],
+                service_playlists: vec![],
+                service_playlist_tracks: vec![],
+                files: vec![],
+                playlist_subscriptions: vec![],
+                deemix_downloads: vec![],
+                dumped_at: 0,
+            }
+        };
+
+        let json = serde_json::to_string(&dump).unwrap();
+        let restored: DataDump = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.tag_categories[0].name, "Tag with üñîçödë");
+        assert_eq!(restored.tag_energy_levels[0].energy_level, 3);
+        assert_eq!(restored.tag_parents[0].tag_id, 10);
+        assert_eq!(restored.tag_parents[0].parent_tag_id, 5);
+    }
+
+    #[test]
+    fn test_data_dump_serialization_json_field_names() {
+        // Verify that the dump structs serialize with snake_case field names
+        let dump = DataDump {
+            tag_categories: vec![DumpTagCategory {
+                id: 1,
+                name: "Test".to_string(),
+                icon: "fa-x".to_string(),
+                prefix: "T".to_string(),
+                sort_order: 0,
+                is_default: true,
+                created_at: 0,
+            }],
+            ..DataDump {
+                tag_categories: vec![],
+                tags: vec![],
+                tag_embeddings: vec![],
+                tag_energy_levels: vec![],
+                tag_parents: vec![],
+                tag_similarities: vec![],
+                folders: vec![],
+                service_config: vec![],
+                service_tracks: vec![],
+                service_playlists: vec![],
+                service_playlist_tracks: vec![],
+                files: vec![],
+                playlist_subscriptions: vec![],
+                deemix_downloads: vec![],
+                dumped_at: 0,
+            }
+        };
+
+        let json = serde_json::to_value(&dump).unwrap();
+        assert!(json.get("tag_categories").is_some());
+        assert!(json.get("dumped_at").is_some());
+        let cat = &json["tag_categories"][0];
+        // These structs use plain snake_case (no #[serde(rename_all)])
+        assert!(
+            cat.get("is_default").is_some(),
+            "field should be snake_case: is_default"
+        );
+        assert!(
+            cat.get("sort_order").is_some(),
+            "field should be snake_case: sort_order"
+        );
+    }
+
+    // ── parse_dump_resilient ──────────────────────────────────────────
+
+    #[test]
+    fn test_parse_dump_resilient_valid() {
+        let json = r#"{
+            "dumped_at": 1000,
+            "tag_categories": [{
+                "id": 1,
+                "name": "Setlist",
+                "icon": "fa-list",
+                "prefix": "S",
+                "sort_order": 0,
+                "is_default": true,
+                "created_at": 100
+            }],
+            "tags": [],
+            "tag_embeddings": [],
+            "tag_energy_levels": [],
+            "tag_parents": [],
+            "tag_similarities": [],
+            "folders": [],
+            "service_config": [],
+            "service_tracks": [],
+            "service_playlists": [],
+            "service_playlist_tracks": [],
+            "files": [],
+            "playlist_subscriptions": [],
+            "deemix_downloads": []
+        }"#;
+
+        let dump = parse_dump_resilient(json).unwrap();
+        assert_eq!(dump.dumped_at, 1000);
+        assert_eq!(dump.tag_categories.len(), 1);
+        assert_eq!(dump.tag_categories[0].name, "Setlist");
+    }
+
+    #[test]
+    fn test_parse_dump_resilient_missing_tables() {
+        // Tables that don't exist in the JSON should be empty, not error
+        let json = r#"{
+            "dumped_at": 2000,
+            "tag_categories": []
+        }"#;
+
+        let dump = parse_dump_resilient(json).unwrap();
+        assert_eq!(dump.dumped_at, 2000);
+        assert!(dump.tag_categories.is_empty());
+        assert!(dump.tags.is_empty());
+        assert!(dump.files.is_empty());
+        assert!(dump.service_tracks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_dump_resilient_missing_dumped_at() {
+        // Missing dumped_at should default to 0
+        let json = r#"{
+            "tag_categories": []
+        }"#;
+
+        let dump = parse_dump_resilient(json).unwrap();
+        assert_eq!(dump.dumped_at, 0);
+    }
+
+    #[test]
+    fn test_parse_dump_resilient_skips_bad_rows() {
+        // One bad row in a table should be skipped, good rows preserved
+        let json = r#"{
+            "dumped_at": 3000,
+            "tag_categories": [
+                {
+                    "id": 1,
+                    "name": "Good",
+                    "icon": "fa-x",
+                    "prefix": "G",
+                    "sort_order": 0,
+                    "is_default": true,
+                    "created_at": 100
+                },
+                {
+                    "id": "not-an-integer",
+                    "name": "Bad",
+                    "icon": "fa-y",
+                    "prefix": "B",
+                    "sort_order": 1,
+                    "is_default": false,
+                    "created_at": 200
+                }
+            ]
+        }"#;
+
+        let dump = parse_dump_resilient(json).unwrap();
+        assert_eq!(dump.tag_categories.len(), 1);
+        assert_eq!(dump.tag_categories[0].name, "Good");
+    }
+
+    #[test]
+    fn test_parse_dump_resilient_invalid_json() {
+        let json = "not valid json at all";
+        let result = parse_dump_resilient(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_dump_resilient_empty_object() {
+        let json = "{}";
+        let dump = parse_dump_resilient(json).unwrap();
+        assert_eq!(dump.dumped_at, 0);
+        assert!(dump.tag_categories.is_empty());
+    }
+
+    // ── Dump struct defaults ──────────────────────────────────────────
+
+    #[test]
+    fn test_dump_tag_defaults() {
+        let tag: DumpTag = serde_json::from_str("{}").unwrap();
+        assert_eq!(tag.id, 0);
+        assert_eq!(tag.name, "");
+        assert_eq!(tag.category_id, 0);
+        assert_eq!(tag.sort_order, 0);
+        assert_eq!(tag.created_at, 0);
+        assert!(tag.reviewed_at.is_none());
+    }
+
+    #[test]
+    fn test_dump_file_defaults() {
+        let file: DumpFile = serde_json::from_str("{}").unwrap();
+        assert_eq!(file.id, 0);
+        assert_eq!(file.file_path, "");
+        assert_eq!(file.file_hash, "");
+        assert_eq!(file.file_type, "");
+        assert_eq!(file.file_size, 0);
+        assert_eq!(file.rating, 0);
+        assert_eq!(file.play_count, 0);
+    }
+}
+
 async fn import_deemix_downloads(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     rows: &[DumpDeemixDownload],

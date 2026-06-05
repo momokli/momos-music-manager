@@ -52,6 +52,112 @@ fn resolve_db_url() -> String {
     "sqlite:./app.db".to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Command;
+    use std::env;
+
+    fn deemix_cmd() -> clap::Command {
+        DeemixCommand::augment_subcommands(Command::new("deemix"))
+    }
+
+    #[test]
+    fn test_deemix_command_auth() {
+        let matches = deemix_cmd()
+            .try_get_matches_from(vec!["deemix", "auth", "my_arl_token"])
+            .unwrap();
+        let sub = matches.subcommand_matches("auth").unwrap();
+        let arl: &String = sub.get_one::<String>("arl").unwrap();
+        assert_eq!(arl, "my_arl_token");
+    }
+
+    #[test]
+    fn test_deemix_command_auth_with_host() {
+        let matches = deemix_cmd()
+            .try_get_matches_from(vec![
+                "deemix",
+                "auth",
+                "my_arl_token",
+                "http://localhost:9999",
+            ])
+            .unwrap();
+        let sub = matches.subcommand_matches("auth").unwrap();
+        let host: &String = sub.get_one::<String>("host").unwrap();
+        assert_eq!(host, "http://localhost:9999");
+    }
+
+    #[test]
+    fn test_deemix_command_status() {
+        let matches = deemix_cmd()
+            .try_get_matches_from(vec!["deemix", "status"])
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("status"));
+    }
+
+    #[test]
+    fn test_deemix_command_queue() {
+        let matches = deemix_cmd()
+            .try_get_matches_from(vec!["deemix", "queue"])
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("queue"));
+    }
+
+    #[test]
+    fn test_deemix_command_add() {
+        let matches = deemix_cmd()
+            .try_get_matches_from(vec![
+                "deemix",
+                "add",
+                "https://open.spotify.com/playlist/abc",
+            ])
+            .unwrap();
+        let sub = matches.subcommand_matches("add").unwrap();
+        let url: &String = sub.get_one::<String>("url").unwrap();
+        assert_eq!(url, "https://open.spotify.com/playlist/abc");
+    }
+
+    #[test]
+    fn test_deemix_command_retry() {
+        let matches = deemix_cmd()
+            .try_get_matches_from(vec!["deemix", "retry", "42"])
+            .unwrap();
+        let sub = matches.subcommand_matches("retry").unwrap();
+        let id: i64 = *sub.get_one::<i64>("id").unwrap();
+        assert_eq!(id, 42);
+    }
+
+    #[test]
+    fn test_deemix_command_delete() {
+        let matches = deemix_cmd()
+            .try_get_matches_from(vec!["deemix", "delete", "99"])
+            .unwrap();
+        let sub = matches.subcommand_matches("delete").unwrap();
+        let id: i64 = *sub.get_one::<i64>("id").unwrap();
+        assert_eq!(id, 99);
+    }
+
+    #[test]
+    fn test_resolve_db_url_from_env() {
+        // Use a single test to avoid race condition with env var manipulation
+        unsafe { env::set_var("DATABASE_URL", "sqlite:/tmp/test.db") };
+        let url = resolve_db_url();
+        assert_eq!(url, "sqlite:/tmp/test.db");
+        unsafe { env::remove_var("DATABASE_URL") };
+
+        // Now test default (no env var set)
+        let url2 = resolve_db_url();
+        assert_eq!(url2, "sqlite:./app.db");
+    }
+
+    #[test]
+    fn test_deemix_command_enum_debug() {
+        let cmd = DeemixCommand::Status;
+        let debug = format!("{:?}", cmd);
+        assert_eq!(debug, "Status");
+    }
+}
+
 async fn connect_db() -> Result<Pool<Sqlite>> {
     let u = resolve_db_url();
     Ok(SqlitePool::connect_with(

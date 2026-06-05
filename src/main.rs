@@ -1,50 +1,15 @@
-use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
-
-type CategoryMeans = HashMap<i64, (String, Vec<f32>)>;
 
 use anyhow::Result;
-use axum::{
-    Router,
-    body::Body,
-    extract::Path,
-    http::{StatusCode, header},
-    response::{IntoResponse, Response},
-    routing::get,
-};
 use clap::{Parser, Subcommand};
-use rust_embed::Embed;
-use sqlx::{
-    Pool, Sqlite, SqlitePool,
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
-};
-use tower_http::cors::CorsLayer;
+use sqlx::{Pool, Sqlite, SqlitePool};
+use tokio::sync::Mutex;
 use tracing::info;
 
-mod api;
-mod audio_extensions;
-mod backup;
-mod comment;
-mod config;
-mod db;
-mod deemix;
-mod digging;
-mod dump;
-mod embeddings;
-mod global_poller;
-mod maintainer;
-mod poller;
-mod scan_cache;
-mod spotify;
-mod tasks;
-mod traktor;
-mod watch;
-
-#[cfg(target_os = "macos")]
-mod launch_agent;
+use momos_music_manager::AppState;
+use momos_music_manager::config::ServiceCredentials;
+use momos_music_manager::tasks::TaskManager;
 
 #[derive(Parser)]
 #[command(name = "momos-music-manager")]
@@ -97,93 +62,8 @@ enum Commands {
     /// Deemix download queue actions
     Deemix {
         #[command(subcommand)]
-        command: crate::deemix::cli::DeemixCommand,
+        command: momos_music_manager::deemix::cli::DeemixCommand,
     },
-}
-
-struct AppState {
-    db: Pool<Sqlite>,
-    config: crate::config::ServiceCredentials,
-    task_manager: crate::tasks::TaskManager,
-    embeddings: Mutex<Option<crate::embeddings::EmbeddingModel>>,
-    category_means: tokio::sync::Mutex<Option<CategoryMeans>>,
-    public_url: Option<String>,
-}
-
-// ── Embedded Frontend Assets ───────────────────────────────────────────────
-
-#[derive(Embed)]
-#[folder = "frontend/"]
-struct FrontendAssets;
-
-/// Infer a MIME type from the file extension.
-fn mime_for_path(path: &str) -> &'static str {
-    if path.ends_with(".html") {
-        "text/html; charset=utf-8"
-    } else if path.ends_with(".js") {
-        "application/javascript; charset=utf-8"
-    } else if path.ends_with(".css") {
-        "text/css; charset=utf-8"
-    } else if path.ends_with(".png") {
-        "image/png"
-    } else if path.ends_with(".svg") {
-        "image/svg+xml"
-    } else if path.ends_with(".ico") {
-        "image/x-icon"
-    } else if path.ends_with(".woff2") {
-        "font/woff2"
-    } else if path.ends_with(".woff") {
-        "font/woff"
-    } else if path.ends_with(".ttf") {
-        "font/ttf"
-    } else {
-        "application/octet-stream"
-    }
-}
-
-/// Catch-all handler that serves embedded frontend assets.
-///
-/// - Exact file paths (e.g. `/app.js`, `/style.css`) return the file directly.
-/// - `/` and any unknown path return `index.html` (SPA fallback for client-side
-///   routing via hash fragments).
-/// - `/api/*` paths are never routed here because the API router takes priority.
-async fn static_handler(Path(path): Path<String>) -> Response {
-    // Normalise: strip leading slash, default to index.html
-    let asset_path = if path.is_empty() || path == "/" || path.starts_with("api/") {
-        "index.html"
-    } else {
-        path.trim_start_matches('/')
-    };
-
-    match FrontendAssets::get(asset_path) {
-        Some(content) => Response::builder()
-            .header(header::CONTENT_TYPE, mime_for_path(asset_path))
-            .body(axum::body::Body::from(content.data))
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-        None => {
-            // SPA fallback — let the client-side router handle it
-            FrontendAssets::get("index.html")
-                .map(|_| index_html_response())
-                .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
-        }
-    }
-}
-
-/// Helper: serve the embedded index.html with the correct content type.
-fn index_html_response() -> Response {
-    FrontendAssets::get("index.html")
-        .map(|content| {
-            Response::builder()
-                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-                .body(Body::from(content.data))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-        })
-        .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
-}
-
-/// Handler for the bare root path `/` — serves index.html.
-async fn root_handler() -> Response {
-    index_html_response()
 }
 
 // ── CLI entry point ────────────────────────────────────────────────────────
@@ -201,129 +81,100 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Load config (env vars > config.toml > built-in defaults)
-    let config = crate::config::ServiceCredentials::load();
-    let database_url = config.database_url.clone();
-    info!("Database: {database_url}");
-
-    // Ensure the parent directory of the database file exists
-    let db_path_str = database_url
-        .strip_prefix("sqlite:")
-        .unwrap_or(&database_url);
-    let db_path = std::path::Path::new(db_path_str);
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to create database directory {}: {e}",
-                parent.display()
-            )
-        })?;
-    }
-
-    let options = SqliteConnectOptions::from_str(&database_url)?
-        .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal)
-        .busy_timeout(Duration::from_secs(5))
-        .synchronous(SqliteSynchronous::Normal);
-    let db = SqlitePool::connect_with(options).await?;
-
-    // Run migrations
-    sqlx::migrate!().run(&db).await?;
-    info!("Migrations complete");
-
     match cli.command {
         Commands::Serve {
             host,
             port,
             public_url,
         } => {
-            let host = host.unwrap_or_else(|| config.server_host.clone());
-            let port = port.unwrap_or(config.server_port);
-            serve(db, host, port, public_url).await?;
+            let host = host.unwrap_or_else(|| ServiceCredentials::load().server_host);
+            let port = port.unwrap_or_else(|| ServiceCredentials::load().server_port);
+            serve(host, port, public_url).await?;
         }
         Commands::Scan { directory } => {
-            info!("Scanning: {directory}");
+            let db = create_db_pool().await?;
             scan_directory(&db, &directory).await?;
         }
         Commands::DbStatus => {
-            info!("Database status");
+            let db = create_db_pool().await?;
             db_status(&db).await?;
         }
         Commands::ScanFile { path } => {
-            info!("Scan file: {path}");
+            let db = create_db_pool().await?;
             scan_single_file(&db, &path).await?;
         }
-        Commands::Deemix { command } => {
-            crate::deemix::cli::run(command).await?;
-        }
         Commands::Dump { output } => {
-            crate::dump::export_dump(&db, &output).await?;
+            let db = create_db_pool().await?;
+            momos_music_manager::dump::export_dump(&db, &output).await?;
         }
         Commands::Restore { input } => {
-            crate::dump::import_dump(&db, &input).await?;
+            let db = create_db_pool().await?;
+            momos_music_manager::dump::import_dump(&db, &input).await?;
         }
-        #[cfg(target_os = "macos")]
         Commands::InstallLaunchAgent => {
-            crate::launch_agent::install()?;
+            #[cfg(target_os = "macos")]
+            {
+                momos_music_manager::launch_agent::install()?;
+                println!("Launch agent installed");
+            }
+            #[cfg(not(target_os = "macos"))]
+            println!("Launch agents are only supported on macOS");
         }
-        #[cfg(not(target_os = "macos"))]
-        Commands::InstallLaunchAgent => {
-            anyhow::bail!("Launch agent is only supported on macOS");
-        }
-        #[cfg(target_os = "macos")]
         Commands::UninstallLaunchAgent => {
-            crate::launch_agent::uninstall()?;
+            #[cfg(target_os = "macos")]
+            {
+                momos_music_manager::launch_agent::uninstall()?;
+                println!("Launch agent removed");
+            }
+            #[cfg(not(target_os = "macos"))]
+            println!("Launch agents are only supported on macOS");
         }
-        #[cfg(not(target_os = "macos"))]
-        Commands::UninstallLaunchAgent => {
-            anyhow::bail!("Launch agent is only supported on macOS");
-        }
-        #[cfg(target_os = "macos")]
         Commands::ServiceStatus => {
-            let status = crate::launch_agent::status()?;
-            println!("{}", status);
+            #[cfg(target_os = "macos")]
+            {
+                match momos_music_manager::launch_agent::status() {
+                    Ok(status) => println!("{}", status),
+                    Err(e) => eprintln!("Error: {}", e),
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            println!("Launch agents are only supported on macOS");
         }
-        #[cfg(not(target_os = "macos"))]
-        Commands::ServiceStatus => {
-            anyhow::bail!("Launch agent is only supported on macOS");
+        Commands::Deemix { command } => {
+            momos_music_manager::deemix::cli::run(command).await?;
         }
     }
 
     Ok(())
 }
 
-async fn serve(
-    db: Pool<Sqlite>,
-    host: String,
-    port: u16,
-    public_url: Option<String>,
-) -> Result<()> {
-    let config = crate::config::ServiceCredentials::load();
-    // Note: config is reloaded here for the serve() scope;
-    // main() already loaded it, but we need an owned copy for AppState.
-    // In a future refactor, main() could pass it in directly.
-    let task_manager = crate::tasks::TaskManager::new();
+/// Create a database pool from the configured URL (default: `app.db`).
+async fn create_db_pool() -> Result<Pool<Sqlite>> {
+    let config = ServiceCredentials::load();
+    let url = &config.database_url;
+    let pool = SqlitePool::connect(url).await?;
+    momos_music_manager::db::init_db(&pool).await?;
+    Ok(pool)
+}
 
-    // CLI --public-url flag takes highest priority, then env var/config.toml
+/// Start the HTTP server with all background tasks.
+async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()> {
+    let config = ServiceCredentials::load();
+    let db = create_db_pool().await?;
+    let task_manager = TaskManager::new();
+
     let public_url = public_url.or_else(|| config.server_public_url.clone());
 
-    // Clone for subscription poller (background task needs own ownership)
+    // Clones for background tasks
     let poller_db = db.clone();
     let poller_config = config.clone();
-
-    // Clone for folder watcher (needs own pool before db is moved into AppState)
     let watcher_db = db.clone();
     let poller_cancel = tokio_util::sync::CancellationToken::new();
-
-    // Clone for global poller
     let global_poller_db = db.clone();
     let global_poller_config = config.clone();
     let global_interval = config.global_poll_interval_secs;
     let global_cancel = poller_cancel.clone();
-
     let pruner_tm = task_manager.clone();
-
-    // Extract maintainer config + cancel token before config/poller_cancel are moved
     let maint_interval = config.maintainer_interval_secs;
     let maint_full_scan_max_age = config.maintainer_full_scan_max_age_secs;
     let maint_backup_discovery_interval = config.maintainer_backup_discovery_interval_secs;
@@ -333,7 +184,7 @@ async fn serve(
         db,
         config,
         task_manager,
-        embeddings: tokio::sync::Mutex::new(None),
+        embeddings: Mutex::new(None),
         category_means: tokio::sync::Mutex::new(None),
         public_url,
     });
@@ -346,7 +197,7 @@ async fn serve(
 
     // Spawn subscription poller — polls subscribed playlists every 30s
     let poller_handle = tokio::spawn(async move {
-        crate::poller::start_subscription_poller(
+        momos_music_manager::poller::start_subscription_poller(
             poller_db,
             poller_config,
             poller_cancel,
@@ -354,14 +205,12 @@ async fn serve(
         )
         .await;
     });
-    // Keep poller alive for the lifetime of the server
     let _poller_handle = poller_handle;
 
-    // Spawn background task pruner — removes completed/failed/cancelled tasks
-    // that are older than 5 minutes, checking every 60 seconds
+    // Spawn background task pruner — removes completed/failed/cancelled tasks older than 5 min
     tokio::spawn(async move {
-        let prune_age = std::time::Duration::from_secs(300); // 5 minutes
-        let check_interval = std::time::Duration::from_secs(60);
+        let prune_age = Duration::from_secs(300);
+        let check_interval = Duration::from_secs(60);
         loop {
             tokio::time::sleep(check_interval).await;
             pruner_tm.prune_old_tasks(prune_age).await;
@@ -369,17 +218,20 @@ async fn serve(
     });
 
     // Start folder watcher — polls active folders every 5 minutes
-    let mut folder_watcher =
-        crate::watch::FolderWatcher::new(watcher_db, crate::watch::FolderWatcherConfig::default());
+    let mut folder_watcher = momos_music_manager::watch::FolderWatcher::new(
+        watcher_db,
+        momos_music_manager::watch::FolderWatcherConfig::default(),
+    );
     if let Err(e) = folder_watcher.start() {
         tracing::error!("Failed to start folder watcher: {}", e);
     } else {
         tracing::info!("Folder watcher started");
     }
-    // Spawn global playlist poller — checks ALL playlists via snapshot_id comparison
+
+    // Spawn global playlist poller
     if global_interval > 0 && global_poller_config.is_spotify_configured() {
         tokio::spawn(async move {
-            crate::global_poller::start_global_poller(
+            momos_music_manager::global_poller::start_global_poller(
                 global_poller_db,
                 global_poller_config,
                 global_interval,
@@ -398,23 +250,21 @@ async fn serve(
         );
     }
 
-    // Keep alive for server lifetime
     let _folder_watcher = folder_watcher;
 
-    // Auto-reconcile on startup: for each folder with a backup_path,
-    // trigger a backup task to reconcile files already on NAS.
+    // Auto-reconcile on startup
     let recon_db = state.db.clone();
     let recon_tm = state.task_manager.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        let folders: Vec<crate::db::Folder> = sqlx::query_as::<_, crate::db::Folder>(
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let folders: Vec<momos_music_manager::db::Folder> = sqlx::query_as::<_, momos_music_manager::db::Folder>(
             "SELECT * FROM folders WHERE backup_path IS NOT NULL AND backup_path != '' AND auto_backup = 1",
         )
         .fetch_all(&recon_db)
         .await
         .unwrap_or_default();
         for folder in folders {
-            let unbacked = crate::db::get_unbacked_up_files(&recon_db, folder.id)
+            let unbacked = momos_music_manager::db::get_unbacked_up_files(&recon_db, folder.id)
                 .await
                 .unwrap_or_default();
             if !unbacked.is_empty() {
@@ -423,7 +273,10 @@ async fn serve(
                     folder.folder_path,
                     unbacked.len()
                 );
-                crate::tasks::start_backup_folder_task(&recon_tm, &recon_db, folder.id).await;
+                momos_music_manager::tasks::start_backup_folder_task(
+                    &recon_tm, &recon_db, folder.id,
+                )
+                .await;
             } else {
                 tracing::info!(
                     "Auto-reconcile: folder '{}' already fully backed up",
@@ -433,11 +286,11 @@ async fn serve(
         }
     });
 
-    // Start maintainer — background health checks
+    // Start maintainer
     if maint_interval > 0 {
         let maint_db = state.db.clone();
         tokio::spawn(async move {
-            crate::maintainer::start_maintainer(
+            momos_music_manager::maintainer::start_maintainer(
                 maint_db,
                 maint_interval,
                 maint_full_scan_max_age,
@@ -451,15 +304,14 @@ async fn serve(
         info!("Maintainer disabled (interval=0)");
     }
 
-    // Auto-backup poller: every 10 min, check folders with auto_backup enabled
-    // and trigger backup if unbacked files exist.
+    // Auto-backup poller: every 10 min
     let auto_db = state.db.clone();
     let auto_tm = state.task_manager.clone();
     tokio::spawn(async move {
-        let interval = std::time::Duration::from_secs(600);
+        let interval = Duration::from_secs(600);
         loop {
             tokio::time::sleep(interval).await;
-            let folders: Vec<crate::db::Folder> = match sqlx::query_as::<_, crate::db::Folder>(
+            let folders: Vec<momos_music_manager::db::Folder> = match sqlx::query_as::<_, momos_music_manager::db::Folder>(
                 "SELECT * FROM folders WHERE auto_backup = 1 AND backup_path IS NOT NULL AND backup_path != ''"
             )
             .fetch_all(&auto_db)
@@ -472,49 +324,46 @@ async fn serve(
                 }
             };
             for folder in &folders {
-                let unbacked = match crate::db::get_unbacked_up_files(&auto_db, folder.id).await {
-                    Ok(f) => f,
-                    Err(e) => {
-                        tracing::warn!(
-                            "Auto-backup: failed to check files for folder {}: {}",
-                            folder.id,
-                            e
-                        );
-                        continue;
-                    }
-                };
+                let unbacked =
+                    match momos_music_manager::db::get_unbacked_up_files(&auto_db, folder.id).await
+                    {
+                        Ok(f) => f,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Auto-backup: failed to check files for folder {}: {}",
+                                folder.id,
+                                e
+                            );
+                            continue;
+                        }
+                    };
                 if !unbacked.is_empty() {
                     tracing::info!(
                         "Auto-backup: folder '{}' has {} unbacked files — starting backup task",
                         folder.folder_path,
                         unbacked.len()
                     );
-                    crate::tasks::start_backup_folder_task(&auto_tm, &auto_db, folder.id).await;
+                    momos_music_manager::tasks::start_backup_folder_task(
+                        &auto_tm, &auto_db, folder.id,
+                    )
+                    .await;
                 }
             }
         }
     });
 
-    // Build our application with routes.
-    // API routes take priority; the catch-all {*path} handles everything else
-    // by serving the embedded frontend assets (with SPA fallback to index.html).
-    let app = Router::new()
-        .without_v07_checks()
-        .merge(api::router())
-        .route("/", get(root_handler))
-        .route("/{*path}", get(static_handler))
-        .layer(CorsLayer::permissive())
-        .with_state(state);
+    // Build the application with routes.
+    let app = momos_music_manager::build_router(state);
 
     let address = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&address).await?;
     let actual_addr = listener.local_addr()?;
     info!("Listening on http://{addr}/", addr = actual_addr);
-
     info!(
         "🚀 Momo's Music Manager v{} started",
         env!("CARGO_PKG_VERSION")
     );
+
     axum::serve(listener, app).await?;
 
     Ok(())
@@ -522,34 +371,25 @@ async fn serve(
 
 async fn scan_directory(pool: &Pool<Sqlite>, directory: &str) -> Result<()> {
     use std::path::Path;
-
     let path = Path::new(directory);
     if !path.exists() {
         anyhow::bail!("Directory does not exist: {}", directory);
     }
-
     info!("Scanning directory: {}", path.display());
-
-    // Use db module to scan directory
-    db::scan_directory(pool, path).await?;
-
+    momos_music_manager::db::scan_directory(pool, path).await?;
     Ok(())
 }
 
 async fn scan_single_file(pool: &Pool<Sqlite>, path_str: &str) -> Result<()> {
-    use crate::db;
     use std::path::Path;
-
     let path = Path::new(path_str);
     if !path.exists() {
         anyhow::bail!("File does not exist: {}", path_str);
     }
-
     println!("Scanning single file: {}", path.display());
     println!();
 
-    // Extract metadata without storing to database
-    let file = db::extract_audio_metadata_from_file(path).await?;
+    let file = momos_music_manager::db::extract_audio_metadata_from_file(path).await?;
 
     println!("Metadata:");
     println!("  Title:       {:?}", file.title);
@@ -576,24 +416,15 @@ async fn scan_single_file(pool: &Pool<Sqlite>, path_str: &str) -> Result<()> {
     println!("  File Size:   {} bytes", file.file_size);
     println!();
 
-    // Also store it to database for verification
     println!("Storing to database...");
-    match db::scan_and_store_file(pool, path).await {
-        Ok(stored) => {
-            println!("Stored with id={}", stored.id);
-        }
-        Err(e) => {
-            println!("Failed to store: {}", e);
-        }
-    }
-
+    let stored = momos_music_manager::db::scan_and_store_file(pool, Path::new(path_str)).await?;
+    println!("Stored with id: {}", stored.id);
     Ok(())
 }
 
 async fn db_status(pool: &Pool<Sqlite>) -> Result<()> {
     use sqlx::Row;
 
-    // Check tables
     let tables = sqlx::query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         .fetch_all(pool)
         .await?;
@@ -604,7 +435,6 @@ async fn db_status(pool: &Pool<Sqlite>) -> Result<()> {
         println!("  - {}", name);
     }
 
-    // Count records in main tables
     let files_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files")
         .fetch_one(pool)
         .await
@@ -624,4 +454,97 @@ async fn db_status(pool: &Pool<Sqlite>) -> Result<()> {
     println!("  Tags: {}", tags_count);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn args<'a>(args: &'a [&'a str]) -> Vec<&'a str> {
+        let mut v = vec!["momos-music-manager"];
+        v.extend_from_slice(args);
+        v
+    }
+
+    #[test]
+    fn test_cli_serve_parses() {
+        let matches = Cli::command()
+            .try_get_matches_from(args(&["serve", "--host", "127.0.0.1", "--port", "3000"]))
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("serve"));
+    }
+
+    #[test]
+    fn test_cli_serve_parses_minimal() {
+        let matches = Cli::command()
+            .try_get_matches_from(args(&["serve"]))
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("serve"));
+    }
+
+    #[test]
+    fn test_cli_scan_file_parses() {
+        let matches = Cli::command()
+            .try_get_matches_from(args(&["scan-file", "/path/to/file.flac"]))
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("scan-file"));
+    }
+
+    #[test]
+    fn test_cli_dump_parses() {
+        let matches = Cli::command()
+            .try_get_matches_from(args(&["dump"]))
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("dump"));
+    }
+
+    #[test]
+    fn test_cli_dump_custom_output() {
+        let matches = Cli::command()
+            .try_get_matches_from(args(&["dump", "--output", "/tmp/custom.json"]))
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("dump"));
+        let sub = matches.subcommand_matches("dump").unwrap();
+        let output: String = sub.get_one::<String>("output").cloned().unwrap();
+        assert_eq!(output, "/tmp/custom.json");
+    }
+
+    #[test]
+    fn test_cli_restore_parses() {
+        let matches = Cli::command()
+            .try_get_matches_from(args(&["restore", "--input", "/tmp/dump.json"]))
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("restore"));
+    }
+
+    #[test]
+    fn test_cli_scan_parses() {
+        let matches = Cli::command()
+            .try_get_matches_from(args(&["scan", "/music/stems"]))
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("scan"));
+    }
+
+    #[test]
+    fn test_cli_db_status_parses() {
+        let matches = Cli::command()
+            .try_get_matches_from(args(&["db-status"]))
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("db-status"));
+    }
+
+    #[test]
+    fn test_cli_invalid_subcommand() {
+        let result = Cli::command().try_get_matches_from(args(&["bogus"]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cli_serve_public_url() {
+        let matches = Cli::command()
+            .try_get_matches_from(args(&["serve", "--public-url", "https://example.com"]))
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("serve"));
+    }
 }

@@ -1,6 +1,6 @@
 # Momo's Music Manager — Agent Guidance
 
-> **Last Updated**: 2026-06-03 — v0.7.0
+> **Last Updated**: 2026-06-04 — v0.7.0
 
 ---
 
@@ -53,6 +53,7 @@ When bundling features for a release:
 13. **Sync State**: In-memory `TaskManager` — tasks auto-pruned 5 min after completion
 14. **Config Priority** (highest wins): Env vars > `~/.config/momos-music-manager/config.toml` > built-in defaults
 15. **Server-Side Filtering**: All filters must be server-side on paginated pages. Client-side filtering after pagination breaks page counts.
+16. **Testing**: 432 tests (208 unit + 10 binary + 214 integration). Every endpoint tested, every query param covered. ≥75% line coverage target. See `tests/README.md`.
 
 ---
 
@@ -133,6 +134,31 @@ git branch --show-current && git status --short | head -20
 
 ---
 
+### Testing
+
+- **`cargo test` is the single source of truth.** Every API endpoint, every filter
+  parameter, every query variation must have a corresponding integration test.
+  Agents must never merge code that doesn't pass `cargo test`.
+- **Every plan that adds or modifies an API endpoint or filter parameter MUST
+  include "add/update integration test" as an acceptance criterion.** Tests are
+  not optional — they are part of the feature contract.
+- **Coverage threshold**: ≥75% line coverage (via `cargo llvm-cov`). Run
+  `cargo llvm-cov --fail-under-lines 75` before merging.
+- **432 tests**: 208 unit + 10 binary + 214 integration. See `tests/README.md`
+  for the full breakdown of which file covers which endpoint.
+- **Unit tests** go in `#[cfg(test)] mod tests` within the source file for
+  pure functions. Integration tests go in `tests/api_*.rs` files.
+- **Integration tests use a self-contained SQLite DB.** No external server, no
+  real data. Each test creates a fresh in-memory DB, runs all migrations, seeds
+  hand-crafted data that exercises edge cases, then hits the API and asserts
+  exact results (row counts, field values, response shapes).
+- **Test files mirror API structure.** `tests/api_files.rs` tests `/api/files*`,
+  `tests/api_tracks.rs` tests `/api/tracks*`, etc. When adding a new endpoint,
+  the test file is unambiguous.
+- **Migration integrity is tested.** A dedicated test creates a fresh DB and
+  runs all migrations end-to-end. If a migration breaks the chain, `cargo test`
+  catches it immediately — no need to manually `rm -f app.db`.
+
 ## Dev Commands
 
 ```bash
@@ -144,6 +170,21 @@ cd frontend && python3 -m http.server 8000
 
 # Kill everything
 ./kill-all.sh
+
+# Run integration tests (self-contained, no server needed)
+cargo test
+
+# Run integration tests with output (see println! / dbg!)
+cargo test -- --nocapture
+
+# Run a specific test file
+cargo test --test api_files
+
+# Run a single test by name
+cargo test files_filter_is_local_true
+
+# Smoke test against a running server (legacy, light use only)
+./test.sh
 
 # Scan single file for metadata debugging
 cargo run -- scan-file /path/to/file.stem.m4a
@@ -5270,3 +5311,1624 @@ backup_discovery_interval_secs = 604800 # backup discovery interval (default 7d)
 - [ ] Cancel token honored for clean shutdown
 - [ ] Zero cost when idle (timestamp checks only)
 - [ ] cargo build passes
+
+---
+
+## Plan: integration-test-harness
+
+**Status**: done ✅
+**Branch**: `feat/integration-test-harness`
+**Ready for review**: no
+**Depends on**: nothing
+**Migration needed**: no
+
+### Description
+
+Build a self-contained Rust integration test harness. Replaces the curl-based
+`test.sh` smoke tests with deterministic, fast tests that create a fresh SQLite
+DB, run all migrations, seed hand-crafted data, hit every API endpoint with
+every filter combination, and assert exact results. Run with `cargo test` — no
+server needed, runs in seconds.
+
+### Why
+
+- Agents need fast, deterministic feedback. `cargo test` = single source of truth.
+- curl-based tests against real data are fragile (data changes, manual server).
+- 16 migrations, 14+ API endpoints, 50+ filter params — all untested.
+- Every future plan MUST include tests (enforced by Section 1 Testing rules).
+
+### Architecture: How `cargo test` creates a full app
+
+1. **In-memory SQLite** with `datetime` → `UnixEpoch` conversion for
+   `unixepoch()` compatibility (SQLite needs `DATETIME` format, Rust supplies
+   Unix timestamps).
+2. **Run all migrations** from `migrations/` directory, in order.
+3. **Seed hand-crafted data** that exercises every edge case and view chain.
+4. **Create a test `Router`** via a new `build_router()` function (extracted
+   from `serve()` — see Phase 1).
+5. **Hit endpoints with `reqwest`** (already a dependency), parse JSON
+   responses, assert exact values.
+
+#### Why in-memory SQLite instead of temp file?
+
+In-memory with `datetime` type affinity works for all our use cases:
+`unixepoch()` returns Unix timestamps, `datetime(unixepoch(), ...)` works.
+Rust code stores `i64` Unix timestamps. The only caveat: `date('now')` returns
+UTC date string, not Unix timestamp. Our queries use `unixepoch('now', ...)`
+which works correctly in memory.
+
+### Phase 1: Extract `build_router()` from `serve()`
+
+**File**: `src/main.rs`
+
+Move all `.route()` calls from `serve()` into a standalone function:
+
+```rust
+/// Build the Axum router from AppState. Extracted for testability.
+/// Does NOT spawn background tasks (pollers, watchers, maintainer).
+pub fn build_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/", get(root_handler))
+        .route("/api/storage/status", get(api::storage_status_handler))
+        .route("/api/storage/prune-preview", post(api::prune_preview_handler))
+        // ... all existing routes ...
+        .fallback(get(static_handler))
+        .layer(CorsLayer::permissive())
+}
+```
+
+In `serve()`, replace inline router construction with `build_router(state.clone())`.
+
+**This is a pure refactor — zero behavior change.**
+
+### Phase 2: Test helpers
+
+**File**: `tests/common/mod.rs`
+
+```rust
+use sqlx::{Pool, Sqlite, SqlitePool};
+use axum::Router;
+use std::sync::Arc;
+
+/// Create an in-memory SQLite DB, run all migrations, return pool.
+pub async fn create_test_db() -> Pool<Sqlite> {
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    // Enable WAL + normal sync for in-memory (fast, no durability concern)
+    sqlx::query("PRAGMA journal_mode=WAL").execute(&pool).await.unwrap();
+    // Run all migration files in order
+    run_migrations(&pool).await;
+    pool
+}
+
+/// Run all .sql files from migrations/ in numeric order.
+async fn run_migrations(pool: &Pool<Sqlite>) {
+    let mut files: Vec<_> = std::fs::read_dir("migrations")
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map_or(false, |e| e == "sql"))
+        .collect();
+    files.sort();
+    for path in &files {
+        let sql = std::fs::read_to_string(path).unwrap();
+        sqlx::query(&sql).execute(pool).await.unwrap();
+    }
+}
+
+/// Build a test AppState with the given DB pool.
+pub async fn test_app_state(pool: Pool<Sqlite>) -> Arc<AppState> {
+    Arc::new(AppState {
+        db: pool,
+        config: ServiceCredentials::defaults_for_test(),
+        task_manager: TaskManager::new(),
+        embeddings: Mutex::new(None),
+        category_means: Mutex::new(None),
+        public_url: None,
+    })
+}
+
+/// Create a full test app (DB + migrations + router).
+pub async fn test_app() -> (Router, Pool<Sqlite>) {
+    let pool = create_test_db().await;
+    let state = test_app_state(pool.clone()).await;
+    let router = momos_music_manager::build_router(state);
+    (router, pool)
+}
+```
+
+**Note**: `AppState` and `TaskManager` need to be `pub` (or at least
+`pub(crate)`). If they aren't already, make them so.
+
+### Phase 3: Domain test files
+
+Each test file follows the same pattern:
+
+```rust
+// tests/api_files.rs
+mod common;
+use axum_test::TestServer;  // or axum::test helpers
+
+#[tokio::test]
+async fn files_list_returns_paginated_results() {
+    let (app, pool) = common::test_app().await;
+    common::seed_basic_files(&pool).await;  // inserts 5 files
+
+    let server = TestServer::new(app).unwrap();
+    let resp = server.get("/api/files?limit=3").await;
+    resp.assert_status_ok();
+
+    let json: serde_json::Value = resp.json();
+    let files = json["data"].as_array().unwrap();
+    assert_eq!(files.len(), 3, "limit=3 should return 3 files");
+}
+```
+
+#### Test files to create
+
+| File                           | Covers                                                                       |
+| ------------------------------ | ---------------------------------------------------------------------------- |
+| `tests/common/mod.rs`          | DB creation, migration runner, seed helpers, test app factory                |
+| `tests/migration_integrity.rs` | All 16 migrations run cleanly, schema has expected tables/views              |
+| `tests/api_files.rs`           | All `FilesQuery` params: `isLocal`, `backedUp`, `safeToDelete`, `fileTypes`, |
+|                                | `search`, `sort`, `order`, `tags`, `pmvCategories`, `pmvAggregate`,          |
+|                                | `commentStatuses`, `linkedOnly`, `nonDefaultOnly`, `untaggedOnly`,           |
+|                                | `keys`, plus count endpoint parity                                           |
+| `tests/api_tracks.rs`          | All `TracksQuery` params: `services`, `fileTypes`, `fileTypeAgg`,            |
+|                                | `hasLocal`, `hasBackup`, `playlists`, `tags`, `search`, `sort`,              |
+|                                | plus `/api/tracks/{id}/detail` with `inBackpack` + WAV variants,             |
+|                                | plus count endpoint parity                                                   |
+| `tests/api_playlists.rs`       | `service` filter, `search`, `archive` filter, count, pagination              |
+| `tests/api_tags.rs`            | `search`, `sort`, `categoryId`, `backpack` toggle (`PUT`), count             |
+| `tests/api_storage.rs`         | `GET /api/storage/status` (all fields), `POST /api/storage/prune-preview`    |
+|                                | (hasStemVariant, reasons), `POST /api/storage/prune` (if safe)               |
+| `tests/api_folders.rs`         | Folder list, folder detail, backup config update                             |
+| `tests/api_tasks.rs`           | Task list, task detail                                                       |
+| `tests/api_digging.rs`         | `POST /api/digging/suggest` (seed tag + seed IDs), `/api/files/{id}/stream`  |
+| `tests/api_file_variants.rs`   | `GET /api/files/{id}/variants` (stemType, WAV source grouping)               |
+
+**Each test file is ~100–300 lines.** Total: ~2,000 lines of test code.
+
+### Seed data design principles
+
+- **Minimal, hand-crafted rows.** ~30–50 rows total across all tables.
+- **One edge case per row.** A file with ISRC but no stem variant. A file with
+  stem variant. A file backed up but not local. A WAV with `source_of`. A tag
+  with `backpack=true`. A track in multiple playlists.
+- **Deterministic IDs.** No `AUTOINCREMENT` guessing — seed inserts include
+  explicit IDs where needed for cross-table references.
+- **Reusable seed functions.** `common::seed_basic_files()`,
+  `common::seed_track_with_variants()`, etc. Tests compose them.
+
+### How tests stay up-to-date
+
+**Mechanism 1: Hard rule in Section 1.** Every plan that touches an API endpoint
+or filter MUST include "add/update integration test" as acceptance criterion.
+Agents are instructed to enforce this.
+
+**Mechanism 2: Obvious file placement.** The test file name mirrors the API path:
+`tests/api_files.rs` ↔ `/api/files*`. When an agent modifies `src/api.rs`'s file
+handlers, the corresponding test file is unambiguous.
+
+**Mechanism 3: Meta-tests.** Each test file has a "count" test that asserts the
+number of top-level filter params. If a param is added to the query struct but
+no test exercises it, the count changes and the meta-test fails. Example:
+
+```rust
+#[test]
+fn all_files_query_params_have_coverage() {
+    // grep FilesQuery fields and compare to test function count
+    // This is a canary — fails when a param is added without a test
+}
+```
+
+This is a lightweight lint, not a full coverage tool. If it becomes annoying,
+remove it — the hard rule (Mechanism 1) is the real enforcement.
+
+**Mechanism 4: Migration integrity test.** `tests/migration_integrity.rs` creates
+a fresh DB and runs all migrations. If a migration breaks (wrong order, syntax
+error, missing dependency), this test catches it before any other test runs.
+
+### Dependencies
+
+No new dependencies. `reqwest` is already in `Cargo.toml`. `axum::test` is
+built-in (behind the `axum/test` feature, enable if needed). Alternatively,
+`axum_test` crate for ergonomic `TestServer` — or just use `reqwest` against a
+bound port with `tokio::net::TcpListener`.
+
+### Files to create
+
+- `tests/common/mod.rs` — test helpers, migration runner, seed functions
+- `tests/migration_integrity.rs` — migration chain test
+- `tests/api_files.rs` — files endpoint tests
+- `tests/api_tracks.rs` — tracks endpoint tests
+- `tests/api_playlists.rs` — playlists endpoint tests
+- `tests/api_tags.rs` — tags endpoint tests
+- `tests/api_storage.rs` — storage endpoint tests
+- `tests/api_folders.rs` — folders endpoint tests
+- `tests/api_tasks.rs` — tasks endpoint tests
+- `tests/api_digging.rs` — digging suggest + audio stream tests
+- `tests/api_file_variants.rs` — file variants endpoint tests
+
+### Files to modify
+
+- `src/main.rs` — extract `build_router()` from `serve()`; make `AppState` fields `pub`
+- `src/config.rs` — add `ServiceCredentials::defaults_for_test()` (or `#[cfg(test)]` constructor)
+- `Cargo.toml` — enable `axum/test` feature if not already (check)
+
+### Acceptance Criteria
+
+- [ ] `build_router()` extracted; `serve()` delegates to it; `cargo build` passes
+- [ ] `cargo test` creates fresh in-memory DB, runs all 16 migrations, no errors
+- [ ] `tests/migration_integrity.rs`: asserts all expected tables + views exist
+- [ ] `tests/api_files.rs`: ≥15 tests covering every `FilesQuery` param + count parity
+- [ ] `tests/api_tracks.rs`: ≥12 tests covering every `TracksQuery` param + detail endpoint + count parity
+- [ ] `tests/api_playlists.rs`: ≥5 tests (list, filter, search, archive, pagination)
+- [ ] `tests/api_tags.rs`: ≥5 tests (list, search, sort, backpack toggle, count)
+- [ ] `tests/api_storage.rs`: ≥4 tests (status fields, prune-preview hasStemVariant, prune-preview reasons)
+- [ ] `tests/api_digging.rs`: ≥3 tests (seed by tag, seed by file IDs, audio stream range request)
+- [ ] `tests/api_file_variants.rs`: ≥3 tests (stem variants, WAV source grouping, no-variants)
+- [ ] All tests pass: `cargo test` exits 0
+- [ ] `cargo test` completes in <10 seconds
+- [ ] `test.sh` still works as legacy smoke test (no changes needed to test.sh)
+
+---
+
+## Plan: test-coverage-100
+
+**Status**: proposed
+**Branch**: `feat/test-coverage-100`
+**Ready for review**: no
+**Depends on**: `feat/integration-test-harness`
+**Migration needed**: no
+
+### Description
+
+Achieve ~100% backend route coverage. Currently 17/59 routes tested (29%).
+The goal is to test every route that doesn't require external services
+(Spotify OAuth, SSH/NAS, WebSocket, ML models). Mutations (POST/PUT)
+get basic smoke tests; read endpoints get filter-param coverage.
+
+### Current coverage
+
+| Domain         | Tested         | Untested                                                                                      |
+| -------------- | -------------- | --------------------------------------------------------------------------------------------- |
+| Files          | 7 of 12 routes | `latest`, `service-links`, `{id}/detail`, `{id}/write-comment`, `key-comparison`              |
+| Tracks         | 4 of 7 routes  | `{id}`, `needs-comment-count`, `write-comments`                                               |
+| Tags           | 3 of 8 routes  | `POST` (create), `{id}`, `curation-queue`, `unreviewed`, `categorize`                         |
+| Playlists      | 1 of 4 routes  | `local` (POST), `{id}/archive`, `{id}`                                                        |
+| Storage        | 2 of 5 routes  | `prune`, `backup/{id}`, `discover-backup/{id}`                                                |
+| Folders        | 0 of 5 routes  | All 5                                                                                         |
+| Tasks          | 0 of 2 routes  | Both                                                                                          |
+| Digging        | 1 of 3 routes  | `search`, `tracks`                                                                            |
+| Infrastructure | 1 of 8 routes  | `health`, `dump`, `restore`, `tag-energy-levels`×4, `tags/{id}/children`, `tags/{id}/suggest` |
+
+**Untested filter params on already-tested endpoints:**
+
+| Endpoint             | Missing params                                                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `GET /api/files`     | `commentStatuses`, `linkedOnly`, `nonDefaultOnly`, `keys`, `safeToDelete`, `pmvCategories`, `pmvAggregate`, `bpmMin`, `bpmMax` |
+| `GET /api/tracks`    | `hasLocal`, `hasBackup`                                                                                                        |
+| `GET /api/playlists` | `archive`, `categories`, `subscribed`, `stale`                                                                                 |
+
+### Categorization of untested routes
+
+**Tier A — Fully testable with seed data alone (37 routes):**
+All CRUD reads, writes, and infrastructure endpoints that work against
+SQLite with seeded data. No external services needed.
+
+**Tier B — Partially testable (2 routes):**
+`/api/services/{service}/sync` and `/api/services/{service}/reset` —
+can test the "not configured" error response.
+
+**Tier C — Not testable in CI (7 routes):**
+OAuth (`/api/services/{service}/auth`, `/callback`), WebSocket (`/ws/spotify`),
+SSH (`/api/backup/test`, `/api/backup/explore`), ML (`/api/embeddings/*`),
+Traktor (`/api/traktor/import` — needs `.nml` file on disk, actually testable
+if we write an inline NML string to a temp file before calling).
+
+### Exclusions (routes we deliberately skip)
+
+| Route                          | Reason                                                       |
+| ------------------------------ | ------------------------------------------------------------ |
+| `/api/services/{service}/auth` | OAuth redirect — can't test without real Spotify credentials |
+| `/callback`                    | OAuth callback — same                                        |
+| `/ws/spotify`                  | WebSocket — requires real-time auth token                    |
+| `/api/backup/test`             | SSH connection test — needs NAS                              |
+| `/api/backup/explore`          | SSH file listing — needs NAS                                 |
+| `/api/embeddings/status`       | Requires ML model download (BERT, ~500MB)                    |
+| `/api/embeddings/reset-review` | Same                                                         |
+
+### Phase 1: Missing filter params (highest ROI — fills existing test files)
+
+**File**: `tests/api_files.rs` — add ~8 tests
+
+| Test                                         | What it proves                                                  |
+| -------------------------------------------- | --------------------------------------------------------------- |
+| `files_filter_comment_statuses_needs_update` | `?commentStatuses=needs_update` filters correctly               |
+| `files_filter_comment_statuses_up_to_date`   | `?commentStatuses=up_to_date` filters correctly                 |
+| `files_filter_linked_only`                   | `?linkedOnly=true` returns only files with service links        |
+| `files_filter_unlinked`                      | `?unlinked=true` returns only files without service links       |
+| `files_filter_non_default_only`              | `?nonDefaultOnly=true` returns only files with non-Setlist tags |
+| `files_filter_key`                           | `?key=4m` returns files matching that Camelot key               |
+| `files_filter_safe_to_delete`                | `?safeToDelete=true` filters correctly                          |
+| `files_filter_pmv_categories`                | `?pmvCategories=p,m` returns files with Phase/Mood tags         |
+| `files_filter_pmv_aggregate`                 | `?pmvAggregate=full` returns files with all 3 PMV tags          |
+
+**File**: `tests/api_tracks.rs` — add ~3 tests
+
+| Test                       | What it proves                                           |
+| -------------------------- | -------------------------------------------------------- |
+| `tracks_filter_has_local`  | `?hasLocal=true` filters to tracks with local files      |
+| `tracks_filter_has_backup` | `?hasBackup=true` filters to tracks with backed-up files |
+| `tracks_single_by_id`      | `GET /api/tracks/1` returns single track                 |
+
+**File**: `tests/api_playlists.rs` — add ~4 tests
+
+| Test                                | What it proves                                       |
+| ----------------------------------- | ---------------------------------------------------- |
+| `playlists_filter_archive_archived` | `?archive=archived` returns only archived playlists  |
+| `playlists_filter_archive_active`   | `?archive=active` returns only active playlists      |
+| `playlists_filter_subscribed`       | `?subscribed=true` returns only subscribed playlists |
+| `playlists_filter_categories`       | `?categories=1,2` filters by tag category IDs        |
+
+### Phase 2: Read-only endpoints (existing domains, new tests)
+
+#### `tests/api_folders.rs` — NEW FILE
+
+| Test                   | What it proves                                        |
+| ---------------------- | ----------------------------------------------------- |
+| `folders_list`         | `GET /api/folders` returns all seeded folders         |
+| `folders_count`        | `GET /api/folders/count` matches list length          |
+| `folders_single`       | `GET /api/folders/{id}/stats` returns folder metadata |
+| `folders_toggle_watch` | `POST /api/folders/{id}/watch` toggles active flag    |
+| `folders_not_found`    | `GET /api/folders/9999/stats` returns 404             |
+
+#### `tests/api_tasks.rs` — NEW FILE
+
+| Test                       | What it proves                                     |
+| -------------------------- | -------------------------------------------------- |
+| `tasks_list_empty`         | `GET /api/tasks` returns empty array on fresh DB   |
+| `tasks_list_with_task`     | After triggering a scan, returns tasks with status |
+| `tasks_single_not_found`   | `GET /api/tasks/xxx-xxx` returns 404               |
+| `tasks_list_status_filter` | `?status=completed` filters correctly              |
+
+#### Extend existing files
+
+| File                     | Add                                                                                       |
+| ------------------------ | ----------------------------------------------------------------------------------------- |
+| `tests/api_files.rs`     | `files_latest` — `GET /api/files/latest` returns most recent                              |
+| `tests/api_files.rs`     | `files_service_links` — `GET /api/files/service-links` returns Spotify/SC links           |
+| `tests/api_files.rs`     | `files_detail` — `GET /api/files/1/detail` returns full metadata                          |
+| `tests/api_files.rs`     | `files_key_comparison` — `GET /api/files/key-comparison?tag=Groovy` returns BPM/key table |
+| `tests/api_tags.rs`      | `tags_single_by_id` — `GET /api/tags/7` returns tag with category info                    |
+| `tests/api_tags.rs`      | `tags_curation_queue` — `GET /api/tags/curation-queue` returns Setlist tags               |
+| `tests/api_tags.rs`      | `tags_unreviewed` — `GET /api/tags/unreviewed` returns tags without parents               |
+| `tests/api_playlists.rs` | `playlists_single` — `GET /api/playlists/1` returns playlist detail                       |
+| `tests/api_digging.rs`   | `digging_search` — `GET /api/digging/search?q=X` returns results                          |
+| `tests/api_digging.rs`   | `digging_tracks` — `GET /api/digging/tracks?limit=5` returns paginated                    |
+
+### Phase 3: Mutation endpoints
+
+| File                     | Test                                                                                                                                                                                                                                              |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/api_files.rs`     | `files_write_comment` — `POST /api/files/1/write-comment` queues task, returns taskId                                                                                                                                                             |
+| `tests/api_files.rs`     | `files_write_comments_bulk` — `POST /api/files/write-comments-by-ids` with body `{"fileIds": [1,2,3]}` queues bulk task (NOT `/api/files/write-comments` -- that endpoint takes filter params `{linkedOnly, tags, nonDefaultOnly}`, not file IDs) |
+| `tests/api_tracks.rs`    | `tracks_needs_comment_count` — `POST /api/tracks/needs-comment-count` with `{"trackIds": [1]}`                                                                                                                                                    |
+| `tests/api_tags.rs`      | `tags_create` — `POST /api/tags` with `{"name":"NewTag","categoryId":3}` returns created tag                                                                                                                                                      |
+| `tests/api_tags.rs`      | `tags_categorize` — `PUT /api/tags/7/categorize` with `{"categoryId":4}` moves to Vibe                                                                                                                                                            |
+| `tests/api_playlists.rs` | `playlists_create_local` — `POST /api/playlists/local` creates local playlist                                                                                                                                                                     |
+| `tests/api_playlists.rs` | `playlists_toggle_archive` — `PUT /api/playlists/1/archive` toggles `archiveDeleted`                                                                                                                                                              |
+| `tests/api_folders.rs`   | `folders_scan` — `POST /api/folders/1/scan` triggers scan task (note: folder path `/test/stems` doesn't exist on disk, so `GET /api/tasks/{id}` should show failed status)                                                                        |
+| `tests/api_storage.rs`   | `storage_prune` -- First calls prune-preview to get candidates, then `POST /api/storage/prune` with body `{"fileIds": [candidate_ids...]}` (NOT `?confirm=true` -- that query param does not exist on this endpoint)                              |
+
+### Phase 4: Error states & infrastructure
+
+| File                     | Test                                                                                 |
+| ------------------------ | ------------------------------------------------------------------------------------ |
+| `tests/api_files.rs`     | `files_not_found` — `GET /api/files/9999` returns 404                                |
+| `tests/api_tracks.rs`    | `tracks_not_found` — `GET /api/tracks/9999` returns 404                              |
+| `tests/api_tags.rs`      | `tags_not_found` — `GET /api/tags/9999` returns 404                                  |
+| `tests/api_playlists.rs` | `playlists_not_found` — `GET /api/playlists/9999` returns 404                        |
+| `tests/api_digging.rs`   | `digging_suggest_no_seeds` — `POST /api/digging/suggest` with empty body returns 400 |
+| `tests/api_playlists.rs` | `playlists_create_local_no_name` — `POST /api/playlists/local` with `{}` returns 400 |
+| `tests/api_tags.rs`      | `tags_create_no_name` — `POST /api/tags` with `{}` returns 400                       |
+
+#### Infrastructure
+
+| File                        | Test                                                                           |
+| --------------------------- | ------------------------------------------------------------------------------ |
+| `tests/api_health.rs` — NEW | `health_check` — `GET /api/health` returns `{"status": "ok"}`                  |
+| `tests/api_dump.rs` — NEW   | `dump_download` — `GET /api/dump` returns JSON with Content-Disposition header |
+| `tests/api_dump.rs` — NEW   | `restore_no_confirm` — `POST /api/restore` without `?confirm=true` returns 400 |
+| `tests/api_tags.rs`         | `tags_children` — `GET /api/tags/7/children` returns child tags                |
+| `tests/api_tags.rs`         | `tags_suggest` — `GET /api/tags/7/suggest` returns category suggestion         |
+
+#### Service endpoints (error paths only)
+
+| File                          | Test                                                                                                    |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `tests/api_services.rs` — NEW | `services_sync_not_configured` — `POST /api/services/soundcloud/sync` returns error (SC not configured) |
+| `tests/api_services.rs` — NEW | `services_list` — `GET /api/services` returns service status array                                      |
+
+### Seed data requirements
+
+#### Fixes to existing seed (critical -- blocks Phase 1)
+
+1. **Add `spotify_id` to file rows in `seed_basic_data()`** -- files need
+   `spotify_id = 'spotify:track:aaa'` (matching service_track 1's `service_id`)
+   for `v_file_track_link` to resolve. Without this, `hasLocal`, `hasBackup`,
+   `linkedOnly`, and `unlinked` filters silently return empty results.
+
+2. **Add a 4th unlinked file** -- file id=4 with ISRC `US999` (no matching
+   service_track) so `?unlinked=true` can be proven to return files.
+
+#### New seed functions (blocks Phase 1-2 tests)
+
+| Function                     | Needed for                                                                                         | What it does                                                                                    |
+| ---------------------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `seed_files_with_comments()` | `commentStatuses=needs_update`, `up_to_date`                                                       | Files with `comment` set, `file_resolved_tags` populated so computed target differs from stored |
+| `seed_tag_hierarchy()`       | `curation-queue`, `unreviewed`, `nonDefaultOnly`, `pmvCategories`, `pmvAggregate`, `tags_children` | Setlist-category tags with parent/child relationships + playlist matching + file links          |
+| `seed_subscribed_playlist()` | `playlists_filter_subscribed`, `archive`                                                           | One row in `playlist_subscriptions` + playlist with `archive_deleted=true`                      |
+
+#### Refresh pattern (call after seeding for tag-filter tests)
+
+Every test that filters by tags, PMV, or non-default must call:
+
+```rust
+momos_music_manager::db::refresh_file_resolved_tags(&pool).await.unwrap();
+```
+
+### Immediate wins -- tests writable NOW (no seed changes)
+
+21 tests can be written against existing `seed_basic_data()`:
+
+| File               | Tests                                                                                                    |
+| ------------------ | -------------------------------------------------------------------------------------------------------- |
+| `api_files.rs`     | `files_filter_key`, `safe_to_delete`, `latest`, `service_links`, `detail`, `key_comparison`, `not_found` |
+| `api_tracks.rs`    | `has_local`, `has_backup` (need spotify_id fix first), `single_by_id`, `not_found`                       |
+| `api_playlists.rs` | `archive_active`, `single`, `not_found`                                                                  |
+| `api_tags.rs`      | `single_by_id`, `not_found`, `create`, `categorize`, `create_no_name`                                    |
+| `api_folders.rs`   | All 5 (list, count, single, toggle_watch, not_found)                                                     |
+| `api_tasks.rs`     | All 4 (list_empty, list_with_task, not_found, status_filter)                                             |
+| `api_storage.rs`   | `prune`                                                                                                  |
+| `api_health.rs`    | `health_check`                                                                                           |
+| `api_dump.rs`      | `dump_download`, `restore_no_confirm`                                                                    |
+| `api_services.rs`  | `services_list`, `sync_not_configured`                                                                   |
+
+### Filter combinations the frontend uses (test these together)
+
+| Page         | Critical combo                                                 | Why                       |
+| ------------ | -------------------------------------------------------------- | ------------------------- |
+| files.js     | `isLocal=true` + `commentStatuses=needs_update`                | Tri-state filters combine |
+| files.js     | `backedUp=true` + `isLocal=false`                              | Backup-only files         |
+| files.js     | `fileTypes=flac,stem.m4a` + `safeToDelete=true`                | Cross-filter              |
+| tracks.js    | `hasLocal=true` + `hasBackup=true`                             | AND'd boolean flags       |
+| tracks.js    | `pmvCategories=p,m,v` + `hasLocal=true` + `fileTypes=stem.m4a` | Three independent dims    |
+| digging.js   | `energyLevels` + `keyList/keyRange` + `tags` + `pmvCategories` | All 4 toggles on          |
+| playlists.js | `archive=archived` + `subscribed=true`                         | Subscribed + archived     |
+
+### Seed data ID ranges (documented to prevent collisions)
+
+| Entity            | ID range | Source                                   |
+| ----------------- | -------- | ---------------------------------------- |
+| Tags              | 1-6      | Migration 001 (phase tags)               |
+| Tags              | 7-9      | `seed_basic_data`                        |
+| Tags              | 10-19    | `seed_tag_hierarchy` (new)               |
+| Tags              | 20+      | `seed_pmv_tags` or inline                |
+| Files             | 1-3      | `seed_basic_data`                        |
+| Files             | 4        | Unlinked file (add to `seed_basic_data`) |
+| Files             | 10-13    | `seed_digging_data`                      |
+| Files             | 20-24    | `seed_wav_variant_data`                  |
+| Files             | 30+      | `seed_files_with_comments` (new)         |
+| Service playlists | 1-2      | `seed_basic_data`                        |
+| Service playlists | 3+       | `seed_subscribed_playlist` (new)         |
+
+### What "100%" actually means
+
+52 of 59 routes (88%) for process-unique endpoints. 7 deliberately excluded:
+
+- 2 OAuth (`/api/services/{service}/auth`, `/callback`)
+- 1 WebSocket (`/ws/spotify`)
+- 2 SSH (`/api/backup/test`, `/api/backup/explore`)
+- 2 ML (`/api/embeddings/*`)
+
+This considers only unique URL paths. Some paths have multiple handlers
+(GET+POST+PUT). Tests cover all handler methods on covered paths.
+
+### Files to create
+
+- `tests/api_folders.rs` — 5 tests
+- `tests/api_tasks.rs` — 4 tests
+- `tests/api_health.rs` — 1 test
+- `tests/api_dump.rs` — 2 tests
+- `tests/api_services.rs` — 2 tests
+
+### Files to modify
+
+- `tests/api_files.rs` — add ~14 tests (filters + read endpoints + mutations + error states)
+- `tests/api_tracks.rs` — add ~6 tests (filters + single + mutation + error)
+- `tests/api_tags.rs` — add ~10 tests (read + create + categorize + error + children + suggest)
+- `tests/api_playlists.rs` — add ~8 tests (archive/subscribed filters + single + create local + toggle archive + error)
+- `tests/api_storage.rs` — add ~1 test (prune)
+- `tests/api_digging.rs` — add ~3 tests (search, tracks, no-seeds error)
+- `tests/common/mod.rs` — add `seed_files_with_comments()`, `seed_subscribed_playlist()`, `seed_tag_hierarchy()` helpers
+
+### Acceptance Criteria
+
+- [ ] `cargo build` passes
+- [ ] Existing 129 tests still pass (no regressions)
+- [ ] New test files created: `api_folders.rs`, `api_tasks.rs`, `api_health.rs`, `api_dump.rs`, `api_services.rs`
+- [ ] All FilesQuery params have at least 1 test (22 params), count parity test covers all
+- [ ] All TracksQuery params have at least 1 test (21 params)
+- [ ] All PlaylistsQuery params have at least 1 test (11 params)
+- [ ] All TagsQuery params tested (already done ✅)
+- [ ] All CurationQueueQuery, FoldersQuery, TasksQuery params have at least 1 test
+- [ ] All mutation endpoints return valid responses (200 or appropriate error)
+- [ ] All 404 error paths tested (files, tracks, tags, playlists)
+- [ ] `cargo test` completes in <15 seconds (current: ~5s with 129 tests)
+- [ ] Total test count: ~200+ (129 existing + ~75 new)
+
+## Plan: fix-scan-folder-task-tracking
+
+**Status**: done ✅
+**Branch**: `fix/scan-folder-task-tracking`
+**Ready for review**: no
+**Depends on**: `feat/test-coverage-100`
+**Migration needed**: no
+
+### Description
+
+The `scan_folder_handler` in `src/api.rs` uses a raw `tokio::spawn` instead of
+the TaskManager, making folder scans invisible to `/api/tasks` and the Tasks
+page UI. Every other async operation (write comment, backup, prune, sync)
+properly uses `start_*_task()` — this is the only outlier.
+
+### Root cause
+
+`src/api.rs` line 6910:
+
+```rust
+tokio::spawn(async move {
+    match scan_folder(&db, id, scan_mode).await {
+        Ok(file_count) => tracing::info!("Scanned {} files", file_count),
+        Err(e) => tracing::error!("Failed to scan folder {}: {}", id, e),
+    }
+});
+```
+
+`start_scan_folder_task()` already exists in `src/tasks/mod.rs` (line 1479)
+and supports `ScanMode`. The handler just isn't using it.
+
+### Fix
+
+**File**: `src/api.rs` — replace the `tokio::spawn` block in `scan_folder_handler`
+
+```rust
+// Use TaskManager so the task appears in /api/tasks and the Tasks UI
+let task_id = match crate::tasks::start_scan_folder_task(
+    &state.task_manager,
+    &state.db,
+    id,
+    scan_mode,
+).await {
+    Ok(id) => id,
+    Err(e) => return internal_error(e).into_response(),
+};
+
+Json(ApiResponse {
+    data: serde_json::json!({
+        "taskId": task_id,
+        "folderId": id,
+        "mode": if matches!(scan_mode, crate::db::ScanMode::Full) { "full" } else { "incremental" }
+    }),
+})
+.into_response()
+```
+
+Also remove the unused `tokio::spawn` and the manual tracing calls (the task
+worker handles those).
+
+**File**: `tests/api_tasks.rs` — update `tasks_list_with_task`
+
+Currently triggers a write-comment task to populate the task list. Now that
+scan tasks appear, prefer scanning (it's a more natural fit for this test):
+
+```rust
+// Trigger a scan task on folder 1 (path doesn't exist, task will register)
+let scan_resp = client
+    .post(format!("{base}/api/folders/1/scan?mode=full"))
+    .send().await.unwrap();
+assert_eq!(scan_resp.status(), 200);
+let scan_json: serde_json::Value = scan_resp.json().await.unwrap();
+let task_id = scan_json["data"]["taskId"].as_str().unwrap();
+
+// Verify the task appears in the list
+let tasks_resp = client.get(format!("{base}/api/tasks")).send().await.unwrap();
+let tasks_json: serde_json::Value = tasks_resp.json().await.unwrap();
+let tasks = tasks_json["data"].as_array().unwrap();
+assert!(!tasks.is_empty(), "scan task should appear in task list");
+```
+
+### Acceptance Criteria
+
+- [ ] `scan_folder_handler` uses `start_scan_folder_task()` instead of `tokio::spawn`
+- [ ] Response includes `taskId` for frontend progress polling
+- [ ] `POST /api/folders/1/scan?mode=full` returns a taskId visible in `GET /api/tasks`
+- [ ] All 190 existing tests still pass
+- [ ] `cargo build` passes
+
+---
+
+## Plan: harness-completeness-audit
+
+**Status**: proposed
+**Branch**: `feat/harness-completeness`
+**Ready for review**: no
+**Depends on**: `fix/scan-folder-task-tracking`
+**Migration needed**: no
+
+### Description
+
+Comprehensive audit of the test harness for coverage gaps. Three parallel
+reviews — route coverage, seed data adequacy, and frontend→backend param
+completeness — revealed 36 untested routes, 2 placebo tests, 1 silent frontend
+bug, and ~50 untested parameter/endpoint combinations.
+
+### Current state
+
+| Metric                             | Value    |
+| ---------------------------------- | -------- |
+| Total routes (unique URL + method) | 112      |
+| Tested                             | 56 (50%) |
+| Untested (testable)                | 36 (32%) |
+| Partial (error only or needs more) | 4 (4%)   |
+| Excluded (OAuth, SSH, ML, WS)      | 16 (14%) |
+| Frontend params tested             | ~55      |
+| Frontend params untested           | ~50      |
+
+### 🔴 Critical: Placebo tests (assert 200, prove nothing)
+
+**PMV filter tests in `api_files.rs` are dead.** `files_filter_pmv_categories`
+and `files_filter_pmv_aggregate_full` both seed data where all files have
+`comment = NULL`. The PMV filter operates on the `[PMV]` bracket in the
+`comment` column, so every filter variant returns 0 rows — and the tests
+assert 0, passing regardless of whether the filter SQL is correct, inverted,
+or completely broken.
+
+**Fix**: Add a file with `comment = "[PMV] groovy"` to `seed_files_with_comments`,
+then assert:
+
+- `?pmvCategories=p` returns that file
+- `?pmvCategories=m,v` returns that file
+- `?pmvAggregate=full` returns that file
+- `?pmvAggregate=partial` returns that file
+
+### 🔴 Critical: Frontend bug — `untagged` parameter is a silent placebo
+
+**File**: `frontend/pages/playlists.js` sends `params.set("untagged", "true")`
+but `PlaylistsQuery` has **no `untagged` field**. The parameter is silently
+ignored by serde. The "Untagged" filter button on the Playlists page does
+nothing.
+
+**Fix**: Either add `untagged_only: Option<bool>` to `PlaylistsQuery` and
+implement the SQL filter, or remove the dead button from the frontend.
+
+### 🟡 Phase 1: Unblock placebo PMV tests (blocks Phase 2 PMV coverage)
+
+**File**: `tests/common/mod.rs` — `seed_files_with_comments()`
+
+Add a file row with `comment = "[PMV] groovy"`, link it to a service track
+and the "Groovy" playlist, add backup file_locations, then update the two
+PMV filter tests to assert positive results instead of 0.
+
+**Tests to update**: `files_filter_pmv_categories`, `files_filter_pmv_aggregate_full`
+(and add `_partial` and `_none` variants).
+
+### 🟡 Phase 2: Missing filter params on existing endpoints
+
+**`tests/api_tracks.rs`** — add ~9 tests:
+
+| Test                                | Param                                                           |
+| ----------------------------------- | --------------------------------------------------------------- |
+| `tracks_filter_pmv_categories`      | `?pmvCategories=m` (needs seed with PMV comment on linked file) |
+| `tracks_filter_pmv_aggregate_full`  | `?pmvAggregate=full`                                            |
+| `tracks_filter_file_types`          | `?fileTypes=flac`                                               |
+| `tracks_filter_file_type_agg_any`   | `?fileTypeAgg=any`                                              |
+| `tracks_filter_file_type_agg_none`  | `?fileTypeAgg=none`                                             |
+| `tracks_filter_imported_after_days` | `?importedAfterDays=365`                                        |
+| `tracks_filter_added_after_days`    | `?addedAfterDays=365`                                           |
+| `tracks_single_playlist_id`         | `?playlistId=1` (single playlist param)                         |
+
+### 🟡 Phase 3: Missing POST mutation endpoints
+
+**`tests/api_tracks.rs`**:
+
+- `tracks_write_comments` — `POST /api/tracks/write-comments` with `{"trackIds": [1]}`, verify returns taskId
+- `tracks_backpack_toggle` — `POST /api/tracks/1/backpack` with `{"add": true}`, verify via detail endpoint
+
+**`tests/api_files.rs`**:
+
+- `files_needs_comment_count` — `POST /api/files/needs-comment-count` with `{"fileIds": [1,2]}`
+- `files_write_comments_by_ids` — `POST /api/files/write-comments-by-ids` with `{"fileIds": [1]}`
+
+**`tests/api_tags.rs`**:
+
+- `tags_update` — `PUT /api/tags/7` with `{"name": "Groovy-Renamed"}`, verify via GET
+- `tags_delete` — `DELETE /api/tags/{newly_created_id}`, verify 404 on re-fetch
+
+**`tests/api_playlists.rs`**:
+
+- `playlists_delete` — `DELETE /api/playlists/{newly_created_id}`, verify 404 on re-fetch
+
+**`tests/api_folders.rs`**:
+
+- `folders_create` — `POST /api/folders` with `{"folderPath": "/test/new", "active": true}`
+- `folders_update` — `PUT /api/folders/1` with `{"active": false}`, verify via stats
+- `folders_delete` — `DELETE /api/folders/{newly_created_id}`
+
+### 🟡 Phase 4: Missing read endpoints
+
+**`tests/api_tag_categories.rs`** — NEW FILE:
+
+- `tag_categories_list` — `GET /api/tag-categories` returns 5 categories (Setlist, Phase, Mood, Vibe, Merkmal)
+- `tag_categories_create` — `POST /api/tag-categories` creates a category
+
+**`tests/api_tag_energy_levels.rs`** — NEW FILE:
+
+- `tag_energy_levels_list` — `GET /api/tag-energy-levels` returns array
+
+**Extend existing files**:
+
+- `tests/api_tasks.rs` — `tasks_single_by_id` (use taskId from scan task)
+- `tests/api_tasks.rs` — `tasks_cancel` — `DELETE /api/tasks/{taskId}`
+- `tests/api_tags.rs` — `tags_parents_get` — `GET /api/tags/10/parents` returns parents (needs seed_tag_hierarchy)
+- `tests/api_tags.rs` — `tags_parents_set` — `PUT /api/tags/10/parents` with body
+- `tests/api_tags.rs` — `tags_from_playlists` — `GET /api/tags/from-playlists`
+- `tests/api_tags.rs` — `tags_service_coverage` — `GET /api/tags/service-coverage`
+
+### 🟡 Phase 5: Critical filter COMBINATIONS
+
+The frontend sends multiple filters simultaneously. Verify count parity for:
+
+| Combo                                           | Endpoint      |
+| ----------------------------------------------- | ------------- |
+| `isLocal=true` + `commentStatuses=needs_update` | `/api/files`  |
+| `backedUp=true` + `isLocal=false`               | `/api/files`  |
+| `hasLocal=true` + `hasBackup=true`              | `/api/tracks` |
+| `pmvCategories=m,v` + `hasLocal=true`           | `/api/tracks` |
+
+### 🟡 Phase 6: Digging tracks parameter coverage
+
+**`tests/api_digging.rs`** — add ~5 tests for the `/api/digging/tracks` endpoint
+params that the digging page ladder and filter rows send:
+`energyLevels`, `keyList`, `keyRange`, `bpmMin`, `bpmMax`, `tags`, `sortBy`,
+`sortOrder`, `pmvCategories`, `pmvAggregate`.
+
+Each param gets one smoke test verifying the endpoint accepts it and returns
+valid JSON. The digging engine already has complex logic tested via
+`/api/digging/suggest`; these just verify the param plumbing.
+
+### 🟢 Low priority (future rounds)
+
+- Folder backup config tests (`PUT /api/folders/{id}/backup`, `PUT /api/folders/{id}/auto-backup`)
+- Deemix queue CRUD (requires deemix-pyweb running)
+- Traktor status/import (requires `.nml` file on disk — potentially testable)
+- Storage backup/discover-backup (requires SSH/NAS)
+- Tag similarities (depends on embeddings)
+- `POST /api/restore` success path (requires valid dump JSON)
+- Playlist subscriptions CRUD
+- Dashboard-only endpoints (`/api/tags/from-playlists`, `/api/traktor/status`)
+
+### Seed data changes needed
+
+| Change                                                            | For                                |
+| ----------------------------------------------------------------- | ---------------------------------- |
+| Add `comment = "[PMV] groovy"` file to `seed_files_with_comments` | Phase 1 PMV tests                  |
+| Add Phase-category tag + playlist + file link                     | Positive PMV category filter tests |
+
+### Files to create
+
+- `tests/api_tag_categories.rs` — 2 tests
+- `tests/api_tag_energy_levels.rs` — 1 test
+
+### Files to modify
+
+- `tests/common/mod.rs` — add PMV-file to `seed_files_with_comments()`
+- `tests/api_files.rs` — fix PMV placebo tests + add mutation tests
+- `tests/api_tracks.rs` — add 13 tests (filters + mutations)
+- `tests/api_tags.rs` — add 7 tests (mutations + read endpoints)
+- `tests/api_playlists.rs` — add 1 test (delete)
+- `tests/api_folders.rs` — add 3 tests (create, update, delete)
+- `tests/api_digging.rs` — add ~5 tests (tracks params)
+- `tests/api_tasks.rs` — add 2 tests (single, cancel)
+- `frontend/pages/playlists.js` — fix `untagged` placebo (or add `untagged_only` to PlaylistsQuery)
+
+### Acceptance Criteria
+
+- [ ] PMV filter tests assert actual non-zero results (not placebo)
+- [ ] `untagged` bug fixed (param handled or removed from frontend)
+- [ ] All TracksQuery filter params tested (21/21)
+- [ ] Files POST mutation endpoints tested (write-comments-by-ids, needs-comment-count)
+- [ ] Tracks POST mutations tested (write-comments, backlog toggle)
+- [ ] Tag update/delete endpoints tested
+- [ ] Playlist delete endpoint tested
+- [ ] Folder create/update/delete tested
+- [ ] Digging tracks params have at least basic smoke coverage
+- [ ] Tag-categories and tag-energy-levels endpoints tested
+- [ ] `cargo build` passes
+- [ ] All existing 190 tests still pass
+- [ ] Total test count: ~230+
+
+## Plan: fix-files-pmv-filter
+
+**Status**: proposed
+**Branch**: `fix/files-pmv-filter`
+**Ready for review**: no
+**Depends on**: `fix/scan-folder-task-tracking`
+**Migration needed**: no
+
+### Description
+
+The Files PMV filter reads the `[PMV]` bracket string from the `comment`
+column using `SUBSTR(files.comment, 2, 1)` — but that's a display/export
+artifact, not the actual tag category data. The correct approach is to
+query `file_resolved_tags.prefix`, which reflects the actual Phase/Mood/Vibe
+tags assigned to a file through the tag→playlist→track→file resolution chain.
+
+The Tracks PMV filter already does this correctly using
+`track_resolved_tags.prefix`. Files uses the wrong data source in
+**three separate places**: `get_files()`, `get_files_count()`, and
+`build_files_filter_sql()`.
+
+### Root cause
+
+The `[PMV]` bracket in the comment string is a write-only export artifact.
+When a file has Mood and Vibe tags, the comment writer writes `[ MV] tags...`
+— but this string can go stale (comment not yet written, tags changed since
+last write). The actual truth is in `file_resolved_tags.prefix`.
+
+### Fix: Replace SUBSTR with file_resolved_tags EXISTS
+
+**`get_files()`** (~line 7159) and **`get_files_count()`** (~line 7627):
+
+```rust
+// Before (wrong — parses comment string):
+sql.push_str(" AND (files.comment IS NOT NULL AND files.comment LIKE '[___]%' AND     (SUBSTR(files.comment, 2, 1) = 'P' OR SUBSTR(files.comment, 3, 1) = 'P' OR SUBSTR(files.comment, 4, 1) = 'P'))");
+
+// After (correct — queries actual tag category data):
+sql.push_str(" AND EXISTS (SELECT 1 FROM file_resolved_tags frt     WHERE frt.file_id = f.id AND LOWER(frt.prefix) IN ('p','m','v'))");
+```
+
+**Categories filter (OR logic)**:
+
+```sql
+AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = f.id AND LOWER(frt.prefix) IN (?,?,...))
+```
+
+**Full aggregate (AND logic)**:
+
+```sql
+AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = f.id AND LOWER(frt.prefix) = 'p')
+AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = f.id AND LOWER(frt.prefix) = 'm')
+AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = f.id AND LOWER(frt.prefix) = 'v')
+```
+
+**Partial aggregate (OR logic)**:
+
+```sql
+AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = f.id AND LOWER(frt.prefix) IN ('p','m','v'))
+```
+
+**None aggregate**:
+
+```sql
+AND NOT EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = f.id AND LOWER(frt.prefix) IN ('p','m','v'))
+```
+
+**`build_files_filter_sql()`** (~line 1910) — same fix, same SQL pattern.
+
+### Files to modify
+
+- `src/api.rs` — replace PMV `SUBSTR` logic in `get_files()` (~lines 7159-7208)
+- `src/api.rs` — replace PMV `SUBSTR` logic in `get_files_count()` (~lines 7627-7665)
+- `src/api.rs` — replace PMV `SUBSTR` logic in `build_files_filter_sql()` (~lines 1910-1950)
+- `tests/api_files.rs` — fix `files_filter_pmv_categories` and `files_filter_pmv_aggregate_full` tests (no longer need `[PMV]` comment strings, just need `file_resolved_tags` with P/M/V prefixes)
+- `tests/api_tracks.rs` — add PMV filter tests for tracks (tracks already use correct `track_resolved_tags.prefix` mechanism)
+
+### Seed data implications
+
+After the fix, PMV filter tests don't need comment strings at all. They need:
+
+- Tags in Phase, Mood, and Vibe categories
+- Playlist→tag name matching
+- Track→playlist linking
+- File→track linking via ISRC/spotify_id
+- `refresh_file_resolved_tags()` called after seeding
+
+The existing `seed_tag_hierarchy()` already creates Mood (id=11, "shadow") and
+Vibe (id=12, "techno") tags. With file 1 linked to those via parent resolution,
+the PMV filter becomes testable. We just need to add a Phase-category tag to
+complete the set.
+
+### Acceptance Criteria
+
+- [ ] `get_files()` PMV filter uses `file_resolved_tags.prefix`, not `SUBSTR(comment)`
+- [ ] `get_files_count()` PMV filter uses same correct mechanism
+- [ ] `build_files_filter_sql()` PMV filter uses same correct mechanism
+- [ ] `?pmvCategories=m` returns files with Mood-category tags
+- [ ] `?pmvCategories=v` returns files with Vibe-category tags
+- [ ] `?pmvAggregate=full` returns files with P+M+V tags (all three)
+- [ ] `?pmvAggregate=partial` returns files with at least one PMV tag
+- [ ] `?pmvAggregate=none` returns files with no PMV tags
+- [ ] Count endpoint matches list endpoint for all PMV filter variants
+- [ ] All 190 existing tests still pass
+- [ ] `cargo build` passes
+
+## Plan: harden-test-harness
+
+**Status**: done ✅
+**Branch**: `fix/harden-test-harness`
+**Ready for review**: no
+**Depends on**: `fix/files-pmv-filter`
+**Migration needed**: no
+
+### Description
+
+Harden the test harness based on three-audit findings: strengthen 12 weak
+assertions, fix 6 handlers missing proper 404 responses, and fix 1 wrong
+status code. This is the final polish pass — no new routes, just quality.
+
+### Part A: Harden weak assertions (12 tests, ~50 lines)
+
+| File             | Test                         | Current                                            | Fix                                                                                                                   |
+| ---------------- | ---------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `api_files.rs`   | `files_latest`               | Only checks `id` + `filePath` fields exist         | Assert files are ordered by `created_at` DESC (or at least 2 distinct files returned)                                 |
+| `api_files.rs`   | `files_write_comment`        | Accepts `taskId` being null                        | Assert `taskId` is a non-empty string on success                                                                      |
+| `api_files.rs`   | `files_key_comparison`       | Silent eprintln on 500, field-presence only on 200 | Assert `summary.matchCount` or `summary.totalCount` is present as a number                                            |
+| `api_tracks.rs`  | `tracks_needs_comment_count` | Only checks field names exist                      | Assert `tracksNeedingUpdate` + `filesNeedingUpdate` are numbers                                                       |
+| `api_storage.rs` | `storage_status_has_fields`  | 19 `contains_key` checks, no values                | After field-presence check, also verify `localFileCount` matches the value from `storage_status_counts` test seed (2) |
+| `api_storage.rs` | `storage_prune_preview`      | Field-presence-only loop                           | Also assert `candidates.len() > 0` and first candidate has `fileSize > 0`                                             |
+| `api_digging.rs` | `digging_tracks`             | Smoke test only                                    | Add one filter param (e.g., `?limit=3`) and verify returned count ≤ 3                                                 |
+| `api_tasks.rs`   | `tasks_single_not_found`     | Accepts both 404 and 200                           | Assert strictly 404                                                                                                   |
+| `api_tasks.rs`   | `tasks_list_status_filter`   | Lax comparison                                     | After scan task runs, verify `?status=running` or `?status=completed` returns non-empty                               |
+
+### Part B: Fix missing 404 handlers (5 handlers, ~30 lines)
+
+These handlers silently succeed or return 500 when the entity doesn't exist.
+Each fix follows the same pattern: check existence first, then operate.
+
+| Handler                        | File:Line      | Fix                                                           |
+| ------------------------------ | -------------- | ------------------------------------------------------------- |
+| `delete_tag_handler`           | `api.rs:3337`  | Query tag by ID first; return 404 if `None`, then `DELETE`    |
+| `delete_folder_handler`        | `api.rs:6877`  | Query folder by ID first; return 404 if `None`, then `DELETE` |
+| `update_folder_handler`        | `api.rs:6814`  | Query folder by ID first; return 404 if `None`, then `UPDATE` |
+| `folder_backup_config_handler` | `api.rs:10401` | Query folder by ID first; return 404 if `None`, then update   |
+| `folder_auto_backup_handler`   | `api.rs:10376` | Query folder by ID first; return 404 if `None`, then update   |
+
+### Part C: Fix wrong status code (1 handler, ~2 lines)
+
+| Handler                   | File:Line     | Fix                                                                                                   |
+| ------------------------- | ------------- | ----------------------------------------------------------------------------------------------------- |
+| `digging_suggest_handler` | `api.rs:2847` | Return 400 (StatusCode::BAD_REQUEST) instead of 500 when neither `seedTag` nor `seedFileIds` provided |
+
+### Part D: Update tests for fixed handlers (4 tests, ~20 lines)
+
+After fixing the 404 handlers, add/update tests:
+
+| File             | Test                       | What                                                                   |
+| ---------------- | -------------------------- | ---------------------------------------------------------------------- |
+| `api_tags.rs`    | `tags_delete`              | `DELETE /api/tags/{new_id}` → 404 on valid ID, verify tag gone via GET |
+| `api_folders.rs` | `folders_delete`           | `DELETE /api/folders/{new_id}` → 404 on valid ID                       |
+| `api_folders.rs` | `folders_update_not_found` | `PUT /api/folders/9999` → 404                                          |
+| `api_digging.rs` | `digging_suggest_no_seeds` | After fix, assert 400 instead of 500                                   |
+
+### Files to modify
+
+- `src/api.rs` — Part B (5 handlers) + Part C (1 handler)
+- `tests/api_files.rs` — 3 weak tests
+- `tests/api_tracks.rs` — 1 weak test
+- `tests/api_storage.rs` — 2 weak tests
+- `tests/api_digging.rs` — 2 tests (harden + fix status code)
+- `tests/api_tasks.rs` — 2 weak tests
+- `tests/api_tags.rs` — 1 new test (delete)
+- `tests/api_folders.rs` — 2 new tests (delete + update 404)
+
+### Acceptance Criteria
+
+- [ ] All 12 weak assertions now verify specific values, not just field presence
+- [ ] `delete_tag_handler` returns 404 for non-existent tag
+- [ ] `delete_folder_handler` returns 404 for non-existent folder
+- [ ] `update_folder_handler` returns 404 for non-existent folder
+- [ ] `folder_backup_config_handler` returns 404 for non-existent folder
+- [ ] `folder_auto_backup_handler` returns 404 for non-existent folder
+- [ ] `digging_suggest_handler` returns 400 (not 500) for empty request
+- [ ] All 192 existing tests still pass
+- [ ] 4 new tests verify the fixed error paths
+- [ ] `cargo build` passes
+- [ ] Total test count: ~199 (195 + 4 new)
+
+---
+
+## Plan: 100-percent-coverage
+
+**Status**: done ✅
+**Branch**: `feat/100-percent-coverage`
+**Ready for review**: no
+**Depends on**: `feat/query-performance-optimization` (current branch), `fix/scan-folder-task-tracking` (done ✅)
+**Migration needed**: no
+
+### Description
+
+Achieve effective 100% code coverage: every API endpoint tested (happy + sad paths),
+every query param covered, all pure business logic unit-tested, external-service
+modules tested with error paths. The goal is **behavioral coverage** — every code
+path exercised by a test — not necessarily 100% line coverage (external services
+can't run in CI).
+
+### Current State
+
+| Metric                               | Value                                       |
+| ------------------------------------ | ------------------------------------------- |
+| Source lines                         | 31,505                                      |
+| Routes (unique `.route()` calls)     | 118                                         |
+| Total tests                          | 195 (59 unit + 134 integration + 2 doctest) |
+| Modules with 0 unit tests            | 17 of 22                                    |
+| Route handler methods                | ~130 (GET+POST+PUT+DELETE across 118 paths) |
+| Routes completely untested           | ~38                                         |
+| Routes partially tested (error-only) | ~4                                          |
+
+**Source modules by line count and test status**:
+
+| Module                   | Lines  | Unit Tests | Status                               |
+| ------------------------ | ------ | ---------- | ------------------------------------ |
+| `api.rs`                 | 10,688 | 0          | Integration tests cover handlers     |
+| `db.rs`                  | 5,265  | 1          | Vastly undertested                   |
+| `tasks/mod.rs`           | 3,208  | 0          | Integration (via task endpoints)     |
+| `digging.rs`             | 2,150  | 0          | Integration (via digging endpoints)  |
+| `spotify/sync_worker.rs` | 1,395  | 0          | External service (error paths only)  |
+| `dump.rs`                | 1,288  | 0          | Integration (via dump endpoints)     |
+| `comment.rs`             | 819    | 37         | ✅ Well covered                      |
+| `traktor.rs`             | 605    | 8          | ✅ Covered                           |
+| `poller.rs`              | 575    | 0          | External service (error paths only)  |
+| `config.rs`              | 568    | 0          | Untested (pure Rust, fully testable) |
+| `global_poller.rs`       | 532    | 0          | External service (error paths only)  |
+| `main.rs`                | 457    | 0          | CLI parsing testable                 |
+| `embeddings.rs`          | 429    | 6          | ✅ Covered                           |
+| `backup/mod.rs`          | 410    | 0          | SSH-dependent (parse logic testable) |
+| `deemix/client.rs`       | 373    | 0          | External service (error paths only)  |
+| `spotify/client.rs`      | 344    | 0          | External service (error paths only)  |
+| `audio_extensions.rs`    | 343    | 6          | ✅ Well covered                      |
+| `launch_agent.rs`        | 311    | 0          | macOS-specific (excluded)            |
+| `scan_cache.rs`          | 277    | 0          | Pure Rust (fully testable)           |
+| `spotify/replay.rs`      | 265    | 0          | Pure Rust (fully testable)           |
+| `deemix/cli.rs`          | 227    | 0          | CLI parsing testable                 |
+| `maintainer.rs`          | 221    | 0          | Scheduling logic testable            |
+| `watch.rs`               | 207    | 0          | File system (smoke only)             |
+| `deemix/models.rs`       | 166    | 0          | Pure Rust (fully testable)           |
+| `spotify/models.rs`      | ~100   | 0          | Pure Rust (fully testable)           |
+
+### What "100%" means (realistic target)
+
+| Category                 | Lines  | Target         | Strategy                                                     |
+| ------------------------ | ------ | -------------- | ------------------------------------------------------------ |
+| `api.rs` handlers        | 10,688 | 90% behavioral | Integration (happy+sad paths, all params, all filter combos) |
+| `db.rs` logic            | 5,265  | 80% line       | Unit (in-memory SQLite) + integration                        |
+| `tasks/mod.rs`           | 3,208  | 40% line       | Integration (via task endpoints + scan/write triggers)       |
+| `digging.rs`             | 2,150  | 80% line       | Integration (endpoints) + unit (scoring, keys, dedup)        |
+| `spotify/sync_worker.rs` | 1,395  | 20% line       | Integration (error paths only — no real Spotify in CI)       |
+| `dump.rs`                | 1,288  | 60% line       | Integration (endpoints) + unit (serialization)               |
+| `comment.rs`             | 819    | 100% ✅        | Already covered (37 tests)                                   |
+| `traktor.rs`             | 605    | 90% ✅         | Already covered (8 tests), add error paths                   |
+| `poller.rs`              | 575    | 15% line       | Integration (error paths only)                               |
+| `config.rs`              | 568    | 90% line       | Unit (TOML parsing, env override, priority)                  |
+| `global_poller.rs`       | 532    | 15% line       | Integration (error paths only)                               |
+| `main.rs`                | 457    | 50% line       | Unit (CLI parsing, build_router structure)                   |
+| `embeddings.rs`          | 429    | 90% ✅         | Already covered (6 tests), add edge cases                    |
+| `backup/mod.rs`          | 410    | 30% line       | Unit (path construction, output parsing)                     |
+| `deemix/client.rs`       | 373    | 15% line       | Integration (error paths only)                               |
+| `spotify/client.rs`      | 344    | 15% line       | Integration (error paths only)                               |
+| `audio_extensions.rs`    | 343    | 100% ✅        | Already covered (6 tests)                                    |
+| `launch_agent.rs`        | 311    | 0%             | Excluded (macOS launchd — can't test in CI)                  |
+| `scan_cache.rs`          | 277    | 70% line       | Unit (cache hits, invalidation, expiry)                      |
+| `spotify/replay.rs`      | 265    | 80% line       | Unit (replay mode, cache save/load)                          |
+| `deemix/cli.rs`          | 227    | 50% line       | Unit (CLI arg parsing)                                       |
+| `maintainer.rs`          | 221    | 30% line       | Unit (scheduling logic, age checks)                          |
+| `watch.rs`               | 207    | 15% line       | Smoke (start/stop, no real FS in CI)                         |
+| `deemix/models.rs`       | 166    | 85% line       | Unit (serialization, status variants)                        |
+| `spotify/models.rs`      | ~100   | 85% line       | Unit (key conversion, From impls)                            |
+
+**Overall behavioral target**: ≥90% of reachable code paths exercised.
+**Overall line coverage target**: ≥75% (measured via `cargo-llvm-cov`).
+
+Rationale for <100% line coverage:
+
+- External service code (Spotify API, deemix server, SSH/NAS) can't run in CI without real credentials
+- System-level code (launchd, file watchers) is inherently integration-level
+- `tasks/mod.rs` and `api.rs` are mostly I/O orchestration — covered by integration tests
+- The goal is **effective** coverage: every behavior path exercised, not every line
+
+---
+
+### Phase 1: Prerequisite fixes — ~115 lines changed
+
+Merge the two existing proposed fix plans from this document. These must be
+done first because they fix bugs in the code under test and strengthen weak
+assertions that would mask regressions.
+
+#### 1a: Fix PMV filter data source (`fix/files-pmv-filter` plan)
+
+The Files PMV filter reads `SUBSTR(files.comment, 2, 1)` — a comment-string
+artifact — instead of `file_resolved_tags.prefix` (the actual tag category
+data). Fix in 3 places: `get_files()`, `get_files_count()`,
+`build_files_filter_sql()`. Replace with `EXISTS (SELECT 1 FROM
+file_resolved_tags frt WHERE frt.file_id = f.id AND LOWER(frt.prefix) IN (...))`.
+
+**Files**: `src/api.rs` (~30 lines, 3 locations)
+
+#### 1b: Strengthen assertions + fix 404 handlers (`harden-test-harness` plan)
+
+- **12 weak assertions**: Replace `contains_key()` / field-presence checks with
+  specific value assertions (e.g., `localFileCount` must equal seed value 2,
+  `taskId` must be non-empty string)
+- **5 handlers missing proper 404**: `delete_tag_handler`, `delete_folder_handler`,
+  `update_folder_handler`, `folder_backup_config_handler`,
+  `folder_auto_backup_handler` — query entity first, return 404 if `None`
+- **1 wrong status code**: `digging_suggest_handler` returns 500 instead of 400
+  for empty request body — change to `StatusCode::BAD_REQUEST`
+
+**Files**: `src/api.rs` (~35 lines), `tests/api_*.rs` (~50 lines)
+
+---
+
+### Phase 2: Missing route coverage — ~80 integration tests, ~2,000 lines
+
+Every unique endpoint gets at least one test. Read endpoints get full filter-param
+coverage. Mutations get smoke tests. Error paths (400, 404) tested.
+
+#### 2a: Files endpoints (add ~8 tests to `tests/api_files.rs`)
+
+| Test                               | Endpoint                                | Coverage                      |
+| ---------------------------------- | --------------------------------------- | ----------------------------- |
+| `files_sync_comment`               | `POST /api/files/{id}/sync-comment`     | Write comment for single file |
+| `files_similar_tracks`             | `GET /api/files/{id}/similar-tracks`    | Similar tracks by tag         |
+| `files_debug_comment`              | `GET /api/files/{id}/debug-comment`     | Debug comment computation     |
+| `files_needs_comment_count_by_ids` | `POST /api/files/needs-comment-count`   | By file IDs                   |
+| `files_write_comments_by_ids`      | `POST /api/files/write-comments-by-ids` | By file IDs                   |
+| `files_backup_status`              | `GET /api/files/{id}/backup-status`     | Backup status for file        |
+| `files_pull_from_backup_error`     | `POST /api/files/{id}/pull-from-backup` | Error: no SSH config          |
+| `files_needs_update_count`         | `GET /api/files/needs-update-count`     | Filter-based count            |
+
+Note: `/api/files/bulk-sync` and `/api/files/write-comments` share a handler.
+`/api/files/needs-comment-count-all` and `/api/files/write-comments-all` are
+higher-risk (operate on all files) — smoke-test via the existing filter-based
+endpoints instead.
+
+#### 2b: Tracks endpoints (add ~9 tests to `tests/api_tracks.rs`)
+
+| Test                           | Endpoint                               | Coverage                              |
+| ------------------------------ | -------------------------------------- | ------------------------------------- |
+| `tracks_write_comments`        | `POST /api/tracks/write-comments`      | Bulk write by track IDs               |
+| `tracks_needs_refresh_count`   | `POST /api/tracks/needs-refresh-count` | Refresh count                         |
+| `tracks_refresh_comments`      | `POST /api/tracks/refresh-comments`    | Refresh comments                      |
+| `tracks_backpack_toggle`       | `POST /api/tracks/{id}/backpack`       | Add/remove from backpack              |
+| `tracks_filter_pmv_categories` | `?pmvCategories=m,v`                   | PMV filter (uses track_resolved_tags) |
+| `tracks_filter_pmv_aggregate`  | `?pmvAggregate=full`                   | PMV aggregate                         |
+| `tracks_filter_file_types`     | `?fileTypes=flac`                      | File type filter                      |
+| `tracks_filter_file_type_agg`  | `?fileTypeAgg=any`                     | File type aggregate                   |
+| `tracks_filter_date_imported`  | `?importedAfterDays=365`               | Import date filter                    |
+| `tracks_filter_date_added`     | `?addedAfterDays=365`                  | Added date filter                     |
+| `tracks_filter_playlist_id`    | `?playlistId=1`                        | Single playlist param                 |
+
+#### 2c: Tags endpoints (add ~8 tests to `tests/api_tags.rs`)
+
+| Test                         | Endpoint                               | Coverage                   |
+| ---------------------------- | -------------------------------------- | -------------------------- |
+| `tags_from_playlists`        | `GET /api/tags/from-playlists`         | Playlists without tags     |
+| `tags_create_from_playlists` | `POST /api/tags/create-from-playlists` | Create tags from playlists |
+| `tags_service_coverage`      | `GET /api/tags/service-coverage`       | Service coverage stats     |
+| `tags_parents_get`           | `GET /api/tags/{id}/parents`           | Get parent tags            |
+| `tags_parents_set`           | `PUT /api/tags/{id}/parents`           | Set parent tags            |
+| `tags_bulk_categorize`       | `POST /api/tags/bulk-categorize`       | Bulk category assignment   |
+| `tags_bulk_import`           | `POST /api/tags/bulk-import`           | Bulk import                |
+| `tags_bulk_resolve`          | `POST /api/tags/bulk-resolve`          | Bulk resolve               |
+
+#### 2d: Playlists endpoints (add ~8 tests to `tests/api_playlists.rs`)
+
+| Test                           | Endpoint                                   | Coverage                                |
+| ------------------------------ | ------------------------------------------ | --------------------------------------- |
+| `playlists_delete`             | `DELETE /api/playlists/{id}`               | Delete playlist + verify 404 on refetch |
+| `playlists_tracks`             | `GET /api/playlists/{id}/tracks`           | List tracks in playlist                 |
+| `playlists_add_track`          | `POST /api/playlists/{id}/tracks`          | Add track to playlist                   |
+| `playlists_subscriptions_list` | `GET /api/playlists/subscriptions`         | List subscriptions                      |
+| `playlists_subscribe`          | `POST /api/playlists/subscriptions`        | Subscribe to playlist                   |
+| `playlists_unsubscribe`        | `DELETE /api/playlists/subscriptions/{id}` | Unsubscribe                             |
+| `playlists_comment_diff_stats` | `GET /api/playlists/comment-diff-stats`    | Comment diff stats                      |
+| `playlists_filter_stale`       | `?stale=1`                                 | Stale playlists filter                  |
+
+#### 2e: Folders endpoints (add ~6 tests to `tests/api_folders.rs`)
+
+| Test                    | Endpoint                              | Coverage                                           |
+| ----------------------- | ------------------------------------- | -------------------------------------------------- |
+| `folders_create`        | `POST /api/folders`                   | Create folder                                      |
+| `folders_update`        | `PUT /api/folders/{id}`               | Update folder                                      |
+| `folders_scan`          | `POST /api/folders/{id}/scan`         | Trigger scan (path doesn't exist → task registers) |
+| `folders_backup_config` | `PUT /api/folders/{id}/backup`        | Set backup config                                  |
+| `folders_auto_backup`   | `PUT /api/folders/{id}/auto-backup`   | Toggle auto-backup                                 |
+| `folders_scan_sources`  | `POST /api/folders/{id}/scan-sources` | Scan WAV sources                                   |
+
+#### 2f: Storage endpoints (add ~5 tests to `tests/api_storage.rs`)
+
+| Test                             | Endpoint                                 | Coverage                  |
+| -------------------------------- | ---------------------------------------- | ------------------------- |
+| `storage_settings_get`           | `GET /api/storage/settings`              | Get settings              |
+| `storage_settings_put`           | `PUT /api/storage/settings`              | Update settings           |
+| `storage_backup_no_ssh`          | `POST /api/storage/backup/{id}`          | Error: SSH not configured |
+| `storage_backup_wavs_no_ssh`     | `POST /api/storage/backup-wavs/{id}`     | Error: SSH not configured |
+| `storage_discover_backup_no_ssh` | `POST /api/storage/discover-backup/{id}` | Error: SSH not configured |
+
+#### 2g: Service endpoints (add ~6 tests, extend `tests/api_services.rs`)
+
+| Test                    | Endpoint                                   | Coverage                              |
+| ----------------------- | ------------------------------------------ | ------------------------------------- |
+| `services_config_get`   | `GET /api/services/{service}/config`       | Get service config                    |
+| `services_config_put`   | `PUT /api/services/{service}/config`       | Update service config                 |
+| `services_fetch_counts` | `GET /api/services/{service}/fetch-counts` | Fetch counts                          |
+| `services_sync_status`  | `GET /api/services/{service}/sync-status`  | Sync status                           |
+| `services_reset`        | `POST /api/services/{service}/reset`       | Reset service (error: not configured) |
+| `services_deemix_auth`  | `POST /api/services/deemix/auth`           | Deemix auth (error: not configured)   |
+
+#### 2h: Deemix endpoints (new file `tests/api_deemix.rs`, ~4 tests)
+
+| Test                      | Endpoint                                     | Coverage                        |
+| ------------------------- | -------------------------------------------- | ------------------------------- |
+| `deemix_queue_list`       | `GET /api/services/deemix/queue`             | Queue list (empty — no server)  |
+| `deemix_queue_add_error`  | `POST /api/services/deemix/queue`            | Add to queue (error: no server) |
+| `deemix_queue_retry_404`  | `POST /api/services/deemix/queue/{id}/retry` | Retry non-existent → 404        |
+| `deemix_queue_delete_404` | `DELETE /api/services/deemix/queue/{id}`     | Delete non-existent → 404       |
+
+#### 2i: Tag energy levels (new file `tests/api_tag_energy_levels.rs`, ~3 tests)
+
+| Test                      | Endpoint                              | Coverage         |
+| ------------------------- | ------------------------------------- | ---------------- |
+| `tag_energy_levels_list`  | `GET /api/tag-energy-levels`          | List all         |
+| `tag_energy_levels_set`   | `PUT /api/tag-energy-levels/{tag_id}` | Set energy level |
+| `tag_energy_levels_batch` | `PUT /api/tag-energy-levels/batch`    | Batch reorder    |
+
+#### 2j: Tag categories (new file `tests/api_tag_categories.rs`, ~3 tests)
+
+| Test                    | Endpoint                          | Coverage                            |
+| ----------------------- | --------------------------------- | ----------------------------------- |
+| `tag_categories_list`   | `GET /api/tag-categories`         | List all (5 defaults + any created) |
+| `tag_categories_create` | `POST /api/tag-categories`        | Create category                     |
+| `tag_categories_delete` | `DELETE /api/tag-categories/{id}` | Delete created category             |
+
+#### 2k: Spotify sync endpoints (new file `tests/api_spotify_sync.rs`, ~5 tests)
+
+All return errors when Spotify isn't configured — test the error paths:
+
+| Test                                 | Endpoint                                           | Coverage              |
+| ------------------------------------ | -------------------------------------------------- | --------------------- |
+| `spotify_sync_playlists_error`       | `POST /api/services/spotify/sync/playlists`        | Error: not configured |
+| `spotify_sync_new_playlists_error`   | `POST /api/services/spotify/sync/new-playlists`    | Error                 |
+| `spotify_sync_playlists_batch_error` | `POST /api/services/spotify/sync/playlists/batch`  | Error                 |
+| `spotify_sync_tracks_error`          | `POST /api/services/spotify/sync/tracks`           | Error                 |
+| `spotify_refresh_playlist_error`     | `POST /api/services/spotify/refresh-playlist/{id}` | Error                 |
+
+#### 2l: Infrastructure endpoints (add ~4 tests to existing files or new)
+
+| Test                      | Endpoint                           | Coverage               |
+| ------------------------- | ---------------------------------- | ---------------------- |
+| `version_check`           | `GET /api/version`                 | Returns version string |
+| `tag_similarities_status` | `GET /api/tag-similarities/status` | Similarities status    |
+| `traktor_status`          | `GET /api/traktor/status`          | Traktor import status  |
+| `traktor_import_no_file`  | `POST /api/traktor/import`         | Error: no file         |
+
+#### 2m: Embeddings endpoints (add ~3 tests to existing or new)
+
+| Test                         | Endpoint                               | Coverage                 |
+| ---------------------------- | -------------------------------------- | ------------------------ |
+| `embeddings_status`          | `GET /api/embeddings/status`           | Status (no model loaded) |
+| `embeddings_recompute`       | `POST /api/embeddings/recompute`       | Triggers recompute task  |
+| `tag_similarities_recompute` | `POST /api/tag-similarities/recompute` | Triggers task            |
+
+#### 2n: Digging endpoints (add ~2 tests to `tests/api_digging.rs`)
+
+| Test                         | Endpoint                                         | Coverage           |
+| ---------------------------- | ------------------------------------------------ | ------------------ |
+| `digging_ladder_suggest`     | `POST /api/digging/ladder/suggest`               | Ladder suggestions |
+| `digging_tracks_with_params` | `GET /api/digging/tracks?energyLevels=1&limit=3` | Filter params      |
+
+#### 2o: Filter combination tests (~4 tests across files)
+
+The frontend sends multiple filters simultaneously — test that critical
+combinations work and count parity holds:
+
+| Combo                                           | Endpoint      | Test file       |
+| ----------------------------------------------- | ------------- | --------------- |
+| `isLocal=true` + `commentStatuses=needs_update` | `/api/files`  | `api_files.rs`  |
+| `backedUp=true` + `isLocal=false`               | `/api/files`  | `api_files.rs`  |
+| `hasLocal=true` + `hasBackup=true`              | `/api/tracks` | `api_tracks.rs` |
+| `pmvCategories=m,v` + `hasLocal=true`           | `/api/tracks` | `api_tracks.rs` |
+
+---
+
+### Phase 3: Unit tests for untested modules — ~130 unit tests, ~2,000 lines
+
+Every untested pure-Rust module gets a `#[cfg(test)]` module. External-service
+modules get tests for their pure logic (parsing, conversion, error handling).
+
+#### 3a: `src/config.rs` (~15 tests)
+
+Test config file parsing, env var override, priority ordering, defaults:
+
+- `config_loads_from_toml` — Parse a valid temp config.toml
+- `config_env_override` — Env var `SPOTIFY_CLIENT_ID` overrides TOML
+- `config_defaults` — Missing optional values get defaults
+- `config_priority_order` — Env > TOML > hardcoded default
+- `config_spotify_configured` — `is_spotify_configured()` returns bool
+- `config_soundcloud_configured` — Same for SoundCloud
+- `config_youtube_configured` — Same for YouTube
+- `config_invalid_toml` — Graceful error on malformed TOML
+- `config_missing_file` — Graceful when config.toml doesn't exist
+- `config_empty_sections` — Empty `[spotify]` doesn't crash
+- `config_polling_section` — Parse `[polling]` section
+- `config_maintainer_section` — Parse `[maintainer]` section
+- `config_database_url_env` — `DATABASE_URL` env var
+- `config_public_url` — `PUBLIC_URL` / `MOMOS_PUBLIC_URL` env var
+- `config_secrets_not_in_debug` — Secrets excluded from Debug output
+
+#### 3b: `src/db.rs` (~40 tests)
+
+Test pure functions and in-memory SQLite operations:
+
+- 5 tests: Camelot key parsing (`parse_camelot_key`, display, edge cases)
+- 5 tests: Comment computation (`compute_target_comment`, with/without parents, empty)
+- 4 tests: Tag queries (`get_tag_by_name` nocase, `tag_exists`, by category, by backpack)
+- 4 tests: File tag resolution (`get_file_resolved_tags`, `refresh_file_resolved_tags`)
+- 4 tests: Prune candidates (`get_prune_candidates` with various filters)
+- 3 tests: Storage status (`get_storage_status` field accuracy)
+- 4 tests: File variants (`get_file_variants` ISRC grouping, WAV source grouping)
+- 3 tests: WAV→stem linking (`link_wav_to_stem` parsing, matching, edge cases)
+- 3 tests: File locations CRUD (local/backup tracking)
+- 3 tests: Folder CRUD (create, update, delete)
+- 2 tests: Playlist subscription CRUD
+
+#### 3c: `src/digging.rs` (~20 tests)
+
+- 5 tests: Camelot key compatibility (`are_keys_compatible` — perfect, good, ok, incompatible, edge cases)
+- 3 tests: Scoring (`score_breakdown` math, edge cases, ranking order)
+- 3 tests: BPM outlier detection (median-based, edge cases, single seed)
+- 3 tests: ISRC dedup with format preference (stem.m4a > flac > wav)
+- 2 tests: Audio format preference ranking
+- 4 tests: Full `get_multi_seed_suggestions` flow (by tag, by file IDs, empty seeds, no candidates)
+
+#### 3d: `src/dump.rs` (~10 tests)
+
+- 3 tests: Dump to JSON (empty DB, populated DB, all tables present)
+- 3 tests: Restore from JSON (valid, invalid, preserves IDs)
+- 2 tests: Roundtrip (dump → restore → dump produces identical output)
+- 2 tests: Edge cases (large dataset, special characters in strings)
+
+#### 3e: `src/spotify/models.rs` (~5 tests)
+
+- 3 tests: `spotify_key_to_camelot` — all 24 key mappings (12 minor + 12 major)
+- 2 tests: Conversion from rspotify types (PlaylistInfo, TrackInfo)
+
+#### 3f: `src/spotify/replay.rs` (~8 tests)
+
+- 3 tests: Replay mode (enabled check, cache hit, cache miss)
+- 3 tests: Cache operations (save, load, invalidation/clear)
+- 2 tests: File I/O (save to temp file, load back, corrupt file error)
+
+#### 3g: `src/scan_cache.rs` (~8 tests)
+
+- 2 tests: Cache hit/miss (same path+size+mtime → hit, changed → miss)
+- 3 tests: Cache lifecycle (expiry/TTL, clear all, LRU eviction at max entries)
+- 2 tests: Serialization (save to file, load from file)
+- 1 test: Empty cache behavior
+
+#### 3h: `src/main.rs` (~5 tests)
+
+- 3 tests: CLI parsing (`serve`, `scan-file`, `dump`, `restore` subcommands)
+- 1 test: `build_router()` returns router with expected top-level routes
+- 1 test: Help text includes all subcommands
+
+#### 3i: `src/maintainer.rs` (~5 tests)
+
+- 2 tests: Scheduling logic (interval calculation, next run time)
+- 2 tests: Condition checks (full_scan_needed when last_scanned old, not needed when recent)
+- 1 test: Auto-backup eligibility check
+
+#### 3j: `src/backup/mod.rs` (~8 tests)
+
+- 3 tests: Remote path construction (local→remote mapping)
+- 2 tests: Output parsing (`ls -l` size extraction, `find` listing)
+- 2 tests: Backup engine creation (with/without SSH config)
+- 1 test: Dry-run output parsing
+
+#### 3k: `src/deemix/models.rs` + `src/deemix/cli.rs` (~5 tests)
+
+- 2 tests: Model deserialization (queue status JSON → struct)
+- 2 tests: CLI argument parsing (subcommands)
+- 1 test: Download status enum variants
+
+---
+
+### Phase 4: External service error paths — covered by Phase 2
+
+For modules that require real external services (Spotify API, deemix server,
+SSH/NAS), test only the "service not available" error paths. These are covered
+by Phase 2 integration tests:
+
+- **Spotify sync**: 5 error-path tests (Phase 2k) — `POST` returns error when not configured
+- **Deemix queue**: 4 error-path tests (Phase 2h) — `POST`/`DELETE` returns error when no server
+- **Backup/SSH**: 3 error-path tests (Phase 2f) — `POST` returns error when no SSH config
+- **Service auth/config**: 6 tests (Phase 2g) — `GET`/`PUT`/`POST` on config endpoints
+
+No additional work beyond Phase 2.
+
+---
+
+### Phase 5: Coverage measurement + iterative gap filling
+
+#### 5a: Set up coverage tooling
+
+```bash
+# Install cargo-llvm-cov (requires nightly or Rust 1.74+)
+cargo install cargo-llvm-cov
+
+# Generate HTML coverage report
+cargo llvm-cov --html --ignore-filename-regex 'tests/'
+
+# Or with tarpaulin (works on stable)
+cargo install cargo-tarpaulin
+cargo tarpaulin --out Html --output-dir coverage --ignore-tests
+```
+
+#### 5b: Iterative gap filling process
+
+1. Run coverage → generate HTML report
+2. Sort modules by uncovered-line count descending
+3. For each module with >20 uncovered lines, add targeted tests
+4. Re-run coverage → verify improvement
+5. Repeat until ≥75% line coverage
+
+#### 5c: Coverage report as CI artifact
+
+Add to release checklist (AGENT.md Section 1 Release Process):
+
+- Step 7.5: Run `cargo llvm-cov --fail-under-lines 75` to verify coverage threshold
+
+---
+
+### Phase 6: Documentation
+
+#### 6a: Add `tests/README.md`
+
+Document:
+
+- How to run tests: `cargo test`, `cargo test --test api_files`
+- Test structure: unit (in `src/` via `#[cfg(test)]`), integration (in `tests/`)
+- Seed data conventions: all in `tests/common/mod.rs`, explicit IDs, `refresh_file_resolved_tags()` after seeding
+- How to add a new endpoint test: template + pattern
+- Coverage measurement commands
+- Coverage target: ≥75% line
+
+#### 6b: Update AGENT.md Section 1 Testing rules
+
+Replace the existing Testing section (or add to it):
+
+```markdown
+### Testing
+
+- **`cargo test` is the single source of truth.** Every API endpoint, every filter
+  parameter, every query variation must have a corresponding integration test.
+  Agents must never merge code that doesn't pass `cargo test`.
+- **Every plan that adds or modifies an API endpoint or filter parameter MUST
+  include "add/update integration test" as an acceptance criterion.** Tests are
+  not optional — they are part of the feature contract.
+- **Coverage threshold**: ≥75% line coverage (via `cargo llvm-cov`). Run
+  `cargo llvm-cov --fail-under-lines 75` before release.
+- **Unit tests** go in `#[cfg(test)] mod tests` within the source file for
+  pure functions. Integration tests go in `tests/api_*.rs` files.
+- **Integration tests use a self-contained SQLite DB.** No external server, no
+  real data. Each test creates a fresh in-memory DB, runs all migrations, seeds
+  hand-crafted data that exercises edge cases, then hits the API and asserts
+  exact results (row counts, field values, response shapes).
+- **Test files mirror API structure.** `tests/api_files.rs` tests `/api/files*`,
+  `tests/api_tracks.rs` tests `/api/tracks*`, etc.
+- **Migration integrity is tested.** A dedicated test creates a fresh DB and
+  runs all migrations end-to-end.
+```
+
+---
+
+### Files to create
+
+- `tests/api_deemix.rs` — ~4 tests (deemix queue endpoints)
+- `tests/api_spotify_sync.rs` — ~5 tests (Spotify sync endpoints, error paths)
+- `tests/api_tag_categories.rs` — ~3 tests
+- `tests/api_tag_energy_levels.rs` — ~3 tests
+- `tests/README.md` — documentation
+
+### Files to modify
+
+- `src/api.rs` — Phase 1 fixes (~65 lines)
+- `src/config.rs` — add `#[cfg(test)]` module (~15 tests, ~200 lines)
+- `src/db.rs` — add `#[cfg(test)]` module (~40 tests, ~600 lines)
+- `src/digging.rs` — add `#[cfg(test)]` module (~20 tests, ~300 lines)
+- `src/dump.rs` — add `#[cfg(test)]` module (~10 tests, ~150 lines)
+- `src/spotify/models.rs` — add `#[cfg(test)]` module (~5 tests, ~80 lines)
+- `src/spotify/replay.rs` — add `#[cfg(test)]` module (~8 tests, ~120 lines)
+- `src/scan_cache.rs` — add `#[cfg(test)]` module (~8 tests, ~120 lines)
+- `src/main.rs` — add `#[cfg(test)]` module (~5 tests, ~80 lines)
+- `src/maintainer.rs` — add `#[cfg(test)]` module (~5 tests, ~80 lines)
+- `src/backup/mod.rs` — add `#[cfg(test)]` module (~8 tests, ~120 lines)
+- `src/deemix/models.rs` — add `#[cfg(test)]` module (~3 tests, ~50 lines)
+- `src/deemix/cli.rs` — add `#[cfg(test)]` module (~2 tests, ~30 lines)
+- `tests/common/mod.rs` — add seed helpers for new scenarios (~200 lines)
+- `tests/api_files.rs` — add ~8 tests (~250 lines)
+- `tests/api_tracks.rs` — add ~11 tests (~300 lines)
+- `tests/api_tags.rs` — add ~8 tests (~200 lines)
+- `tests/api_playlists.rs` — add ~8 tests (~200 lines)
+- `tests/api_folders.rs` — add ~6 tests (~150 lines)
+- `tests/api_storage.rs` — add ~5 tests (~120 lines)
+- `tests/api_services.rs` — add ~6 tests (~150 lines)
+- `tests/api_digging.rs` — add ~2 tests (~60 lines)
+- `tests/api_tasks.rs` — add ~2 tests (~50 lines)
+- `AGENT.md` — update Section 1 Testing rules, update "Last Updated"
+
+### Acceptance Criteria
+
+**Phase 1 (prerequisites):**
+
+- [ ] Files PMV filter uses `file_resolved_tags.prefix`, not `SUBSTR(comment)`
+- [ ] 5 handlers return proper 404 for non-existent entities (tag, folder, config)
+- [ ] `digging_suggest_handler` returns 400 for empty request (not 500)
+- [ ] 12 weak assertions strengthened to verify specific values
+- [ ] All 195 existing tests still pass
+- [ ] `cargo build` passes
+
+**Phase 2 (route coverage):**
+
+- [ ] Every unique API route has at least one integration test (happy or sad path)
+- [ ] Every query param on FilesQuery, TracksQuery, PlaylistsQuery, TagsQuery has a test
+- [ ] 400/404 error paths tested for all CRUD endpoints (create, read, update, delete)
+- [ ] 4 critical filter combinations tested with count parity
+- [ ] 5 new test files created: `api_deemix.rs`, `api_spotify_sync.rs`, `api_tag_categories.rs`, `api_tag_energy_levels.rs`, `tests/README.md`
+- [ ] All 13 existing test files extended with missing endpoint/param coverage
+- [ ] Total integration tests: ~215 (134 existing + ~80 new)
+
+**Phase 3 (unit tests):**
+
+- [ ] `config.rs`: 15 unit tests (TOML parsing, env override, priority, defaults)
+- [ ] `db.rs`: 40 unit tests (camelot keys, comment computation, tag queries, file resolution, prune candidates, storage status, file variants, WAV linking, CRUD)
+- [ ] `digging.rs`: 20 unit tests (camelot compatibility, scoring, BPM outliers, ISRC dedup, full flow)
+- [ ] `dump.rs`: 10 unit tests (serialization, deserialization, roundtrip, edge cases)
+- [ ] `spotify/models.rs`: 5 unit tests (key conversion, type conversions)
+- [ ] `spotify/replay.rs`: 8 unit tests (replay mode, cache operations, file I/O)
+- [ ] `scan_cache.rs`: 8 unit tests (hit/miss, TTL, LRU, serialization)
+- [ ] `main.rs`: 5 unit tests (CLI parsing, build_router structure)
+- [ ] `maintainer.rs`: 5 unit tests (scheduling, condition checks)
+- [ ] `backup/mod.rs`: 8 unit tests (path construction, output parsing)
+- [ ] `deemix/models.rs` + `deemix/cli.rs`: 5 unit tests (deserialization, CLI parsing)
+- [ ] Total unit tests: ~190 (59 existing + ~130 new)
+
+**Phase 5 (coverage measurement):**
+
+- [ ] `cargo llvm-cov` reports ≥75% line coverage
+- [ ] No uncovered critical paths (happy paths for all endpoints)
+- [ ] Coverage threshold enforced in release checklist
+
+**Phase 6 (documentation):**
+
+- [ ] `tests/README.md` exists with conventions, setup, and coverage commands
+- [ ] AGENT.md Section 1 Testing rules updated with coverage threshold and unit test conventions
+
+**Overall:**
+
+- [ ] `cargo build` passes
+- [ ] `cargo test` passes (all ~405 tests)
+- [ ] `cargo test` completes in <30 seconds
+- [ ] No regressions to existing functionality
+- [ ] Total test count: ~405 (195 existing + ~210 new)

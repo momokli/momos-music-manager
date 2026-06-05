@@ -275,3 +275,165 @@ pub async fn entry_count() -> usize {
     }
     count
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    // ── ScanCacheMode tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_scan_cache_mode_default_is_live() {
+        unsafe { env::remove_var("SCAN_CACHE") };
+        assert_eq!(ScanCacheMode::from_env(), ScanCacheMode::Live);
+    }
+
+    #[test]
+    fn test_scan_cache_mode_record() {
+        unsafe { env::set_var("SCAN_CACHE", "record") };
+        let mode = ScanCacheMode::from_env();
+        assert_eq!(mode, ScanCacheMode::Record);
+        assert!(mode.should_record());
+        assert!(!mode.should_replay());
+        unsafe { env::remove_var("SCAN_CACHE") };
+    }
+
+    #[test]
+    fn test_scan_cache_mode_replay() {
+        unsafe { env::set_var("SCAN_CACHE", "replay") };
+        let mode = ScanCacheMode::from_env();
+        assert_eq!(mode, ScanCacheMode::Replay);
+        assert!(!mode.should_record());
+        assert!(mode.should_replay());
+        unsafe { env::remove_var("SCAN_CACHE") };
+    }
+
+    #[test]
+    fn test_scan_cache_mode_off_is_live() {
+        unsafe { env::set_var("SCAN_CACHE", "off") };
+        assert_eq!(ScanCacheMode::from_env(), ScanCacheMode::Live);
+        unsafe { env::remove_var("SCAN_CACHE") };
+    }
+
+    #[test]
+    fn test_scan_cache_mode_live_flags() {
+        let mode = ScanCacheMode::Live;
+        assert!(!mode.should_record());
+        assert!(!mode.should_replay());
+    }
+
+    #[test]
+    fn test_scan_cache_mode_clone_and_eq() {
+        let a = ScanCacheMode::Record;
+        let b = ScanCacheMode::Record;
+        let c = ScanCacheMode::Live;
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    // ── path_hash tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_path_hash_deterministic() {
+        let h1 = path_hash("/music/track.flac");
+        let h2 = path_hash("/music/track.flac");
+        assert_eq!(h1, h2, "same input must produce same hash");
+        assert_eq!(h1.len(), 16, "hash must be 16 hex chars");
+    }
+
+    #[test]
+    fn test_path_hash_different_paths() {
+        let h1 = path_hash("/music/track1.flac");
+        let h2 = path_hash("/music/track2.flac");
+        assert_ne!(h1, h2, "different paths must produce different hashes");
+    }
+
+    // ── cache_root tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_cache_root_default() {
+        unsafe { env::remove_var("SCAN_CACHE_DIR") };
+        let root = cache_root();
+        assert_eq!(root, PathBuf::from("./dev-data/scan-cache"));
+    }
+
+    #[test]
+    fn test_cache_root_from_env() {
+        unsafe { env::set_var("SCAN_CACHE_DIR", "/tmp/test-scan-cache") };
+        let root = cache_root();
+        assert_eq!(root, PathBuf::from("/tmp/test-scan-cache"));
+        unsafe { env::remove_var("SCAN_CACHE_DIR") };
+    }
+
+    // ── entry_path tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_entry_path_ends_with_json() {
+        let p = entry_path("some_file.flac");
+        assert!(p.to_string_lossy().ends_with(".json"));
+    }
+
+    #[test]
+    fn test_entry_path_contains_hash() {
+        let p = entry_path("/music/test.flac");
+        let filename = p.file_name().unwrap().to_string_lossy();
+        // filename format: HASH.json
+        assert!(filename.len() > 5, "filename should be hash.json");
+        assert!(filename.ends_with(".json"));
+    }
+
+    // ── CachedFileEntry construction ───────────────────────────────────
+
+    #[test]
+    fn test_cached_file_entry_fields() {
+        let entry = CachedFileEntry {
+            file_path: "/music/test.flac".to_string(),
+            last_modified: 1700000000,
+            file_hash: "abc123".to_string(),
+            metadata: File {
+                id: 0,
+                file_path: "/music/test.flac".to_string(),
+                file_hash: "abc".to_string(),
+                file_type: "flac".to_string(),
+                file_size: 12345,
+                last_modified: 1700000000,
+                isrc: None,
+                last_scanned: 1700000000,
+                title: Some("Test".to_string()),
+                artist: Some("Artist".to_string()),
+                album: None,
+                album_artist: None,
+                track_number: None,
+                total_tracks: None,
+                disc_number: None,
+                total_discs: None,
+                genre: None,
+                year: None,
+                composer: None,
+                comment: None,
+                duration_ms: None,
+                bitrate: None,
+                sample_rate: None,
+                channels: None,
+                bpm: None,
+                musical_key: None,
+                rating: 0,
+                play_count: 0,
+                last_played: None,
+                spotify_id: None,
+                soundcloud_id: None,
+                youtube_id: None,
+                source_of: None,
+                stem_type: None,
+                last_verified_local: None,
+                created_at: 1700000000,
+                updated_at: 1700000000,
+            },
+        };
+
+        assert_eq!(entry.file_path, "/music/test.flac");
+        assert_eq!(entry.last_modified, 1700000000);
+        assert_eq!(entry.file_hash, "abc123");
+    }
+}

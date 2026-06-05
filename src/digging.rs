@@ -2148,3 +2148,422 @@ pub async fn get_ladder_suggestions(
         candidates_considered,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_camelot_key ────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_camelot_key_8a() {
+        let key = parse_camelot_key("8A").unwrap();
+        assert_eq!(key.position, 8);
+        assert_eq!(key.mode, 'A');
+    }
+
+    #[test]
+    fn test_parse_camelot_key_12b() {
+        let key = parse_camelot_key("12B").unwrap();
+        assert_eq!(key.position, 12);
+        assert_eq!(key.mode, 'B');
+    }
+
+    #[test]
+    fn test_parse_camelot_key_minor_as_a() {
+        // 'm' (minor) maps to 'A' on Camelot wheel
+        let key = parse_camelot_key("4m").unwrap();
+        assert_eq!(key.position, 4);
+        assert_eq!(key.mode, 'A');
+    }
+
+    #[test]
+    fn test_parse_camelot_key_major_as_b() {
+        // 'd' (major) maps to 'B' on Camelot wheel
+        let key = parse_camelot_key("9d").unwrap();
+        assert_eq!(key.position, 9);
+        assert_eq!(key.mode, 'B');
+    }
+
+    #[test]
+    fn test_parse_camelot_key_1a() {
+        let key = parse_camelot_key("1A").unwrap();
+        assert_eq!(key.position, 1);
+        assert_eq!(key.mode, 'A');
+    }
+
+    #[test]
+    fn test_parse_camelot_key_invalid_too_short() {
+        assert!(parse_camelot_key("").is_none());
+        assert!(parse_camelot_key("A").is_none());
+    }
+
+    #[test]
+    fn test_parse_camelot_key_invalid_no_mode() {
+        assert!(parse_camelot_key("8").is_none());
+        assert!(parse_camelot_key("12").is_none());
+    }
+
+    #[test]
+    fn test_parse_camelot_key_invalid_position() {
+        assert!(parse_camelot_key("0A").is_none());
+        assert!(parse_camelot_key("13B").is_none());
+    }
+
+    #[test]
+    fn test_parse_camelot_key_invalid_number() {
+        assert!(parse_camelot_key("XX").is_none());
+        assert!(parse_camelot_key("ab").is_none());
+    }
+
+    #[test]
+    fn test_parse_camelot_key_case_insensitive() {
+        let key = parse_camelot_key("8a").unwrap();
+        assert_eq!(key.position, 8);
+        assert_eq!(key.mode, 'A');
+
+        let key2 = parse_camelot_key("8b").unwrap();
+        assert_eq!(key2.mode, 'B');
+    }
+
+    // ── are_keys_compatible ──────────────────────────────────────────
+
+    fn all_jumps() -> Vec<String> {
+        vec![
+            "+1".to_string(),
+            "-1".to_string(),
+            "+2".to_string(),
+            "-2".to_string(),
+            "+7".to_string(),
+            "-7".to_string(),
+            "a_to_b".to_string(),
+            "same".to_string(),
+        ]
+    }
+
+    #[test]
+    fn test_are_keys_compatible_perfect_same() {
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let to = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        assert!(are_keys_compatible(from, to, &all_jumps()));
+    }
+
+    #[test]
+    fn test_are_keys_compatible_same_not_allowed() {
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let to = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let jumps = vec!["+1".to_string(), "-1".to_string()];
+        assert!(!are_keys_compatible(from, to, &jumps));
+    }
+
+    #[test]
+    fn test_are_keys_compatible_good_plus_one() {
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let to = CamelotKey {
+            position: 9,
+            mode: 'A',
+        };
+        assert!(are_keys_compatible(from, to, &all_jumps()));
+    }
+
+    #[test]
+    fn test_are_keys_compatible_good_minus_one() {
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let to = CamelotKey {
+            position: 7,
+            mode: 'A',
+        };
+        assert!(are_keys_compatible(from, to, &all_jumps()));
+    }
+
+    #[test]
+    fn test_are_keys_compatible_ok_plus_two() {
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let to = CamelotKey {
+            position: 10,
+            mode: 'A',
+        };
+        assert!(are_keys_compatible(from, to, &all_jumps()));
+    }
+
+    #[test]
+    fn test_are_keys_compatible_ok_minus_two() {
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let to = CamelotKey {
+            position: 6,
+            mode: 'A',
+        };
+        assert!(are_keys_compatible(from, to, &all_jumps()));
+    }
+
+    #[test]
+    fn test_are_keys_compatible_ok_plus_seven() {
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let to = CamelotKey {
+            position: 3,
+            mode: 'A',
+        };
+        assert!(are_keys_compatible(from, to, &all_jumps()));
+    }
+
+    #[test]
+    fn test_are_keys_compatible_ok_minus_seven() {
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let to = CamelotKey {
+            position: 1,
+            mode: 'A',
+        };
+        assert!(are_keys_compatible(from, to, &all_jumps()));
+    }
+
+    #[test]
+    fn test_are_keys_compatible_a_to_b() {
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let to = CamelotKey {
+            position: 8,
+            mode: 'B',
+        };
+        assert!(are_keys_compatible(from, to, &all_jumps()));
+    }
+
+    #[test]
+    fn test_are_keys_compatible_a_to_b_not_allowed() {
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let to = CamelotKey {
+            position: 8,
+            mode: 'B',
+        };
+        let jumps = vec!["+1".to_string(), "same".to_string()];
+        assert!(!are_keys_compatible(from, to, &jumps));
+    }
+
+    #[test]
+    fn test_are_keys_compatible_mode_mismatch_not_allowed() {
+        // Position change + mode change is not supported
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let to = CamelotKey {
+            position: 9,
+            mode: 'B',
+        };
+        assert!(!are_keys_compatible(from, to, &all_jumps()));
+    }
+
+    #[test]
+    fn test_are_keys_compatible_wrap_around_minus_one() {
+        // Position 1 with +1 → position 12 wraps via modulo logic
+        let from = CamelotKey {
+            position: 1,
+            mode: 'A',
+        };
+        // 12 → diff = 11 → that's -1 (11 ≡ -1 mod 12)
+        let to = CamelotKey {
+            position: 12,
+            mode: 'A',
+        };
+        assert!(are_keys_compatible(from, to, &all_jumps()));
+    }
+
+    #[test]
+    fn test_are_keys_compatible_incompatible_other() {
+        // Position 8 to 4: diff = -4 ≡ 8 mod 12 → not in {1,2,5,7,10,11}
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let to = CamelotKey {
+            position: 4,
+            mode: 'A',
+        };
+        assert!(!are_keys_compatible(from, to, &all_jumps()));
+    }
+
+    // ── audio_format_preference ──────────────────────────────────────
+
+    #[test]
+    fn test_audio_format_preference_stem_m4a() {
+        assert_eq!(audio_format_preference("stem.m4a"), 0);
+        assert_eq!(audio_format_preference("m4a"), 0);
+    }
+
+    #[test]
+    fn test_audio_format_preference_mp3() {
+        assert_eq!(audio_format_preference("mp3"), 1);
+        assert_eq!(audio_format_preference("mpeg"), 1);
+    }
+
+    #[test]
+    fn test_audio_format_preference_flac() {
+        assert_eq!(audio_format_preference("flac"), 2);
+    }
+
+    #[test]
+    fn test_audio_format_preference_wav() {
+        assert_eq!(audio_format_preference("wav"), 3);
+        assert_eq!(audio_format_preference("wave"), 3);
+    }
+
+    #[test]
+    fn test_audio_format_preference_aiff() {
+        assert_eq!(audio_format_preference("aif"), 4);
+        assert_eq!(audio_format_preference("aiff"), 4);
+    }
+
+    #[test]
+    fn test_audio_format_preference_other() {
+        assert_eq!(audio_format_preference("opus"), 5);
+        assert_eq!(audio_format_preference("unknown"), 5);
+        assert_eq!(audio_format_preference(""), 5);
+    }
+
+    #[test]
+    fn test_audio_format_preference_case_insensitive() {
+        assert_eq!(audio_format_preference("FLAC"), 2);
+        assert_eq!(audio_format_preference("StEm.M4A"), 0);
+        assert_eq!(audio_format_preference("WAV"), 3);
+    }
+
+    // ── dedup_suggestions ────────────────────────────────────────────
+
+    fn make_suggestion(
+        file_id: i64,
+        isrc: Option<&str>,
+        file_type: &str,
+        score: f64,
+    ) -> DiggingSuggestion {
+        DiggingSuggestion {
+            file_id,
+            title: "Test Track".to_string(),
+            artist: "Test Artist".to_string(),
+            bpm: Some(128.0),
+            musical_key: Some("8A".to_string()),
+            genre: Some("House".to_string()),
+            isrc: isrc.map(|s| s.to_string()),
+            file_path: format!("/music/track.{}", file_type),
+            file_type: file_type.to_string(),
+            play_count: 0,
+            last_played: None,
+            duration_ms: Some(300000),
+            matching_seed_id: 1,
+            camelot_compatibility: "perfect".to_string(),
+            bpm_diff: Some(0.0),
+            shared_tags: vec![],
+            all_tags: vec![],
+            energy_level: None,
+            score_breakdown: ScoreBreakdown {
+                play_count_score: 0.0,
+                recency_score: -50.0,
+                bpm_score: 0.0,
+                camelot_bonus: -30.0,
+                tag_match_bonus: 0.0,
+                tag_richness_bonus: 0.0,
+                category_overlap_bonus: 0.0,
+                energy_match_score: 0.0,
+            },
+            score,
+        }
+    }
+
+    #[test]
+    fn test_dedup_suggestions_no_isrc_all_unique() {
+        let suggestions = vec![
+            make_suggestion(1, None, "stem.m4a", 10.0),
+            make_suggestion(2, None, "flac", 20.0),
+        ];
+        let result = dedup_suggestions(suggestions);
+        // NULL ISRC entries are always unique
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_dedup_suggestions_same_isrc_keeps_lower_score() {
+        let suggestions = vec![
+            make_suggestion(1, Some("US123"), "flac", 50.0),
+            make_suggestion(2, Some("US123"), "stem.m4a", 30.0),
+        ];
+        let result = dedup_suggestions(suggestions);
+        assert_eq!(result.len(), 1);
+        // Should keep stem.m4a with lower score (30)
+        assert_eq!(result[0].file_id, 2);
+        assert_eq!(result[0].score, 30.0);
+    }
+
+    #[test]
+    fn test_dedup_suggestions_same_isrc_same_score_prefers_browser_format() {
+        let suggestions = vec![
+            make_suggestion(1, Some("US123"), "flac", 25.0),
+            make_suggestion(2, Some("US123"), "stem.m4a", 25.0),
+        ];
+        let result = dedup_suggestions(suggestions);
+        assert_eq!(result.len(), 1);
+        // Same score → prefer stem.m4a (lower preference number)
+        assert_eq!(result[0].file_type, "stem.m4a");
+    }
+
+    #[test]
+    fn test_dedup_suggestions_different_isrcs_kept_separate() {
+        let suggestions = vec![
+            make_suggestion(1, Some("US123"), "flac", 10.0),
+            make_suggestion(2, Some("US456"), "stem.m4a", 20.0),
+        ];
+        let result = dedup_suggestions(suggestions);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_dedup_suggestions_mixed_isrc_nulls() {
+        let suggestions = vec![
+            make_suggestion(1, Some("US123"), "flac", 10.0),
+            make_suggestion(2, Some("US123"), "stem.m4a", 5.0),
+            make_suggestion(3, None, "flac", 30.0),
+            make_suggestion(4, None, "wav", 40.0),
+        ];
+        let result = dedup_suggestions(suggestions);
+        // 2 unique ISRCs collapsed to 1, + 2 NULL ISRCs = 3 total
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_dedup_suggestions_empty_input() {
+        let result = dedup_suggestions(vec![]);
+        assert!(result.is_empty());
+    }
+}
