@@ -460,6 +460,9 @@ async fn db_status(pool: &Pool<Sqlite>) -> Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use sqlx::SqlitePool;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     fn args<'a>(args: &'a [&'a str]) -> Vec<&'a str> {
         let mut v = vec!["momos-music-manager"];
@@ -546,5 +549,94 @@ mod tests {
             .try_get_matches_from(args(&["serve", "--public-url", "https://example.com"]))
             .unwrap();
         assert_eq!(matches.subcommand_name(), Some("serve"));
+    }
+
+    #[test]
+    fn test_cli_help_contains_all_subcommands() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_help().to_string();
+        // Every top-level subcommand name should appear in the help text
+        assert!(help.contains("serve"), "help should mention 'serve'");
+        assert!(help.contains("scan"), "help should mention 'scan'");
+        assert!(
+            help.contains("scan-file"),
+            "help should mention 'scan-file'"
+        );
+        assert!(help.contains("dump"), "help should mention 'dump'");
+        assert!(help.contains("restore"), "help should mention 'restore'");
+        assert!(
+            help.contains("db-status"),
+            "help should mention 'db-status'"
+        );
+        assert!(help.contains("deemix"), "help should mention 'deemix'");
+    }
+
+    #[test]
+    fn test_cli_serve_invalid_port_value() {
+        let result =
+            Cli::command().try_get_matches_from(args(&["serve", "--port", "not-a-number"]));
+        assert!(result.is_err(), "non-numeric --port should fail");
+    }
+
+    #[test]
+    fn test_cli_scan_missing_path() {
+        // The `scan` subcommand requires a positional directory argument
+        let result = Cli::command().try_get_matches_from(args(&["scan"]));
+        assert!(result.is_err(), "scan without a path should fail");
+    }
+
+    #[test]
+    fn test_cli_install_launch_agent_parses() {
+        let matches = Cli::command()
+            .try_get_matches_from(args(&["install-launch-agent"]))
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("install-launch-agent"));
+    }
+
+    #[test]
+    fn test_cli_uninstall_launch_agent_parses() {
+        let matches = Cli::command()
+            .try_get_matches_from(args(&["uninstall-launch-agent"]))
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("uninstall-launch-agent"));
+    }
+
+    #[test]
+    fn test_cli_service_status_parses() {
+        let matches = Cli::command()
+            .try_get_matches_from(args(&["service-status"]))
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("service-status"));
+    }
+
+    #[test]
+    fn test_cli_deemix_requires_subcommand() {
+        // The `deemix` subcommand has its own sub-subcommands
+        let result = Cli::command().try_get_matches_from(args(&["deemix"]));
+        assert!(
+            result.is_err(),
+            "deemix without a sub-subcommand should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_router_creates_router() {
+        // Verify that build_router() returns without panicking when given
+        // a valid AppState with an in-memory database. Full route-level
+        // testing is done in the integration tests.
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite pool");
+        let config = ServiceCredentials::load();
+        let task_manager = TaskManager::new();
+        let state = Arc::new(AppState {
+            db: pool,
+            config,
+            task_manager,
+            embeddings: Mutex::new(None),
+            category_means: tokio::sync::Mutex::new(None),
+            public_url: None,
+        });
+        let _router = momos_music_manager::build_router(state);
     }
 }

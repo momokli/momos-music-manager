@@ -286,6 +286,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_backup_path_empty_string() {
+        // Split on empty string returns None (no colon found)
+        let result = parse_backup_path("");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_backup_path_empty_host() {
+        // Colon at start: host is empty, path is present
+        let result = parse_backup_path(":/remote/path");
+        assert_eq!(result, Some(("", "/remote/path")));
+    }
+
+    #[test]
+    fn test_parse_backup_path_no_path() {
+        // Colon at end: host is present, path is empty
+        let result = parse_backup_path("host:");
+        assert_eq!(result, Some(("host", "")));
+    }
+
+    #[test]
     fn test_should_run_backup_discovery_never_run() {
         assert!(!should_run_backup_discovery(100000, 0, 604800));
     }
@@ -314,5 +335,61 @@ mod tests {
         assert_eq!(row.folder_path, "/music/stems");
         assert!(row.auto_backup);
         assert!(row.backup_path.is_some());
+    }
+
+    // ── Zero / large interval edge cases ────────────────────────────
+
+    #[test]
+    fn test_needs_full_scan_zero_interval_just_scanned() {
+        // interval=0, last_scanned matches now → not expired
+        assert!(!needs_full_scan(Some(1000), 1000, 0));
+    }
+
+    #[test]
+    fn test_needs_full_scan_zero_interval_expired() {
+        // interval=0, any positive elapsed time means expired
+        assert!(needs_full_scan(Some(1000), 1001, 0));
+    }
+
+    #[test]
+    fn test_needs_full_scan_very_large_interval() {
+        // A 31-year interval means nothing triggers within reasonable time
+        assert!(!needs_full_scan(Some(1_000_000), 2_000_000, 1_000_000_000));
+    }
+
+    #[test]
+    fn test_needs_full_scan_large_age_just_below_boundary() {
+        // elapsed = max_age - 1 → not expired
+        assert!(!needs_full_scan(Some(0), 59, 60));
+    }
+
+    #[test]
+    fn test_needs_full_scan_large_age_at_boundary() {
+        // elapsed = max_age → not expired (strictly greater)
+        assert!(!needs_full_scan(Some(0), 60, 60));
+    }
+
+    #[test]
+    fn test_needs_full_scan_large_age_just_over_boundary() {
+        // elapsed = max_age + 1 → expired
+        assert!(needs_full_scan(Some(0), 61, 60));
+    }
+
+    #[test]
+    fn test_should_run_backup_discovery_exact_boundary() {
+        // now - last_run == interval → not yet (strictly greater)
+        assert!(!should_run_backup_discovery(604800, 0, 604800));
+    }
+
+    #[test]
+    fn test_should_run_backup_discovery_just_over_boundary() {
+        // now - last_run == interval + 1 → should run
+        assert!(should_run_backup_discovery(604801, 0, 604800));
+    }
+
+    #[test]
+    fn test_should_run_backup_discovery_zero_interval() {
+        // interval=0, any positive elapsed time should trigger
+        assert!(should_run_backup_discovery(1, 0, 0));
     }
 }

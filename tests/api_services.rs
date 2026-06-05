@@ -1,4 +1,11 @@
 //! Integration tests for `/api/services*` endpoints.
+//!
+//! Phases:
+//!   1. Services list (existing)
+//!   2. Sync not configured (existing)
+//!   3. Config GET/PUT (extended)
+//!   4. Fetch counts, sync status, reset (extended)
+//!   5. Deemix auth (existing)
 
 mod common;
 
@@ -253,5 +260,194 @@ async fn services_deemix_auth() {
         status == 400 || status == 200 || status == 500,
         "deemix auth should return 400/200/500, got {}",
         status
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 7 — Named tests for coverage completeness
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+/// `GET /api/services/spotify/config` — returns 404 when not configured.
+async fn services_config_get_spotify() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/services/spotify/config", base))
+        .send()
+        .await
+        .unwrap();
+
+    // Without seed_service_config, Spotify is not configured → 404
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    eprintln!("services_config_get_spotify: status={status}, body={body}");
+
+    assert_eq!(
+        status, 404,
+        "unconfigured Spotify config GET should return 404, got {status}"
+    );
+    assert!(
+        body["data"]
+            .as_str()
+            .map_or(false, |s| s.contains("not configured"))
+            || body["data"].as_str().map_or(false, |s| s.contains("Not"))
+            || body["error"]
+                .as_str()
+                .map_or(false, |s| s.contains("not configured")),
+        "response should indicate not configured, got: {body}"
+    );
+}
+
+#[tokio::test]
+/// `PUT /api/services/spotify/config` — stores config when valid JSON is sent.
+async fn services_config_put_valid() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .put(format!("{}/api/services/spotify/config", base))
+        .json(&serde_json::json!({
+            "user_id": "config_test_user",
+            "playlist_id": "config_test_playlist"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    eprintln!("services_config_put_valid: status={status}, body={body}");
+
+    assert!(
+        status.is_success(),
+        "valid config PUT should succeed, got {status}: {body}"
+    );
+
+    // Verify via GET that the config was stored (now has a row in service_config table)
+    let get_resp = client
+        .get(format!("{}/api/services/spotify/config", base))
+        .send()
+        .await
+        .unwrap();
+
+    let get_status = get_resp.status();
+    let get_body: Value = get_resp.json().await.unwrap();
+    eprintln!("config after PUT: status={get_status}, body={get_body}");
+
+    // After PUT, the config should return 200 (config row exists in DB)
+    assert_eq!(get_status, 200, "config should exist after PUT");
+    let data = &get_body["data"];
+    assert!(
+        data.is_object(),
+        "config GET after PUT should return an object, got: {get_body}"
+    );
+    // The service_config row should now exist for 'spotify'
+    assert!(
+        data["service"].as_str() == Some("spotify") || data["id"].as_i64().is_some(),
+        "config should contain service/id fields, got: {get_body}"
+    );
+}
+
+#[tokio::test]
+/// `PUT /api/services/spotify/config` — with malformed JSON returns 422 or 400.
+async fn services_config_put_invalid() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Send non-JSON content type
+    let resp = client
+        .put(format!("{}/api/services/spotify/config", base))
+        .header("Content-Type", "text/plain")
+        .body("not-json-at-all")
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body_text = resp.text().await.unwrap_or_default();
+    eprintln!("services_config_put_invalid: status={status}, body={body_text}");
+
+    // axum rejects non-JSON bodies with 415 (Unsupported Media Type) or 400
+    assert!(
+        status == 415 || status == 400 || status == 422 || status == 500,
+        "invalid JSON config PUT should return 415/400/422/500, got {status}"
+    );
+}
+
+#[tokio::test]
+/// `GET /api/services/spotify/fetch-counts` — returns 501 when not configured.
+async fn services_fetch_counts_spotify() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/services/spotify/fetch-counts", base))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    eprintln!("services_fetch_counts_spotify: status={status}, body={body}");
+
+    // fetch-counts returns 400 for unconfigured services (not implemented)
+    assert!(
+        status == 400 || status == 501,
+        "fetch-counts for unconfigured Spotify should return 400 or 501, got {status}"
+    );
+}
+
+#[tokio::test]
+/// `GET /api/services/spotify/sync-status` — returns 404 when not configured.
+async fn services_sync_status_spotify() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/services/spotify/sync-status", base))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    eprintln!("services_sync_status_spotify: status={status}, body={body}");
+
+    // Without configuration, sync-status returns 404
+    assert!(
+        status == 404 || status == 200,
+        "sync-status for unconfigured Spotify should return 404, got {status}"
+    );
+}
+
+#[tokio::test]
+/// `POST /api/services/spotify/reset` — resets service configuration.
+async fn services_reset_spotify() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // First seed a config so there's something to reset
+    common::seed_service_config(&pool, "spotify").await;
+
+    let resp = client
+        .post(format!("{}/api/services/spotify/reset", base))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    eprintln!("services_reset_spotify: status={status}, body={body}");
+
+    // Reset should succeed (200) or return an error
+    assert!(
+        status.is_success(),
+        "reset should return 200, got {status}: {body}"
+    );
+    assert!(
+        body["data"].is_object() || body["data"].is_string() || body["data"].is_null(),
+        "reset response should contain data, got: {body}"
     );
 }

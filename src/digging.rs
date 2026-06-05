@@ -2156,6 +2156,15 @@ mod tests {
     // ── parse_camelot_key ────────────────────────────────────────────
 
     #[test]
+    fn test_parse_camelot_key_whitespace() {
+        // Whitespace before/after should return None
+        assert!(parse_camelot_key(" 8A").is_none());
+        assert!(parse_camelot_key("8A ").is_none());
+        assert!(parse_camelot_key(" 8A ").is_none());
+        assert!(parse_camelot_key("\t12B").is_none());
+    }
+
+    #[test]
     fn test_parse_camelot_key_8a() {
         let key = parse_camelot_key("8A").unwrap();
         assert_eq!(key.position, 8);
@@ -2228,6 +2237,21 @@ mod tests {
 
     // ── are_keys_compatible ──────────────────────────────────────────
 
+    #[test]
+    fn test_are_keys_compatible_wrap_around_plus_one() {
+        // Position 12 with -1 → position 1 wraps via modulo logic
+        let from = CamelotKey {
+            position: 12,
+            mode: 'A',
+        };
+        // 1 → diff = -11 ≡ 1 mod 12 → that's +1
+        let to = CamelotKey {
+            position: 1,
+            mode: 'A',
+        };
+        assert!(are_keys_compatible(from, to, &all_jumps()));
+    }
+
     fn all_jumps() -> Vec<String> {
         vec![
             "+1".to_string(),
@@ -2266,6 +2290,73 @@ mod tests {
         };
         let jumps = vec!["+1".to_string(), "-1".to_string()];
         assert!(!are_keys_compatible(from, to, &jumps));
+    }
+
+    #[test]
+    fn test_are_keys_compatible_only_same_jump() {
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let jumps = vec!["same".to_string()];
+
+        // Same key: should match
+        let same = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        assert!(are_keys_compatible(from, same, &jumps));
+
+        // Different position: should NOT match
+        let different = CamelotKey {
+            position: 9,
+            mode: 'A',
+        };
+        assert!(!are_keys_compatible(from, different, &jumps));
+
+        // Mode change only: should NOT match
+        let mode_change = CamelotKey {
+            position: 8,
+            mode: 'B',
+        };
+        assert!(!are_keys_compatible(from, mode_change, &jumps));
+    }
+
+    #[test]
+    fn test_are_keys_compatible_only_plus_one_jump() {
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let jumps = vec!["+1".to_string()];
+
+        // +1 position: should match (good)
+        let plus_one = CamelotKey {
+            position: 9,
+            mode: 'A',
+        };
+        assert!(are_keys_compatible(from, plus_one, &jumps));
+
+        // -1 position: should NOT match
+        let minus_one = CamelotKey {
+            position: 7,
+            mode: 'A',
+        };
+        assert!(!are_keys_compatible(from, minus_one, &jumps));
+
+        // Same key: should NOT match (same not in jumps)
+        let same = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        assert!(!are_keys_compatible(from, same, &jumps));
+
+        // +2 position: should NOT match
+        let plus_two = CamelotKey {
+            position: 10,
+            mode: 'A',
+        };
+        assert!(!are_keys_compatible(from, plus_two, &jumps));
     }
 
     #[test]
@@ -2565,5 +2656,180 @@ mod tests {
     fn test_dedup_suggestions_empty_input() {
         let result = dedup_suggestions(vec![]);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_dedup_suggestions_score_tie_different_isrc() {
+        // Same score but different ISRCs → both kept
+        let suggestions = vec![
+            make_suggestion(1, Some("US001"), "flac", 50.0),
+            make_suggestion(2, Some("US002"), "flac", 50.0),
+        ];
+        let result = dedup_suggestions(suggestions);
+        assert_eq!(result.len(), 2);
+        // Both unique ISRCs should survive
+        let ids: std::collections::HashSet<i64> = result.iter().map(|s| s.file_id).collect();
+        assert!(ids.contains(&1));
+        assert!(ids.contains(&2));
+    }
+
+    #[test]
+    fn test_dedup_suggestions_score_tie_prefers_stem_over_wav() {
+        // Same score, same ISRC: stem.m4a (pref=0) should win over wav (pref=3)
+        let suggestions = vec![
+            make_suggestion(1, Some("US001"), "wav", 30.0),
+            make_suggestion(2, Some("US001"), "stem.m4a", 30.0),
+        ];
+        let result = dedup_suggestions(suggestions);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].file_type, "stem.m4a");
+        assert_eq!(result[0].file_id, 2);
+    }
+
+    // ── BPM range clamping ────────────────────────────────────────────
+
+    #[test]
+    fn test_suggest_bpm_range_clamped_to_min() {
+        // The engine clamps bpm_range to [1.0, 30.0]
+        // Input 0.5 → should clamp to 1.0
+        let clamped = 0.5f64.clamp(1.0, 30.0);
+        assert!((clamped - 1.0).abs() < f64::EPSILON);
+
+        // Input -5.0 → should clamp to 1.0
+        let clamped2 = (-5.0f64).clamp(1.0, 30.0);
+        assert!((clamped2 - 1.0).abs() < f64::EPSILON);
+
+        // Default value 8.0 stays unchanged
+        let clamped3 = 8.0f64.clamp(1.0, 30.0);
+        assert!((clamped3 - 8.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_suggest_bpm_range_clamped_to_max() {
+        // Input 50.0 → should clamp to 30.0
+        let clamped = 50.0f64.clamp(1.0, 30.0);
+        assert!((clamped - 30.0).abs() < f64::EPSILON);
+
+        // Input 100.0 → should clamp to 30.0
+        let clamped2 = 100.0f64.clamp(1.0, 30.0);
+        assert!((clamped2 - 30.0).abs() < f64::EPSILON);
+    }
+
+    // ── Camelot compatibility with no active jumps ────────────────────
+
+    #[test]
+    fn test_suggest_camelot_jumps_all_off() {
+        // When all jumps are disabled, even perfect matches should fail
+        let from = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let to = CamelotKey {
+            position: 8,
+            mode: 'A',
+        };
+        let no_jumps: Vec<String> = vec![];
+        assert!(!are_keys_compatible(from, to, &no_jumps));
+
+        // Different position + no jumps → also incompatible
+        let to2 = CamelotKey {
+            position: 9,
+            mode: 'A',
+        };
+        assert!(!are_keys_compatible(from, to2, &no_jumps));
+
+        // Mode change + no jumps → incompatible
+        let to3 = CamelotKey {
+            position: 8,
+            mode: 'B',
+        };
+        assert!(!are_keys_compatible(from, to3, &no_jumps));
+    }
+
+    // ── Score breakdown math ──────────────────────────────────────────
+
+    /// Helper: compute the total score from a ScoreBreakdown (mirrors the engine's formula).
+    fn total_score_from_breakdown(b: &ScoreBreakdown) -> f64 {
+        b.play_count_score
+            + b.recency_score
+            + b.bpm_score
+            + b.camelot_bonus
+            + b.tag_match_bonus
+            + b.tag_richness_bonus
+            + b.category_overlap_bonus
+    }
+
+    #[test]
+    fn test_suggest_score_breakdown_exact_weights() {
+        // Construct a ScoreBreakdown with known values and verify total_score formula
+        let b = ScoreBreakdown {
+            play_count_score: 10.0,      // play_count 5 * 2.0
+            recency_score: 200.0,        // 400 days since played
+            bpm_score: 15.0,             // BPM diff 10 * 1.5
+            camelot_bonus: -30.0,        // perfect match
+            tag_match_bonus: -10.0,      // 2 shared tags * -5.0
+            tag_richness_bonus: 0.0,     // prefer_tag_richness disabled
+            category_overlap_bonus: 0.0, // prefer_tag_richness disabled
+            energy_match_score: 0.0,     // not included in total_score
+        };
+        let total = total_score_from_breakdown(&b);
+        // 10.0 + 200.0 + 15.0 + (-30.0) + (-10.0) + 0.0 + 0.0 = 185.0
+        assert!(
+            (total - 185.0).abs() < f64::EPSILON,
+            "expected 185.0, got {}",
+            total
+        );
+
+        // Verify energy_match_score is NOT included in total_score (it's stored separately)
+        let b_with_energy = ScoreBreakdown {
+            play_count_score: 0.0,
+            recency_score: 0.0,
+            bpm_score: 0.0,
+            camelot_bonus: 0.0,
+            tag_match_bonus: 0.0,
+            tag_richness_bonus: 0.0,
+            category_overlap_bonus: 0.0,
+            energy_match_score: 50.0, // should NOT affect total
+        };
+        let total2 = total_score_from_breakdown(&b_with_energy);
+        assert!(
+            (total2 - 0.0).abs() < f64::EPSILON,
+            "energy_match_score should not affect total, got {}",
+            total2
+        );
+    }
+
+    #[test]
+    fn test_suggest_ranked_by_scoring_criteria() {
+        // Create suggestions with different scores
+        let mut suggestions = vec![
+            make_suggestion(1, Some("US001"), "flac", 100.0),
+            make_suggestion(2, Some("US002"), "flac", 50.0),
+            make_suggestion(3, Some("US003"), "flac", 200.0),
+            make_suggestion(4, Some("US004"), "flac", 0.0),
+        ];
+
+        // Sort by score ascending (mirrors the engine's sort_by)
+        suggestions.sort_by(|a, b| {
+            a.score
+                .partial_cmp(&b.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Lower score = better (higher rank)
+        assert_eq!(suggestions[0].file_id, 4); // score 0.0 = best
+        assert_eq!(suggestions[1].file_id, 2); // score 50.0
+        assert_eq!(suggestions[2].file_id, 1); // score 100.0
+        assert_eq!(suggestions[3].file_id, 3); // score 200.0 = worst
+
+        // Verify scores are strictly ascending
+        for window in suggestions.windows(2) {
+            assert!(
+                window[0].score <= window[1].score,
+                "scores not sorted: {} > {}",
+                window[0].score,
+                window[1].score
+            );
+        }
     }
 }

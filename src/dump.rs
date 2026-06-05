@@ -1273,6 +1273,199 @@ mod tests {
     // ── DataDump serialization roundtrip ─────────────────────────────
 
     #[test]
+    fn test_data_dump_all_table_types() {
+        // Verify all 14 table types appear in a roundtrip
+        let dump = DataDump {
+            tag_categories: vec![DumpTagCategory {
+                id: 1,
+                name: "Setlist".to_string(),
+                icon: "fa-list".to_string(),
+                prefix: "S".to_string(),
+                sort_order: 0,
+                is_default: true,
+                created_at: 100,
+            }],
+            tags: vec![DumpTag {
+                id: 10,
+                name: "Groovy".to_string(),
+                category_id: 1,
+                sort_order: 0,
+                created_at: 100,
+                reviewed_at: None,
+            }],
+            tag_embeddings: vec![DumpTagEmbedding {
+                tag_id: 10,
+                embedding_b64: "AAAA".to_string(),
+                model_version: "v1".to_string(),
+                updated_at: 100,
+            }],
+            tag_energy_levels: vec![DumpTagEnergyLevel {
+                tag_id: 10,
+                energy_level: 3,
+                created_at: 100,
+            }],
+            tag_parents: vec![DumpTagParent {
+                id: 1,
+                tag_id: 10,
+                parent_tag_id: 5,
+                created_at: 100,
+            }],
+            tag_similarities: vec![DumpTagSimilarity {
+                tag_a_id: 10,
+                tag_b_id: 5,
+                similarity: 0.85,
+                updated_at: 100,
+            }],
+            folders: vec![DumpFolder {
+                id: 1,
+                folder_path: "/music/stems".to_string(),
+                active: true,
+                scan_recursive: true,
+                fixed_extensions: true,
+                file_extensions: "stem.m4a,flac".to_string(),
+                max_depth: 5,
+                last_scanned: Some(1000),
+                created_at: 100,
+                updated_at: 100,
+            }],
+            service_config: vec![DumpServiceConfig {
+                id: 1,
+                service: "spotify".to_string(),
+                refresh_token: None,
+                metadata_json: None,
+                access_token: None,
+                token_expiry: None,
+                user_id: None,
+                playlist_id: None,
+                is_connected: false,
+                last_checked: None,
+                last_synced: None,
+                remote_playlists_count: 0,
+                remote_tracks_count: 0,
+                created_at: 100,
+                updated_at: 100,
+            }],
+            service_tracks: vec![DumpServiceTrack {
+                id: 1,
+                service: "spotify".to_string(),
+                service_id: "spotify:track:abc".to_string(),
+                title: "Test Track".to_string(),
+                artist: "Test Artist".to_string(),
+                album: None,
+                isrc: Some("US123".to_string()),
+                duration_ms: Some(300000),
+                metadata_json: None,
+                imported_at: 100,
+                updated_at: 100,
+            }],
+            service_playlists: vec![DumpServicePlaylist {
+                id: 1,
+                service: "spotify".to_string(),
+                playlist_id: "37i9dQZF1DXcBWIGoYBM5M".to_string(),
+                name: "Today's Top Hits".to_string(),
+                description: Some("Biggest hits".to_string()),
+                metadata_json: None,
+                imported_at: 100,
+                updated_at: 100,
+                last_fetched_at: Some(200),
+                remote_track_count: 50,
+                remote_unique_count: 50,
+            }],
+            service_playlist_tracks: vec![DumpServicePlaylistTrack {
+                playlist_id: 1,
+                track_id: 1,
+                position: Some(0),
+                added_at: 100,
+            }],
+            files: vec![DumpFile {
+                id: 100,
+                file_path: "/music/test.flac".to_string(),
+                file_hash: "abc123".to_string(),
+                file_type: "flac".to_string(),
+                file_size: 12345,
+                last_modified: 1000000,
+                isrc: Some("US123".to_string()),
+                last_scanned: 1000001,
+                title: Some("Test".to_string()),
+                artist: Some("Artist".to_string()),
+                album: None,
+                album_artist: None,
+                track_number: Some(1),
+                total_tracks: Some(10),
+                disc_number: Some(1),
+                total_discs: Some(1),
+                genre: Some("House".to_string()),
+                year: Some(2024),
+                composer: None,
+                comment: Some("[PMV] house".to_string()),
+                duration_ms: Some(300000),
+                bitrate: Some(1411),
+                sample_rate: Some(44100),
+                channels: Some(2),
+                bpm: Some(128.0),
+                musical_key: Some("8A".to_string()),
+                rating: 3,
+                play_count: 42,
+                last_played: Some(2000000),
+                spotify_id: Some("spotify:track:abc".to_string()),
+                soundcloud_id: None,
+                youtube_id: None,
+                created_at: 1000000,
+                updated_at: 1000001,
+            }],
+            playlist_subscriptions: vec![DumpPlaylistSubscription {
+                id: 1,
+                service: "spotify".to_string(),
+                playlist_id: "37i9dQZF1DXcBWIGoYBM5M".to_string(),
+                service_playlist_id: Some(1),
+                subscribed_at: 100,
+                last_polled_at: Some(200),
+                poll_interval_secs: 1800,
+                is_active: true,
+            }],
+            deemix_downloads: vec![DumpDeemixDownload {
+                id: 1,
+                spotify_playlist_url: "https://open.spotify.com/playlist/abc".to_string(),
+                playlist_name: Some("Test DL".to_string()),
+                status: "completed".to_string(),
+                track_count_total: 50,
+                track_count_downloaded: 50,
+                error_message: None,
+                created_at: 100,
+                updated_at: 100,
+            }],
+            dumped_at: 1234567890,
+        };
+
+        let json = serde_json::to_string(&dump).unwrap();
+        let restored: DataDump = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.dumped_at, 1234567890);
+        assert_eq!(restored.tag_categories.len(), 1);
+        assert_eq!(restored.tags.len(), 1);
+        assert_eq!(restored.tag_embeddings.len(), 1);
+        assert_eq!(restored.tag_energy_levels.len(), 1);
+        assert_eq!(restored.tag_parents.len(), 1);
+        assert_eq!(restored.tag_similarities.len(), 1);
+        assert_eq!(restored.folders.len(), 1);
+        assert_eq!(restored.service_config.len(), 1);
+        assert_eq!(restored.service_tracks.len(), 1);
+        assert_eq!(restored.service_playlists.len(), 1);
+        assert_eq!(restored.service_playlist_tracks.len(), 1);
+        assert_eq!(restored.files.len(), 1);
+        assert_eq!(restored.playlist_subscriptions.len(), 1);
+        assert_eq!(restored.deemix_downloads.len(), 1);
+
+        // Verify a few specific values across different tables
+        assert_eq!(restored.tag_categories[0].name, "Setlist");
+        assert_eq!(restored.tag_similarities[0].similarity, 0.85);
+        assert!(restored.folders[0].active);
+        assert_eq!(restored.service_tracks[0].service, "spotify");
+        assert_eq!(restored.deemix_downloads[0].status, "completed");
+        assert_eq!(restored.playlist_subscriptions[0].poll_interval_secs, 1800);
+    }
+
+    #[test]
     fn test_data_dump_roundtrip_empty() {
         let dump = DataDump {
             tag_categories: vec![],
@@ -1298,6 +1491,97 @@ mod tests {
         assert!(restored.tag_categories.is_empty());
         assert!(restored.tags.is_empty());
         assert!(restored.files.is_empty());
+    }
+
+    #[test]
+    fn test_data_dump_large_dataset_roundtrip() {
+        // 100+ files and 50+ tags to stress serde
+        let files: Vec<DumpFile> = (0..150)
+            .map(|i| DumpFile {
+                id: i + 1,
+                file_path: format!("/music/track_{}.flac", i),
+                file_hash: format!("hash_{}", i),
+                file_type: "flac".to_string(),
+                file_size: 1000 + i,
+                last_modified: 1000000 + i,
+                isrc: Some(format!("US{:07}", i)),
+                last_scanned: 1000001,
+                title: Some(format!("Track {}", i)),
+                artist: Some("Artist".to_string()),
+                album: None,
+                album_artist: None,
+                track_number: Some(1),
+                total_tracks: Some(1),
+                disc_number: Some(1),
+                total_discs: Some(1),
+                genre: Some("House".to_string()),
+                year: Some(2024),
+                composer: None,
+                comment: None,
+                duration_ms: Some(300000),
+                bitrate: Some(1411),
+                sample_rate: Some(44100),
+                channels: Some(2),
+                bpm: Some(128.0),
+                musical_key: Some("8A".to_string()),
+                rating: 0,
+                play_count: 0,
+                last_played: None,
+                spotify_id: None,
+                soundcloud_id: None,
+                youtube_id: None,
+                created_at: 1000000,
+                updated_at: 1000001,
+            })
+            .collect();
+
+        let tags: Vec<DumpTag> = (0..50)
+            .map(|i| DumpTag {
+                id: i + 100,
+                name: format!("Tag-{}", i),
+                category_id: 1,
+                sort_order: i,
+                created_at: 1000,
+                reviewed_at: None,
+            })
+            .collect();
+
+        let dump = DataDump {
+            files,
+            tags,
+            ..DataDump {
+                tag_categories: vec![],
+                tags: vec![],
+                tag_embeddings: vec![],
+                tag_energy_levels: vec![],
+                tag_parents: vec![],
+                tag_similarities: vec![],
+                folders: vec![],
+                service_config: vec![],
+                service_tracks: vec![],
+                service_playlists: vec![],
+                service_playlist_tracks: vec![],
+                files: vec![],
+                playlist_subscriptions: vec![],
+                deemix_downloads: vec![],
+                dumped_at: 0,
+            }
+        };
+
+        let json = serde_json::to_string(&dump).unwrap();
+        let restored: DataDump = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.files.len(), 150);
+        assert_eq!(restored.tags.len(), 50);
+
+        // Spot-check first, middle, and last items
+        assert_eq!(restored.files[0].id, 1);
+        assert_eq!(restored.files[0].isrc, Some("US0000000".to_string()));
+        assert_eq!(restored.files[75].id, 76);
+        assert_eq!(restored.files[75].file_path, "/music/track_75.flac");
+        assert_eq!(restored.files[149].id, 150);
+        assert_eq!(restored.files[149].isrc, Some("US0000149".to_string()));
+        assert_eq!(restored.tags[25].name, "Tag-25");
     }
 
     #[test]
@@ -1441,6 +1725,326 @@ mod tests {
         assert_eq!(restored.tag_energy_levels[0].energy_level, 3);
         assert_eq!(restored.tag_parents[0].tag_id, 10);
         assert_eq!(restored.tag_parents[0].parent_tag_id, 5);
+    }
+
+    #[test]
+    fn test_data_dump_unicode_special_chars() {
+        // Emoji, null codepoint in display field, and other special characters
+        let dump = DataDump {
+            tag_categories: vec![DumpTagCategory {
+                id: 1,
+                name: "🎵 Emoji Tag 🔥".to_string(),
+                icon: "fa:🔥-heart".to_string(),
+                prefix: "🎵".to_string(),
+                sort_order: 0,
+                is_default: false,
+                created_at: 0,
+            }],
+            tags: vec![
+                DumpTag {
+                    id: 1,
+                    name: "emoji/🎵/🔥/tag".to_string(),
+                    category_id: 1,
+                    sort_order: 0,
+                    created_at: 0,
+                    reviewed_at: None,
+                },
+                DumpTag {
+                    id: 2,
+                    name: "tag_with\nnewline".to_string(),
+                    category_id: 1,
+                    sort_order: 1,
+                    created_at: 0,
+                    reviewed_at: None,
+                },
+            ],
+            files: vec![DumpFile {
+                id: 1,
+                file_path: "/music/Straße üñîçödë 🎵.flac".to_string(),
+                file_hash: "abc".to_string(),
+                file_type: "flac".to_string(),
+                file_size: 100,
+                last_modified: 0,
+                isrc: None,
+                last_scanned: 0,
+                title: Some("Track with 🔥 emoji".to_string()),
+                artist: Some("Café & résumé 🎧".to_string()),
+                album: None,
+                album_artist: None,
+                track_number: None,
+                total_tracks: None,
+                disc_number: None,
+                total_discs: None,
+                genre: Some("World 🌍".to_string()),
+                year: None,
+                composer: None,
+                comment: Some("[🎵🎵🎵] emoji\ntags".to_string()),
+                duration_ms: None,
+                bitrate: None,
+                sample_rate: None,
+                channels: None,
+                bpm: None,
+                musical_key: None,
+                rating: 0,
+                play_count: 0,
+                last_played: None,
+                spotify_id: None,
+                soundcloud_id: None,
+                youtube_id: None,
+                created_at: 0,
+                updated_at: 0,
+            }],
+            ..DataDump {
+                tag_categories: vec![],
+                tags: vec![],
+                tag_embeddings: vec![],
+                tag_energy_levels: vec![],
+                tag_parents: vec![],
+                tag_similarities: vec![],
+                folders: vec![],
+                service_config: vec![],
+                service_tracks: vec![],
+                service_playlists: vec![],
+                service_playlist_tracks: vec![],
+                files: vec![],
+                playlist_subscriptions: vec![],
+                deemix_downloads: vec![],
+                dumped_at: 0,
+            }
+        };
+
+        let json = serde_json::to_string(&dump).unwrap();
+        let restored: DataDump = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.tag_categories[0].name, "🎵 Emoji Tag 🔥");
+        assert_eq!(restored.tags[0].name, "emoji/🎵/🔥/tag");
+        assert_eq!(restored.tags[1].name, "tag_with\nnewline");
+        assert_eq!(restored.files[0].file_path, "/music/Straße üñîçödë 🎵.flac");
+        assert_eq!(
+            restored.files[0].title,
+            Some("Track with 🔥 emoji".to_string())
+        );
+        assert_eq!(
+            restored.files[0].artist,
+            Some("Café & résumé 🎧".to_string())
+        );
+        assert_eq!(
+            restored.files[0].comment,
+            Some("[🎵🎵🎵] emoji\ntags".to_string())
+        );
+    }
+
+    #[test]
+    fn test_data_dump_compares_identical() {
+        // Two serializations of the same data should produce identical JSON
+        let dump = DataDump {
+            tag_categories: vec![DumpTagCategory {
+                id: 1,
+                name: "Test".to_string(),
+                icon: "fa-x".to_string(),
+                prefix: "T".to_string(),
+                sort_order: 0,
+                is_default: true,
+                created_at: 100,
+            }],
+            tags: vec![DumpTag {
+                id: 10,
+                name: "Test Tag".to_string(),
+                category_id: 1,
+                sort_order: 0,
+                created_at: 100,
+                reviewed_at: None,
+            }],
+            files: vec![DumpFile {
+                id: 100,
+                file_path: "/music/test.flac".to_string(),
+                file_hash: "abc".to_string(),
+                file_type: "flac".to_string(),
+                ..DumpFile {
+                    id: 0,
+                    file_path: String::new(),
+                    file_hash: String::new(),
+                    file_type: String::new(),
+                    file_size: 0,
+                    last_modified: 0,
+                    isrc: None,
+                    last_scanned: 0,
+                    title: None,
+                    artist: None,
+                    album: None,
+                    album_artist: None,
+                    track_number: None,
+                    total_tracks: None,
+                    disc_number: None,
+                    total_discs: None,
+                    genre: None,
+                    year: None,
+                    composer: None,
+                    comment: None,
+                    duration_ms: None,
+                    bitrate: None,
+                    sample_rate: None,
+                    channels: None,
+                    bpm: None,
+                    musical_key: None,
+                    rating: 0,
+                    play_count: 0,
+                    last_played: None,
+                    spotify_id: None,
+                    soundcloud_id: None,
+                    youtube_id: None,
+                    created_at: 0,
+                    updated_at: 0,
+                }
+            }],
+            ..DataDump {
+                tag_categories: vec![],
+                tags: vec![],
+                tag_embeddings: vec![],
+                tag_energy_levels: vec![],
+                tag_parents: vec![],
+                tag_similarities: vec![],
+                folders: vec![],
+                service_config: vec![],
+                service_tracks: vec![],
+                service_playlists: vec![],
+                service_playlist_tracks: vec![],
+                files: vec![],
+                playlist_subscriptions: vec![],
+                deemix_downloads: vec![],
+                dumped_at: 42,
+            }
+        };
+
+        let json1 = serde_json::to_string(&dump).unwrap();
+        let json2 = serde_json::to_string(&dump).unwrap();
+        assert_eq!(
+            json1, json2,
+            "two dumps of same data must produce identical JSON"
+        );
+    }
+
+    #[test]
+    fn test_data_dump_restore_idempotent() {
+        // Restoring twice produces same state as restoring once.
+        // Creates a dump, serializes, deserializes, re-serializes, and compares.
+        let original = DataDump {
+            tag_categories: vec![DumpTagCategory {
+                id: 1,
+                name: "Idempotent".to_string(),
+                icon: "fa-i".to_string(),
+                prefix: "I".to_string(),
+                sort_order: 0,
+                is_default: false,
+                created_at: 10,
+            }],
+            tags: vec![DumpTag {
+                id: 1,
+                name: "Identity".to_string(),
+                category_id: 1,
+                sort_order: 0,
+                created_at: 10,
+                reviewed_at: None,
+            }],
+            ..DataDump {
+                tag_categories: vec![],
+                tags: vec![],
+                tag_embeddings: vec![],
+                tag_energy_levels: vec![],
+                tag_parents: vec![],
+                tag_similarities: vec![],
+                folders: vec![],
+                service_config: vec![],
+                service_tracks: vec![],
+                service_playlists: vec![],
+                service_playlist_tracks: vec![],
+                files: vec![],
+                playlist_subscriptions: vec![],
+                deemix_downloads: vec![],
+                dumped_at: 999,
+            }
+        };
+
+        // First restore: serialize → deserialize → serialize
+        let json1 = serde_json::to_string(&original).unwrap();
+        let restored: DataDump = serde_json::from_str(&json1).unwrap();
+        let json2 = serde_json::to_string(&restored).unwrap();
+
+        // Second restore: serialize the restored → deserialize again → serialize
+        let restored2: DataDump = serde_json::from_str(&json2).unwrap();
+        let json3 = serde_json::to_string(&restored2).unwrap();
+
+        // Both roundtrips should produce identical JSON
+        assert_eq!(json1, json2, "first roundtrip must be identical");
+        assert_eq!(json2, json3, "second roundtrip must be identical to first");
+    }
+
+    #[test]
+    fn test_data_dump_roundtrip_preserves_references() {
+        // FK-like references (tag_parents) must survive roundtrip intact
+        let dump = DataDump {
+            tags: vec![
+                DumpTag {
+                    id: 10,
+                    name: "Child Tag".to_string(),
+                    category_id: 1,
+                    sort_order: 0,
+                    created_at: 100,
+                    reviewed_at: None,
+                },
+                DumpTag {
+                    id: 5,
+                    name: "Parent Tag".to_string(),
+                    category_id: 1,
+                    sort_order: 0,
+                    created_at: 100,
+                    reviewed_at: None,
+                },
+            ],
+            tag_parents: vec![DumpTagParent {
+                id: 1,
+                tag_id: 10,
+                parent_tag_id: 5,
+                created_at: 100,
+            }],
+            tag_similarities: vec![DumpTagSimilarity {
+                tag_a_id: 10,
+                tag_b_id: 5,
+                similarity: 0.92,
+                updated_at: 100,
+            }],
+            ..DataDump {
+                tag_categories: vec![],
+                tags: vec![],
+                tag_embeddings: vec![],
+                tag_energy_levels: vec![],
+                tag_parents: vec![],
+                tag_similarities: vec![],
+                folders: vec![],
+                service_config: vec![],
+                service_tracks: vec![],
+                service_playlists: vec![],
+                service_playlist_tracks: vec![],
+                files: vec![],
+                playlist_subscriptions: vec![],
+                deemix_downloads: vec![],
+                dumped_at: 0,
+            }
+        };
+
+        let json = serde_json::to_string(&dump).unwrap();
+        let restored: DataDump = serde_json::from_str(&json).unwrap();
+
+        // Tag parents: references intact
+        assert_eq!(restored.tags.len(), 2);
+        assert_eq!(restored.tag_parents.len(), 1);
+        assert_eq!(restored.tag_parents[0].tag_id, 10);
+        assert_eq!(restored.tag_parents[0].parent_tag_id, 5);
+
+        // Tag similarities: references intact
+        assert_eq!(restored.tag_similarities[0].tag_a_id, 10);
+        assert_eq!(restored.tag_similarities[0].tag_b_id, 5);
+        assert!((restored.tag_similarities[0].similarity - 0.92).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1598,6 +2202,67 @@ mod tests {
         let dump = parse_dump_resilient(json).unwrap();
         assert_eq!(dump.dumped_at, 0);
         assert!(dump.tag_categories.is_empty());
+    }
+
+    #[test]
+    fn test_parse_dump_resilient_truncated_json() {
+        // A truncated JSON string that should fail to parse
+        let json = "{\"dumped_at\": 1000, \"tag_categories\": [{\"id\": 1, \"name\": \"Trunc\"";
+        match parse_dump_resilient(json) {
+            Err(_) => {} // expected
+            Ok(_) => panic!("truncated JSON should return Err"),
+        }
+    }
+
+    #[test]
+    fn test_parse_dump_resilient_wrong_field_types() {
+        // A table has a field with wrong type (string where number expected)
+        // The bad row should be skipped, good rows preserved
+        let json = r#"{
+            "dumped_at": 100,
+            "tags": [
+                {
+                    "id": 1,
+                    "name": "Good Tag",
+                    "category_id": 1,
+                    "sort_order": 0,
+                    "created_at": 100
+                },
+                {
+                    "id": "not-a-number",
+                    "name": "Bad Tag",
+                    "category_id": 1,
+                    "sort_order": 0,
+                    "created_at": 200
+                },
+                {
+                    "id": 3,
+                    "name": "Another Good",
+                    "category_id": 2,
+                    "sort_order": 1,
+                    "created_at": 300
+                }
+            ],
+            "tag_categories": [],
+            "tag_embeddings": [],
+            "tag_energy_levels": [],
+            "tag_parents": [],
+            "tag_similarities": [],
+            "folders": [],
+            "service_config": [],
+            "service_tracks": [],
+            "service_playlists": [],
+            "service_playlist_tracks": [],
+            "files": [],
+            "playlist_subscriptions": [],
+            "deemix_downloads": []
+        }"#;
+
+        let dump = parse_dump_resilient(json).unwrap();
+        assert_eq!(dump.tags.len(), 2, "bad row should be skipped");
+        assert_eq!(dump.tags[0].name, "Good Tag");
+        assert_eq!(dump.tags[1].name, "Another Good");
+        assert_eq!(dump.dumped_at, 100);
     }
 
     // ── Dump struct defaults ──────────────────────────────────────────

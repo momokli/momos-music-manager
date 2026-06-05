@@ -332,6 +332,64 @@ mod tests {
         assert_ne!(a, c);
     }
 
+    // ── CacheResult tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_cache_result_hit_vs_miss() {
+        // Verify CacheResult enum variants work as expected
+        match CacheResult::Miss {
+            CacheResult::Miss => {}
+            _ => panic!("expected Miss"),
+        }
+        // Hit requires a File — create a minimal one
+        let file = File {
+            id: 0,
+            file_path: String::new(),
+            file_hash: String::new(),
+            file_type: String::new(),
+            file_size: 0,
+            last_modified: 0,
+            isrc: None,
+            last_scanned: 0,
+            title: None,
+            artist: None,
+            album: None,
+            album_artist: None,
+            track_number: None,
+            total_tracks: None,
+            disc_number: None,
+            total_discs: None,
+            genre: None,
+            year: None,
+            composer: None,
+            comment: None,
+            duration_ms: None,
+            bitrate: None,
+            sample_rate: None,
+            channels: None,
+            bpm: None,
+            musical_key: None,
+            rating: 0,
+            play_count: 0,
+            last_played: None,
+            spotify_id: None,
+            soundcloud_id: None,
+            youtube_id: None,
+            source_of: None,
+            stem_type: None,
+            last_verified_local: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        match CacheResult::Hit(file) {
+            CacheResult::Hit(f) => {
+                assert_eq!(f.id, 0);
+                assert!(f.title.is_none());
+            }
+            _ => panic!("expected Hit"),
+        }
+    }
+
     // ── path_hash tests ────────────────────────────────────────────────
 
     #[test]
@@ -347,6 +405,17 @@ mod tests {
         let h1 = path_hash("/music/track1.flac");
         let h2 = path_hash("/music/track2.flac");
         assert_ne!(h1, h2, "different paths must produce different hashes");
+    }
+
+    #[test]
+    fn test_path_hash_empty_string() {
+        // Empty string path should still produce a valid 16-char hex hash
+        let h = path_hash("");
+        assert_eq!(h.len(), 16, "empty path must produce 16-char hash");
+        assert!(
+            h.chars().all(|c| c.is_ascii_hexdigit()),
+            "empty path hash must be hex"
+        );
     }
 
     // ── cache_root tests ───────────────────────────────────────────────
@@ -435,5 +504,266 @@ mod tests {
         assert_eq!(entry.file_path, "/music/test.flac");
         assert_eq!(entry.last_modified, 1700000000);
         assert_eq!(entry.file_hash, "abc123");
+    }
+
+    // ── Large path / special characters ─────────────────────────────
+
+    #[test]
+    fn test_path_hash_very_long_path() {
+        // A path > 500 chars should still produce a valid 16-char hex hash
+        let long_path = "/music/".to_string()
+            + &"a".repeat(200)
+            + "/"
+            + &"b".repeat(200)
+            + "/very_long_artist_name_-_very_long_track_title_remix_version.stem.m4a";
+        let h = path_hash(&long_path);
+        assert_eq!(h.len(), 16, "hash must be 16 hex chars even for long paths");
+        assert!(
+            h.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash should only contain hex chars"
+        );
+    }
+
+    #[test]
+    fn test_path_hash_special_characters() {
+        // Unicode, emoji, spaces, and symbols should all produce valid hashes
+        let paths = [
+            "/music/Español/Canción.flac",
+            "/music/日本語/曲.flac",
+            "/music/🎵/track.wav",
+            "/music/artist - 'single' (2024) [WAV]/track.wav",
+            "/music/symbols/!@#$%^&*().flac",
+            "/music/  spaces  /  file  .flac",
+            "/music/new\nline/test.flac",
+        ];
+        for p in &paths {
+            let h = path_hash(p);
+            assert_eq!(h.len(), 16, "hash must be 16 chars for path: {}", p);
+            assert!(
+                h.chars().all(|c| c.is_ascii_hexdigit()),
+                "hash should only contain hex chars for path: {}",
+                p
+            );
+        }
+    }
+
+    #[test]
+    fn test_path_hash_deterministic_special_chars() {
+        // Same special-char path always produces the same hash
+        let path = "/music/Español/🎵/Canción - 'álbum'.flac";
+        let h1 = path_hash(path);
+        let h2 = path_hash(path);
+        assert_eq!(h1, h2, "same path must produce same hash");
+    }
+
+    #[test]
+    fn test_cached_file_entry_serde_roundtrip() {
+        // Verify that a CachedFileEntry survives JSON serialization
+        let entry = CachedFileEntry {
+            file_path: "/music/Español/🎵/test.stem.m4a".to_string(),
+            last_modified: 1700000000,
+            file_hash: "a1b2c3d4e5f6a7b8".to_string(),
+            metadata: File {
+                id: 42,
+                file_path: "/music/Español/🎵/test.stem.m4a".to_string(),
+                file_hash: "deadbeef".to_string(),
+                file_type: "stem.m4a".to_string(),
+                file_size: 99999999,
+                last_modified: 1700000000,
+                isrc: Some("USABC1234567".to_string()),
+                last_scanned: 1700000000,
+                title: Some("Test Track".to_string()),
+                artist: Some("Artista".to_string()),
+                album: Some("Álbum".to_string()),
+                album_artist: None,
+                track_number: Some(1),
+                total_tracks: Some(12),
+                disc_number: None,
+                total_discs: None,
+                genre: Some("House".to_string()),
+                year: Some(2024),
+                composer: None,
+                comment: Some("[PMV] groovy house".to_string()),
+                duration_ms: Some(300000),
+                bitrate: Some(1411),
+                sample_rate: Some(44100),
+                channels: Some(2),
+                bpm: Some(128.0),
+                musical_key: Some("4m".to_string()),
+                rating: 3,
+                play_count: 42,
+                last_played: Some(1700000000),
+                spotify_id: Some("spotify:track:abc".to_string()),
+                soundcloud_id: None,
+                youtube_id: None,
+                source_of: None,
+                stem_type: None,
+                last_verified_local: Some(1700000000),
+                created_at: 1700000000,
+                updated_at: 1700000000,
+            },
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string_pretty(&entry).expect("serialize");
+        // Deserialize back
+        let deserialized: CachedFileEntry = serde_json::from_str(&json).expect("deserialize");
+
+        // Verify roundtrip
+        assert_eq!(deserialized.file_path, entry.file_path);
+        assert_eq!(deserialized.last_modified, entry.last_modified);
+        assert_eq!(deserialized.file_hash, entry.file_hash);
+        assert_eq!(deserialized.metadata.id, entry.metadata.id);
+        assert_eq!(deserialized.metadata.title, entry.metadata.title);
+        assert_eq!(deserialized.metadata.artist, entry.metadata.artist);
+        assert_eq!(deserialized.metadata.isrc, entry.metadata.isrc);
+        assert_eq!(deserialized.metadata.comment, entry.metadata.comment);
+        assert_eq!(deserialized.metadata.bpm, entry.metadata.bpm);
+        assert_eq!(
+            deserialized.metadata.musical_key,
+            entry.metadata.musical_key
+        );
+    }
+
+    #[test]
+    fn test_cached_file_entry_serde_null_fields() {
+        // Verify that optional (None) fields survive roundtrip correctly
+        let entry = CachedFileEntry {
+            file_path: "/music/null-test.flac".to_string(),
+            last_modified: 1700000000,
+            file_hash: "hash123".to_string(),
+            metadata: File {
+                id: 0,
+                file_path: "/music/null-test.flac".to_string(),
+                file_hash: "hash123".to_string(),
+                file_type: "flac".to_string(),
+                file_size: 0,
+                last_modified: 1700000000,
+                isrc: None,
+                last_scanned: 1700000000,
+                title: None,
+                artist: None,
+                album: None,
+                album_artist: None,
+                track_number: None,
+                total_tracks: None,
+                disc_number: None,
+                total_discs: None,
+                genre: None,
+                year: None,
+                composer: None,
+                comment: None,
+                duration_ms: None,
+                bitrate: None,
+                sample_rate: None,
+                channels: None,
+                bpm: None,
+                musical_key: None,
+                rating: 0,
+                play_count: 0,
+                last_played: None,
+                spotify_id: None,
+                soundcloud_id: None,
+                youtube_id: None,
+                source_of: None,
+                stem_type: None,
+                last_verified_local: None,
+                created_at: 0,
+                updated_at: 0,
+            },
+        };
+
+        let json = serde_json::to_string_pretty(&entry).expect("serialize");
+        let deserialized: CachedFileEntry = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(deserialized.file_path, "/music/null-test.flac");
+        assert_eq!(deserialized.metadata.title, None);
+        assert_eq!(deserialized.metadata.artist, None);
+        assert_eq!(deserialized.metadata.isrc, None);
+        assert_eq!(deserialized.metadata.bpm, None);
+        assert_eq!(deserialized.metadata.spotify_id, None);
+        assert_eq!(deserialized.metadata.rating, 0);
+        assert_eq!(deserialized.metadata.play_count, 0);
+        assert_eq!(deserialized.metadata.file_size, 0);
+    }
+
+    #[test]
+    fn test_cached_file_entry_very_large_fields() {
+        // Very long strings and large numeric values should survive roundtrip
+        let very_long_string = "a".repeat(10_000);
+        let entry = CachedFileEntry {
+            file_path: "/music/very_long_path_name_test.flac".to_string(),
+            last_modified: i64::MAX,
+            file_hash: very_long_string.clone(),
+            metadata: File {
+                id: i64::MAX,
+                file_path: very_long_string.clone(),
+                file_hash: very_long_string.clone(),
+                file_type: "flac".to_string(),
+                file_size: i64::MAX,
+                last_modified: i64::MAX,
+                isrc: Some("US".to_string() + &"X".repeat(100)),
+                last_scanned: i64::MAX,
+                title: Some(very_long_string.clone()),
+                artist: Some(very_long_string.clone()),
+                album: Some(very_long_string.clone()),
+                album_artist: None,
+                track_number: Some(i32::MAX),
+                total_tracks: Some(i32::MAX),
+                disc_number: None,
+                total_discs: None,
+                genre: Some(very_long_string.clone()),
+                year: Some(i32::MAX),
+                composer: None,
+                comment: Some(very_long_string.clone()),
+                duration_ms: Some(i64::MAX),
+                bitrate: Some(i32::MAX),
+                sample_rate: Some(i32::MAX),
+                channels: Some(i32::MAX),
+                bpm: Some(f64::MAX),
+                musical_key: Some(very_long_string.clone()),
+                rating: i32::MAX,
+                play_count: i32::MAX,
+                last_played: Some(i64::MAX),
+                spotify_id: Some(very_long_string.clone()),
+                soundcloud_id: None,
+                youtube_id: None,
+                source_of: None,
+                stem_type: Some("vocals".to_string()),
+                last_verified_local: Some(i64::MAX),
+                created_at: i64::MAX,
+                updated_at: i64::MAX,
+            },
+        };
+
+        let json = serde_json::to_string_pretty(&entry).expect("serialize large entry");
+        let deserialized: CachedFileEntry =
+            serde_json::from_str(&json).expect("deserialize large entry");
+
+        // Verify core fields
+        assert_eq!(
+            deserialized.file_path,
+            "/music/very_long_path_name_test.flac"
+        );
+        assert_eq!(deserialized.last_modified, i64::MAX);
+        assert!(
+            deserialized.file_hash.len() == 10_000,
+            "10k-char hash should survive roundtrip"
+        );
+        // Verify extreme numeric values
+        assert_eq!(deserialized.metadata.id, i64::MAX);
+        assert_eq!(deserialized.metadata.file_size, i64::MAX);
+        assert_eq!(deserialized.metadata.duration_ms, Some(i64::MAX));
+        assert_eq!(deserialized.metadata.bpm, Some(f64::MAX));
+        // Verify very long strings
+        assert_eq!(
+            deserialized.metadata.title.as_deref(),
+            Some(very_long_string.as_str())
+        );
+        assert_eq!(
+            deserialized.metadata.artist.as_deref(),
+            Some(very_long_string.as_str())
+        );
+        assert!(deserialized.metadata.isrc.as_ref().unwrap().len() > 100);
     }
 }

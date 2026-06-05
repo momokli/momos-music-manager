@@ -598,3 +598,159 @@ async fn storage_discover_backup_no_ssh() {
         status
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 5 — Settings edge cases & Prune execute
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+/// `PUT /api/storage/settings` accepts unusual JSON values gracefully.
+async fn storage_settings_edge_cases() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Test with nested object
+    let resp = client
+        .put(format!("{}/api/storage/settings", base))
+        .json(&serde_json::json!({
+            "nested": {"key": "value"},
+            "number": 42,
+            "flag": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "nested object should return 200");
+
+    // Test with array value
+    let resp = client
+        .put(format!("{}/api/storage/settings", base))
+        .json(&serde_json::json!(["a", "b", "c"]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "array value should return 200");
+
+    // Test with null value
+    let resp = client
+        .put(format!("{}/api/storage/settings", base))
+        .json(&serde_json::json!(null))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "null value should return 200");
+
+    // Test with empty object
+    let resp = client
+        .put(format!("{}/api/storage/settings", base))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "empty object should return 200");
+
+    // Verify settings still accessible after all the writes
+    let resp = client
+        .get(format!("{}/api/storage/settings", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "settings GET should still work");
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        json["data"].is_object() || json["data"].is_null(),
+        "settings GET should return object or null"
+    );
+}
+
+#[tokio::test]
+/// `POST /api/storage/prune` with `{"fileIds": []}` returns 400.
+async fn storage_prune_execute_empty() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .post(format!("{}/api/storage/prune", base))
+        .json(&serde_json::json!({"file_ids": []}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "empty fileIds should return 400 (no file IDs), got {}",
+        resp.status()
+    );
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["error"].as_str().is_some(),
+        "error response should have an error field, got: {}",
+        body
+    );
+}
+
+#[tokio::test]
+/// `POST /api/storage/prune` with valid file IDs creates a prune task.
+async fn storage_prune_execute_valid() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // File 1 is local+backed_up+has_stem → safe to delete
+    let resp = client
+        .post(format!("{}/api/storage/prune", base))
+        .json(&serde_json::json!({"file_ids": [1, 2]}))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    eprintln!("prune_execute_valid: status={status}, body={body:#}");
+
+    assert!(
+        status.is_success(),
+        "prune with valid file IDs should succeed, got {}",
+        status
+    );
+
+    let task_id = body["data"]["taskId"].as_str();
+    assert!(
+        task_id.is_some() && !task_id.unwrap().is_empty(),
+        "prune response should contain a non-empty taskId, got: {:#}",
+        body
+    );
+}
+
+#[tokio::test]
+/// `POST /api/storage/prune` with non-existent file IDs still creates a task.
+async fn storage_prune_execute_invalid_ids() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Non-existent file IDs — handler still creates a task (task skips missing files)
+    let resp = client
+        .post(format!("{}/api/storage/prune", base))
+        .json(&serde_json::json!({"file_ids": [9999, 8888]}))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    eprintln!("prune_execute_invalid_ids: status={status}, body={body:#}");
+
+    assert!(
+        status.is_success(),
+        "prune with non-existent IDs should still return task (handler doesn't validate existence), got {}",
+        status
+    );
+
+    let task_id = body["data"]["taskId"].as_str();
+    assert!(
+        task_id.is_some() && !task_id.unwrap().is_empty(),
+        "prune response should contain a non-empty taskId even for non-existent IDs, got: {:#}",
+        body
+    );
+}

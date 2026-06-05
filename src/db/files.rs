@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::{fs, path::Path, time::SystemTime};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use lofty::{prelude::*, read_from_path};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Pool, Row, Sqlite};
@@ -1650,4 +1650,1418 @@ pub async fn get_files_by_source(pool: &Pool<Sqlite>, source_file_id: i64) -> Re
         .fetch_all(pool)
         .await?;
     Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::SqlitePool;
+
+    /// Create the `files` table with all columns matching the current schema.
+    /// Also creates `file_locations` and `file_resolved_tags` for dependent tests.
+    async fn create_files_table(pool: &SqlitePool) {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT NOT NULL UNIQUE,
+                file_hash TEXT NOT NULL,
+                file_type TEXT NOT NULL CHECK (file_type IN ('flac', 'mp3', 'stem.m4a', 'wav', 'opus')),
+                file_size INTEGER NOT NULL,
+                last_modified INTEGER NOT NULL,
+                isrc TEXT,
+                last_scanned INTEGER DEFAULT (unixepoch()),
+                title TEXT,
+                artist TEXT,
+                album TEXT,
+                album_artist TEXT,
+                track_number INTEGER,
+                total_tracks INTEGER,
+                disc_number INTEGER,
+                total_discs INTEGER,
+                genre TEXT,
+                year INTEGER,
+                composer TEXT,
+                comment TEXT,
+                duration_ms INTEGER,
+                bitrate INTEGER,
+                sample_rate INTEGER,
+                channels INTEGER,
+                bpm REAL,
+                musical_key TEXT,
+                rating INTEGER DEFAULT 0,
+                play_count INTEGER DEFAULT 0,
+                last_played INTEGER,
+                spotify_id TEXT,
+                soundcloud_id TEXT,
+                youtube_id TEXT,
+                source_of INTEGER REFERENCES files(id),
+                stem_type TEXT,
+                last_verified_local INTEGER,
+                created_at INTEGER DEFAULT (unixepoch()),
+                updated_at INTEGER DEFAULT (unixepoch())
+            )
+            "#,
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn create_file_locations_table(pool: &SqlitePool) {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS file_locations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                location_type TEXT NOT NULL CHECK (location_type IN ('local', 'backup')),
+                path TEXT NOT NULL,
+                file_size INTEGER,
+                last_verified INTEGER,
+                created_at INTEGER DEFAULT (unixepoch()),
+                UNIQUE(file_id, location_type)
+            )
+            "#,
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn create_file_resolved_tags_table(pool: &SqlitePool) {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS file_resolved_tags (
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                tag_id INTEGER NOT NULL,
+                tag_name TEXT NOT NULL,
+                category_id INTEGER NOT NULL,
+                category_name TEXT NOT NULL,
+                prefix TEXT NOT NULL,
+                sort_order INTEGER DEFAULT 0,
+                created_at INTEGER,
+                is_default BOOLEAN DEFAULT FALSE,
+                PRIMARY KEY (file_id, tag_id)
+            )
+            "#,
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Insert a minimal file row for testing. Returns the generated ID.
+    async fn insert_test_file(
+        pool: &SqlitePool,
+        file_path: &str,
+        file_type: &str,
+        overrides: &[(&str, &str)],
+    ) -> i64 {
+        let mut fields = vec![
+            "file_path".to_string(),
+            "file_hash".to_string(),
+            "file_type".to_string(),
+            "file_size".to_string(),
+            "last_modified".to_string(),
+            "rating".to_string(),
+            "play_count".to_string(),
+        ];
+        let mut values: Vec<String> = vec![
+            format!("'{}'", file_path.replace('\'', "''")),
+            format!("'hash-{}'", file_path.replace('\'', "''")),
+            format!("'{}'", file_type),
+            "12345".to_string(),
+            "1000000".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+        ];
+
+        for (key, val) in overrides {
+            fields.push(key.to_string());
+            values.push(if *val == "NULL" {
+                "NULL".to_string()
+            } else {
+                format!("'{}'", val.replace('\'', "''"))
+            });
+        }
+
+        let sql = format!(
+            "INSERT INTO files ({}) VALUES ({}) RETURNING id",
+            fields.join(", "),
+            values.join(", ")
+        );
+
+        sqlx::query_scalar::<_, i64>(&sql)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    // ========================================================================
+    // Pure Function Tests
+    // ========================================================================
+
+    #[test]
+    fn test_file_type_from_path_all_types() {
+        assert_eq!(file_type_from_path(Path::new("song.flac")), Some("flac"));
+        assert_eq!(file_type_from_path(Path::new("song.mp3")), Some("mp3"));
+        assert_eq!(file_type_from_path(Path::new("song.m4a")), Some("stem.m4a"));
+        assert_eq!(file_type_from_path(Path::new("song.wav")), Some("wav"));
+        assert_eq!(file_type_from_path(Path::new("song.opus")), Some("opus"));
+    }
+
+    #[test]
+    fn test_file_type_from_path_unknown_and_edges() {
+        assert_eq!(file_type_from_path(Path::new("song.aiff")), None);
+        assert_eq!(file_type_from_path(Path::new("song")), None); // no extension
+        assert_eq!(file_type_from_path(Path::new("")), None);
+        // Uppercase
+        assert_eq!(file_type_from_path(Path::new("song.FLAC")), Some("flac"));
+        assert_eq!(file_type_from_path(Path::new("song.M4A")), Some("stem.m4a"));
+        // Hidden file with extension
+        assert_eq!(file_type_from_path(Path::new(".config.flac")), Some("flac"));
+    }
+
+    #[test]
+    fn test_parse_year_normal_and_edge() {
+        assert_eq!(parse_year("2024"), Some(2024));
+        assert_eq!(parse_year("2024-01-15"), Some(2024)); // ISO date with parts
+        assert_eq!(parse_year("1999-12-31"), Some(1999));
+        assert_eq!(parse_year(""), None); // empty
+        assert_eq!(parse_year("not-a-year"), None); // non-numeric
+        assert_eq!(parse_year("-"), None); // just dash
+    }
+
+    #[test]
+    fn test_parse_track_number_and_total() {
+        assert_eq!(parse_track_number("3/12"), Some(3));
+        assert_eq!(parse_track_number("1/10"), Some(1));
+        assert_eq!(parse_track_number("5"), Some(5)); // no total
+        assert_eq!(parse_track_number(""), None);
+        assert_eq!(parse_track_number("abc/12"), None);
+
+        assert_eq!(parse_total_tracks("3/12"), Some(12));
+        assert_eq!(parse_total_tracks("5"), None); // no total part
+        assert_eq!(parse_total_tracks("/10"), Some(10));
+        assert_eq!(parse_total_tracks(""), None);
+    }
+
+    #[test]
+    fn test_parse_disc_number_and_total() {
+        assert_eq!(parse_disc_number("1/2"), Some(1));
+        assert_eq!(parse_disc_number("2/3"), Some(2));
+        assert_eq!(parse_disc_number("1"), Some(1));
+        assert_eq!(parse_disc_number(""), None);
+
+        assert_eq!(parse_total_discs("1/2"), Some(2));
+        assert_eq!(parse_total_discs("1"), None);
+        assert_eq!(parse_total_discs("/3"), Some(3));
+        assert_eq!(parse_total_discs(""), None);
+    }
+
+    #[test]
+    fn test_parse_bpm_variants() {
+        assert_eq!(parse_bpm("128"), Some(128.0));
+        assert_eq!(parse_bpm("128.5"), Some(128.5));
+        assert_eq!(parse_bpm("140.00"), Some(140.0));
+        assert_eq!(parse_bpm(""), None);
+        assert_eq!(parse_bpm("abc"), None);
+        assert_eq!(parse_bpm("128.5.5"), None);
+    }
+
+    // ========================================================================
+    // DB Function Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_get_files_empty() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+
+        let files = get_files(&pool).await.unwrap();
+        assert!(files.is_empty(), "expected empty files list");
+    }
+
+    #[tokio::test]
+    async fn test_get_files_populated() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+
+        let id1 = insert_test_file(&pool, "/music/song1.flac", "flac", &[]).await;
+        let id2 = insert_test_file(&pool, "/music/song2.mp3", "mp3", &[]).await;
+
+        let files = get_files(&pool).await.unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].file_path, "/music/song1.flac");
+        assert_eq!(files[1].file_path, "/music/song2.mp3");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_by_id_found() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+
+        let id = insert_test_file(&pool, "/music/test.flac", "flac", &[]).await;
+
+        let file = get_file_by_id(&pool, id).await.unwrap();
+        assert!(file.is_some());
+        assert_eq!(file.unwrap().file_path, "/music/test.flac");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_by_id_not_found() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+
+        let file = get_file_by_id(&pool, 999).await.unwrap();
+        assert!(file.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_file_by_path_found() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+
+        insert_test_file(&pool, "/music/test.flac", "flac", &[]).await;
+
+        let file = get_file_by_path(&pool, "/music/test.flac").await.unwrap();
+        assert!(file.is_some());
+        assert_eq!(file.unwrap().file_type, "flac");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_by_path_not_found() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+
+        let file = get_file_by_path(&pool, "/nonexistent.flac").await.unwrap();
+        assert!(file.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_update_file_comment() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+
+        let id = insert_test_file(&pool, "/music/test.flac", "flac", &[]).await;
+
+        update_file_comment(&pool, id, "[PMV] groovy techno")
+            .await
+            .unwrap();
+
+        let file = get_file_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(file.comment, Some("[PMV] groovy techno".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_update_file_comment_overwrites() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+
+        let id = insert_test_file(
+            &pool,
+            "/music/test.flac",
+            "flac",
+            &[("comment", "old comment")],
+        )
+        .await;
+
+        update_file_comment(&pool, id, "new comment").await.unwrap();
+
+        let file = get_file_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(file.comment, Some("new comment".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_set_file_source_of() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+
+        let stem_id = insert_test_file(&pool, "/music/track.stem.m4a", "stem.m4a", &[]).await;
+        let wav_id = insert_test_file(&pool, "/music/track_vocals.wav", "wav", &[]).await;
+
+        set_file_source_of(&pool, wav_id, stem_id).await.unwrap();
+
+        let wav = get_file_by_id(&pool, wav_id).await.unwrap().unwrap();
+        assert_eq!(wav.source_of, Some(stem_id));
+    }
+
+    #[tokio::test]
+    async fn test_get_files_by_source() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+
+        let stem_id = insert_test_file(&pool, "/music/track.stem.m4a", "stem.m4a", &[]).await;
+        let wav1 = insert_test_file(&pool, "/music/track_vocals.wav", "wav", &[]).await;
+        let wav2 = insert_test_file(&pool, "/music/track_bass.wav", "wav", &[]).await;
+
+        set_file_source_of(&pool, wav1, stem_id).await.unwrap();
+        set_file_source_of(&pool, wav2, stem_id).await.unwrap();
+
+        // Also add an unrelated WAV (should not appear)
+        let _other_id = insert_test_file(&pool, "/music/other.wav", "wav", &[]).await;
+
+        let sources = get_files_by_source(&pool, stem_id).await.unwrap();
+        assert_eq!(sources.len(), 2);
+        assert!(
+            sources
+                .iter()
+                .any(|f| f.file_path == "/music/track_vocals.wav")
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|f| f.file_path == "/music/track_bass.wav")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_files_by_source_empty() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+
+        let sources = get_files_by_source(&pool, 999).await.unwrap();
+        assert!(sources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_file_variants_not_found() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+
+        let result = get_file_variants(&pool, 999).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_file_variants_single() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_locations_table(&pool).await;
+
+        let id = insert_test_file(&pool, "/music/track.flac", "flac", &[]).await;
+
+        let result = get_file_variants(&pool, id).await.unwrap();
+        assert!(result.is_some());
+        let variants = result.unwrap();
+        assert_eq!(variants.file_id, id);
+        assert_eq!(variants.variants.len(), 1);
+        assert_eq!(variants.variants[0].file_type, "flac");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_variants_same_isrc() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_locations_table(&pool).await;
+
+        let id1 = insert_test_file(
+            &pool,
+            "/music/track.flac",
+            "flac",
+            &[("isrc", "USABC1234567")],
+        )
+        .await;
+        let id2 = insert_test_file(
+            &pool,
+            "/music/track.stem.m4a",
+            "stem.m4a",
+            &[("isrc", "USABC1234567")],
+        )
+        .await;
+
+        let result = get_file_variants(&pool, id1).await.unwrap();
+        assert!(result.is_some());
+        let variants = result.unwrap();
+        // Should find both variants (same ISRC)
+        assert_eq!(variants.variants.len(), 2);
+        assert_eq!(variants.isrc, Some("USABC1234567".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_file_variants_wav_sources() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_locations_table(&pool).await;
+
+        let stem_id = insert_test_file(
+            &pool,
+            "/music/track.stem.m4a",
+            "stem.m4a",
+            &[("isrc", "USABC1234567")],
+        )
+        .await;
+        let _wav_vocals = insert_test_file(
+            &pool,
+            "/music/track_vocals.wav",
+            "wav",
+            &[
+                ("source_of", &format!("{}", stem_id)),
+                ("stem_type", "vocals"),
+            ],
+        )
+        .await;
+        let _wav_bass = insert_test_file(
+            &pool,
+            "/music/track_bass.wav",
+            "wav",
+            &[
+                ("source_of", &format!("{}", stem_id)),
+                ("stem_type", "bass"),
+            ],
+        )
+        .await;
+
+        // Querying the stem should find the WAV sources via source_of
+        let result = get_file_variants(&pool, stem_id).await.unwrap();
+        assert!(result.is_some());
+        let variants = result.unwrap();
+        // Should include stem + 2 WAV variants
+        assert_eq!(
+            variants.variants.len(),
+            3,
+            "expected stem + 2 WAVs, got {:?}",
+            variants
+                .variants
+                .iter()
+                .map(|v| &v.file_type)
+                .collect::<Vec<_>>()
+        );
+        let wavs: Vec<_> = variants
+            .variants
+            .iter()
+            .filter(|v| v.file_type == "wav")
+            .collect();
+        assert_eq!(wavs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_variants_wav_with_source() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_locations_table(&pool).await;
+
+        let stem_id = insert_test_file(&pool, "/music/track.stem.m4a", "stem.m4a", &[]).await;
+        let wav_id = insert_test_file(
+            &pool,
+            "/music/track_vocals.wav",
+            "wav",
+            &[("source_of", &format!("{}", stem_id))],
+        )
+        .await;
+        let wav_sibling = insert_test_file(
+            &pool,
+            "/music/track_bass.wav",
+            "wav",
+            &[("source_of", &format!("{}", stem_id))],
+        )
+        .await;
+
+        // Querying the WAV file should include the stem + sibling WAVs
+        let result = get_file_variants(&pool, wav_id).await.unwrap();
+        assert!(result.is_some());
+        let variants = result.unwrap();
+        assert_eq!(
+            variants.variants.len(),
+            3,
+            "expected stem + 2 WAVs (self + sibling), got {}",
+            variants.variants.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_file_resolved_tags_batch_empty() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_file_resolved_tags_table(&pool).await;
+
+        let result = get_file_resolved_tags_batch(&pool, &[]).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_file_resolved_tags_batch_single() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(&pool, "/music/track.flac", "flac", &[]).await;
+
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 1, 'groovy', 1, 'Mood', 'M', 0, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let result = get_file_resolved_tags_batch(&pool, &[id]).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, id);
+        assert_eq!(result[0].1, "groovy");
+        assert_eq!(result[0].2, "M");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_resolved_tags_batch_multiple() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id1 = insert_test_file(&pool, "/music/track1.flac", "flac", &[]).await;
+        let id2 = insert_test_file(&pool, "/music/track2.flac", "flac", &[]).await;
+
+        // Tag for file 1
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 10, 'deep', 3, 'Vibe', 'V', 1, 1000000)",
+        )
+        .bind(id1)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Tag for file 2
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 11, 'dark', 3, 'Vibe', 'V', 1, 1000000)",
+        )
+        .bind(id2)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let result = get_file_resolved_tags_batch(&pool, &[id1, id2])
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 2);
+
+        let tags_for_1: Vec<_> = result.iter().filter(|r| r.0 == id1).collect();
+        let tags_for_2: Vec<_> = result.iter().filter(|r| r.0 == id2).collect();
+        assert_eq!(tags_for_1.len(), 1);
+        assert_eq!(tags_for_2.len(), 1);
+        assert_eq!(tags_for_1[0].1, "deep");
+        assert_eq!(tags_for_2[0].1, "dark");
+    }
+
+    #[tokio::test]
+    async fn test_get_tags_for_file() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(&pool, "/music/track.flac", "flac", &[]).await;
+
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 5, 'techno', 2, 'Setlist', 'S', 0, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 6, 'warehouse', 3, 'Vibe', 'V', 1, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let tags = get_tags_for_file(&pool, id).await.unwrap();
+        assert_eq!(tags.len(), 2);
+        assert!(tags.iter().any(|t| t.name == "techno"));
+        assert!(tags.iter().any(|t| t.name == "warehouse"));
+        // Tags should be ordered by name
+        assert_eq!(tags[0].name, "techno");
+        assert_eq!(tags[1].name, "warehouse");
+    }
+
+    #[tokio::test]
+    async fn test_get_tags_for_file_empty() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(&pool, "/music/track.flac", "flac", &[]).await;
+
+        let tags = get_tags_for_file(&pool, id).await.unwrap();
+        assert!(tags.is_empty());
+    }
+
+    // ========================================================================
+    // Pure Function Edge Cases
+    // ========================================================================
+
+    #[test]
+    fn test_parse_year_leading_zeros() {
+        assert_eq!(parse_year("002024"), Some(2024));
+        assert_eq!(parse_year("0000"), Some(0));
+        assert_eq!(parse_year("0999"), Some(999));
+    }
+
+    #[test]
+    fn test_parse_year_negative_and_invalid() {
+        assert_eq!(parse_year("-2024"), None); // negative year
+        assert_eq!(parse_year("not-a-year"), None);
+        assert_eq!(parse_year("  2024  "), None); // whitespace not trimmed
+        assert_eq!(parse_year("2024-13-01"), Some(2024)); // valid month range not checked
+    }
+
+    #[test]
+    fn test_parse_track_number_leading_zeros() {
+        assert_eq!(parse_track_number("03/12"), Some(3));
+        assert_eq!(parse_track_number("007/100"), Some(7));
+        assert_eq!(parse_track_number("0/5"), Some(0));
+    }
+
+    #[test]
+    fn test_parse_track_number_negative_and_invalid() {
+        // parse accepts negative numbers (valid i32)
+        assert_eq!(parse_track_number("-1/12"), Some(-1));
+        assert_eq!(parse_track_number("1/-2"), Some(1)); // only first part matters
+        assert_eq!(parse_track_number("abc"), None);
+        assert_eq!(parse_track_number("1.5/10"), None); // non-integer
+    }
+
+    #[test]
+    fn test_parse_bpm_zero_and_extreme() {
+        assert_eq!(parse_bpm("0"), Some(0.0));
+        assert_eq!(parse_bpm("999.9"), Some(999.9));
+        assert_eq!(parse_bpm("0.5"), Some(0.5));
+        assert_eq!(parse_bpm("00.00"), Some(0.0));
+    }
+
+    #[test]
+    fn test_parse_bpm_precision_and_truncation() {
+        let bpm = parse_bpm("128.123456789").unwrap();
+        // BPM is an f64, so just check it's approximately correct
+        assert!((bpm - 128.123456789).abs() < 1e-9);
+        assert_eq!(parse_bpm("140.00"), Some(140.0));
+        // parse accepts negative BPM strings (valid f64), even if metadata doesn't have them
+        assert_eq!(parse_bpm("-5.0"), Some(-5.0));
+    }
+
+    #[test]
+    fn test_parse_disc_number_edge_cases() {
+        assert_eq!(parse_disc_number("0/2"), Some(0));
+        assert_eq!(parse_disc_number("2/0"), Some(2)); // total 0 is weird but parsed
+        assert_eq!(parse_disc_number("abc"), None);
+        // parse accepts negative numbers (valid i32)
+        assert_eq!(parse_disc_number("-1/2"), Some(-1));
+        assert_eq!(parse_total_discs("1/0"), Some(0)); // zero total discs
+        assert_eq!(parse_total_discs("/"), None); // empty parts
+    }
+
+    // ========================================================================
+    // compute_target_comment Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_compute_target_comment_no_tags_no_source() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(
+            &pool,
+            "/music/track.flac",
+            "flac",
+            &[
+                ("spotify_id", "NULL"),
+                ("soundcloud_id", "NULL"),
+                ("youtube_id", "NULL"),
+            ],
+        )
+        .await;
+
+        let comment = compute_target_comment(&pool, id).await.unwrap();
+        // No PMV tags, no service IDs → empty string
+        assert_eq!(
+            comment, "",
+            "expected empty comment for file with no tags and no service IDs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compute_target_comment_no_tags_with_source() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(
+            &pool,
+            "/music/track.flac",
+            "flac",
+            &[("spotify_id", "spotify:track:abc123")],
+        )
+        .await;
+
+        let comment = compute_target_comment(&pool, id).await.unwrap();
+        // No PMV tags → [___], spotify ID appended
+        assert!(comment.contains("[___]"), "should have empty PMV");
+        assert!(
+            comment.contains("sp:spotify:track:abc123"),
+            "should contain spotify ID"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compute_target_comment_all_pmv() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(
+            &pool,
+            "/music/track.flac",
+            "flac",
+            &[("spotify_id", "spotify:track:abc123")],
+        )
+        .await;
+
+        // Add tags for all three PMV categories
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 1, 'build', 2, 'Phase', 'P', 0, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 2, 'groovy', 3, 'Mood', 'M', 1, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 3, 'dark', 4, 'Vibe', 'V', 2, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let comment = compute_target_comment(&pool, id).await.unwrap();
+        assert!(comment.contains("[PMV]"), "should have all three PMV chars");
+        assert!(comment.contains("build"), "should contain Phase tag");
+        assert!(comment.contains("groovy"), "should contain Mood tag");
+        assert!(comment.contains("dark"), "should contain Vibe tag");
+        assert!(
+            comment.contains("sp:spotify:track:abc123"),
+            "should contain spotify ID"
+        );
+        // Tags should be sorted alphabetically
+        let build_pos = comment.find("build").unwrap();
+        let dark_pos = comment.find("dark").unwrap();
+        let groovy_pos = comment.find("groovy").unwrap();
+        assert!(build_pos < dark_pos, "build should come before dark");
+        assert!(dark_pos < groovy_pos, "dark should come before groovy");
+    }
+
+    #[tokio::test]
+    async fn test_compute_target_comment_partial_pmv() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(&pool, "/music/track.flac", "flac", &[]).await;
+
+        // Only add a Mood tag
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 2, 'groovy', 3, 'Mood', 'M', 1, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Also add a Setlist tag (category S, not PMV)
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 5, 'some-playlist', 1, 'Setlist', 'S', 0, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let comment = compute_target_comment(&pool, id).await.unwrap();
+        // Only Mood present → [_M_]
+        assert!(comment.contains("[_M_]"), "should have only M in PMV");
+        assert!(comment.contains("groovy"), "should contain Mood tag");
+        assert!(
+            comment.contains("some-playlist"),
+            "should contain Setlist tag"
+        );
+        assert!(!comment.contains("P"), "should NOT have Phase");
+        assert!(!comment.contains("V"), "should NOT have Vibe");
+    }
+
+    #[tokio::test]
+    async fn test_compute_target_comment_setlist_only() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(
+            &pool,
+            "/music/track.flac",
+            "flac",
+            &[("spotify_id", "spotify:track:xyz")],
+        )
+        .await;
+
+        // Only Setlist tag (category 'S', not P/M/V)
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 10, 'my-playlist', 1, 'Setlist', 'S', 0, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let comment = compute_target_comment(&pool, id).await.unwrap();
+        // No PMV tags → [___], but Setlist tags still included
+        assert!(comment.contains("[___]"), "should have empty PMV");
+        assert!(
+            comment.contains("my-playlist"),
+            "should contain Setlist tag"
+        );
+        assert!(
+            comment.contains("sp:spotify:track:xyz"),
+            "should contain spotify ID"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compute_target_comment_multiple_source_ids() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(
+            &pool,
+            "/music/track.flac",
+            "flac",
+            &[
+                ("spotify_id", "spotify:track:s1"),
+                ("soundcloud_id", "sc:12345"),
+                ("youtube_id", "yt:abcdef"),
+            ],
+        )
+        .await;
+
+        // Add a Mood tag to give non-empty PMV
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 2, 'groovy', 3, 'Mood', 'M', 1, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let comment = compute_target_comment(&pool, id).await.unwrap();
+        assert!(comment.contains("[_M_]"), "should have only M");
+        assert!(comment.contains("groovy"), "should contain tag");
+        assert!(
+            comment.contains("sp:spotify:track:s1"),
+            "should have spotify ID"
+        );
+        assert!(comment.contains("sc:sc:12345"), "should have soundcloud ID");
+        assert!(comment.contains("yt:yt:abcdef"), "should have youtube ID");
+    }
+
+    // ========================================================================
+    // compute_target_comments_batch Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_compute_target_comments_batch_empty_input() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let results = compute_target_comments_batch(&pool, &[]).await.unwrap();
+        assert!(results.is_empty(), "expected empty map for empty input");
+    }
+
+    #[tokio::test]
+    async fn test_compute_target_comments_batch_nonexistent_ids() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let results = compute_target_comments_batch(&pool, &[999, 1000])
+            .await
+            .unwrap();
+        assert!(results.is_empty(), "expected empty map for nonexistent IDs");
+    }
+
+    #[tokio::test]
+    async fn test_compute_target_comments_batch_single_file() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(
+            &pool,
+            "/music/track.flac",
+            "flac",
+            &[("spotify_id", "spotify:track:abc123")],
+        )
+        .await;
+
+        // Add a Mood tag
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 1, 'deep', 3, 'Mood', 'M', 1, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let results = compute_target_comments_batch(&pool, &[id]).await.unwrap();
+        assert_eq!(results.len(), 1, "expected 1 result");
+        let comment = results.get(&id).unwrap();
+        assert!(comment.contains("[_M_]"), "should have M mood");
+        assert!(comment.contains("deep"), "should contain tag");
+        assert!(
+            comment.contains("sp:spotify:track:abc123"),
+            "should contain source"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compute_target_comments_batch_multiple_files() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id1 = insert_test_file(
+            &pool,
+            "/music/track1.flac",
+            "flac",
+            &[("spotify_id", "spotify:track:one")],
+        )
+        .await;
+        let id2 = insert_test_file(
+            &pool,
+            "/music/track2.flac",
+            "flac",
+            &[("spotify_id", "spotify:track:two")],
+        )
+        .await;
+
+        // File 1: Phase tag
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 1, 'build', 2, 'Phase', 'P', 0, 1000000)",
+        )
+        .bind(id1)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // File 2: Vibe tag
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 2, 'dark', 4, 'Vibe', 'V', 0, 1000000)",
+        )
+        .bind(id2)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let results = compute_target_comments_batch(&pool, &[id1, id2])
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2, "expected 2 results");
+
+        let c1 = results.get(&id1).unwrap();
+        assert!(c1.contains("[P__]"), "file1 should have Phase");
+        assert!(c1.contains("build"), "file1 should contain build tag");
+
+        let c2 = results.get(&id2).unwrap();
+        assert!(c2.contains("[__V]"), "file2 should have Vibe");
+        assert!(c2.contains("dark"), "file2 should contain dark tag");
+    }
+
+    // ========================================================================
+    // Additional DB Edge Cases
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_get_files_ordered_by_file_path() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+
+        // Insert in non-alphabetical order
+        let _c = insert_test_file(&pool, "/music/z_last.flac", "flac", &[]).await;
+        let _a = insert_test_file(&pool, "/music/a_first.mp3", "mp3", &[]).await;
+        let _b = insert_test_file(&pool, "/music/b_middle.wav", "wav", &[]).await;
+
+        let files = get_files(&pool).await.unwrap();
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].file_path, "/music/a_first.mp3");
+        assert_eq!(files[1].file_path, "/music/b_middle.wav");
+        assert_eq!(files[2].file_path, "/music/z_last.flac");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_variants_with_backup_location() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_locations_table(&pool).await;
+
+        let id = insert_test_file(&pool, "/music/track.flac", "flac", &[]).await;
+
+        // Add backup location
+        sqlx::query(
+            "INSERT INTO file_locations (file_id, location_type, path, file_size, last_verified, created_at)
+             VALUES (?, 'backup', '/backup/track.flac', 12345, 1000000, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let result = get_file_variants(&pool, id).await.unwrap().unwrap();
+        assert_eq!(result.variants.len(), 1);
+        assert!(
+            result.variants[0].backed_up,
+            "file should be marked as backed up"
+        );
+        assert_eq!(result.variants[0].file_size, 12345);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_variants_stem_with_wav_sources_backed_up() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_locations_table(&pool).await;
+
+        let stem_id = insert_test_file(&pool, "/music/track.stem.m4a", "stem.m4a", &[]).await;
+
+        let _wav = insert_test_file(
+            &pool,
+            "/music/track_vocals.wav",
+            "wav",
+            &[
+                ("source_of", &format!("{}", stem_id)),
+                ("stem_type", "vocals"),
+            ],
+        )
+        .await;
+
+        // Back up the stem
+        sqlx::query(
+            "INSERT INTO file_locations (file_id, location_type, path, file_size, last_verified, created_at)
+             VALUES (?, 'backup', '/backup/track.stem.m4a', 50000, 1000000, 1000000)",
+        )
+        .bind(stem_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let result = get_file_variants(&pool, stem_id).await.unwrap().unwrap();
+        // stem + 1 WAV = 2 variants
+        assert_eq!(result.variants.len(), 2);
+
+        let stem_variant = result
+            .variants
+            .iter()
+            .find(|v| v.file_type == "stem.m4a")
+            .unwrap();
+        assert!(stem_variant.backed_up, "stem should be backed up");
+
+        let wav_variant = result
+            .variants
+            .iter()
+            .find(|v| v.file_type == "wav")
+            .unwrap();
+        assert!(
+            !wav_variant.backed_up,
+            "WAV should NOT be backed up (no backup location for it)"
+        );
+        assert_eq!(wav_variant.stem_type.as_deref(), Some("vocals"));
+    }
+
+    #[tokio::test]
+    async fn test_get_file_variants_different_isrc_no_grouping() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_locations_table(&pool).await;
+
+        let id1 = insert_test_file(
+            &pool,
+            "/music/track1.flac",
+            "flac",
+            &[("isrc", "USAAA0000001")],
+        )
+        .await;
+        let _id2 = insert_test_file(
+            &pool,
+            "/music/track2.stem.m4a",
+            "stem.m4a",
+            &[("isrc", "USBBB0000002")],
+        )
+        .await;
+
+        // Different ISRCs — should NOT group together
+        let result = get_file_variants(&pool, id1).await.unwrap().unwrap();
+        assert_eq!(result.variants.len(), 1, "different ISRC should not group");
+        assert_eq!(result.variants[0].file_type, "flac");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_variants_no_isrc_no_grouping() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_locations_table(&pool).await;
+
+        let id1 = insert_test_file(&pool, "/music/track1.flac", "flac", &[("isrc", "NULL")]).await;
+        let _id2 = insert_test_file(
+            &pool,
+            "/music/track2.stem.m4a",
+            "stem.m4a",
+            &[("isrc", "NULL")],
+        )
+        .await;
+
+        // NULL ISRC files should not group together
+        let result = get_file_variants(&pool, id1).await.unwrap().unwrap();
+        assert_eq!(result.variants.len(), 1, "null ISRC should not group");
+    }
+
+    #[tokio::test]
+    async fn test_get_tags_for_file_multiple_categories() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(&pool, "/music/track.flac", "flac", &[]).await;
+
+        // Insert tags from different categories
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 1, 'build', 2, 'Phase', 'P', 0, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 2, 'groovy', 3, 'Mood', 'M', 1, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 3, 'dark', 4, 'Vibe', 'V', 2, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let tags = get_tags_for_file(&pool, id).await.unwrap();
+        assert_eq!(tags.len(), 3);
+        // Should be ordered alphabetically by tag_name
+        assert_eq!(tags[0].name, "build");
+        assert_eq!(tags[1].name, "dark");
+        assert_eq!(tags[2].name, "groovy");
+    }
+
+    #[tokio::test]
+    async fn test_update_file_comment_to_empty_string() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+
+        let id = insert_test_file(
+            &pool,
+            "/music/track.flac",
+            "flac",
+            &[("comment", "old comment")],
+        )
+        .await;
+
+        update_file_comment(&pool, id, "").await.unwrap();
+
+        let file = get_file_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(file.comment, Some("".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_file_resolved_tags_batch_duplicate_ids() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(&pool, "/music/track.flac", "flac", &[]).await;
+
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 1, 'groovy', 3, 'Mood', 'M', 0, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Passing same ID twice — SQL `WHERE file_id IN (1,1)` returns the row only once
+        let result = get_file_resolved_tags_batch(&pool, &[id, id])
+            .await
+            .unwrap();
+        // SQL IN deduplicates its arguments, so we only get one row
+        assert_eq!(
+            result.len(),
+            1,
+            "duplicate IDs in IN clause should yield one row"
+        );
+        assert_eq!(result[0].0, id);
+        assert_eq!(result[0].1, "groovy");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_resolved_tags_batch_single_file_no_tags() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(&pool, "/music/track.flac", "flac", &[]).await;
+
+        let result = get_file_resolved_tags_batch(&pool, &[id]).await.unwrap();
+        assert!(result.is_empty(), "file with no tags should return empty");
+    }
+
+    #[tokio::test]
+    async fn test_get_file_resolved_tags_batch_mixed_existing_and_not() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(&pool, "/music/track.flac", "flac", &[]).await;
+
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 1, 'deep', 3, 'Mood', 'M', 0, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Mix of existing and non-existing file IDs
+        let result = get_file_resolved_tags_batch(&pool, &[id, 9999])
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1, "should only return tags for existing file");
+        assert_eq!(result[0].0, id);
+    }
+
+    #[tokio::test]
+    async fn test_get_file_resolved_tags_batch_multiple_tags_per_file() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        create_file_resolved_tags_table(&pool).await;
+
+        let id = insert_test_file(&pool, "/music/track.flac", "flac", &[]).await;
+
+        // Two tags for the same file
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 1, 'deep', 3, 'Mood', 'M', 1, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 2, 'dark', 4, 'Vibe', 'V', 2, 1000000)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let result = get_file_resolved_tags_batch(&pool, &[id]).await.unwrap();
+        assert_eq!(result.len(), 2, "should return 2 tags for the file");
+        assert_eq!(result[0].0, id);
+        assert_eq!(result[1].0, id);
+        let names: Vec<&str> = result.iter().map(|r| r.1.as_str()).collect();
+        assert!(names.contains(&"deep"));
+        assert!(names.contains(&"dark"));
+    }
+
+    #[tokio::test]
+    async fn test_get_tags_for_file_distinct_deduplication() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        create_files_table(&pool).await;
+        // Use a table without the UNIQUE(file_id, tag_id) constraint
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS file_tags_dup (
+                file_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                tag_name TEXT NOT NULL,
+                category_id INTEGER NOT NULL,
+                category_name TEXT NOT NULL,
+                prefix TEXT NOT NULL,
+                sort_order INTEGER DEFAULT 0,
+                created_at INTEGER
+            )"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let id = insert_test_file(&pool, "/music/track.flac", "flac", &[]).await;
+
+        // Same tag inserted twice (no PK to prevent it)
+        sqlx::query("INSERT INTO file_tags_dup (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 1, 'groovy', 3, 'Mood', 'M', 0, 1000000)")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO file_tags_dup (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at)
+             VALUES (?, 1, 'groovy', 3, 'Mood', 'M', 0, 1000000)")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Query using file_tags_dup to verify DISTINCT works
+        let tags = sqlx::query_as::<_, Tag>(
+            "SELECT DISTINCT tag_id as id, tag_name as name, category_id, sort_order, created_at, 0 as backpack
+             FROM file_tags_dup WHERE file_id = ? ORDER BY tag_name",
+        )
+        .bind(id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(tags.len(), 1, "DISTINCT should deduplicate same tag_id");
+        assert_eq!(tags[0].name, "groovy");
+    }
 }

@@ -107,3 +107,65 @@ async fn deemix_queue_delete_404() {
         "404 response should have an error or data field, got: {body}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Validation tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// POST /api/services/deemix/queue/{string}/retry — invalid numeric ID → 422.
+#[tokio::test]
+async fn deemix_queue_retry_validation() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .post(format!(
+            "{}/api/services/deemix/queue/nonexistent/retry",
+            base
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    // Non-numeric ID cannot be parsed as i64 → 400 Bad Request
+    let status = resp.status();
+    let body_text = resp.text().await.unwrap_or_default();
+    eprintln!("deemix queue retry validation status: {status}, body: {body_text:?}");
+
+    assert!(
+        status == 400 || status == 422,
+        "retry with non-numeric ID should return 400 or 422, got {status}"
+    );
+    assert!(
+        body_text.to_lowercase().contains("cannot parse")
+            || body_text.to_lowercase().contains("invalid"),
+        "response should indicate parsing failure, got: {body_text:?}"
+    );
+}
+
+/// DELETE /api/services/deemix/queue/{string} — invalid numeric ID → 400.
+#[tokio::test]
+async fn deemix_queue_delete_validation() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .delete(format!("{}/api/services/deemix/queue/nonexistent", base))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body_text = resp.text().await.unwrap_or_default();
+    eprintln!("deemix queue delete validation status: {status}, body: {body_text:?}");
+
+    assert!(
+        status == 400 || status == 422,
+        "delete with non-numeric ID should return 400 or 422, got {status}"
+    );
+    assert!(
+        body_text.to_lowercase().contains("cannot parse")
+            || body_text.to_lowercase().contains("invalid"),
+        "response should indicate parsing failure, got: {body_text:?}"
+    );
+}

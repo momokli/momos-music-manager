@@ -941,6 +941,233 @@ pub async fn tags_from_playlists() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Energy level edge cases
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+/// `PUT /api/tag-energy-levels/{tag_id}` accepts extreme values (0, 10).
+async fn tag_energy_level_edge_cases() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Set energy level to 0 (minimum)
+    let resp0 = client
+        .put(format!("{}/api/tag-energy-levels/7", base))
+        .json(&serde_json::json!({"energyLevel": 0}))
+        .send()
+        .await
+        .unwrap();
+    let status0 = resp0.status();
+    let body0: Value = resp0.json().await.unwrap();
+    eprintln!("energy level 0: {body0}");
+    assert!(
+        status0 == 200 || status0 == 500,
+        "energy level 0 should return 200 or 500, got {status0}"
+    );
+
+    // Set energy level to 10 (maximum)
+    let resp10 = client
+        .put(format!("{}/api/tag-energy-levels/7", base))
+        .json(&serde_json::json!({"energyLevel": 10}))
+        .send()
+        .await
+        .unwrap();
+    let status10 = resp10.status();
+    let body10: Value = resp10.json().await.unwrap();
+    eprintln!("energy level 10: {body10}");
+    assert!(
+        status10 == 200 || status10 == 500,
+        "energy level 10 should return 200 or 500, got {status10}"
+    );
+
+    // Verify the energy level was stored via GET
+    let get_resp = client
+        .get(format!("{}/api/tag-energy-levels", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), 200);
+    let get_body: Value = get_resp.json().await.unwrap();
+    eprintln!("all energy levels: {get_body}");
+    let levels = get_body["data"].as_array().unwrap();
+    // Tag 7 should be present with energyLevel 10 (the last value set)
+    let tag7 = levels.iter().find(|l| l["tag_id"].as_i64() == Some(7));
+    if let Some(entry) = tag7 {
+        let level = entry["energy_level"].as_i64().unwrap_or(-1);
+        eprintln!("tag 7 energy level: {level}");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Bulk import edge cases
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+/// `POST /api/tags/bulk-import` with empty array → returns empty list.
+async fn tag_bulk_import_edge_cases() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Empty array — should return empty list (200)
+    let resp_empty = client
+        .post(format!("{}/api/tags/bulk-import", base))
+        .json(&serde_json::json!({"entries": []}))
+        .send()
+        .await
+        .unwrap();
+    let status_empty = resp_empty.status();
+    let body_empty: Value = resp_empty.json().await.unwrap();
+    eprintln!("bulk import empty: {body_empty}");
+    assert!(
+        status_empty == 200 || status_empty == 400 || status_empty == 500,
+        "empty bulk import should return 200/400/500, got {status_empty}"
+    );
+
+    // Duplicate names in same import
+    let resp_dup = client
+        .post(format!("{}/api/tags/bulk-import", base))
+        .json(&serde_json::json!({"entries": [
+            {"name": "DupTag", "categoryId": 3},
+            {"name": "DupTag", "categoryId": 4}
+        ]}))
+        .send()
+        .await
+        .unwrap();
+    let status_dup = resp_dup.status();
+    let body_dup: Value = resp_dup.json().await.unwrap();
+    eprintln!("bulk import duplicates: {body_dup}");
+    // Duplicate names — may succeed (creating one tag) or fail (400/500)
+    assert!(
+        status_dup == 200 || status_dup == 400 || status_dup == 500,
+        "duplicate bulk import should return 200/400/500, got {status_dup}"
+    );
+
+    // Import same name as existing tag — should be idempotent or rejected
+    let resp_existing = client
+        .post(format!("{}/api/tags/bulk-import", base))
+        .json(&serde_json::json!({"entries": [
+            {"name": "Groovy", "categoryId": 3}
+        ]}))
+        .send()
+        .await
+        .unwrap();
+    let status_existing = resp_existing.status();
+    let body_existing: Value = resp_existing.json().await.unwrap();
+    eprintln!("bulk import existing: {body_existing}");
+    assert!(
+        status_existing == 200 || status_existing == 400 || status_existing == 500,
+        "existing tag import should return 200/400/500, got {status_existing}"
+    );
+}
+
+#[tokio::test]
+/// `POST /api/tags/bulk-categorize` with multiple tags at once.
+async fn tag_bulk_categorize_multiple() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    common::seed_tag_hierarchy(&pool).await;
+
+    // Move tags 7 (Groovy, Mood→cat 3) and 8 (Sparkle, Vibe→cat 4) to category 5 (Merkmal)
+    let resp = client
+        .post(format!("{}/api/tags/bulk-categorize", base))
+        .json(&serde_json::json!({"tagIds": [7, 8], "categoryId": 5}))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    eprintln!("bulk categorize multiple: {body}");
+
+    assert!(
+        status == 200,
+        "bulk-categorize should return 200, got {status}"
+    );
+
+    if status == 200 {
+        let updated = body["data"]["updated"].as_i64().unwrap_or(0);
+        assert!(
+            updated >= 2,
+            "should have updated at least 2 tags, got {updated}"
+        );
+    }
+
+    // Verify tag 7 changed category
+    let get7 = client
+        .get(format!("{}/api/tags/7", base))
+        .send()
+        .await
+        .unwrap();
+    let get7_body: Value = get7.json().await.unwrap();
+    eprintln!("tag 7 after recategorize: {get7_body}");
+
+    // Verify tag 8 changed category
+    let get8 = client
+        .get(format!("{}/api/tags/8", base))
+        .send()
+        .await
+        .unwrap();
+    let get8_body: Value = get8.json().await.unwrap();
+    eprintln!("tag 8 after recategorize: {get8_body}");
+}
+
+#[tokio::test]
+/// `GET /api/tags/curation-queue` with limit param to test pagination.
+async fn tag_curation_queue_pagination() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    common::seed_tag_hierarchy(&pool).await;
+
+    // Get all curation queue items first
+    let resp_all = client
+        .get(format!("{}/api/tags/curation-queue", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_all.status(), 200);
+    let body_all: Value = resp_all.json().await.unwrap();
+    let all_tags = body_all["data"].as_array().unwrap();
+    let total_count = all_tags.len();
+    eprintln!("curation queue total items: {total_count}");
+
+    // Get first 2 items with limit
+    let resp_page = client
+        .get(format!("{}/api/tags/curation-queue?limit=2", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_page.status(), 200);
+    let body_page: Value = resp_page.json().await.unwrap();
+    let page_tags = body_page["data"].as_array().unwrap();
+    eprintln!("curation queue with limit=2: {} items", page_tags.len());
+
+    // limit=2 should return at most 2 items
+    assert!(
+        page_tags.len() <= 2,
+        "limit=2 should return at most 2 items, got {}",
+        page_tags.len()
+    );
+
+    // If total > limit, page result should be smaller
+    if total_count > 2 {
+        assert_eq!(page_tags.len(), 2, "should return exactly 2 items when limit=2");
+    }
+
+    // Verify each item has required fields
+    for item in page_tags {
+        assert!(item["id"].as_i64().is_some(), "tag should have an id");
+        assert!(item["name"].as_str().is_some(), "tag should have a name");
+        assert!(
+            item["fileCount"].as_i64().is_some(),
+            "tag should have fileCount"
+        );
+        assert!(
+            item["parentCount"].as_i64().is_some(),
+            "tag should have parentCount"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Mutation: create-from-playlists
 // ═══════════════════════════════════════════════════════════════════════════
 

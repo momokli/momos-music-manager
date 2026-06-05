@@ -165,3 +165,99 @@ async fn spotify_refresh_playlist_error() {
         "response should indicate not configured"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Additional tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// DELETE /api/services/spotify/sync/{task_id} — cancel non-existent task.
+#[tokio::test]
+async fn spotify_sync_task_cancel() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .delete(format!(
+            "{}/api/services/spotify/sync/nonexistent-task-id",
+            base
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    // Non-existent task → error (probably 500 since cancel_task returns error)
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    eprintln!("spotify sync cancel: {body}");
+
+    assert!(
+        status == 404 || status == 500,
+        "cancel non-existent task should return 404 or 500, got {status}"
+    );
+}
+
+/// POST /api/services/spotify/refresh-playlist/9999 — non-existent playlist_id (no config).
+#[tokio::test]
+async fn spotify_refresh_playlist_not_found() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .post(format!(
+            "{}/api/services/spotify/refresh-playlist/9999",
+            base
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    // Spotify not configured → 400 even with non-existent playlist ID
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    eprintln!("spotify refresh playlist 9999: {body}");
+
+    assert_eq!(
+        status, 400,
+        "refresh-playlist/9999 without config should return 400, got {status}"
+    );
+    assert!(
+        body["data"]
+            .as_str()
+            .map_or(false, |s| s.contains("not configured"))
+            || body["error"]
+                .as_str()
+                .map_or(false, |s| s.contains("not configured")),
+        "response should indicate not configured, got: {body}"
+    );
+}
+
+/// POST /api/services/spotify/sync — full sync error (Spotify not configured).
+#[tokio::test]
+async fn spotify_sync_full_error() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .post(format!("{}/api/services/spotify/sync", base))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    eprintln!("spotify sync full error: {body}");
+
+    assert_eq!(
+        status, 400,
+        "sync full without config should return 400, got {status}"
+    );
+    assert!(
+        body["data"]
+            .as_str()
+            .map_or(false, |s| s.contains("not configured"))
+            || body["error"]
+                .as_str()
+                .map_or(false, |s| s.contains("not configured")),
+        "response should indicate not configured, got: {body}"
+    );
+}

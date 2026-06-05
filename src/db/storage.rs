@@ -815,3 +815,997 @@ pub async fn get_storage_status(pool: &Pool<Sqlite>) -> Result<StorageStatus> {
         wav_backed_up,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::SqlitePool;
+
+    /// Create an in-memory SQLite DB with the minimal schema for storage tests.
+    async fn test_db() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+
+        // files: core file table (just the columns we need for storage tests)
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT NOT NULL UNIQUE,
+                file_hash TEXT NOT NULL DEFAULT '',
+                file_type TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                last_modified INTEGER NOT NULL DEFAULT 0,
+                last_scanned INTEGER NOT NULL DEFAULT 0,
+                isrc TEXT,
+                title TEXT,
+                artist TEXT,
+                album TEXT,
+                album_artist TEXT,
+                track_number INTEGER,
+                total_tracks INTEGER,
+                disc_number INTEGER,
+                total_discs INTEGER,
+                genre TEXT,
+                year INTEGER,
+                composer TEXT,
+                comment TEXT,
+                duration_ms INTEGER,
+                bitrate INTEGER,
+                sample_rate INTEGER,
+                channels INTEGER,
+                bpm REAL,
+                musical_key TEXT,
+                rating INTEGER NOT NULL DEFAULT 0,
+                play_count INTEGER NOT NULL DEFAULT 0,
+                last_played INTEGER,
+                spotify_id TEXT,
+                soundcloud_id TEXT,
+                youtube_id TEXT,
+                source_of INTEGER,
+                stem_type TEXT,
+                last_verified_local INTEGER,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // file_locations: tracks where a file physically exists
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS file_locations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                location_type TEXT NOT NULL CHECK (location_type IN ('local', 'backup')),
+                path TEXT NOT NULL,
+                file_size INTEGER,
+                last_verified INTEGER,
+                created_at INTEGER DEFAULT (unixepoch()),
+                UNIQUE(file_id, location_type)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // tags: minimal for backpack checking
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                category_id INTEGER NOT NULL DEFAULT 1,
+                sort_order INTEGER DEFAULT 0,
+                created_at INTEGER DEFAULT (unixepoch()),
+                backpack INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // file_resolved_tags: materialized tag resolution
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS file_resolved_tags (
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                tag_id INTEGER NOT NULL,
+                tag_name TEXT NOT NULL,
+                category_id INTEGER NOT NULL,
+                category_name TEXT NOT NULL,
+                prefix TEXT NOT NULL,
+                sort_order INTEGER DEFAULT 0,
+                created_at INTEGER,
+                is_default INTEGER DEFAULT 0,
+                PRIMARY KEY (file_id, tag_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // service_config: for service config tests
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS service_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                service TEXT NOT NULL UNIQUE,
+                refresh_token TEXT,
+                metadata_json TEXT,
+                access_token TEXT,
+                token_expiry INTEGER,
+                user_id TEXT,
+                playlist_id TEXT,
+                is_connected INTEGER NOT NULL DEFAULT 0,
+                last_checked INTEGER,
+                last_synced INTEGER,
+                remote_playlists_count INTEGER NOT NULL DEFAULT 0,
+                remote_tracks_count INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // folders: for unbacked-up files queries
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS folders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                folder_path TEXT NOT NULL UNIQUE,
+                active INTEGER NOT NULL DEFAULT 1,
+                scan_recursive INTEGER NOT NULL DEFAULT 1,
+                fixed_extensions INTEGER NOT NULL DEFAULT 0,
+                file_extensions TEXT NOT NULL DEFAULT '',
+                max_depth INTEGER NOT NULL DEFAULT 10,
+                last_scanned INTEGER,
+                scan_sources INTEGER NOT NULL DEFAULT 0,
+                backup_path TEXT,
+                auto_backup INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        pool
+    }
+
+    // Helper: insert a file row, returning its id
+    async fn insert_file(
+        pool: &SqlitePool,
+        id: i64,
+        path: &str,
+        file_type: &str,
+        size: i64,
+        isrc: Option<&str>,
+        bpm: Option<f64>,
+        comment: Option<&str>,
+    ) -> i64 {
+        let comment_val = comment.map(|s| s.to_string());
+        sqlx::query(
+            "INSERT INTO files (id, file_path, file_hash, file_type, file_size, last_modified, last_scanned, isrc, title, artist, bpm, comment, created_at, updated_at)
+             VALUES (?, ?, '', ?, ?, 0, 0, ?, ?, ?, ?, ?, 0, 0)",
+        )
+        .bind(id)
+        .bind(path)
+        .bind(file_type)
+        .bind(size)
+        .bind(isrc)
+        .bind(path) // title = path as placeholder
+        .bind("Test Artist")
+        .bind(bpm)
+        .bind(comment_val)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    // ── File Location CRUD ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_file_location_create_and_get() {
+        let pool = test_db().await;
+        insert_file(
+            &pool,
+            1,
+            "/test/song.flac",
+            "flac",
+            12345,
+            None,
+            Some(120.0),
+            None,
+        )
+        .await;
+
+        set_file_location(&pool, 1, "local", "/test/song.flac", 12345)
+            .await
+            .unwrap();
+
+        let locations = get_file_locations(&pool, 1).await.unwrap();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].location_type, "local");
+        assert_eq!(locations[0].file_size, Some(12345));
+    }
+
+    #[tokio::test]
+    async fn test_file_location_upsert_updates_path() {
+        let pool = test_db().await;
+        insert_file(&pool, 1, "/test/song.flac", "flac", 100, None, None, None).await;
+
+        set_file_location(&pool, 1, "local", "/test/song.flac", 100)
+            .await
+            .unwrap();
+        // Update with new size
+        set_file_location(&pool, 1, "local", "/test/song.flac", 200)
+            .await
+            .unwrap();
+
+        let locations = get_file_locations(&pool, 1).await.unwrap();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].file_size, Some(200));
+    }
+
+    #[tokio::test]
+    async fn test_file_location_multiple_types() {
+        let pool = test_db().await;
+        insert_file(&pool, 1, "/test/song.flac", "flac", 100, None, None, None).await;
+
+        set_file_location(&pool, 1, "local", "/test/song.flac", 100)
+            .await
+            .unwrap();
+        set_file_location(&pool, 1, "backup", "/backup/test/song.flac", 100)
+            .await
+            .unwrap();
+
+        let locations = get_file_locations(&pool, 1).await.unwrap();
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].location_type, "backup");
+        assert_eq!(locations[1].location_type, "local");
+
+        // Remove local
+        remove_file_location(&pool, 1, "local").await.unwrap();
+        let locations = get_file_locations(&pool, 1).await.unwrap();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].location_type, "backup");
+    }
+
+    #[tokio::test]
+    async fn test_file_location_remove_non_existent() {
+        let pool = test_db().await;
+        // Removing a location that doesn't exist should not error
+        remove_file_location(&pool, 999, "local").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_record_backup_result() {
+        let pool = test_db().await;
+        insert_file(&pool, 1, "/test/song.flac", "flac", 100, None, None, None).await;
+
+        record_backup_result(&pool, 1, true, 100, "/backup/test/song.flac")
+            .await
+            .unwrap();
+
+        let locations = get_file_locations(&pool, 1).await.unwrap();
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].location_type, "backup");
+        assert_eq!(locations[0].path, "/backup/test/song.flac");
+    }
+
+    #[tokio::test]
+    async fn test_record_backup_result_failure() {
+        let pool = test_db().await;
+        insert_file(&pool, 1, "/test/song.flac", "flac", 100, None, None, None).await;
+
+        record_backup_result(&pool, 1, false, 0, "/backup/test/song.flac")
+            .await
+            .unwrap();
+
+        // Failure should not create a backup location
+        let locations = get_file_locations(&pool, 1).await.unwrap();
+        assert!(locations.is_empty());
+    }
+
+    // ── WAV Source Linking ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_set_and_get_files_by_source() {
+        let pool = test_db().await;
+        insert_file(
+            &pool,
+            1,
+            "/test/stem.stem.m4a",
+            "stem.m4a",
+            1000,
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_file(
+            &pool,
+            2,
+            "/test/sub/vocals.wav",
+            "wav",
+            500,
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_file(
+            &pool,
+            3,
+            "/test/sub/drums.wav",
+            "wav",
+            400,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        set_file_source_of(&pool, 2, 1).await.unwrap();
+        set_file_source_of(&pool, 3, 1).await.unwrap();
+
+        let sources = get_files_by_source(&pool, 1).await.unwrap();
+        assert_eq!(sources.len(), 2);
+        assert!(sources.iter().all(|f| f.file_type == "wav"));
+    }
+
+    #[tokio::test]
+    async fn test_get_files_by_source_empty() {
+        let pool = test_db().await;
+        insert_file(
+            &pool,
+            1,
+            "/test/stem.stem.m4a",
+            "stem.m4a",
+            1000,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let sources = get_files_by_source(&pool, 1).await.unwrap();
+        assert!(sources.is_empty());
+    }
+
+    // ── Prune Candidates ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_prune_candidates_basic() {
+        let pool = test_db().await;
+        // File must be: backed up + local + metadata-complete + not in backpack
+        let fid = insert_file(
+            &pool,
+            1,
+            "/test/song.flac",
+            "flac",
+            1000,
+            Some("ISRC-1"),
+            Some(120.0),
+            None,
+        )
+        .await;
+        set_file_location(&pool, fid, "local", "/test/song.flac", 1000)
+            .await
+            .unwrap();
+        set_file_location(&pool, fid, "backup", "/backup/test/song.flac", 1000)
+            .await
+            .unwrap();
+
+        let candidates = get_prune_candidates(&pool).await.unwrap();
+        assert_eq!(candidates.len(), 1, "file should be a prune candidate");
+        assert_eq!(candidates[0].file_id, fid);
+        assert_eq!(candidates[0].reason, "not_followed");
+    }
+
+    #[tokio::test]
+    async fn test_prune_candidates_excludes_backpack() {
+        let pool = test_db().await;
+        let fid = insert_file(
+            &pool,
+            1,
+            "/test/song.flac",
+            "flac",
+            1000,
+            Some("ISRC-1"),
+            Some(120.0),
+            None,
+        )
+        .await;
+        set_file_location(&pool, fid, "local", "/test/song.flac", 1000)
+            .await
+            .unwrap();
+        set_file_location(&pool, fid, "backup", "/backup/test/song.flac", 1000)
+            .await
+            .unwrap();
+
+        // Give it a backpack tag
+        sqlx::query("INSERT INTO tags (id, name, category_id, backpack) VALUES (1, 'keep', 1, 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix)
+             VALUES (?, 1, 'keep', 1, 'Setlist', 'S')",
+        )
+        .bind(fid)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let candidates = get_prune_candidates(&pool).await.unwrap();
+        assert_eq!(candidates.len(), 0, "backpack files should be excluded");
+    }
+
+    #[tokio::test]
+    async fn test_prune_candidates_requires_local() {
+        let pool = test_db().await;
+        let fid = insert_file(
+            &pool,
+            1,
+            "/test/song.flac",
+            "flac",
+            1000,
+            Some("ISRC-1"),
+            Some(120.0),
+            None,
+        )
+        .await;
+        // Backed up but NOT local
+        set_file_location(&pool, fid, "backup", "/backup/test/song.flac", 1000)
+            .await
+            .unwrap();
+
+        let candidates = get_prune_candidates(&pool).await.unwrap();
+        assert_eq!(
+            candidates.len(),
+            0,
+            "files without local location should be excluded"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prune_candidates_requires_metadata_or_wav() {
+        let pool = test_db().await;
+        // FLAC without BPM or comment — not metadata-complete
+        let fid = insert_file(
+            &pool,
+            1,
+            "/test/song.flac",
+            "flac",
+            1000,
+            Some("ISRC-1"),
+            None,
+            None,
+        )
+        .await;
+        set_file_location(&pool, fid, "local", "/test/song.flac", 1000)
+            .await
+            .unwrap();
+        set_file_location(&pool, fid, "backup", "/backup/test/song.flac", 1000)
+            .await
+            .unwrap();
+
+        let candidates = get_prune_candidates(&pool).await.unwrap();
+        assert_eq!(
+            candidates.len(),
+            0,
+            "files without bpm or comment should be excluded"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prune_candidates_wav_with_source() {
+        let pool = test_db().await;
+        let stem_id = insert_file(
+            &pool,
+            1,
+            "/test/stem.stem.m4a",
+            "stem.m4a",
+            1000,
+            Some("ISRC-1"),
+            Some(120.0),
+            None,
+        )
+        .await;
+        let wav_id = insert_file(
+            &pool,
+            2,
+            "/test/sub/vocals.wav",
+            "wav",
+            500,
+            None,
+            None,
+            None,
+        )
+        .await;
+        set_file_source_of(&pool, wav_id, stem_id).await.unwrap();
+        set_file_location(&pool, wav_id, "local", "/test/sub/vocals.wav", 500)
+            .await
+            .unwrap();
+        set_file_location(&pool, wav_id, "backup", "/backup/sub/vocals.wav", 500)
+            .await
+            .unwrap();
+
+        let candidates = get_prune_candidates(&pool).await.unwrap();
+        assert_eq!(
+            candidates.len(),
+            1,
+            "backed-up WAV with source_of should be a candidate"
+        );
+        assert_eq!(candidates[0].reason, "wav_backed_up");
+        assert!(
+            candidates[0].has_stem_variant,
+            "WAV always has stem variant"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prune_candidates_wav_without_source_excluded() {
+        let pool = test_db().await;
+        let wav_id = insert_file(
+            &pool,
+            2,
+            "/test/sub/vocals.wav",
+            "wav",
+            500,
+            None,
+            None,
+            None,
+        )
+        .await;
+        set_file_location(&pool, wav_id, "local", "/test/sub/vocals.wav", 500)
+            .await
+            .unwrap();
+        set_file_location(&pool, wav_id, "backup", "/backup/sub/vocals.wav", 500)
+            .await
+            .unwrap();
+        // No source_of set — should NOT be a prune candidate
+
+        let candidates = get_prune_candidates(&pool).await.unwrap();
+        assert_eq!(
+            candidates.len(),
+            0,
+            "WAV without source_of should be excluded"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prune_candidates_has_stem_variant() {
+        let pool = test_db().await;
+        // FLAC with same-ISRC stem = has_stem_variant
+        let flac = insert_file(
+            &pool,
+            1,
+            "/test/song.flac",
+            "flac",
+            1000,
+            Some("ISRC-X"),
+            Some(120.0),
+            None,
+        )
+        .await;
+        let _stem = insert_file(
+            &pool,
+            2,
+            "/test/song.stem.m4a",
+            "stem.m4a",
+            500,
+            Some("ISRC-X"),
+            Some(120.0),
+            None,
+        )
+        .await;
+        set_file_location(&pool, flac, "local", "/test/song.flac", 1000)
+            .await
+            .unwrap();
+        set_file_location(&pool, flac, "backup", "/backup/test/song.flac", 1000)
+            .await
+            .unwrap();
+
+        let candidates = get_prune_candidates(&pool).await.unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert!(
+            candidates[0].has_stem_variant,
+            "FLAC with same-ISRC stem should have stem variant"
+        );
+    }
+
+    // ── Storage Status ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_storage_status_basic() {
+        let pool = test_db().await;
+
+        // Insert a stem and a FLAC with local + backup
+        insert_file(
+            &pool,
+            1,
+            "/test/track.stem.m4a",
+            "stem.m4a",
+            5000,
+            None,
+            Some(120.0),
+            None,
+        )
+        .await;
+        set_file_location(&pool, 1, "local", "/test/track.stem.m4a", 5000)
+            .await
+            .unwrap();
+        set_file_location(&pool, 1, "backup", "/backup/track.stem.m4a", 5000)
+            .await
+            .unwrap();
+
+        insert_file(
+            &pool,
+            2,
+            "/test/track.flac",
+            "flac",
+            10000,
+            None,
+            Some(120.0),
+            None,
+        )
+        .await;
+        set_file_location(&pool, 2, "local", "/test/track.flac", 10000)
+            .await
+            .unwrap();
+        set_file_location(&pool, 2, "backup", "/backup/track.flac", 10000)
+            .await
+            .unwrap();
+
+        // Insert a backup-only file (not local)
+        insert_file(&pool, 3, "/test/old.flac", "flac", 2000, None, None, None).await;
+        set_file_location(&pool, 3, "backup", "/backup/old.flac", 2000)
+            .await
+            .unwrap();
+
+        let status = get_storage_status(&pool).await.unwrap();
+        assert_eq!(status.local_file_count, 2, "2 local files");
+        assert_eq!(status.tracked_file_count, 3, "3 total tracked files");
+        assert_eq!(status.local_size_bytes, 15000);
+        assert_eq!(status.backup_count, 3, "all 3 are backed up");
+        assert_eq!(status.local_stems, 1);
+        assert_eq!(status.local_flacs, 1);
+        assert_eq!(status.local_stems_size, 5000);
+        assert_eq!(status.local_flacs_size, 10000);
+        assert!(
+            status.prune_candidate_count >= 2,
+            "both local tracked files should be candidates"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_storage_status_empty() {
+        let pool = test_db().await;
+        let status = get_storage_status(&pool).await.unwrap();
+        assert_eq!(status.local_file_count, 0);
+        assert_eq!(status.tracked_file_count, 0);
+        assert_eq!(status.local_size_bytes, 0);
+        assert_eq!(status.backup_count, 0);
+        assert_eq!(status.prune_candidate_count, 0);
+    }
+
+    // ── Unbacked-up files ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_unbacked_up_files() {
+        let pool = test_db().await;
+
+        // Insert a folder with path matching our test files
+        sqlx::query(
+            "INSERT INTO folders (id, folder_path, active, created_at, updated_at)
+             VALUES (1, '/test', 1, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // File in the folder, not backed up
+        insert_file(&pool, 1, "/test/song.flac", "flac", 1000, None, None, None).await;
+        set_file_location(&pool, 1, "local", "/test/song.flac", 1000)
+            .await
+            .unwrap();
+
+        // File in the folder, backed up
+        insert_file(
+            &pool,
+            2,
+            "/test/backed.flac",
+            "flac",
+            2000,
+            None,
+            None,
+            None,
+        )
+        .await;
+        set_file_location(&pool, 2, "local", "/test/backed.flac", 2000)
+            .await
+            .unwrap();
+        set_file_location(&pool, 2, "backup", "/backup/test/backed.flac", 2000)
+            .await
+            .unwrap();
+
+        // File outside the folder
+        insert_file(&pool, 3, "/other/song.flac", "flac", 3000, None, None, None).await;
+
+        let unbacked = get_unbacked_up_files(&pool, 1).await.unwrap();
+        assert_eq!(
+            unbacked.len(),
+            1,
+            "only the file without backup should appear"
+        );
+        assert_eq!(unbacked[0].id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_clear_backup_status() {
+        let pool = test_db().await;
+
+        sqlx::query(
+            "INSERT INTO folders (id, folder_path, active, created_at, updated_at)
+             VALUES (1, '/test', 1, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        insert_file(&pool, 1, "/test/song.flac", "flac", 1000, None, None, None).await;
+        set_file_location(&pool, 1, "backup", "/backup/test/song.flac", 1000)
+            .await
+            .unwrap();
+        set_file_location(&pool, 1, "local", "/test/song.flac", 1000)
+            .await
+            .unwrap();
+
+        // Clear backup status
+        clear_backup_status(&pool, 1).await.unwrap();
+
+        let locations = get_file_locations(&pool, 1).await.unwrap();
+        assert_eq!(locations.len(), 1, "only local should remain");
+        assert_eq!(locations[0].location_type, "local");
+    }
+
+    // ── Service Config ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_service_config_not_configured() {
+        let pool = test_db().await;
+        let config = get_service_config(&pool, "spotify").await.unwrap();
+        assert!(config.is_none(), "unconfigured service should return None");
+    }
+
+    #[tokio::test]
+    async fn test_update_and_get_service_config() {
+        let pool = test_db().await;
+
+        update_service_config(&pool, "soundcloud", Some("user-123"), Some("pl-main"))
+            .await
+            .unwrap();
+
+        let config = get_service_config(&pool, "soundcloud").await.unwrap();
+        assert!(config.is_some());
+        let cfg = config.unwrap();
+        assert_eq!(cfg.service, "soundcloud");
+        assert_eq!(cfg.user_id.as_deref(), Some("user-123"));
+        assert_eq!(cfg.playlist_id.as_deref(), Some("pl-main"));
+    }
+
+    #[tokio::test]
+    async fn test_update_service_connection_status() {
+        let pool = test_db().await;
+
+        // Create config row first
+        update_service_config(&pool, "spotify", None, None)
+            .await
+            .unwrap();
+
+        update_service_connection_status(&pool, "spotify", true)
+            .await
+            .unwrap();
+
+        let (connected,): (bool,) =
+            sqlx::query_as("SELECT is_connected FROM service_config WHERE service = 'spotify'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(connected);
+
+        // Toggle off
+        update_service_connection_status(&pool, "spotify", false)
+            .await
+            .unwrap();
+        let (connected,): (bool,) =
+            sqlx::query_as("SELECT is_connected FROM service_config WHERE service = 'spotify'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!connected);
+    }
+
+    #[tokio::test]
+    async fn test_update_service_sync_timestamp() {
+        let pool = test_db().await;
+
+        update_service_config(&pool, "youtube", None, Some("yt-main"))
+            .await
+            .unwrap();
+
+        update_service_sync_timestamp(&pool, "youtube")
+            .await
+            .unwrap();
+
+        let (synced,): (Option<i64>,) =
+            sqlx::query_as("SELECT last_synced FROM service_config WHERE service = 'youtube'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(synced.is_some(), "last_synced should be set");
+    }
+
+    #[tokio::test]
+    async fn test_update_storage_setting() {
+        let pool = test_db().await;
+
+        update_storage_setting(&pool, r#"{"stem_preferred": true}"#)
+            .await
+            .unwrap();
+
+        let (meta,): (String,) =
+            sqlx::query_as("SELECT metadata_json FROM service_config WHERE service = 'storage'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(meta, r#"{"stem_preferred": true}"#);
+
+        // Update again — should overwrite
+        update_storage_setting(&pool, r#"{"stem_preferred": false}"#)
+            .await
+            .unwrap();
+        let (meta2,): (String,) =
+            sqlx::query_as("SELECT metadata_json FROM service_config WHERE service = 'storage'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(meta2, r#"{"stem_preferred": false}"#);
+    }
+
+    #[tokio::test]
+    async fn test_update_service_tokens() {
+        let pool = test_db().await;
+
+        update_service_config(&pool, "spotify", None, None)
+            .await
+            .unwrap();
+
+        update_service_tokens(
+            &pool,
+            "spotify",
+            Some("refresh-abc"),
+            Some("access-xyz"),
+            Some(9999999999),
+        )
+        .await
+        .unwrap();
+
+        let (refresh, access, expiry): (Option<String>, Option<String>, Option<i64>) =
+            sqlx::query_as(
+                "SELECT refresh_token, access_token, token_expiry FROM service_config WHERE service = 'spotify'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(refresh.as_deref(), Some("refresh-abc"));
+        assert_eq!(access.as_deref(), Some("access-xyz"));
+        assert_eq!(expiry, Some(9999999999));
+    }
+
+    #[tokio::test]
+    async fn test_discover_backup_files_new_files() {
+        let pool = test_db().await;
+
+        sqlx::query(
+            "INSERT INTO folders (id, folder_path, active, created_at, updated_at)
+             VALUES (1, '/music/stems', 1, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let remote_files = vec!["track1.flac".to_string(), "track2.stem.m4a".to_string()];
+
+        let result = discover_backup_files(&pool, 1, &remote_files, "/backup")
+            .await
+            .unwrap();
+        assert_eq!(result.files_on_backup, 2);
+        assert_eq!(
+            result.newly_discovered, 2,
+            "both files should be newly discovered"
+        );
+        assert_eq!(result.already_tracked, 0);
+
+        // Verify files were created
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_discover_backup_files_already_tracked() {
+        let pool = test_db().await;
+
+        sqlx::query(
+            "INSERT INTO folders (id, folder_path, active, created_at, updated_at)
+             VALUES (1, '/music', 1, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Existing file in DB
+        insert_file(&pool, 1, "/music/song.flac", "flac", 500, None, None, None).await;
+
+        let remote_files = vec!["song.flac".to_string()];
+
+        let result = discover_backup_files(&pool, 1, &remote_files, "/backup")
+            .await
+            .unwrap();
+        assert_eq!(
+            result.already_tracked, 1,
+            "file already in DB should be tracked"
+        );
+        assert_eq!(result.newly_discovered, 0);
+
+        // Should have created a backup file location
+        let locations = get_file_locations(&pool, 1).await.unwrap();
+        assert_eq!(
+            locations.len(),
+            1,
+            "backup location should have been created"
+        );
+        assert_eq!(locations[0].location_type, "backup");
+    }
+
+    // ── File Deletion ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_delete_local_file_by_id_not_found() {
+        let pool = test_db().await;
+        // File ID that doesn't exist in DB
+        let result = delete_local_file_by_id(&pool, 9999).await.unwrap();
+        assert!(!result, "non-existent file should return false");
+    }
+
+    #[tokio::test]
+    async fn test_delete_local_file_by_id_not_on_disk() {
+        let pool = test_db().await;
+        insert_file(
+            &pool,
+            1,
+            "/nonexistent/path/file.flac",
+            "flac",
+            1000,
+            None,
+            None,
+            None,
+        )
+        .await;
+        set_file_location(&pool, 1, "local", "/nonexistent/path/file.flac", 1000)
+            .await
+            .unwrap();
+
+        let result = delete_local_file_by_id(&pool, 1).await.unwrap();
+        assert!(result, "should return true even if file wasn't on disk");
+
+        // Local entry should be removed
+        let locations = get_file_locations(&pool, 1).await.unwrap();
+        assert!(locations.is_empty(), "local location should be removed");
+    }
+}

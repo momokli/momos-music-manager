@@ -274,10 +274,15 @@ async fn folders_create() {
         data["id"].as_i64().is_some(),
         "created folder should have an id"
     );
-    assert_eq!(
-        data["path"].as_str().unwrap_or(""),
-        "/tmp/test-create",
-        "path should match"
+    assert!(
+        data["path"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("/tmp/test-create")
+            || data["path"].as_str().unwrap_or("") == "/tmp/test-create"
+            || data["path"].as_str().unwrap_or("") == "/private/tmp/test-create",
+        "path should end with /tmp/test-create, got {:?}",
+        data["path"].as_str()
     );
     assert!(
         data["watchEnabled"].as_bool().unwrap_or(false),

@@ -463,7 +463,7 @@ pub async fn get_tags_for_service_track(pool: &Pool<Sqlite>, track_id: i64) -> R
     // Find tags linked to this track via v_tag_playlist (playlist → tag name matching)
     let tags = sqlx::query_as::<_, Tag>(
         r#"
-        SELECT DISTINCT t.id, t.name, t.category_id, t.sort_order, t.created_at
+        SELECT DISTINCT t.id, t.name, t.category_id, t.sort_order, t.created_at, t.backpack
         FROM tags t
         JOIN v_tag_playlist vtp ON vtp.tag_id = t.id
         JOIN service_playlist_tracks spt ON spt.playlist_id = vtp.playlist_id
@@ -476,4 +476,589 @@ pub async fn get_tags_for_service_track(pool: &Pool<Sqlite>, track_id: i64) -> R
     .await?;
 
     Ok(tags)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::SqlitePool;
+
+    /// Create an in-memory SQLite DB with the minimal schema for track tests.
+    async fn test_db() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+
+        // service_tracks: core table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS service_tracks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                service TEXT NOT NULL,
+                service_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                artist TEXT NOT NULL,
+                album TEXT,
+                isrc TEXT,
+                duration_ms INTEGER,
+                metadata_json TEXT,
+                imported_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                spotify_tempo REAL,
+                spotify_key_camelot TEXT,
+                spotify_key_raw INTEGER,
+                spotify_mode INTEGER,
+                spotify_danceability REAL,
+                spotify_energy REAL,
+                spotify_valence REAL,
+                UNIQUE(service, service_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // tags: for tag resolution tests
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                category_id INTEGER NOT NULL DEFAULT 1,
+                sort_order INTEGER DEFAULT 0,
+                created_at INTEGER DEFAULT (unixepoch()),
+                backpack INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // service_playlists: for tag matching
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS service_playlists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                service TEXT NOT NULL,
+                playlist_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                metadata_json TEXT,
+                imported_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                last_fetched_at INTEGER,
+                remote_track_count INTEGER NOT NULL DEFAULT 0,
+                remote_unique_count INTEGER NOT NULL DEFAULT 0,
+                archive_deleted INTEGER NOT NULL DEFAULT 0,
+                snapshot_id TEXT,
+                UNIQUE(service, playlist_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // service_playlist_tracks: track membership in playlists
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS service_playlist_tracks (
+                playlist_id INTEGER NOT NULL REFERENCES service_playlists(id),
+                track_id INTEGER NOT NULL,
+                position INTEGER,
+                added_at INTEGER NOT NULL DEFAULT 0,
+                deleted_at INTEGER,
+                PRIMARY KEY (playlist_id, track_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // v_tag_playlist view for tag→playlist matching
+        sqlx::query(
+            "CREATE VIEW IF NOT EXISTS v_tag_playlist AS
+             SELECT DISTINCT t.id AS tag_id, t.name AS tag_name,
+                    sp.id AS playlist_id, sp.name AS playlist_name,
+                    sp.service
+             FROM tags t
+             JOIN service_playlists sp ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // tag_categories: needed for TagCategory queries
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tag_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                icon TEXT NOT NULL DEFAULT 'fa-tag',
+                prefix TEXT NOT NULL DEFAULT 'T',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                tag_count INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER DEFAULT (unixepoch())
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // v_tag_categories view
+        sqlx::query(
+            "CREATE VIEW IF NOT EXISTS v_tag_categories AS
+             SELECT * FROM tag_categories",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // files: for key_comparison tests
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT NOT NULL UNIQUE,
+                file_hash TEXT NOT NULL DEFAULT '',
+                file_type TEXT NOT NULL,
+                file_size INTEGER NOT NULL DEFAULT 0,
+                last_modified INTEGER NOT NULL DEFAULT 0,
+                last_scanned INTEGER NOT NULL DEFAULT 0,
+                isrc TEXT,
+                title TEXT,
+                artist TEXT,
+                album TEXT,
+                album_artist TEXT,
+                track_number INTEGER,
+                total_tracks INTEGER,
+                disc_number INTEGER,
+                total_discs INTEGER,
+                genre TEXT,
+                year INTEGER,
+                composer TEXT,
+                comment TEXT,
+                duration_ms INTEGER,
+                bitrate INTEGER,
+                sample_rate INTEGER,
+                channels INTEGER,
+                bpm REAL,
+                musical_key TEXT,
+                rating INTEGER NOT NULL DEFAULT 0,
+                play_count INTEGER NOT NULL DEFAULT 0,
+                last_played INTEGER,
+                spotify_id TEXT,
+                soundcloud_id TEXT,
+                youtube_id TEXT,
+                source_of INTEGER,
+                stem_type TEXT,
+                last_verified_local INTEGER,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // file_locations: for linking files to backup/local
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS file_locations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                location_type TEXT NOT NULL CHECK (location_type IN ('local', 'backup')),
+                path TEXT NOT NULL,
+                file_size INTEGER,
+                last_verified INTEGER,
+                created_at INTEGER DEFAULT (unixepoch()),
+                UNIQUE(file_id, location_type)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // file_resolved_tags: materialized tag resolution
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS file_resolved_tags (
+                file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                tag_id INTEGER NOT NULL,
+                tag_name TEXT NOT NULL,
+                category_id INTEGER NOT NULL,
+                category_name TEXT NOT NULL,
+                prefix TEXT NOT NULL,
+                sort_order INTEGER DEFAULT 0,
+                created_at INTEGER,
+                is_default INTEGER DEFAULT 0,
+                PRIMARY KEY (file_id, tag_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // v_file_track_link view
+        sqlx::query(
+            "CREATE VIEW IF NOT EXISTS v_file_track_link AS
+             SELECT f.id AS file_id, st.id AS track_id
+             FROM files f
+             JOIN service_tracks st ON (
+                 st.isrc = f.isrc
+                 OR (st.service = 'spotify' AND st.service_id = f.spotify_id)
+                 OR (st.service = 'soundcloud' AND st.service_id = f.soundcloud_id)
+                 OR (st.service = 'youtube' AND st.service_id = f.youtube_id)
+                 OR (st.service = 'local' AND st.service_id = CAST(f.id AS TEXT))
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        pool
+    }
+
+    // ── get_service_tracks ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_service_tracks_empty() {
+        let pool = test_db().await;
+        let tracks = get_service_tracks(&pool).await.unwrap();
+        assert!(tracks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_service_tracks_returns_all() {
+        let pool = test_db().await;
+
+        sqlx::query(
+            "INSERT INTO service_tracks (service, service_id, title, artist, isrc, imported_at, updated_at)
+             VALUES ('spotify', 's-1', 'Track One', 'Artist 1', 'ISRC-1', 100, 100),
+                    ('spotify', 's-2', 'Track Two', 'Artist 2', 'ISRC-2', 200, 200),
+                    ('soundcloud', 'sc-1', 'SC Track', 'SC Artist', NULL, 300, 300)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let tracks = get_service_tracks(&pool).await.unwrap();
+        assert_eq!(tracks.len(), 3);
+
+        // Verify ordering: service first, then title
+        assert_eq!(tracks[0].service, "soundcloud");
+        assert_eq!(tracks[1].service, "spotify");
+        assert_eq!(tracks[2].service, "spotify");
+        assert_eq!(tracks[1].title, "Track One");
+        assert_eq!(tracks[2].title, "Track Two");
+    }
+
+    // ── get_tags_for_service_track ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_tags_for_service_track_returns_matching_tags() {
+        let pool = test_db().await;
+
+        // Create a tag with a name matching the playlist
+        sqlx::query(
+            "INSERT INTO tags (id, name, category_id) VALUES (1, 'Groovy', 1), (2, 'Dark', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Create a playlist with the same name as the tag
+        let pl_id: i64 = sqlx::query_scalar(
+            "INSERT INTO service_playlists (service, playlist_id, name, imported_at, updated_at)
+             VALUES ('spotify', 'pl-1', 'Groovy', 0, 0)
+             RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Create a track and link it to the playlist
+        let tr_id: i64 = sqlx::query_scalar(
+            "INSERT INTO service_tracks (id, service, service_id, title, artist, imported_at, updated_at)
+             VALUES (1, 'spotify', 'st-1', 'Test Track', 'Test Artist', 0, 0)
+             RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO service_playlist_tracks (playlist_id, track_id, position, added_at)
+             VALUES (?, ?, 0, 0)",
+        )
+        .bind(pl_id)
+        .bind(tr_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let tags = get_tags_for_service_track(&pool, tr_id).await.unwrap();
+        assert_eq!(tags.len(), 1, "should find 1 matching tag");
+        assert_eq!(tags[0].name, "Groovy");
+    }
+
+    #[tokio::test]
+    async fn test_get_tags_for_service_track_no_match() {
+        let pool = test_db().await;
+
+        // Create a tag and a playlist with different names
+        sqlx::query("INSERT INTO tags (id, name, category_id) VALUES (1, 'Groovy', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let pl_id: i64 = sqlx::query_scalar(
+            "INSERT INTO service_playlists (service, playlist_id, name, imported_at, updated_at)
+             VALUES ('spotify', 'pl-other', 'Other Name', 0, 0)
+             RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let tr_id: i64 = sqlx::query_scalar(
+            "INSERT INTO service_tracks (id, service, service_id, title, artist, imported_at, updated_at)
+             VALUES (1, 'spotify', 'st-1', 'Test', 'Artist', 0, 0)
+             RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO service_playlist_tracks (playlist_id, track_id, position, added_at)
+             VALUES (?, ?, 0, 0)",
+        )
+        .bind(pl_id)
+        .bind(tr_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let tags = get_tags_for_service_track(&pool, tr_id).await.unwrap();
+        assert!(tags.is_empty(), "no tags should match 'Other Name'");
+    }
+
+    // ── TrackDetail struct ────────────────────────────────────────────────
+
+    #[test]
+    fn test_track_detail_in_backpack_false_by_default() {
+        let detail = TrackDetail {
+            id: 1,
+            service: "spotify".to_string(),
+            service_id: "s-1".to_string(),
+            title: "Test".to_string(),
+            artist: "Artist".to_string(),
+            album: None,
+            isrc: None,
+            duration_ms: Some(240000),
+            popularity: None,
+            files: vec![],
+            tags: vec![],
+            playlists: vec![],
+            in_backpack: false,
+        };
+        assert!(!detail.in_backpack);
+        assert_eq!(detail.title, "Test");
+    }
+
+    // ── TrackDetail edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn test_track_detail_default_fields() {
+        let detail = TrackDetail {
+            id: 42,
+            service: "soundcloud".to_string(),
+            service_id: "sc-abc".to_string(),
+            title: "Cloud Track".to_string(),
+            artist: "SC Artist".to_string(),
+            album: None,
+            isrc: Some("ISRC-SC-1".to_string()),
+            duration_ms: None,
+            popularity: None,
+            files: vec![],
+            tags: vec![],
+            playlists: vec![],
+            in_backpack: true,
+        };
+        assert!(detail.in_backpack);
+        assert_eq!(detail.service_id, "sc-abc");
+        assert_eq!(detail.isrc.as_deref(), Some("ISRC-SC-1"));
+        assert!(detail.duration_ms.is_none());
+        assert!(detail.files.is_empty());
+    }
+
+    #[test]
+    fn test_track_detail_file_defaults() {
+        let file = TrackDetailFile {
+            id: 1,
+            file_path: "/music/track.flac".to_string(),
+            file_type: "flac".to_string(),
+            stem_type: None,
+            file_size: 5000i64,
+            isrc: None,
+            title: Some("Track".to_string()),
+            artist: Some("Artist".to_string()),
+            album: None,
+            bpm: Some(128.0),
+            musical_key: Some("8A".to_string()),
+            duration_ms: Some(300000),
+            bitrate: None,
+            sample_rate: None,
+            channels: None,
+            comment: None,
+            rating: Some(0),
+            play_count: Some(5),
+            last_played: Some(1000),
+            backed_up: true,
+            backup_path: Some("/backup/track.flac".to_string()),
+            is_local: true,
+        };
+        assert_eq!(file.file_type, "flac");
+        assert!(file.stem_type.is_none());
+        assert!(file.backed_up);
+        assert!(file.is_local);
+        assert_eq!(file.play_count, Some(5));
+    }
+
+    // ── Key Comparison ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_key_comparison_empty() {
+        let pool = test_db().await;
+        let (results, summary) = get_key_comparison(&pool, None, Some(10)).await.unwrap();
+        assert!(results.is_empty(), "no data should return empty results");
+        assert_eq!(summary.total_compared, 0);
+        assert_eq!(summary.bpm_match_count, 0);
+        assert_eq!(summary.key_match_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_key_comparison_with_tag() {
+        let pool = test_db().await;
+
+        // Insert a file
+        sqlx::query(
+            "INSERT INTO files (id, file_path, file_hash, file_type, file_size, bpm, musical_key, title, artist, isrc, spotify_id, created_at, updated_at)
+             VALUES (1, '/test/track.flac', '', 'flac', 1000, 124.0, '8A', 'Test Track', 'Test Artist', 'ISRC-MATCH', 'spotify:track:abc', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Insert a service track with Spotify audio features
+        sqlx::query(
+            "INSERT INTO service_tracks (id, service, service_id, title, artist, isrc, spotify_tempo, spotify_key_camelot, spotify_key_raw, spotify_mode, imported_at, updated_at)
+             VALUES (1, 'spotify', 'spotify:track:abc', 'Test Track', 'Test Artist', 'ISRC-MATCH', 124.0, '8A', 5, 0, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Insert a tag and file_resolved_tags entry for filtering
+        sqlx::query("INSERT INTO tags (id, name, category_id) VALUES (1, 'Groovy', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix)
+             VALUES (1, 1, 'Groovy', 1, 'Setlist', 'S')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Test with tag filter
+        let (results, summary) = get_key_comparison(&pool, Some("Groovy"), Some(10))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1, "should find 1 matching file");
+        assert_eq!(results[0].title, "Test Track");
+
+        // BPM should match (124 vs 124, diff 0 <= 1)
+        assert_eq!(results[0].bpm_match, Some(true));
+        // Key should match (8A == 8A)
+        assert_eq!(results[0].key_match, Some(true));
+
+        assert_eq!(summary.total_compared, 1);
+        assert_eq!(summary.bpm_match_count, 1);
+        assert_eq!(summary.key_match_count, 1);
+        assert_eq!(summary.bpm_mismatch_count, 0);
+        assert_eq!(summary.key_mismatch_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_key_comparison_mismatch() {
+        let pool = test_db().await;
+
+        // File with mismatched BPM and key
+        sqlx::query(
+            "INSERT INTO files (id, file_path, file_hash, file_type, file_size, bpm, musical_key, title, artist, isrc, spotify_id, created_at, updated_at)
+             VALUES (1, '/test/mismatch.flac', '', 'flac', 1000, 140.0, '8A', 'Mismatch', 'Artist', 'ISRC-MM', 'spotify:track:mm', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Spotify says 128 BPM, 6A
+        sqlx::query(
+            "INSERT INTO service_tracks (id, service, service_id, title, artist, isrc, spotify_tempo, spotify_key_camelot, spotify_key_raw, spotify_mode, imported_at, updated_at)
+             VALUES (1, 'spotify', 'spotify:track:mm', 'Mismatch', 'Artist', 'ISRC-MM', 128.0, '6A', 3, 1, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (results, summary) = get_key_comparison(&pool, None, Some(10)).await.unwrap();
+        assert_eq!(results.len(), 1);
+
+        // BPM mismatch: |140 - 128| = 12 > 1
+        assert_eq!(results[0].bpm_match, Some(false));
+        // Key mismatch: 8A != 6A
+        assert_eq!(results[0].key_match, Some(false));
+
+        assert_eq!(summary.total_compared, 1);
+        assert_eq!(summary.bpm_mismatch_count, 1);
+        assert_eq!(summary.key_mismatch_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_key_comparison_missing_fields() {
+        let pool = test_db().await;
+
+        // File with NULL BPM and no linked track (no v_file_track_link match)
+        sqlx::query(
+            "INSERT INTO files (id, file_path, file_hash, file_type, file_size, title, artist, created_at, updated_at)
+             VALUES (1, '/test/nobpm.flac', '', 'flac', 500, 'No BPM', 'Artist', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // This file has no matching service track — should not appear
+        let (results, summary) = get_key_comparison(&pool, None, Some(10)).await.unwrap();
+        assert!(
+            results.is_empty(),
+            "file without linked Spotify track should not appear"
+        );
+        assert_eq!(summary.total_compared, 0);
+    }
+
+    // ── get_service_tracks edge cases ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_service_tracks_returns_only_service_tracks() {
+        let pool = test_db().await;
+
+        sqlx::query(
+            "INSERT INTO service_tracks (service, service_id, title, artist, imported_at, updated_at)
+             VALUES  ('spotify', 's-1', 'A Track', 'A Artist', 0, 0),
+                     ('local', 'l-1', 'Local Track', 'Local Artist', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let tracks = get_service_tracks(&pool).await.unwrap();
+        assert_eq!(tracks.len(), 2, "should return all services");
+
+        // Verify ordering: by service then title
+        assert_eq!(tracks[0].service, "local");
+        assert_eq!(tracks[1].service, "spotify");
+    }
 }

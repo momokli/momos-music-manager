@@ -461,3 +461,21 @@ pub async fn seed_subscribed_playlist(pool: &Pool<Sqlite>) {
     .await
     .unwrap();
 }
+
+/// Seed a service_config row for the given service.
+///
+/// Use this to pre-configure a service before testing config read/update endpoints.
+/// Default stored values: user_id="test_user", playlist_id="test_playlist".
+pub async fn seed_service_config(pool: &Pool<Sqlite>, service: &str) {
+    let now = 1700000000;
+    sqlx::query(
+        r#"INSERT OR REPLACE INTO service_config (service, user_id, playlist_id, is_connected, created_at, updated_at)
+           VALUES (?, 'test_user', 'test_playlist', 0, ?, ?)"#,
+    )
+    .bind(service)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+}

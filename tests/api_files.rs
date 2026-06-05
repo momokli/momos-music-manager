@@ -1809,3 +1809,351 @@ pub async fn files_filter_backed_up_and_not_local() {
         files.len()
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 7 — Additional filter/sort tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+/// `?bpmMin=140&bpmMax=140` returns only file 3 (BPM=140.0).
+/// Files 1+2 have BPM 128.0/128.5, file 4 has no BPM.
+async fn files_filter_bpm_exact() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/files?limit=5&bpmMin=140&bpmMax=140", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        200,
+        "expected 200 OK for bpmMin=140&bpmMax=140"
+    );
+
+    let json: Value = resp.json().await.unwrap();
+    let files = json["data"].as_array().unwrap();
+
+    assert_eq!(
+        files.len(),
+        1,
+        "bpmMin=140&bpmMax=140 should return 1 file (file 3)"
+    );
+    assert_eq!(files[0]["id"], 3, "should be file 3");
+    assert_eq!(files[0]["bpm"].as_f64().unwrap(), 140.0);
+
+    // Count endpoint parity
+    let count_resp = client
+        .get(format!("{}/api/files/count?bpmMin=140&bpmMax=140", base))
+        .send()
+        .await
+        .unwrap();
+    let count_json: Value = count_resp.json().await.unwrap();
+    let count_val = match count_json["data"].as_u64() {
+        Some(n) => n as usize,
+        None => count_json["data"]["count"].as_u64().unwrap() as usize,
+    };
+    assert_eq!(count_val, 1, "count should be 1");
+}
+
+#[tokio::test]
+/// `?key=4m,8m` returns files with Camelot keys 4m or 8m (files 1, 2, 3).
+async fn files_filter_multiple_keys() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/files?limit=5&key=4m,8m", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "expected 200 OK for key=4m,8m");
+
+    let json: Value = resp.json().await.unwrap();
+    let files = json["data"].as_array().unwrap();
+
+    assert_eq!(
+        files.len(),
+        3,
+        "key=4m,8m should return 3 files (1, 2, 3)"
+    );
+    let ids: Vec<i64> = files.iter().map(|f| f["id"].as_i64().unwrap()).collect();
+    assert!(ids.contains(&1), "should include file 1 (4m)");
+    assert!(ids.contains(&2), "should include file 2 (4m)");
+    assert!(ids.contains(&3), "should include file 3 (8m)");
+    assert!(!ids.contains(&4), "file 4 has NULL key, should NOT be included");
+
+    // Count endpoint parity
+    let count_resp = client
+        .get(format!("{}/api/files/count?key=4m,8m", base))
+        .send()
+        .await
+        .unwrap();
+    let count_json: Value = count_resp.json().await.unwrap();
+    let count_val = match count_json["data"].as_u64() {
+        Some(n) => n as usize,
+        None => count_json["data"]["count"].as_u64().unwrap() as usize,
+    };
+    assert_eq!(count_val, 3, "count should be 3");
+}
+
+#[tokio::test]
+/// `?sort=play_count&order=desc` returns files ordered by play_count descending.
+/// Seed: file 1=10, file 2=10, file 3=3, file 4=0.
+/// Expected order: [1,2] then [3] then [4] (ties broken by id desc).
+async fn files_sort_play_count() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/files?limit=5&sort=play_count&order=desc", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+
+    let json: Value = resp.json().await.unwrap();
+    let files = json["data"].as_array().unwrap();
+
+    assert!(
+        files.len() >= 3,
+        "should return at least 3 files, got {}",
+        files.len()
+    );
+
+    // Verify each file's play_count is >= the next one's (descending order)
+    for i in 0..files.len().saturating_sub(1) {
+        let curr = files[i]["playCount"].as_i64().unwrap_or(i64::MIN);
+        let next = files[i + 1]["playCount"].as_i64().unwrap_or(i64::MIN);
+        assert!(
+            curr >= next,
+            "play_count should be descending: {} >= {} at index {}",
+            curr,
+            next,
+            i
+        );
+    }
+
+    // First files should be IDs 1 or 2 (play_count=10)
+    let first_id = files[0]["id"].as_i64().unwrap();
+    assert!(
+        first_id == 1 || first_id == 2,
+        "first result should be file 1 or 2 (play_count=10), got {}",
+        first_id
+    );
+}
+
+#[tokio::test]
+/// `?sort=bpm&order=asc` returns files ordered by BPM ascending.
+async fn files_sort_bpm_asc() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/files?limit=5&sort=bpm&order=asc", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+
+    let json: Value = resp.json().await.unwrap();
+    let files = json["data"].as_array().unwrap();
+
+    assert!(
+        files.len() >= 3,
+        "should return at least 3 files, got {}",
+        files.len()
+    );
+
+    // First file with a BPM should be lowest (128.0 = file 1 or 2)
+    // File 4 has NULL BPM → sorted last (NULLS LAST in SQLite)
+    let first_bpm = files[0]["bpm"].as_f64();
+    let first_id = files[0]["id"].as_i64().unwrap();
+    if let Some(bpm) = first_bpm {
+        assert!(
+            bpm >= 128.0,
+            "first BPM should be >= 128.0, got {}",
+            bpm
+        );
+        // File 1 or 2 should be first
+        assert!(
+            first_id == 1 || first_id == 2,
+            "first result should be file 1 or 2 (BPM=128/128.5), got {}",
+            first_id
+        );
+    }
+
+    // Verify ascending BPM order for non-null BPMs
+    let bpms: Vec<f64> = files
+        .iter()
+        .filter_map(|f| f["bpm"].as_f64())
+        .collect();
+    for i in 0..bpms.len().saturating_sub(1) {
+        assert!(
+            bpms[i] <= bpms[i + 1],
+            "BPM should be ascending: {} <= {} at index {}",
+            bpms[i],
+            bpms[i + 1],
+            i
+        );
+    }
+}
+
+#[tokio::test]
+/// `?safeToDelete=false` is a no-op (filter only activates for true).
+/// All 4 seed files should be returned.
+async fn files_filter_safe_to_delete_false() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/files?limit=10&safeToDelete=false", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        200,
+        "expected 200 OK for safeToDelete=false"
+    );
+
+    let json: Value = resp.json().await.unwrap();
+    let files = json["data"].as_array().unwrap();
+
+    // safeToDelete=false is a no-op — all 4 files should be returned
+    assert_eq!(
+        files.len(),
+        4,
+        "safeToDelete=false should return all 4 seed files (no-op), got {}",
+        files.len()
+    );
+
+    let ids: Vec<i64> = files.iter().map(|f| f["id"].as_i64().unwrap()).collect();
+    assert!(ids.contains(&1), "should include file 1");
+    assert!(ids.contains(&2), "should include file 2");
+    assert!(ids.contains(&3), "should include file 3");
+    assert!(ids.contains(&4), "should include file 4");
+}
+
+#[tokio::test]
+/// `POST /api/files/write-comments` with `{"linked_only": true}` queues a
+/// bulk write-comment task and returns a taskId.
+async fn files_write_comment_task_succeeds() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let _ = momos_music_manager::db::refresh_file_resolved_tags(&pool)
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{}/api/files/write-comments", base))
+        .json(&serde_json::json!({"linked_only": true}))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let json: Value = resp.json().await.unwrap();
+
+    assert!(
+        status.is_success(),
+        "write-comments (linked_only) returned {}: {:#}",
+        status,
+        json
+    );
+
+    let task_id = json["data"]["taskId"].as_str().unwrap_or("");
+    assert!(
+        !task_id.is_empty(),
+        "should return a non-empty taskId, got: {:#}",
+        json["data"]
+    );
+}
+
+#[tokio::test]
+/// `POST /api/files/bulk-sync` with `{"non_default_only": true}` queues a
+/// bulk sync task and returns a taskId.
+async fn files_bulk_sync_by_filter() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    common::seed_tag_hierarchy(&pool).await;
+
+    let _ = momos_music_manager::db::refresh_file_resolved_tags(&pool)
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{}/api/files/bulk-sync", base))
+        .json(&serde_json::json!({"non_default_only": true}))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let json: Value = resp.json().await.unwrap();
+
+    assert!(
+        status.is_success(),
+        "bulk-sync (non_default_only) returned {}: {:#}",
+        status,
+        json
+    );
+
+    let task_id = json["data"]["taskId"].as_str().unwrap_or("");
+    assert!(
+        !task_id.is_empty(),
+        "should return a non-empty taskId, got: {:#}",
+        json["data"]
+    );
+}
+
+#[tokio::test]
+/// Files with `comment = NULL` in the database should appear with `comment: null`
+/// in the API response (not empty string, not missing field).
+async fn files_filter_comment_null() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/files?limit=10", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+
+    let json: Value = resp.json().await.unwrap();
+    let files = json["data"].as_array().unwrap();
+
+    // All 4 seed files have comment=NULL (no comment column set in INSERT)
+    // Verify the API returns null, not empty string
+    for f in files {
+        let id = f["id"].as_i64().unwrap();
+        let comment = &f["comment"];
+        eprintln!(
+            "file {}: comment={:?}",
+            id,
+            if comment.is_null() {
+                "null".to_string()
+            } else {
+                comment.as_str().unwrap_or("").to_string()
+            }
+        );
+        // Seed files 1-4 all have NULL comments
+        if id <= 4 {
+            assert!(
+                comment.is_null(),
+                "file {} should have null comment, got {:?}",
+                id,
+                comment
+            );
+        }
+    }
+}

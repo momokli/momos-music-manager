@@ -763,10 +763,172 @@ mod tests {
     }
 
     #[test]
+    fn test_env_var_found() {
+        unsafe { std::env::set_var("TEST_ENV_FOUND", "hello") };
+        let result = env_var("TEST_ENV_FOUND");
+        unsafe { std::env::remove_var("TEST_ENV_FOUND") };
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_env_var_missing() {
+        unsafe { std::env::remove_var("TEST_ENV_MISSING_404") };
+        let result = env_var("TEST_ENV_MISSING_404");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("TEST_ENV_MISSING_404")
+        );
+    }
+
+    #[test]
+    fn test_env_var_optional_found() {
+        unsafe { std::env::set_var("TEST_ENV_OPT_FOUND", "opt-value") };
+        let result = env_var_optional("TEST_ENV_OPT_FOUND");
+        unsafe { std::env::remove_var("TEST_ENV_OPT_FOUND") };
+        assert_eq!(result, Some("opt-value".to_string()));
+    }
+
+    #[test]
+    fn test_env_var_optional_missing() {
+        unsafe { std::env::remove_var("TEST_ENV_OPT_MISSING") };
+        let result = env_var_optional("TEST_ENV_OPT_MISSING");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_env_var_optional_empty() {
+        unsafe { std::env::set_var("TEST_ENV_OPT_EMPTY", "") };
+        let result = env_var_optional("TEST_ENV_OPT_EMPTY");
+        unsafe { std::env::remove_var("TEST_ENV_OPT_EMPTY") };
+        assert_eq!(result, None, "empty string should be treated as unset");
+    }
+
+    #[test]
+    fn test_config_paths_returns_paths() {
+        let paths = ServiceCredentials::config_paths();
+        assert!(
+            !paths.is_empty(),
+            "config_paths should return at least one path"
+        );
+        for path in &paths {
+            let s = path.to_string_lossy();
+            assert!(
+                s.ends_with("config.toml"),
+                "each path should end with config.toml, got: {}",
+                s
+            );
+            assert!(
+                s.contains("momos-music-manager"),
+                "each path should contain momos-music-manager, got: {}",
+                s
+            );
+        }
+    }
+
+    #[test]
     fn test_default_database_url_format() {
         let url = default_database_url();
         assert!(url.starts_with("sqlite:"));
         assert!(url.contains("momos-music-manager"));
         assert!(url.contains("library.db"));
+    }
+
+    // ── New edge-case tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_env_or_toml_port_invalid_number() {
+        // Non-numeric string should fail to parse as u16
+        unsafe { std::env::set_var("TEST_PORT_NON_NUMERIC", "not-a-number") };
+        let result = env_or_toml_port("TEST_PORT_NON_NUMERIC", Some(8080));
+        unsafe { std::env::remove_var("TEST_PORT_NON_NUMERIC") };
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_env_or_toml_port_out_of_range() {
+        // A number larger than u16::MAX (65535) should fail to parse
+        unsafe { std::env::set_var("TEST_PORT_OOR", "99999") };
+        let result = env_or_toml_port("TEST_PORT_OOR", Some(3000));
+        unsafe { std::env::remove_var("TEST_PORT_OOR") };
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_env_or_toml_mixed_env_and_toml_priority() {
+        // Set one env var, leave another unset.
+        // The set one should come from env, the unset one should fall back to toml.
+        unsafe { std::env::set_var("TEST_MIXED_HOST", "from-env-host") };
+        unsafe { std::env::remove_var("TEST_MIXED_PORT") };
+
+        let host = env_or_toml("TEST_MIXED_HOST", Some("from-toml-host".to_string()));
+        let port = env_or_toml_port("TEST_MIXED_PORT", Some(9999));
+
+        unsafe { std::env::remove_var("TEST_MIXED_HOST") };
+
+        assert_eq!(host, Some("from-env-host".to_string()));
+        assert_eq!(port, Some(9999));
+    }
+
+    #[test]
+    fn test_credential_source_does_not_leak_value() {
+        // credential_source returns "env"/"toml"/"default"/"missing", never the actual value
+        unsafe { std::env::set_var("TEST_SECRET_KEY", "super-secret-value") };
+        let src = ServiceCredentials::credential_source(
+            "TEST_SECRET_KEY",
+            Some("super-secret-value"),
+            true,
+        );
+        unsafe { std::env::remove_var("TEST_SECRET_KEY") };
+        assert_eq!(src, "env");
+        assert_ne!(src, "super-secret-value");
+
+        // When env is not set, source should be "toml" (because has_toml=true)
+        unsafe { std::env::remove_var("TEST_SECRET_KEY_2") };
+        let src2 =
+            ServiceCredentials::credential_source("TEST_SECRET_KEY_2", Some("toml-value"), true);
+        assert_eq!(src2, "toml");
+        assert_ne!(src2, "toml-value");
+
+        // When no env and no toml, source should be "missing"
+        let src3 = ServiceCredentials::credential_source("TEST_SECRET_KEY_3", None, false);
+        assert_eq!(src3, "missing");
+    }
+
+    #[test]
+    fn test_bool_env_var_true() {
+        // Set an env to "true" and verify it parses as true
+        unsafe { std::env::set_var("TEST_BOOL_TRUE", "true") };
+        let val = std::env::var("TEST_BOOL_TRUE")
+            .ok()
+            .filter(|v| !v.is_empty());
+        unsafe { std::env::remove_var("TEST_BOOL_TRUE") };
+        assert_eq!(val, Some("true".to_string()));
+
+        // Verify round-trip through env_or_toml
+        unsafe { std::env::set_var("TEST_BOOL_TRUE_2", "true") };
+        let result = env_or_toml("TEST_BOOL_TRUE_2", Some("false".to_string()));
+        unsafe { std::env::remove_var("TEST_BOOL_TRUE_2") };
+        assert_eq!(result, Some("true".to_string()));
+    }
+
+    #[test]
+    fn test_bool_env_var_false() {
+        // Set an env to "false" and verify it's treated as a valid value
+        unsafe { std::env::set_var("TEST_BOOL_FALSE", "false") };
+        let val = std::env::var("TEST_BOOL_FALSE")
+            .ok()
+            .filter(|v| !v.is_empty());
+        unsafe { std::env::remove_var("TEST_BOOL_FALSE") };
+        assert_eq!(val, Some("false".to_string()));
+
+        // Verify round-trip through env_or_toml
+        unsafe { std::env::set_var("TEST_BOOL_FALSE_2", "false") };
+        let result = env_or_toml("TEST_BOOL_FALSE_2", Some("true".to_string()));
+        unsafe { std::env::remove_var("TEST_BOOL_FALSE_2") };
+        assert_eq!(result, Some("false".to_string()));
     }
 }

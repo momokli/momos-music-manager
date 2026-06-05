@@ -63,9 +63,7 @@ pub async fn link_wav_to_stem(
     wav_file_path: &str,
 ) -> Result<Option<(i64, String)>> {
     let path = std::path::Path::new(wav_file_path);
-    let filename = path.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
     // Extract stem_type: text after last '_' before '.wav'
     let stem_name_no_ext = filename.strip_suffix(".wav").unwrap_or(filename);
@@ -94,7 +92,7 @@ pub async fn link_wav_to_stem(
 
     // Look up the stem file
     let stem = sqlx::query_as::<_, File>(
-        "SELECT * FROM files WHERE file_path = ? AND file_type = 'stem.m4a'"
+        "SELECT * FROM files WHERE file_path = ? AND file_type = 'stem.m4a'",
     )
     .bind(&expected_stem_path)
     .fetch_optional(pool)
@@ -129,7 +127,10 @@ mod tests {
     fn test_file_type_from_path() {
         assert_eq!(file_type_from_path(Path::new("song.flac")), Some("flac"));
         assert_eq!(file_type_from_path(Path::new("song.mp3")), Some("mp3"));
-        assert_eq!(file_type_from_path(Path::new("song.stem.m4a")), Some("stem.m4a"));
+        assert_eq!(
+            file_type_from_path(Path::new("song.stem.m4a")),
+            Some("stem.m4a")
+        );
         assert_eq!(file_type_from_path(Path::new("song.wav")), Some("wav"));
         assert_eq!(file_type_from_path(Path::new("song.txt")), None);
     }
@@ -148,5 +149,87 @@ mod tests {
         assert!(STEM_TYPES.contains(&"instrumental"));
         assert!(STEM_TYPES.contains(&"other"));
         assert_eq!(STEM_TYPES.len(), 5);
+    }
+
+    #[test]
+    fn test_file_type_from_path_uppercase() {
+        assert_eq!(file_type_from_path(Path::new("SONG.FLAC")), Some("flac"));
+        assert_eq!(file_type_from_path(Path::new("SONG.MP3")), Some("mp3"));
+        assert_eq!(
+            file_type_from_path(Path::new("SONG.STEM.M4A")),
+            Some("stem.m4a")
+        );
+        assert_eq!(file_type_from_path(Path::new("SONG.WAV")), Some("wav"));
+    }
+
+    #[test]
+    fn test_file_type_from_path_edge_cases() {
+        // No extension
+        assert_eq!(file_type_from_path(Path::new("README")), None);
+        assert_eq!(file_type_from_path(Path::new(".gitignore")), None);
+        // Unknown extension
+        assert_eq!(file_type_from_path(Path::new("song.txt")), None);
+        assert_eq!(file_type_from_path(Path::new("song.pdf")), None);
+        // Mixed case
+        assert_eq!(file_type_from_path(Path::new("Song.Flac")), Some("flac"));
+        assert_eq!(file_type_from_path(Path::new("Song.Aiff")), Some("aiff"));
+        assert_eq!(file_type_from_path(Path::new("Song.Ogg")), Some("ogg"));
+        assert_eq!(file_type_from_path(Path::new("Song.Wma")), Some("wma"));
+        assert_eq!(file_type_from_path(Path::new("Song.Aif")), Some("aif"));
+        assert_eq!(file_type_from_path(Path::new("Song.M4p")), Some("m4p"));
+    }
+
+    #[test]
+    fn test_file_type_from_path_stem_m4a() {
+        // stem.m4a specifically, not just any .m4a
+        assert_eq!(
+            file_type_from_path(Path::new("/music/stems/artist - title.stem.m4a")),
+            Some("stem.m4a")
+        );
+        assert_eq!(
+            file_type_from_path(Path::new("artist - title.stem.m4a")),
+            Some("stem.m4a")
+        );
+        // Plain .m4a should still work
+        assert_eq!(file_type_from_path(Path::new("song.m4a")), Some("stem.m4a"));
+    }
+
+    #[test]
+    fn test_file_type_from_path_opus_and_ogg() {
+        assert_eq!(file_type_from_path(Path::new("song.opus")), Some("opus"));
+        assert_eq!(file_type_from_path(Path::new("song.ogg")), Some("ogg"));
+    }
+
+    #[test]
+    fn test_calculate_file_hash_with_temp_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_hash_mmm.tmp");
+        std::fs::write(&path, b"hello world").unwrap();
+
+        let hash = calculate_file_hash(&path).unwrap();
+        // SHA-256 of "hello world"
+        assert_eq!(
+            hash,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_normalize_and_validate_folder_path_trailing_slash() {
+        let dir = std::env::temp_dir();
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        let expected = canonical.to_string_lossy().to_string();
+
+        // With trailing slash
+        let input = format!("{}/", dir.display());
+        let result = normalize_and_validate_folder_path(&input).unwrap();
+        assert_eq!(result, expected);
+
+        // Without trailing slash
+        let input = format!("{}", dir.display());
+        let result = normalize_and_validate_folder_path(&input).unwrap();
+        assert_eq!(result, expected);
     }
 }
