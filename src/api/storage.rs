@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -206,6 +206,85 @@ async fn storage_discover_backup_handler(
 
     Json(ApiResponse {
         data: serde_json::json!({ "taskId": task_id }),
+    })
+    .into_response()
+}
+
+// ── Format Priority ──────────────────────────────────────────────────────────
+
+/// Known audio format strings used for validation.
+fn known_audio_formats() -> Vec<&'static str> {
+    crate::audio_extensions::ALL_EXTENSIONS
+        .iter()
+        .map(|e| e.as_str())
+        .collect()
+}
+
+/// GET /api/storage/settings/format-priority
+/// Returns the current format priority list. Falls back to defaults if not set.
+async fn format_priority_get_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let priorities = crate::db::files::load_format_priorities(&state.db).await;
+    Json(ApiResponse {
+        data: serde_json::json!({"priorities": priorities}),
+    })
+    .into_response()
+}
+
+/// PUT /api/storage/settings/format-priority
+/// Sets a custom format priority list. Validates non-empty + known formats.
+async fn format_priority_put_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let priorities = match body["priorities"].as_array() {
+        Some(arr) if !arr.is_empty() => arr,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "priorities must be a non-empty array".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate each format is known
+    let known = known_audio_formats();
+    for val in priorities {
+        let f = val.as_str().unwrap_or("");
+        if !known.contains(&f) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("unknown format: {}", f),
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    // Convert to JSON string array and store on deemix service_config row
+    let json_str = serde_json::to_string(&priorities).unwrap_or_default();
+    let now = chrono::Utc::now().timestamp();
+
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO service_config (service, metadata_json, is_connected, remote_playlists_count, remote_tracks_count, created_at, updated_at)
+        VALUES ('deemix', ?, 0, 0, 0, ?, ?)
+        ON CONFLICT(service) DO UPDATE SET
+            metadata_json = excluded.metadata_json,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(&json_str)
+    .bind(now)
+    .bind(now)
+    .execute(&state.db)
+    .await;
+
+    Json(ApiResponse {
+        data: serde_json::json!({"priorities": priorities}),
     })
     .into_response()
 }
@@ -598,6 +677,10 @@ pub(super) fn router() -> Router<Arc<AppState>> {
             post(storage_discover_backup_handler),
         )
         .route("/api/storage/sync-backpack", post(sync_backpack_handler))
+        .route(
+            "/api/storage/settings/format-priority",
+            get(format_priority_get_handler).put(format_priority_put_handler),
+        )
         .route("/api/backup/test", get(backup_test_handler))
         .route("/api/backup/explore", get(backup_explore_handler))
         .route(

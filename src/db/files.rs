@@ -1690,15 +1690,49 @@ pub async fn get_files_by_source(pool: &Pool<Sqlite>, source_file_id: i64) -> Re
 // Backpack Pull Candidates
 // ============================================================================
 
-/// Format preference for backpack pull: lower = better.
-/// stem.m4a > flac > mp3 > wav > other
+/// Default format priorities: stem.m4a > flac > mp3 > wav > other
+pub fn default_format_priorities() -> Vec<String> {
+    vec![
+        "stem.m4a".to_string(),
+        "flac".to_string(),
+        "mp3".to_string(),
+        "wav".to_string(),
+    ]
+}
+
+/// Rank a format according to a custom priority list.
+/// Lower return value = better. Unknown formats get `u8::MAX`.
+pub fn format_preference_with(file_type: &str, priorities: &[String]) -> u8 {
+    priorities
+        .iter()
+        .position(|p| p == file_type)
+        .map(|i| i as u8)
+        .unwrap_or(u8::MAX)
+}
+
+/// Legacy wrapper: format preference using the hardcoded default order.
 pub fn format_preference(file_type: &str) -> u8 {
-    match file_type {
-        "stem.m4a" => 0,
-        "flac" => 1,
-        "mp3" => 2,
-        "wav" => 3,
-        _ => 4,
+    format_preference_with(file_type, &default_format_priorities())
+}
+
+/// Load format priorities from service_config (stored on the 'deemix' row's
+/// metadata_json as a JSON string array). Falls back to default priorities.
+pub async fn load_format_priorities(pool: &Pool<Sqlite>) -> Vec<String> {
+    let row: Option<(String,)> =
+        sqlx::query_as(r#"SELECT metadata_json FROM service_config WHERE service = 'deemix'"#)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+
+    match row {
+        Some((json_str,)) if !json_str.is_empty() => {
+            match serde_json::from_str::<Vec<String>>(&json_str) {
+                Ok(priorities) if !priorities.is_empty() => priorities,
+                _ => default_format_priorities(),
+            }
+        }
+        _ => default_format_priorities(),
     }
 }
 
@@ -1714,6 +1748,9 @@ pub async fn get_backpack_pull_candidates(
     pool: &Pool<sqlx::Sqlite>,
 ) -> Result<Vec<crate::db::PullCandidate>> {
     use crate::db::PullCandidate;
+
+    // Load format priorities (could be user-configured)
+    let priorities = load_format_priorities(pool).await;
 
     // Step 1: Get all file IDs that are in backpack tags (via file_resolved_tags)
     // A file is in a backpack tag if any of its resolved tags has backpack = 1.
@@ -1817,7 +1854,7 @@ pub async fn get_backpack_pull_candidates(
             .iter()
             .filter(|f| f.file_type != "wav") // skip WAV source files
             .collect();
-        sorted.sort_by_key(|f| format_preference(&f.file_type));
+        sorted.sort_by_key(|f| format_preference_with(&f.file_type, &priorities));
 
         if sorted.is_empty() {
             continue;
@@ -1846,7 +1883,7 @@ pub async fn get_backpack_pull_candidates(
     }
 
     // Sort by format preference (best formats first)
-    candidates.sort_by_key(|c| format_preference(&c.file_type));
+    candidates.sort_by_key(|c| format_preference_with(&c.file_type, &priorities));
 
     Ok(candidates)
 }
@@ -2084,8 +2121,39 @@ mod tests {
         assert_eq!(format_preference("flac"), 1);
         assert_eq!(format_preference("mp3"), 2);
         assert_eq!(format_preference("wav"), 3);
-        assert_eq!(format_preference("opus"), 4);
-        assert_eq!(format_preference("aiff"), 4);
+        assert_eq!(format_preference("opus"), u8::MAX);
+        assert_eq!(format_preference("aiff"), u8::MAX);
+    }
+
+    #[test]
+    fn test_format_preference_with_config() {
+        let prio = vec![
+            "mp3".to_string(),
+            "flac".to_string(),
+            "stem.m4a".to_string(),
+        ];
+        assert!(
+            format_preference_with("mp3", &prio) < format_preference_with("flac", &prio),
+            "mp3 should rank higher than flac"
+        );
+        assert!(
+            format_preference_with("flac", &prio) < format_preference_with("stem.m4a", &prio),
+            "flac should rank higher than stem.m4a"
+        );
+        assert_eq!(
+            format_preference_with("wav", &prio),
+            u8::MAX,
+            "unknown format should return MAX"
+        );
+    }
+
+    #[test]
+    fn test_default_priorities() {
+        let defaults = default_format_priorities();
+        assert_eq!(defaults[0], "stem.m4a");
+        assert_eq!(defaults[1], "flac");
+        assert_eq!(defaults[2], "mp3");
+        assert_eq!(defaults[3], "wav");
     }
 
     // ========================================================================

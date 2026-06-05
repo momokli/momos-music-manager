@@ -754,3 +754,94 @@ async fn storage_prune_execute_invalid_ids() {
         body
     );
 }
+
+#[tokio::test]
+/// `GET /api/storage/settings/format-priority` returns default format priority list.
+async fn storage_format_priority_get_defaults() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/storage/settings/format-priority", base))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    eprintln!("format_priority_get_defaults: status={status}, body={body:#}");
+
+    assert!(status.is_success(), "expected 200, got {status}");
+    let prio = body["data"]["priorities"].as_array().unwrap();
+    assert!(
+        prio.len() >= 4,
+        "should have at least 4 default formats, got {}",
+        prio.len()
+    );
+}
+
+#[tokio::test]
+/// `PUT` then `GET /api/storage/settings/format-priority` roundtrip.
+async fn storage_format_priority_put_and_get() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let put = client
+        .put(format!("{}/api/storage/settings/format-priority", base))
+        .json(&serde_json::json!({"priorities": ["mp3", "stem.m4a", "flac"]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        put.status().is_success(),
+        "PUT format-priority expected 200, got {}",
+        put.status()
+    );
+
+    let get = client
+        .get(format!("{}/api/storage/settings/format-priority", base))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = get.json().await.unwrap();
+    eprintln!("format_priority_put_and_get: body={body:#}");
+
+    let prio = body["data"]["priorities"].as_array().unwrap();
+    assert_eq!(prio[0], "mp3");
+    assert_eq!(prio[1], "stem.m4a");
+}
+
+#[tokio::test]
+/// `PUT /api/storage/settings/format-priority` with invalid bodies returns 400.
+async fn storage_format_priority_put_invalid() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Empty array → 400
+    let resp = client
+        .put(format!("{}/api/storage/settings/format-priority", base))
+        .json(&serde_json::json!({"priorities": []}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "empty priorities should return 400, got {}",
+        resp.status()
+    );
+
+    // Unknown format → 400
+    let resp = client
+        .put(format!("{}/api/storage/settings/format-priority", base))
+        .json(&serde_json::json!({"priorities": ["xyz"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "unknown format should return 400, got {}",
+        resp.status()
+    );
+}

@@ -40,6 +40,7 @@ export async function init(container, signal) {
   renderLayout(container);
   await loadStatus(container);
   await loadFolders(container);
+  await loadFormatPriority(container);
   await loadPrunePreview(container);
   wireEvents(container);
 }
@@ -55,6 +56,7 @@ function renderLayout(container) {
     </div>
     <div id="storage-status-cards"></div>
     <div id="storage-file-types"></div>
+    <div id="storage-format-priority"></div>
     <div id="storage-folders"></div>
     <div id="storage-prune-section">
       <h2 class="section-title"><i class="fas fa-trash-alt"></i> Prune Preview</h2>
@@ -399,6 +401,54 @@ async function loadFolders(container) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/*  Format Priority                                                     */
+/* ------------------------------------------------------------------ */
+
+async function loadFormatPriority(container) {
+  const el = container.querySelector("#storage-format-priority");
+  if (!el) return;
+  try {
+    const resp = await fetchJSON("/api/storage/settings/format-priority");
+    const priorities = resp.data?.priorities ?? ["stem.m4a", "flac", "mp3", "wav"];
+    renderFormatPriority(el, priorities);
+  } catch (err) {
+    el.innerHTML = renderErrorBlock({
+      title: "Failed to load format priority settings",
+      detail: err.message,
+    });
+  }
+}
+
+function renderFormatPriority(el, priorities) {
+  let html = `<div class="card" id="format-priority-card">
+    <h3><i class="fas fa-sort-amount-down"></i> Format Priority</h3>
+    <p class="help-text">When pulling from backup, higher formats are preferred.</p>
+    <ul class="format-priority-list" id="format-priority-list">
+      ${priorities
+        .map(
+          (fmt, i) => `
+        <li class="format-priority-item" data-format="${escapeHtml(fmt)}">
+          <span class="format-priority-drag"><i class="fas fa-grip-lines"></i></span>
+          <span class="format-priority-name">${escapeHtml(fmt)}</span>
+          <span class="format-priority-buttons">
+            <button class="btn btn-sm btn-icon format-priority-up" ${i === 0 ? "disabled" : ""} title="Move up"><i class="fas fa-chevron-up"></i></button>
+            <button class="btn btn-sm btn-icon format-priority-down" ${i === priorities.length - 1 ? "disabled" : ""} title="Move down"><i class="fas fa-chevron-down"></i></button>
+          </span>
+        </li>`,
+        )
+        .join("")}
+    </ul>
+    <div class="format-priority-actions">
+      <input type="text" id="format-priority-add" placeholder="flac" class="input-text" style="width: 120px; margin-right: 0.5rem;" />
+      <button id="format-priority-add-btn" class="btn btn-sm">Add</button>
+      <button id="format-priority-reset" class="btn btn-sm btn-outline">Reset</button>
+      <button id="format-priority-save" class="btn btn-sm btn-primary">Save</button>
+    </div>
+  </div>`;
+  el.innerHTML = html;
+}
+
 async function loadPrunePreview(container) {
   try {
     state.loadingPrune = true;
@@ -520,6 +570,111 @@ function wireEvents(container) {
         }
       }
     }
+
+    // ── Format Priority ──────────────────────────────────────────────
+
+    // Move up ▲
+    const upBtn = e.target.closest(".format-priority-up");
+    if (upBtn) {
+      const li = upBtn.closest(".format-priority-item");
+      const prev = li?.previousElementSibling;
+      if (li && prev) {
+        li.parentNode.insertBefore(li, prev);
+        // Re-enable/disable buttons after move
+        const list = li.parentNode;
+        Array.from(list.children).forEach((item, i) => {
+          const up = item.querySelector(".format-priority-up");
+          const down = item.querySelector(".format-priority-down");
+          if (up) up.disabled = i === 0;
+          if (down) down.disabled = i === list.children.length - 1;
+        });
+      }
+      return;
+    }
+
+    // Move down ▼
+    const downBtn = e.target.closest(".format-priority-down");
+    if (downBtn) {
+      const li = downBtn.closest(".format-priority-item");
+      const next = li?.nextElementSibling;
+      if (li && next) {
+        li.parentNode.insertBefore(next, li);
+        // Re-enable/disable buttons after move
+        const list = li.parentNode;
+        Array.from(list.children).forEach((item, i) => {
+          const up = item.querySelector(".format-priority-up");
+          const down = item.querySelector(".format-priority-down");
+          if (up) up.disabled = i === 0;
+          if (down) down.disabled = i === list.children.length - 1;
+        });
+      }
+      return;
+    }
+
+    // Save
+    const saveBtn = e.target.closest("#format-priority-save");
+    if (saveBtn) {
+      const items = container.querySelectorAll(".format-priority-item");
+      const priorities = Array.from(items).map((li) => li.dataset.format);
+      try {
+        await fetchJSON("/api/storage/settings/format-priority", {
+          method: "PUT",
+          body: JSON.stringify({ priorities }),
+        });
+        showToast("Format priority saved", "success");
+      } catch (err) {
+        showToast("Failed to save format priority: " + err.message, "error");
+      }
+      return;
+    }
+
+    // Reset
+    const resetBtn = e.target.closest("#format-priority-reset");
+    if (resetBtn) {
+      await loadFormatPriority(container);
+      showToast("Reset to defaults", "success");
+      return;
+    }
+
+    // Add format
+    const addBtn = e.target.closest("#format-priority-add-btn");
+    if (addBtn) {
+      const input = container.querySelector("#format-priority-add");
+      const fmt = input?.value?.trim().toLowerCase();
+      const list = container.querySelector("#format-priority-list");
+      if (!fmt || !list) return;
+      if (!/^[a-z0-9.]+$/.test(fmt)) {
+        showToast("Invalid format: " + fmt, "error");
+        return;
+      }
+      // Check for duplicate
+      const existing = list.querySelector(`.format-priority-item[data-format="${fmt}"]`);
+      if (existing) {
+        showToast("Format already in list", "error");
+        return;
+      }
+      const li = document.createElement("li");
+      li.className = "format-priority-item";
+      li.dataset.format = fmt;
+      li.innerHTML = `<span class="format-priority-drag"><i class="fas fa-grip-lines"></i></span>
+        <span class="format-priority-name">${escapeHtml(fmt)}</span>
+        <span class="format-priority-buttons">
+          <button class="btn btn-sm btn-icon format-priority-up" title="Move up"><i class="fas fa-chevron-up"></i></button>
+          <button class="btn btn-sm btn-icon format-priority-down" title="Move down"><i class="fas fa-chevron-down"></i></button>
+        </span>`;
+      list.appendChild(li);
+      // Update button states
+      Array.from(list.children).forEach((item, i) => {
+        const up = item.querySelector(".format-priority-up");
+        const down = item.querySelector(".format-priority-down");
+        if (up) up.disabled = i === 0;
+        if (down) down.disabled = i === list.children.length - 1;
+      });
+      input.value = "";
+      return;
+    }
+
+    // ── Prune filters / actions ─────────────────────────────────────
 
     // Select all with stem variant (only affects stem-variant items, leaves others untouched)
     const selectStem = e.target.closest("#prune-select-stem-variants");

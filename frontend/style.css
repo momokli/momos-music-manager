@@ -4756,6 +4756,47 @@ th.drop-target {
 /*  Storage Page                                                              */
 /* ========================================================================== */
 
+.format-priority-list {
+    list-style: none;
+    padding: 0;
+    margin: 0.5rem 0;
+}
+
+.format-priority-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin-bottom: 0.25rem;
+    background: var(--bg);
+}
+
+.format-priority-name {
+    flex: 1;
+    font-family: monospace;
+}
+
+.format-priority-buttons {
+    display: flex;
+    gap: 0.25rem;
+}
+
+.format-priority-actions {
+    display: flex;
+    align-items: center;
+    margin-top: 0.75rem;
+    gap: 0.25rem;
+    flex-wrap: wrap;
+}
+
+#format-priority-card .help-text {
+    margin: 0.25rem 0 0.5rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
 #storage-prune-section {
     margin-top: 2rem;
 }
