@@ -394,6 +394,7 @@ async fn get_tag_with_category(
             category: row.try_get("category").ok(),
             category_icon: row.try_get("category_icon").ok(),
             created_at: row.try_get("created_at").ok(),
+            backpack: row.try_get("backpack").ok(),
         }))
     } else {
         Ok(None)
@@ -694,6 +695,7 @@ async fn create_tag_handler(
                         category: None,
                         category_icon: None,
                         created_at: None,
+                        backpack: None,
                     };
                     Json(ApiResponse { data: api_tag }).into_response()
                 }
@@ -729,6 +731,7 @@ async fn update_tag_handler(
                         category: None,
                         category_icon: None,
                         created_at: None,
+                        backpack: None,
                     };
                     Json(ApiResponse { data: api_tag }).into_response()
                 }
@@ -933,6 +936,7 @@ async fn categorize_tag_handler(
                         category: None,
                         category_icon: None,
                         created_at: None,
+                        backpack: None,
                     },
                 })
                 .into_response(),

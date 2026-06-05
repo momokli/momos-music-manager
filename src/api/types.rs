@@ -58,6 +58,7 @@ pub struct Tag {
     pub category: Option<String>,
     pub category_icon: Option<String>,
     pub created_at: Option<i64>,
+    pub backpack: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

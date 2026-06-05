@@ -43,7 +43,19 @@ pub async fn ensure_backpack_column(pool: &SqlitePool) -> Result<()> {
     .unwrap_or(false);
 
     if has_backpack {
-        tracing::debug!("tags.backpack column already exists — skipping rename");
+        tracing::debug!("tags.backpack column already exists");
+        // The column was renamed in a previous run, but the view may still be stale.
+        // Check and recreate the view if it's missing the backpack column.
+        let view_has_backpack: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('v_tags_with_categories') WHERE name = 'backpack'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+        if !view_has_backpack {
+            tracing::info!("Recreating v_tags_with_categories to include backpack column");
+            recreate_tags_view(pool).await?;
+        }
         return Ok(());
     }
 
@@ -60,6 +72,7 @@ pub async fn ensure_backpack_column(pool: &SqlitePool) -> Result<()> {
             .execute(pool)
             .await?;
         tracing::info!("tags.backpack rename complete");
+        recreate_tags_view(pool).await?;
     } else {
         tracing::debug!("Neither tags.followed nor tags.backpack found — adding backpack column");
         sqlx::query("ALTER TABLE tags ADD COLUMN backpack BOOLEAN NOT NULL DEFAULT 0")
@@ -67,5 +80,23 @@ pub async fn ensure_backpack_column(pool: &SqlitePool) -> Result<()> {
             .await?;
     }
 
+    Ok(())
+}
+
+/// Recreate v_tags_with_categories to include the backpack column.
+/// Needed after the followed→backpack rename, since SQLite views don't auto-update
+/// when the underlying table columns are renamed.
+async fn recreate_tags_view(pool: &SqlitePool) -> Result<()> {
+    sqlx::query(
+        "DROP VIEW IF EXISTS v_tags_with_categories; \
+         CREATE VIEW v_tags_with_categories AS \
+         SELECT t.id, t.name, t.category_id, t.sort_order, t.created_at, t.reviewed_at, t.backpack, \
+                tc.name as category, tc.icon as category_icon \
+         FROM tags t \
+         LEFT JOIN tag_categories tc ON t.category_id = tc.id",
+    )
+    .execute(pool)
+    .await?;
+    tracing::info!("v_tags_with_categories recreated with backpack column");
     Ok(())
 }
