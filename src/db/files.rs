@@ -1773,18 +1773,20 @@ pub async fn get_backpack_pull_candidates(
         priorities
     );
 
-    // Step 2: For each backpack file, find all variants sharing the same ISRC.
-    // Build a map: ISRC → Vec<File>. Files without ISRC get their own entry keyed by file_id.
+    // Step 2: For each backpack file, find all variants sharing the same track_id
+    // via v_file_track_link. Files not linked to any track get individual groups.
     let placeholders: Vec<String> = backpack_file_ids.iter().map(|_| "?".to_string()).collect();
     let sql = format!(
-        "SELECT * FROM files WHERE isrc IN (
-             SELECT DISTINCT f2.isrc FROM files f2
-             WHERE f2.id IN ({})
-               AND f2.isrc IS NOT NULL
+        "SELECT DISTINCT f.* FROM files f
+         JOIN v_file_track_link v ON v.file_id = f.id
+         WHERE v.track_id IN (
+             SELECT DISTINCT v2.track_id FROM v_file_track_link v2
+             WHERE v2.file_id IN ({})
          )
          UNION
-         SELECT * FROM files WHERE id IN ({})
-           AND isrc IS NULL
+         SELECT DISTINCT f.* FROM files f
+         WHERE f.id IN ({})
+           AND f.id NOT IN (SELECT file_id FROM v_file_track_link)
          ORDER BY file_type",
         placeholders.join(","),
         placeholders.join(",")
@@ -1801,17 +1803,24 @@ pub async fn get_backpack_pull_candidates(
 
     let all_files: Vec<File> = query.fetch_all(pool).await?;
 
-    // Step 3: Group files by ISRC (or by id if no ISRC)
-    let mut groups: std::collections::HashMap<String, Vec<&File>> =
-        std::collections::HashMap::new();
+    // Step 3: Build file_id → track_id mapping from v_file_track_link
+    let track_id_placeholders: Vec<String> = all_files.iter().map(|_| "?".to_string()).collect();
+    let track_sql = format!(
+        "SELECT file_id, track_id FROM v_file_track_link WHERE file_id IN ({})",
+        track_id_placeholders.join(",")
+    );
+    let mut track_query = sqlx::query_as::<_, (i64, i64)>(&track_sql);
     for f in &all_files {
-        let key = f.isrc.as_deref().unwrap_or("").to_string();
-        // Treat files without ISRC individually: use id as key suffix
-        let key = if key.is_empty() {
-            format!("_no_isrc_{}", f.id)
-        } else {
-            key
-        };
+        track_query = track_query.bind(f.id);
+    }
+    let file_track_pairs: Vec<(i64, i64)> = track_query.fetch_all(pool).await?;
+    let file_track_map: std::collections::HashMap<i64, i64> =
+        file_track_pairs.into_iter().collect();
+
+    // Group files by track_id. Unlinked files each get their own group (negative file_id key).
+    let mut groups: std::collections::HashMap<i64, Vec<&File>> = std::collections::HashMap::new();
+    for f in &all_files {
+        let key = file_track_map.get(&f.id).copied().unwrap_or(-f.id);
         groups.entry(key).or_default().push(f);
     }
 
@@ -1854,7 +1863,7 @@ pub async fn get_backpack_pull_candidates(
         })
     };
 
-    for (_isrc, group) in &groups {
+    for (_track_id, group) in &groups {
         // Sort group by format preference (best first), excluding WAVs
         let mut sorted: Vec<&&File> = group
             .iter()
@@ -1892,7 +1901,7 @@ pub async fn get_backpack_pull_candidates(
     candidates.sort_by_key(|c| format_preference_with(&c.file_type, &priorities));
 
     tracing::info!(
-        "Backpack pull: {} candidates from {} ISRC groups",
+        "Backpack pull: {} candidates from {} track groups",
         candidates.len(),
         groups.len()
     );
@@ -1960,17 +1969,19 @@ pub async fn cleanup_redundant_backpack_files(pool: &Pool<Sqlite>) -> Result<(us
         return Ok((0, 0));
     }
 
-    // Step 2: Find all ISRC-mates of backpack files (same query as get_backpack_pull_candidates)
+    // Step 2: Find all track-mates of backpack files via v_file_track_link (same query as get_backpack_pull_candidates)
     let placeholders: Vec<String> = backpack_file_ids.iter().map(|_| "?".to_string()).collect();
     let sql = format!(
-        "SELECT * FROM files WHERE isrc IN (
-             SELECT DISTINCT f2.isrc FROM files f2
-             WHERE f2.id IN ({})
-               AND f2.isrc IS NOT NULL
+        "SELECT DISTINCT f.* FROM files f
+         JOIN v_file_track_link v ON v.file_id = f.id
+         WHERE v.track_id IN (
+             SELECT DISTINCT v2.track_id FROM v_file_track_link v2
+             WHERE v2.file_id IN ({})
          )
          UNION
-         SELECT * FROM files WHERE id IN ({})
-           AND isrc IS NULL
+         SELECT DISTINCT f.* FROM files f
+         WHERE f.id IN ({})
+           AND f.id NOT IN (SELECT file_id FROM v_file_track_link)
          ORDER BY file_type",
         placeholders.join(","),
         placeholders.join(",")
@@ -1986,16 +1997,24 @@ pub async fn cleanup_redundant_backpack_files(pool: &Pool<Sqlite>) -> Result<(us
 
     let all_files: Vec<File> = query.fetch_all(pool).await?;
 
-    // Step 3: Group files by ISRC (same as get_backpack_pull_candidates)
-    let mut groups: std::collections::HashMap<String, Vec<&File>> =
-        std::collections::HashMap::new();
+    // Step 3: Build file_id → track_id mapping from v_file_track_link, then group by track_id
+    let track_id_placeholders: Vec<String> = all_files.iter().map(|_| "?".to_string()).collect();
+    let track_sql = format!(
+        "SELECT file_id, track_id FROM v_file_track_link WHERE file_id IN ({})",
+        track_id_placeholders.join(",")
+    );
+    let mut track_query = sqlx::query_as::<_, (i64, i64)>(&track_sql);
     for f in &all_files {
-        let key = f.isrc.as_deref().unwrap_or("").to_string();
-        let key = if key.is_empty() {
-            format!("_no_isrc_{}", f.id)
-        } else {
-            key
-        };
+        track_query = track_query.bind(f.id);
+    }
+    let file_track_pairs: Vec<(i64, i64)> = track_query.fetch_all(pool).await?;
+    let file_track_map: std::collections::HashMap<i64, i64> =
+        file_track_pairs.into_iter().collect();
+
+    // Group files by track_id. Unlinked files each get their own group (negative file_id key).
+    let mut groups: std::collections::HashMap<i64, Vec<&File>> = std::collections::HashMap::new();
+    for f in &all_files {
+        let key = file_track_map.get(&f.id).copied().unwrap_or(-f.id);
         groups.entry(key).or_default().push(f);
     }
 
