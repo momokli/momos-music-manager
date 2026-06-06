@@ -20,6 +20,14 @@ let state = {
 
 let _container = null;
 let _signal = null;
+let _sizeState = {
+  localBytes: 0,
+  targetBytes: 0,
+  lastLocalBytes: 0,
+  lastTime: 0,
+  etaSecs: null,
+};
+let _pollInterval = null;
 
 export async function init(container, signal) {
   _container = container;
@@ -38,6 +46,11 @@ export async function init(container, signal) {
 
     // Load size stats asynchronously (nice-to-have, won't block page render)
     loadSizeStats();
+
+    // Poll every 5s for live ETA during active pull
+    if (_pollInterval) clearInterval(_pollInterval);
+    _pollInterval = setInterval(pollSizeStats, 5000);
+    pollSizeStats();
   } catch (err) {
     if (signal.aborted) return;
     container.innerHTML = `<div class="detail-error"><i class="fa-solid fa-triangle-exclamation"></i> Failed to load: ${escapeHtml(err.message)}</div>`;
@@ -97,14 +110,58 @@ async function loadSizeStats() {
   try {
     const resp = await fetchJSON("/api/storage/backpack-size");
     if (resp?.data) {
-      renderSizeStats(resp.data);
+      _sizeState.localBytes = resp.data.localBytes;
+      _sizeState.targetBytes = resp.data.targetBytes;
+      renderSizeStats(resp.data, _sizeState.etaSecs);
     }
   } catch {
     // Silently ignore — size stats are nice-to-have
   }
 }
 
-function renderSizeStats(stats) {
+async function pollSizeStats() {
+  try {
+    const resp = await fetchJSON("/api/storage/backpack-size");
+    if (!resp?.data) return;
+    const s = resp.data;
+
+    const now = Date.now();
+    if (_sizeState.lastTime > 0 && _sizeState.lastLocalBytes > 0) {
+      const pulled = s.localBytes - _sizeState.lastLocalBytes;
+      const elapsed = (now - _sizeState.lastTime) / 1000;
+      if (pulled > 0 && elapsed > 2) {
+        const rate = pulled / elapsed;
+        _sizeState.etaSecs = s.needsPullBytes > 0 ? s.needsPullBytes / rate : 0;
+      }
+    }
+
+    _sizeState.localBytes = s.localBytes;
+    _sizeState.lastLocalBytes = s.localBytes;
+    _sizeState.lastTime = now;
+
+    renderSizeStats(s, _sizeState.etaSecs);
+  } catch {
+    // ignore
+  }
+}
+
+function formatEta(secs) {
+  if (secs == null || secs <= 0 || !isFinite(secs)) return "";
+  if (secs < 60) return " (< 1 min)";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return ` (~${mins} min)`;
+  const hours = Math.floor(mins / 60);
+  const remain = mins % 60;
+  if (remain === 0) return ` (~${hours}h)`;
+  return ` (~${hours}h ${remain}min)`;
+}
+
+function formatRate(bytesPerSec) {
+  if (!bytesPerSec || !isFinite(bytesPerSec) || bytesPerSec <= 0) return "";
+  return formatBytes(bytesPerSec) + "/s";
+}
+
+function renderSizeStats(stats, etaSecs) {
   if (!stats || stats.trackCount === 0) return;
 
   const percent =
@@ -114,6 +171,25 @@ function renderSizeStats(stats) {
 
   const el = document.querySelector("#backpack-size-stats");
   if (!el) return;
+
+  // Compute rate for display
+  let rateStr = "";
+  if (stats.needsPullBytes > 0 && _sizeState.lastTime > 0) {
+    const now = Date.now();
+    const elapsed = (now - _sizeState.lastTime) / 1000;
+    if (elapsed > 2) {
+      const pulled = _sizeState.localBytes - _sizeState.lastLocalBytes;
+      if (pulled > 0) rateStr = " at " + formatRate(pulled / elapsed);
+    }
+  }
+
+  const etaHtml = etaSecs != null && etaSecs > 0 ? formatEta(etaSecs) : "";
+
+  // Loading spinner when needsPullBytes > 0 but rate not yet known
+  const loadingPulse =
+    stats.needsPullBytes > 0 && !etaHtml
+      ? '<span class="backpack-pulse-dot"></span>'
+      : "";
 
   el.innerHTML = `
     <div class="backpack-size-cards">
@@ -131,7 +207,7 @@ function renderSizeStats(stats) {
     </div>
     ${
       stats.needsPullBytes > 0
-        ? `<div class="backpack-size-remaining">${formatBytes(stats.needsPullBytes)} remaining to pull</div>`
+        ? `<div class="backpack-size-remaining">${loadingPulse} ${formatBytes(stats.needsPullBytes)} remaining to pull${rateStr}${etaHtml}</div>`
         : '<div class="backpack-size-done" style="color:var(--green);text-align:center;margin-top:0.5rem;font-size:0.9rem">✓ Fully synced</div>'
     }
   `;

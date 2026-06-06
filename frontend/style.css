@@ -5531,3 +5531,26 @@ body.dark .storage-warning {
     font-size: 0.9rem;
     margin-top: 0.5rem;
 }
+
+/* Pulse animation for active pull indicator */
+.backpack-pulse-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: backpack-pulse 1.5s ease-in-out infinite;
+    vertical-align: middle;
+    margin-right: 4px;
+}
+@keyframes backpack-pulse {
+    0%,
+    100% {
+        opacity: 0.4;
+        transform: scale(0.8);
+    }
+    50% {
+        opacity: 1;
+        transform: scale(1.2);
+    }
+}
