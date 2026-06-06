@@ -1,6 +1,6 @@
 use sqlx::{FromRow, SqlitePool};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Lightweight folder info for maintainer queries (avoids importing the full Folder struct).
 #[derive(Debug, FromRow)]
@@ -22,11 +22,14 @@ pub async fn start_maintainer(
     interval_secs: u64,
     full_scan_max_age: u64,
     backup_discovery_interval: u64,
+    auto_prune: bool,
+    auto_cleanup_dirs: bool,
     cancel_token: CancellationToken,
 ) {
     info!(
-        "Maintainer started (interval={}s, full_scan_max_age={}s, backup_discovery_interval={}s)",
-        interval_secs, full_scan_max_age, backup_discovery_interval
+        "Maintainer started (interval={}s, full_scan_max_age={}s, backup_discovery_interval={}s, \
+         auto_prune={}, auto_cleanup_dirs={})",
+        interval_secs, full_scan_max_age, backup_discovery_interval, auto_prune, auto_cleanup_dirs,
     );
 
     // Track when we last ran backup discovery (start at 0 so it runs on first cycle)
@@ -279,6 +282,95 @@ pub async fn start_maintainer(
                 }
                 Err(e) => {
                     warn!("Maintainer: failed to get backpack pull candidates: {}", e);
+                }
+            }
+        }
+
+        // ── Check 5: Auto-prune non-backpack files ────────────────────
+        //
+        // When auto_prune is enabled, delete all local files that are backed
+        // up and not protected by any backpack tag. This keeps the local disk
+        // a pure cache of only backpack files.
+        if auto_prune {
+            match crate::db::get_prune_candidates(&db).await {
+                Ok(candidates) if !candidates.is_empty() => {
+                    let mut deleted = 0usize;
+                    let mut freed: i64 = 0;
+                    for c in &candidates {
+                        let path = std::path::Path::new(&c.file_path);
+                        match tokio::fs::remove_file(path).await {
+                            Ok(()) => {
+                                deleted += 1;
+                                freed += c.file_size;
+                                let _ = sqlx::query(
+                                    "DELETE FROM file_locations WHERE file_id = ? \
+                                     AND location_type = 'local'",
+                                )
+                                .bind(c.file_id)
+                                .execute(&db)
+                                .await;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Maintainer auto-prune: failed to delete {}: {}",
+                                    c.file_path, e
+                                );
+                            }
+                        }
+                    }
+                    if deleted > 0 {
+                        info!(
+                            "Maintainer auto-prune: deleted {} files, freed {} bytes",
+                            deleted, freed
+                        );
+                    }
+                }
+                Ok(_) => {} // no candidates
+                Err(e) => warn!("Maintainer: prune candidate query failed: {}", e),
+            }
+        }
+
+        // ── Check 6: Remove empty sub-folders in music dirs ───────────
+        //
+        // After pruning files, some WAV source directories may become empty.
+        // Remove them to keep the filesystem clean.
+        if auto_cleanup_dirs {
+            for folder in &folders {
+                let root = std::path::Path::new(&folder.folder_path);
+                if !root.exists() || !root.is_dir() {
+                    continue;
+                }
+                match std::fs::read_dir(root) {
+                    Ok(entries) => {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_dir() {
+                                if let Ok(mut dir_entries) = std::fs::read_dir(&path) {
+                                    if dir_entries.next().is_none() {
+                                        match std::fs::remove_dir(&path) {
+                                            Ok(()) => debug!(
+                                                "Maintainer: removed empty directory: {}",
+                                                path.display()
+                                            ),
+                                            Err(e) => warn!(
+                                                "Maintainer: failed to remove empty \
+                                                 directory {}: {}",
+                                                path.display(),
+                                                e
+                                            ),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Maintainer: failed to list directory {}: {}",
+                            root.display(),
+                            e
+                        );
+                    }
                 }
             }
         }

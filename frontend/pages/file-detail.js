@@ -114,7 +114,30 @@ function renderSection(title, body) {
 
 function renderFileInfo(f) {
   return renderKvTable([
-    ["Path", escHtml(f.filePath || "—")],
+    [
+      "Path",
+      f.isLocal
+        ? escHtml(f.filePath || "—")
+        : '<span style="opacity:0.5;text-decoration:line-through">' +
+          escHtml(f.filePath || "—") +
+          '</span><div style="color:var(--muted);font-size:0.8rem;margin-top:2px">↳ On backup: ' +
+          escHtml(f.backupPath || "—") +
+          "</div>",
+    ],
+    [
+      "On Disk",
+      f.isLocal
+        ? '<span style="color:var(--green)">✓ Yes</span>'
+        : '<span style="color:var(--red)">✗ No — backup only</span>',
+    ],
+    [
+      "Backed Up",
+      f.backedUp
+        ? '<span style="color:var(--green)">✓ Yes' +
+          (f.backupPath ? " — " + escHtml(f.backupPath) : "") +
+          "</span>"
+        : '<span style="color:var(--text-muted)">— No</span>',
+    ],
     ["Type", f.fileType ? escHtml(f.fileType.toUpperCase()) : "—"],
     ["Size", f.fileSize != null ? formatBytes(f.fileSize) : "—"],
     ["ISRC", escHtml(f.isrc || "—")],
@@ -286,6 +309,10 @@ function renderVariantCard(v) {
     ? '<span class="variant-backed-up" title="Backed up">✓</span>'
     : '<span class="variant-not-backed-up" title="Not backed up">✗</span>';
 
+  const localIcon = v.isLocal
+    ? '<span class="variant-local" title="On disk">💻</span>'
+    : '<span class="variant-backup-only" title="Backup only">💾</span>';
+
   const fileName = (v.filePath || "").split("/").pop() || "";
 
   return /* html */ `
@@ -294,6 +321,7 @@ function renderVariantCard(v) {
       ${stemTypeHtml}
       <span class="variant-filename" title="${escHtml(v.filePath)}">${escHtml(fileName)}</span>
       <span class="variant-size">${formatBytes(v.fileSize)}</span>
+      ${localIcon}
       ${backupIcon}
     </div>
   `;

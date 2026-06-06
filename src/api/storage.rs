@@ -333,10 +333,21 @@ async fn sync_backpack_handler(State(state): State<Arc<AppState>>) -> impl IntoR
     };
 
     if candidates.is_empty() {
+        // No pull candidates, but still run cleanup (redundant files from previous syncs)
+        let (deleted, freed_bytes) =
+            match crate::db::cleanup_redundant_backpack_files(&state.db).await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::warn!("Backpack cleanup failed: {}", e);
+                    (0, 0)
+                }
+            };
         return Json(ApiResponse {
             data: serde_json::json!({
                 "pulled": 0,
                 "failed": 0,
+                "deleted": deleted,
+                "freedBytes": freed_bytes,
                 "candidates": []
             }),
         })
@@ -418,10 +429,22 @@ async fn sync_backpack_handler(State(state): State<Arc<AppState>>) -> impl IntoR
         }
     }
 
+    // 3. Clean up redundant lower-priority local files (e.g. FLAC when stem is now local)
+    let (deleted, freed_bytes) = match crate::db::cleanup_redundant_backpack_files(&state.db).await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::warn!("Backpack cleanup failed: {}", e);
+            (0, 0)
+        }
+    };
+
     Json(ApiResponse {
         data: serde_json::json!({
             "pulled": pulled,
             "failed": failed,
+            "deleted": deleted,
+            "freedBytes": freed_bytes,
             "candidates": results
         }),
     })

@@ -1888,6 +1888,170 @@ pub async fn get_backpack_pull_candidates(
     Ok(candidates)
 }
 
+/// After backpack pull completes, delete redundant local files within each ISRC group.
+///
+/// For each ISRC group with backpack-tagged files:
+/// - Keep the BEST format (by configured priorities) that is local
+/// - Delete all other local files in the group — ONLY if they're backed up
+/// - Never delete a file that isn't backed up
+/// - Skip WAV source files
+///
+/// Returns (deleted_count, freed_bytes).
+pub async fn cleanup_redundant_backpack_files(pool: &Pool<Sqlite>) -> Result<(usize, i64)> {
+    let priorities = load_format_priorities(pool).await;
+
+    // Step 1: Get all file IDs that are in backpack tags
+    let backpack_file_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT frt.file_id
+         FROM file_resolved_tags frt
+         JOIN tags t ON t.id = frt.tag_id
+         WHERE t.backpack = 1",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if backpack_file_ids.is_empty() {
+        return Ok((0, 0));
+    }
+
+    // Step 2: Find all ISRC-mates of backpack files (same query as get_backpack_pull_candidates)
+    let placeholders: Vec<String> = backpack_file_ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT * FROM files WHERE isrc IN (
+             SELECT DISTINCT f2.isrc FROM files f2
+             WHERE f2.id IN ({})
+               AND f2.isrc IS NOT NULL
+         )
+         UNION
+         SELECT * FROM files WHERE id IN ({})
+           AND isrc IS NULL
+         ORDER BY file_type",
+        placeholders.join(","),
+        placeholders.join(",")
+    );
+
+    let mut query = sqlx::query_as::<_, File>(&sql);
+    for id in &backpack_file_ids {
+        query = query.bind(id);
+    }
+    for id in &backpack_file_ids {
+        query = query.bind(id);
+    }
+
+    let all_files: Vec<File> = query.fetch_all(pool).await?;
+
+    // Step 3: Group files by ISRC (same as get_backpack_pull_candidates)
+    let mut groups: std::collections::HashMap<String, Vec<&File>> =
+        std::collections::HashMap::new();
+    for f in &all_files {
+        let key = f.isrc.as_deref().unwrap_or("").to_string();
+        let key = if key.is_empty() {
+            format!("_no_isrc_{}", f.id)
+        } else {
+            key
+        };
+        groups.entry(key).or_default().push(f);
+    }
+
+    // Step 4: Fetch all file_locations for all files at once
+    let loc_placeholders: Vec<String> = all_files.iter().map(|_| "?".to_string()).collect();
+    let loc_sql = format!(
+        "SELECT * FROM file_locations WHERE file_id IN ({})",
+        loc_placeholders.join(",")
+    );
+    let mut loc_query = sqlx::query_as::<_, FileLocation>(&loc_sql);
+    for f in &all_files {
+        loc_query = loc_query.bind(f.id);
+    }
+    let all_locations: Vec<FileLocation> = loc_query.fetch_all(pool).await?;
+
+    // Index locations by file_id
+    let mut locs_by_file: std::collections::HashMap<i64, Vec<&FileLocation>> =
+        std::collections::HashMap::new();
+    for loc in &all_locations {
+        locs_by_file.entry(loc.file_id).or_default().push(loc);
+    }
+
+    let is_local = |file_id: i64| -> bool {
+        locs_by_file
+            .get(&file_id)
+            .map(|locs| locs.iter().any(|l| l.location_type == "local"))
+            .unwrap_or(false)
+    };
+
+    let is_backed_up = |file_id: i64| -> bool {
+        locs_by_file
+            .get(&file_id)
+            .map(|locs| locs.iter().any(|l| l.location_type == "backup"))
+            .unwrap_or(false)
+    };
+
+    let mut deleted = 0usize;
+    let mut freed_bytes: i64 = 0;
+
+    for (_key, group) in &groups {
+        // Sort group by format preference (best first), excluding WAVs
+        let mut sorted: Vec<&&File> = group
+            .iter()
+            .filter(|f| f.file_type != "wav") // skip WAV source files
+            .collect();
+        sorted.sort_by_key(|f| format_preference_with(&f.file_type, &priorities));
+
+        if sorted.len() <= 1 {
+            // Need at least 2 files in the group to have a redundant one
+            continue;
+        }
+
+        // Find the best format that is local → this is the "keeper"
+        let keeper = sorted.iter().find(|f| is_local(f.id));
+
+        let Some(keeper) = keeper else {
+            // No local file at all — nothing to clean up yet (pull must happen first)
+            continue;
+        };
+
+        // For all OTHER local files in the group, check if they're redundant
+        for file in sorted
+            .iter()
+            .filter(|f| f.id != keeper.id) // not the keeper
+            .filter(|f| is_local(f.id)) // is local
+            .filter(|f| is_backed_up(f.id)) // is backed up (safety check)
+            .filter(|f| f.file_type != keeper.file_type)
+        // different format than keeper
+        {
+            // Delete from filesystem
+            let path_ref = std::path::Path::new(&file.file_path);
+            if path_ref.exists() {
+                match tokio::fs::remove_file(path_ref).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            "Backpack cleanup: deleted redundant local {} ({})",
+                            file.file_path,
+                            file.file_type
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to delete redundant local file {}: {}",
+                            file.file_path,
+                            e
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            // Remove local location record
+            let _ = crate::db::remove_file_location(pool, file.id, "local").await;
+
+            freed_bytes += file.file_size;
+            deleted += 1;
+        }
+    }
+
+    Ok((deleted, freed_bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

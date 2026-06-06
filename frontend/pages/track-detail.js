@@ -196,8 +196,14 @@ function renderFileCard(f, track) {
       </div>
       <table class="detail-kv">
         <tbody>
-          <tr><th>File Path</th><td><code>${escHtml(f.filePath || "—")}</code></td></tr>
+          <tr><th>On Disk</th><td>${f.isLocal ? '<span style="color:var(--green)">✓ Yes</span>' : '<span style="color:var(--red)">✗ No — backup only</span>'}</td></tr>
           <tr><th>Backed Up</th><td>${f.backedUp ? '<span style="color:var(--green)">✓ Yes' + (f.backupPath ? " — " + escHtml(f.backupPath) : "") + "</span>" : '<span style="color:var(--text-muted)">— No</span>'}</td></tr>
+          <tr><th>File Path</th><td>${
+            f.isLocal
+              ? `<code>${escHtml(f.filePath || "—")}</code>`
+              : `<code style="opacity:0.5;text-decoration:line-through">${escHtml(f.filePath || "—")}</code>
+               <div style="color:var(--muted);font-size:0.8rem;margin-top:2px">↳ On backup: ${escHtml(f.backupPath || "—")}</div>`
+          }</td></tr>
           <tr><th>ISRC</th><td>${escHtml(f.isrc || "—")}</td></tr>
           <tr><th>Album</th><td>${escHtml(f.album || "—")}</td></tr>
           <tr><th>BPM</th><td>${f.bpm != null ? f.bpm.toFixed(1) : "—"}</td></tr>
@@ -251,6 +257,9 @@ function renderWavCard(w) {
   const stemLabel = w.stemType
     ? w.stemType.charAt(0).toUpperCase() + w.stemType.slice(1)
     : "";
+  const localIcon = w.isLocal
+    ? '<span class="variant-local" title="On disk">💻</span>'
+    : '<span class="variant-backup-only" title="Backup only">💾</span>';
   const backupIcon = w.backedUp
     ? '<span class="variant-backed-up" title="Backed up">&#10003;</span>'
     : '<span class="variant-not-backed-up" title="Not backed up">&#10007;</span>';
@@ -261,6 +270,7 @@ function renderWavCard(w) {
       <span class="variant-stem-type">${escHtml(stemLabel)}</span>
       <span class="variant-filename" title="${escHtml(w.filePath)}">${escHtml(fileName)}</span>
       <span class="variant-size">${formatBytes(w.fileSize)}</span>
+      ${localIcon}
       ${backupIcon}
     </div>
   `;

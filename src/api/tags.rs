@@ -1468,6 +1468,20 @@ async fn tag_backpack_handler(
                         }
                     };
                     if candidates.is_empty() {
+                        // No pull needed, but still clean up redundant formats
+                        match crate::db::cleanup_redundant_backpack_files(&db).await {
+                            Ok((deleted, freed)) if deleted > 0 => {
+                                tracing::info!(
+                                    "Backpack cleanup (no pull needed): deleted {} redundant local files ({} bytes)",
+                                    deleted,
+                                    freed
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!("Backpack cleanup failed: {}", e);
+                            }
+                        }
                         tracing::info!("Backpack sync for tag #{}: all files already local", id);
                         return;
                     }
@@ -1521,6 +1535,20 @@ async fn tag_backpack_handler(
                             Err(e) => {
                                 tracing::warn!("Error pulling {}: {}", c.local_path, e);
                             }
+                        }
+                    }
+                    // After pulling files, clean up redundant lower-priority local files
+                    match crate::db::cleanup_redundant_backpack_files(&db).await {
+                        Ok((deleted, freed)) if deleted > 0 => {
+                            tracing::info!(
+                                "Backpack cleanup: deleted {} redundant local files ({} bytes)",
+                                deleted,
+                                freed
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("Backpack cleanup failed: {}", e);
                         }
                     }
                     tracing::info!(
