@@ -67,6 +67,13 @@ async fn storage_status_handler(State(state): State<Arc<AppState>>) -> impl Into
     }
 }
 
+async fn backpack_size_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match crate::db::files::get_backpack_size_stats(&state.db).await {
+        Ok(stats) => Json(ApiResponse { data: stats }).into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
 async fn storage_backup_handler(
     State(state): State<Arc<AppState>>,
     Path(folder_id): Path<i64>,
@@ -676,6 +683,7 @@ pub(super) fn router() -> Router<Arc<AppState>> {
             post(storage_discover_backup_handler),
         )
         .route("/api/storage/sync-backpack", post(sync_backpack_handler))
+        .route("/api/storage/backpack-size", get(backpack_size_handler))
         .route(
             "/api/storage/settings/format-priority",
             get(format_priority_get_handler).put(format_priority_put_handler),

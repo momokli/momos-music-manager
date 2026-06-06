@@ -35,6 +35,9 @@ export async function init(container, signal) {
     state.tags = tags;
     renderPage(container, tags);
     wireEvents(container);
+
+    // Load size stats asynchronously (nice-to-have, won't block page render)
+    loadSizeStats();
   } catch (err) {
     if (signal.aborted) return;
     container.innerHTML = `<div class="detail-error"><i class="fa-solid fa-triangle-exclamation"></i> Failed to load: ${escapeHtml(err.message)}</div>`;
@@ -49,6 +52,8 @@ function renderPage(container, tags) {
       <h1><i class="fa-solid fa-box"></i> Backpack</h1>
     </div>
 
+    <div id="backpack-size-stats"></div>
+
     <div class="backpack-summary">
       <div class="backpack-stat">
         <span class="backpack-stat-value">${tags.length}</span>
@@ -60,9 +65,10 @@ function renderPage(container, tags) {
       </div>
     </div>
 
-    ${tags.length === 0
-      ? '<div class="text-muted" style="padding:1rem">No backpack tags. Toggle "Backpack" on a tag in the Tags page.</div>'
-      : `
+    ${
+      tags.length === 0
+        ? '<div class="text-muted" style="padding:1rem">No backpack tags. Toggle "Backpack" on a tag in the Tags page.</div>'
+        : `
     <div class="backpack-section">
       <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem">
         <h2 class="section-title" style="margin:0"><i class="fa-solid fa-tags"></i> Backpack Tags</h2>
@@ -72,7 +78,8 @@ function renderPage(container, tags) {
         ${tags.map(renderTagCard).join("")}
       </div>
     </div>
-    `}
+    `
+    }
   `;
 }
 
@@ -84,6 +91,58 @@ function renderTagCard(tag) {
       <span class="backpack-tag-count">${tag.fileCount || 0} tracks</span>
     </div>
   `;
+}
+
+async function loadSizeStats() {
+  try {
+    const resp = await fetchJSON("/api/storage/backpack-size");
+    if (resp?.data) {
+      renderSizeStats(resp.data);
+    }
+  } catch {
+    // Silently ignore — size stats are nice-to-have
+  }
+}
+
+function renderSizeStats(stats) {
+  if (!stats || stats.trackCount === 0) return;
+
+  const percent =
+    stats.targetBytes > 0
+      ? Math.round((stats.localBytes / stats.targetBytes) * 100)
+      : 100;
+
+  const el = document.querySelector("#backpack-size-stats");
+  if (!el) return;
+
+  el.innerHTML = `
+    <div class="backpack-size-cards">
+      <div class="backpack-size-card">
+        <div class="backpack-size-value">${formatBytes(stats.localBytes)}</div>
+        <div class="backpack-size-bar">
+          <div class="backpack-size-bar-fill" style="width:${percent}%"></div>
+        </div>
+        <div class="backpack-size-label">On Disk (${percent}%)</div>
+      </div>
+      <div class="backpack-size-card">
+        <div class="backpack-size-value">${formatBytes(stats.targetBytes)}</div>
+        <div class="backpack-size-label">Target (fully synced)</div>
+      </div>
+    </div>
+    ${
+      stats.needsPullBytes > 0
+        ? `<div class="backpack-size-remaining">${formatBytes(stats.needsPullBytes)} remaining to pull</div>`
+        : '<div class="backpack-size-done" style="color:var(--green);text-align:center;margin-top:0.5rem;font-size:0.9rem">✓ Fully synced</div>'
+    }
+  `;
+}
+
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
 function wireEvents(container) {

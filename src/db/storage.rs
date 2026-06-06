@@ -81,6 +81,17 @@ pub struct StorageStatus {
     pub wav_backed_up: i64,
 }
 
+/// Size statistics for backpack-tagged files — used by the Backpack page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackpackSizeStats {
+    pub tag_count: i64,
+    pub track_count: i64,
+    pub local_bytes: i64,
+    pub target_bytes: i64,
+    pub needs_pull_bytes: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ServiceConfig {
     pub id: i64,

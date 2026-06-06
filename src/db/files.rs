@@ -1909,6 +1909,170 @@ pub async fn get_backpack_pull_candidates(
     Ok(candidates)
 }
 
+/// Compute size statistics for backpack-tagged files.
+///
+/// For each track whose tags have `backpack = 1`:
+/// 1. Find all file variants for the track (by ISRC)
+/// 2. Pick the best available format: stem.m4a > flac > mp3 > other (WAVs excluded)
+/// 3. Count the best format's size as `target_bytes`, and if local, as `local_bytes`
+///
+/// `needs_pull_bytes = target_bytes - local_bytes` (how much needs to be pulled from backup).
+pub async fn get_backpack_size_stats(pool: &Pool<Sqlite>) -> Result<BackpackSizeStats> {
+    // Load format priorities (could be user-configured)
+    let priorities = load_format_priorities(pool).await;
+
+    // Step 1: Count backpack tags
+    let tag_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE backpack = 1")
+        .fetch_one(pool)
+        .await?;
+
+    if tag_count == 0 {
+        return Ok(BackpackSizeStats {
+            tag_count: 0,
+            track_count: 0,
+            local_bytes: 0,
+            target_bytes: 0,
+            needs_pull_bytes: 0,
+        });
+    }
+
+    // Step 2: Get all file IDs that are in backpack tags (via file_resolved_tags)
+    let backpack_file_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT frt.file_id
+         FROM file_resolved_tags frt
+         JOIN tags t ON t.id = frt.tag_id
+         WHERE t.backpack = 1",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if backpack_file_ids.is_empty() {
+        return Ok(BackpackSizeStats {
+            tag_count,
+            track_count: 0,
+            local_bytes: 0,
+            target_bytes: 0,
+            needs_pull_bytes: 0,
+        });
+    }
+
+    // Step 3: Count distinct track_ids
+    let placeholders: Vec<String> = backpack_file_ids.iter().map(|_| "?".to_string()).collect();
+    let track_count_sql = format!(
+        "SELECT COUNT(DISTINCT v.track_id) FROM v_file_track_link v WHERE v.file_id IN ({})",
+        placeholders.join(",")
+    );
+    let mut track_count_query = sqlx::query_scalar::<_, i64>(&track_count_sql);
+    for id in &backpack_file_ids {
+        track_count_query = track_count_query.bind(id);
+    }
+    let track_count: i64 = track_count_query.fetch_one(pool).await?;
+
+    // Step 4: Fetch all files linked to the same tracks as backpack files
+    let sql = format!(
+        "SELECT DISTINCT f.* FROM files f
+         JOIN v_file_track_link v ON v.file_id = f.id
+         WHERE v.track_id IN (
+             SELECT DISTINCT v2.track_id FROM v_file_track_link v2
+             WHERE v2.file_id IN ({})
+         )
+         UNION
+         SELECT DISTINCT f.* FROM files f
+         WHERE f.id IN ({})
+           AND f.id NOT IN (SELECT file_id FROM v_file_track_link)
+         ORDER BY file_type",
+        placeholders.join(","),
+        placeholders.join(",")
+    );
+
+    let mut query = sqlx::query_as::<_, File>(&sql);
+    for id in &backpack_file_ids {
+        query = query.bind(id);
+    }
+    for id in &backpack_file_ids {
+        query = query.bind(id);
+    }
+
+    let all_files: Vec<File> = query.fetch_all(pool).await?;
+
+    // Step 5: Build file_id → track_id mapping from v_file_track_link
+    let track_placeholders: Vec<String> = all_files.iter().map(|_| "?".to_string()).collect();
+    let track_sql = format!(
+        "SELECT file_id, track_id FROM v_file_track_link WHERE file_id IN ({})",
+        track_placeholders.join(",")
+    );
+    let mut track_query = sqlx::query_as::<_, (i64, i64)>(&track_sql);
+    for f in &all_files {
+        track_query = track_query.bind(f.id);
+    }
+    let file_track_pairs: Vec<(i64, i64)> = track_query.fetch_all(pool).await?;
+    let file_track_map: HashMap<i64, i64> = file_track_pairs.into_iter().collect();
+
+    // Group files by track_id
+    let mut groups: HashMap<i64, Vec<&File>> = HashMap::new();
+    for f in &all_files {
+        let key = file_track_map.get(&f.id).copied().unwrap_or(-f.id);
+        groups.entry(key).or_default().push(f);
+    }
+
+    // Step 6: Fetch all file_locations for the relevant files
+    let loc_placeholders: Vec<String> = all_files.iter().map(|_| "?".to_string()).collect();
+    let loc_sql = format!(
+        "SELECT * FROM file_locations WHERE file_id IN ({})",
+        loc_placeholders.join(",")
+    );
+    let mut loc_query = sqlx::query_as::<_, FileLocation>(&loc_sql);
+    for f in &all_files {
+        loc_query = loc_query.bind(f.id);
+    }
+    let all_locations: Vec<FileLocation> = loc_query.fetch_all(pool).await?;
+
+    let mut locs_by_file: HashMap<i64, Vec<&FileLocation>> = HashMap::new();
+    for loc in &all_locations {
+        locs_by_file.entry(loc.file_id).or_default().push(loc);
+    }
+
+    let is_local = |file_id: i64| -> bool {
+        locs_by_file
+            .get(&file_id)
+            .map(|locs| locs.iter().any(|l| l.location_type == "local"))
+            .unwrap_or(false)
+    };
+
+    // Step 7: For each track group, pick best format and accumulate sizes
+    let mut target_bytes: i64 = 0;
+    let mut local_bytes: i64 = 0;
+
+    for (_track_id, group) in &groups {
+        let mut sorted: Vec<&&File> = group
+            .iter()
+            .filter(|f| f.file_type != "wav") // skip WAV source files
+            .collect();
+        sorted.sort_by_key(|f| format_preference_with(&f.file_type, &priorities));
+
+        if sorted.is_empty() {
+            continue;
+        }
+
+        let best = sorted[0];
+
+        target_bytes += best.file_size;
+        if is_local(best.id) {
+            local_bytes += best.file_size;
+        }
+    }
+
+    let needs_pull_bytes = (target_bytes - local_bytes).max(0);
+
+    Ok(BackpackSizeStats {
+        tag_count,
+        track_count,
+        local_bytes,
+        target_bytes,
+        needs_pull_bytes,
+    })
+}
+
 /// Resolve the SSH host from a file's backup path by matching against folder configs.
 ///
 /// The backup_path from `PullCandidate` is like `/volume1/media/stems/file.stem.m4a`
