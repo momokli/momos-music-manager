@@ -1767,6 +1767,12 @@ pub async fn get_backpack_pull_candidates(
         return Ok(Vec::new());
     }
 
+    tracing::info!(
+        "Backpack pull: {} backpack files, priorities={:?}",
+        backpack_file_ids.len(),
+        priorities
+    );
+
     // Step 2: For each backpack file, find all variants sharing the same ISRC.
     // Build a map: ISRC → Vec<File>. Files without ISRC get their own entry keyed by file_id.
     let placeholders: Vec<String> = backpack_file_ids.iter().map(|_| "?".to_string()).collect();
@@ -1885,7 +1891,47 @@ pub async fn get_backpack_pull_candidates(
     // Sort by format preference (best formats first)
     candidates.sort_by_key(|c| format_preference_with(&c.file_type, &priorities));
 
+    tracing::info!(
+        "Backpack pull: {} candidates from {} ISRC groups",
+        candidates.len(),
+        groups.len()
+    );
+
     Ok(candidates)
+}
+
+/// Resolve the SSH host from a file's backup path by matching against folder configs.
+///
+/// The backup_path from `PullCandidate` is like `/volume1/media/stems/file.stem.m4a`
+/// (no `host:` prefix). We match it against each folder's `backup_path`, which is
+/// like `backup:/volume1/media/stems`, to extract `("backup", "/volume1/media/stems/file.stem.m4a")`.
+pub async fn resolve_backup_host(
+    pool: &Pool<Sqlite>,
+    backup_path: &str,
+) -> Result<(String, String)> {
+    // Get all folders with backup_path configured
+    let folders = sqlx::query_as::<_, crate::db::Folder>(
+        "SELECT * FROM folders WHERE backup_path IS NOT NULL AND backup_path != ''",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for folder in &folders {
+        if let Some(ref bp) = folder.backup_path {
+            // folder.backup_path is like "backup:/volume1/media/stems"
+            if let Some((host, folder_remote_prefix)) = bp.split_once(':') {
+                // Check if backup_path starts with the folder's remote prefix
+                if backup_path.starts_with(folder_remote_prefix) {
+                    return Ok((host.to_string(), backup_path.to_string()));
+                }
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "No matching folder found for backup path: {}",
+        backup_path
+    ))
 }
 
 /// After backpack pull completes, delete redundant local files within each ISRC group.

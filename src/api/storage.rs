@@ -290,36 +290,12 @@ async fn format_priority_put_handler(
 }
 
 /// Resolve the SSH host from a file's backup path by matching against folder configs.
-/// The backup_path is like "/volume1/media/stems/file.stem.m4a" and we need to
-/// find which folder's backup_path prefix (e.g., "backup:/volume1/media/stems")
-/// matches it and extract "backup" as the SSH host.
+/// Delegates to `crate::db::resolve_backup_host`.
 async fn resolve_backup_host(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     backup_path: &str,
 ) -> anyhow::Result<(String, String)> {
-    // Get all folders with backup_path configured
-    let folders = sqlx::query_as::<_, crate::db::Folder>(
-        "SELECT * FROM folders WHERE backup_path IS NOT NULL AND backup_path != ''",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    for folder in &folders {
-        if let Some(ref bp) = folder.backup_path {
-            // folder.backup_path is like "backup:/volume1/media/stems"
-            if let Some((host, folder_remote_prefix)) = bp.split_once(':') {
-                // Check if backup_path starts with the folder's remote prefix
-                if backup_path.starts_with(folder_remote_prefix) {
-                    return Ok((host.to_string(), backup_path.to_string()));
-                }
-            }
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "No matching folder found for backup path: {}",
-        backup_path
-    ))
+    crate::db::resolve_backup_host(pool, backup_path).await
 }
 
 /// POST /api/storage/sync-backpack

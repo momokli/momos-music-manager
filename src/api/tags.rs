@@ -1492,20 +1492,21 @@ async fn tag_backpack_handler(
                     );
                     let mut pulled = 0usize;
                     for c in &candidates {
-                        let (ssh_host, remote_path) = match c.backup_path.split_once(':') {
-                            Some((h, p)) => (h, p),
-                            None => {
-                                tracing::warn!(
-                                    "Invalid backup path for file #{}: {}",
-                                    c.file_id,
-                                    c.backup_path
-                                );
-                                continue;
-                            }
-                        };
+                        let (ssh_host, remote_path) =
+                            match crate::db::resolve_backup_host(&db, &c.backup_path).await {
+                                Ok((h, p)) => (h, p),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Cannot resolve backup host for file #{}: {}",
+                                        c.file_id,
+                                        e
+                                    );
+                                    continue;
+                                }
+                            };
                         let engine = crate::backup::BackupEngine::new(ssh_host.to_string());
                         let local = std::path::Path::new(&c.local_path);
-                        match engine.pull_file(remote_path, local).await {
+                        match engine.pull_file(&remote_path, local).await {
                             Ok((true, size)) => {
                                 pulled += 1;
                                 let _ = crate::db::set_file_location(
