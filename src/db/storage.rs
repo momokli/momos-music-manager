@@ -510,11 +510,14 @@ pub async fn get_files_by_source(pool: &Pool<Sqlite>, source_file_id: i64) -> Re
 // Prune
 // ============================================================================
 
-/// Get all files that can be safely pruned (backed up, metadata-ready,
-/// not in any backpack tag, and currently on local disk).
+/// Get all files that can be safely pruned (backed up, not in any backpack
+/// tag, and currently on local disk).
+///
+/// A file is safe to delete if: backed up + local + not in backpack.
+/// No other gates — the user trusts backup.
 ///
 /// Two-step approach (file_resolved_tags is already materialized and fast):
-/// 1. Get all backed-up non-WAV file IDs (fast, uses indexes)
+/// 1. Get all backed-up+local file IDs (fast, uses indexes)
 /// 2. Get all file IDs with backpack tags via file_resolved_tags
 /// 3. Subtract in Rust, then fetch details for remaining candidates
 pub async fn get_prune_candidates(pool: &Pool<Sqlite>) -> Result<Vec<PruneCandidate>> {
@@ -523,12 +526,6 @@ pub async fn get_prune_candidates(pool: &Pool<Sqlite>) -> Result<Vec<PruneCandid
         "SELECT DISTINCT fl.file_id FROM file_locations fl
          JOIN files f ON f.id = fl.file_id
          WHERE fl.location_type = 'backup'
-           AND (f.file_type != 'wav' OR (f.file_type = 'wav' AND f.source_of IS NOT NULL))
-           AND (
-               f.file_type = 'wav'
-               OR f.bpm IS NOT NULL
-               OR (f.comment IS NOT NULL AND f.comment != '')
-           )
            AND EXISTS (
                SELECT 1 FROM file_locations fl2
                WHERE fl2.file_id = f.id AND fl2.location_type = 'local'
@@ -551,7 +548,13 @@ pub async fn get_prune_candidates(pool: &Pool<Sqlite>) -> Result<Vec<PruneCandid
     .await?;
 
     // Build HashSet for fast lookup
-    let backpack_set: HashSet<i64> = backpack.into_iter().collect();
+    let backpack_set: HashSet<i64> = backpack.iter().copied().collect();
+
+    tracing::info!(
+        "Prune: {} backed-up+local files, {} backpack-protected",
+        backed_up.len(),
+        backpack.len()
+    );
 
     // Step 3: filter in Rust — candidates = backed_up minus backpack
     let candidate_ids: Vec<i64> = backed_up
@@ -560,8 +563,17 @@ pub async fn get_prune_candidates(pool: &Pool<Sqlite>) -> Result<Vec<PruneCandid
         .collect();
 
     if candidate_ids.is_empty() {
+        tracing::info!(
+            "Prune: 0 candidates after removing {} backpack-protected files",
+            backpack.len()
+        );
         return Ok(vec![]);
     }
+
+    tracing::info!(
+        "Prune: {} candidates after removing backpack",
+        candidate_ids.len()
+    );
 
     // Step 4: fetch full file details for candidates (limit to avoid over-fetching)
     // Build IN clause dynamically — SQLx doesn't support arrays, so use placeholders
@@ -1193,7 +1205,7 @@ mod tests {
     #[tokio::test]
     async fn test_prune_candidates_basic() {
         let pool = test_db().await;
-        // File must be: backed up + local + metadata-complete + not in backpack
+        // File must be: backed up + local + not in backpack
         let fid = insert_file(
             &pool,
             1,
@@ -1285,9 +1297,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prune_candidates_requires_metadata_or_wav() {
+    async fn test_prune_candidates_allows_no_metadata() {
         let pool = test_db().await;
-        // FLAC without BPM or comment — not metadata-complete
+        // FLAC without BPM or comment — still a candidate if backed up + local
         let fid = insert_file(
             &pool,
             1,
@@ -1309,9 +1321,11 @@ mod tests {
         let candidates = get_prune_candidates(&pool).await.unwrap();
         assert_eq!(
             candidates.len(),
-            0,
-            "files without bpm or comment should be excluded"
+            1,
+            "files without bpm or comment should still be candidates if backed up + local"
         );
+        assert_eq!(candidates[0].file_id, fid);
+        assert!(!candidates[0].has_stem_variant);
     }
 
     #[tokio::test]
@@ -1361,7 +1375,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prune_candidates_wav_without_source_excluded() {
+    async fn test_prune_candidates_wav_without_source_allowed() {
         let pool = test_db().await;
         let wav_id = insert_file(
             &pool,
@@ -1380,14 +1394,16 @@ mod tests {
         set_file_location(&pool, wav_id, "backup", "/backup/sub/vocals.wav", 500)
             .await
             .unwrap();
-        // No source_of set — should NOT be a prune candidate
+        // No source_of set — still a candidate if backed up + local
 
         let candidates = get_prune_candidates(&pool).await.unwrap();
         assert_eq!(
             candidates.len(),
-            0,
-            "WAV without source_of should be excluded"
+            1,
+            "WAV without source_of should still be a candidate if backed up + local"
         );
+        assert_eq!(candidates[0].file_id, wav_id);
+        assert_eq!(candidates[0].reason, "wav_backed_up");
     }
 
     #[tokio::test]
