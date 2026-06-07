@@ -657,21 +657,25 @@ function showNewTagModal(container) {
         showToast(`Tag "${name}" created`, "success");
         close();
 
-        // Refresh bundle list and select the new tag
-        const r = await fetchJSON("/api/tags/bundles?limit=200");
-        state.bundles = r.data || [];
-        const newTag = state.bundles.find(
-          (b) => b.name.toLowerCase() === name.toLowerCase(),
-        );
-        if (newTag) {
-          renderFullPage(container);
-          wireEvents(container, null);
-          await selectBundle(container, newTag.id);
-        } else {
-          // Fallback: just re-render the list
-          renderFullPage(container);
-          wireEvents(container, null);
-        }
+        // Add the new tag directly to state — it has 0 members so it won't
+        // appear in GET /api/tags/bundles (which uses EXISTS on tag_bundles).
+        const createdTag = resp.data; // { id, name, category, ... }
+        const bundleEntry = {
+          id: createdTag.id,
+          name: createdTag.name,
+          categoryId: 1,
+          categoryName: "Setlist",
+          memberCount: 0,
+          backpack: false,
+        };
+        state.bundles = [...state.bundles, bundleEntry];
+        state.selectedBundleId = createdTag.id;
+        state.selectedBundle = bundleEntry;
+        state.members = [];
+        renderFullPage(container);
+        wireEvents(container, null);
+        // Auto-navigate to the detail view so the user can start adding members
+        await selectBundle(container, createdTag.id);
       } catch (err) {
         showToast(`Failed to create tag: ${err.message}`, "error");
       }

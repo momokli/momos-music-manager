@@ -1547,3 +1547,233 @@ pub async fn tags_bulk_resolve() {
     assert!(!data2.is_empty());
     assert_eq!(data2[0]["status"], "moved", "tag should be moved");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tag bundle lifecycle: create → 0-members (not in list) → add → remove all
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn tags_bundle_lifecycle_create_add_members_remove() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // ── Create a new Setlist tag for bundling ──
+    let create_resp = client
+        .post(format!("{}/api/tags", base))
+        .json(&serde_json::json!({"name": "test-bundle", "categoryId": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), 200);
+    let created: Value = create_resp.json().await.unwrap();
+    let bundle_id = created["data"]["id"].as_i64().unwrap();
+
+    // ── 0 members → NOT in bundle list (backend uses EXISTS on tag_bundles) ──
+    let list_resp = client
+        .get(format!("{}/api/tags/bundles", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), 200);
+    let list: Value = list_resp.json().await.unwrap();
+    let names: Vec<&str> = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        !names.contains(&"test-bundle"),
+        "0-member bundle should NOT be in list"
+    );
+
+    // ── Add members → now appears with memberCount ──
+    let set_resp = client
+        .put(format!("{}/api/tags/{}/bundle-members", base, bundle_id))
+        .json(&serde_json::json!({"memberTagIds": [1, 2]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(set_resp.status(), 200);
+
+    let list_resp = client
+        .get(format!("{}/api/tags/bundles", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), 200);
+    let list: Value = list_resp.json().await.unwrap();
+    let bundle = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "test-bundle")
+        .expect("bundle should now appear in list");
+    assert_eq!(bundle["memberCount"], 2);
+
+    // ── Verify bundle-of from a member tag ──
+    let of_resp = client
+        .get(format!("{}/api/tags/1/bundle-of", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(of_resp.status(), 200);
+    let of: Value = of_resp.json().await.unwrap();
+    let bundle_ids: Vec<i64> = of["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["id"].as_i64().unwrap())
+        .collect();
+    assert!(
+        bundle_ids.contains(&bundle_id),
+        "tag 1 should be a member of test-bundle"
+    );
+
+    // ── Verify GET members ──
+    let members_resp = client
+        .get(format!("{}/api/tags/{}/bundle-members", base, bundle_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(members_resp.status(), 200);
+    let members: Value = members_resp.json().await.unwrap();
+    assert_eq!(members["data"].as_array().unwrap().len(), 2);
+
+    // ── Remove all members → disappears from list ──
+    let clear_resp = client
+        .put(format!("{}/api/tags/{}/bundle-members", base, bundle_id))
+        .json(&serde_json::json!({"memberTagIds": []}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(clear_resp.status(), 200);
+
+    let list_resp = client
+        .get(format!("{}/api/tags/bundles", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), 200);
+    let list: Value = list_resp.json().await.unwrap();
+    let names: Vec<&str> = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        !names.contains(&"test-bundle"),
+        "0-member bundle should disappear from list after clearing members"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Multi-level bundle resolution (transitive bundle-of)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn tags_bundle_multilevel_resolution() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Create two bundle tags with multi-level nesting:
+    //   peaktime-all (id=X) → bundles afterhour-jonas-two (id=Y)
+    //   afterhour-jonas-two (id=Y) → bundles start (tag 1) + build (tag 2)
+
+    let create_a = client
+        .post(format!("{}/api/tags", base))
+        .json(&serde_json::json!({"name": "peaktime-all", "categoryId": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_a.status(), 200);
+    let peaktime_id = create_a.json::<Value>().await.unwrap()["data"]["id"]
+        .as_i64()
+        .unwrap();
+
+    let create_b = client
+        .post(format!("{}/api/tags", base))
+        .json(&serde_json::json!({"name": "afterhour-jonas-two", "categoryId": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_b.status(), 200);
+    let aj_id = create_b.json::<Value>().await.unwrap()["data"]["id"]
+        .as_i64()
+        .unwrap();
+
+    // ── Level 1: afterhour-jonas-two bundles [start, build] ──
+    let l1 = client
+        .put(format!("{}/api/tags/{}/bundle-members", base, aj_id))
+        .json(&serde_json::json!({"memberTagIds": [1, 2]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(l1.status(), 200);
+
+    // ── Level 2: peaktime-all bundles [afterhour-jonas-two] ──
+    let l2 = client
+        .put(format!("{}/api/tags/{}/bundle-members", base, peaktime_id))
+        .json(&serde_json::json!({"memberTagIds": [aj_id]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(l2.status(), 200);
+
+    // ── tag 1 should be bundled in afterhour-jonas-two ──
+    let of = client
+        .get(format!("{}/api/tags/1/bundle-of", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(of.status(), 200);
+    let of_json: Value = of.json().await.unwrap();
+    let bundle_names: Vec<&str> = of_json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        bundle_names.contains(&"afterhour-jonas-two"),
+        "tag 1 should be bundled in afterhour-jonas-two"
+    );
+
+    // ── afterhour-jonas-two should be bundled in peaktime-all ──
+    let of2 = client
+        .get(format!("{}/api/tags/{}/bundle-of", base, aj_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(of2.status(), 200);
+    let of2_json: Value = of2.json().await.unwrap();
+    let peaktime_found = of2_json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b["name"] == "peaktime-all");
+    assert!(
+        peaktime_found,
+        "afterhour-jonas-two should be bundled in peaktime-all"
+    );
+
+    // ── tag 1 should NOT have peaktime-all in bundle-of (bundle-of is NOT transitive) ──
+    let of3 = client
+        .get(format!("{}/api/tags/1/bundle-of", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(of3.status(), 200);
+    let of3_json: Value = of3.json().await.unwrap();
+    let of3_names: Vec<&str> = of3_json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        !of3_names.contains(&"peaktime-all"),
+        "bundle-of is NOT transitive: tag 1 should list only its direct bundle parent"
+    );
+}
