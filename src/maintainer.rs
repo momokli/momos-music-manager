@@ -51,6 +51,19 @@ pub async fn start_maintainer(
 
         let now = chrono::Utc::now().timestamp();
 
+        // ── Check 0: Refresh materialized tag tables ─────────────────
+        //
+        // Ensures comment computation uses current tag resolution data
+        // after any background changes (global poller, subscription poller,
+        // folder watcher, etc.). Runs before all other checks so they
+        // operate on fresh data.
+        if let Err(e) = crate::db::refresh_file_resolved_tags(&db).await {
+            warn!("Maintainer: failed to refresh file_resolved_tags: {}", e);
+        }
+        if let Err(e) = crate::db::refresh_track_resolved_tags(&db).await {
+            warn!("Maintainer: failed to refresh track_resolved_tags: {}", e);
+        }
+
         // ── Check 1: Full scan needed for active folders ──────────────
         //
         // For each active folder, check if `last_scanned` is older than

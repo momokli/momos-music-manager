@@ -429,9 +429,13 @@ pub async fn ensure_tag_for_playlist_name(pool: &Pool<Sqlite>, playlist_name: &s
 /// Call this after any tag/playlist/track sync. Also refresh track_resolved_tags when appropriate.
 /// Returns the number of rows inserted.
 pub async fn refresh_file_resolved_tags(pool: &Pool<Sqlite>) -> Result<u64> {
+    // Wrap DELETE + INSERT in a single transaction so they run on the same
+    // connection and are visible atomically to other pool connections.
+    let mut tx = pool.begin().await?;
+
     // Truncate the table
     sqlx::query("DELETE FROM file_resolved_tags")
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
     // Repopulate from the view
@@ -446,8 +450,10 @@ pub async fn refresh_file_resolved_tags(pool: &Pool<Sqlite>) -> Result<u64> {
         SELECT CHANGES();
         "#,
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     let count = changed as u64;
     tracing::info!("Refreshed file_resolved_tags: {} rows", count);
@@ -458,9 +464,13 @@ pub async fn refresh_file_resolved_tags(pool: &Pool<Sqlite>) -> Result<u64> {
 /// Call this after any tag/playlist/track sync.
 /// Returns the number of rows inserted.
 pub async fn refresh_track_resolved_tags(pool: &Pool<Sqlite>) -> Result<u64> {
+    // Wrap DELETE + INSERT in a single transaction so they run on the same
+    // connection and are visible atomically to other pool connections.
+    let mut tx = pool.begin().await?;
+
     // Truncate the table
     sqlx::query("DELETE FROM track_resolved_tags")
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
     // Repopulate from the view
@@ -473,8 +483,10 @@ pub async fn refresh_track_resolved_tags(pool: &Pool<Sqlite>) -> Result<u64> {
         SELECT CHANGES();
         "#,
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     let count = changed as u64;
     tracing::info!("Refreshed track_resolved_tags: {} rows", count);

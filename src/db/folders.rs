@@ -345,6 +345,11 @@ pub async fn scan_folder(
         .await?;
     }
 
+    // Refresh materialized tag tables since new files may match existing
+    // tracks via ISRC (called directly by the Maintainer, not through the task system).
+    let _ = refresh_file_resolved_tags(pool).await;
+    let _ = refresh_track_resolved_tags(pool).await;
+
     Ok(file_count)
 }
 

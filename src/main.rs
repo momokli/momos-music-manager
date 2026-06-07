@@ -191,6 +191,16 @@ async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()
         public_url,
     });
 
+    // Refresh materialized tag tables so comment computation is correct from startup.
+    // Non-fatal: log and continue if a refresh fails.
+    if let Err(e) = momos_music_manager::db::refresh_file_resolved_tags(&state.db).await {
+        tracing::error!("Failed to refresh file_resolved_tags at startup: {}", e);
+    }
+    if let Err(e) = momos_music_manager::db::refresh_track_resolved_tags(&state.db).await {
+        tracing::error!("Failed to refresh track_resolved_tags at startup: {}", e);
+    }
+    tracing::info!("Materialized tag tables refreshed at startup");
+
     // Query subscription count so the poller startup log is accurate
     let sub_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subscriptions")
         .fetch_one(&poller_db)

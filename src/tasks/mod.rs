@@ -1594,6 +1594,11 @@ pub async fn start_scan_folder_task(
                         .execute(&db_clone)
                         .await;
 
+                // Refresh materialized tag tables since new files may have
+                // been indexed that match existing tracks via ISRC.
+                let _ = crate::db::refresh_file_resolved_tags(&db_clone).await;
+                let _ = crate::db::refresh_track_resolved_tags(&db_clone).await;
+
                 let msg = format!(
                     "Scan complete: {} files found in folder #{}",
                     file_count, folder_id

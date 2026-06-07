@@ -350,6 +350,19 @@ async fn run_poll_cycle(
         new_tracks_total,
     );
 
+    // ── Step 6: Refresh materialized tag tables if tracks were added ────
+    if new_tracks_total > 0 {
+        if let Err(e) = crate::db::refresh_file_resolved_tags(db).await {
+            error!("Global poller: failed to refresh file_resolved_tags: {}", e);
+        }
+        if let Err(e) = crate::db::refresh_track_resolved_tags(db).await {
+            error!(
+                "Global poller: failed to refresh track_resolved_tags: {}",
+                e
+            );
+        }
+    }
+
     Ok(())
 }
 
