@@ -456,12 +456,15 @@ pub async fn check_bundle_cycle(
         if !visited.insert(current) {
             continue;
         }
-        // Find all bundles that contain `current` as a member
-        let bundles: Vec<(i64,)> =
-            sqlx::query_as("SELECT bundle_tag_id FROM tag_bundles WHERE member_tag_id = ?")
-                .bind(current)
-                .fetch_all(pool)
-                .await?;
+        // Find all bundles that contain `current` as a member.
+        // Exclude the bundle being modified — its entries are about to be deleted.
+        let bundles: Vec<(i64,)> = sqlx::query_as(
+            "SELECT bundle_tag_id FROM tag_bundles WHERE member_tag_id = ? AND bundle_tag_id != ?",
+        )
+        .bind(current)
+        .bind(bundle_tag_id)
+        .fetch_all(pool)
+        .await?;
         for (bundle_id,) in bundles {
             if !visited.contains(&bundle_id) {
                 queue.push(bundle_id);
