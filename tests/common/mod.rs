@@ -138,191 +138,22 @@ pub async fn spawn_test_app() -> (reqwest::Client, String, Pool<Sqlite>) {
 // Seed Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Insert basic seed data that most tests need:
-/// - 2 tag categories (Setlist, Mood)
-/// - 3 tags (Groovy, Deep, Dark)
-/// - 3 files with various properties
-/// - File location entries (local + backup variants)
-/// - 1 folder
-/// - Service tracks + playlists + playlist_tracks for tag resolution
+/// Insert basic seed data that most tests need.
+/// Delegates to the shared `db::testing::seed_basic_scenario` function.
 pub async fn seed_basic_data(pool: &Pool<Sqlite>) {
-    // ── Tag categories
-    //    Migration 001 already seeds: Setlist(id=1), Phase(id=2), Mood(id=3),
-    //    Vibe(id=4), Merkmal(id=5). We reference those IDs — no re-insertion.
-
-    // ── Tags (all in Mood category, id=3 from migration 001)
-    //    Migration 001 already inserts 6 phase tags (start, build, peak, release,
-    //    sustain, end) which auto-assign IDs 1–6. Use IDs 7+ to avoid conflict.
-    sqlx::query(
-        r#"INSERT INTO tags (id, name, category_id, backpack)
-           VALUES (7, 'Groovy', 3, 0),
-                  (8, 'Deep', 3, 1),
-                  (9, 'Dark', 3, 0)"#,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-
-    // ── Folder
-    sqlx::query(
-        r#"INSERT INTO folders (id, folder_path, scan_recursive, active)
-           VALUES (1, '/test/stems', 1, 1)"#,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-
-    // ── Files
-    //    File 1: FLAC, BPM=128.0, key=4m, ISRC=US001, backed up + local
-    //    File 2: stem.m4a, BPM=128.5, key=4m, ISRC=US001 (same track, stem variant)
-    //    File 3: FLAC, BPM=140.0, key=8m, ISRC=US002, backed up only (not local)
-    sqlx::query(
-        r#"INSERT INTO files (id, file_path, file_type, file_size, last_modified, title, artist,
-             bpm, musical_key, isrc, rating, play_count, last_played,
-             duration_ms, file_hash, spotify_id)
-           VALUES
-             (1, '/test/stems/Artist - Title.flac',    'flac',    5000000, 1700000000, 'Title One',   'Artist A', 128.0, '4m', 'US001', 4, 10, 1700000000, 300000, 'hash1', 'spotify:track:aaa'),
-             (2, '/test/stems/Artist - Title.stem.m4a', 'stem.m4a', 8000000, 1700000000, 'Title One',  'Artist A', 128.5, '4m', 'US001', 4, 10, 1700000000, 300000, 'hash2', 'spotify:track:aaa'),
-             (3, '/test/stems/Other - Track.flac',     'flac',    6000000, 1700000000, 'Track Two',   'Artist B', 140.0, '8m', 'US002', 2,  3, 1690000000, 240000, 'hash3', 'spotify:track:bbb'),
-             (4, '/test/stems/Unlinked - Song.flac',   'flac',    4000000, 1700000000, 'Unlinked',    'Orphan',  NULL, NULL, 'US999', 0,  0, NULL,      180000, 'hash4', NULL)"#,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-
-    // ── File locations
-    sqlx::query(
-        r#"INSERT INTO file_locations (file_id, location_type, path, file_size, last_verified)
-           VALUES
-             (1, 'local',  '/test/stems/Artist - Title.flac',       5000000, 1700000000),
-             (1, 'backup', '/backup/stems/Artist - Title.flac',     5000000, 1700000000),
-             (2, 'local',  '/test/stems/Artist - Title.stem.m4a',   8000000, 1700000000),
-             (2, 'backup', '/backup/stems/Artist - Title.stem.m4a', 8000000, 1700000000),
-             (3, 'backup', '/backup/stems/Other - Track.flac',      6000000, 1700000000),
-             (4, 'backup', '/backup/stems/Unlinked - Song.flac',     4000000, 1700000000)"#,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-
-    // ── Update last_verified_local on files 1 and 2
-    sqlx::query("UPDATE files SET last_verified_local = 1700000000 WHERE id IN (1, 2)")
-        .execute(pool)
-        .await
-        .unwrap();
-
-    // ── Service tracks
-    sqlx::query(
-        r#"INSERT INTO service_tracks (id, service, service_id, title, artist, isrc, imported_at)
-           VALUES
-             (1, 'spotify', 'spotify:track:aaa', 'Title One',  'Artist A', 'US001', 1700000000),
-             (2, 'spotify', 'spotify:track:bbb', 'Track Two',  'Artist B', 'US002', 1700000000),
-             (3, 'spotify', 'spotify:track:ccc', 'Orphan Demo','Artist C', 'US003', 1690000000)"#,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-
-    // ── Service playlists
-    sqlx::query(
-        r#"INSERT INTO service_playlists (id, service, playlist_id, name, snapshot_id)
-           VALUES
-             (1, 'spotify', 'spotify:playlist:111', 'Groovy',   'snap1'),
-             (2, 'spotify', 'spotify:playlist:222', 'Deep Mix', 'snap2')"#,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-
-    // ── Service playlist tracks (track→playlist linking for tag resolution)
-    sqlx::query(
-        r#"INSERT INTO service_playlist_tracks (playlist_id, track_id, position, added_at)
-           VALUES
-             (1, 1, 0, 1700000000),
-             (2, 2, 0, 1700000000)"#,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+    momos_music_manager::db::testing::seed_basic_scenario(pool).await;
 }
 
 /// Seed data for the digging endpoint: tracks with BPM/key for suggestion testing.
+/// Delegates to the shared `db::testing::seed_digging_scenario` function.
 pub async fn seed_digging_data(pool: &Pool<Sqlite>) {
-    for (i, (isrc, title, artist, bpm, key)) in [
-        ("US100", "Games People Play", "Paula van Klar", 140.0, "3m"),
-        ("US101", "The Void", "Maite Dedecker", 141.0, "8m"),
-        ("US102", "This Summer", "Anna Reusch", 140.0, "6m"),
-        // Outlier: 160 BPM — should be excluded from suggestions
-        ("US103", "Mean One", "Elon Bass", 160.0, "1m"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let file_id = 10 + i as i64;
-        sqlx::query(
-            r#"INSERT INTO files (id, file_path, file_type, file_size, last_modified, title, artist,
-                 bpm, musical_key, isrc, file_hash)
-               VALUES (?, ?, 'flac', 5000000, 1700000000, ?, ?, ?, ?, ?, 'dig-hash')"#,
-        )
-        .bind(file_id)
-        .bind(format!("/test/stems/{}.flac", title))
-        .bind(title)
-        .bind(artist)
-        .bind(bpm)
-        .bind(key)
-        .bind(isrc)
-        .execute(pool)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            r#"INSERT INTO file_locations (file_id, location_type, path, file_size)
-               VALUES (?, 'local', ?, 5000000)"#,
-        )
-        .bind(file_id)
-        .bind(format!("/test/stems/{}.flac", title))
-        .execute(pool)
-        .await
-        .unwrap();
-    }
+    momos_music_manager::db::testing::seed_digging_scenario(pool).await;
 }
 
 /// Seed WAV source data: links 5 WAV children to stem file (id=2) via `source_of`.
+/// Delegates to the shared `db::testing::seed_wav_variant_scenario` function.
 pub async fn seed_wav_variant_data(pool: &Pool<Sqlite>) {
-    for (i, stem_type) in ["vocals", "bass", "drums", "instrumental", "other"]
-        .into_iter()
-        .enumerate()
-    {
-        let wav_id = 20 + i as i64;
-        sqlx::query(
-            r#"INSERT INTO files (id, file_path, file_type, file_size, last_modified, title, artist,
-                 isrc, source_of, stem_type, file_hash)
-               VALUES (?, ?, 'wav', 2000000, 1700000000, 'Title One', 'Artist A', 'US001', 2, ?, 'wav-hash')"#,
-        )
-        .bind(wav_id)
-        .bind(format!(
-            "/test/stems/Artist_Title/Artist - Title_{}.wav",
-            stem_type
-        ))
-        .bind(stem_type)
-        .execute(pool)
-        .await
-        .unwrap();
-
-        // WAVs are backed up but not local
-        sqlx::query(
-            r#"INSERT INTO file_locations (file_id, location_type, path, file_size)
-               VALUES (?, 'backup', ?, 2000000)"#,
-        )
-        .bind(wav_id)
-        .bind(format!(
-            "/backup/stems/Artist_Title/Artist - Title_{}.wav",
-            stem_type
-        ))
-        .execute(pool)
-        .await
-        .unwrap();
-    }
+    momos_music_manager::db::testing::seed_wav_variant_scenario(pool).await;
 }
 
 /// Seed tag hierarchy: a Setlist tag with Mood+Vibe parents, playlist, and file link.
@@ -331,60 +162,10 @@ pub async fn seed_wav_variant_data(pool: &Pool<Sqlite>) {
 /// Playlist 3 "collapse-capital" matches tag 10
 /// File 1 (US001) linked via service_track 1 -> playlist 3 -> tag 10 -> resolves to parents 11+12
 ///
-/// NOTE: parent name "shadow" avoids collision with tag 9 "Dark" from seed_basic_data
-///       (tags.name has UNIQUE COLLATE NOCASE).
-///
 /// After calling this, call `refresh_file_resolved_tags()` to populate the materialised table.
+/// Delegates to the shared `db::testing::seed_tag_hierarchy` function.
 pub async fn seed_tag_hierarchy(pool: &Pool<Sqlite>) {
-    // -- Parent tags (Phase + Mood + Vibe) --
-    // Use "shadow" to avoid UNIQUE COLLATE NOCASE collision with tag 9 "Dark" from seed_basic_data
-    sqlx::query(
-        r#"INSERT INTO tags (id, name, category_id, backpack)
-           VALUES (11, 'shadow', 3, 0),
-                  (12, 'techno', 4, 0),
-                  (13, 'driving', 2, 0)"#,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-
-    // -- Setlist tag (child) --
-    sqlx::query(
-        r#"INSERT INTO tags (id, name, category_id, backpack)
-           VALUES (10, 'collapse-capital', 1, 0)"#,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-
-    // -- Parent relationships --
-    sqlx::query(
-        r#"INSERT INTO tag_parents (tag_id, parent_tag_id)
-           VALUES (10, 11),
-                  (10, 12),
-                  (10, 13)"#,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-
-    // -- Playlist matching the Setlist tag name --
-    sqlx::query(
-        r#"INSERT INTO service_playlists (id, service, playlist_id, name)
-           VALUES (3, 'spotify', 'spotify:playlist:333', 'collapse-capital')"#,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
-
-    // -- Link existing track 1 (US001) to playlist 3 --
-    sqlx::query(
-        r#"INSERT INTO service_playlist_tracks (playlist_id, track_id, position, added_at)
-           VALUES (3, 1, 0, 1700000000)"#,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+    momos_music_manager::db::testing::seed_tag_hierarchy(pool).await;
 }
 
 /// Seed files with explicit `comment` values for comment-status filter testing.

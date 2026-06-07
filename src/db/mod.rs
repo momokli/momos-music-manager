@@ -12,6 +12,7 @@ pub mod playlists;
 pub mod schema;
 pub mod storage;
 pub mod tags;
+pub mod testing;
 pub mod tracks;
 pub mod types;
 
@@ -23,5 +24,6 @@ pub use playlists::*;
 pub use schema::*;
 pub use storage::*;
 pub use tags::*;
+pub use testing::*;
 pub use tracks::*;
 pub use types::*;

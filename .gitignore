@@ -12,4 +12,7 @@ library.db
 frontend/node_modules/
 frontend/dist/
 frontend/*.log
+frontend/playwright-report/
+frontend/test-results/
 prod.db*
+test-playwright.db*

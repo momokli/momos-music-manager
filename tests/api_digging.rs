@@ -593,7 +593,7 @@ async fn digging_tracks() {
     common::seed_digging_data(&pool).await;
 
     let resp = client
-        .get(format!("{}/api/digging/tracks?limit=3", base))
+        .get(format!("{}/api/digging/tracks?pageSize=3", base))
         .send()
         .await
         .unwrap();
@@ -701,7 +701,7 @@ async fn digging_ladder_suggest() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-/// `GET /api/digging/tracks?energyLevels=1&limit=3` — filter params.
+/// `GET /api/digging/tracks?energyLevels=1&pageSize=3` — filter params.
 async fn digging_tracks_with_params() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
@@ -709,7 +709,7 @@ async fn digging_tracks_with_params() {
 
     let resp = client
         .get(format!(
-            "{}/api/digging/tracks?energyLevels=1&limit=3&sortBy=bpm&sortOrder=asc",
+            "{}/api/digging/tracks?energyLevels=1&pageSize=3&sortBy=bpm&sortOrder=asc",
             base
         ))
         .send()

@@ -7,12 +7,14 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::api::types::{ApiResponse, internal_error};
+use crate::db::testing;
 use crate::embeddings::compute_tag_similarities;
 use crate::tasks::TaskStatus;
 
@@ -367,6 +369,49 @@ async fn tag_similarities_status_handler(State(state): State<Arc<AppState>>) -> 
     .into_response()
 }
 
+// ── Testing Seed Endpoint ─────────────────────────────────────────────────
+
+/// POST /api/testing/seed — Seed known test data for Playwright E2E tests.
+/// Accepts `{ "scenario": "basic" | "files_filter" | "digging" | "wav_variants" }`.
+/// Returns row counts per table.
+async fn testing_seed_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let scenario = body
+        .get("scenario")
+        .and_then(|v| v.as_str())
+        .unwrap_or("basic");
+
+    testing::clear_all_tables(&state.db).await;
+
+    let counts: HashMap<String, usize> = match scenario {
+        "basic" => testing::seed_basic_scenario(&state.db).await,
+        "files_filter" => testing::seed_files_filter_scenario(&state.db).await,
+        "digging" => testing::seed_digging_scenario(&state.db).await,
+        "wav_variants" => testing::seed_wav_variant_scenario(&state.db).await,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("Unknown scenario: {}. Valid: basic, files_filter, digging, wav_variants", scenario)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "scenario": scenario,
+            "rows": counts,
+        })),
+    )
+        .into_response()
+}
+
 // ── Router ────────────────────────────────────────────────────────────────
 
 pub(super) fn router() -> Router<Arc<AppState>> {
@@ -378,6 +423,8 @@ pub(super) fn router() -> Router<Arc<AppState>> {
             "/api/restore",
             post(restore_handler).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
         )
+        // Testing seed endpoint for Playwright E2E tests
+        .route("/api/testing/seed", post(testing_seed_handler))
         .route("/api/tasks", get(tasks_list_handler))
         .route(
             "/api/tasks/{id}",
