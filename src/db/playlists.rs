@@ -426,6 +426,7 @@ pub async fn ensure_tag_for_playlist_name(pool: &Pool<Sqlite>, playlist_name: &s
 }
 
 /// Truncate and repopulate `file_resolved_tags` from the `v_file_resolved_tags` view.
+/// Then resolves tag bundles transitively.
 /// Call this after any tag/playlist/track sync. Also refresh track_resolved_tags when appropriate.
 /// Returns the number of rows inserted.
 pub async fn refresh_file_resolved_tags(pool: &Pool<Sqlite>) -> Result<u64> {
@@ -438,7 +439,7 @@ pub async fn refresh_file_resolved_tags(pool: &Pool<Sqlite>) -> Result<u64> {
         .execute(&mut *tx)
         .await?;
 
-    // Repopulate from the view
+    // Step 1: Repopulate from the view
     let changed: i64 = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT OR IGNORE INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at, is_default)
@@ -453,14 +454,69 @@ pub async fn refresh_file_resolved_tags(pool: &Pool<Sqlite>) -> Result<u64> {
     .fetch_one(&mut *tx)
     .await?;
 
+    // Step 2: Resolve tag bundles transitively
+    // For each bundle tag, find files that have any of its member tags.
+    // Repeat until no new rows are inserted (handles multi-level bundles).
+    let bundle_changed: i64 = {
+        let mut total: i64 = 0;
+        let mut iteration_count = 0u32;
+        loop {
+            let inserted: i64 = sqlx::query_scalar(
+                r#"
+                INSERT OR IGNORE INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at, is_default)
+                SELECT DISTINCT
+                    frt.file_id,
+                    t.id AS tag_id,
+                    t.name AS tag_name,
+                    tc.id AS category_id,
+                    tc.name AS category_name,
+                    tc.prefix,
+                    tc.sort_order,
+                    t.created_at,
+                    COALESCE(tc.is_default, 0) AS is_default
+                FROM tag_bundles tb
+                JOIN file_resolved_tags frt ON frt.tag_id = tb.member_tag_id
+                JOIN tags t ON t.id = tb.bundle_tag_id
+                JOIN tag_categories tc ON tc.id = t.category_id
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM file_resolved_tags frt2
+                    WHERE frt2.file_id = frt.file_id AND frt2.tag_id = t.id
+                );
+                SELECT CHANGES();
+                "#,
+            )
+            .fetch_one(&mut *tx)
+            .await?;
+
+            if inserted == 0 {
+                break; // No more bundle propagation possible
+            }
+            total += inserted;
+            iteration_count += 1;
+            if iteration_count > 20 {
+                tracing::warn!(
+                    "Tag bundle resolution exceeded max iterations (20). Possible deep chain or circular reference."
+                );
+                break;
+            }
+        }
+        total
+    };
+
     tx.commit().await?;
 
-    let count = changed as u64;
-    tracing::info!("Refreshed file_resolved_tags: {} rows", count);
+    let count = (changed + bundle_changed) as u64;
+    tracing::info!(
+        "Refreshed file_resolved_tags: {} rows ({} from view, {} from bundles)",
+        count,
+        changed,
+        bundle_changed
+    );
     Ok(count)
 }
 
 /// Truncate and repopulate `track_resolved_tags` from the `v_track_tags` view.
+/// Then resolves tag bundles transitively.
 /// Call this after any tag/playlist/track sync.
 /// Returns the number of rows inserted.
 pub async fn refresh_track_resolved_tags(pool: &Pool<Sqlite>) -> Result<u64> {
@@ -473,7 +529,7 @@ pub async fn refresh_track_resolved_tags(pool: &Pool<Sqlite>) -> Result<u64> {
         .execute(&mut *tx)
         .await?;
 
-    // Repopulate from the view
+    // Step 1: Repopulate from the view
     let changed: i64 = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT OR IGNORE INTO track_resolved_tags (track_id, tag_id, tag_name, category_id, category_name, prefix, is_default)
@@ -486,10 +542,60 @@ pub async fn refresh_track_resolved_tags(pool: &Pool<Sqlite>) -> Result<u64> {
     .fetch_one(&mut *tx)
     .await?;
 
+    // Step 2: Resolve tag bundles transitively
+    let bundle_changed: i64 = {
+        let mut total: i64 = 0;
+        let mut iteration_count = 0u32;
+        loop {
+            let inserted: i64 = sqlx::query_scalar(
+                r#"
+                INSERT OR IGNORE INTO track_resolved_tags (track_id, tag_id, tag_name, category_id, category_name, prefix, is_default)
+                SELECT DISTINCT
+                    trt.track_id,
+                    t.id AS tag_id,
+                    t.name AS tag_name,
+                    tc.id AS category_id,
+                    tc.name AS category_name,
+                    tc.prefix,
+                    COALESCE(tc.is_default, 0) AS is_default
+                FROM tag_bundles tb
+                JOIN track_resolved_tags trt ON trt.tag_id = tb.member_tag_id
+                JOIN tags t ON t.id = tb.bundle_tag_id
+                JOIN tag_categories tc ON tc.id = t.category_id
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM track_resolved_tags trt2
+                    WHERE trt2.track_id = trt.track_id AND trt2.tag_id = t.id
+                );
+                SELECT CHANGES();
+                "#,
+            )
+            .fetch_one(&mut *tx)
+            .await?;
+
+            if inserted == 0 {
+                break;
+            }
+            total += inserted;
+            iteration_count += 1;
+            if iteration_count > 20 {
+                tracing::warn!(
+                    "Tag bundle resolution for tracks exceeded max iterations (20). Possible deep chain or circular reference."
+                );
+                break;
+            }
+        }
+        total
+    };
+
     tx.commit().await?;
 
-    let count = changed as u64;
-    tracing::info!("Refreshed track_resolved_tags: {} rows", count);
+    let count = (changed + bundle_changed) as u64;
+    tracing::info!(
+        "Refreshed track_resolved_tags: {} rows ({} from view, {} from bundles)",
+        count,
+        changed,
+        bundle_changed
+    );
     Ok(count)
 }
 

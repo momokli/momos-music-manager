@@ -393,6 +393,202 @@ pub async fn set_tag_parents(
     get_tag_parents(pool, tag_id).await
 }
 
+// ── Tag Bundles ─────────────────────────────────────────────────────────
+
+/// Get all member tags of a bundle tag.
+pub async fn get_bundle_members(pool: &Pool<Sqlite>, bundle_tag_id: i64) -> Result<Vec<Tag>> {
+    let members = sqlx::query_as::<_, Tag>(
+        r#"
+        SELECT t.id, t.name, t.category_id, t.sort_order, t.created_at, t.backpack
+        FROM tag_bundles tb
+        JOIN tags t ON t.id = tb.member_tag_id
+        WHERE tb.bundle_tag_id = ?
+        ORDER BY t.name
+        "#,
+    )
+    .bind(bundle_tag_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(members)
+}
+
+/// Get all bundle tags that include this tag as a member (reverse lookup).
+pub async fn get_bundle_of(pool: &Pool<Sqlite>, member_tag_id: i64) -> Result<Vec<Tag>> {
+    let bundles = sqlx::query_as::<_, Tag>(
+        r#"
+        SELECT t.id, t.name, t.category_id, t.sort_order, t.created_at, t.backpack
+        FROM tag_bundles tb
+        JOIN tags t ON t.id = tb.bundle_tag_id
+        WHERE tb.member_tag_id = ?
+        ORDER BY t.name
+        "#,
+    )
+    .bind(member_tag_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(bundles)
+}
+
+/// Perform cycle detection: check if `bundle_tag_id` is reachable from any of `member_tag_ids`
+/// by following `tag_bundles.member_tag_id` → `tag_bundles.bundle_tag_id` (i.e., a chain
+/// where member X is in a bundle Y, and Y is in a bundle Z, etc.).
+/// Returns an error message if a cycle is detected.
+pub async fn check_bundle_cycle(
+    pool: &Pool<Sqlite>,
+    bundle_tag_id: i64,
+    member_tag_ids: &[i64],
+) -> Result<()> {
+    if member_tag_ids.is_empty() {
+        return Ok(());
+    }
+
+    // BFS/DFS from all member_tag_ids: for each tag, find bundles it's a member of.
+    // If any bundle in the chain == bundle_tag_id, we have a cycle.
+    let mut visited = std::collections::HashSet::new();
+    let mut queue: Vec<i64> = member_tag_ids.to_vec();
+
+    while let Some(current) = queue.pop() {
+        if current == bundle_tag_id {
+            return Err(anyhow::anyhow!(
+                "Circular bundle relationship detected: tag would become an ancestor of itself"
+            ));
+        }
+        if !visited.insert(current) {
+            continue;
+        }
+        // Find all bundles that contain `current` as a member
+        let bundles: Vec<(i64,)> =
+            sqlx::query_as("SELECT bundle_tag_id FROM tag_bundles WHERE member_tag_id = ?")
+                .bind(current)
+                .fetch_all(pool)
+                .await?;
+        for (bundle_id,) in bundles {
+            if !visited.contains(&bundle_id) {
+                queue.push(bundle_id);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Replace all members of a bundle tag.
+/// Validates: no self-reference, all members exist, no cycles.
+pub async fn set_bundle_members(
+    pool: &Pool<Sqlite>,
+    bundle_tag_id: i64,
+    member_tag_ids: &[i64],
+) -> Result<Vec<Tag>> {
+    // Validate: bundle tag exists
+    let bundle_exists: bool = sqlx::query_scalar("SELECT COUNT(*) > 0 FROM tags WHERE id = ?")
+        .bind(bundle_tag_id)
+        .fetch_one(pool)
+        .await?;
+    if !bundle_exists {
+        return Err(anyhow::anyhow!(
+            "Bundle tag with id {} not found",
+            bundle_tag_id
+        ));
+    }
+
+    // Validate: no self-reference
+    if member_tag_ids.contains(&bundle_tag_id) {
+        return Err(anyhow::anyhow!("A tag cannot be a member of itself"));
+    }
+
+    // Validate: all member tags exist
+    for &member_id in member_tag_ids {
+        let exists: bool = sqlx::query_scalar("SELECT COUNT(*) > 0 FROM tags WHERE id = ?")
+            .bind(member_id)
+            .fetch_one(pool)
+            .await?;
+        if !exists {
+            return Err(anyhow::anyhow!(
+                "Member tag with id {} not found",
+                member_id
+            ));
+        }
+    }
+
+    // Validate: no cycles (check BEFORE modifying tag_bundles)
+    check_bundle_cycle(pool, bundle_tag_id, member_tag_ids).await?;
+
+    // Replace members in a transaction
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("DELETE FROM tag_bundles WHERE bundle_tag_id = ?")
+        .bind(bundle_tag_id)
+        .execute(&mut *tx)
+        .await?;
+
+    for &member_id in member_tag_ids {
+        sqlx::query(
+            "INSERT OR IGNORE INTO tag_bundles (bundle_tag_id, member_tag_id) VALUES (?, ?)",
+        )
+        .bind(bundle_tag_id)
+        .bind(member_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
+    // Return the new member tags
+    get_bundle_members(pool, bundle_tag_id).await
+}
+
+/// Returns all tags that have bundle members, with their member count.
+pub async fn get_bundle_tags_list(pool: &Pool<Sqlite>, search: Option<&str>) -> Result<Vec<Tag>> {
+    if let Some(search_term) = search.filter(|s| !s.is_empty()) {
+        let pattern = format!("%{}%", search_term);
+        let tags = sqlx::query_as::<_, Tag>(
+            r#"
+            SELECT t.*
+            FROM tags t
+            WHERE EXISTS (SELECT 1 FROM tag_bundles tb WHERE tb.bundle_tag_id = t.id)
+              AND t.name LIKE ?
+            ORDER BY t.name
+            "#,
+        )
+        .bind(pattern)
+        .fetch_all(pool)
+        .await?;
+        Ok(tags)
+    } else {
+        let tags = sqlx::query_as::<_, Tag>(
+            r#"
+            SELECT t.*
+            FROM tags t
+            WHERE EXISTS (SELECT 1 FROM tag_bundles tb WHERE tb.bundle_tag_id = t.id)
+            ORDER BY t.name
+            "#,
+        )
+        .fetch_all(pool)
+        .await?;
+        Ok(tags)
+    }
+}
+
+/// Get bundle members with member count for each bundle tag (used by API list).
+/// Returns (tag_id, tag_name, category_id, category_name, category_icon, is_default, prefix, created_at, backpack, member_count)
+pub async fn get_bundle_tags_with_counts(
+    pool: &Pool<Sqlite>,
+    search: Option<&str>,
+) -> Result<Vec<(Tag, i64)>> {
+    let tags = get_bundle_tags_list(pool, search).await?;
+    let mut result = Vec::new();
+    for tag in tags {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tag_bundles WHERE bundle_tag_id = ?")
+                .bind(tag.id)
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
+        result.push((tag, count));
+    }
+    Ok(result)
+}
+
 // ── Tag Service Connections ─────────────────────────────────────────────
 
 pub async fn get_tag_service_connections(

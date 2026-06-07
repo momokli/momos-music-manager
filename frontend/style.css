@@ -5554,3 +5554,77 @@ body.dark .storage-warning {
         transform: scale(1.2);
     }
 }
+
+/* ── Tag Bundles Page ────────────────── */
+.tag-bundles-layout {
+    display: flex;
+    gap: 1.5rem;
+    height: calc(100vh - 180px);
+}
+.tag-bundles-list {
+    width: 35%;
+    flex-shrink: 0;
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+    padding-right: 1rem;
+}
+.tag-bundles-detail {
+    flex: 1;
+    overflow-y: auto;
+}
+
+/* Bundle list items */
+.bundle-list-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.bundle-list-item:hover {
+    background: var(--bg-hover);
+}
+.bundle-list-item.active {
+    background: var(--accent-bg);
+    color: var(--accent);
+}
+.bundle-list-item .member-count {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-left: 0.5rem;
+}
+
+/* Highlighted state for tag-dropdown-item (keyboard nav) */
+.tag-dropdown-item.highlighted {
+    background: var(--accent-bg);
+    outline: 1px solid var(--accent);
+}
+
+/* Typeahead dropdown container */
+.typeahead-dropdown {
+    position: absolute;
+    z-index: 100;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    max-height: 200px;
+    overflow-y: auto;
+    width: 100%;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.page-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-4);
+}
+.page-header-row h1 {
+    font-size: 1.25rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}

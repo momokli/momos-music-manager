@@ -34,6 +34,7 @@ const PAGE_MAP = {
   "folder-detail": "folder-detail",
   storage: "storage",
   backpack: "backpack",
+  "tag-bundles": "tag-bundles",
 };
 
 let currentPageId = null;

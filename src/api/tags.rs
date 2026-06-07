@@ -22,11 +22,12 @@ use crate::api::types::{ApiResponse, ErrorResponse, apply_sort, internal_error};
 use crate::db::{
     ServiceConnections, bulk_categorize_tags, bulk_check_tags, bulk_create_tags, bulk_review_tags,
     bulk_update_tags, categorize_tag as db_categorize_tag, create_tag, create_tag_category,
-    delete_tag, delete_tag_category, get_curation_queue, get_embeddings_by_category, get_tag_by_id,
+    delete_tag, delete_tag_category, get_bundle_members, get_bundle_of,
+    get_bundle_tags_with_counts, get_curation_queue, get_embeddings_by_category, get_tag_by_id,
     get_tag_by_name, get_tag_categories, get_tag_category_by_id, get_tag_children,
     get_tag_embedding, get_tag_parents, get_tag_review_counts, get_unreviewed_tags,
-    refresh_file_resolved_tags, refresh_track_resolved_tags, set_tag_backpack, set_tag_parents,
-    update_tag, update_tag_category_metadata, upsert_tag_embedding,
+    refresh_file_resolved_tags, refresh_track_resolved_tags, set_bundle_members, set_tag_backpack,
+    set_tag_parents, update_tag, update_tag_category_metadata, upsert_tag_embedding,
 };
 use crate::digging::{
     TagReorderItem, delete_tag_energy_level, get_tag_energy_levels, reorder_tags_batch,
@@ -242,13 +243,28 @@ struct BatchReorderRequest {
     tags: Vec<TagReorderItem>,
 }
 
-// ─── Parent Tag Types ──────────────────────────────────────────────────────
+// ── Parent Tag Types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SetTagParentsRequest {
     #[serde(rename = "parentTagIds")]
     parent_tag_ids: Vec<i64>,
+}
+
+// ── Tag Bundle Types ────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetBundleMembersRequest {
+    #[serde(rename = "memberTagIds")]
+    member_tag_ids: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TagBundlesQuery {
+    search: Option<String>,
 }
 
 // ── Helper functions ──────────────────────────────────────────────────────
@@ -1568,6 +1584,115 @@ async fn tag_backpack_handler(
     }
 }
 
+// ── Tag Bundle Handlers ──────────────────────────────────────────────────
+
+/// GET /api/tags/bundles — list all bundle tags with member count
+async fn tag_bundles_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<TagBundlesQuery>,
+) -> impl IntoResponse {
+    match get_bundle_tags_with_counts(&state.db, params.search.as_deref()).await {
+        Ok(bundles) => {
+            // Enrich with category info
+            let mut result = Vec::new();
+            for (tag, member_count) in bundles {
+                let api_tag = get_tag_with_category(&state.db, tag.id)
+                    .await
+                    .ok()
+                    .flatten();
+                let category_name = api_tag.as_ref().and_then(|t| t.category.clone());
+                let category_id = Some(tag.category_id);
+                result.push(serde_json::json!({
+                    "id": tag.id,
+                    "name": tag.name,
+                    "categoryId": category_id,
+                    "categoryName": category_name,
+                    "memberCount": member_count,
+                    "backpack": tag.backpack,
+                }));
+            }
+            Json(ApiResponse { data: result }).into_response()
+        }
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+/// GET /api/tags/{id}/bundle-members
+async fn tag_bundle_members_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match get_bundle_members(&state.db, id).await {
+        Ok(members) => {
+            let mut api_tags: Vec<crate::api::types::Tag> = Vec::new();
+            for member in members {
+                if let Ok(Some(api_tag)) = get_tag_with_category(&state.db, member.id).await {
+                    api_tags.push(api_tag);
+                }
+            }
+            Json(ApiResponse { data: api_tags }).into_response()
+        }
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+/// PUT /api/tags/{id}/bundle-members
+async fn tag_bundle_members_set_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(request): Json<SetBundleMembersRequest>,
+) -> impl IntoResponse {
+    match set_bundle_members(&state.db, id, &request.member_tag_ids).await {
+        Ok(members) => {
+            // Refresh materialized tables since bundle resolution changed
+            let _ = refresh_file_resolved_tags(&state.db).await;
+            let _ = refresh_track_resolved_tags(&state.db).await;
+
+            let mut api_tags: Vec<crate::api::types::Tag> = Vec::new();
+            for member in members {
+                if let Ok(Some(api_tag)) = get_tag_with_category(&state.db, member.id).await {
+                    api_tags.push(api_tag);
+                }
+            }
+            Json(ApiResponse { data: api_tags }).into_response()
+        }
+        Err(e) => {
+            let err_msg = e.to_string();
+            if err_msg.contains("Circular bundle")
+                || err_msg.contains("cannot be a member of itself")
+                || err_msg.contains("not found")
+            {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse { error: err_msg }),
+                )
+                    .into_response()
+            } else {
+                internal_error(e).into_response()
+            }
+        }
+    }
+}
+
+/// GET /api/tags/{id}/bundle-of
+async fn tag_bundle_of_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match get_bundle_of(&state.db, id).await {
+        Ok(bundles) => {
+            let mut api_tags: Vec<crate::api::types::Tag> = Vec::new();
+            for bundle in bundles {
+                if let Ok(Some(api_tag)) = get_tag_with_category(&state.db, bundle.id).await {
+                    api_tags.push(api_tag);
+                }
+            }
+            Json(ApiResponse { data: api_tags }).into_response()
+        }
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
 // ── Router ─────────────────────────────────────────────────────────────────
 
 pub(super) fn router() -> Router<Arc<AppState>> {
@@ -1605,6 +1730,12 @@ pub(super) fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/tags/{id}/children", get(tag_children_handler))
         .route("/api/tags/{id}/backpack", put(tag_backpack_handler))
+        .route("/api/tags/bundles", get(tag_bundles_handler))
+        .route(
+            "/api/tags/{id}/bundle-members",
+            get(tag_bundle_members_handler).put(tag_bundle_members_set_handler),
+        )
+        .route("/api/tags/{id}/bundle-of", get(tag_bundle_of_handler))
         .route(
             "/api/tag-categories",
             get(tag_categories_handler).post(create_tag_category_handler),

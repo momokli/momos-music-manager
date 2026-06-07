@@ -559,6 +559,164 @@ async fn tags_toggle_backpack() {
     );
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Tag Bundles
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn tags_bundles_list_empty() {
+    let (client, base, _pool) = common::spawn_test_app().await;
+    // No seed data — bundle list should be empty, not error
+    let resp = client
+        .get(format!("{}/api/tags/bundles", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let bundles = body["data"].as_array().unwrap();
+    assert!(
+        bundles.is_empty(),
+        "bundle list should be empty on fresh DB"
+    );
+}
+
+#[tokio::test]
+async fn tags_bundle_members_set_and_get() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Tag 7 (Groovy, Mood) will be the bundle tag.
+    // Tag 1 (End, Phase) and Tag 2 (Start, Phase) as members.
+    let resp = client
+        .put(format!("{}/api/tags/7/bundle-members", base))
+        .json(&serde_json::json!({"memberTagIds": [1, 2]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Verify GET returns the members
+    let resp = client
+        .get(format!("{}/api/tags/7/bundle-members", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let members = body["data"].as_array().unwrap();
+    assert_eq!(members.len(), 2);
+
+    // Verify bundle list now includes tag 7
+    let resp = client
+        .get(format!("{}/api/tags/bundles", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let list = body["data"].as_array().unwrap();
+    assert!(!list.is_empty(), "bundle list should not be empty");
+    let bundle = list.iter().find(|b| b["id"] == 7).unwrap();
+    assert_eq!(bundle["memberCount"], 2);
+}
+
+#[tokio::test]
+async fn tags_bundle_members_self_reference() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Try to set tag 7 as its own member
+    let resp = client
+        .put(format!("{}/api/tags/7/bundle-members", base))
+        .json(&serde_json::json!({"memberTagIds": [7]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "self-reference should return 400");
+
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("cannot be a member of itself"),
+        "error should mention self-reference"
+    );
+}
+
+#[tokio::test]
+async fn tags_bundle_of() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Setup: tag 9 (Dark) bundles tag 7 (Groovy) as member
+    let resp = client
+        .put(format!("{}/api/tags/9/bundle-members", base))
+        .json(&serde_json::json!({"memberTagIds": [7]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Reverse lookup from tag 7: should find tag 9
+    let resp = client
+        .get(format!("{}/api/tags/7/bundle-of", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let bundles = body["data"].as_array().unwrap();
+    assert!(
+        bundles.iter().any(|b| b["name"] == "Dark"),
+        "tag 7 should be a member of bundle 'Dark'"
+    );
+}
+
+#[tokio::test]
+async fn tags_bundle_resolves_into_file_resolved_tags() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Create a bundle: tag 9 (Dark, Mood) bundles tag 7 (Groovy, Mood) as member.
+    // File 1 has tag 7 (Groovy) resolved via playlist→tag matching.
+    // After refresh, file 1 should ALSO have tag 9 (Dark) via bundle resolution.
+    let resp = client
+        .put(format!("{}/api/tags/9/bundle-members", base))
+        .json(&serde_json::json!({"memberTagIds": [7]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // The PUT handler already calls refresh_file_resolved_tags.
+    // File 1 should now have tag 9 (Dark, id=9) in its resolved tags.
+    // File 1 already has tag 7 (Groovy, id=7) from the view-based resolution.
+    // Since file 1 has tag 7 (member), and tag 9 bundles tag 7, file 1 gets tag 9 too.
+    let resp = client
+        .get(format!("{}/api/files/1/detail", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    let file = &body["data"];
+    let tags = file["tags"].as_array().unwrap();
+
+    // File 1 should have tag 7 (Groovy) from view resolution
+    assert!(
+        tags.iter().any(|t| t["id"] == 7),
+        "file 1 should have tag 7 (Groovy) from playlist→tag matching"
+    );
+    // File 1 should ALSO have tag 9 (Dark) from bundle resolution
+    assert!(
+        tags.iter().any(|t| t["id"] == 9),
+        "file 1 should have tag 9 (Dark) from bundle resolution"
+    );
+}
+
 #[tokio::test]
 async fn tags_toggle_backpack_deep() {
     let (client, base, pool) = common::spawn_test_app().await;
@@ -1149,7 +1307,11 @@ async fn tag_curation_queue_pagination() {
 
     // If total > limit, page result should be smaller
     if total_count > 2 {
-        assert_eq!(page_tags.len(), 2, "should return exactly 2 items when limit=2");
+        assert_eq!(
+            page_tags.len(),
+            2,
+            "should return exactly 2 items when limit=2"
+        );
     }
 
     // Verify each item has required fields

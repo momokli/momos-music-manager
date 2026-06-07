@@ -43,6 +43,7 @@ const TOOLS_ITEMS = [
   { id: "key-comparison", label: "Key Comparison", icon: "fa-scale-balanced" },
   { id: "storage", label: "Storage", icon: "fa-hdd" },
   { id: "backpack", label: "Backpack", icon: "fa-box" },
+  { id: "tag-bundles", label: "Tag Bundles", icon: "fa-layer-group" },
 ];
 
 /** @type {string | null} - id of the currently open dropdown section, if any */
