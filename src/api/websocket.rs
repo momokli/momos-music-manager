@@ -161,6 +161,8 @@ async fn legacy_callback_handler(
         scopes: scopes!(
             "playlist-read-private",
             "playlist-read-collaborative",
+            "playlist-modify-public",
+            "playlist-modify-private",
             "user-read-playback-state"
         ),
         ..Default::default()

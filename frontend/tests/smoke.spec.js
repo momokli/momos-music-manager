@@ -70,4 +70,14 @@ test.describe("App Shell", () => {
     await expect(page.locator("#tags-content")).toBeVisible();
     expect(errors).toEqual([]);
   });
+
+  test("daily page loads without errors", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await page.goto("/#daily");
+    await page.waitForSelector(".daily-page", { timeout: 8000 });
+    await expect(page.locator(".daily-page")).toBeVisible();
+    expect(errors).toEqual([]);
+  });
 });

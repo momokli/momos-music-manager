@@ -10,7 +10,6 @@ pub mod retry;
 pub mod sync_worker;
 
 // Re-export commonly used types
-// NOTE: Re-exports currently unused; add back when external consumers need them
-// pub use client::SpotifyClient;
+pub use client::SpotifyClient;
 // pub use models::*;
 // pub use sync_worker::SpotifySyncWorker;

@@ -1,6 +1,6 @@
 # Momo's Music Manager — Agent Guidance
 
-> **Last Updated**: 2026-06-07 — v0.7.0
+> **Last Updated**: 2026-06-08 — v0.8.0
 
 ---
 
@@ -136,28 +136,77 @@ git branch --show-current && git status --short | head -20
 
 ### Testing
 
-- **`cargo test` is the single source of truth.** Every API endpoint, every filter
-  parameter, every query variation must have a corresponding integration test.
-  Agents must never merge code that doesn't pass `cargo test`.
+Testing is **not optional**. Every feature must be validated at both the backend
+(API + logic) and frontend (DOM + user interaction) levels before delivery.
+
+#### Backend Testing (`cargo test`)
+
+- **`cargo test` is the single source of truth for backend behavior.** Every API
+  endpoint, every filter parameter, every query variation must have a
+  corresponding integration test.
 - **Every plan that adds or modifies an API endpoint or filter parameter MUST
-  include "add/update integration test" as an acceptance criterion.** Tests are
-  not optional — they are part of the feature contract.
+  include "add/update integration test" as an acceptance criterion.**
 - **Coverage threshold**: ≥75% line coverage (via `cargo llvm-cov`). Run
-  `cargo llvm-cov --fail-under-lines 75` before merging. Current: 59.28%.
-- **645 tests**: 375 unit + 18 binary + 252 integration. See `tests/README.md`
-  for the full breakdown of which file covers which endpoint.
-- **Unit tests** go in `#[cfg(test)] mod tests` within the source file for
-  pure functions. Integration tests go in `tests/api_*.rs` files.
-- **Integration tests use a self-contained SQLite DB.** No external server, no
-  real data. Each test creates a fresh in-memory DB, runs all migrations, seeds
-  hand-crafted data that exercises edge cases, then hits the API and asserts
-  exact results (row counts, field values, response shapes).
-- **Test files mirror API structure.** `tests/api_files.rs` tests `/api/files*`,
-  `tests/api_tracks.rs` tests `/api/tracks*`, etc. When adding a new endpoint,
-  the test file is unambiguous.
+  `cargo llvm-cov --fail-under-lines 75` before merging.
+- **659 tests**: 379 lib + 18 bin + 262 integration. See `tests/README.md` for
+  the full breakdown.
+- **Unit tests** go in `#[cfg(test)] mod tests` within the source file for pure
+  functions. Integration tests go in `tests/api_*.rs` files.
+- **Integration tests use a self-contained SQLite DB.** Each test creates a
+  fresh in-memory DB, runs all migrations, seeds hand-crafted data, hits the API,
+  and asserts exact results (row counts, field values, response shapes).
+- **Test files mirror API structure.** `tests/api_files.rs` → `/api/files*`,
+  `tests/api_tracks.rs` → `/api/tracks*`, etc.
 - **Migration integrity is tested.** A dedicated test creates a fresh DB and
-  runs all migrations end-to-end. If a migration breaks the chain, `cargo test`
-  catches it immediately — no need to manually `rm -f app.db`.
+  runs all migrations end-to-end.
+
+#### Frontend Testing (`npx playwright test`)
+
+- **`npx playwright test` is the single source of truth for frontend behavior.**
+  Every new page, feature, filter, or UI interaction MUST include Playwright
+  acceptance tests.
+- **Every plan that modifies a frontend page or adds a new one MUST include
+  "add/update Playwright tests" as an acceptance criterion.**
+- Test files live in `frontend/tests/` — one file per page:
+  `smoke.spec.js`, `files.spec.js`, `tracks.spec.js`, etc.
+- **Tests are self-contained**: Playwright auto-starts the Rust server with an
+  isolated test DB (`test-playwright.db`), runs tests, then kills the server.
+  One command: `cd frontend && npx playwright test`.
+- **Every test seeds its own data** via `POST /api/testing/seed` in `beforeEach`.
+  Available scenarios: `basic`, `files_filter`, `digging`, `wav_variants`.
+  The seed endpoint guarantees deterministic state — no flaky tests.
+- **New seed scenarios** needed by tests go in `src/db/testing.rs` and are
+  registered in the `testing_seed_handler` match block in
+  `src/api/infrastructure.rs`.
+- **Selectors**: use `#id` or `[data-*]` attributes from the page's HTML.
+  Never rely on CSS class order or nth-child selectors — those change.
+- **Page errors**: every smoke test MUST listen for `pageerror` events and
+  assert `errors.length === 0`. Catches `ReferenceError`, `TypeError`, etc.
+
+#### Agent Validation Checklist (run before declaring "done")
+
+```bash
+# 1. Backend compiles
+cargo build
+
+# 2. All backend tests pass
+cargo test
+
+# 3. All frontend tests pass (auto-starts server, seeds DB, runs tests, kills server)
+cd frontend && npx playwright test
+```
+
+#### When to Extend Tests
+
+| Change                     | Action                                                                   |
+| -------------------------- | ------------------------------------------------------------------------ |
+| New API endpoint           | Add integration test in `tests/api_*.rs`                                 |
+| New API filter param       | Add test case in existing test file                                      |
+| New frontend page          | Create `frontend/tests/{page}.spec.js` + register in `app.js` + `nav.js` |
+| New frontend filter/button | Add Playwright test that clicks it and asserts result                    |
+| Changed frontend behavior  | Update existing Playwright test to match new behavior                    |
+| New seed data shape needed | Add scenario to `src/db/testing.rs` + register in seed handler           |
+| Bug fix                    | Write a failing test FIRST, then fix. The test proves the bug is dead.   |
 
 ## Dev Commands
 
@@ -182,6 +231,18 @@ cargo test --test api_files
 
 # Run a single test by name
 cargo test files_filter_is_local_true
+
+# Run all frontend Playwright tests (auto-starts server, seeds DB, runs tests)
+cd frontend && npx playwright test
+
+# Run tests for a specific page
+cd frontend && npx playwright test tests/files.spec.js
+
+# Run with browser visible (debugging)
+cd frontend && npx playwright test --headed
+
+# Debug a failed test (interactive trace viewer)
+cd frontend && npx playwright show-trace test-results/.../trace.zip
 
 # Smoke test against a running server (legacy, light use only)
 ./test.sh
@@ -213,13 +274,7 @@ cargo run -- serve  # then use the Traktor import page in the frontend
 
 ---
 
-## Current Migration Map (001–016)
-
-> **Note**: Migration 017 (`tag_bundles`) was added in the `feat/tag-bundles` branch — it won't be on `main` until the next release.
-
----
-
-## Current Migration Map (001–017)
+## Current Migration Map (001–018)
 
 Use this as a quick index. For actual SQL, query the live DB with `sqlite3 app.db ".schema"`.
 
@@ -242,6 +297,7 @@ Use this as a quick index. For actual SQL, query the live DB with `sqlite3 app.d
 | `015_track_resolved_tags.sql`     | Materialized `track_resolved_tags` table for track-level tag query performance                                                                       |
 | `016_backpack_rename.sql`         | Renamed `tags.followed` to `tags.backpack`                                                                                                           |
 | `017_tag_bundles.sql`             | New `tag_bundles` table for bundle/curation tags — aggregate multiple member tags into one                                                           |
+| `018_canonical_playlist_id.sql`   | `canonical_playlist_id` on `service_playlists` for multi-provider playlist linking (daily-tagging-queue push-to-spotify)                             |
 
 ---
 
@@ -354,8 +410,10 @@ src/
 
 1. Document progress and decisions in `docs/DECISIONS.md`
 2. Leave TODO comments in code
-3. Ensure backend compiles (`cargo build`) before handing over
-4. Test with `curl` commands first, then frontend
+3. Run `cargo build` — must pass
+4. Run `cargo test` — all 659+ tests must pass
+5. Run `cd frontend && npx playwright test` — all frontend tests must pass
+6. If you added a new endpoint, verify with `curl` first
 
 ---
 
@@ -8242,3 +8300,59 @@ Step 2 — Implement:
 - [ ] Storage page shows Metadata Gap card with counts
 - [ ] Pull button works, shows results
 - [ ] `cargo build` + `cargo test` pass
+
+---
+
+## Plan: daily-tagging-queue
+
+**Status**: done ✅
+**Branch**: `feat/daily-tagging-queue`
+**Ready for review**: yes
+**Depends on**: nothing
+**Migration needed**: yes — `018_canonical_playlist_id.sql`
+
+### Description
+
+"Daily Tagging Queue" — pick source tags, set a BPM range, generate a narrowed Spotify
+playlist for on-the-go listening. Tagging happens BY adding tracks to tag-named playlists
+in the Spotify mobile app. Two-way sync: tracks added on phone flow back via global poller.
+The loop: curate → push → listen → tag (on phone) → sync back.
+
+### What was built
+
+#### Phase A: Push-to-Spotify
+
+- **Migration 018**: `canonical_playlist_id` column + index on `service_playlists`
+- **Write OAuth scopes**: Added `playlist-modify-public` + `playlist-modify-private` in 5 locations
+  (`src/spotify/client.rs`, `src/api/services.rs` ×3, `src/api/websocket.rs`)
+- **SpotifyClient methods**: `get_current_user_id()`, `create_playlist()`, `add_tracks_to_playlist()`
+  in `src/spotify/client.rs`
+- **Shared push function**: `push_playlist_to_spotify()` in `src/api/playlists.rs` — creates
+  Spotify playlist, adds tracks in batches of 100, links via `canonical_playlist_id`
+- **HTTP handler**: `POST /api/playlists/{id}/push-to-spotify` with `{ name?, public? }`
+
+#### Phase B: Daily Generate Endpoint
+
+- **New module**: `src/api/daily.rs`
+- **`POST /api/daily/generate`**: Takes `{ tags, bpmMin, bpmMax, limit, excludeFullyTagged }`
+  - Resolves tags → tracks via `track_resolved_tags`, filters by BPM, random sample + limit
+  - Creates local playlist: `Daily-{tag}-{bpmMin}-{bpmMax}-{date}` (no spaces)
+  - Best-effort push to Spotify via `push_playlist_to_spotify()`
+  - Returns `{ playlistId, playlistName, trackCount, spotifyUrl }`
+
+#### Phase C: Frontend Daily Page
+
+- **New page**: `frontend/pages/daily.js` — tag typeahead, BPM presets, limit, exclude toggle, result card, localStorage history
+- Registered in `frontend/app.js` PAGE_MAP + `frontend/shared/nav.js` TOOLS_ITEMS
+
+### Acceptance Criteria
+
+- [x] `cargo build` passes (zero new warnings)
+- [x] `cargo test` passes (659 tests)
+- [x] Migration 018 runs cleanly (001→018)
+- [x] Write OAuth scopes in all 5 locations
+- [x] `POST /api/daily/generate` creates playlist + pushes to Spotify
+- [x] `POST /api/playlists/{id}/push-to-spotify` works independently
+- [x] BPM filter, exclude-fully-tagged, random sample all work
+- [x] `#daily` page renders with full form + history
+- [ ] **User must re-authenticate Spotify** on Services page for write scopes

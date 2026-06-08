@@ -9,7 +9,8 @@ use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth, Token,
     clients::{BaseClient, OAuthClient},
     model::{
-        Market, PlaylistId, SimplifiedPlaylist, TrackId, playlist::FullPlaylist, track::FullTrack,
+        Market, PlaylistId, SimplifiedPlaylist, TrackId, UserId, playlist::FullPlaylist,
+        track::FullTrack,
     },
 };
 use sqlx::Pool;
@@ -77,6 +78,8 @@ impl SpotifyClient {
             scopes: rspotify::scopes!(
                 "playlist-read-private",
                 "playlist-read-collaborative",
+                "playlist-modify-public",
+                "playlist-modify-private",
                 "user-read-playback-state"
             ),
             ..Default::default()
@@ -309,6 +312,71 @@ impl SpotifyClient {
             .current_user()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch current user: {}", e))
+    }
+
+    /// Get current user's Spotify ID.
+    pub async fn get_current_user_id(&self) -> Result<String> {
+        self.refresh_token_if_needed().await?;
+        let user = self
+            .spotify
+            .current_user()
+            .await
+            .context("Failed to get current user")?;
+        Ok(user.id.to_string())
+    }
+
+    /// Create a Spotify playlist. Returns (playlist_id, spotify_url).
+    pub async fn create_playlist(
+        &self,
+        user_id: &str,
+        name: &str,
+        public: bool,
+        description: Option<&str>,
+    ) -> Result<(String, String)> {
+        self.refresh_token_if_needed().await?;
+        let uid =
+            UserId::from_id(user_id).map_err(|e| anyhow::anyhow!("Invalid user ID: {}", e))?;
+        let playlist = self
+            .spotify
+            .user_playlist_create(uid, name, Some(public), None, description)
+            .await
+            .context("Failed to create Spotify playlist")?;
+        let url = playlist
+            .external_urls
+            .get("spotify")
+            .cloned()
+            .unwrap_or_default();
+        Ok((playlist.id.to_string(), url))
+    }
+
+    /// Add tracks to a Spotify playlist in batches of 100.
+    /// track_uris should be "spotify:track:XXX" format.
+    pub async fn add_tracks_to_playlist(
+        &self,
+        playlist_id: &str,
+        track_uris: &[String],
+    ) -> Result<()> {
+        self.refresh_token_if_needed().await?;
+        let pid = PlaylistId::from_id(playlist_id)
+            .map_err(|e| anyhow::anyhow!("Invalid playlist ID: {}", e))?;
+
+        for chunk in track_uris.chunks(100) {
+            let items: Vec<rspotify::model::PlayableId> = chunk
+                .iter()
+                .filter_map(|uri| {
+                    TrackId::from_uri(uri)
+                        .ok()
+                        .map(|id| rspotify::model::PlayableId::Track(id))
+                })
+                .collect();
+            if !items.is_empty() {
+                self.spotify
+                    .playlist_add_items(pid.clone(), items, None)
+                    .await
+                    .context("Failed to add tracks to playlist")?;
+            }
+        }
+        Ok(())
     }
 
     /// Save current tokens to database

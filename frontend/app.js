@@ -34,6 +34,7 @@ const PAGE_MAP = {
   "folder-detail": "folder-detail",
   storage: "storage",
   backpack: "backpack",
+  daily: "daily",
   "tag-bundles": "tag-bundles",
 };
 

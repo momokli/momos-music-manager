@@ -5628,3 +5628,133 @@ body.dark .storage-warning {
     align-items: center;
     gap: var(--space-2);
 }
+
+/* ── Daily Tagging Queue ─────────────────────────────────────────── */
+
+.daily-page {
+    max-width: 700px;
+}
+
+.daily-intro {
+    color: var(--muted);
+    margin-bottom: 1.5rem;
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+
+.daily-form {
+    padding: 1.5rem;
+}
+
+.daily-form-row {
+    margin-bottom: 1.25rem;
+}
+
+.daily-label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.4rem;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+}
+
+.daily-tag-input-row {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.daily-bpm-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.daily-bpm-sep {
+    color: var(--muted);
+    font-weight: 600;
+}
+
+.daily-bpm-presets {
+    display: flex;
+    gap: 0.3rem;
+    flex-wrap: wrap;
+    margin-left: 0.5rem;
+}
+
+.daily-bpm-presets .btn {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.5rem;
+}
+
+.daily-result-card {
+    padding: 1rem 1.5rem;
+    margin-top: 1rem;
+}
+
+.daily-result-card h4 {
+    margin: 0 0 0.5rem 0;
+}
+
+.daily-result-card p {
+    color: var(--muted);
+    margin: 0 0 0.75rem 0;
+}
+
+.daily-result-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.daily-spotify-btn {
+    background: #1db954;
+    color: #fff;
+    border: none;
+}
+
+.daily-spotify-btn:hover {
+    background: #1ed760;
+    color: #fff;
+}
+
+.daily-history {
+    margin-top: 1rem;
+    padding: 1.5rem;
+}
+
+.daily-history h3 {
+    margin: 0 0 1rem 0;
+}
+
+.daily-history-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.9rem;
+}
+
+.daily-history-item:last-child {
+    border-bottom: none;
+}
+
+.daily-history-name {
+    flex: 1;
+    font-weight: 500;
+}
+
+.daily-history-count {
+    color: var(--muted);
+    font-size: 0.8rem;
+    min-width: 60px;
+}
+
+.daily-history-date {
+    color: var(--muted);
+    font-size: 0.8rem;
+}

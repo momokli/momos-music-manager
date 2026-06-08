@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::AppState;
 
+pub mod daily;
 pub mod deemix_api;
 pub mod digging;
 pub mod explorer;
@@ -26,6 +27,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .merge(infrastructure::router())
         .merge(deemix_api::router())
+        .merge(daily::router())
         .merge(traktor::router())
         .merge(explorer::router())
         .merge(digging::router())

@@ -14,7 +14,6 @@ use sqlx::Pool;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 
-
 use crate::AppState;
 use crate::api::types::{ApiResponse, CallbackParams, internal_error};
 use crate::config::ServiceCredentials;
@@ -173,6 +172,8 @@ async fn service_auth_handler(
                 scopes: scopes!(
                     "playlist-read-private",
                     "playlist-read-collaborative",
+                    "playlist-modify-public",
+                    "playlist-modify-private",
                     "user-read-playback-state"
                 ),
                 ..Default::default()
@@ -405,6 +406,8 @@ async fn service_callback_handler(
         scopes: scopes!(
             "playlist-read-private",
             "playlist-read-collaborative",
+            "playlist-modify-public",
+            "playlist-modify-private",
             "user-read-playback-state"
         ),
         ..Default::default()
@@ -753,6 +756,8 @@ async fn service_fetch_counts_handler(
         scopes: scopes!(
             "playlist-read-private",
             "playlist-read-collaborative",
+            "playlist-modify-public",
+            "playlist-modify-private",
             "user-read-playback-state"
         ),
         ..Default::default()

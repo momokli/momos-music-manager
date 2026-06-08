@@ -14,7 +14,7 @@ pub async fn connect_db() -> Result<SqlitePool> {
     let options = SqliteConnectOptions::from_str(&database_url)?
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
-        .busy_timeout(Duration::from_secs(5))
+        .busy_timeout(Duration::from_secs(30))
         .synchronous(SqliteSynchronous::Normal);
     let pool = SqlitePool::connect_with(options).await?;
     Ok(pool)
