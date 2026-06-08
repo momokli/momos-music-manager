@@ -1768,12 +1768,14 @@ async function computeNeedsCount(container, state) {
   try {
     let resp;
     if (state.selectAllMode) {
-      // Use filter-based endpoint for "select all" mode
-      const filterParams = buildFilterParams(state);
-      resp = await fetchJSON("/api/files/needs-comment-count-all", {
-        method: "POST",
-        body: JSON.stringify(filterParams),
-      });
+      // Use the same GET params as the page for guaranteed filter parity.
+      // The count endpoint already handles isLocal, commentStatuses, etc.
+      const params = buildParams(state);
+      params.delete("limit");
+      params.delete("offset");
+      params.delete("sort");
+      params.delete("order");
+      resp = await fetchJSON(`/api/files/count?${params}`);
     } else {
       const selectedIds = Array.from(state.selectedFileIds);
       resp = await fetchJSON("/api/files/needs-comment-count", {
@@ -1781,7 +1783,9 @@ async function computeNeedsCount(container, state) {
         body: JSON.stringify({ fileIds: selectedIds }),
       });
     }
-    state.needsCommentCount = resp.data.filesNeedingUpdate || 0;
+    // count endpoint returns a plain number; needs-comment-count returns {filesNeedingUpdate}
+    state.needsCommentCount =
+      typeof resp.data === "number" ? resp.data : resp.data.filesNeedingUpdate || 0;
     btn.innerHTML = `<i class="fas fa-pen"></i> WRITE COMMENTS (${state.needsCommentCount})`;
   } catch (err) {
     console.warn("Failed to compute needs-comment count:", err);
