@@ -6,7 +6,7 @@
  *
  * Layout:
  *   Left panel: searchable list of bundle tags with member count
- *   Right panel: selected bundle detail (member chips, add/remove, file preview)
+ *   Right panel: selected bundle detail (member chips, add/remove)
  */
 
 import {
@@ -185,16 +185,7 @@ function renderBundleDetail(bundle, members) {
       </div>
     </div>
 
-    <div id="tb-file-preview" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-xl);padding:var(--space-4) var(--space-6);">
-      <div style="display:flex;align-items:center;gap:var(--space-2);margin-bottom:var(--space-3);">
-        <i class="fas fa-file" style="color:var(--text-muted);font-size:0.85rem;"></i>
-        <span style="font-weight:600;font-size:0.85rem;color:var(--text-secondary);">File Preview</span>
-        <span style="font-size:0.75rem;color:var(--text-subtle);">(first 10 tracks)</span>
-      </div>
-      <div id="tb-file-preview-content">
-        <div class="loading" style="padding:1rem 0;"><div class="spinner" style="width:20px;height:20px;"></div></div>
-      </div>
-    </div>
+
   `;
 }
 
@@ -228,10 +219,6 @@ function renderTypeaheadDropdown(results, selectedIndex) {
       `;
     })
     .join("");
-}
-
-function renderFilePreviewContainer() {
-  return `<div class="loading" style="padding:1rem 0;"><div class="spinner" style="width:20px;height:20px;"></div></div>`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -472,9 +459,6 @@ async function selectBundle(container, bundleId) {
       detail.innerHTML = renderBundleDetail(state.selectedBundle, state.members);
       wireTypeahead(container, null);
     }
-
-    // Load file preview
-    loadFilePreview(container, bundleId);
   } catch (err) {
     showToast(`Failed to load bundle members: ${err.message}`, "error");
     if (detail) {
@@ -504,9 +488,6 @@ async function addMember(container, tag) {
     if (chipsEl) {
       chipsEl.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:0.25rem;">${state.members.map(renderMemberChip).join("")}</div>`;
     }
-
-    // Update file preview
-    loadFilePreview(container, state.selectedBundleId);
   } catch (err) {
     // Rollback
     state.members = state.members.filter((m) => m.id !== tag.id);
@@ -539,9 +520,6 @@ async function removeMember(container, member) {
           '<span style="font-size:0.85rem;color:var(--text-subtle);">No member tags yet. Search and add tags below.</span>';
       }
     }
-
-    // Update file preview
-    loadFilePreview(container, state.selectedBundleId);
   } catch (err) {
     // Rollback
     state.members = oldMembers;
@@ -573,52 +551,6 @@ async function refreshBundleList(container) {
   }
 }
 
-async function loadFilePreview(container, bundleId) {
-  const previewContent = container.querySelector("#tb-file-preview-content");
-  if (!previewContent) return;
-
-  try {
-    // Fetch files tagged with this bundle tag (first 10)
-    const resp = await fetchJSON(
-      `/api/files?tags=${encodeURIComponent(state.selectedBundle?.name || "")}&limit=10`,
-    );
-    const files = resp.data || [];
-
-    if (files.length === 0) {
-      previewContent.innerHTML =
-        '<span style="font-size:0.85rem;color:var(--text-subtle);">No files with this bundle tag yet.</span>';
-      return;
-    }
-
-    const rows = files
-      .map((f) => {
-        const tags = f.tags || [];
-        const tagStr = tags
-          .slice(0, 4)
-          .map((t) => escapeHtml(t.tagName || t.name))
-          .join(", ");
-        const more = tags.length > 4 ? ` +${tags.length - 4}` : "";
-        return `
-          <div style="display:flex;align-items:center;gap:0.75rem;padding:0.3rem 0;border-bottom:1px solid var(--border);font-size:0.85rem;">
-            <span style="min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-              <strong>${escapeHtml(f.title)}</strong>
-            </span>
-            <span style="color:var(--text-muted);flex-shrink:0;">${escapeHtml(f.artist || "—")}</span>
-            <span style="color:var(--text-subtle);font-size:0.75rem;flex-shrink:0;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-              ${escapeHtml(tagStr)}${more}
-            </span>
-          </div>
-        `;
-      })
-      .join("");
-
-    previewContent.innerHTML = rows;
-  } catch {
-    previewContent.innerHTML =
-      '<span style="font-size:0.85rem;color:var(--text-subtle);">Could not load file preview.</span>';
-  }
-}
-
 /* ------------------------------------------------------------------ */
 /*  New Tag Modal                                                     */
 /* ------------------------------------------------------------------ */
@@ -630,7 +562,7 @@ function showNewTagModal(container) {
       <div style="padding:var(--space-6);">
         <div class="form-group">
           <label>Tag Name</label>
-          <input type="text" class="input-text w-full" id="new-bundle-tag-name" placeholder="e.g. afterhour-jonas">
+          <input type="text" class="input-text w-full" id="new-bundle-tag-name" placeholder="e.g. my-bundle">
         </div>
         <div style="font-size:0.8rem;color:var(--text-subtle);margin-top:var(--space-2);">
           Created as a Setlist category tag. You can add member tags afterwards.
