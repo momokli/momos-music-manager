@@ -19,11 +19,8 @@ use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::process::Command as TokioCommand;
 
-
 use crate::AppState;
-use crate::api::types::{
-    ApiResponse, ErrorResponse, apply_sort, internal_error,
-};
+use crate::api::types::{ApiResponse, ErrorResponse, apply_sort, internal_error};
 use crate::comment::generate_target_comment;
 use crate::db::{
     File, compute_target_comment, compute_target_comments_batch, find_tag_similar_tracks,
@@ -245,6 +242,9 @@ struct FilesFilterAll {
     pub pmv_aggregate: Option<String>,
     pub file_types: Option<String>,
     pub comment_statuses: Option<String>,
+    pub backed_up: Option<bool>,
+    pub is_local: Option<bool>,
+    pub safe_to_delete: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -619,6 +619,44 @@ fn build_files_filter_sql(filter: &FilesFilterAll) -> String {
         }
     }
 
+    // Tag filter: files that have any of the selected tags
+    if let Some(ref tags_str) = filter.tags
+        && !tags_str.is_empty()
+    {
+        let lowered: Vec<String> = tags_str
+            .split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if !lowered.is_empty() {
+            let placeholders: Vec<String> = lowered.iter().map(|_| "?".to_string()).collect();
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM file_resolved_tags frt WHERE frt.file_id = files.id AND LOWER(TRIM(frt.tag_name)) IN ({}))",
+                placeholders.join(",")
+            ));
+        }
+    }
+
+    // Backup filter
+    if let Some(true) = filter.backed_up {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'backup')");
+    } else if let Some(false) = filter.backed_up {
+        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'backup')");
+    }
+
+    // Local presence filter
+    if let Some(true) = filter.is_local {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'local')");
+    } else if let Some(false) = filter.is_local {
+        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'local')");
+    }
+
+    if let Some(true) = filter.safe_to_delete {
+        sql.push_str(" AND EXISTS (SELECT 1 FROM file_locations fl WHERE fl.file_id = files.id AND fl.location_type = 'backup')");
+        sql.push_str(" AND files.file_type != 'stem.m4a'");
+        sql.push_str(" AND EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.file_type = 'stem.m4a')");
+    }
+
     sql
 }
 
@@ -677,6 +715,30 @@ async fn files_needs_comment_count_all_handler(
             .filter(|s| !s.is_empty())
         {
             q = q.bind(t);
+        }
+    }
+
+    // Bind tag filter params
+    if let Some(ref tags_str) = filter.tags
+        && !tags_str.is_empty()
+    {
+        for t in tags_str
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(t);
+        }
+    }
+
+    // Bind PMV filter params
+    if let Some(ref pmv_cats) = filter.pmv_categories {
+        for c in pmv_cats
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(c);
         }
     }
 
@@ -764,6 +826,30 @@ async fn files_write_comments_all_handler(
             .filter(|s| !s.is_empty())
         {
             q = q.bind(t);
+        }
+    }
+
+    // Bind tag filter params
+    if let Some(ref tags_str) = filter.tags
+        && !tags_str.is_empty()
+    {
+        for t in tags_str
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(t);
+        }
+    }
+
+    // Bind PMV filter params
+    if let Some(ref pmv_cats) = filter.pmv_categories {
+        for c in pmv_cats
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(c);
         }
     }
 
@@ -1743,10 +1829,9 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
                 }
             });
             if let Some(ref pat) = search_pat {
-                id_q = id_q
-                    .bind(pat.as_str())
-                    .bind(pat.as_str())
-                    .bind(pat.as_str());
+                for _ in 0..8 {
+                    id_q = id_q.bind(pat.as_str());
+                }
             }
             if let Some(bpm_min) = query.bpm_min {
                 id_q = id_q.bind(bpm_min);
@@ -1779,6 +1864,22 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
                     .filter(|s| !s.is_empty())
                 {
                     id_q = id_q.bind(t);
+                }
+            }
+
+            // Re-bind tag filter params
+            for tag in &tag_param_values {
+                id_q = id_q.bind(tag.as_str());
+            }
+
+            // Re-bind PMV filter params
+            if let Some(ref pmv_cats) = query.pmv_categories {
+                for c in pmv_cats
+                    .split(',')
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+                {
+                    id_q = id_q.bind(c);
                 }
             }
 

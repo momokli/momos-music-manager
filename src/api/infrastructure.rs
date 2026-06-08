@@ -390,11 +390,12 @@ async fn testing_seed_handler(
         "files_filter" => testing::seed_files_filter_scenario(&state.db).await,
         "digging" => testing::seed_digging_scenario(&state.db).await,
         "wav_variants" => testing::seed_wav_variant_scenario(&state.db).await,
+        "comment_diff" => testing::seed_comment_diff_scenario(&state.db).await,
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
-                    "error": format!("Unknown scenario: {}. Valid: basic, files_filter, digging, wav_variants", scenario)
+                    "error": format!("Unknown scenario: {}. Valid: basic, files_filter, digging, wav_variants, comment_diff", scenario)
                 })),
             )
                 .into_response();

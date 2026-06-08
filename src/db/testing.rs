@@ -423,6 +423,69 @@ pub async fn seed_wav_variant_scenario(pool: &Pool<Sqlite>) -> HashMap<String, u
     counts
 }
 
+/// Seed data for comment diff testing. Creates two files:
+/// - File 40: comment differs from target → needsUpdate=true (local, backed up)
+/// - File 41: comment matches target → needsUpdate=false (local, backed up)
+/// Both are linked to playlist "Groovy" → tag "Groovy" (Mood/M).
+pub async fn seed_comment_diff_scenario(pool: &Pool<Sqlite>) -> HashMap<String, usize> {
+    let mut counts = seed_basic_scenario(pool).await;
+
+    // Files 40, 41 with explicit comments
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO files (id, file_path, file_type, file_size, last_modified, title, artist,
+             isrc, comment, file_hash, spotify_id)
+           VALUES
+             (40, '/test/stems/Diff - NeedsUpdate.flac', 'flac', 5000000, 1700000000,
+              'DiffTest Needs', 'Artist Diff', 'US040', 'old wrong comment', 'hash40', 'spotify:track:diff1'),
+             (41, '/test/stems/Diff - UpToDate.flac',   'flac', 5000000, 1700000000,
+              'DiffTest OK',    'Artist Diff', 'US041', 'groovy',           'hash41', 'spotify:track:diff2')"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Both are local + backed up
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO file_locations (file_id, location_type, path, file_size, last_verified)
+           VALUES
+             (40, 'local',  '/test/stems/Diff - NeedsUpdate.flac', 5000000, 1700000000),
+             (40, 'backup', '/backup/stems/Diff - NeedsUpdate.flac', 5000000, 1700000000),
+             (41, 'local',  '/test/stems/Diff - UpToDate.flac',   5000000, 1700000000),
+             (41, 'backup', '/backup/stems/Diff - UpToDate.flac', 5000000, 1700000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Service tracks for linking
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_tracks (id, service, service_id, title, artist, isrc, imported_at)
+           VALUES
+             (20, 'spotify', 'spotify:track:diff1', 'DiffTest Needs', 'Artist Diff', 'US040', 1700000000),
+             (21, 'spotify', 'spotify:track:diff2', 'DiffTest OK',    'Artist Diff', 'US041', 1700000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Link to playlist "Groovy" (id=1) → tag "Groovy" (Mood, prefix M)
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_playlist_tracks (playlist_id, track_id, position, added_at)
+           VALUES (1, 20, 0, 1700000000), (1, 21, 0, 1700000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Populate file_resolved_tags so target comment can be computed
+    crate::db::refresh_file_resolved_tags(pool).await.unwrap();
+
+    *counts.get_mut("files").unwrap() += 2;
+    *counts.get_mut("file_locations").unwrap() += 4;
+    *counts.get_mut("service_tracks").unwrap() += 2;
+    counts
+}
+
 /// Seed a subscribed playlist for archive/subscription testing.
 pub async fn seed_subscribed_playlist(pool: &Pool<Sqlite>) {
     sqlx::query("UPDATE service_playlists SET archive_deleted = 1 WHERE id = 1")

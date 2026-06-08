@@ -81,4 +81,76 @@ test.describe("Files Page", () => {
       expect(page.url()).toContain("file-detail");
     }
   });
+
+  test("comment diff shows old/new when file needs update", async ({ page, request }) => {
+    // Seed with comment diff scenario — file 40 needs update, file 41 is up-to-date
+    await request.post("/api/testing/seed", {
+      data: { scenario: "comment_diff" },
+    });
+
+    // Navigate with filters: local files only, needs_update comment status
+    await page.goto("/#files?commentStatuses=needs_update&isLocal=true");
+    await page.waitForSelector("#files-content table tbody tr", { timeout: 8000 });
+
+    // Check for JavaScript errors
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    // The page should show diff-line elements for files needing updates
+    const diffLines = page.locator(".diff-line");
+    const count = await diffLines.count();
+    expect(count).toBeGreaterThan(0);
+
+    // Each diff-line should contain old (-) and new (+) indicators
+    const firstDiff = diffLines.first();
+    await expect(firstDiff.locator(".diff-line-old .diff-sign.minus")).toBeVisible();
+    await expect(firstDiff.locator(".diff-line-new .diff-sign.plus")).toBeVisible();
+
+    // Should NOT show the ✓ unchanged indicator for files needing updates
+    // (files that are up-to-date won't appear with needs_update filter)
+    const unchanged = page.locator(".diff-line-unchanged");
+    const unchangedCount = await unchanged.count();
+    // File 41 is filtered out (needsUpdate=false), so no unchanged lines in results
+    expect(unchangedCount).toBe(0);
+
+    // Verify no JS errors
+    expect(errors.length).toBe(0);
+  });
+
+  test("select all count respects isLocal filter", async ({ page, request }) => {
+    // Seed comment diff scenario
+    await request.post("/api/testing/seed", {
+      data: { scenario: "comment_diff" },
+    });
+
+    await page.goto("/#files?commentStatuses=needs_update&isLocal=true");
+    await page.waitForSelector("#files-content table tbody tr", { timeout: 8000 });
+
+    // Read the total count from the stats row
+    const statsRow = page.locator("#files-content .stats-row strong");
+    const statsText = await statsRow.textContent();
+    const totalMatching = parseInt(statsText, 10);
+    expect(totalMatching).toBeGreaterThan(0);
+
+    // Check all visible rows via the header select-all checkbox
+    const selectAllCheckbox = page.locator("#files-select-all");
+    await selectAllCheckbox.setChecked(false);
+    await selectAllCheckbox.setChecked(true);
+    await page.waitForTimeout(500);
+
+    // Now the WRITE COMMENTS button should show a count matching the filtered total
+    const writeBtn = page.locator("#files-actions-write-comments");
+    await expect(writeBtn).toBeVisible({ timeout: 3000 });
+
+    const btnText = await writeBtn.textContent();
+    // Extract the number from "WRITE COMMENTS (N)"
+    const match = btnText.match(/WRITE COMMENTS \((\d+)\)/);
+    if (match) {
+      const writeCount = parseInt(match[1], 10);
+      // The write count must not exceed the total matching files
+      expect(writeCount).toBeLessThanOrEqual(totalMatching);
+      // Should be at least 1 (file 40 needs update; file 41 is up-to-date)
+      expect(writeCount).toBeGreaterThan(0);
+    }
+  });
 });

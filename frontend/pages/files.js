@@ -242,7 +242,7 @@ function adaptFile(f) {
     diffOld: diff.diffOld,
     diffNew: diff.diffNew,
     commentUnchanged: diff.unchanged,
-    needsUpdate: f.needsUpdate,
+    needsUpdate: f.commentNeedsUpdate,
     comment: f.comment,
     commentTarget: f.commentTarget,
     playCount: f.playCount,
