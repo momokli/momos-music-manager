@@ -102,6 +102,7 @@ struct MaintainerToml {
     backup_discovery_interval_secs: Option<u64>,
     auto_prune: Option<bool>,
     auto_cleanup_dirs: Option<bool>,
+    traktor_import_enabled: Option<bool>,
 }
 
 // ── Runtime representation ─────────────────────────────────────────────────
@@ -146,6 +147,7 @@ pub struct ServiceCredentials {
     pub maintainer_backup_discovery_interval_secs: u64,
     pub maintainer_auto_prune: bool,
     pub maintainer_auto_cleanup_dirs: bool,
+    pub maintainer_traktor_import_enabled: bool,
 }
 
 impl ServiceCredentials {
@@ -339,6 +341,19 @@ impl ServiceCredentials {
                         .and_then(|m| m.auto_cleanup_dirs)
                 })
                 .unwrap_or(false),
+
+            maintainer_traktor_import_enabled: std::env::var(
+                "MOMOS_MAINTAINER_TRAKTOR_IMPORT_ENABLED",
+            )
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .or_else(|| {
+                toml_config
+                    .maintainer
+                    .as_ref()
+                    .and_then(|m| m.traktor_import_enabled)
+            })
+            .unwrap_or(true),
         };
 
         info!(
@@ -348,12 +363,13 @@ impl ServiceCredentials {
 
         info!(
             "Maintainer config: interval={}s, full_scan_max_age={}s, backup_discovery_interval={}s, \
-             auto_prune={}, auto_cleanup_dirs={}",
+             auto_prune={}, auto_cleanup_dirs={}, traktor_import={}",
             credentials.maintainer_interval_secs,
             credentials.maintainer_full_scan_max_age_secs,
             credentials.maintainer_backup_discovery_interval_secs,
             credentials.maintainer_auto_prune,
             credentials.maintainer_auto_cleanup_dirs,
+            credentials.maintainer_traktor_import_enabled,
         );
 
         credentials
@@ -409,6 +425,12 @@ impl ServiceCredentials {
             maintainer_auto_cleanup_dirs: env_var_optional("MOMOS_MAINTAINER_AUTO_CLEANUP_DIRS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(false),
+
+            maintainer_traktor_import_enabled: env_var_optional(
+                "MOMOS_MAINTAINER_TRAKTOR_IMPORT_ENABLED",
+            )
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(true),
         }
     }
 
@@ -549,6 +571,7 @@ impl ServiceCredentials {
             maintainer_backup_discovery_interval_secs: 604800,
             maintainer_auto_prune: false,
             maintainer_auto_cleanup_dirs: false,
+            maintainer_traktor_import_enabled: false,
         }
     }
 }

@@ -40,8 +40,11 @@ pub struct TraktorEntry {
     /// Last played date in Traktor format (`LAST_PLAYED`), e.g. `"2025/12/1"`
     pub last_played_raw: Option<String>,
     /// Rating (`RANKING` attribute on `<INFO>`, 0-255 scale in Traktor)
-    #[allow(dead_code)]
     pub rating: Option<i32>,
+    /// BPM from `<TEMPO BPM="...">` child element
+    pub bpm: Option<f64>,
+    /// Musical key from `<INFO KEY="...">` attribute (Camelot notation)
+    pub musical_key: Option<String>,
 }
 
 /// Statistics returned after an import run.
@@ -53,10 +56,16 @@ pub struct ImportStats {
     pub matched: usize,
     /// Entries that had no `PLAYCOUNT` attribute (skipped during update)
     pub no_play_count: usize,
-    /// Files whose `play_count` was actually updated
-    pub updated_play_count: usize,
-    /// Files whose `last_played` was actually updated
-    pub updated_last_played: usize,
+    /// Matched entries providing play count data
+    pub with_play_count: usize,
+    /// Matched entries providing last played data
+    pub with_last_played: usize,
+    /// Matched entries providing BPM data
+    pub with_bpm: usize,
+    /// Matched entries providing musical key data
+    pub with_key: usize,
+    /// Matched entries providing rating data
+    pub with_rating: usize,
 }
 
 // ============================================================
@@ -171,12 +180,27 @@ fn parse_entry(node: roxmltree::Node) -> Option<TraktorEntry> {
         .attribute("RANKING")
         .and_then(|v| v.parse::<i32>().ok());
 
+    // 1. <TEMPO BPM="129.999847" BPM_QUALITY="100.000000">
+    let tempo = node.children().find(|c| c.has_tag_name("TEMPO"));
+    let bpm = tempo
+        .and_then(|t| t.attribute("BPM"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|&b| b > 0.0);
+
+    // 2. <INFO KEY="10d"> — already inside the INFO node
+    let musical_key = info
+        .attribute("KEY")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     Some(TraktorEntry {
         dir,
         file,
         play_count,
         last_played_raw,
         rating,
+        bpm,
+        musical_key,
     })
 }
 
@@ -266,7 +290,6 @@ fn parse_last_played(date_str: &str) -> Option<i64> {
 /// - 103–153 = 3 stars
 /// - 154–204 = 4 stars
 /// - 205–255 = 5 stars
-#[allow(dead_code)]
 fn traktor_ranking_to_rating(ranking: i32) -> i32 {
     if ranking <= 0 {
         0
@@ -285,8 +308,12 @@ fn traktor_ranking_to_rating(ranking: i32) -> i32 {
 
 /// Match parsed Traktor entries against the database and update stats.
 ///
-/// Returns `ImportStats` with counts of what happened.
-pub async fn import_play_stats(db: &Pool<Sqlite>, entries: &[TraktorEntry]) -> Result<ImportStats> {
+/// Imports play_count, last_played, BPM, musical key, and rating.
+/// All fields use COALESCE so data accumulates and never regresses on re-import.
+pub async fn import_traktor_metadata(
+    db: &Pool<Sqlite>,
+    entries: &[TraktorEntry],
+) -> Result<ImportStats> {
     let mut stats = ImportStats {
         total_entries: entries.len(),
         ..Default::default()
@@ -319,13 +346,24 @@ pub async fn import_play_stats(db: &Pool<Sqlite>, entries: &[TraktorEntry]) -> R
         .collect();
 
     // Prepare batch updates
-    let mut updated_play_count = 0usize;
-    let mut updated_last_played = 0usize;
+    let mut with_play_count = 0usize;
+    let mut with_last_played = 0usize;
+    let mut with_bpm = 0usize;
+    let mut with_key = 0usize;
+    let mut with_rating = 0usize;
     let mut matched = 0usize;
     let mut no_play_count = 0usize;
 
     // Collect updates to avoid holding a tx open during iteration
-    type UpdateRow = (Option<i32>, Option<i64>, i64); // (play_count, last_played, file_id)
+    // (play_count, last_played, bpm, musical_key, rating, file_id)
+    type UpdateRow = (
+        Option<i32>,
+        Option<i64>,
+        Option<f64>,
+        Option<String>,
+        Option<i32>,
+        i64,
+    );
     let mut updates: Vec<UpdateRow> = vec![];
 
     for entry in entries {
@@ -342,30 +380,65 @@ pub async fn import_play_stats(db: &Pool<Sqlite>, entries: &[TraktorEntry]) -> R
             if play_count.is_none() {
                 no_play_count += 1;
             } else {
-                updated_play_count += 1;
+                with_play_count += 1;
             }
             if last_played_ts.is_some() {
-                updated_last_played += 1;
+                with_last_played += 1;
+            }
+            if entry.bpm.is_some() {
+                with_bpm += 1;
+            }
+            if entry.musical_key.is_some() {
+                with_key += 1;
+            }
+            if entry.rating.is_some() {
+                with_rating += 1;
             }
 
-            updates.push((play_count, last_played_ts, *file_id));
+            let rating_converted = entry.rating.map(traktor_ranking_to_rating);
+
+            updates.push((
+                play_count,
+                last_played_ts,
+                entry.bpm,
+                entry.musical_key.clone(),
+                rating_converted,
+                *file_id,
+            ));
         }
     }
 
     stats.matched = matched;
     stats.no_play_count = no_play_count;
+    stats.with_play_count = with_play_count;
+    stats.with_last_played = with_last_played;
+    stats.with_bpm = with_bpm;
+    stats.with_key = with_key;
+    stats.with_rating = with_rating;
 
     // Execute batch updates
     if !updates.is_empty() {
         let batch_size = 100;
         for chunk in updates.chunks(batch_size) {
             let now = chrono::Utc::now().timestamp();
-            for (play_count, last_played_ts, file_id) in chunk {
+            for (play_count, last_played_ts, bpm, musical_key, rating, file_id) in chunk {
                 sqlx::query(
-                    "UPDATE files SET play_count = COALESCE(?, play_count), last_played = COALESCE(?, last_played), updated_at = ? WHERE id = ?",
+                    r#"
+                    UPDATE files SET
+                        play_count  = COALESCE(?, play_count),
+                        last_played = COALESCE(?, last_played),
+                        bpm         = COALESCE(?, bpm),
+                        musical_key = COALESCE(?, musical_key),
+                        rating      = COALESCE(?, rating),
+                        updated_at  = ?
+                    WHERE id = ?
+                    "#,
                 )
                 .bind(*play_count)
                 .bind(*last_played_ts)
+                .bind(*bpm)
+                .bind(musical_key.as_deref())
+                .bind(*rating)
                 .bind(now)
                 .bind(file_id)
                 .execute(db)
@@ -375,12 +448,15 @@ pub async fn import_play_stats(db: &Pool<Sqlite>, entries: &[TraktorEntry]) -> R
         }
     }
 
-    stats.updated_play_count = updated_play_count;
-    stats.updated_last_played = updated_last_played;
-
     info!(
-        "Traktor import complete: {} entries, {} matched, {} play counts, {} last played dates",
-        stats.total_entries, stats.matched, stats.updated_play_count, stats.updated_last_played,
+        "Traktor import complete: {} entries, {} matched, {} with play counts, {} with last played, {} with BPM, {} with key, {} with rating",
+        stats.total_entries,
+        stats.matched,
+        stats.with_play_count,
+        stats.with_last_played,
+        stats.with_bpm,
+        stats.with_key,
+        stats.with_rating,
     );
 
     Ok(stats)
@@ -407,7 +483,7 @@ pub async fn run_import(
 ) -> Result<(ImportStats, PathBuf)> {
     let nml_path = resolve_collection_path(custom_path)?;
     let entries = parse_collection_nml(&nml_path)?;
-    let stats = import_play_stats(db, &entries).await?;
+    let stats = import_traktor_metadata(db, &entries).await?;
     Ok((stats, nml_path))
 }
 
@@ -521,7 +597,7 @@ mod tests {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <NML VERSION="20">
 <HEAD COMPANY="www.native-instruments.com" PROGRAM="Traktor Pro 4"></HEAD>
-<COLLECTION ENTRIES="2">
+<COLLECTION ENTRIES="4">
 <ENTRY MODIFIED_DATE="2026/3/1" MODIFIED_TIME="58284" LOCK="1"
       AUDIO_ID="abc123" TITLE="Test Track" ARTIST="Test Artist">
   <LOCATION DIR="/:Users/:test/:Music/:" FILE="test.mp3" VOLUME="Macintosh HD" VOLUMEID="Macintosh HD"></LOCATION>
@@ -536,6 +612,21 @@ mod tests {
   <INFO BITRATE="900000" KEY="1m" PLAYTIME="300" IMPORT_DATE="2025/2/1" FLAGS="12" FILESIZE="20000"></INFO>
   <TEMPO BPM="128.000000" BPM_QUALITY="100.000000"></TEMPO>
 </ENTRY>
+<!-- Entry 3: no <TEMPO>, no KEY attribute (edge case for missing metadata) -->
+<ENTRY MODIFIED_DATE="2026/3/1" MODIFIED_TIME="58286"
+      AUDIO_ID="ghi789" TITLE="Edge Case" ARTIST="No Metadata">
+  <LOCATION DIR="/:Users/:test/:edge/:" FILE="edge.flac" VOLUME="Macintosh HD" VOLUMEID="Macintosh HD"></LOCATION>
+  <ALBUM TITLE="Edge Album"></ALBUM>
+  <INFO BITRATE="900000" PLAYCOUNT="0" PLAYTIME="300" IMPORT_DATE="2025/2/1" RANKING="0" FLAGS="12" FILESIZE="20000"></INFO>
+</ENTRY>
+<!-- Entry 4: realistic fractional BPM from Traktor -->
+<ENTRY MODIFIED_DATE="2026/3/1" MODIFIED_TIME="58287"
+      AUDIO_ID="jkl012" TITLE="Fractional BPM" ARTIST="Analyzed Track">
+  <LOCATION DIR="/:Users/:test/:stems/:" FILE="fractional.stem.m4a" VOLUME="Macintosh HD" VOLUMEID="Macintosh HD"></LOCATION>
+  <ALBUM TITLE="Fractional Album"></ALBUM>
+  <INFO BITRATE="320000" KEY="9m" PLAYCOUNT="12" PLAYTIME="300" IMPORT_DATE="2025/3/1" LAST_PLAYED="2025/7/1" RANKING="128" FLAGS="12" FILESIZE="50000"></INFO>
+  <TEMPO BPM="129.999847" BPM_QUALITY="99.000000"></TEMPO>
+</ENTRY>
 </COLLECTION>
 </NML>"#;
 
@@ -545,19 +636,37 @@ mod tests {
         let path = tmpfile.into_temp_path();
 
         let entries = parse_collection_nml(&path).unwrap();
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 4);
 
-        // First entry
+        // Entry 0: full metadata
         assert_eq!(entries[0].dir, "/:Users/:test/:Music/:");
         assert_eq!(entries[0].file, "test.mp3");
         assert_eq!(entries[0].play_count, Some(5));
         assert_eq!(entries[0].last_played_raw, Some("2025/6/15".to_string()));
         assert_eq!(entries[0].rating, Some(180));
+        assert_eq!(entries[0].bpm, Some(124.0));
+        assert_eq!(entries[0].musical_key.as_deref(), Some("8m"));
 
-        // Second entry (no playcount)
+        // Entry 1: no playcount, no last_played, but HAS BPM + key
         assert_eq!(entries[1].play_count, None);
         assert!(entries[1].last_played_raw.is_none());
         assert_eq!(entries[1].rating, None);
+        assert_eq!(entries[1].bpm, Some(128.0));
+        assert_eq!(entries[1].musical_key.as_deref(), Some("1m"));
+
+        // Entry 2: no <TEMPO>, no KEY attribute, RANKING=0
+        assert_eq!(entries[2].bpm, None, "missing <TEMPO> \u{2192} None");
+        assert_eq!(
+            entries[2].musical_key, None,
+            "missing KEY attr \u{2192} None"
+        );
+        assert_eq!(entries[2].rating, Some(0), "RANKING=0 \u{2192} Some(0)");
+        assert_eq!(entries[2].play_count, Some(0));
+
+        // Entry 3: fractional BPM from real Traktor export
+        assert_eq!(entries[3].bpm, Some(129.999847));
+        assert_eq!(entries[3].musical_key.as_deref(), Some("9m"));
+        assert_eq!(entries[3].rating, Some(128));
     }
 
     #[test]
@@ -602,4 +711,151 @@ mod tests {
             "/Users/momo/Music/stems".to_lowercase()
         );
     }
+
+    /// Parse XML from a string for testing
+    fn parse_xml(xml: &str) -> Vec<TraktorEntry> {
+        use std::io::Write;
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        tmpfile.write_all(xml.as_bytes()).unwrap();
+        let path = tmpfile.into_temp_path();
+        parse_collection_nml(&path).unwrap()
+    }
+
+    #[test]
+    fn test_parse_entry_filters_edge_cases() {
+        // BPM="0.000000" should be filtered to None
+        // KEY="" should be filtered to None
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<NML VERSION="20">
+<HEAD COMPANY="www.native-instruments.com" PROGRAM="Traktor Pro 4"></HEAD>
+<COLLECTION ENTRIES="1">
+<ENTRY MODIFIED_DATE="2026/3/1" MODIFIED_TIME="58284"
+      AUDIO_ID="test123" TITLE="Zero BPM" ARTIST="Test">
+  <LOCATION DIR="/:test/:" FILE="zero.flac" VOLUME="V"></LOCATION>
+  <INFO BITRATE="320000" KEY="" PLAYCOUNT="0" PLAYTIME="100" IMPORT_DATE="2025/1/1"></INFO>
+  <TEMPO BPM="0.000000" BPM_QUALITY="0"></TEMPO>
+</ENTRY>
+</COLLECTION>
+</NML>"#;
+
+        let entries = parse_xml(xml);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].bpm, None,
+            "BPM=0 should be filtered to None"
+        );
+        assert_eq!(
+            entries[0].musical_key, None,
+            "KEY=\" should be filtered to None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_import_traktor_metadata() {
+        use sqlx::SqlitePool;
+
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            r#"CREATE TABLE files (
+                id INTEGER PRIMARY KEY,
+                file_path TEXT NOT NULL UNIQUE,
+                file_hash TEXT NOT NULL DEFAULT '',
+                file_type TEXT NOT NULL DEFAULT 'flac',
+                file_size INTEGER NOT NULL DEFAULT 0,
+                last_modified INTEGER NOT NULL DEFAULT 0,
+                last_scanned INTEGER NOT NULL DEFAULT 0,
+                isrc TEXT,
+                title TEXT, artist TEXT, album TEXT,
+                bpm REAL, musical_key TEXT,
+                rating INTEGER NOT NULL DEFAULT 0,
+                play_count INTEGER NOT NULL DEFAULT 0,
+                last_played INTEGER,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Insert a file that will match the Traktor entry
+        sqlx::query("INSERT INTO files (id, file_path) VALUES (1, '/Users/test/test.flac')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Entry with BPM, Key, and Rating
+        let entry = TraktorEntry {
+            dir: "/:Users/:test/:".to_string(),
+            file: "test.flac".to_string(),
+            play_count: Some(5),
+            last_played_raw: Some("2025/6/1".to_string()),
+            bpm: Some(128.0),
+            musical_key: Some("4m".to_string()),
+            rating: Some(180),
+        };
+
+        let stats = import_traktor_metadata(&pool, &[entry]).await.unwrap();
+        assert_eq!(stats.matched, 1);
+        assert_eq!(stats.with_bpm, 1);
+        assert_eq!(stats.with_key, 1);
+        assert_eq!(stats.with_rating, 1);
+
+        let (bpm, key, rating): (Option<f64>, Option<String>, i32) =
+            sqlx::query_as("SELECT bpm, musical_key, rating FROM files WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bpm, Some(128.0));
+        assert_eq!(key.as_deref(), Some("4m"));
+        assert_eq!(rating, 4, "rating 180 should convert to 4 stars");
+
+        // ── COALESCE: re-import with NULL values — nothing should change ──
+        let null_entry = TraktorEntry {
+            dir: "/:Users/:test/:".to_string(),
+            file: "test.flac".to_string(),
+            play_count: None,
+            last_played_raw: None,
+            bpm: None,
+            musical_key: None,
+            rating: None,
+        };
+        let stats2 = import_traktor_metadata(&pool, &[null_entry]).await.unwrap();
+        assert_eq!(stats2.with_bpm, 0);
+        assert_eq!(stats2.with_key, 0);
+        assert_eq!(stats2.with_rating, 0);
+
+        let (bpm2, key2, rating2): (Option<f64>, Option<String>, i32) =
+            sqlx::query_as("SELECT bpm, musical_key, rating FROM files WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bpm2, Some(128.0), "BPM should survive NULL re-import");
+        assert_eq!(
+            key2.as_deref(),
+            Some("4m"),
+            "Key should survive NULL re-import"
+        );
+        assert_eq!(rating2, 4, "Rating should survive NULL re-import");
+
+        // ── COALESCE: re-import with rating=0 — SHOULD overwrite ──
+        let unrate = TraktorEntry {
+            dir: "/:Users/:test/:".to_string(),
+            file: "test.flac".to_string(),
+            play_count: None,
+            last_played_raw: None,
+            bpm: None,
+            musical_key: None,
+            rating: Some(0),
+        };
+        let stats3 = import_traktor_metadata(&pool, &[unrate]).await.unwrap();
+        assert_eq!(stats3.with_rating, 1);
+        let (_bpm3, _key3, rating3): (Option<f64>, Option<String>, i32) =
+            sqlx::query_as("SELECT bpm, musical_key, rating FROM files WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rating3, 0, "rating=0 should overwrite — user unrated in Traktor");
+    }
 }
+

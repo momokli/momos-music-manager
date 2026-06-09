@@ -1715,11 +1715,14 @@ pub async fn start_traktor_import_task(
         match crate::traktor::run_import(&db_clone, custom_path_ref).await {
             Ok((stats, nml_path)) => {
                 let msg = format!(
-                    "Import complete: {} entries parsed, {} matched, {} play counts, {} last played dates. Used: {}",
+                    "Import complete: {} entries parsed, {} matched, {} play counts, {} last played, {} BPM, {} key, {} rating. Used: {}",
                     stats.total_entries,
                     stats.matched,
-                    stats.updated_play_count,
-                    stats.updated_last_played,
+                    stats.with_play_count,
+                    stats.with_last_played,
+                    stats.with_bpm,
+                    stats.with_key,
+                    stats.with_rating,
                     nml_path.display()
                 );
                 info!("{}", msg);

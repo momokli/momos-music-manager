@@ -24,16 +24,52 @@ pub async fn start_maintainer(
     backup_discovery_interval: u64,
     auto_prune: bool,
     auto_cleanup_dirs: bool,
+    traktor_import_enabled: bool,
     cancel_token: CancellationToken,
 ) {
     info!(
         "Maintainer started (interval={}s, full_scan_max_age={}s, backup_discovery_interval={}s, \
-         auto_prune={}, auto_cleanup_dirs={})",
-        interval_secs, full_scan_max_age, backup_discovery_interval, auto_prune, auto_cleanup_dirs,
+         auto_prune={}, auto_cleanup_dirs={}, traktor_import={})",
+        interval_secs,
+        full_scan_max_age,
+        backup_discovery_interval,
+        auto_prune,
+        auto_cleanup_dirs,
+        traktor_import_enabled,
     );
 
     // Track when we last ran backup discovery (start at 0 so it runs on first cycle)
     let mut last_backup_discovery: i64 = 0;
+    // Track collection.nml mtime for Traktor auto-import detection
+    let mut last_nml_mtime: Option<i64> = None;
+
+    // Run Traktor import once at startup to seed initial state
+    if traktor_import_enabled {
+        if let Ok((_path, mtime)) = crate::traktor::get_collection_status(None) {
+            let mtime_secs = mtime
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            info!(
+                "Maintainer: initial Traktor import at startup (mtime {})",
+                mtime_secs
+            );
+            match crate::traktor::run_import(&db, None).await {
+                Ok((stats, _)) => {
+                    info!(
+                        "Maintainer: initial traktor import complete: {} entries, {} matched, {} BPM, {} key, {} rating",
+                        stats.total_entries,
+                        stats.matched,
+                        stats.with_bpm,
+                        stats.with_key,
+                        stats.with_rating
+                    );
+                    last_nml_mtime = Some(mtime_secs);
+                }
+                Err(e) => warn!("Maintainer: initial traktor import failed: {}", e),
+            }
+        }
+    }
 
     loop {
         // Sleep for the interval (or until cancelled)
@@ -299,6 +335,40 @@ pub async fn start_maintainer(
                 }
                 Err(e) => {
                     warn!("Maintainer: failed to get backpack pull candidates: {}", e);
+                }
+            }
+        }
+
+        // ── Check 7: Traktor collection.nml auto-import ──────────────
+        //
+        // Checks if collection.nml has been modified (e.g. user analysed
+        // new files in Traktor and closed the app). If changed, triggers
+        // import to pull BPM, key, rating, and play stats into the DB.
+        if traktor_import_enabled {
+            if let Ok((_path, mtime)) = crate::traktor::get_collection_status(None) {
+                let mtime_secs = mtime
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                if last_nml_mtime.map_or(true, |last| mtime_secs > last) {
+                    info!(
+                        "Maintainer: collection.nml changed (mtime {}), auto-importing...",
+                        mtime_secs
+                    );
+                    match crate::traktor::run_import(&db, None).await {
+                        Ok((stats, _)) => {
+                            info!(
+                                "Maintainer: traktor auto-import complete: {} entries, {} matched, {} BPM, {} key, {} rating",
+                                stats.total_entries,
+                                stats.matched,
+                                stats.with_bpm,
+                                stats.with_key,
+                                stats.with_rating,
+                            );
+                            last_nml_mtime = Some(mtime_secs);
+                        }
+                        Err(e) => warn!("Maintainer: traktor auto-import failed: {}", e),
+                    }
                 }
             }
         }

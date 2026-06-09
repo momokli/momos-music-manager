@@ -180,6 +180,7 @@ async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()
     let maint_backup_discovery_interval = config.maintainer_backup_discovery_interval_secs;
     let maint_auto_prune = config.maintainer_auto_prune;
     let maint_auto_cleanup_dirs = config.maintainer_auto_cleanup_dirs;
+    let maint_traktor_import = config.maintainer_traktor_import_enabled;
     let maint_cancel = poller_cancel.clone();
 
     let state = Arc::new(AppState {
@@ -309,6 +310,7 @@ async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()
                 maint_backup_discovery_interval,
                 maint_auto_prune,
                 maint_auto_cleanup_dirs,
+                maint_traktor_import,
                 maint_cancel,
             )
             .await;

@@ -1010,7 +1010,10 @@ pub async fn write_comment_to_file(file_path: &str, comment: &str) -> Result<()>
     let is_flac = file_path.to_lowercase().ends_with(".flac");
 
     if is_flac {
+        // --remove-tag first: metaflac --set-tag APPENDS by default.
+        // Without --remove-tag, old COMMENT tags accumulate on every write.
         let output = Command::new("metaflac")
+            .arg("--remove-tag=COMMENT")
             .arg("--set-tag")
             .arg(format!("COMMENT={}", comment))
             .arg(file_path)
@@ -3743,5 +3746,119 @@ mod tests {
 
         assert_eq!(tags.len(), 1, "DISTINCT should deduplicate same tag_id");
         assert_eq!(tags[0].name, "groovy");
+    }
+
+    // ========================================================================
+    // write_comment_to_file regression tests — metaflac --set-tag appends
+    // ========================================================================
+
+    fn fixtures_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+    }
+
+    fn test_flac_path() -> std::path::PathBuf {
+        fixtures_dir().join("test.flac")
+    }
+
+    /// Helper: count how many COMMENT tags a FLAC file has.
+    fn count_comment_tags(path: &std::path::Path) -> usize {
+        let output = std::process::Command::new("metaflac")
+            .arg("--list")
+            .arg(path)
+            .output()
+            .expect("metaflac not found");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout.lines().filter(|l| l.contains("COMMENT=")).count()
+    }
+
+    /// Helper: get the first COMMENT tag value from a FLAC file.
+    fn get_comment_tag(path: &std::path::Path) -> Option<String> {
+        let output = std::process::Command::new("metaflac")
+            .arg("--list")
+            .arg(path)
+            .output()
+            .expect("metaflac not found");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some(idx) = line.find("COMMENT=") {
+                return Some(line[idx + "COMMENT=".len()..].to_string());
+            }
+        }
+        None
+    }
+
+    /// Test: write_comment_to_file on FLAC must REPLACE the existing comment,
+    /// not append a duplicate. This is the regression test for the metaflac
+    /// --set-tag append behaviour.
+    #[tokio::test]
+    async fn test_write_comment_to_file_replaces_not_appends_flac() {
+        let src = test_flac_path();
+        assert!(src.exists(), "test fixture missing: {:?}", src);
+
+        // Work on a copy so we do not corrupt the fixture.
+        let tmp = std::env::temp_dir().join("mmm_test_replace.flac");
+        std::fs::copy(&src, &tmp).unwrap();
+
+        // Sanity: fixture should have exactly 1 COMMENT tag.
+        let before_count = count_comment_tags(&tmp);
+        assert_eq!(
+            before_count, 1,
+            "test fixture should have exactly 1 COMMENT tag, found {}",
+            before_count
+        );
+        let before_val = get_comment_tag(&tmp);
+        assert_eq!(before_val.as_deref(), Some("old comment value"));
+
+        // Write a DIFFERENT comment.
+        let new_comment = "[PMV] new tag value";
+        write_comment_to_file(&tmp.to_string_lossy(), new_comment)
+            .await
+            .expect("write_comment_to_file should succeed");
+
+        // After writing, there must be exactly 1 COMMENT tag with the new value.
+        let after_count = count_comment_tags(&tmp);
+        assert_eq!(
+            after_count, 1,
+            "write_comment_to_file must replace, not append; expected 1 COMMENT tag, found {}",
+            after_count
+        );
+        let after_val = get_comment_tag(&tmp);
+        assert_eq!(
+            after_val.as_deref(),
+            Some(new_comment),
+            "COMMENT tag should be the new value"
+        );
+
+        // Cleanup.
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Test: writing the same comment twice should be idempotent.
+    #[tokio::test]
+    async fn test_write_comment_to_file_idempotent() {
+        let src = test_flac_path();
+        assert!(src.exists());
+
+        let tmp = std::env::temp_dir().join("mmm_test_idem.flac");
+        std::fs::copy(&src, &tmp).unwrap();
+
+        let comment = "[PMV] idempotent test";
+
+        // Write twice.
+        write_comment_to_file(&tmp.to_string_lossy(), comment)
+            .await
+            .unwrap();
+        write_comment_to_file(&tmp.to_string_lossy(), comment)
+            .await
+            .unwrap();
+
+        let count = count_comment_tags(&tmp);
+        assert_eq!(count, 1, "idempotent: should still have 1 COMMENT tag");
+        let val = get_comment_tag(&tmp);
+        assert_eq!(val.as_deref(), Some(comment));
+
+        let _ = std::fs::remove_file(&tmp);
     }
 }

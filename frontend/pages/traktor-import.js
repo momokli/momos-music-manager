@@ -1,13 +1,12 @@
 /**
- * traktor-import.js — Import play counts and last-played dates from Traktor's collection.nml.
+ * traktor-import.js — Import metadata from Traktor's collection.nml.
  *
  * Sections:
- *   Top Bar — Mode toggle (Auto/Manual) + path input + continuous toggle + import button
- *   Status Bar — Detected path, last modified, live watch indicator
- *   Progress Panel — Status badge, progress bar, expandable logs
+ *   Header — Detected path, last modified, mode toggle, import button
+ *   Progress Panel — Import stats, auto-import info
  *
  * Settings are persisted in localStorage.
- * Uses existing CSS design system classes (card, btn, input-text, status-badge, etc.)
+ * Auto-import is handled server-side by the Maintainer.
  */
 
 import { fetchJSON } from "../shared/api.js";
@@ -20,15 +19,6 @@ import { renderLoading } from "../shared/components.js";
 const LS_PREFIX = "traktor_import_";
 const LS_PATH_MODE = LS_PREFIX + "pathMode";
 const LS_CUSTOM_PATH = LS_PREFIX + "customPath";
-const LS_CONTINUOUS = LS_PREFIX + "continuous";
-const LS_INTERVAL = LS_PREFIX + "interval";
-
-const INTERVAL_OPTIONS = [
-  { value: 5, label: "5 min" },
-  { value: 15, label: "15 min" },
-  { value: 30, label: "30 min" },
-  { value: 60, label: "1 hour" },
-];
 
 /* ------------------------------------------------------------------ */
 /*  State                                                              */
@@ -37,12 +27,9 @@ const INTERVAL_OPTIONS = [
 let state = {
   pathMode: localStorage.getItem(LS_PATH_MODE) || "auto",
   customPath: localStorage.getItem(LS_CUSTOM_PATH) || "",
-  continuous: localStorage.getItem(LS_CONTINUOUS) === "true",
-  intervalMinutes: parseInt(localStorage.getItem(LS_INTERVAL), 10) || 15,
 
   detectedPath: null,
   detectedModifiedAt: null,
-  lastKnownModifiedAt: null,
 
   taskId: null,
   taskStatus: "",
@@ -50,9 +37,6 @@ let state = {
   taskLogs: [],
   taskPercent: null,
   pollHandle: null,
-
-  contPollHandle: null,
-  lastContCheckTime: null,
 };
 
 let containerEl = null;
@@ -71,10 +55,6 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
 }
-
-/* ------------------------------------------------------------------ */
-/*  Persistence helpers                                                */
-/* ------------------------------------------------------------------ */
 
 function saveSetting(key, value) {
   localStorage.setItem(key, String(value));
@@ -139,95 +119,41 @@ async function pollTask() {
   try {
     const resp = await fetchJSON(`/api/tasks/${state.taskId}`, { signal: abortSignal });
     const data = resp.data || resp;
-    const rawStatus = (data.status || "").toLowerCase();
+    const rawStatus = data.status || "";
     const map = {
-      pending: "pending",
+      pending: "running",
       running: "running",
       completed: "completed",
       failed: "failed",
       cancelled: "cancelled",
     };
-    state.taskStatus = map[rawStatus] || rawStatus;
-    state.taskMessage = data.message || "";
-    state.taskPercent = data.percent != null ? Math.round(data.percent) : null;
-    if (Array.isArray(data.logs)) state.taskLogs = data.logs;
-    updateUI();
+    const status = map[rawStatus] || rawStatus;
+    state.taskStatus = status;
+    state.taskMessage = data.message || data.progress?.message || "";
+    state.taskLogs = data.logs || [];
+    state.taskPercent = data.progress?.percent ?? null;
 
-    if (["completed", "failed", "cancelled"].includes(state.taskStatus)) {
+    const btn = containerEl?.querySelector("#traktor-import-btn");
+    const st = state.taskStatus;
+    if (st === "completed" || st === "failed" || st === "cancelled") {
       stopTaskPolling();
-      const btn = containerEl?.querySelector("#traktor-import-btn");
       if (btn) btn.disabled = false;
-      if (state.taskStatus === "completed") {
-        try {
-          const st = await fetchStatus();
-          state.lastKnownModifiedAt = st.modifiedAt;
-        } catch (_) {
-          /* ignore */
-        }
-        updateUI();
-      }
     }
-  } catch (err) {
-    if (err.name === "AbortError") return;
-    state.taskMessage = `Poll error: ${err.message}`;
     updateUI();
+  } catch (_) {
+    /* silently retry */
   }
 }
 
 function startTaskPolling() {
   stopTaskPolling();
-  state.pollHandle = setInterval(pollTask, 1500);
+  state.pollHandle = setInterval(pollTask, 1000);
 }
 
 function stopTaskPolling() {
   if (state.pollHandle) {
     clearInterval(state.pollHandle);
     state.pollHandle = null;
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/*  Continuous polling                                                 */
-/* ------------------------------------------------------------------ */
-
-async function checkForChanges() {
-  if (state.taskStatus === "running") return;
-
-  try {
-    const data = await fetchStatus();
-    const currentMtime = data.modifiedAt;
-    state.lastContCheckTime = Date.now();
-
-    if (
-      currentMtime != null &&
-      state.lastKnownModifiedAt != null &&
-      currentMtime > state.lastKnownModifiedAt
-    ) {
-      state.lastKnownModifiedAt = currentMtime;
-      state.taskMessage = "Collection changed \u2014 auto-importing\u2026";
-      updateUI();
-      await startImport();
-    } else if (currentMtime != null && state.lastKnownModifiedAt == null) {
-      state.lastKnownModifiedAt = currentMtime;
-    }
-    updateUI();
-  } catch (_) {
-    /* silent */
-  }
-}
-
-function startContinuousPolling() {
-  stopContinuousPolling();
-  if (!state.continuous) return;
-  const ms = state.intervalMinutes * 60 * 1000;
-  state.contPollHandle = setInterval(checkForChanges, ms);
-  setTimeout(checkForChanges, 2000);
-}
-
-function stopContinuousPolling() {
-  if (state.contPollHandle) {
-    clearInterval(state.contPollHandle);
-    state.contPollHandle = null;
   }
 }
 
@@ -239,300 +165,123 @@ function setPathMode(mode) {
   if (state.pathMode === mode) return;
   state.pathMode = mode;
   saveSetting(LS_PATH_MODE, mode);
-  updateUI();
-  refreshDetectedPath();
+  fetchStatus()
+    .then(() => updateUI())
+    .catch(() => {});
 }
 
 function saveCustomPath() {
-  const input = containerEl?.querySelector("#traktor-custom-path-input");
-  if (input) {
-    state.customPath = input.value.trim();
-    saveSetting(LS_CUSTOM_PATH, state.customPath);
-  }
-  refreshDetectedPath();
+  const input = containerEl?.querySelector("#traktor-path-input");
+  if (!input) return;
+  state.customPath = input.value.trim();
+  saveSetting(LS_CUSTOM_PATH, state.customPath);
+  fetchStatus()
+    .then(() => updateUI())
+    .catch(() => {});
 }
 
-function toggleContinuous() {
-  state.continuous = !state.continuous;
-  saveSetting(LS_CONTINUOUS, state.continuous);
-  if (state.continuous) {
-    startContinuousPolling();
-  } else {
-    stopContinuousPolling();
-  }
-  updateUI();
-}
-
-function setIntervalMinutes(val) {
-  state.intervalMinutes = parseInt(val, 10);
-  saveSetting(LS_INTERVAL, state.intervalMinutes);
-  if (state.continuous) {
-    startContinuousPolling();
-  }
-  updateUI();
-}
-
-async function refreshDetectedPath() {
-  try {
-    await fetchStatus();
-  } catch (_) {
-    /* ignore */
-  }
-  if (state.detectedPath) {
-    state.lastKnownModifiedAt = state.detectedModifiedAt;
-  }
-  updateUI();
+function refreshDetectedPath() {
+  fetchStatus()
+    .then(() => updateUI())
+    .catch(() => {});
 }
 
 /* ------------------------------------------------------------------ */
-/*  UI Rendering                                                       */
+/*  Rendering helpers                                                  */
 /* ------------------------------------------------------------------ */
 
-/**
- * Render a mode chip — shows currently selected mode with a clear visual.
- * Clicking it switches to that mode.
- */
-function modeChip(mode, label, icon) {
+function modeChip(mode, label) {
   const active = state.pathMode === mode;
-  return `<button class="btn ${active ? "btn-primary" : ""}" data-mode="${mode}"
-    style="flex:1;justify-content:center;font-size:0.8rem;${
-      active ? "box-shadow:0 0 0 1px var(--accent);" : "opacity:0.7;"
-    }"
-    onclick="window.traktorSetPathMode('${mode}')">
-    <i class="fa-solid ${icon}"></i> ${label}
-  </button>`;
+  return `<button class="btn btn-sm ${active ? "btn-primary" : "btn-ghost"}"
+    data-action="set-path-mode" data-mode="${mode}">${label}</button>`;
 }
 
-/**
- * Render the path editing area.
- */
 function pathSection() {
   const isManual = state.pathMode === "manual";
   const isRunning = state.taskStatus === "running";
 
+  let html = '<div class="form-row">';
+  html += `<span class="form-label">Mode</span>`;
+  html += `<div class="filter-group">${modeChip("auto", "Auto-detect")}${modeChip("manual", "Manual path")}</div>`;
+  html += "</div>";
+
   if (isManual) {
-    return `
-      <div class="flex items-center gap-2" style="flex-wrap:wrap;">
-        <input
-          type="text"
-          id="traktor-custom-path-input"
-          class="input-text"
-          placeholder="/absolute/path/to/collection.nml"
-          value="${escapeHtml(state.customPath)}"
-          style="flex:1;min-width:200px;font-family:var(--font-mono);font-size:0.8rem;"
-          ${isRunning ? "disabled" : ""}
-        />
-        <button class="btn btn-primary btn-sm" onclick="window.traktorSavePath()" ${isRunning ? "disabled" : ""}>
-          <i class="fa-solid fa-check"></i> Save
-        </button>
-      </div>
-      <div style="margin-top:6px;font-size:0.75rem;color:var(--text-subtle);">
-        <i class="fa-solid fa-circle-info"></i> Full path to <code style="font-size:0.75rem;">collection.nml</code>
-      </div>`;
+    html += '<div class="form-row" style="margin-top: 0.5rem;">';
+    html += `<input type="text" class="input-text" id="traktor-path-input"
+      value="${escapeHtml(state.customPath)}"
+      placeholder="/path/to/collection.nml"
+      data-action="save-custom-path" />`;
+    html += "</div>";
   }
 
-  // Auto mode — show detected path
-  return `
-    <div class="flex items-center gap-2" style="flex-wrap:wrap;">
-      <code style="flex:1;background:var(--bg);padding:6px 10px;border-radius:var(--radius-md);font-size:0.8rem;color:var(--text-secondary);min-width:200px;border:1px solid var(--border);">
-        ${state.detectedPath ? escapeHtml(state.detectedPath) : '<span style="color:var(--text-subtle);">Not detected</span>'}
-      </code>
-      <button class="btn btn-sm" onclick="window.traktorRefreshStatus()" title="Refresh">
-        <i class="fa-solid fa-rotate"></i>
-      </button>
-    </div>
-    `;
+  html += '<div class="form-row" style="margin-top: 0.75rem;">';
+  html += `<button class="btn btn-primary" id="traktor-import-btn"
+    ${isRunning ? "disabled" : ""} data-action="start-import">
+    <i class="fas fa-download"></i> Import Now
+  </button>`;
+  html += "</div>";
+
+  return html;
 }
 
-/**
- * Render the full page.
- */
 function renderPage() {
   const isRunning = state.taskStatus === "running";
-  const hasTask = !!state.taskId;
   const taskStatus = state.taskStatus;
+  const hasTask = taskStatus === "completed" || taskStatus === "failed";
 
-  const isWatching = state.continuous && state.detectedPath && taskStatus !== "running";
+  const detectedPath = state.detectedPath || "\u2014";
+  const modifiedAt = state.detectedModifiedAt
+    ? new Date(state.detectedModifiedAt * 1000).toLocaleString()
+    : "\u2014";
 
-  /* ──── Top bar: mode chips + continuous toggle + import button ──── */
   const topBarHtml = `
-    <div style="display:flex;align-items:stretch;gap:var(--space-3);flex-wrap:wrap;">
-
-      <!-- Mode chips (left group) -->
-      <div style="display:flex;gap:2px;background:var(--bg);padding:2px;border-radius:var(--radius-md);border:1px solid var(--border);">
-        ${modeChip("auto", "Auto", "fa-magnifying-glass")}
-        ${modeChip("manual", "Manual", "fa-pen")}
+    <div class="card" style="margin-bottom: 1rem;">
+      <div class="card-header">
+        <h2><i class="fas fa-file-import"></i> Traktor Import</h2>
       </div>
-
-      <!-- Continuous toggle (fixed width, no jump) -->
-      <button class="btn" id="traktor-continuous-btn" ${isRunning ? "disabled" : ""}
-        style="min-width:120px;justify-content:center;gap:6px;${
-          state.continuous
-            ? "background:rgba(16,185,129,0.1);border-color:var(--green);color:var(--green);"
-            : "opacity:0.7;"
-        }">
-        <span style="width:8px;height:8px;border-radius:50%;display:inline-block;
-          ${state.continuous ? "background:var(--green);box-shadow:0 0 6px var(--green);" : "background:var(--text-subtle);"}">
-        </span>
-        <span style="min-width:54px;display:inline-block;text-align:left;">Watching</span>
-        <span style="font-size:0.7rem;opacity:0.7;min-width:28px;display:inline-block;text-align:right;">${state.intervalMinutes}min</span>
-      </button>
-
-      <!-- Interval buttons (always visible, greyed when not watching) -->
-      <div style="display:flex;gap:2px;background:var(--bg);padding:2px;border-radius:var(--radius-md);border:1px solid var(--border);opacity:${state.continuous ? "1" : "0.4"};">
-        ${INTERVAL_OPTIONS.map(
-          (o) =>
-            `<button class="btn btn-sm interval-btn" data-interval="${o.value}"
-              style="${state.intervalMinutes === o.value && state.continuous ? "background:var(--accent);border-color:var(--accent);color:#fff;" : ""}"
-              ${isRunning || !state.continuous ? "disabled" : ""}>${o.label}</button>`,
-        ).join("")}
-      </div>
-
-      <!-- Import button (right, prominent) -->
-      <button
-        id="traktor-import-btn"
-        class="btn" ${isRunning ? "disabled" : ""}
-        style="flex:1;justify-content:center;background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;gap:var(--space-2);min-width:160px;
-          ${isRunning ? "opacity:0.6;" : ""}
-          ${isRunning ? "" : "box-shadow:0 0 20px rgba(99,102,241,0.15);"}">
-        <i class="fa-solid ${isRunning ? "fa-spinner fa-spin" : "fa-upload"}"></i>
-        <span>${isRunning ? "Importing\u2026" : "Import from Traktor"}</span>
-      </button>
-    </div>`;
-
-  /* ──── Path / status row ──── */
-  const statusRowHtml = `
-    <div class="card" style="padding:var(--space-4);">
-      <div style="display:flex;align-items:flex-start;gap:var(--space-3);flex-wrap:wrap;">
-
-        <!-- Left: path info -->
-        <div style="flex:1;min-width:200px;">
-          <div style="font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-subtle);margin-bottom:6px;">
-            <i class="fa-solid fa-folder-tree" style="margin-right:4px;"></i>
-            ${state.pathMode === "manual" ? "Manual Path" : "Detected Path"}
-          </div>
-          ${pathSection()}
+      <div class="card-body">
+        <div class="form-row">
+          <span class="form-label">Collection</span>
+          <span class="text-mono" style="font-size: 0.8rem;">${escapeHtml(detectedPath)}</span>
         </div>
-
-        <!-- Right: status info -->
-        <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;flex-shrink:0;">
-          ${
-            state.detectedModifiedAt
-              ? `<span class="status-badge" style="font-size:0.7rem;">
-                 <i class="fa-regular fa-calendar"></i>
-                 Modified ${new Date(state.detectedModifiedAt * 1000).toLocaleString()}
-               </span>`
-              : ""
-          }
-
-          ${
-            isWatching
-              ? `<span class="status-badge running" style="font-size:0.7rem;animation:pulse-dot 2s ease-in-out infinite;">
-                 <span style="width:6px;height:6px;border-radius:50%;background:var(--accent);display:inline-block;"></span>
-                 Watching ${state.lastContCheckTime ? "\u2014 last check " + new Date(state.lastContCheckTime).toLocaleTimeString() : ""}
-               </span>`
-              : ""
-          }
+        <div class="form-row">
+          <span class="form-label">Last modified</span>
+          <span>${modifiedAt}</span>
         </div>
+        ${pathSection()}
       </div>
     </div>`;
 
-  /* ──── Progress panel ──── */
   const progressHtml = hasTask
-    ? `<div class="card" id="traktor-progress-panel" style="padding:var(--space-4);border-left:3px solid ${
-        taskStatus === "running"
-          ? "var(--accent)"
-          : taskStatus === "completed"
-            ? "var(--green)"
-            : taskStatus === "failed"
-              ? "var(--red)"
-              : "var(--text-muted)"
-      };">
-
-        <!-- Progress header -->
-        <div class="flex items-center justify-between" style="margin-bottom:var(--space-3);">
-          <div class="flex items-center gap-2">
-            <h3 style="font-size:0.85rem;font-weight:600;color:var(--text-secondary);margin:0;">
-              <i class="fa-solid fa-list-check" style="margin-right:6px;color:var(--accent);"></i>
-              Import Task
-            </h3>
-            <span class="status-badge ${taskStatus}" style="font-size:0.7rem;">
-              <i class="fa-solid ${taskStatus === "running" ? "fa-spinner fa-spin" : taskStatus === "completed" ? "fa-check-circle" : taskStatus === "failed" ? "fa-times-circle" : taskStatus === "cancelled" ? "fa-ban" : "fa-clock"}"></i>
-              ${taskStatus.charAt(0).toUpperCase() + taskStatus.slice(1)}
-            </span>
-            ${state.taskPercent != null ? `<span style="font-size:0.75rem;color:var(--text-muted);font-weight:500;">${state.taskPercent}%</span>` : ""}
-          </div>
-
-          ${
-            taskStatus === "failed" ||
-            taskStatus === "completed" ||
-            taskStatus === "cancelled"
-              ? `<button class="btn btn-sm" onclick="window.traktorResetTask()">
-                 <i class="fa-solid fa-xmark"></i> Dismiss
-               </button>`
-              : ""
-          }
+    ? `
+    <div class="card">
+      <div class="card-header">
+        <h3>Last Import</h3>
+      </div>
+      <div class="card-body">
+        <div class="form-row">
+          <span class="status-badge status-${taskStatus}">${taskStatus === "completed" ? "\u2713 Completed" : "\u2717 Failed"}</span>
         </div>
-
-        <!-- Progress bar -->
-        ${
-          state.taskPercent != null
-            ? `<div style="margin-bottom:var(--space-3);">
-               <div style="width:100%;height:6px;background:var(--border);border-radius:999px;overflow:hidden;">
-                 <div style="width:${state.taskPercent}%;height:100%;background:${taskStatus === "failed" ? "var(--red)" : taskStatus === "completed" ? "var(--green)" : "var(--accent)"};border-radius:999px;transition:width 0.3s ease;"></div>
-               </div>
-             </div>`
-            : ""
-        }
-
-        <!-- Message -->
-        ${
-          state.taskMessage
-            ? `<p style="color:var(--text);font-size:0.85rem;margin-bottom:var(--space-3);">${escapeHtml(state.taskMessage)}</p>`
-            : ""
-        }
-
-        <!-- Expandable logs -->
-        <details ${state.taskLogs.length > 0 ? "open" : ""}>
-          <summary style="cursor:pointer;color:var(--text-subtle);font-size:0.8rem;user-select:none;padding:2px 0;">
-            <i class="fa-solid fa-terminal" style="margin-right:6px;"></i>
-            Logs (${state.taskLogs.length})
-          </summary>
-          <div style="margin-top:var(--space-2);max-height:240px;overflow-y:auto;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-md);padding:var(--space-3);font-family:var(--font-mono);font-size:0.78rem;line-height:1.6;">
-            ${
-              state.taskLogs.length > 0
-                ? state.taskLogs
-                    .map(
-                      (l) =>
-                        `<div style="color:var(--text-secondary);white-space:pre-wrap;">${escapeHtml(l)}</div>`,
-                    )
-                    .join("")
-                : '<div style="color:var(--text-muted);font-style:italic;">No logs yet\u2026</div>'
-            }
-          </div>
-        </details>
-
-        <!-- Success actions -->
-        ${
-          taskStatus === "completed"
-            ? `<div style="margin-top:var(--space-3);padding-top:var(--space-3);border-top:1px solid var(--border);display:flex;gap:var(--space-2);">
-               <a href="#tracks" class="btn btn-sm btn-green"><i class="fa-solid fa-music"></i> View Tracks</a>
-               <a href="#dashboard" class="btn btn-sm"><i class="fa-solid fa-gauge-high"></i> Dashboard</a>
-             </div>`
-            : ""
-        }
-      </div>`
+        ${state.taskMessage ? `<p style="margin-top: 0.5rem;">${escapeHtml(state.taskMessage)}</p>` : ""}
+        ${state.taskLogs.length ? `<pre class="task-logs" style="margin-top: 0.5rem; font-size: 0.75rem; max-height: 200px; overflow-y: auto;">${state.taskLogs.map(escapeHtml).join("\n")}</pre>` : ""}
+      </div>
+    </div>`
     : "";
 
-  /* ──── Assemble everything ──── */
-  return `
+  const autoImportInfo = `
+    <div class="card" style="margin-top: 1rem; opacity: 0.7;">
+      <div class="card-body">
+        <p><i class="fas fa-info-circle"></i> <strong>Auto-import is handled by the server.</strong></p>
+        <p style="font-size: 0.8rem;">The maintainer checks <code>collection.nml</code> periodically and imports BPM, musical key, rating, and play stats whenever it changes. No browser tab needed.</p>
+      </div>
+    </div>`;
 
-
-    ${topBarHtml}
-    <div style="margin-top:var(--space-3);">${statusRowHtml}</div>
-    ${progressHtml ? `<div style="margin-top:var(--space-3);">${progressHtml}</div>` : ""}
-  `;
+  return topBarHtml + progressHtml + autoImportInfo;
 }
+
+/* ------------------------------------------------------------------ */
+/*  Update UI                                                          */
+/* ------------------------------------------------------------------ */
 
 function updateUI() {
   if (!containerEl) return;
@@ -545,35 +294,26 @@ function updateUI() {
 /* ------------------------------------------------------------------ */
 
 function wireEvents() {
-  // Continuous toggle button
-  const contBtn = document.getElementById("traktor-continuous-btn");
-  if (contBtn) {
-    contBtn.onclick = () => toggleContinuous();
-  }
-
-  // Interval buttons
-  document.querySelectorAll(".interval-btn").forEach((btn) => {
-    btn.onclick = () => setIntervalMinutes(btn.dataset.interval);
-  });
+  if (!containerEl) return;
 
   // Import button
-  const importBtn = document.getElementById("traktor-import-btn");
+  const importBtn = containerEl.querySelector("#traktor-import-btn");
   if (importBtn) {
-    importBtn.onclick = () => startImport();
+    importBtn.addEventListener("click", () => startImport());
   }
 
-  // Global handlers
-  window.traktorSetPathMode = (mode) => setPathMode(mode);
-  window.traktorSavePath = () => saveCustomPath();
-  window.traktorRefreshStatus = () => refreshDetectedPath();
-  window.traktorResetTask = () => {
-    state.taskId = null;
-    state.taskStatus = "";
-    state.taskMessage = "";
-    state.taskLogs = [];
-    state.taskPercent = null;
-    updateUI();
-  };
+  // Path mode toggle
+  containerEl.querySelectorAll('[data-action="set-path-mode"]').forEach((btn) => {
+    btn.addEventListener("click", () => setPathMode(btn.dataset.mode));
+  });
+
+  // Custom path input (Enter to save)
+  const pathInput = containerEl.querySelector("#traktor-path-input");
+  if (pathInput) {
+    pathInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") saveCustomPath();
+    });
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -582,11 +322,8 @@ function wireEvents() {
 
 function cleanup() {
   stopTaskPolling();
-  stopContinuousPolling();
-  delete window.traktorSetPathMode;
-  delete window.traktorSavePath;
-  delete window.traktorRefreshStatus;
-  delete window.traktorResetTask;
+  containerEl = null;
+  abortSignal = null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -612,9 +349,6 @@ export function init(container, signal) {
 
     try {
       await fetchStatus();
-      if (state.detectedPath) {
-        state.lastKnownModifiedAt = state.detectedModifiedAt;
-      }
     } catch (_) {
       /* ok */
     }
@@ -623,10 +357,6 @@ export function init(container, signal) {
 
     container.innerHTML = renderPage();
     wireEvents();
-
-    if (state.continuous) {
-      startContinuousPolling();
-    }
 
     signal.addEventListener("abort", cleanup);
   });
