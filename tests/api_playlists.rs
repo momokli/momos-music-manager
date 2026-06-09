@@ -896,3 +896,70 @@ pub async fn playlists_filter_stale() {
     );
     assert_eq!(extract_total(&json), 0);
 }
+
+// ── Services field (canonical_playlist_id grouping) ──────────────────────────
+
+#[tokio::test]
+/// `GET /api/playlists` includes a `services` field computed from
+/// `canonical_playlist_id`. After manually linking a Spotify row to a
+/// local playlist, `services` should contain both "local" and "spotify".
+async fn playlists_list_includes_services_field() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    momos_music_manager::db::testing::seed_basic_scenario(&pool).await;
+
+    // Create a local playlist using track 1 (which has spotify_id = 'spotify:track:aaa')
+    let resp = client
+        .post(format!("{}/api/playlists/local", base))
+        .json(&serde_json::json!({"name": "Test Push", "trackIds": [1]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: Value = resp.json().await.unwrap();
+    let local_id = json["data"]["playlistId"].as_i64().unwrap();
+
+    // Manually link a Spotify row to simulate a pushed playlist
+    sqlx::query(
+        "UPDATE service_playlists SET canonical_playlist_id = 'test-canonical' WHERE id = ?",
+    )
+    .bind(local_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO service_playlists (service, playlist_id, canonical_playlist_id, name, imported_at, updated_at) VALUES ('spotify', 'spotify:playlist:test-pushed', 'test-canonical', 'Test Push', unixepoch(), unixepoch())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Query playlists and verify services field
+    let resp = client
+        .get(format!("{}/api/playlists?limit=50", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: Value = resp.json().await.unwrap();
+    let playlists = extract_playlists(&json);
+
+    // Find our test playlist
+    let pushed = playlists
+        .iter()
+        .find(|p| p["name"] == "Test Push")
+        .expect("Test Push playlist not found");
+
+    let services = pushed["services"].as_str().expect("services field missing");
+
+    assert!(
+        services.contains("local"),
+        "services should contain 'local', got: {}",
+        services
+    );
+    assert!(
+        services.contains("spotify"),
+        "services should contain 'spotify', got: {}",
+        services
+    );
+}

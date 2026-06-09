@@ -203,6 +203,23 @@ function viewTracksCell(r) {
 
 function actions(r) {
   let b = "";
+
+  // Push to Spotify for local playlists not yet mirrored
+  if (r.svc === "local" && !(r.services || "").includes("spotify")) {
+    b +=
+      '<button class="btn btn-sm btn-spotify" data-act="push-spotify" data-id="' +
+      r.id +
+      '" title="Push to Spotify"><i class="fab fa-spotify"></i> Push</button> ';
+  }
+
+  // Open in Spotify when playlist exists there
+  if ((r.services || "").includes("spotify")) {
+    b +=
+      '<a href="https://open.spotify.com/playlist/' +
+      r.playlistId +
+      '" target="_blank" rel="noopener" class="btn btn-sm btn-spotify" title="Open in Spotify"><i class="fab fa-spotify"></i></a> ';
+  }
+
   if (r.tag)
     b += `<button class="btn btn-sm btn-purple" data-act="edit-tag" data-id="${r.id}" title="Edit tag"><i class="fas fa-pencil-alt"></i></button> `;
   else
@@ -504,6 +521,7 @@ async function fetchAndRender(container, signal, state) {
         updatedAt: p.updatedAt || p.updated_at || null,
         archiveDeleted: p.archiveDeleted ?? false,
         totalTrackCount: p.totalTrackCount ?? p.trackCount ?? 0,
+        services: p.services || p.service || "",
       };
     });
 
@@ -1015,6 +1033,25 @@ function wireContentEvents(container, signal, state) {
             showToast(`Retry failed: ${err.message}`, "error");
             b.disabled = false;
             b.innerHTML = '<i class="fa-solid fa-rotate"></i>';
+          }
+        } else if (act === "push-spotify") {
+          b.disabled = true;
+          b.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Push';
+          try {
+            const resp = await fetchJSON(
+              "/api/playlists/" + b.dataset.id + "/push-to-spotify",
+              {
+                method: "POST",
+                body: JSON.stringify({ public: true }),
+              },
+            );
+            showToast("Pushed to Spotify", "success");
+            updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
+            fetchAndRender(container, signal, state);
+          } catch (err) {
+            showToast("Push failed: " + err.message, "error");
+            b.disabled = false;
+            b.innerHTML = '<i class="fab fa-spotify"></i> Push';
           }
         }
       },

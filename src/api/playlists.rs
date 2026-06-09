@@ -98,6 +98,8 @@ pub struct Playlist {
     pub tag_name: Option<String>,
     pub archive_deleted: bool,
     pub total_track_count: i64,
+    #[sqlx(default)]
+    pub services: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -346,7 +348,7 @@ async fn playlists_handler(
     // LEFT JOIN v_tag_playlist with DISTINCT subquery to avoid cartesian product
     // when multiple tags match the same playlist via case-insensitive name matching.
     let mut main_builder = QueryBuilder::new(
-        "SELECT sp.*, \n               COUNT(CASE WHEN spt.deleted_at IS NULL THEN 1 END) as track_count, \n               COUNT(spt.track_id) as total_track_count,\n               vtp.tag_name\n         FROM service_playlists sp\n         LEFT JOIN service_playlist_tracks spt ON sp.id = spt.playlist_id\n         LEFT JOIN (SELECT DISTINCT playlist_id, tag_name FROM v_tag_playlist) vtp ON vtp.playlist_id = sp.id",
+        "SELECT sp.*, \n               COUNT(CASE WHEN spt.deleted_at IS NULL THEN 1 END) as track_count, \n               COUNT(spt.track_id) as total_track_count,\n               vtp.tag_name,\n               COALESCE(\n                   (SELECT GROUP_CONCAT(DISTINCT sp2.service) FROM service_playlists sp2\n                    WHERE sp2.canonical_playlist_id = sp.canonical_playlist_id),\n                   sp.service\n               ) as services\n         FROM service_playlists sp\n         LEFT JOIN service_playlist_tracks spt ON sp.id = spt.playlist_id\n         LEFT JOIN (SELECT DISTINCT playlist_id, tag_name FROM v_tag_playlist) vtp ON vtp.playlist_id = sp.id",
     );
 
     let mut count_builder =
@@ -615,6 +617,7 @@ async fn playlists_handler(
                 "archiveDeleted": p.archive_deleted,
                 "deemixStatus": deemix_status,
                 "deemixId": deemix_id,
+                "services": p.services,
             })
         })
         .collect();

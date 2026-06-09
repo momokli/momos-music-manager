@@ -732,6 +732,17 @@ body {
     color: #1a1a2e;
 }
 
+.btn-spotify {
+    background: #1db954;
+    border-color: #1db954;
+    color: white;
+}
+
+.btn-spotify:hover:not(:disabled) {
+    background: #1ed760;
+    border-color: #1ed760;
+}
+
 .btn-sm {
     padding: 2px var(--space-2);
     font-size: 0.75rem;
