@@ -140,6 +140,8 @@ pub struct FilesQuery {
     pub offset: Option<i64>,
     pub bpm_min: Option<f64>,
     pub bpm_max: Option<f64>,
+    pub rating_min: Option<i32>,
+    pub play_count_min: Option<i32>,
     pub key: Option<String>,
     pub tags: Option<String>,
     pub search: Option<String>,
@@ -1149,6 +1151,14 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
         sql.push_str(" AND bpm <= ?");
     }
 
+    if let Some(rating_min) = query.rating_min {
+        sql.push_str(" AND rating >= ?");
+    }
+
+    if let Some(play_count_min) = query.play_count_min {
+        sql.push_str(" AND play_count >= ?");
+    }
+
     if let Some(ref key_str) = query.key {
         let keys: Vec<&str> = key_str
             .split(',')
@@ -1289,7 +1299,8 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
             "title",
             "artist",
             "bpm",
-            "key",
+            "musical_key",
+            "rating",
             "isrc",
             "play_count",
             "last_played",
@@ -1326,6 +1337,14 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
 
     if let Some(bpm_max) = query.bpm_max {
         q = q.bind(bpm_max);
+    }
+
+    if let Some(rating_min) = query.rating_min {
+        q = q.bind(rating_min);
+    }
+
+    if let Some(play_count_min) = query.play_count_min {
+        q = q.bind(play_count_min);
     }
 
     if let Some(ref key_str) = query.key {
@@ -1755,6 +1774,14 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
 
     if let Some(bpm_max) = query.bpm_max {
         q = q.bind(bpm_max);
+    }
+
+    if let Some(rating_min) = query.rating_min {
+        q = q.bind(rating_min);
+    }
+
+    if let Some(play_count_min) = query.play_count_min {
+        q = q.bind(play_count_min);
     }
 
     if let Some(ref key_str) = query.key {

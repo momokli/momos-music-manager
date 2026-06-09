@@ -1620,6 +1620,11 @@ th:not(.sort-asc):not(.sort-desc) i.fa-sort {
     font-size: 0.7rem;
 }
 
+.rating-stars {
+    color: #f59e0b;
+    letter-spacing: 1px;
+}
+
 .badge-format {
     background: rgba(100, 116, 139, 0.12);
     color: var(--muted);

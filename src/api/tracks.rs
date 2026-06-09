@@ -44,6 +44,11 @@ pub struct TracksQuery {
     pub added_before_days: Option<i64>,
     pub has_local: Option<bool>,
     pub has_backup: Option<bool>,
+    pub bpm_min: Option<f64>,
+    pub bpm_max: Option<f64>,
+    pub keys: Option<String>,
+    pub rating_min: Option<i32>,
+    pub play_count_min: Option<i32>,
     pub sort: Option<String>,
     pub order: Option<String>,
     pub page_size: Option<i64>,
@@ -95,6 +100,20 @@ pub struct ApiServiceTrack {
     pub format_info: Vec<TrackFormatInfo>,
     #[serde(default)]
     pub in_backpack: bool,
+    // ── File metrics from linked files (aggregated) ──
+    #[serde(default)]
+    pub bpm: Option<f64>,
+    /// Display string for BPM — shows all distinct values, e.g. "159.0 / 160"
+    #[serde(default)]
+    pub bpm_display: Option<String>,
+    #[serde(default)]
+    pub musical_key: Option<String>,
+    #[serde(default)]
+    pub rating: Option<i32>,
+    #[serde(default)]
+    pub play_count: Option<i32>,
+    #[serde(default)]
+    pub last_played: Option<i64>,
 }
 
 impl From<ServiceTrack> for ApiServiceTrack {
@@ -117,6 +136,12 @@ impl From<ServiceTrack> for ApiServiceTrack {
             playlist_tags: vec![],
             format_info: vec![],
             in_backpack: false,
+            bpm: None,
+            bpm_display: None,
+            musical_key: None,
+            rating: None,
+            play_count: None,
+            last_played: None,
         }
     }
 }
@@ -908,6 +933,43 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         sql.push_str(" AND (SELECT MAX(spt4.added_at) FROM service_playlist_tracks spt4 WHERE spt4.track_id = st.id) <= unixepoch('now', ?)");
     }
 
+    // ── File metrics filters ──
+    let bpm_min_filter = query.bpm_min;
+    let bpm_max_filter = query.bpm_max;
+    let keys_filter = query.keys.clone();
+    let rating_min_filter = query.rating_min;
+    let play_count_min_filter = query.play_count_min;
+    if bpm_min_filter.is_some()
+        || bpm_max_filter.is_some()
+        || keys_filter.is_some()
+        || rating_min_filter.is_some()
+        || play_count_min_filter.is_some()
+    {
+        if bpm_min_filter.is_some() {
+            sql.push_str(" AND EXISTS (SELECT 1 FROM v_file_track_link vft_bpm JOIN files f_bpm ON f_bpm.id = vft_bpm.file_id WHERE vft_bpm.track_id = st.id AND f_bpm.bpm >= ?)");
+        }
+        if bpm_max_filter.is_some() {
+            sql.push_str(" AND EXISTS (SELECT 1 FROM v_file_track_link vft_bpm2 JOIN files f_bpm2 ON f_bpm2.id = vft_bpm2.file_id WHERE vft_bpm2.track_id = st.id AND f_bpm2.bpm <= ?)");
+        }
+        if let Some(ref keys_str) = keys_filter {
+            let key_list: Vec<&str> = keys_str
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !key_list.is_empty() {
+                let kh: Vec<String> = key_list.iter().map(|_| "?".to_string()).collect();
+                sql.push_str(&format!(" AND EXISTS (SELECT 1 FROM v_file_track_link vft_k JOIN files f_k ON f_k.id = vft_k.file_id WHERE vft_k.track_id = st.id AND f_k.musical_key IN ({}))", kh.join(",")));
+            }
+        }
+        if rating_min_filter.is_some() {
+            sql.push_str(" AND EXISTS (SELECT 1 FROM v_file_track_link vft_r JOIN files f_r ON f_r.id = vft_r.file_id WHERE vft_r.track_id = st.id AND f_r.rating >= ?)");
+        }
+        if play_count_min_filter.is_some() {
+            sql.push_str(" AND EXISTS (SELECT 1 FROM v_file_track_link vft_p JOIN files f_p ON f_p.id = vft_p.file_id WHERE vft_p.track_id = st.id AND f_p.play_count >= ?)");
+        }
+    }
+
     // Format filter (hasLocal / hasBackup)
     if let Some(true) = query.has_local {
         if !local_track_ids.is_empty() {
@@ -1027,6 +1089,29 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
     }
     if let Some(days) = added_before_days_filter {
         query_builder = query_builder.bind(format!("-{} days", days));
+    }
+
+    // ── File metrics filter binds ──
+    if let Some(bpm_min) = bpm_min_filter {
+        query_builder = query_builder.bind(bpm_min);
+    }
+    if let Some(bpm_max) = bpm_max_filter {
+        query_builder = query_builder.bind(bpm_max);
+    }
+    if let Some(ref keys_str) = keys_filter {
+        for k in keys_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            query_builder = query_builder.bind(k);
+        }
+    }
+    if let Some(rating_min) = rating_min_filter {
+        query_builder = query_builder.bind(rating_min);
+    }
+    if let Some(play_count_min) = play_count_min_filter {
+        query_builder = query_builder.bind(play_count_min);
     }
 
     let tracks = query_builder
@@ -1212,6 +1297,96 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
         .into_iter()
         .collect();
 
+    // ── Step 7: Aggregate file metrics per track (BPM, Key, Rating, Play Count, Last Played) ──
+    // Query all linked files with metrics, ordered by format priority per track.
+    // In Rust we keep the first row per track (best format) and compute aggregates.
+    #[derive(Debug, Default, Clone)]
+    struct AggregatedMetrics {
+        bpm_primary: Option<f64>,
+        bpm_values: Vec<(String, f64)>, // (file_type, bpm)
+        musical_key: Option<String>,
+        rating: i32,
+        play_count: i32,
+        last_played: Option<i64>,
+    }
+
+    let metrics_sql = format!(
+        concat!(
+            "SELECT vft.track_id, f.bpm, f.musical_key, f.rating, f.play_count, ",
+            "f.last_played, f.file_type ",
+            "FROM v_file_track_link vft ",
+            "JOIN files f ON f.id = vft.file_id ",
+            "WHERE vft.track_id IN ({}) ",
+            "ORDER BY vft.track_id, ",
+            "  CASE f.file_type ",
+            "    WHEN 'stem.m4a' THEN 0 ",
+            "    WHEN 'flac' THEN 1 ",
+            "    WHEN 'mp3' THEN 2 ",
+            "    WHEN 'wav' THEN 3 ",
+            "    ELSE 4 ",
+            "  END"
+        ),
+        ids_list
+    );
+
+    let mut metrics_q = sqlx::query(&metrics_sql);
+    for id in &track_ids {
+        metrics_q = metrics_q.bind(id);
+    }
+
+    let metrics_rows = metrics_q.fetch_all(pool).await.unwrap_or_default();
+    let mut metrics_map: std::collections::HashMap<i64, AggregatedMetrics> =
+        std::collections::HashMap::new();
+
+    for row in &metrics_rows {
+        let track_id: i64 = match row.try_get("track_id") {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+        let bpm: Option<f64> = row.try_get("bpm").ok().flatten();
+        let musical_key: Option<String> = row.try_get("musical_key").ok().flatten();
+        let rating: i32 = row
+            .try_get::<Option<i32>, _>("rating")
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let play_count: i32 = row
+            .try_get::<Option<i32>, _>("play_count")
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let last_played: Option<i64> = row.try_get("last_played").ok().flatten();
+        let file_type: String = row.try_get("file_type").unwrap_or_default();
+
+        let entry = metrics_map.entry(track_id).or_default();
+        // Set best-format key (first non-null by format priority)
+        if entry.musical_key.is_none() {
+            entry.musical_key = musical_key.clone();
+        }
+        // Track distinct BPM values (for display: "159.0 / 160")
+        if let Some(b) = bpm {
+            if !entry.bpm_values.iter().any(|(_, v)| (v - b).abs() < 0.01) {
+                entry.bpm_values.push((file_type, b));
+            }
+        }
+        // Primary BPM is first non-null by format priority (best file)
+        if entry.bpm_primary.is_none() && bpm.is_some() {
+            entry.bpm_primary = bpm;
+        }
+        // Rating: max across all files
+        if rating > entry.rating {
+            entry.rating = rating;
+        }
+        // Play count: sum across all files
+        entry.play_count += play_count;
+        // Last played: max across all files
+        if let Some(lp) = last_played {
+            if entry.last_played.map_or(true, |e| lp > e) {
+                entry.last_played = Some(lp);
+            }
+        }
+    }
+
     Ok(tracks
         .into_iter()
         .map(|t| {
@@ -1232,6 +1407,25 @@ async fn get_tracks(pool: &Pool<Sqlite>, query: &TracksQuery) -> Result<Vec<ApiS
             }
             api_track.max_added_at = max_added_at_map.remove(&api_track.id);
             api_track.in_backpack = backpack_track_ids.contains(&api_track.id);
+            // ── Enrich with aggregated file metrics ──
+            if let Some(metrics) = metrics_map.remove(&api_track.id) {
+                api_track.bpm = metrics.bpm_primary;
+                // Build display string: "159.0 / 160" or just "155.0"
+                if metrics.bpm_values.len() > 1 {
+                    let display: Vec<String> = metrics
+                        .bpm_values
+                        .iter()
+                        .map(|(_, v)| format!("{:.1}", v))
+                        .collect();
+                    api_track.bpm_display = Some(display.join(" / "));
+                } else if let Some(bpm) = metrics.bpm_primary {
+                    api_track.bpm_display = Some(format!("{:.1}", bpm));
+                }
+                api_track.musical_key = metrics.musical_key;
+                api_track.rating = Some(metrics.rating);
+                api_track.play_count = Some(metrics.play_count);
+                api_track.last_played = metrics.last_played;
+            }
             api_track
         })
         .collect())

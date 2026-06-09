@@ -81,6 +81,8 @@ const HASH_SCHEMA = {
   backedUp: { type: "boolean", default: null },
   safeToDelete: { type: "boolean", default: null },
   isLocal: { type: "boolean", default: null },
+  ratingMin: { type: "number", default: 0 },
+  playCountMin: { type: "number", default: 0 },
 };
 
 /**
@@ -105,6 +107,8 @@ const HASH_DEFAULTS = {
   backedUp: null,
   safeToDelete: null,
   isLocal: null,
+  ratingMin: 0,
+  playCountMin: 0,
 };
 
 /* ------------------------------------------------------------------ */
@@ -115,7 +119,7 @@ const FILES_COLUMNS = [
   { id: "title", label: "Title", sortable: true, sortKey: "title", defaultWidth: 180 },
   { id: "artist", label: "Artist", sortable: true, sortKey: "artist", defaultWidth: 80 },
   { id: "bpm", label: "BPM", sortable: true, sortKey: "bpm", defaultWidth: 80 },
-  { id: "key", label: "Key", sortable: true, sortKey: "key", defaultWidth: 50 },
+  { id: "key", label: "Key", sortable: true, sortKey: "musical_key", defaultWidth: 50 },
   {
     id: "format",
     label: "Format",
@@ -125,6 +129,7 @@ const FILES_COLUMNS = [
   },
   { id: "linked", label: "Linked", sortable: false, defaultWidth: 50 },
   { id: "isrc", label: "ISRC", sortable: true, sortKey: "isrc", defaultWidth: 50 },
+  { id: "rating", label: "★", sortable: true, sortKey: "rating", defaultWidth: 70 },
   {
     id: "plays",
     label: "Plays",
@@ -170,6 +175,10 @@ const FILES_CELL_RENDERERS = {
   artist: (f) => escapeHtml(f.artist),
   bpm: (f) => `<span class="font-mono">${formatBPM(f.bpm)}</span>`,
   key: (f) => renderKeyBadge(f.key),
+  rating: (f) =>
+    f.rating != null && f.rating > 0
+      ? `<span class="rating-stars">${"★".repeat(Math.min(f.rating, 5))}${"☆".repeat(Math.max(5 - f.rating, 0))}</span>`
+      : '<span class="text-muted">—</span>',
   format: (f) =>
     f.fileType
       ? `<span class="badge badge-format">${escapeHtml(f.fileType.toUpperCase())}</span>`
@@ -245,6 +254,7 @@ function adaptFile(f) {
     needsUpdate: f.commentNeedsUpdate,
     comment: f.comment,
     commentTarget: f.commentTarget,
+    rating: f.rating,
     playCount: f.playCount,
     lastPlayed: f.lastPlayed || null,
     matchedServices: f.matchedServices || [],
@@ -498,6 +508,14 @@ function renderToolbar(state) {
               </div>
             </div>
             <div class="filter-row">
+              <span class="filter-row-label toggleable" data-filter="rating">Rating</span>
+              <input type="number" class="input-text" data-filter-input="ratingMin" min="0" max="5" placeholder="Min ★" style="width:80px">
+            </div>
+            <div class="filter-row">
+              <span class="filter-row-label toggleable" data-filter="plays">Plays</span>
+              <input type="number" class="input-text" data-filter-input="playCountMin" min="0" placeholder="Min plays" style="width:80px">
+            </div>
+            <div class="filter-row">
               <span class="filter-row-label toggleable" data-filter="tag">Tags</span>
               <div class="typeahead-wrap" style="flex:1">
                 <div class="tag-search-wrap">
@@ -723,6 +741,8 @@ function buildParams(state) {
   if (state.selectedServices && state.selectedServices.length > 0) {
     params.set("selectedServices", state.selectedServices.join(","));
   }
+  if (state.ratingMin > 0) params.set("ratingMin", state.ratingMin);
+  if (state.playCountMin > 0) params.set("playCountMin", state.playCountMin);
   if (state.pmvCategories && state.pmvCategories.length > 0) {
     params.set("pmvCategories", state.pmvCategories.join(","));
   }
@@ -767,6 +787,8 @@ function buildFilterParams(state) {
     f.fileTypes = state.fileTypes.join(",");
   if (state.commentStatuses && state.commentStatuses.length > 0)
     f.commentStatuses = state.commentStatuses.join(",");
+  if (state.ratingMin > 0) f.ratingMin = state.ratingMin;
+  if (state.playCountMin > 0) f.playCountMin = state.playCountMin;
   if (state.backedUp !== null) f.backedUp = state.backedUp;
   if (state.safeToDelete !== null) f.safeToDelete = state.safeToDelete;
   if (state.isLocal !== null) f.isLocal = state.isLocal;
@@ -943,6 +965,26 @@ function wireToolbarEvents(container, signal, state) {
       { signal },
     );
   }
+
+  // ── Filter input fields (rating, plays, etc.) ──
+  filterPanel?.querySelectorAll("[data-filter-input]").forEach((input) => {
+    input.addEventListener(
+      "input",
+      () => {
+        const key = input.dataset.filterInput;
+        const val = input.value.trim();
+        if (key === "ratingMin" || key === "playCountMin") {
+          state[key] = val ? parseInt(val, 10) : 0;
+        } else {
+          state[key] = val;
+        }
+        state.page = 0;
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  });
 
   // ── Tag search input with keyboard navigation ──
   const tagSearch = container.querySelector("#files-tag-search");
@@ -1886,6 +1928,8 @@ export async function init(container, signal, hashParams) {
     // Filter section enable/disable flags
     bpmEnabled: true,
     keyEnabled: true,
+    ratingEnabled: true,
+    playsEnabled: true,
     tagEnabled: true,
     serviceEnabled: true,
     pmvEnabled: true,

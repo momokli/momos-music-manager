@@ -44,6 +44,9 @@ import { renderActionsPanel, updateSelectionCount } from "../shared/actions-pane
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
+const MINOR_KEYS = Array.from({ length: 12 }, (_, i) => `${i + 1}m`);
+const MAJOR_KEYS = Array.from({ length: 12 }, (_, i) => `${i + 1}d`);
+
 /**
  * Column model for the tracks page.
  * Each entry: { id, label, sortable?, sortKey?, defaultWidth }.
@@ -70,6 +73,11 @@ const TRACKS_COLUMNS = [
     defaultWidth: 80,
   },
   { id: "isrc", label: "ISRC", sortable: true, sortKey: "isrc", defaultWidth: 60 },
+  { id: "bpm", label: "BPM", sortable: false, defaultWidth: 80 },
+  { id: "key", label: "Key", sortable: false, defaultWidth: 60 },
+  { id: "rating", label: "★", sortable: false, defaultWidth: 60 },
+  { id: "plays", label: "Plays", sortable: false, defaultWidth: 60 },
+  { id: "lastPlayed", label: "Last Played", sortable: false, defaultWidth: 80 },
   {
     id: "imported",
     label: "Imported",
@@ -108,6 +116,11 @@ const HASH_DEFAULTS = {
   addedUnit: "days",
   hasLocal: false,
   hasBackup: false,
+  bpmMin: 0,
+  bpmMax: 300,
+  keys: [],
+  ratingMin: 0,
+  playCountMin: 0,
   page: 0,
 };
 
@@ -136,6 +149,11 @@ const HASH_SCHEMA = {
   addedUnit: true,
   hasLocal: true,
   hasBackup: true,
+  bpmMin: true,
+  bpmMax: true,
+  keys: true,
+  ratingMin: true,
+  playCountMin: true,
   playlistId: true,
   playlistName: true,
 };
@@ -165,6 +183,24 @@ const TRACKS_CELL_RENDERERS = {
   localFiles: (t) => renderFormatBadges(t),
   duration: (t) =>
     `<span class="font-mono">${escapeHtml(formatDuration(t.duration))}</span>`,
+  bpm: (t) =>
+    t.bpmDisplay
+      ? `<span class="font-mono">${escapeHtml(t.bpmDisplay)}</span>`
+      : '<span class="text-muted">—</span>',
+  key: (t) =>
+    t.musicalKey
+      ? `<span class="badge badge-key">${escapeHtml(t.musicalKey)}</span>`
+      : '<span class="text-muted">—</span>',
+  rating: (t) =>
+    t.rating != null && t.rating > 0
+      ? `<span class="rating-stars">${"★".repeat(Math.min(t.rating, 5))}</span>`
+      : '<span class="text-muted">—</span>',
+  plays: (t) =>
+    t.playCount != null
+      ? `<span class="font-mono text-sm">${t.playCount}</span>`
+      : '<span class="text-muted">—</span>',
+  lastPlayed: (t) =>
+    t.lastPlayed ? formatTimestamp(t.lastPlayed) : '<span class="text-muted">—</span>',
   isrc: (t) =>
     t.isrc
       ? `<span class="font-mono text-sm">${escapeHtml(t.isrc)}</span>`
@@ -260,7 +296,6 @@ function renderFormatBadges(t) {
     .join(" ");
 }
 
-
 /* ------------------------------------------------------------------ */
 /*  Adapter                                                            */
 /* ------------------------------------------------------------------ */
@@ -280,6 +315,11 @@ function adaptTrack(t) {
     files: t.localFiles && t.localFiles.length > 0 ? t.localFiles.join(" ") : null,
     duration: t.durationMs ? Math.round(t.durationMs / 1000) : 0,
     isrc: t.isrc,
+    bpmDisplay: t.bpmDisplay || null,
+    musicalKey: t.musicalKey || null,
+    rating: t.rating || null,
+    playCount: t.playCount || null,
+    lastPlayed: t.lastPlayed || null,
     importedAt: t.importedAt || null,
     maxAddedAt: t.maxAddedAt || null,
     playlistNames: t.playlistNames || [],
@@ -369,6 +409,56 @@ function renderToolbar(search, state) {
               </div>
             </div>
             <div class="tag-chips" id="tracks-playlist-chips">${playlistChipsHtml}</div>
+          </div>
+
+          <!-- BPM filter (dual range slider) -->
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="bpm">BPM</span>
+            <div class="dual-range-wrap">
+              <div class="dual-range">
+                <div class="dual-range-track">
+                  <div class="dual-range-fill" style="left:0%;width:100%"></div>
+                </div>
+                <input type="range" class="dual-range-input" data-sf-filter="bpmMin"
+                       min="0" max="300" step="1" value="0">
+                <input type="range" class="dual-range-input" data-sf-filter="bpmMax"
+                       min="0" max="300" step="1" value="300">
+              </div>
+              <div class="dual-range-values">
+                <span class="dual-range-min-val">0</span>
+                <span class="sep">——</span>
+                <span class="dual-range-max-val">300</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Key filter (Camelot toggle buttons) -->
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="key">Key</span>
+            <div class="key-grid-wrap">
+              <div class="key-grid" data-key-row="minor">
+                ${MINOR_KEYS.map((k) => `<button class="key-btn minor${(state.keys || []).includes(k) ? " active" : ""}" data-key="${k}">${k}</button>`).join("")}
+                <button class="key-btn action" data-key-action="minor-all">ALL m</button>
+                <button class="key-btn action" data-key-action="minor-none">NONE m</button>
+              </div>
+              <div class="key-grid" data-key-row="major">
+                ${MAJOR_KEYS.map((k) => `<button class="key-btn major${(state.keys || []).includes(k) ? " active" : ""}" data-key="${k}">${k}</button>`).join("")}
+                <button class="key-btn action" data-key-action="major-all">ALL d</button>
+                <button class="key-btn action" data-key-action="major-none">NONE d</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Rating filter -->
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="rating">Rating</span>
+            <input type="number" class="input-text" data-filter-input="ratingMin" min="0" max="5" placeholder="Min ★" style="width:80px">
+          </div>
+
+          <!-- Plays filter -->
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="plays">Plays</span>
+            <input type="number" class="input-text" data-filter-input="playCountMin" min="0" placeholder="Min plays" style="width:80px">
           </div>
 
           <!-- Date filter -->
@@ -608,6 +698,13 @@ function buildParams(state) {
   if (state.selectedTags && state.selectedTags.length > 0) {
     params.set("tags", state.selectedTags.join(","));
   }
+  if (state.bpmMin > 0) params.set("bpmMin", state.bpmMin);
+  if (state.bpmMax < 300) params.set("bpmMax", state.bpmMax);
+  if (state.keys && state.keys.length > 0) {
+    params.set("keys", state.keys.join(","));
+  }
+  if (state.ratingMin > 0) params.set("ratingMin", state.ratingMin);
+  if (state.playCountMin > 0) params.set("playCountMin", state.playCountMin);
   if (state.pmvCategories && state.pmvCategories.length > 0) {
     params.set("pmvCategories", state.pmvCategories.join(","));
   }
@@ -1215,6 +1312,111 @@ function wireToolbarEvents(container, signal, state) {
     );
   }
 
+  // ── Dual range BPM slider ──
+  const dualRange = container.querySelector(".dual-range");
+  if (dualRange) {
+    const minInput = dualRange.querySelector('[data-sf-filter="bpmMin"]');
+    const maxInput = dualRange.querySelector('[data-sf-filter="bpmMax"]');
+    const fill = dualRange.querySelector(".dual-range-fill");
+    const minVal = container.querySelector(".dual-range-min-val");
+    const maxVal = container.querySelector(".dual-range-max-val");
+
+    function updateDualRange() {
+      let min = parseFloat(minInput.value) || 0;
+      let max = parseFloat(maxInput.value) || 300;
+      if (min > max) {
+        [min, max] = [max, min];
+        minInput.value = min;
+        maxInput.value = max;
+      }
+      const pctMin = (min / 300) * 100;
+      const pctMax = (max / 300) * 100;
+      if (fill) {
+        fill.style.left = `${pctMin}%`;
+        fill.style.width = `${pctMax - pctMin}%`;
+      }
+      if (minVal) minVal.textContent = min;
+      if (maxVal) maxVal.textContent = max;
+    }
+
+    minInput.addEventListener("input", updateDualRange);
+    maxInput.addEventListener("input", updateDualRange);
+  }
+
+  // ── Key buttons (toggle multiple) + ALL/NONE actions ──
+  const keyGridWrap = container.querySelector(".key-grid-wrap");
+  if (keyGridWrap) {
+    keyGridWrap.addEventListener(
+      "click",
+      (e) => {
+        const btn = e.target.closest(".key-btn");
+        if (!btn) return;
+
+        const action = btn.dataset.keyAction;
+        if (action) {
+          switch (action) {
+            case "minor-all":
+              state.keys = [...state.keys.filter((k) => !k.endsWith("m")), ...MINOR_KEYS];
+              break;
+            case "minor-none":
+              state.keys = state.keys.filter((k) => !k.endsWith("m"));
+              break;
+            case "major-all":
+              state.keys = [...state.keys.filter((k) => !k.endsWith("d")), ...MAJOR_KEYS];
+              break;
+            case "major-none":
+              state.keys = state.keys.filter((k) => !k.endsWith("d"));
+              break;
+          }
+          state.page = 0;
+          updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
+          fetchAndRender(container, signal, state);
+          // Re-sync all 24 key button active states
+          container.querySelectorAll(".key-btn[data-key]").forEach((kb) => {
+            kb.classList.toggle("active", state.keys.includes(kb.dataset.key));
+          });
+          return;
+        }
+
+        // Regular key toggle
+        const dbVal = btn.dataset.key;
+        if (!dbVal) return;
+        const idx = state.keys.indexOf(dbVal);
+        if (idx >= 0) {
+          state.keys.splice(idx, 1);
+        } else {
+          state.keys.push(dbVal);
+        }
+        btn.classList.toggle("active");
+        state.page = 0;
+        updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  }
+
+  // ── Filter input fields (rating, plays, etc.) ──
+  const tracksFilterPanel = container.querySelector("#tracks-filter-panel");
+  tracksFilterPanel?.querySelectorAll("[data-filter-input]").forEach((input) => {
+    input.addEventListener(
+      "input",
+      () => {
+        const key = input.dataset.filterInput;
+        const val = input.value.trim();
+        if (key === "ratingMin" || key === "playCountMin") {
+          state[key] = val ? parseInt(val, 10) : 0;
+        } else {
+          state[key] = val;
+        }
+        state.page = 0;
+        updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  });
+
   // ── PMV category buttons (multi-select: P, M, V) ──
   const pmvCatBtns = container.querySelector("#pmv-cat-btns");
   if (pmvCatBtns) {
@@ -1472,7 +1674,7 @@ function wireToolbarEvents(container, signal, state) {
       const row = label.closest(".filter-row");
       if (row) {
         const inputs = row.querySelectorAll(
-          "select, input, button, .filter-group, .tag-chips, .typeahead-wrap",
+          "select, input, button, .filter-group, .tag-chips, .dual-range-wrap, .key-grid-wrap, .typeahead-wrap",
         );
         inputs.forEach((el) => el.classList.toggle("filter-disabled", !isActive));
       }
@@ -1509,7 +1711,7 @@ function wireToolbarEvents(container, signal, state) {
       label.classList.remove("off");
       row
         .querySelectorAll(
-          "select, input, button, .filter-group, .tag-chips, .typeahead-wrap",
+          "select, input, button, .filter-group, .tag-chips, .dual-range-wrap, .key-grid-wrap, .typeahead-wrap",
         )
         .forEach((el) => el.classList.remove("filter-disabled"));
       updateHash("tracks", state, HASH_DEFAULTS, HASH_SCHEMA);
@@ -1848,8 +2050,17 @@ export async function init(container, signal, hashParams) {
     addedUnit: hashParams?.addedUnit || "days",
     hasLocal: hashParams?.hasLocal === "true" || false,
     hasBackup: hashParams?.hasBackup === "true" || false,
+    bpmMin: parseInt(hashParams?.bpmMin) || 0,
+    bpmMax: parseInt(hashParams?.bpmMax) || 300,
+    keys: parseCSV(hashParams?.keys),
+    ratingMin: parseInt(hashParams?.ratingMin) || 0,
+    playCountMin: parseInt(hashParams?.playCountMin) || 0,
     playlistId: hashParams?.playlistId ? parseInt(hashParams.playlistId) : null,
     playlistName: hashParams?.playlistName || null,
+    bpmEnabled: true,
+    keyEnabled: true,
+    ratingEnabled: true,
+    playsEnabled: true,
     tagEnabled: true,
     playlistEnabled: true,
     serviceEnabled: true,
