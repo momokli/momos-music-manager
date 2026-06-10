@@ -545,47 +545,877 @@ npx playwright test
 - `frontend/shared/` — utilities and components
 - `frontend/app.js` — old hash router
 
-### Acceptance Criteria
+### TDD Strategy: Tests First, Always
 
-**Phase 1 — Scaffold + First Page:**
+Every line of React/TypeScript code is justified by a Playwright test that:
 
-- [ ] `cd frontend && npm install` succeeds
+1. **Fails first** — the test proves the feature doesn't exist yet
+2. **Passes after implementation** — the test proves the feature works
+3. **Survives refactors** — the test catches regressions
+
+This means tests are written BEFORE the React component. The agent workflow:
+
+```bash
+# Agent's TDD cycle for each page/feature:
+# 1. Write the test → run → it FAILS (feature doesn't exist)
+cd frontend && npx playwright test -- tests/new-page.spec.ts
+
+# 2. Implement the React component
+# 3. Run the test → it PASSES
+cd frontend && npx playwright test -- tests/new-page.spec.ts
+
+# 4. Add to tsconfig, vite build, app router
+# 5. Run all gates → all green → ship
+npx tsc --noEmit && npx vite build && npx playwright test
+```
+
+### Test Infrastructure Changes
+
+#### Dual-stack Playwright config
+
+During migration, Playwright tests two separate apps from one config:
+
+```typescript
+// playwright.config.ts — two projects
+projects: [
+  {
+    name: "react",
+    testDir: "./tests/",
+    testMatch: /.*\.spec\.ts/,
+    use: { baseURL: "http://localhost:5173" }, // Vite dev server
+  },
+  {
+    name: "vanilla",
+    testDir: "./tests/",
+    testMatch: /.*\.spec\.js/,
+    use: { baseURL: "http://localhost:3000" }, // Rust embedded
+  },
+];
+```
+
+- **React tests** (`.spec.ts`): run against Vite dev server (`npm run dev`), use TypeScript
+- **Vanilla tests** (`.spec.js`): run against Rust embedded server, unchanged during migration
+- **Shared seed endpoint**: both projects hit `POST /api/testing/seed` on the Rust server (port 3000)
+- **Global setup**: starts both Vite dev server + Rust server before tests
+
+#### New seed scenarios needed
+
+| Scenario        | Needed by          | What it seeds                                                                                                                         |
+| --------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `tags_hub`      | Tags page tests    | All 6 system categories, phase tags with energy levels, mood/vibe/genre defaults, setlist tags with parents, static + dynamic bundles |
+| `setup_hub`     | Setup page tests   | Services in various states, folders with backup config, storage stats with files                                                      |
+| `sidebar_nav`   | Navigation tests   | Basic data + all page routes registered                                                                                               |
+| `digging_react` | Digging page tests | Seed files with BPM/Key/tags, same as `digging` scenario but with React-compatible data                                               |
+
+---
+
+### Phase 0: Scaffold (test infrastructure first)
+
+**Test file**: `frontend/tests/scaffold.spec.ts`
+
+```typescript
+import { test, expect } from "@playwright/test";
+
+test("Vite dev server serves index.html", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (err) => errors.push(err.message));
+
+  await page.goto("/");
+  await expect(page.locator("#root")).toBeVisible({ timeout: 10000 });
+  expect(errors).toEqual([]);
+});
+
+test("React mounts without errors", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (err) => errors.push(err.message));
+
+  await page.goto("/");
+  // React renders SOMETHING into #root (even if just a placeholder)
+  const root = page.locator("#root");
+  await expect(root).not.toBeEmpty({ timeout: 10000 });
+  expect(errors).toEqual([]);
+});
+
+test("TypeScript compiles without errors", async () => {
+  // This is verified by the tsc --noEmit gate, but document it
+  // The test passes when the CI script runs tsc first
+});
+```
+
+**Acceptance**:
+
+- [ ] `npx playwright test -- tests/scaffold.spec.ts` FAILS (no Vite/React yet)
+- [ ] After `npm create vite@latest`, `npm install`, test PASSES
 - [ ] `npx tsc --noEmit` passes
 - [ ] `npx vite build` produces a bundle
-- [ ] At least one page (Digging) renders identically to the vanilla version
-- [ ] Playwright tests pass for the ported page(s)
-- [ ] Old and new stacks coexist (some pages vanilla, some React)
 
-**Phase 2 — Navigation + Core Pages:**
+---
 
-- [ ] Sidebar nav renders with 7 items (Dig, Daily, Pack, Tracks, Lists, Tags, Setup)
-- [ ] React Router handles hash-based navigation
-- [ ] Dashboard ported to React
-- [ ] Tracks page (unified or separate) ported to React
-- [ ] Lists page ported to React
+### Phase 1: Sidebar Navigation (TDD)
 
-**Phase 3 — Tags Hub:**
+**Write these tests FIRST — they will all FAIL until the sidebar is built.**
 
-- [ ] Tags page renders with 7 collapsible sections
-- [ ] Energy Curve section: 6 default phase tags with energy levels
-- [ ] Mood/Vibe/Genre sections: chip grids with typeahead
-- [ ] Merkmal section: freeform typeahead
-- [ ] Setlist section: table with parent tags, backpack toggle, curate button
-- [ ] Bundles section: static + dynamic bundle management
+**Test file**: `frontend/tests/sidebar.spec.ts`
 
-**Phase 4 — Setup Hub + Cleanup:**
+```typescript
+import { test, expect } from "@playwright/test";
 
-- [ ] Setup page renders with cards for all 8 setup concerns
-- [ ] All vanilla JS files deleted
-- [ ] `app.js` deleted
-- [ ] Playwright tests ported to new selectors
+test.describe("Sidebar Navigation", () => {
+  test.beforeEach(async ({ request }) => {
+    await request.post("http://localhost:3000/api/testing/seed", {
+      data: { scenario: "basic" },
+    });
+  });
+
+  test("renders 7 nav items", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (err) => errors.push(err.message));
+
+    await page.goto("/");
+    const nav = page.locator("[data-sidebar]");
+    await expect(nav).toBeVisible();
+
+    // 7 nav links: Dig, Daily, Pack, Tracks, Lists, Tags, Setup
+    const links = nav.locator("[data-nav-item]");
+    await expect(links).toHaveCount(7);
+    expect(errors).toEqual([]);
+  });
+
+  test("has three section headers", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator('[data-nav-section="workflows"]')).toBeVisible();
+    await expect(page.locator('[data-nav-section="library"]')).toBeVisible();
+    await expect(page.locator('[data-nav-section="setup"]')).toBeVisible();
+  });
+
+  test("workflow items are Dig, Daily, Pack", async ({ page }) => {
+    await page.goto("/");
+    const workflowSection = page.locator('[data-nav-section="workflows"]');
+    const items = workflowSection.locator("[data-nav-item]");
+    await expect(items).toHaveCount(3);
+    await expect(items.nth(0)).toContainText("Dig");
+    await expect(items.nth(1)).toContainText("Daily");
+    await expect(items.nth(2)).toContainText("Pack");
+  });
+
+  test("library items are Tracks, Lists, Tags", async ({ page }) => {
+    await page.goto("/");
+    const libSection = page.locator('[data-nav-section="library"]');
+    const items = libSection.locator("[data-nav-item]");
+    await expect(items).toHaveCount(3);
+    await expect(items.nth(0)).toContainText("Tracks");
+    await expect(items.nth(1)).toContainText("Lists");
+    await expect(items.nth(2)).toContainText("Tags");
+  });
+
+  test("setup item exists", async ({ page }) => {
+    await page.goto("/");
+    const setupSection = page.locator('[data-nav-section="setup"]');
+    await expect(setupSection.locator("[data-nav-item]")).toContainText("Setup");
+  });
+
+  test("active nav item is highlighted", async ({ page }) => {
+    await page.goto("/");
+    await page.click('[data-nav-item="dig"]');
+    // The Dig item should have an active class or attribute
+    await expect(page.locator('[data-nav-item="dig"]')).toHaveAttribute(
+      "data-active",
+      "true",
+    );
+  });
+
+  test("clicking nav item navigates to correct page", async ({ page }) => {
+    await page.goto("/");
+    await page.click('[data-nav-item="tags"]');
+    // URL should reflect the Tags page (hash or path-based)
+    await expect(page).toHaveURL(/.*tags.*/);
+    // Tags page content should be visible
+    await expect(page.locator('[data-page="tags"]')).toBeVisible();
+  });
+
+  test("hash-based navigation still works for backward compat", async ({ page }) => {
+    await page.goto("/#digging");
+    // Should navigate to the Dig page
+    await expect(page.locator('[data-page="digging"]')).toBeVisible();
+  });
+});
+```
+
+**Acceptance**:
+
+- [ ] All 8 tests FAIL before Sidebar.tsx exists
+- [ ] All 8 tests PASS after Sidebar.tsx + App.tsx + React Router implemented
+- [ ] Sidebar renders at 220px width, sticky, dark background
+- [ ] Section headers (WORKFLOWS, LIBRARY, SETTINGS) visible with muted styling
+- [ ] Active item has accent color + left border indicator
+- [ ] Version number displayed at bottom of sidebar
+
+---
+
+### Phase 2: Dashboard (TDD)
+
+**Test file**: `frontend/tests/dashboard.spec.ts`
+
+```typescript
+import { test, expect } from "@playwright/test";
+
+test.describe("Dashboard Page", () => {
+  test.beforeEach(async ({ request }) => {
+    await request.post("http://localhost:3000/api/testing/seed", {
+      data: { scenario: "basic" },
+    });
+  });
+
+  test("renders without console errors", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (err) => errors.push(err.message));
+
+    await page.goto("/");
+    await expect(page.locator('[data-page="dashboard"]')).toBeVisible({ timeout: 8000 });
+    expect(errors).toEqual([]);
+  });
+
+  test("shows stats cards", async ({ page }) => {
+    await page.goto("/");
+    // At minimum, shows files/tracks/playlists/tags counts
+    await expect(page.locator('[data-stat="files"]')).toBeVisible();
+    await expect(page.locator('[data-stat="tracks"]')).toBeVisible();
+    await expect(page.locator('[data-stat="playlists"]')).toBeVisible();
+    await expect(page.locator('[data-stat="tags"]')).toBeVisible();
+  });
+
+  test("shows service status", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator("[data-service-status]")).toBeVisible();
+  });
+
+  test("shows recent activity", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator("[data-recent-activity]")).toBeVisible();
+  });
+
+  test("quick action buttons work", async ({ page }) => {
+    await page.goto("/");
+    // Sync all button
+    const syncBtn = page.locator('[data-action="sync-all"]');
+    await expect(syncBtn).toBeVisible();
+    // Navigate buttons
+    await expect(page.locator('[data-action="go-to-files"]')).toBeVisible();
+  });
+});
+```
+
+**Acceptance**:
+
+- [ ] 5 tests FAIL before Dashboard.tsx exists
+- [ ] 5 tests PASS after Dashboard implemented
+- [ ] Stats cards show real counts from API, not hardcoded zeros
+- [ ] Service status shows connected/not-configured per service
+- [ ] Page is the default landing route (`/`)
+
+---
+
+### Phase 3: Digging Page (TDD)
+
+**Test file**: `frontend/tests/digging.spec.ts`
+
+```typescript
+import { test, expect } from "@playwright/test";
+
+test.describe("Digging Page", () => {
+  test.beforeEach(async ({ request }) => {
+    await request.post("http://localhost:3000/api/testing/seed", {
+      data: { scenario: "digging" },
+    });
+  });
+
+  test("renders without console errors", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (err) => errors.push(err.message));
+
+    await page.goto("/#/digging");
+    await expect(page.locator('[data-page="digging"]')).toBeVisible({ timeout: 8000 });
+    expect(errors).toEqual([]);
+  });
+
+  test("tag typeahead finds and selects tags", async ({ page }) => {
+    await page.goto("/#/digging");
+    const input = page.locator("[data-digging-tag-search]");
+    await input.fill("collapse");
+    // Dropdown should appear with matching tags
+    await expect(page.locator("[data-digging-tag-dropdown]")).toBeVisible();
+    await page.locator("[data-digging-tag-dropdown] >> text=Collapse-capital").click();
+    // Tag chip should appear
+    await expect(page.locator("[data-digging-tag-chip]")).toContainText(
+      "Collapse-capital",
+    );
+  });
+
+  test("find similar returns suggestions", async ({ page }) => {
+    await page.goto("/#/digging");
+    // Select a tag
+    await page.locator("[data-digging-tag-search]").fill("collapse");
+    await page.locator("[data-digging-tag-dropdown] >> text=Collapse-capital").click();
+    // Click Find Similar
+    await page.locator('[data-action="find-similar"]').click();
+    // Suggestions should appear
+    await expect(page.locator("[data-digging-suggestion]").first()).toBeVisible({
+      timeout: 10000,
+    });
+  });
+
+  test("suggestions show BPM, key, camelot compatibility", async ({ page }) => {
+    await page.goto("/#/digging");
+    await page.locator("[data-digging-tag-search]").fill("collapse");
+    await page.locator("[data-digging-tag-dropdown] >> text=Collapse-capital").click();
+    await page.locator('[data-action="find-similar"]').click();
+
+    const first = page.locator("[data-digging-suggestion]").first();
+    await expect(first.locator('[data-field="bpm"]')).toBeVisible({ timeout: 10000 });
+    await expect(first.locator('[data-field="key"]')).toBeVisible();
+    await expect(first.locator("[data-camelot-compat]")).toBeVisible();
+  });
+
+  test("BPM range slider filters suggestions", async ({ page }) => {
+    await page.goto("/#/digging");
+    await page.locator("[data-digging-tag-search]").fill("collapse");
+    await page.locator("[data-digging-tag-dropdown] >> text=Collapse-capital").click();
+    await page.locator('[data-action="find-similar"]').click();
+    await expect(page.locator("[data-digging-suggestion]").first()).toBeVisible({
+      timeout: 10000,
+    });
+
+    // Adjust BPM range
+    const slider = page.locator("[data-bpm-range]");
+    await expect(slider).toBeVisible();
+  });
+
+  test("audio player plays and pauses", async ({ page }) => {
+    await page.goto("/#/digging");
+    await page.locator("[data-digging-tag-search]").fill("collapse");
+    await page.locator("[data-digging-tag-dropdown] >> text=Collapse-capital").click();
+    await page.locator('[data-action="find-similar"]').click();
+
+    // Click play on first suggestion
+    const playBtn = page
+      .locator("[data-digging-suggestion]")
+      .first()
+      .locator('[data-action="play"]');
+    await expect(playBtn).toBeVisible({ timeout: 10000 });
+    await playBtn.click();
+    // Button should change to pause icon
+    await expect(playBtn.locator(".fa-pause")).toBeVisible();
+  });
+
+  test("add to staging and save as playlist", async ({ page }) => {
+    await page.goto("/#/digging");
+    await page.locator("[data-digging-tag-search]").fill("collapse");
+    await page.locator("[data-digging-tag-dropdown] >> text=Collapse-capital").click();
+    await page.locator('[data-action="find-similar"]').click();
+    await expect(page.locator("[data-digging-suggestion]").first()).toBeVisible({
+      timeout: 10000,
+    });
+
+    // Add first suggestion to staging
+    await page
+      .locator("[data-digging-suggestion]")
+      .first()
+      .locator('[data-action="add-to-staging"]')
+      .click();
+    // Staging area should show 1 track
+    await expect(page.locator("[data-staging-count]")).toContainText("1");
+  });
+});
+```
+
+**Acceptance**:
+
+- [ ] 7 tests FAIL before Digging.tsx exists
+- [ ] 7 tests PASS after Digging page implemented
+- [ ] Tag typeahead works with debounced search
+- [ ] Suggestions render sorted by match quality
+- [ ] Camelot compatibility badges (perfect=green, good=blue, ok=grey)
+- [ ] Audio player loads from `/api/files/{id}/stream`, supports Range requests
+- [ ] Staging area accumulates tracks, shows key coverage
+- [ ] Behavior matches the vanilla `digging.js` page (parity test)
+
+---
+
+### Phase 4: Tags Hub (TDD)
+
+**Test file**: `frontend/tests/tags.spec.ts`
+
+```typescript
+import { test, expect } from "@playwright/test";
+
+test.describe("Tags Hub Page", () => {
+  test.beforeEach(async ({ request }) => {
+    await request.post("http://localhost:3000/api/testing/seed", {
+      data: { scenario: "tags_hub" },
+    });
+  });
+
+  test("renders without console errors", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (err) => errors.push(err.message));
+
+    await page.goto("/#/tags");
+    await expect(page.locator('[data-page="tags"]')).toBeVisible({ timeout: 8000 });
+    expect(errors).toEqual([]);
+  });
+
+  // ── ENERGY CURVE ──────────────────────────────────────────
+
+  test("energy curve section shows 6 default phase tags", async ({ page }) => {
+    await page.goto("/#/tags");
+    const section = page.locator('[data-tags-section="energy-curve"]');
+    await expect(section).toBeVisible();
+
+    // 6 default phase tags: End(0), Release(1), Start(2), Sustain(3), Build(4), Peak(5)
+    const tags = section.locator("[data-energy-tag]");
+    await expect(tags).toHaveCount(6);
+    await expect(tags.nth(0)).toContainText("Peak");
+    await expect(tags.nth(5)).toContainText("End");
+  });
+
+  test("energy curve shows energy levels 0-5", async ({ page }) => {
+    await page.goto("/#/tags");
+    const section = page.locator('[data-tags-section="energy-curve"]');
+    // Each phase tag has a data-energy attribute
+    await expect(section.locator('[data-energy="5"]')).toBeVisible();
+    await expect(section.locator('[data-energy="0"]')).toBeVisible();
+  });
+
+  test("energy curve can add a new phase tag", async ({ page }) => {
+    await page.goto("/#/tags");
+    const section = page.locator('[data-tags-section="energy-curve"]');
+    await section.locator('[data-action="add-phase-tag"]').click();
+    // Typeahead or input appears
+    const input = section.locator("[data-new-tag-input]");
+    await expect(input).toBeVisible();
+    await input.fill("Intro");
+    // Energy level selector appears
+    await section.locator("[data-energy-select]").selectOption("2");
+    await section.locator('[data-action="save-tag"]').click();
+    // New tag appears in the curve
+    await expect(section.locator("[data-energy-tag]")).toHaveCount(7);
+  });
+
+  // ── MOOD / VIBE / GENRE ───────────────────────────────────
+
+  test("mood section shows chip grid with defaults", async ({ page }) => {
+    await page.goto("/#/tags");
+    const section = page.locator('[data-tags-section="mood"]');
+    await expect(section).toBeVisible();
+    // Should have multiple mood chips (prefilled defaults)
+    const chips = section.locator("[data-tag-chip]");
+    await expect(chips.first()).toBeVisible();
+    // At least 5 default moods
+    expect(await chips.count()).toBeGreaterThanOrEqual(5);
+  });
+
+  test("vibe section shows chip grid with defaults", async ({ page }) => {
+    await page.goto("/#/tags");
+    const section = page.locator('[data-tags-section="vibe"]');
+    await expect(section).toBeVisible();
+    const chips = section.locator("[data-tag-chip]");
+    expect(await chips.count()).toBeGreaterThanOrEqual(5);
+  });
+
+  test("genre section shows chip grid with defaults", async ({ page }) => {
+    await page.goto("/#/tags");
+    const section = page.locator('[data-tags-section="genre"]');
+    await expect(section).toBeVisible();
+    const chips = section.locator("[data-tag-chip]");
+    // Should have the 10 seeded default genres
+    expect(await chips.count()).toBeGreaterThanOrEqual(10);
+    await expect(chips.first()).toContainText("techno");
+  });
+
+  test("mood/vibe/genre sections have add input with typeahead", async ({ page }) => {
+    await page.goto("/#/tags");
+    const section = page.locator('[data-tags-section="mood"]');
+    const addInput = section.locator("[data-add-tag-input]");
+    await expect(addInput).toBeVisible();
+    await addInput.fill("new");
+    // Typeahead should appear for creating a new tag
+    await expect(section.locator("[data-create-tag-option]")).toBeVisible();
+  });
+
+  // ── MERKMAL ───────────────────────────────────────────────
+
+  test("merkmal section has freeform typeahead", async ({ page }) => {
+    await page.goto("/#/tags");
+    const section = page.locator('[data-tags-section="merkmal"]');
+    await expect(section).toBeVisible();
+    const input = section.locator("[data-add-tag-input]");
+    await expect(input).toBeVisible();
+    // No default chips (merkmal is user-created only)
+    const chips = section.locator("[data-tag-chip]");
+    expect(await chips.count()).toBe(0);
+  });
+
+  // ── SETLIST ───────────────────────────────────────────────
+
+  test("setlist section shows table with parent tags", async ({ page }) => {
+    await page.goto("/#/tags");
+    const section = page.locator('[data-tags-section="setlist"]');
+    await expect(section).toBeVisible();
+
+    // Table with columns: tag name, files, parent tags, backpack
+    const table = section.locator("table");
+    await expect(table).toBeVisible();
+    await expect(table.locator("th")).toHaveCount(4);
+  });
+
+  test("setlist section has curate button", async ({ page }) => {
+    await page.goto("/#/tags");
+    const section = page.locator('[data-tags-section="setlist"]');
+    await expect(section.locator('[data-action="curate"]')).toBeVisible();
+  });
+
+  test("setlist backpack toggle works", async ({ page }) => {
+    await page.goto("/#/tags");
+    const section = page.locator('[data-tags-section="setlist"]');
+    const backpackBtn = section.locator('[data-action="toggle-backpack"]').first();
+    await expect(backpackBtn).toBeVisible();
+    await backpackBtn.click();
+    // Icon should change from outline to filled
+    await expect(backpackBtn.locator(".fa-backpack")).toBeVisible();
+  });
+
+  // ── BUNDLES ───────────────────────────────────────────────
+
+  test("bundles section shows static and dynamic bundles", async ({ page }) => {
+    await page.goto("/#/tags");
+    const section = page.locator('[data-tags-section="bundles"]');
+    await expect(section).toBeVisible();
+    await expect(section.locator('[data-bundle-type="static"]')).toBeVisible();
+    await expect(section.locator('[data-bundle-type="dynamic"]')).toBeVisible();
+  });
+
+  test("new bundle button opens creation form", async ({ page }) => {
+    await page.goto("/#/tags");
+    const section = page.locator('[data-tags-section="bundles"]');
+    await section.locator('[data-action="new-bundle"]').click();
+    await expect(section.locator("[data-bundle-form]")).toBeVisible();
+  });
+
+  // ── COLLAPSIBLE SECTIONS ──────────────────────────────────
+
+  test("sections are collapsible and state persists", async ({ page }) => {
+    await page.goto("/#/tags");
+    const section = page.locator('[data-tags-section="mood"]');
+    const toggle = section.locator("[data-section-toggle]");
+    await toggle.click();
+    // Section content should be hidden
+    await expect(section.locator("[data-tag-chip]").first()).not.toBeVisible();
+
+    // Reload page — collapse state should persist
+    await page.reload();
+    await expect(
+      page.locator('[data-tags-section="mood"] [data-tag-chip]').first(),
+    ).not.toBeVisible();
+  });
+});
+```
+
+**Acceptance**:
+
+- [ ] 16 tests FAIL before Tags.tsx exists
+- [ ] 16 tests PASS after Tags Hub implemented
+- [ ] 7 sections rendered (Energy Curve, Mood, Vibe, Genre, Merkmal, Setlist, Bundles)
+- [ ] Energy curve: visual bar chart, editable energy levels 0-5
+- [ ] Mood/Vibe/Genre: chip grid + typeahead add input
+- [ ] Merkmal: empty chip grid + typeahead add input (no defaults)
+- [ ] Setlist: paginated table with search, sort, parent tags column, backpack toggle
+- [ ] Bundles: static + dynamic bundle list with create/edit buttons
+- [ ] Collapse state persisted in localStorage per section
+- [ ] "+ New" button at top creates tag with category picker
+
+---
+
+### Phase 5: Setup Hub (TDD)
+
+**Test file**: `frontend/tests/setup.spec.ts`
+
+```typescript
+import { test, expect } from "@playwright/test";
+
+test.describe("Setup Hub Page", () => {
+  test.beforeEach(async ({ request }) => {
+    await request.post("http://localhost:3000/api/testing/seed", {
+      data: { scenario: "setup_hub" },
+    });
+  });
+
+  test("renders without console errors", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (err) => errors.push(err.message));
+
+    await page.goto("/#/setup");
+    await expect(page.locator('[data-page="setup"]')).toBeVisible({ timeout: 8000 });
+    expect(errors).toEqual([]);
+  });
+
+  test("shows 8 concern cards", async ({ page }) => {
+    await page.goto("/#/setup");
+    const cards = page.locator("[data-setup-card]");
+    await expect(cards).toHaveCount(8);
+  });
+
+  test("services card shows connection status", async ({ page }) => {
+    await page.goto("/#/setup");
+    const servicesCard = page.locator('[data-setup-card="services"]');
+    await expect(servicesCard).toBeVisible();
+    await expect(servicesCard.locator('[data-service="spotify"]')).toBeVisible();
+    await expect(servicesCard.locator('[data-service="soundcloud"]')).toBeVisible();
+    await expect(servicesCard.locator('[data-service="youtube"]')).toBeVisible();
+    await expect(servicesCard.locator('[data-service="deemix"]')).toBeVisible();
+  });
+
+  test("folders card shows folder list with scan actions", async ({ page }) => {
+    await page.goto("/#/setup");
+    const foldersCard = page.locator('[data-setup-card="folders"]');
+    await expect(
+      foldersCard.locator('[data-action="scan-folder"]').first(),
+    ).toBeVisible();
+    await expect(foldersCard.locator('[data-action="full-scan"]').first()).toBeVisible();
+  });
+
+  test("storage card shows backup/prune stats", async ({ page }) => {
+    await page.goto("/#/setup");
+    const storageCard = page.locator('[data-setup-card="storage"]');
+    await expect(storageCard).toBeVisible();
+    await expect(storageCard.locator('[data-stat="local-files"]')).toBeVisible();
+    await expect(storageCard.locator('[data-stat="backed-up"]')).toBeVisible();
+  });
+
+  test("tasks card shows recent tasks", async ({ page }) => {
+    await page.goto("/#/setup");
+    const tasksCard = page.locator('[data-setup-card="tasks"]');
+    await expect(tasksCard).toBeVisible();
+  });
+
+  test("import/export card has download and upload", async ({ page }) => {
+    await page.goto("/#/setup");
+    const dataCard = page.locator('[data-setup-card="data"]');
+    await expect(dataCard.locator('[data-action="export"]')).toBeVisible();
+    await expect(dataCard.locator('[data-action="import"]')).toBeVisible();
+  });
+
+  test("key comparison card exists", async ({ page }) => {
+    await page.goto("/#/setup");
+    await expect(page.locator('[data-setup-card="key-comparison"]')).toBeVisible();
+  });
+});
+```
+
+**Acceptance**:
+
+- [ ] 8 tests FAIL before Setup.tsx exists
+- [ ] 8 tests PASS after Setup Hub implemented
+- [ ] Card layout: 2-column or 3-column grid of concern cards
+- [ ] Services card: connection status + auth/resync buttons per service
+- [ ] Folders card: list with quick scan + full scan buttons
+- [ ] Storage card: local/backup/prune stats with action buttons
+- [ ] Tasks card: recent task list with status badges
+- [ ] Deemix Queue card: download queue status
+- [ ] Traktor Import card: file upload + status
+- [ ] Import/Export card: download dump + upload restore
+- [ ] Key Comparison card: links to comparison tool
+
+---
+
+### Phase 6: Port Remaining Pages (TDD)
+
+For each ported page, the test file from `frontend/tests/*.spec.js` is converted
+to TypeScript and updated for React selectors. The test is run FIRST (it fails),
+then the React component is implemented.
+
+**Port order** (simplest → most complex):
+
+| Order | Page     | Test file                | Challenges                                     |
+| ----- | -------- | ------------------------ | ---------------------------------------------- |
+| 1     | Daily    | `tests/daily.spec.ts`    | Simple form + result card, no table            |
+| 2     | Backpack | `tests/backpack.spec.ts` | Tag list + track status cards                  |
+| 3     | Lists    | `tests/lists.spec.ts`    | Table with filters, push-to-spotify, archive   |
+| 4     | Tracks   | `tests/tracks.spec.ts`   | Most complex: table, 20+ filters, bulk actions |
+
+**TDD cycle per page**:
+
+```bash
+# Step 1: Convert existing vanilla test to TypeScript, update selectors
+# Step 2: Run → FAILS (React page doesn't exist)
+cd frontend && npx playwright test -- tests/lists.spec.ts
+
+# Step 3: Implement React page
+# Step 4: Run → PASSES
+cd frontend && npx playwright test -- tests/lists.spec.ts
+
+# Step 5: Delete the old vanilla .js file
+rm frontend/pages/playlists.js
+
+# Step 6: Remove from app.js PAGE_MAP (if last vanilla page)
+```
+
+---
+
+### Phase 7: Cleanup
+
+**Test file**: `frontend/tests/cleanup.spec.ts`
+
+```typescript
+import { test, expect } from "@playwright/test";
+
+test.describe("Cleanup Verification", () => {
+  test("all 7 pages render without console errors", async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (err) => errors.push(err.message));
+
+    const pages = [
+      "/",
+      "/#/digging",
+      "/#/daily",
+      "/#/backpack",
+      "/#/tracks",
+      "/#/lists",
+      "/#/tags",
+      "/#/setup",
+    ];
+
+    for (const path of pages) {
+      await page.goto(path);
+      await page.waitForTimeout(500);
+    }
+    expect(errors).toEqual([]);
+  });
+
+  test("vanilla JS files are deleted", async () => {
+    // This is a build-time check — verified by the fact that
+    // app.js no longer exists and all routes are React Router
+  });
+
+  test("all gates pass", async () => {
+    // tsc --noEmit → 0 errors
+    // vite build → success
+    // playwright test → all pass
+  });
+});
+```
+
+---
+
+### Complete TDD Test Map
+
+| Phase     | Test file           | Test count    | What it proves                                    |
+| --------- | ------------------- | ------------- | ------------------------------------------------- |
+| 0         | `scaffold.spec.ts`  | 3             | Vite serves, React mounts, TS compiles            |
+| 1         | `sidebar.spec.ts`   | 8             | 7 nav items, 3 sections, active state, navigation |
+| 2         | `dashboard.spec.ts` | 5             | Stats cards, service status, quick actions        |
+| 3         | `digging.spec.ts`   | 7             | Tag search, suggestions, audio, staging           |
+| 4         | `tags.spec.ts`      | 16            | 7 sections, energy curve, chips, table, bundles   |
+| 5         | `setup.spec.ts`     | 8             | 8 concern cards, service status, actions          |
+| 6         | `daily.spec.ts`     | ~5            | Form, generate, result card                       |
+| 6         | `backpack.spec.ts`  | ~5            | Tag list, track status, sync                      |
+| 6         | `lists.spec.ts`     | ~8            | Table, filters, push, archive                     |
+| 6         | `tracks.spec.ts`    | ~12           | Table, 20+ filters, sort, bulk actions            |
+| 7         | `cleanup.spec.ts`   | 3             | All pages load, no JS errors                      |
+| **Total** | **15 files**        | **~80 tests** | Full coverage of all 7 pages                      |
+
+### Agent TDD Workflow Summary
+
+```bash
+# Every agent working on a page follows this exact cycle:
+
+# 1. READ the test file to understand what the page must do
+cat frontend/tests/tags.spec.ts
+
+# 2. RUN the test → it FAILS (proves the feature is missing)
+cd frontend && npx playwright test -- tests/tags.spec.ts
+
+# 3. IMPLEMENT the React component
+#    - Create frontend/src/pages/Tags.tsx
+#    - Add to App.tsx router
+#    - Wire up React Query hooks to API endpoints
+
+# 4. RUN the test → it PASSES (proves the feature works)
+cd frontend && npx playwright test -- tests/tags.spec.ts
+
+# 5. RUN all gates → all green → commit
+npx tsc --noEmit && npx vite build && npx playwright test
+
+# 6. DELETE the old vanilla page (if porting)
+rm frontend/pages/tags.js frontend/pages/tag-categories.js ...
+```
+
+### Acceptance Criteria
+
+**Phase 0 — Scaffold (tests written first):**
+
+- [ ] `scaffold.spec.ts` written and FAILING (no Vite/React yet)
+- [ ] `npm create vite@latest` creates the project
+- [ ] `npm install` succeeds with react, react-dom, react-router-dom, @tanstack/react-query, typescript, @types/react, @types/react-dom
+- [ ] `scaffold.spec.ts` PASSES (3/3)
+- [ ] `npx tsc --noEmit` passes
+- [ ] `npx vite build` produces a bundle
+
+**Phase 1 — Sidebar Navigation:**
+
+- [ ] `sidebar.spec.ts` written and FAILING
+- [ ] `Sidebar.tsx` + `App.tsx` implemented
+- [ ] `sidebar.spec.ts` PASSES (8/8)
+- [ ] React Router handles hash-based navigation (`/#/digging`)
+- [ ] Active nav item has `data-active="true"`
+
+**Phase 2 — Dashboard:**
+
+- [ ] `dashboard.spec.ts` written and FAILING
+- [ ] `Dashboard.tsx` implemented with React Query fetching `/api/` stats endpoints
+- [ ] `dashboard.spec.ts` PASSES (5/5)
+
+**Phase 3 — Digging:**
+
+- [ ] `digging.spec.ts` written and FAILING
+- [ ] `Digging.tsx` implemented with tag typeahead, suggestion cards, audio player
+- [ ] `digging.spec.ts` PASSES (7/7)
+- [ ] Behavior matches vanilla `digging.js` (manual parity check)
+
+**Phase 4 — Tags Hub:**
+
+- [ ] `tags.spec.ts` written and FAILING
+- [ ] `Tags.tsx` implemented with 7 collapsible sections
+- [ ] `tags.spec.ts` PASSES (16/16)
+- [ ] Energy curve fetches from `/api/tag-energy-levels`
+- [ ] Mood/Vibe/Genre sections fetch from `/api/tags?categoryId=X`
+- [ ] Setlist table fetches from `/api/tags/curation-queue`
+- [ ] Bundles fetch from `/api/tag-bundles` + `/api/dynamic-bundles`
+
+**Phase 5 — Setup Hub:**
+
+- [ ] `setup.spec.ts` written and FAILING
+- [ ] `Setup.tsx` implemented with card grid linking to underlying endpoints
+- [ ] `setup.spec.ts` PASSES (8/8)
+
+**Phase 6 — Remaining Pages:**
+
+- [ ] Each page: test written → FAILS → implemented → PASSES
+- [ ] Old `.js` file deleted after React page passes tests
+- [ ] `app.js` PAGE_MAP entries removed as pages are ported
+
+**Phase 7 — Cleanup:**
+
+- [ ] `app.js` deleted (all pages ported)
+- [ ] `frontend/pages/` deleted (all vanilla JS gone)
+- [ ] `frontend/shared/` deleted (utilities replaced by `src/utils/`)
+- [ ] `cleanup.spec.ts` PASSES (3/3)
 
 **Cross-cutting:**
 
 - [ ] Migration 021 runs cleanly (001→021)
 - [ ] Comment format `[PMVG]` generated and parsed correctly
 - [ ] All existing `cargo test` passes
-- [ ] All Playwright tests pass
+- [ ] All ~80 Playwright tests pass
 - [ ] `npx tsc --noEmit` passes on every commit
 - [ ] No regressions: all API endpoints, all filter combinations
 
