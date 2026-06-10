@@ -327,6 +327,67 @@ pub async fn start_maintainer(
             }
         }
 
+        // ── Check 5: Backup record verification (daily) ────────────────
+        //
+        // For each folder with a backup_path, verify a sample of backup
+        // records that haven't been checked recently. Uses SSH to stat
+        // remote files and updates last_verified or removes stale entries.
+        let daily_check = (now % (24 * 3600)) as u64;
+        if daily_check < interval_secs {
+            #[derive(Debug, FromRow)]
+            struct FolderBackupRow {
+                id: i64,
+                backup_path: String,
+            }
+
+            let folders_with_backup: Vec<FolderBackupRow> = match sqlx::query_as(
+                "SELECT id, backup_path FROM folders \
+                 WHERE backup_path IS NOT NULL AND backup_path != ''",
+            )
+            .fetch_all(&db)
+            .await
+            {
+                Ok(folders) => folders,
+                Err(e) => {
+                    warn!(
+                        "Maintainer: failed to fetch folders for backup verification: {}",
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            for folder in &folders_with_backup {
+                if let Some((ssh_host, _remote_base)) = folder.backup_path.split_once(':') {
+                    let engine = crate::backup::BackupEngine::new(ssh_host.to_string());
+                    let task_id = crate::tasks::start_backup_verify_task(
+                        &task_manager,
+                        &db,
+                        folder.id,
+                        engine,
+                        100, // sample size
+                    )
+                    .await;
+                    if !task_id.is_empty() {
+                        info!(
+                            "Maintainer: started backup verify task {} for folder #{}",
+                            task_id, folder.id
+                        );
+                    } else {
+                        debug!(
+                            "Maintainer: backup verify already running for folder #{}",
+                            folder.id
+                        );
+                    }
+                } else {
+                    warn!(
+                        "Maintainer: invalid backup_path format for folder #{}: {}",
+                        folder.id, folder.backup_path
+                    );
+                }
+            }
+        }
+
         // ── Check 7: Traktor collection.nml auto-import ──────────────
         //
         // Checks if collection.nml has been modified (e.g. user analysed

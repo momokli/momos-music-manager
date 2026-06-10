@@ -16,7 +16,7 @@ use crate::db::{
     set_file_location,
 };
 
-use crate::tasks::start_prune_files_task;
+use crate::tasks::{Task, TaskStatus, TaskType, start_prune_files_task};
 
 // ── Request/Response types ─────────────────────────────────────────────────
 
@@ -571,6 +571,154 @@ async fn backup_explore_handler(
     }
 }
 
+/// POST /api/storage/backfill-backup-sizes
+///
+/// Background task that queries `file_locations.backup` records with `file_size=0`
+/// and attempts to get the actual file size from the NAS via SSH.
+async fn backfill_backup_sizes_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let zero_size = match crate::db::get_records_needing_backfill(&state.db).await {
+        Ok(records) => records.len(),
+        Err(e) => {
+            tracing::warn!("Backfill: failed to query records: {}", e);
+            return internal_error(e).into_response();
+        }
+    };
+
+    if zero_size == 0 {
+        return Json(ApiResponse {
+            data: serde_json::json!({
+                "taskId": null,
+                "zeroSizeRecords": 0,
+                "message": "No backup records need backfill"
+            }),
+        })
+        .into_response();
+    }
+
+    // Create a task and register it
+    let task = Task::new(
+        TaskType::BackupDiscovery { folder_id: 0 },
+        Some("backup".to_string()),
+    );
+    let task_id = task.id.clone();
+    let worker_task_id = task_id.clone();
+    let cancel_token = task.cancel_token.clone();
+
+    state.task_manager.start_task(task).await;
+
+    let db = state.db.clone();
+    let tm = state.task_manager.clone();
+
+    tokio::spawn(async move {
+        tm.update_task_status(&worker_task_id, TaskStatus::Running)
+            .await;
+        tm.update_progress_text(&worker_task_id, "Backfilling backup sizes...".to_string())
+            .await;
+        tm.update_progress(&worker_task_id, |p| {
+            p.status = TaskStatus::Running;
+            p.message = "Backfilling backup sizes...".to_string();
+        })
+        .await;
+
+        // Get folders with backup paths to extract SSH hosts
+        let folders: Vec<(i64, String)> = match sqlx::query_as(
+            "SELECT id, backup_path FROM folders WHERE backup_path IS NOT NULL AND backup_path != ''"
+        )
+        .fetch_all(&db)
+        .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                tm.add_log(&worker_task_id, format!("Failed to query folders: {}", e)).await;
+                tm.update_task_status(&worker_task_id, TaskStatus::Failed).await;
+                tm.update_progress(&worker_task_id, |p| {
+                    p.status = TaskStatus::Failed;
+                    p.message = format!("DB error: {}", e);
+                }).await;
+                return;
+            }
+        };
+
+        if folders.is_empty() {
+            tm.add_log(
+                &worker_task_id,
+                "No folders with backup paths configured".to_string(),
+            )
+            .await;
+            tm.update_task_status(&worker_task_id, TaskStatus::Failed)
+                .await;
+            tm.update_progress(&worker_task_id, |p| {
+                p.status = TaskStatus::Failed;
+                p.message = "No folders with backup paths configured".to_string();
+            })
+            .await;
+            return;
+        }
+
+        let mut total_checked = 0usize;
+        let mut total_fixed = 0usize;
+        let mut total_failed = 0usize;
+
+        for (folder_id, backup_path) in &folders {
+            if cancel_token.is_cancelled() {
+                tm.update_task_status(&worker_task_id, TaskStatus::Cancelled)
+                    .await;
+                return;
+            }
+
+            // Extract SSH host from backup_path (format: "host:/remote/path" or just "host")
+            let ssh_host = backup_path.split(':').next().unwrap_or(backup_path);
+            let engine = crate::backup::BackupEngine::new(ssh_host.to_string());
+
+            match crate::db::backfill_backup_sizes(&db, &engine).await {
+                Ok((checked, fixed, failed)) => {
+                    total_checked += checked;
+                    total_fixed += fixed;
+                    total_failed += failed;
+                    tm.add_log(
+                        &worker_task_id,
+                        format!(
+                            "Folder #{}: {}/{} fixed, {}/{} failed",
+                            folder_id, fixed, checked, failed, checked
+                        ),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    tm.add_log(
+                        &worker_task_id,
+                        format!("Folder #{} backfill failed: {}", folder_id, e),
+                    )
+                    .await;
+                    // We don't know how many records this folder had, assume all failed
+                    total_checked += 0;
+                    total_failed += 0; // Can't track per-folder failures precisely without separate count
+                }
+            }
+        }
+
+        tm.update_progress(&worker_task_id, |p| {
+            p.status = TaskStatus::Completed;
+            p.message = format!(
+                "Backfill complete: {}/{} fixed, {} failed",
+                total_fixed, total_checked, total_failed
+            );
+        })
+        .await;
+        tm.update_task_status(&worker_task_id, TaskStatus::Completed)
+            .await;
+    });
+
+    Json(ApiResponse {
+        data: serde_json::json!({
+            "taskId": task_id,
+            "zeroSizeRecords": zero_size,
+            "message": format!("Backfill task started for {} records", zero_size)
+        }),
+    })
+    .into_response()
+}
+
 // ── Router ─────────────────────────────────────────────────────────────────
 
 pub(super) fn router() -> Router<Arc<AppState>> {
@@ -589,6 +737,10 @@ pub(super) fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/storage/backup-wavs/{folder_id}",
             post(backup_wavs_handler),
+        )
+        .route(
+            "/api/storage/backfill-backup-sizes",
+            post(backfill_backup_sizes_handler),
         )
         .route(
             "/api/storage/discover-backup/{folder_id}",

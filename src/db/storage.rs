@@ -506,6 +506,206 @@ pub async fn cleanup_stale_backup_entries(
     Ok(removed)
 }
 
+// ============================================================================
+// Backup Verification
+// ============================================================================
+
+/// Get the oldest backup records for a folder, limited by sample_size.
+/// Returns (file_id, file_locations.id, file_size, remote_path).
+pub async fn get_verify_backup_candidates(
+    pool: &Pool<Sqlite>,
+    folder_id: i64,
+    sample_size: usize,
+) -> Result<Vec<(i64, i64, i64, String)>> {
+    let records = sqlx::query_as::<_, (i64, i64, i64, String)>(
+        "SELECT fl.file_id, fl.id, fl.file_size, fl.path
+         FROM file_locations fl
+         JOIN files f ON f.id = fl.file_id
+         JOIN folders fol ON fol.folder_path = substr(f.file_path, 1, length(fol.folder_path))
+         WHERE fl.location_type = 'backup' AND fol.id = ?
+         ORDER BY fl.last_verified ASC NULLS FIRST, fl.created_at ASC
+         LIMIT ?",
+    )
+    .bind(folder_id)
+    .bind(sample_size as i64)
+    .fetch_all(pool)
+    .await?;
+    Ok(records)
+}
+
+/// Verify a sample of backup records for a folder using SSH.
+/// Returns (verified, missing, errors).
+pub async fn verify_backup_records(
+    pool: &Pool<Sqlite>,
+    folder_id: i64,
+    engine: &crate::backup::BackupEngine,
+    sample_size: usize,
+) -> Result<(usize, usize, usize)> {
+    let candidates = get_verify_backup_candidates(pool, folder_id, sample_size).await?;
+    let mut verified = 0usize;
+    let mut missing = 0usize;
+    let mut errors = 0usize;
+
+    let mut backfilled = 0usize;
+    for (file_id, loc_id, file_size, remote_path) in &candidates {
+        if *file_size <= 0 {
+            // Zero-size record — can't verify by comparison.
+            // Resolve by checking remote directly: if the file exists, update
+            // the record with the real size. If not, remove the stale record.
+            match engine.remote_file_size(remote_path).await {
+                Ok(Some(actual_size)) if actual_size > 0 => {
+                    let _ = sqlx::query(
+                        "UPDATE file_locations SET file_size = ?, last_verified = ? WHERE id = ?",
+                    )
+                    .bind(actual_size)
+                    .bind(Utc::now().timestamp())
+                    .bind(loc_id)
+                    .execute(pool)
+                    .await;
+                    backfilled += 1;
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        "Backup verification: file #{} at {} not found on NAS (zero-size record), removing",
+                        file_id,
+                        remote_path
+                    );
+                    let _ = sqlx::query(
+                        "DELETE FROM file_locations WHERE id = ? AND location_type = 'backup'",
+                    )
+                    .bind(loc_id)
+                    .execute(pool)
+                    .await;
+                    missing += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Backup verification: failed to resolve zero-size file #{}: {}",
+                        file_id,
+                        e
+                    );
+                    errors += 1;
+                }
+            }
+            continue;
+        }
+        match engine.verify_file(remote_path, *file_size).await {
+            Ok(true) => {
+                let _ = sqlx::query("UPDATE file_locations SET last_verified = ? WHERE id = ?")
+                    .bind(Utc::now().timestamp())
+                    .bind(loc_id)
+                    .execute(pool)
+                    .await;
+                verified += 1;
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    "Backup verification: file #{} at {} not found on NAS, removing backup record",
+                    file_id,
+                    remote_path
+                );
+                let _ = sqlx::query(
+                    "DELETE FROM file_locations WHERE id = ? AND location_type = 'backup'",
+                )
+                .bind(loc_id)
+                .execute(pool)
+                .await;
+                missing += 1;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Backup verification: failed to verify file #{}: {}",
+                    file_id,
+                    e
+                );
+                errors += 1;
+            }
+        }
+    }
+    if backfilled > 0 {
+        tracing::info!(
+            "Backup verification: backfilled {} zero-size records with actual remote sizes",
+            backfilled
+        );
+    }
+
+    Ok((verified, missing, errors))
+}
+
+// ============================================================================
+// Backup Size Backfill
+// ============================================================================
+
+/// A record needing size backfill.
+#[derive(Debug, FromRow)]
+pub struct BackfillRecord {
+    pub file_id: i64,
+    pub location_id: i64,
+    pub remote_path: String,
+}
+
+/// Get file_locations.backup records that have file_size=0 or NULL.
+pub async fn get_records_needing_backfill(pool: &Pool<Sqlite>) -> Result<Vec<BackfillRecord>> {
+    let records = sqlx::query_as::<_, BackfillRecord>(
+        "SELECT fl.file_id, fl.id AS location_id, fl.path AS remote_path
+         FROM file_locations fl
+         WHERE fl.location_type = 'backup' AND (fl.file_size = 0 OR fl.file_size IS NULL)
+         ORDER BY fl.file_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(records)
+}
+
+/// For backup records with file_size=0, attempt to get the actual
+/// remote file size via SSH and update the record.
+/// Returns (total_checked, fixed, failed).
+pub async fn backfill_backup_sizes(
+    pool: &Pool<Sqlite>,
+    engine: &crate::backup::BackupEngine,
+) -> Result<(usize, usize, usize)> {
+    let records = get_records_needing_backfill(pool).await?;
+    let total = records.len();
+    let mut fixed = 0usize;
+    let mut failed = 0usize;
+
+    for record in &records {
+        match engine.remote_file_size(&record.remote_path).await {
+            Ok(Some(size)) if size > 0 => {
+                let _ = sqlx::query(
+                    "UPDATE file_locations SET file_size = ?, last_verified = ? WHERE id = ?",
+                )
+                .bind(size)
+                .bind(Utc::now().timestamp())
+                .bind(record.location_id)
+                .execute(pool)
+                .await;
+                fixed += 1;
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    "Backfill: file #{} remote size is 0 or missing",
+                    record.file_id
+                );
+                failed += 1;
+            }
+            Err(e) => {
+                tracing::warn!("Backfill: failed to stat file #{}: {}", record.file_id, e);
+                failed += 1;
+            }
+        }
+    }
+
+    tracing::info!(
+        "Backfill complete: {}/{} fixed, {}/{} failed",
+        fixed,
+        total,
+        failed,
+        total
+    );
+    Ok((total, fixed, failed))
+}
+
 /// Clear all backup locations for files in a folder (for re-backup)
 pub async fn clear_backup_status(pool: &Pool<Sqlite>, folder_id: i64) -> Result<()> {
     sqlx::query(
@@ -1914,5 +2114,160 @@ mod tests {
         // Local entry should be removed
         let locations = get_file_locations(&pool, 1).await.unwrap();
         assert!(locations.is_empty(), "local location should be removed");
+    }
+
+    // ── Backup Verification ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_verify_backup_candidates_returns_oldest_first() {
+        let pool = test_db().await;
+
+        sqlx::query(
+            "INSERT INTO folders (id, folder_path, active, created_at, updated_at)
+             VALUES (1, '/test', 1, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        insert_file(&pool, 1, "/test/song1.flac", "flac", 1000, None, None, None).await;
+        insert_file(&pool, 2, "/test/song2.flac", "flac", 2000, None, None, None).await;
+
+        set_file_location(&pool, 1, "backup", "/backup/test/song1.flac", 1000)
+            .await
+            .unwrap();
+        set_file_location(&pool, 2, "backup", "/backup/test/song2.flac", 2000)
+            .await
+            .unwrap();
+
+        let candidates = get_verify_backup_candidates(&pool, 1, 10).await.unwrap();
+        assert_eq!(candidates.len(), 2, "should find both backup records");
+        // First entry should be file 1 (lower file_id / created earlier)
+        assert_eq!(candidates[0].0, 1, "file_id should match");
+        assert_eq!(
+            candidates[0].3, "/backup/test/song1.flac",
+            "remote path should match"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_verify_backup_candidates_respects_sample_size() {
+        let pool = test_db().await;
+
+        sqlx::query(
+            "INSERT INTO folders (id, folder_path, active, created_at, updated_at)
+             VALUES (1, '/test', 1, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        insert_file(&pool, 1, "/test/song1.flac", "flac", 1000, None, None, None).await;
+        insert_file(&pool, 2, "/test/song2.flac", "flac", 2000, None, None, None).await;
+
+        set_file_location(&pool, 1, "backup", "/backup/test/song1.flac", 1000)
+            .await
+            .unwrap();
+        set_file_location(&pool, 2, "backup", "/backup/test/song2.flac", 2000)
+            .await
+            .unwrap();
+
+        let candidates = get_verify_backup_candidates(&pool, 1, 1).await.unwrap();
+        assert_eq!(candidates.len(), 1, "sample_size=1 should return 1 record");
+    }
+
+    #[tokio::test]
+    async fn test_get_verify_backup_candidates_excludes_wrong_folder() {
+        let pool = test_db().await;
+
+        sqlx::query(
+            "INSERT INTO folders (id, folder_path, active, created_at, updated_at)
+             VALUES (1, '/test', 1, 0, 0), (2, '/other', 1, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        insert_file(&pool, 1, "/test/song.flac", "flac", 1000, None, None, None).await;
+        insert_file(
+            &pool,
+            2,
+            "/other/track.flac",
+            "flac",
+            2000,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        set_file_location(&pool, 1, "backup", "/backup/test/song.flac", 1000)
+            .await
+            .unwrap();
+        set_file_location(&pool, 2, "backup", "/backup/other/track.flac", 2000)
+            .await
+            .unwrap();
+
+        // Only folder 1
+        let candidates = get_verify_backup_candidates(&pool, 1, 10).await.unwrap();
+        assert_eq!(candidates.len(), 1, "only file in folder 1 should appear");
+        assert_eq!(candidates[0].0, 1);
+    }
+
+    // ── Backup Size Backfill ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_records_needing_backfill_finds_zero_size() {
+        let pool = test_db().await;
+
+        insert_file(&pool, 1, "/test/song.flac", "flac", 0, None, None, None).await;
+        set_file_location(&pool, 1, "backup", "/backup/test/song.flac", 0)
+            .await
+            .unwrap();
+
+        let records = get_records_needing_backfill(&pool).await.unwrap();
+        assert_eq!(records.len(), 1, "should find the zero-size record");
+        assert_eq!(records[0].file_id, 1);
+        assert_eq!(records[0].remote_path, "/backup/test/song.flac");
+    }
+
+    #[tokio::test]
+    async fn test_get_records_needing_backfill_skips_nonzero_size() {
+        let pool = test_db().await;
+
+        insert_file(&pool, 1, "/test/song.flac", "flac", 1000, None, None, None).await;
+        insert_file(&pool, 2, "/test/zero.flac", "flac", 0, None, None, None).await;
+
+        set_file_location(&pool, 1, "backup", "/backup/test/song.flac", 1000)
+            .await
+            .unwrap();
+        set_file_location(&pool, 2, "backup", "/backup/test/zero.flac", 0)
+            .await
+            .unwrap();
+
+        let records = get_records_needing_backfill(&pool).await.unwrap();
+        assert_eq!(records.len(), 1, "only the zero-size record");
+        assert_eq!(records[0].file_id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_records_needing_backfill_only_backup_type() {
+        let pool = test_db().await;
+
+        insert_file(&pool, 1, "/test/song.flac", "flac", 0, None, None, None).await;
+        // local with size 0 should NOT appear
+        set_file_location(&pool, 1, "local", "/test/song.flac", 0)
+            .await
+            .unwrap();
+        // backup with size > 0 should NOT appear
+        set_file_location(&pool, 1, "backup", "/backup/test/song.flac", 500)
+            .await
+            .unwrap();
+
+        let records = get_records_needing_backfill(&pool).await.unwrap();
+        assert!(
+            records.is_empty(),
+            "backup record has non-zero size, local excluded"
+        );
     }
 }

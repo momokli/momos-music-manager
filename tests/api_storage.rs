@@ -979,3 +979,70 @@ async fn storage_discover_backup_rejects_concurrent() {
         "at least one call should be rejected, got resp1={json1:#} resp2={json2:#}"
     );
 }
+
+#[tokio::test]
+/// `POST /api/storage/backfill-backup-sizes` — returns taskId even when no zero-size records.
+async fn storage_backfill_backup_sizes_no_records() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .post(format!("{}/api/storage/backfill-backup-sizes", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "should return 200");
+    let json: serde_json::Value = resp.json().await.unwrap();
+    let data = &json["data"];
+
+    // Seed data has no zero-size backup records → taskId should be null
+    assert_eq!(
+        data["zeroSizeRecords"].as_i64().unwrap_or(-1),
+        0,
+        "seed data has no zero-size backup records"
+    );
+    assert!(
+        data["taskId"].is_null(),
+        "should not spawn a task when no records need backfill"
+    );
+    assert!(
+        data["message"].is_string(),
+        "should include a message explaining no records need backfill"
+    );
+}
+
+#[tokio::test]
+/// `POST /api/storage/backfill-backup-sizes` — with a zero-size record, spawns a task.
+async fn storage_backfill_backup_sizes_with_zero_size() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Set an existing backup record's file_size to 0 so it needs backfill
+    sqlx::query(
+        r#"UPDATE file_locations SET file_size = 0 WHERE file_id = 3 AND location_type = 'backup'"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let resp = client
+        .post(format!("{}/api/storage/backfill-backup-sizes", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "should return 200");
+    let json: serde_json::Value = resp.json().await.unwrap();
+    let data = &json["data"];
+
+    // Should have found the zero-size record
+    assert!(
+        data["zeroSizeRecords"].as_i64().unwrap_or(0) > 0,
+        "should find the zero-size record, got zeroSizeRecords={:#}",
+        data["zeroSizeRecords"]
+    );
+    // Should spawn a task (which will fail gracefully since no SSH)
+    assert!(data["taskId"].is_string(), "should return a taskId string");
+    assert!(data["message"].is_string(), "should include a message");
+}

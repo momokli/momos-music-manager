@@ -57,6 +57,8 @@ pub enum TaskType {
     PruneFiles { file_ids: Vec<i64> },
     /// BackpackSync: Ensure files in backpack tags are available locally
     BackpackSync,
+    /// Verify backup records still exist on NAS (periodic integrity check)
+    BackupVerify { folder_id: i64 },
 }
 
 /// What to sync for a service
@@ -417,6 +419,7 @@ pub fn task_type_conflict_key(task_type: &TaskType) -> Option<String> {
         TaskType::BackupDiscovery { folder_id } => Some(format!("backup_discovery:{}", folder_id)),
         TaskType::PruneFiles { .. } => None, // prunes don't conflict — multiple can run
         TaskType::BackpackSync => Some("backpack_sync".to_string()),
+        TaskType::BackupVerify { folder_id } => Some(format!("backup_verify:{}", folder_id)),
     }
 }
 
@@ -566,6 +569,7 @@ impl Task {
             TaskType::BackupDiscovery { .. } => "backup_discovery".to_string(),
             TaskType::PruneFiles { .. } => "prune_files".to_string(),
             TaskType::BackpackSync => "backpack_sync".to_string(),
+            TaskType::BackupVerify { .. } => "backup_verify".to_string(),
         };
         (task_type_str, task_details)
     }
@@ -895,6 +899,9 @@ pub fn task_type_label(task_type: &TaskType) -> String {
         }
         TaskType::PruneFiles { file_ids } => format!("Prune {} files", file_ids.len()),
         TaskType::BackpackSync => "Backpack sync all tags".to_string(),
+        TaskType::BackupVerify { folder_id } => {
+            format!("Verify backup records for folder #{}", folder_id)
+        }
     }
 }
 
@@ -1894,8 +1901,11 @@ pub async fn start_backup_folder_task(
         } else {
             1u32
         };
+        // Use list_remote_files_full to get relative paths (not basenames), so we can match
+        // by full relative path — this correctly handles nested WAV source subdirectories
+        // e.g. "subdir/file.wav" not just "file.wav"
         match engine
-            .list_remote_files_with_depth(&remote_base, remote_max_depth)
+            .list_remote_files_full(&remote_base, remote_max_depth)
             .await
         {
             Ok(remote_files) if !remote_files.is_empty() => {
@@ -1926,16 +1936,13 @@ pub async fn start_backup_folder_task(
                             .await;
                         return Ok(());
                     }
-                    let filename = std::path::Path::new(&file.file_path)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    if remote_set.contains(&filename) {
-                        let rel_path = file
-                            .file_path
-                            .strip_prefix(&local_dir)
-                            .unwrap_or(&file.file_path)
-                            .trim_start_matches('/');
+                    // Build the relative path for this local file (relative to the folder root)
+                    let rel_path = file
+                        .file_path
+                        .strip_prefix(&local_dir)
+                        .unwrap_or(&file.file_path)
+                        .trim_start_matches('/');
+                    if remote_set.contains(rel_path) {
                         let remote_path =
                             format!("{}/{}", remote_base.trim_end_matches('/'), rel_path);
                         let _ = crate::db::record_backup_result(
@@ -2096,14 +2103,46 @@ pub async fn start_backup_folder_task(
             let rel_path = rel_path.trim_start_matches('/');
             let remote_path = format!("{}/{}", remote_base.trim_end_matches('/'), rel_path);
 
-            if let Err(e) = crate::db::record_backup_result(
-                &db_clone,
-                file.id,
-                true,
-                file.file_size,
-                &remote_path,
-            )
-            .await
+            // Verify remote file size for a sample of files (first, last, and every 50th).
+            // This helps detect partial/corrupt transfers without checking every file.
+            let is_sampled = i == 0 || i == total_recording - 1 || i % 50 == 0;
+            let actual_size: i64 = if is_sampled {
+                match engine.verify_file(&remote_path, file.file_size).await {
+                    Ok(true) => {
+                        // Size matches — use the actual remote size for the record
+                        match engine.remote_file_size(&remote_path).await {
+                            Ok(Some(s)) if s > 0 => s,
+                            _ => file.file_size,
+                        }
+                    }
+                    Ok(false) => {
+                        tm.add_log(
+                            &worker_task_id,
+                            format!(
+                                "Size mismatch for file #{} ({}): local={}, remote differs",
+                                file.id, rel_path, file.file_size
+                            ),
+                        )
+                        .await;
+                        file.file_size
+                    }
+                    Err(e) => {
+                        // Verification failure is non-fatal — still record with local size
+                        tm.add_log(
+                            &worker_task_id,
+                            format!("Could not verify file #{} ({}): {}", file.id, rel_path, e),
+                        )
+                        .await;
+                        file.file_size
+                    }
+                }
+            } else {
+                file.file_size
+            };
+
+            if let Err(e) =
+                crate::db::record_backup_result(&db_clone, file.id, true, actual_size, &remote_path)
+                    .await
             {
                 tm.add_log(
                     &worker_task_id,
@@ -2871,6 +2910,182 @@ pub async fn start_backup_discovery_task(
 }
 
 // ============================================================
+// BackupVerify worker
+// ============================================================
+
+/// Start a background task to verify backup records still exist on the NAS.
+/// Queries file_locations.backup records, SSHes to the NAS to verify each
+/// file still exists (via stat), and updates last_verified.
+pub async fn start_backup_verify_task(
+    task_manager: &TaskManager,
+    db: &sqlx::Pool<sqlx::Sqlite>,
+    folder_id: i64,
+    engine: crate::backup::BackupEngine,
+    sample_size: usize,
+) -> String {
+    let task = Task::new(
+        TaskType::BackupVerify { folder_id },
+        Some("backup".to_string()),
+    );
+    let task_id = task.id.clone();
+    let worker_task_id = task_id.clone();
+    let cancel_token = task.cancel_token.clone();
+
+    if task_manager.start_task_unique(task).await.is_err() {
+        return String::new(); // Conflict — task already running for this folder
+    }
+
+    let tm = task_manager.clone();
+    let db_clone = db.clone();
+
+    let join_handle = tokio::spawn(async move {
+        tm.add_log(
+            &worker_task_id,
+            format!(
+                "Starting backup verification for folder #{} (sample: {})",
+                folder_id, sample_size
+            ),
+        )
+        .await;
+        tm.update_progress_text(&worker_task_id, "Verifying backup records...".to_string())
+            .await;
+
+        if cancel_token.is_cancelled() {
+            tm.update_task_status(&worker_task_id, TaskStatus::Cancelled)
+                .await;
+            return Ok(());
+        }
+
+        // Query backup records to verify they still exist on the NAS.
+        // Fetches file_locations.backup records older than 30 days, samples them,
+        // SSHes to check stat on each, and updates last_verified.
+        let backup_records = sqlx::query_as::<_, (i64, String, i64)>(
+            "SELECT fl.file_id, fl.path, fl.file_size FROM file_locations fl \
+             WHERE fl.location_type = 'backup' \
+             AND fl.file_id IN (SELECT f.id FROM files f \
+                                JOIN folders fol ON substr(f.file_path, 1, length(fol.folder_path)) = fol.folder_path \
+                                WHERE fol.id = ?) \
+             ORDER BY fl.last_verified ASC NULLS FIRST \
+             LIMIT ?",
+        )
+        .bind(folder_id)
+        .bind(sample_size as i64)
+        .fetch_all(&db_clone)
+        .await
+        .unwrap_or_default();
+
+        let total = backup_records.len();
+        let mut verified: usize = 0;
+        let mut missing: usize = 0;
+        let mut errors: usize = 0;
+
+        for (i, (file_id, remote_path, expected_size)) in backup_records.iter().enumerate() {
+            if cancel_token.is_cancelled() {
+                break;
+            }
+
+            if *expected_size <= 0 {
+                match engine.remote_file_size(remote_path).await {
+                    Ok(Some(actual_size)) if actual_size > 0 => {
+                        let _ = sqlx::query("UPDATE file_locations SET file_size = ?, last_verified = unixepoch() WHERE file_id = ? AND location_type = 'backup'")
+                            .bind(actual_size).bind(file_id).execute(&db_clone).await;
+                        verified += 1;
+                    }
+                    Ok(_) => {
+                        missing += 1;
+                        tm.add_log(
+                            &worker_task_id,
+                            format!("File #{} not on NAS (zero-size): {}", file_id, remote_path),
+                        )
+                        .await;
+                        let _ = sqlx::query("DELETE FROM file_locations WHERE file_id = ? AND location_type = 'backup'")
+                            .bind(file_id).execute(&db_clone).await;
+                    }
+                    Err(e) => {
+                        errors += 1;
+                        tm.add_log(
+                            &worker_task_id,
+                            format!("Error resolving zero-size #{}: {}", file_id, e),
+                        )
+                        .await;
+                    }
+                }
+                continue;
+            }
+            match engine.verify_file(remote_path, *expected_size).await {
+                Ok(true) => {
+                    verified += 1;
+                    let _ = sqlx::query(
+                        "UPDATE file_locations SET last_verified = unixepoch() \
+                         WHERE file_id = ? AND location_type = 'backup'",
+                    )
+                    .bind(file_id)
+                    .execute(&db_clone)
+                    .await;
+                }
+                Ok(false) => {
+                    missing += 1;
+                    tm.add_log(
+                        &worker_task_id,
+                        format!("File #{} missing on NAS: {}", file_id, remote_path),
+                    )
+                    .await;
+                    // Remove the stale backup record
+                    let _ = sqlx::query(
+                        "DELETE FROM file_locations WHERE file_id = ? AND location_type = 'backup'",
+                    )
+                    .bind(file_id)
+                    .execute(&db_clone)
+                    .await;
+                }
+                Err(e) => {
+                    errors += 1;
+                    tm.add_log(
+                        &worker_task_id,
+                        format!("Error verifying file #{} ({}): {}", file_id, remote_path, e),
+                    )
+                    .await;
+                }
+            }
+
+            if i % 50 == 0 && !backup_records.is_empty() {
+                let pct = ((i + 1) as f32 / total as f32) * 100.0;
+                tm.update_progress_text(
+                    &worker_task_id,
+                    format!(
+                        "Verifying backup records: {}/{} ({:.0}%)",
+                        i + 1,
+                        total,
+                        pct
+                    ),
+                )
+                .await;
+            }
+        }
+
+        let msg = format!(
+            "Backup verification: {} verified, {} missing, {} errors ({} total checked)",
+            verified, missing, errors, total
+        );
+        tm.add_log(&worker_task_id, msg.clone()).await;
+        tm.update_progress_text(&worker_task_id, msg.clone()).await;
+        tm.update_task_status(&worker_task_id, TaskStatus::Completed)
+            .await;
+        tm.update_progress(&worker_task_id, |p| {
+            p.status = TaskStatus::Completed;
+            p.percent = Some(100.0);
+            p.message = msg;
+        })
+        .await;
+
+        Ok(())
+    });
+
+    task_manager.set_join_handle(&task_id, join_handle).await;
+    task_id
+}
+
+// ============================================================
 // PruneFiles worker
 // ============================================================
 
@@ -3372,5 +3587,59 @@ mod tests {
 
         let task_id = start_backup_discovery_task(&tm, &pool, 1).await;
         assert!(task_id.is_empty(), "Should return empty string on conflict");
+    }
+
+    #[tokio::test]
+    async fn start_backup_verify_returns_empty_on_conflict() {
+        let tm = TaskManager::new();
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+
+        // Register a conflicting BackupVerify task for folder 1
+        let conflict = Task::new(
+            TaskType::BackupVerify { folder_id: 1 },
+            Some("backup".to_string()),
+        );
+        tm.start_task_unique(conflict).await.unwrap();
+
+        // Second call for the same folder should return empty string
+        let task_id = start_backup_verify_task(
+            &tm,
+            &pool,
+            1,
+            crate::backup::BackupEngine::new("test-host".to_string()),
+            100,
+        )
+        .await;
+        assert!(
+            task_id.is_empty(),
+            "Should return empty string on conflict (same folder_id)"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_backup_verify_succeeds_on_different_folder() {
+        let tm = TaskManager::new();
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+
+        // Register a BackupVerify task for folder 1
+        let conflict = Task::new(
+            TaskType::BackupVerify { folder_id: 1 },
+            Some("backup".to_string()),
+        );
+        tm.start_task_unique(conflict).await.unwrap();
+
+        // Second call for folder 2 should succeed (different conflict key)
+        let task_id = start_backup_verify_task(
+            &tm,
+            &pool,
+            2,
+            crate::backup::BackupEngine::new("test-host".to_string()),
+            100,
+        )
+        .await;
+        assert!(
+            !task_id.is_empty(),
+            "Should succeed for a different folder_id"
+        );
     }
 }

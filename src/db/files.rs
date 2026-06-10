@@ -358,6 +358,12 @@ pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
     // Get file metadata
     let metadata = fs::metadata(path)?;
     let file_size = metadata.len() as i64;
+    if file_size == 0 {
+        warn!(
+            "extract_audio_metadata_from_file: file_size is 0 for {:?}",
+            path
+        );
+    }
     let last_modified = metadata
         .modified()?
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -3873,5 +3879,28 @@ mod tests {
         assert_eq!(val.as_deref(), Some(comment));
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ========================================================================
+    // Scanner Guard Test
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_extract_audio_metadata_file_size_nonzero() {
+        let src = test_flac_path();
+        assert!(src.exists(), "test fixture missing: {:?}", src);
+
+        let result = extract_audio_metadata_from_file(&src).await;
+        assert!(
+            result.is_ok(),
+            "extract should succeed for valid FLAC: {:?}",
+            result.err()
+        );
+        let file = result.unwrap();
+        assert!(
+            file.file_size > 0,
+            "file_size should be > 0 for a real file, got {}",
+            file.file_size
+        );
     }
 }

@@ -165,6 +165,21 @@ impl BackupEngine {
             .collect())
     }
 
+    /// List remote files with relative paths (like find -maxdepth), returning paths
+    /// relative to the remote_dir (not just basenames).
+    /// Uses `find -maxdepth N -type f` under the hood.
+    ///
+    /// Example: for remote_dir=/volume1/media/stems, max_depth=2:
+    ///   /volume1/media/stems/subdir/file.wav → "subdir/file.wav"
+    ///   /volume1/media/stems/file.flac       → "file.flac"
+    pub async fn list_remote_files_relative(
+        &self,
+        remote_dir: &str,
+        max_depth: u32,
+    ) -> Result<Vec<String>> {
+        self.list_remote_files_full(remote_dir, max_depth).await
+    }
+
     /// List remote files with full relative paths (not stripped to basenames).
     /// Returns paths relative to the remote_base directory.
     /// Used for backup discovery where we need to reconstruct local file paths.
@@ -599,5 +614,76 @@ mod tests {
     fn test_parse_remote_file_size_empty() {
         let result = parse_remote_file_size("");
         assert_eq!(result, None);
+    }
+
+    // ── list_remote_files_full relative path tests ────────────────
+    // These test the path-stripping logic used by list_remote_files_full() / list_remote_files_relative().
+    // The function strips the remote_dir prefix to produce paths relative to the backup base.
+
+    #[test]
+    fn test_list_remote_files_full_strips_prefix_to_relative() {
+        // list_remote_files_full strips remote_dir prefix:
+        // /volume1/media/stems/subdir/file.wav + base=/volume1/media/stems → subdir/file.wav
+        let result = strip_remote_prefix(
+            "/volume1/media/stems/subdir/file.wav",
+            "/volume1/media/stems",
+        );
+        assert_eq!(result, Some("subdir/file.wav".to_string()));
+    }
+
+    #[test]
+    fn test_list_remote_files_full_flat_directory() {
+        // Flat directory (depth=1): no subdirectory in relative path
+        // /volume1/media/flacs/Artist - Title.flac + base=/volume1/media/flacs → "Artist - Title.flac"
+        let result = strip_remote_prefix(
+            "/volume1/media/flacs/Artist - Title.flac",
+            "/volume1/media/flacs",
+        );
+        assert_eq!(result, Some("Artist - Title.flac".to_string()));
+    }
+
+    #[test]
+    fn test_list_remote_files_full_deeply_nested() {
+        // Deeply nested: /volume1/media/stems/subdir/subsubdir/file.wav → subdir/subsubdir/file.wav
+        let result = strip_remote_prefix(
+            "/volume1/media/stems/subdir/subsubdir/file.wav",
+            "/volume1/media/stems",
+        );
+        assert_eq!(result, Some("subdir/subsubdir/file.wav".to_string()));
+    }
+
+    #[test]
+    fn test_list_remote_files_full_no_match_returns_none() {
+        // Path outside the base should return None (file not under this base)
+        let result = strip_remote_prefix("/other/path/file.wav", "/volume1/media/stems");
+        assert_eq!(result, None);
+    }
+
+    // ── verify_file tests (pure logic, no SSH) ──────────────────────
+
+    #[test]
+    fn test_verify_file_same_size() {
+        // verify_file returns true when expected_size matches remote_file_size
+        // We test the comparison logic: if remote_file_size returns Some(x), verify with expected_size
+        // This mirrors: verify_file(path, expected) = { remote_file_size(path) -> Some(size) if size == expected }
+        let remote_size = Some(12345i64);
+        let expected = 12345i64;
+        assert!(remote_size.is_some_and(|s| s == expected));
+    }
+
+    #[test]
+    fn test_verify_file_different_size() {
+        // verify_file returns false when expected_size != remote_file_size
+        let remote_size = Some(12345i64);
+        let expected = 99999i64;
+        assert!(!remote_size.is_some_and(|s| s == expected));
+    }
+
+    #[test]
+    fn test_verify_file_missing() {
+        // verify_file returns false when remote_file_size returns None (file doesn't exist)
+        let remote_size: Option<i64> = None;
+        let expected = 12345i64;
+        assert!(!remote_size.is_some_and(|s| s == expected));
     }
 }

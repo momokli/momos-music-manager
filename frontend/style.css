@@ -5840,3 +5840,37 @@ body.dark .storage-warning {
 .db-preview-table td {
     padding: 0.25rem 0.5rem;
 }
+
+.text-danger {
+    color: var(--red);
+}
+
+/* ─── Backfill Backup Sizes ──────────────────────── */
+
+#backfill-section {
+    margin-top: 1.25rem;
+}
+
+.backfill-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+#backfill-status {
+    font-size: 0.85rem;
+}
+
+#backfill-results code {
+    font-size: 0.8rem;
+    padding: 0.1rem 0.3rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+}
+
+#backfill-results .text-danger {
+    color: var(--red);
+    /* kept for specificity if needed */
+}
