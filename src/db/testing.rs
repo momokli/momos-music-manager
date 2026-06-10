@@ -486,6 +486,113 @@ pub async fn seed_comment_diff_scenario(pool: &Pool<Sqlite>) -> HashMap<String, 
     counts
 }
 
+/// Seed data for dynamic bundle testing. Extends seed_basic_scenario with:
+/// - Files at different BPMs (120, 140, 155, 180)
+/// - Tags "hammahalle" (Mood), "spät" (Vibe), "bouncy" (Vibe)
+/// - Playlists matching tag names for file_resolved_tags resolution
+/// - Links: file 61 → hammahalle, file 62 → spät, file 63 → bouncy
+pub async fn seed_dynamic_bundles_scenario(pool: &Pool<Sqlite>) -> HashMap<String, usize> {
+    let mut counts = seed_basic_scenario(pool).await;
+
+    // Tags: hammahalle (Mood=3), spät (Vibe=4), bouncy (Vibe=4)
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO tags (id, name, category_id, backpack)
+           VALUES
+             (50, 'hammahalle', 3, 0),
+             (51, 'spät', 4, 0),
+             (52, 'bouncy', 4, 0)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Files with different BPMs
+    // id=60: 120 BPM flac, id=61: 140 BPM stem.m4a, id=62: 155 BPM stem.m4a, id=63: 180 BPM flac
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO files (id, file_path, file_type, file_size, last_modified, title, artist,
+             bpm, musical_key, isrc, file_hash, spotify_id)
+           VALUES
+             (60, '/test/stems/BPM120 - Track.flac',    'flac',    5000000, 1700000000, 'BPM120',  'Artist120', 120.0, '4m', 'US060', 'hash60', 'spotify:track:bpm120'),
+             (61, '/test/stems/BPM140 - Track.stem.m4a', 'stem.m4a', 8000000, 1700000000, 'BPM140',  'Artist140', 140.0, '6m', 'US061', 'hash61', 'spotify:track:bpm140'),
+             (62, '/test/stems/BPM155 - Track.stem.m4a', 'stem.m4a', 8000000, 1700000000, 'BPM155',  'Artist155', 155.0, '7m', 'US062', 'hash62', 'spotify:track:bpm155'),
+             (63, '/test/stems/BPM180 - Track.flac',    'flac',    5000000, 1700000000, 'BPM180',  'Artist180', 180.0, '9m', 'US063', 'hash63', 'spotify:track:bpm180')"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // File locations (local + backup) for each
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO file_locations (file_id, location_type, path, file_size, last_verified)
+           VALUES
+             (60, 'local',  '/test/stems/BPM120 - Track.flac',        5000000, 1700000000),
+             (60, 'backup', '/backup/stems/BPM120 - Track.flac',      5000000, 1700000000),
+             (61, 'local',  '/test/stems/BPM140 - Track.stem.m4a',    8000000, 1700000000),
+             (61, 'backup', '/backup/stems/BPM140 - Track.stem.m4a',  8000000, 1700000000),
+             (62, 'local',  '/test/stems/BPM155 - Track.stem.m4a',    8000000, 1700000000),
+             (62, 'backup', '/backup/stems/BPM155 - Track.stem.m4a',  8000000, 1700000000),
+             (63, 'local',  '/test/stems/BPM180 - Track.flac',        5000000, 1700000000),
+             (63, 'backup', '/backup/stems/BPM180 - Track.flac',      5000000, 1700000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    sqlx::query("UPDATE files SET last_verified_local = 1700000000 WHERE id IN (60, 61, 62, 63)")
+        .execute(pool)
+        .await
+        .unwrap();
+
+    // Service tracks for linking
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_tracks (id, service, service_id, title, artist, isrc, imported_at)
+           VALUES
+             (60, 'spotify', 'spotify:track:bpm120', 'BPM120', 'Artist120', 'US060', 1700000000),
+             (61, 'spotify', 'spotify:track:bpm140', 'BPM140', 'Artist140', 'US061', 1700000000),
+             (62, 'spotify', 'spotify:track:bpm155', 'BPM155', 'Artist155', 'US062', 1700000000),
+             (63, 'spotify', 'spotify:track:bpm180', 'BPM180', 'Artist180', 'US063', 1700000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Playlists matching tag names for tag resolution
+    // id=3: hammahalle, id=4: spät, id=5: bouncy
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_playlists (id, service, playlist_id, name)
+           VALUES
+             (3, 'spotify', 'spotify:playlist:hammahalle', 'hammahalle'),
+             (4, 'spotify', 'spotify:playlist:spat',        'spät'),
+             (5, 'spotify', 'spotify:playlist:bouncy',      'bouncy')"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Link tracks to playlists: file 61 → hammahalle, file 62 → spät, file 63 → bouncy
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_playlist_tracks (playlist_id, track_id, position, added_at)
+           VALUES
+             (3, 61, 0, 1700000000),
+             (4, 62, 0, 1700000000),
+             (5, 63, 0, 1700000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Populate file_resolved_tags so tag resolution works
+    crate::db::refresh_file_resolved_tags(pool).await.unwrap();
+
+    *counts.get_mut("tags").unwrap() += 3;
+    *counts.get_mut("files").unwrap() += 4;
+    *counts.get_mut("file_locations").unwrap() += 8;
+    *counts.get_mut("service_tracks").unwrap() += 4;
+    *counts.get_mut("service_playlists").unwrap() += 3;
+    *counts.get_mut("service_playlist_tracks").unwrap() += 3;
+    counts
+}
+
 /// Seed a subscribed playlist for archive/subscription testing.
 pub async fn seed_subscribed_playlist(pool: &Pool<Sqlite>) {
     sqlx::query("UPDATE service_playlists SET archive_deleted = 1 WHERE id = 1")

@@ -224,20 +224,65 @@ function formatBytes(bytes) {
 function wireEvents(container) {
   const syncBtn = container.querySelector("#backpack-sync-all");
   if (syncBtn) {
-    syncBtn.addEventListener("click", async () => {
-      const tagIds = state.tags.map((t) => t.id);
+    syncBtn.addEventListener("click", () => handleSyncAll(container));
+  }
+}
+
+async function handleSyncAll(container) {
+  const syncBtn = container.querySelector("#backpack-sync-all");
+  try {
+    if (syncBtn) {
       syncBtn.disabled = true;
       syncBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Syncing...';
-      try {
-        // For now, trigger individual backpack toggles to re-sync.
-        // In the future, this will use a dedicated BackpackSync API.
-        showToast(`Backpack sync triggered for ${tagIds.length} tags`, "success");
-      } catch (err) {
-        showToast(`Backpack sync failed: ${err.message}`, "error");
-      } finally {
+    }
+
+    const resp = await fetchJSON("/api/storage/sync-backpack", { method: "POST" });
+    const taskId = resp?.data?.taskId;
+    const message = resp?.data?.message;
+    if (!taskId) {
+      if (syncBtn) {
         syncBtn.disabled = false;
         syncBtn.innerHTML = '<i class="fas fa-sync"></i> Sync All';
       }
-    });
+      showToast(message || "Backpack sync already in progress", "info");
+      return;
+    }
+
+    showToast("Backpack sync started", "info");
+
+    // Poll task status every 2 seconds
+    const pollInterval = setInterval(async () => {
+      try {
+        const taskResp = await fetchJSON(`/api/tasks/${taskId}`);
+        const task = taskResp?.data;
+        if (!task) return;
+
+        if (task.status === "completed") {
+          clearInterval(pollInterval);
+          showToast("Backpack sync complete", "success");
+          if (syncBtn) {
+            syncBtn.disabled = false;
+            syncBtn.innerHTML = '<i class="fas fa-sync"></i> Sync All';
+          }
+          // Refresh the page to show updated local status
+          await init(container, _signal);
+        } else if (task.status === "failed" || task.status === "cancelled") {
+          clearInterval(pollInterval);
+          showToast(`Backpack sync ${task.status}: ${task.message || ""}`, "error");
+          if (syncBtn) {
+            syncBtn.disabled = false;
+            syncBtn.innerHTML = '<i class="fas fa-sync"></i> Sync All';
+          }
+        }
+      } catch (e) {
+        // Ignore poll errors — keep trying
+      }
+    }, 2000);
+  } catch (e) {
+    showToast(`Backpack sync failed: ${e.message}`, "error");
+    if (syncBtn) {
+      syncBtn.disabled = false;
+      syncBtn.innerHTML = '<i class="fas fa-sync"></i> Sync All';
+    }
   }
 }

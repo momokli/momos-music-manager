@@ -265,3 +265,16 @@ pub async fn seed_service_config(pool: &Pool<Sqlite>, service: &str) {
     .await
     .unwrap();
 }
+
+/// Seed data for dynamic bundle testing.
+///
+/// Extends seed_basic_data with:
+/// - Tags: hammahalle (id=50, Mood), spät (id=51, Vibe), bouncy (id=52, Vibe)
+/// - Files with varying BPM: id=60 (120 flac), id=61 (140 stem.m4a), id=62 (155 stem.m4a), id=63 (180 flac)
+/// - Playlists matching tag names so file_resolved_tags gets populated
+/// - Service tracks + playlist links: 61→hammahalle, 62→spät, 63→bouncy
+///
+/// Delegates to the shared `db::testing::seed_dynamic_bundles_scenario` function.
+pub async fn seed_dynamic_bundles_data(pool: &Pool<Sqlite>) {
+    momos_music_manager::db::testing::seed_dynamic_bundles_scenario(pool).await;
+}

@@ -6,6 +6,7 @@
 //! which sub-module it lives in.
 
 pub mod connection;
+pub mod dynamic_bundles;
 pub mod files;
 pub mod folders;
 pub mod playlists;
@@ -18,6 +19,7 @@ pub mod types;
 
 // Re-export everything so crate::db::* remains backward compatible.
 pub use connection::*;
+pub use dynamic_bundles::*;
 pub use files::*;
 pub use folders::*;
 pub use playlists::*;

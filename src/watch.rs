@@ -35,6 +35,7 @@ impl Default for FolderWatcherConfig {
 /// Folder watcher that polls active folders at regular intervals
 pub struct FolderWatcher {
     db_pool: Pool<Sqlite>,
+    task_manager: crate::tasks::TaskManager,
     config: FolderWatcherConfig,
     is_running: Arc<std::sync::atomic::AtomicBool>,
     shutdown_sender: Option<oneshot::Sender<()>>,
@@ -43,9 +44,14 @@ pub struct FolderWatcher {
 #[allow(dead_code)]
 impl FolderWatcher {
     /// Create a new folder watcher
-    pub fn new(db_pool: Pool<Sqlite>, config: FolderWatcherConfig) -> Self {
+    pub fn new(
+        db_pool: Pool<Sqlite>,
+        task_manager: crate::tasks::TaskManager,
+        config: FolderWatcherConfig,
+    ) -> Self {
         Self {
             db_pool,
+            task_manager,
             config,
             is_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             shutdown_sender: None,
@@ -66,6 +72,7 @@ impl FolderWatcher {
         );
 
         let db_pool = self.db_pool.clone();
+        let tm = self.task_manager.clone();
         let interval_seconds = self.config.scan_interval_seconds;
         let is_running = self.is_running.clone();
 
@@ -81,7 +88,7 @@ impl FolderWatcher {
 
             // Run initial scan immediately
             info!("Running initial folder scan...");
-            if let Err(e) = Self::scan_active_folders(&db_pool).await {
+            if let Err(e) = Self::scan_active_folders(&db_pool, &tm).await {
                 error!("Initial folder scan failed: {}", e);
             }
 
@@ -94,7 +101,7 @@ impl FolderWatcher {
                 tokio::select! {
                     _ = interval.tick() => {
                         info!("Starting scheduled folder scan...");
-                        if let Err(e) = Self::scan_active_folders(&db_pool).await {
+                        if let Err(e) = Self::scan_active_folders(&db_pool, &tm).await {
                             error!("Scheduled folder scan failed: {}", e);
                         } else {
                             info!("Scheduled folder scan completed");
@@ -142,11 +149,14 @@ impl FolderWatcher {
     /// Trigger an immediate scan of all active folders
     pub async fn scan_now(&self) -> Result<usize> {
         info!("Manual folder scan requested");
-        Self::scan_active_folders(&self.db_pool).await
+        Self::scan_active_folders(&self.db_pool, &self.task_manager).await
     }
 
-    /// Scan all active folders in the database
-    async fn scan_active_folders(pool: &Pool<Sqlite>) -> Result<usize> {
+    /// Scan all active folders in the database via background tasks
+    async fn scan_active_folders(
+        pool: &Pool<Sqlite>,
+        tm: &crate::tasks::TaskManager,
+    ) -> Result<usize> {
         // Get all active folders
         let folders = db::get_folders(pool).await?;
         let active_folders: Vec<_> = folders.into_iter().filter(|f| f.active).collect();
@@ -158,39 +168,41 @@ impl FolderWatcher {
 
         info!("Scanning {} active folder(s)...", active_folders.len());
 
-        let mut total_files_scanned = 0;
         let mut scanned_folders = 0;
 
         for folder in active_folders {
-            info!("Scanning folder: {}", folder.folder_path);
+            info!("Starting scan for folder: {}", folder.folder_path);
 
-            match db::scan_folder(
+            match crate::tasks::start_scan_folder_task(
+                tm,
                 pool,
                 folder.id,
                 crate::db::ScanMode::Incremental { since: None },
             )
             .await
             {
-                Ok(file_count) => {
+                Ok(task_id) => {
                     info!(
-                        "Scanned {} files from folder: {}",
-                        file_count, folder.folder_path
+                        "Started scan task {} for folder: {}",
+                        task_id, folder.folder_path
                     );
-                    total_files_scanned += file_count;
                     scanned_folders += 1;
                 }
                 Err(e) => {
-                    error!("Failed to scan folder {}: {}", folder.folder_path, e);
+                    error!(
+                        "Failed to start scan task for folder {}: {}",
+                        folder.folder_path, e
+                    );
                 }
             }
         }
 
         info!(
-            "Folder scan completed: {} folder(s) scanned, {} total files",
-            scanned_folders, total_files_scanned
+            "Folder scan completed: {} folder(s) scanned via background tasks",
+            scanned_folders
         );
 
-        Ok(total_files_scanned)
+        Ok(scanned_folders)
     }
 
     /// Get the watcher configuration

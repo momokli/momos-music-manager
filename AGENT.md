@@ -8755,7 +8755,7 @@ Need to also import/define `starRating` helper for the rating renderer.
 
 ## Plan: dynamic-tag-bundles
 
-**Status**: proposed
+**Status**: done ✅
 **Branch**: `feat/dynamic-tag-bundles`
 **Ready for review**: no
 **Depends on**: nothing

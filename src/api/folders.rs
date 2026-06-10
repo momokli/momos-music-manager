@@ -676,6 +676,16 @@ async fn folder_scan_sources_handler(
     let task_id =
         crate::tasks::start_scan_wav_sources_task(&state.task_manager, &state.db, folder_id).await;
 
+    if task_id.is_empty() {
+        return Json(ApiResponse {
+            data: serde_json::json!({
+                "taskId": null,
+                "message": "Scan WAV sources already in progress for this folder",
+            }),
+        })
+        .into_response();
+    }
+
     Json(ApiResponse {
         data: serde_json::json!({ "taskId": task_id }),
     })

@@ -2042,6 +2042,14 @@ pub async fn get_backpack_size_stats(pool: &Pool<Sqlite>) -> Result<BackpackSize
             .unwrap_or(false)
     };
 
+    let get_backup_path = |file_id: i64| -> Option<String> {
+        locs_by_file.get(&file_id).and_then(|locs| {
+            locs.iter()
+                .find(|l| l.location_type == "backup")
+                .map(|l| l.path.clone())
+        })
+    };
+
     // Step 7: For each track group, pick best format and accumulate sizes
     let mut target_bytes: i64 = 0;
     let mut local_bytes: i64 = 0;
@@ -2059,9 +2067,14 @@ pub async fn get_backpack_size_stats(pool: &Pool<Sqlite>) -> Result<BackpackSize
 
         let best = sorted[0];
 
-        target_bytes += best.file_size;
-        if is_local(best.id) {
-            local_bytes += best.file_size;
+        // Only count tracks whose best format has a backup entry.
+        // Files without backup can never be pulled — they're not the
+        // backpack's concern.
+        if get_backup_path(best.id).is_some() {
+            target_bytes += best.file_size;
+            if is_local(best.id) {
+                local_bytes += best.file_size;
+            }
         }
     }
 

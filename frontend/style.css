@@ -5774,3 +5774,69 @@ body.dark .storage-warning {
     color: var(--muted);
     font-size: 0.8rem;
 }
+
+/* ── Dynamic Bundles ─────────────────────────── */
+.db-layout {
+    display: flex;
+    gap: 1.5rem;
+    height: calc(100vh - 180px);
+}
+.db-list {
+    width: 35%;
+    overflow-y: auto;
+}
+.db-edit {
+    width: 65%;
+    overflow-y: auto;
+}
+.db-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+    margin-bottom: 0.75rem;
+    cursor: pointer;
+    transition: border-color 0.15s;
+}
+.db-card:hover {
+    border-color: var(--primary);
+}
+.db-card.active {
+    border-color: var(--primary);
+    background: var(--accent-bg);
+}
+.db-card-name {
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+}
+.db-card-meta {
+    font-size: 0.8rem;
+    color: var(--muted);
+    display: flex;
+    gap: 0.75rem;
+}
+.db-edit-section {
+    margin-bottom: 1.25rem;
+}
+.db-edit-label {
+    font-weight: 600;
+    font-size: 0.85rem;
+    margin-bottom: 0.4rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.db-preview-table {
+    width: 100%;
+    font-size: 0.85rem;
+}
+.db-preview-table th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 500;
+    padding: 0.3rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+}
+.db-preview-table td {
+    padding: 0.25rem 0.5rem;
+}

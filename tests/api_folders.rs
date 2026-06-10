@@ -472,3 +472,47 @@ async fn folders_scan_sources() {
         .expect("scan-sources response should have taskId");
     assert!(!task_id.is_empty(), "taskId should not be empty");
 }
+
+#[tokio::test]
+/// `POST /api/folders/{id}/scan-sources` — second call for same folder
+/// returns null taskId with "already in progress" message.
+async fn folders_scan_sources_rejects_concurrent() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Enable backup_path and scan_sources first
+    client
+        .put(format!("{}/api/folders/1/backup", base))
+        .json(&serde_json::json!({
+            "backupPath": "/backups/test",
+            "scanSources": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Fire both calls concurrently so the second arrives while the first
+    // task is still Pending (before the background worker transitions it).
+    let (resp1, resp2) = tokio::join!(
+        client
+            .post(format!("{}/api/folders/1/scan-sources", base))
+            .send(),
+        client
+            .post(format!("{}/api/folders/1/scan-sources", base))
+            .send(),
+    );
+    let resp1 = resp1.unwrap();
+    let resp2 = resp2.unwrap();
+    assert_eq!(resp1.status(), 200, "first call should return 200");
+    assert_eq!(resp2.status(), 200, "second call should return 200");
+    let json1: Value = resp1.json().await.unwrap();
+    let json2: Value = resp2.json().await.unwrap();
+    let resp1_conflict = json1["data"]["taskId"].is_null()
+        && json1["data"]["message"] == "Scan WAV sources already in progress for this folder";
+    let resp2_conflict = json2["data"]["taskId"].is_null()
+        && json2["data"]["message"] == "Scan WAV sources already in progress for this folder";
+    assert!(
+        resp1_conflict || resp2_conflict,
+        "at least one call should be rejected, got resp1={json1:#} resp2={json2:#}"
+    );
+}

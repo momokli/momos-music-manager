@@ -8,6 +8,7 @@ use crate::AppState;
 pub mod daily;
 pub mod deemix_api;
 pub mod digging;
+pub mod dynamic_bundles;
 pub mod explorer;
 pub mod files;
 pub mod folders;
@@ -39,5 +40,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(folders::router())
         .merge(tags::router())
         .merge(tracks::router())
+        .merge(dynamic_bundles::router())
         .merge(files::router())
 }

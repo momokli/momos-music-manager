@@ -36,6 +36,7 @@ const PAGE_MAP = {
   backpack: "backpack",
   daily: "daily",
   "tag-bundles": "tag-bundles",
+  "dynamic-bundles": "dynamic-bundles",
 };
 
 let currentPageId = null;

@@ -45,6 +45,7 @@ const TOOLS_ITEMS = [
   { id: "backpack", label: "Backpack", icon: "fa-box" },
   { id: "daily", label: "Daily", icon: "fa-calendar-day" },
   { id: "tag-bundles", label: "Tag Bundles", icon: "fa-layer-group" },
+  { id: "dynamic-bundles", label: "Dynamic Bundles", icon: "fa-filter-list" },
 ];
 
 /** @type {string | null} - id of the currently open dropdown section, if any */

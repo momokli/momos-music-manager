@@ -503,14 +503,86 @@ pub async fn refresh_file_resolved_tags(pool: &Pool<Sqlite>) -> Result<u64> {
         total
     };
 
+    // Step 3: Resolve dynamic bundles
+    // For each dynamic bundle, compute matching file IDs via filter criteria
+    // and INSERT the bundle's tag into file_resolved_tags for those files.
+    let dynamic_bundles: Vec<DynamicBundle> =
+        sqlx::query_as::<_, DynamicBundle>("SELECT * FROM dynamic_bundles")
+            .fetch_all(&mut *tx)
+            .await?;
+
+    let dynamic_changed: i64 = {
+        let mut total: i64 = 0;
+        for db in &dynamic_bundles {
+            // Get the tag info for this bundle's tag
+            let tag: Tag = match sqlx::query_as::<_, Tag>("SELECT * FROM tags WHERE id = ?")
+                .bind(db.tag_id)
+                .fetch_optional(&mut *tx)
+                .await?
+            {
+                Some(t) => t,
+                None => {
+                    tracing::warn!(
+                        "Dynamic bundle tag {} not found for bundle '{}' (id={}), skipping",
+                        db.tag_id,
+                        db.name,
+                        db.id
+                    );
+                    continue;
+                }
+            };
+
+            // Resolve matching file IDs
+            let file_ids =
+                crate::db::dynamic_bundles::resolve_dynamic_bundle_in_tx(&mut *tx, db).await?;
+
+            if file_ids.is_empty() {
+                continue;
+            }
+
+            // Bulk INSERT matching files into file_resolved_tags
+            for chunk in file_ids.chunks(500) {
+                let mut insert_sql = String::from(
+                    "INSERT OR IGNORE INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, sort_order, created_at, is_default) VALUES ",
+                );
+                let mut parts: Vec<String> = Vec::new();
+                for _ in chunk {
+                    parts.push(
+                        "(?, ?, ?, ?, (SELECT name FROM tag_categories WHERE id = ?), (SELECT prefix FROM tag_categories WHERE id = ?), (SELECT sort_order FROM tag_categories WHERE id = ?), ?, (SELECT COALESCE(is_default, 0) FROM tag_categories WHERE id = ?))"
+                            .to_string(),
+                    );
+                }
+                insert_sql.push_str(&parts.join(", "));
+
+                let mut q = sqlx::query(&insert_sql);
+                for &file_id in chunk {
+                    q = q
+                        .bind(file_id)
+                        .bind(tag.id)
+                        .bind(&tag.name)
+                        .bind(tag.category_id)
+                        .bind(tag.category_id)
+                        .bind(tag.category_id)
+                        .bind(tag.category_id)
+                        .bind(tag.created_at)
+                        .bind(tag.category_id);
+                }
+                let affected = q.execute(&mut *tx).await?.rows_affected();
+                total += affected as i64;
+            }
+        }
+        total
+    };
+
     tx.commit().await?;
 
-    let count = (changed + bundle_changed) as u64;
+    let count = (changed + bundle_changed + dynamic_changed) as u64;
     tracing::info!(
-        "Refreshed file_resolved_tags: {} rows ({} from view, {} from bundles)",
+        "Refreshed file_resolved_tags: {} rows ({} from view, {} from bundles, {} from dynamic)",
         count,
         changed,
-        bundle_changed
+        bundle_changed,
+        dynamic_changed
     );
     Ok(count)
 }

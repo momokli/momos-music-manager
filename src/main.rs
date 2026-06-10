@@ -174,13 +174,13 @@ async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()
     let global_poller_config = config.clone();
     let global_interval = config.global_poll_interval_secs;
     let global_cancel = poller_cancel.clone();
-    let pruner_tm = task_manager.clone();
     let maint_interval = config.maintainer_interval_secs;
     let maint_full_scan_max_age = config.maintainer_full_scan_max_age_secs;
     let maint_backup_discovery_interval = config.maintainer_backup_discovery_interval_secs;
     let maint_auto_prune = config.maintainer_auto_prune;
     let maint_auto_cleanup_dirs = config.maintainer_auto_cleanup_dirs;
     let maint_traktor_import = config.maintainer_traktor_import_enabled;
+    let maint_tm = task_manager.clone();
     let maint_cancel = poller_cancel.clone();
 
     let state = Arc::new(AppState {
@@ -220,19 +220,10 @@ async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()
     });
     let _poller_handle = poller_handle;
 
-    // Spawn background task pruner — removes completed/failed/cancelled tasks older than 5 min
-    tokio::spawn(async move {
-        let prune_age = Duration::from_secs(300);
-        let check_interval = Duration::from_secs(60);
-        loop {
-            tokio::time::sleep(check_interval).await;
-            pruner_tm.prune_old_tasks(prune_age).await;
-        }
-    });
-
     // Start folder watcher — polls active folders every 5 minutes
     let mut folder_watcher = momos_music_manager::watch::FolderWatcher::new(
         watcher_db,
+        state.task_manager.clone(),
         momos_music_manager::watch::FolderWatcherConfig::default(),
     );
     if let Err(e) = folder_watcher.start() {
@@ -299,12 +290,89 @@ async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()
         }
     });
 
+    // Auto-backpack-sync on startup
+    let bp_db = state.db.clone();
+    let bp_tm = state.task_manager.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE backpack = 1")
+            .fetch_one(&bp_db)
+            .await
+            .unwrap_or(0);
+        if count > 0 {
+            tracing::info!(
+                "Startup backpack sync: {} backpack tags found, starting sync",
+                count
+            );
+            momos_music_manager::tasks::start_backpack_sync_task(&bp_tm, &bp_db).await;
+        } else {
+            tracing::info!("Startup backpack sync: no backpack tags, skipping");
+        }
+    });
+
+    // Auto-backup-consistency on startup: remove stale file_locations.backup entries
+    // for files that exist in the DB but are no longer on the NAS.
+    let cc_db = state.db.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        #[derive(sqlx::FromRow)]
+        struct FolderBackupRow {
+            id: i64,
+            backup_path: String,
+        }
+        let folders: Vec<FolderBackupRow> = sqlx::query_as(
+            "SELECT id, backup_path FROM folders WHERE backup_path IS NOT NULL AND backup_path != ''"
+        )
+        .fetch_all(&cc_db)
+        .await
+        .unwrap_or_default();
+
+        for folder in &folders {
+            if let Some((ssh_host, remote_base)) = folder.backup_path.split_once(':') {
+                let engine = momos_music_manager::backup::BackupEngine::new(ssh_host.to_string());
+                let max_depth: u32 = 2;
+                match engine.list_remote_files_full(remote_base, max_depth).await {
+                    Ok(remote_files) if !remote_files.is_empty() => {
+                        match momos_music_manager::db::cleanup_stale_backup_entries(
+                            &cc_db,
+                            folder.id,
+                            &remote_files,
+                        )
+                        .await
+                        {
+                            Ok(n) if n > 0 => tracing::info!(
+                                "Startup consistency: removed {} stale backup entries from folder #{}",
+                                n,
+                                folder.id
+                            ),
+                            Ok(_) => {
+                                tracing::info!("Startup consistency: folder #{} clean", folder.id)
+                            }
+                            Err(e) => tracing::warn!(
+                                "Startup consistency: folder #{} error: {}",
+                                folder.id,
+                                e
+                            ),
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(
+                        "Startup consistency: can't list folder #{}: {}",
+                        folder.id,
+                        e
+                    ),
+                }
+            }
+        }
+    });
+
     // Start maintainer
     if maint_interval > 0 {
         let maint_db = state.db.clone();
         tokio::spawn(async move {
             momos_music_manager::maintainer::start_maintainer(
                 maint_db,
+                maint_tm,
                 maint_interval,
                 maint_full_scan_max_age,
                 maint_backup_discovery_interval,

@@ -1470,115 +1470,33 @@ async fn tag_backpack_handler(
 
     match set_tag_backpack(&state.db, id, backpack).await {
         Ok(()) => {
-            // When toggling TO backpack, trigger a background sync to pull
-            // missing files from backup so they're available offline.
+            // When toggling TO backpack, trigger a background sync task
             if backpack {
-                let db = state.db.clone();
-                tokio::spawn(async move {
-                    tracing::info!("Backpack toggled on for tag #{}, starting auto-pull...", id);
-                    let candidates = match crate::db::get_backpack_pull_candidates(&db).await {
-                        Ok(c) => c,
-                        Err(e) => {
-                            tracing::error!("Backpack pull candidate query failed: {}", e);
-                            return;
-                        }
-                    };
-                    if candidates.is_empty() {
-                        // No pull needed, but still clean up redundant formats
-                        match crate::db::cleanup_redundant_backpack_files(&db).await {
-                            Ok((deleted, freed)) if deleted > 0 => {
-                                tracing::info!(
-                                    "Backpack cleanup (no pull needed): deleted {} redundant local files ({} bytes)",
-                                    deleted,
-                                    freed
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!("Backpack cleanup failed: {}", e);
-                            }
-                        }
-                        tracing::info!("Backpack sync for tag #{}: all files already local", id);
-                        return;
-                    }
-                    tracing::info!(
-                        "Backpack sync for tag #{}: {} files need pulling",
-                        id,
-                        candidates.len()
-                    );
-                    let mut pulled = 0usize;
-                    for c in &candidates {
-                        let (ssh_host, remote_path) =
-                            match crate::db::resolve_backup_host(&db, &c.backup_path).await {
-                                Ok((h, p)) => (h, p),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Cannot resolve backup host for file #{}: {}",
-                                        c.file_id,
-                                        e
-                                    );
-                                    continue;
-                                }
-                            };
-                        let engine = crate::backup::BackupEngine::new(ssh_host.to_string());
-                        let local = std::path::Path::new(&c.local_path);
-                        match engine.pull_file(&remote_path, local).await {
-                            Ok((true, size)) => {
-                                pulled += 1;
-                                let _ = crate::db::set_file_location(
-                                    &db,
-                                    c.file_id,
-                                    "local",
-                                    &c.local_path,
-                                    size,
-                                )
-                                .await;
-                                let _ = sqlx::query(
-                                    "UPDATE files SET last_verified_local = unixepoch() WHERE id = ?",
-                                )
-                                .bind(c.file_id)
-                                .execute(&db)
-                                .await;
-                                tracing::debug!(
-                                    "Pulled {} ({}, {} bytes)",
-                                    c.local_path,
-                                    c.file_type,
-                                    size
-                                );
-                            }
-                            Ok((false, _)) => {
-                                tracing::warn!("Failed to pull {} from backup", c.local_path);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Error pulling {}: {}", c.local_path, e);
-                            }
-                        }
-                    }
-                    // After pulling files, clean up redundant lower-priority local files
-                    match crate::db::cleanup_redundant_backpack_files(&db).await {
-                        Ok((deleted, freed)) if deleted > 0 => {
-                            tracing::info!(
-                                "Backpack cleanup: deleted {} redundant local files ({} bytes)",
-                                deleted,
-                                freed
-                            );
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!("Backpack cleanup failed: {}", e);
-                        }
-                    }
-                    tracing::info!(
-                        "Backpack sync complete: {}/{} files pulled",
-                        pulled,
-                        candidates.len()
-                    );
-                });
+                let task_id =
+                    crate::tasks::start_backpack_sync_task(&state.task_manager, &state.db).await;
+                if task_id.is_empty() {
+                    return Json(ApiResponse {
+                        data: serde_json::json!({
+                            "backpack": true,
+                            "taskId": null,
+                            "message": "Backpack sync already in progress",
+                        }),
+                    })
+                    .into_response();
+                }
+                Json(ApiResponse {
+                    data: serde_json::json!({
+                        "backpack": true,
+                        "taskId": task_id,
+                    }),
+                })
+                .into_response()
+            } else {
+                Json(ApiResponse {
+                    data: serde_json::json!({"backpack": false}),
+                })
+                .into_response()
             }
-            Json(ApiResponse {
-                data: serde_json::json!({"backpack": backpack}),
-            })
-            .into_response()
         }
         Err(e) => internal_error(e).into_response(),
     }

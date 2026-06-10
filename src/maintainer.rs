@@ -19,6 +19,7 @@ struct FolderRow {
 /// (folder scans, backup reconciliation, backup discovery).
 pub async fn start_maintainer(
     db: SqlitePool,
+    task_manager: crate::tasks::TaskManager,
     interval_secs: u64,
     full_scan_max_age: u64,
     backup_discovery_interval: u64,
@@ -132,16 +133,23 @@ pub async fn start_maintainer(
                     "Maintainer: folder #{} needs full scan (last_scanned={:?})",
                     folder.id, folder.last_scanned
                 );
-                match crate::db::scan_folder(&db, folder.id, crate::db::ScanMode::Full).await {
-                    Ok(count) => {
+                match crate::tasks::start_scan_folder_task(
+                    &task_manager,
+                    &db,
+                    folder.id,
+                    crate::db::ScanMode::Full,
+                )
+                .await
+                {
+                    Ok(task_id) => {
                         info!(
-                            "Maintainer: full scan completed for folder #{} ({} files)",
-                            folder.id, count
+                            "Maintainer: started full scan task {} for folder #{}",
+                            task_id, folder.id
                         );
                     }
                     Err(e) => {
                         warn!(
-                            "Maintainer: full scan failed for folder #{}: {}",
+                            "Maintainer: could not start full scan for folder #{}: {}",
                             folder.id, e
                         );
                     }
@@ -249,6 +257,32 @@ pub async fn start_maintainer(
                                         );
                                     }
                                 }
+
+                                // ── Also clean up stale backup entries ──
+                                //
+                                // Remove file_locations.backup for files that
+                                // exist in the DB but no longer on the NAS.
+                                match crate::db::cleanup_stale_backup_entries(
+                                    &db,
+                                    folder.id,
+                                    &remote_files,
+                                )
+                                .await
+                                {
+                                    Ok(removed) if removed > 0 => {
+                                        info!(
+                                            "Maintainer: removed {} stale backup entries for folder #{}",
+                                            removed, folder.id
+                                        );
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        warn!(
+                                            "Maintainer: stale backup cleanup failed for folder #{}: {}",
+                                            folder.id, e
+                                        );
+                                    }
+                                }
                             }
                         }
                         Err(e) => {
@@ -272,70 +306,24 @@ pub async fn start_maintainer(
 
         // ── Check 4: Backpack sync ──────────────────────────────────
         //
-        // Periodically check if any files in backpack tags are missing
-        // locally and pull them from backup. This ensures files become
-        // available even when the initial auto-pull from the tag toggle
-        // didn't complete (e.g. server was restarted).
+        // Periodically ensure files in backpack tags are available locally
+        // by triggering a background sync task.
         {
-            match crate::db::get_backpack_pull_candidates(&db).await {
-                Ok(candidates) if !candidates.is_empty() => {
-                    info!(
-                        "Maintainer: {} files in backpack tags need pulling from backup",
-                        candidates.len()
-                    );
-                    let mut pulled = 0usize;
-                    for c in &candidates {
-                        let (ssh_host, remote_path) =
-                            match crate::db::resolve_backup_host(&db, &c.backup_path).await {
-                                Ok((h, p)) => (h, p),
-                                Err(e) => {
-                                    warn!(
-                                        "Maintainer: cannot resolve backup host for file #{}: {}",
-                                        c.file_id, e
-                                    );
-                                    continue;
-                                }
-                            };
-                        let engine = crate::backup::BackupEngine::new(ssh_host.to_string());
-                        let local = std::path::Path::new(&c.local_path);
-                        match engine.pull_file(&remote_path, local).await {
-                            Ok((true, size)) => {
-                                pulled += 1;
-                                let _ = crate::db::set_file_location(
-                                    &db,
-                                    c.file_id,
-                                    "local",
-                                    &c.local_path,
-                                    size,
-                                )
-                                .await;
-                                let _ = sqlx::query(
-                                    "UPDATE files SET last_verified_local = unixepoch() WHERE id = ?",
-                                )
-                                .bind(c.file_id)
-                                .execute(&db)
-                                .await;
-                            }
-                            Ok((false, _)) => {
-                                warn!("Maintainer: failed to pull {} from backup", c.local_path);
-                            }
-                            Err(e) => {
-                                warn!("Maintainer: error pulling {}: {}", c.local_path, e);
-                            }
-                        }
+            // Check if any backpack tags exist before spawning
+            let backpack_tag_count: i64 =
+                match sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE backpack = 1")
+                    .fetch_one(&db)
+                    .await
+                {
+                    Ok(count) => count,
+                    Err(e) => {
+                        warn!("Maintainer: failed to count backpack tags: {}", e);
+                        0
                     }
-                    info!(
-                        "Maintainer: backpack sync pulled {}/{} files",
-                        pulled,
-                        candidates.len()
-                    );
-                }
-                Ok(_) => {
-                    // No candidates — all backpack files are local
-                }
-                Err(e) => {
-                    warn!("Maintainer: failed to get backpack pull candidates: {}", e);
-                }
+                };
+
+            if backpack_tag_count > 0 {
+                crate::tasks::start_backpack_sync_task(&task_manager, &db).await;
             }
         }
 
@@ -378,39 +366,23 @@ pub async fn start_maintainer(
         // When auto_prune is enabled, delete all local files that are backed
         // up and not protected by any backpack tag. This keeps the local disk
         // a pure cache of only backpack files.
+        //
+        // Note: pruning is done via start_prune_files_task (background, async).
+        // Check 6 (empty dir cleanup) runs in the same maintainer cycle but
+        // will only see directories emptied by the *previous* prune cycle.
+        // This one-cycle lag is acceptable — empty dirs are cleaned up on the
+        // next maintainer run.
         if auto_prune {
             match crate::db::get_prune_candidates(&db).await {
                 Ok(candidates) if !candidates.is_empty() => {
-                    let mut deleted = 0usize;
-                    let mut freed: i64 = 0;
-                    for c in &candidates {
-                        let path = std::path::Path::new(&c.file_path);
-                        match tokio::fs::remove_file(path).await {
-                            Ok(()) => {
-                                deleted += 1;
-                                freed += c.file_size;
-                                let _ = sqlx::query(
-                                    "DELETE FROM file_locations WHERE file_id = ? \
-                                     AND location_type = 'local'",
-                                )
-                                .bind(c.file_id)
-                                .execute(&db)
-                                .await;
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "Maintainer auto-prune: failed to delete {}: {}",
-                                    c.file_path, e
-                                );
-                            }
-                        }
-                    }
-                    if deleted > 0 {
-                        info!(
-                            "Maintainer auto-prune: deleted {} files, freed {} bytes",
-                            deleted, freed
-                        );
-                    }
+                    let file_ids: Vec<i64> = candidates.iter().map(|c| c.file_id).collect();
+                    let total_bytes: i64 = candidates.iter().map(|c| c.file_size).sum();
+                    info!(
+                        "Maintainer: {} prune candidates ({} bytes) — dispatching prune task",
+                        file_ids.len(),
+                        total_bytes
+                    );
+                    crate::tasks::start_prune_files_task(&task_manager, &db, file_ids).await;
                 }
                 Ok(_) => {} // no candidates
                 Err(e) => warn!("Maintainer: prune candidate query failed: {}", e),
@@ -420,6 +392,9 @@ pub async fn start_maintainer(
         // ── Check 6: Remove empty sub-folders in music dirs ───────────
         //
         // After pruning files, some WAV source directories may become empty.
+        // Since Check 5 fires a background prune task (async), the empty dirs
+        // from TODAY's prune will be cleaned up in the NEXT maintainer cycle.
+        // This one-cycle lag is acceptable.
         // Remove them to keep the filesystem clean.
         if auto_cleanup_dirs {
             for folder in &folders {

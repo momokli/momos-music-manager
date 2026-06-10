@@ -156,6 +156,26 @@ pub struct Folder {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct DynamicBundle {
+    pub id: i64,
+    pub name: String,
+    pub tag_id: i64,
+    pub base_tags: Option<String>, // JSON
+    pub include_all_tracks: bool,
+    pub bpm_min: Option<f64>,
+    pub bpm_max: Option<f64>,
+    pub pmv_categories: Option<String>, // JSON
+    pub file_types: Option<String>,     // JSON
+    pub exclude_wav_sources: bool,
+    pub keys: Option<String>, // JSON array of Camelot keys
+    pub rating_min: Option<i64>,
+    pub play_count_min: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 // ============================================================================
 // File Lifecycle Types
 // ============================================================================

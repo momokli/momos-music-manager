@@ -8,6 +8,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Pool, Row, Sqlite};
 use tracing::info;
+use unicode_normalization::UnicodeNormalization;
 
 use super::types::*;
 
@@ -368,6 +369,8 @@ pub async fn discover_backup_files(
     };
 
     for rel_path in remote_files {
+        // Normalize to NFC to match DB (NAS stores NFD, DB stores NFC)
+        let rel_path: String = rel_path.nfc().collect();
         // Reconstruct local path: folder_path + / + rel_path
         let local_path = format!("{}/{}", folder_path.trim_end_matches('/'), rel_path);
 
@@ -439,6 +442,68 @@ pub async fn discover_backup_files(
     }
 
     Ok(result)
+}
+
+/// Remove file_locations.backup entries for files that no longer exist on NAS.
+///
+/// `remote_files` should be paths relative to the backup root (e.g. "Artist - Title.flac"),
+/// already normalized to NFC by the caller.
+/// Returns the number of stale entries removed.
+pub async fn cleanup_stale_backup_entries(
+    pool: &Pool<Sqlite>,
+    folder_id: i64,
+    remote_files: &[String],
+) -> Result<usize> {
+    // Build NFC-normalized set of NAS filenames (just the filename, not full path)
+    let nas_filenames: std::collections::HashSet<String> = remote_files
+        .iter()
+        .map(|p| {
+            std::path::Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .nfc()
+                .collect::<String>()
+        })
+        .collect();
+
+    // Get all files with backup entries for this folder
+    #[derive(sqlx::FromRow)]
+    struct BackupEntry {
+        file_id: i64,
+        path: String,
+    }
+
+    let backed_up: Vec<BackupEntry> = sqlx::query_as(
+        "SELECT fl.file_id, fl.path FROM file_locations fl
+         JOIN files f ON f.id = fl.file_id
+         JOIN folders fol ON fol.folder_path = substr(f.file_path, 1, length(fol.folder_path))
+         WHERE fl.location_type = 'backup' AND fol.id = ?",
+    )
+    .bind(folder_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut removed = 0usize;
+    for entry in &backed_up {
+        let filename = std::path::Path::new(&entry.path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        if !nas_filenames.contains(&filename) {
+            sqlx::query(
+                "DELETE FROM file_locations WHERE file_id = ? AND location_type = 'backup'",
+            )
+            .bind(entry.file_id)
+            .execute(pool)
+            .await?;
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
 }
 
 /// Clear all backup locations for files in a folder (for re-backup)

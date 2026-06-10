@@ -106,6 +106,16 @@ async fn storage_backup_handler(
     let task_id =
         crate::tasks::start_backup_folder_task(&state.task_manager, &state.db, folder_id).await;
 
+    if task_id.is_empty() {
+        return Json(ApiResponse {
+            data: serde_json::json!({
+                "taskId": null,
+                "message": "Backup already in progress for this folder",
+            }),
+        })
+        .into_response();
+    }
+
     Json(ApiResponse {
         data: serde_json::json!({ "taskId": task_id }),
     })
@@ -172,6 +182,16 @@ async fn backup_wavs_handler(
     let task_id =
         crate::tasks::start_backup_wavs_task(&state.task_manager, &state.db, folder_id).await;
 
+    if task_id.is_empty() {
+        return Json(ApiResponse {
+            data: serde_json::json!({
+                "taskId": null,
+                "message": "Backup WAVs already in progress for this folder",
+            }),
+        })
+        .into_response();
+    }
+
     Json(ApiResponse {
         data: serde_json::json!({ "taskId": task_id }),
     })
@@ -210,6 +230,16 @@ async fn storage_discover_backup_handler(
 
     let task_id =
         crate::tasks::start_backup_discovery_task(&state.task_manager, &state.db, folder_id).await;
+
+    if task_id.is_empty() {
+        return Json(ApiResponse {
+            data: serde_json::json!({
+                "taskId": null,
+                "message": "Backup discovery already in progress for this folder",
+            }),
+        })
+        .into_response();
+    }
 
     Json(ApiResponse {
         data: serde_json::json!({ "taskId": task_id }),
@@ -296,140 +326,22 @@ async fn format_priority_put_handler(
     .into_response()
 }
 
-/// Resolve the SSH host from a file's backup path by matching against folder configs.
-/// Delegates to `crate::db::resolve_backup_host`.
-async fn resolve_backup_host(
-    pool: &sqlx::Pool<sqlx::Sqlite>,
-    backup_path: &str,
-) -> anyhow::Result<(String, String)> {
-    crate::db::resolve_backup_host(pool, backup_path).await
-}
-
 /// POST /api/storage/sync-backpack
 /// Pulls missing files from backup for all backpack tags.
 /// For each track in a backpack tag, ensures the best format exists locally.
 async fn sync_backpack_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // 1. Get candidates
-    let candidates = match crate::db::get_backpack_pull_candidates(&state.db).await {
-        Ok(c) => c,
-        Err(e) => return internal_error(e).into_response(),
-    };
-
-    if candidates.is_empty() {
-        // No pull candidates, but still run cleanup (redundant files from previous syncs)
-        let (deleted, freed_bytes) =
-            match crate::db::cleanup_redundant_backpack_files(&state.db).await {
-                Ok(result) => result,
-                Err(e) => {
-                    tracing::warn!("Backpack cleanup failed: {}", e);
-                    (0, 0)
-                }
-            };
+    let task_id = crate::tasks::start_backpack_sync_task(&state.task_manager, &state.db).await;
+    if task_id.is_empty() {
         return Json(ApiResponse {
             data: serde_json::json!({
-                "pulled": 0,
-                "failed": 0,
-                "deleted": deleted,
-                "freedBytes": freed_bytes,
-                "candidates": []
+                "taskId": null,
+                "message": "Backpack sync already in progress",
             }),
         })
         .into_response();
     }
-
-    // 2. Pull each candidate from backup
-    let mut pulled = 0usize;
-    let mut failed = 0usize;
-    let mut results: Vec<serde_json::Value> = Vec::new();
-
-    for candidate in &candidates {
-        // Resolve SSH host from the folder config.
-        // candidate.backup_path is like "/volume1/media/stems/file.stem.m4a"
-        // We need to find which folder this file belongs to and extract the host
-        // from the folder's backup_path (e.g., "backup:/volume1/media/stems").
-        let (ssh_host, remote_path) =
-            match resolve_backup_host(&state.db, &candidate.backup_path).await {
-                Ok((host, path)) => (host, path),
-                Err(e) => {
-                    failed += 1;
-                    results.push(serde_json::json!({
-                        "fileId": candidate.file_id,
-                        "status": "error",
-                        "error": format!("{}", e)
-                    }));
-                    continue;
-                }
-            };
-
-        let engine = BackupEngine::new(ssh_host.to_string());
-        let local_path = std::path::Path::new(&candidate.local_path);
-        let remote_path = remote_path.to_string();
-
-        match engine.pull_file(&remote_path, local_path).await {
-            Ok((true, file_size)) => {
-                pulled += 1;
-                // Update file_locations: add 'local' entry
-                let _ = set_file_location(
-                    &state.db,
-                    candidate.file_id,
-                    "local",
-                    &candidate.local_path,
-                    file_size,
-                )
-                .await;
-                // Update last_verified_local
-                let _ =
-                    sqlx::query("UPDATE files SET last_verified_local = unixepoch() WHERE id = ?")
-                        .bind(candidate.file_id)
-                        .execute(&state.db)
-                        .await;
-
-                results.push(serde_json::json!({
-                    "fileId": candidate.file_id,
-                    "status": "pulled",
-                    "fileType": candidate.file_type,
-                    "title": candidate.title,
-                    "artist": candidate.artist,
-                    "localPath": candidate.local_path
-                }));
-            }
-            Ok((false, _)) => {
-                failed += 1;
-                results.push(serde_json::json!({
-                    "fileId": candidate.file_id,
-                    "status": "failed",
-                    "error": "rsync reported failure"
-                }));
-            }
-            Err(e) => {
-                failed += 1;
-                results.push(serde_json::json!({
-                    "fileId": candidate.file_id,
-                    "status": "error",
-                    "error": format!("{}", e)
-                }));
-            }
-        }
-    }
-
-    // 3. Clean up redundant lower-priority local files (e.g. FLAC when stem is now local)
-    let (deleted, freed_bytes) = match crate::db::cleanup_redundant_backpack_files(&state.db).await
-    {
-        Ok(result) => result,
-        Err(e) => {
-            tracing::warn!("Backpack cleanup failed: {}", e);
-            (0, 0)
-        }
-    };
-
     Json(ApiResponse {
-        data: serde_json::json!({
-            "pulled": pulled,
-            "failed": failed,
-            "deleted": deleted,
-            "freedBytes": freed_bytes,
-            "candidates": results
-        }),
+        data: serde_json::json!({ "taskId": task_id }),
     })
     .into_response()
 }

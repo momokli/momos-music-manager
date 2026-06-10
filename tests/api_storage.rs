@@ -845,3 +845,137 @@ async fn storage_format_priority_put_invalid() {
         resp.status()
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 6 — Concurrent task rejection
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+/// `POST /api/storage/backup/{id}` — second call for same folder returns
+/// null taskId with "already in progress" message.
+async fn storage_backup_rejects_concurrent() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Set backup_path first so the handler doesn't reject with 400
+    client
+        .put(format!("{}/api/folders/1/backup", base))
+        .json(&serde_json::json!({
+            "backupPath": "/backups/test",
+            "scanSources": false
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Fire both calls concurrently so the second arrives while the first
+    // task is still Pending (before the background worker transitions it).
+    let (resp1, resp2) = tokio::join!(
+        client.post(format!("{}/api/storage/backup/1", base)).send(),
+        client.post(format!("{}/api/storage/backup/1", base)).send(),
+    );
+    let resp1 = resp1.unwrap();
+    let resp2 = resp2.unwrap();
+    assert_eq!(resp1.status(), 200);
+    assert_eq!(resp2.status(), 200);
+
+    // Must consume both bodies to avoid connection hangs in reqwest
+    let json1: serde_json::Value = resp1.json().await.unwrap();
+    let json2: serde_json::Value = resp2.json().await.unwrap();
+    eprintln!("backup: resp1={json1:#}, resp2={json2:#}");
+
+    // At least one of the calls must be a rejection (can't have two
+    // backups for the same folder running simultaneously).
+    let resp1_conflict = json1["data"]["taskId"].is_null()
+        && json1["data"]["message"] == "Backup already in progress for this folder";
+    let resp2_conflict = json2["data"]["taskId"].is_null()
+        && json2["data"]["message"] == "Backup already in progress for this folder";
+    assert!(
+        resp1_conflict || resp2_conflict,
+        "at least one call should be rejected, got resp1={json1:#} resp2={json2:#}"
+    );
+}
+
+#[tokio::test]
+/// `POST /api/storage/backup-wavs/{id}` — second call returns null taskId.
+async fn storage_backup_wavs_rejects_concurrent() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Set backup_path first
+    client
+        .put(format!("{}/api/folders/1/backup", base))
+        .json(&serde_json::json!({
+            "backupPath": "/backups/test",
+            "scanSources": false
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Fire both calls concurrently
+    let (resp1, resp2) = tokio::join!(
+        client
+            .post(format!("{}/api/storage/backup-wavs/1", base))
+            .send(),
+        client
+            .post(format!("{}/api/storage/backup-wavs/1", base))
+            .send(),
+    );
+    let resp1 = resp1.unwrap();
+    let resp2 = resp2.unwrap();
+    assert_eq!(resp1.status(), 200);
+    assert_eq!(resp2.status(), 200);
+    let json1: serde_json::Value = resp1.json().await.unwrap();
+    let json2: serde_json::Value = resp2.json().await.unwrap();
+    let resp1_conflict = json1["data"]["taskId"].is_null()
+        && json1["data"]["message"] == "Backup WAVs already in progress for this folder";
+    let resp2_conflict = json2["data"]["taskId"].is_null()
+        && json2["data"]["message"] == "Backup WAVs already in progress for this folder";
+    assert!(
+        resp1_conflict || resp2_conflict,
+        "at least one call should be rejected, got resp1={json1:#} resp2={json2:#}"
+    );
+}
+
+#[tokio::test]
+/// `POST /api/storage/discover-backup/{id}` — second call returns null taskId.
+async fn storage_discover_backup_rejects_concurrent() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Set backup_path first
+    client
+        .put(format!("{}/api/folders/1/backup", base))
+        .json(&serde_json::json!({
+            "backupPath": "/backups/test",
+            "scanSources": false
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Fire both calls concurrently
+    let (resp1, resp2) = tokio::join!(
+        client
+            .post(format!("{}/api/storage/discover-backup/1", base))
+            .send(),
+        client
+            .post(format!("{}/api/storage/discover-backup/1", base))
+            .send(),
+    );
+    let resp1 = resp1.unwrap();
+    let resp2 = resp2.unwrap();
+    assert_eq!(resp1.status(), 200);
+    assert_eq!(resp2.status(), 200);
+    let json1: serde_json::Value = resp1.json().await.unwrap();
+    let json2: serde_json::Value = resp2.json().await.unwrap();
+    let resp1_conflict = json1["data"]["taskId"].is_null()
+        && json1["data"]["message"] == "Backup discovery already in progress for this folder";
+    let resp2_conflict = json2["data"]["taskId"].is_null()
+        && json2["data"]["message"] == "Backup discovery already in progress for this folder";
+    assert!(
+        resp1_conflict || resp2_conflict,
+        "at least one call should be rejected, got resp1={json1:#} resp2={json2:#}"
+    );
+}

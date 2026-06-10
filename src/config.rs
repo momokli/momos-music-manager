@@ -323,7 +323,7 @@ impl ServiceCredentials {
                     .as_ref()
                     .and_then(|m| m.backup_discovery_interval_secs)
             })
-            .unwrap_or(604800), // 7 days default
+            .unwrap_or(86400), // 1 day default
 
             maintainer_auto_prune: std::env::var("MOMOS_MAINTAINER_AUTO_PRUNE")
                 .ok()
@@ -416,7 +416,7 @@ impl ServiceCredentials {
                 "MOMOS_MAINTAINER_BACKUP_DISCOVERY_INTERVAL_SECS",
             )
             .and_then(|v| v.parse().ok())
-            .unwrap_or(604800),
+            .unwrap_or(86400),
 
             maintainer_auto_prune: env_var_optional("MOMOS_MAINTAINER_AUTO_PRUNE")
                 .and_then(|v| v.parse().ok())

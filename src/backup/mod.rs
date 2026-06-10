@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 use std::path::Path;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
+use unicode_normalization::UnicodeNormalization;
 
 /// BackupEngine handles copying files to a remote backup destination via SSH/SCP.
 /// Uses the user's ~/.ssh/config for host resolution (e.g. `backup` host).
@@ -261,8 +262,10 @@ impl BackupEngine {
     /// Returns `(true, file_size)` on success, `(false, 0)` on failure.
     pub async fn pull_file(&self, remote_path: &str, local_path: &Path) -> Result<(bool, i64)> {
         let local_str = local_path.to_string_lossy();
+        // Normalize to NFD to match NAS filesystem (macOS rsync stores NFD)
+        let remote_path_nfd: String = remote_path.nfd().collect();
         // Escape special characters in remote path for rsync (spaces, parens, etc.)
-        let escaped_path = remote_path
+        let escaped_path = remote_path_nfd
             .replace('\\', "\\\\")
             .replace(' ', "\\ ")
             .replace('(', "\\(")
