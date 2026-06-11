@@ -5874,3 +5874,319 @@ body.dark .storage-warning {
     color: var(--red);
     /* kept for specificity if needed */
 }
+
+/* ─── Setup Hub Page ────────────────────────────────── */
+
+.setup-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 0.75rem;
+    margin-top: var(--space-4);
+}
+
+.setup-card {
+    background: var(--bg-card, var(--surface));
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    transition: border-color 0.2s;
+}
+
+.setup-card:hover {
+    border-color: var(--border-strong);
+}
+
+.setup-card-header {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.9rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-subtle, rgba(255, 255, 255, 0.02));
+}
+
+.setup-card-header-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: var(--accent);
+    background: rgba(99, 102, 241, 0.1);
+    font-size: 0.9rem;
+}
+
+.setup-card-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-secondary);
+}
+
+.setup-card-body {
+    padding: 0.75rem 1rem 1rem;
+}
+
+/* ── Services ──────────────────────────────────────── */
+
+.setup-services-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.setup-service-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.35rem 0;
+}
+
+.setup-service-row + .setup-service-row {
+    border-top: 1px solid var(--border);
+    padding-top: 0.5rem;
+}
+
+.setup-service-name {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    font-weight: 500;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.setup-service-name i {
+    width: 16px;
+    text-align: center;
+    color: var(--text-muted);
+}
+
+.setup-service-status-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+}
+
+.setup-service-meta {
+    font-size: 0.7rem;
+    color: var(--text-subtle);
+    white-space: nowrap;
+}
+
+.setup-card-action {
+    width: 100%;
+}
+
+/* ── Folders ──────────────────────────────────────── */
+
+.setup-folders-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.setup-folder-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.35rem 0;
+}
+
+.setup-folder-row + .setup-folder-row {
+    border-top: 1px solid var(--border);
+    padding-top: 0.5rem;
+}
+
+.setup-folder-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+}
+
+.setup-folder-path {
+    font-size: 0.8rem;
+    font-family: var(--font-mono, monospace);
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.setup-folder-path i {
+    color: var(--text-muted);
+    margin-right: 0.3rem;
+}
+
+.setup-folder-meta {
+    font-size: 0.7rem;
+    color: var(--text-subtle);
+    margin-top: 1px;
+}
+
+/* ── Storage ──────────────────────────────────────── */
+
+.setup-storage-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.setup-stat-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.3rem 0;
+}
+
+.setup-stat-row + .setup-stat-row {
+    border-top: 1px solid var(--border);
+    padding-top: 0.45rem;
+}
+
+.setup-stat-label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.setup-stat-label i {
+    width: 14px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+}
+
+.setup-stat-value {
+    font-size: 0.85rem;
+    font-weight: 600;
+    font-family: var(--font-mono, monospace);
+}
+
+.setup-storage-hint {
+    font-size: 0.7rem;
+    color: var(--yellow, #eab308);
+    margin: 0;
+}
+
+/* ── Tasks ────────────────────────────────────────── */
+
+.setup-tasks-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.setup-task-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.3rem 0;
+}
+
+.setup-task-row + .setup-task-row {
+    border-top: 1px solid var(--border);
+    padding-top: 0.4rem;
+}
+
+.setup-task-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+}
+
+.setup-task-type {
+    font-size: 0.8rem;
+    font-weight: 500;
+    text-transform: capitalize;
+}
+
+.setup-task-progress {
+    font-size: 0.7rem;
+    color: var(--text-subtle);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.setup-task-right {
+    flex-shrink: 0;
+}
+
+/* ── Data ─────────────────────────────────────────── */
+
+.setup-data-actions {
+    display: flex;
+    flex-direction: column;
+}
+
+.setup-btn-group {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.setup-btn-group .btn {
+    flex: 1;
+}
+
+/* ── Deemix ───────────────────────────────────────── */
+
+.setup-deemix-count {
+    font-size: 0.9rem;
+    margin: 0 0 0.3rem;
+}
+
+.setup-deemix-info p {
+    margin: 0;
+}
+
+/* ── Traktor ──────────────────────────────────────── */
+
+.setup-traktor-info {
+    display: flex;
+    flex-direction: column;
+}
+
+.setup-traktor-path {
+    font-size: 0.8rem;
+    font-family: var(--font-mono, monospace);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin: 0 0 0.2rem;
+}
+
+.setup-traktor-path i {
+    color: var(--text-muted);
+    margin-right: 0.3rem;
+}
+
+.setup-traktor-info .text-muted {
+    margin: 0;
+}
+
+/* ── Key Comparison ───────────────────────────────── */
+
+.setup-key-compare-info {
+    display: flex;
+    flex-direction: column;
+}
+
+.setup-key-compare-info button {
+    align-self: flex-start;
+}

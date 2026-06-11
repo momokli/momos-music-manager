@@ -332,8 +332,11 @@ src/
 
 ## Plan: frontend-rewrite
 
-**Status**: proposed
+**Status**: in-progress
 **Branch**: `feat/frontend-rewrite-plan`
+**Started**: Phase 0 — Scaffold
+**Completed**: Phase 0-6 (all pages ported)
+**Remaining**: Phase 7 — Cleanup (delete old vanilla files)
 **Ready for review**: no
 **Depends on**: nothing
 **Migration needed**: yes — `021_genre_category.sql` (add Genre as 6th system category)

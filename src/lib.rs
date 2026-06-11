@@ -58,7 +58,7 @@ pub struct AppState {
 // ── Embedded Frontend Assets ───────────────────────────────────────────────
 
 #[derive(Embed)]
-#[folder = "frontend/"]
+#[folder = "frontend/dist/"]
 struct FrontendAssets;
 
 /// Infer a MIME type from the file extension.
@@ -81,6 +81,8 @@ fn mime_for_path(path: &str) -> &'static str {
         "font/woff"
     } else if path.ends_with(".ttf") {
         "font/ttf"
+    } else if path.ends_with(".json") {
+        "application/json; charset=utf-8"
     } else {
         "application/octet-stream"
     }
