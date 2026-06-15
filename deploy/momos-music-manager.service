@@ -1,67 +1,39 @@
 [Unit]
 Description=Momo's Music Manager
-After=network.target network-online.target deemix.service
-Wants=network-online.target deemix.service
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=momo
-Group=momo
-WorkingDirectory=/home/momo/momos-music-manager
 
 # ── Environment ──────────────────────────────────────────────────
-# Secrets go in an EnvironmentFile or drop-in override:
-#   systemctl edit momos-music-manager
-#   → paste the Spotify/Deezer credentials below
-
+# Secrets go in a drop-in override:
+#   sudo systemctl edit momos-music-manager
 Environment="DATABASE_URL=sqlite:///home/momo/momos-music-manager/data/library.db"
 Environment="RUST_LOG=info"
-
-# SQLite on this kernel can't create files from scratch (O_CREAT restricted).
-# Create a valid empty DB with sqlite3 so the Rust binary can open it.
-ExecStartPre=/bin/bash -c 'mkdir -p /home/momo/momos-music-manager/data && [ -s /home/momo/momos-music-manager/data/library.db ] || sqlite3 /home/momo/momos-music-manager/data/library.db "VACUUM"'
-
-# Maintainer: runs every 1h, auto-prunes, cleans up stale local entries
 Environment="MOMOS_MAINTAINER_INTERVAL_SECS=3600"
-Environment="MOMOS_GLOBAL_POLL_INTERVAL_SECS=900"
-
-# ═══ Caddy public URL — set to your reverse-proxy domain ═══
-# (the --public-url flag enables correct OAuth redirect callbacks)
 Environment="PUBLIC_URL=https://music.klimk.es"
 
-# ═══ SECRETS — set these in an override file ═══
-# systemctl edit momos-music-manager
-# Environment="SPOTIFY_CLIENT_ID=your_id"
-# Environment="SPOTIFY_CLIENT_SECRET=your_secret"
-# Environment="SPOTIFY_REDIRECT_URI=https://music.klimk.es/callback"
-# Environment="SOUNDCLOUD_API_KEY=..."
-# Environment="SOUNDCLOUD_USER_ID=..."
+# DB file must exist before the Rust binary can open it.
+# (Prefixed with '-' to tolerate failure if DB already exists.)
+ExecStartPre=-/bin/bash -c 'sudo -u momo sqlite3 /home/momo/momos-music-manager/data/library.db "VACUUM" 2>/dev/null'
 
 ExecStart=/home/momo/momos-music-manager/target/release/momos-music-manager serve \
     --host 0.0.0.0 \
-    --port 3000 \
-    --public-url ${PUBLIC_URL}
+    --port 3000
 
-# ── Lifecycle ────────────────────────────────────────────────────
 Restart=always
 RestartSec=10
 TimeoutStartSec=120
-TimeoutStopSec=30
 
-# ── Health check ─────────────────────────────────────────────────
-# Poll /api/health for up to 30 seconds after start
-ExecStartPost=/bin/bash -c ' \
-  for i in $$(seq 1 30); do \
-    if curl -sf http://localhost:3000/api/health > /dev/null 2>&1; then \
-      echo "✓ health check ok ($${i}s)"; exit 0; \
-    fi; \
-    sleep 1; \
-  done; \
-  echo "✗ health check failed"; exit 1'
-
-# ── Resource limits ──────────────────────────────────────────────
-MemoryHigh=2G
-MemoryMax=4G
+# ═══ SECRETS — set these in an override file ═══
+# sudo systemctl edit momos-music-manager
+#   [Service]
+#   Environment="SPOTIFY_CLIENT_ID=..."
+#   Environment="SPOTIFY_CLIENT_SECRET=..."
+#   Environment="SPOTIFY_REDIRECT_URI=https://music.klimk.es/callback"
+#   Environment="SOUNDCLOUD_API_KEY=..."
 
 [Install]
 WantedBy=multi-user.target
