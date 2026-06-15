@@ -1,0 +1,27 @@
+# Server config template — copy to ~/.config/momos-music-manager/config.toml
+# Secrets are set via systemd Environment= overrides, not here.
+# This file handles non-secret settings only.
+
+[polling]
+# How often the global poller checks ALL Spotify playlists (seconds)
+# 0 = disabled
+global_interval_secs = 900
+
+[maintainer]
+# How often the maintainer runs (seconds). 0 = disabled.
+interval_secs = 3600
+# Trigger a full folder scan if last scan is older than this (seconds)
+full_scan_max_age_secs = 86400
+# Discover backup-only files on this interval (seconds)
+backup_discovery_interval_secs = 604800
+# Auto-prune non-backpack files that are backed up
+auto_prune = true
+# Auto-cleanup stale local entries
+auto_cleanup_dirs = true
+# Auto-import Traktor collection on maintainer cycle
+traktor_import_enabled = false
+
+[server]
+host = "0.0.0.0"
+port = 3000
+# public_url = "http://lan:3000"

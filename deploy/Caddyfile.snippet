@@ -1,0 +1,10 @@
+# Add this block to ~/caddy/Caddyfile, then:
+#   cd ~/caddy && docker compose restart caddy
+
+music.klimk.es {
+    reverse_proxy 192.168.178.149:3000
+    encode gzip
+}
+
+# Also register https://music.klimk.es/callback in the Spotify Developer Dashboard:
+#   https://developer.spotify.com/dashboard → your app → Edit Settings → Redirect URIs
