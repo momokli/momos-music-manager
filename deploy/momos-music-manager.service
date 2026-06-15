@@ -17,6 +17,10 @@ WorkingDirectory=/home/momo/momos-music-manager
 Environment="DATABASE_URL=sqlite:///home/momo/momos-music-manager/data/library.db"
 Environment="RUST_LOG=info"
 
+# SQLite on this kernel can't create files from scratch (O_CREAT restricted).
+# Create a valid empty DB with sqlite3 so the Rust binary can open it.
+ExecStartPre=/bin/bash -c 'mkdir -p /home/momo/momos-music-manager/data && [ -s /home/momo/momos-music-manager/data/library.db ] || sqlite3 /home/momo/momos-music-manager/data/library.db "VACUUM"'
+
 # Maintainer: runs every 1h, auto-prunes, cleans up stale local entries
 Environment="MOMOS_MAINTAINER_INTERVAL_SECS=3600"
 Environment="MOMOS_GLOBAL_POLL_INTERVAL_SECS=900"

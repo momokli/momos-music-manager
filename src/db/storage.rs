@@ -12,21 +12,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use super::types::*;
 
-// ============================================================================
-// Storage Types
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct FileLocation {
-    pub id: i64,
-    pub file_id: i64,
-    pub location_type: String, // 'local' | 'backup'
-    pub path: String,
-    pub file_size: Option<i64>,
-    pub last_verified: Option<i64>,
-    pub created_at: i64,
-}
+// FileLocation is defined canonically in types.rs.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
