@@ -1,0 +1,31 @@
+[Unit]
+Description=Deemix downloader (Docker)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=momo
+Group=momo
+WorkingDirectory=/home/momo/deemix
+
+ExecStart=/usr/bin/docker compose up -d --wait
+ExecStop=/usr/bin/docker compose down
+ExecReload=/usr/bin/docker compose restart
+
+# Health check: verify the deemix web UI is responding
+ExecStartPost=/bin/bash -c ' \
+  for i in $$(seq 1 30); do \
+    if curl -sf http://localhost:6595 > /dev/null 2>&1; then \
+      echo "✓ deemix main healthy ($${i}s)"; break; \
+    fi; \
+    sleep 1; \
+  done'
+
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

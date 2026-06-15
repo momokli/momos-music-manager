@@ -71,17 +71,25 @@ cargo build --release
 mkdir -p ~/.config/momos-music-manager
 cp deploy/config.toml ~/.config/momos-music-manager/config.toml
 
-# 7. Create secrets override for Spotify/Deezer
-sudo systemctl edit momos-music-manager
-# Paste your credentials as Environment= lines (see service file for template)
-
-# 8. Install and start
+# 7. Install and start services
 sudo cp deploy/momos-music-manager.service /etc/systemd/system/
+sudo cp deploy/deemix.service /etc/systemd/system/
 sudo systemctl daemon-reload
+sudo systemctl enable --now deemix
 sudo systemctl enable --now momos-music-manager
 
-# 9. Verify
+# 8. Verify
 curl http://localhost:3000/api/health
+
+# 9. Set secrets (Spotify, SoundCloud)
+sudo systemctl edit momos-music-manager
+# Paste:
+#   [Service]
+#   Environment="SPOTIFY_CLIENT_ID=..."
+#   Environment="SPOTIFY_CLIENT_SECRET=..."
+#   Environment="SPOTIFY_REDIRECT_URI=https://music.klimk.es/callback"
+#   Environment="PUBLIC_URL=https://music.klimk.es"
+sudo systemctl restart momos-music-manager
 ```
 
 ## Caddy Reverse Proxy
@@ -161,6 +169,21 @@ What it does:
 5. Health-checks
 
 ## Service Management
+
+Startup order:
+
+```
+multi-user.target
+├── docker.service          (system)
+│   ├── caddy (Docker)      # reverse proxy, TLS
+│   └── deemix               # systemd unit → docker compose up
+│       ├── :6595 (main)
+│       └── :6599 (kids)
+└── momos-music-manager      # depends on deemix.service
+    └── :3000
+```
+
+Commands:
 
 ```bash
 # Status
