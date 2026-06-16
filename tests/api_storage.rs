@@ -1046,3 +1046,268 @@ async fn storage_backfill_backup_sizes_with_zero_size() {
     assert!(data["taskId"].is_string(), "should return a taskId string");
     assert!(data["message"].is_string(), "should include a message");
 }
+
+// ═════════════════════════════════════════════════════════════════════════
+// /api/storage/purge-orphans
+// ═════════════════════════════════════════════════════════════════════════
+
+/// Verify that /api/storage/status includes orphanedFileCount.
+#[tokio::test]
+async fn storage_status_includes_orphaned_count() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/storage/status", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+
+    let json: serde_json::Value = resp.json().await.unwrap();
+    // All files in seed data have folder_id=NULL, so orphaned count should be >= 0
+    let orphaned = json["data"]["orphanedFileCount"].as_i64();
+    assert!(
+        orphaned.is_some(),
+        "expected orphanedFileCount to be a number, got {:?}",
+        json["data"]["orphanedFileCount"]
+    );
+}
+
+/// POST /api/storage/purge-orphans without confirm → 400.
+#[tokio::test]
+async fn storage_purge_orphans_no_confirm() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .post(format!("{}/api/storage/purge-orphans", base))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 400, "expected 400 when confirm is missing");
+}
+
+/// POST /api/storage/purge-orphans with confirm=true when no orphans → {"purged": 0}.
+#[tokio::test]
+async fn storage_purge_orphans_empty() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .post(format!("{}/api/storage/purge-orphans", base))
+        .json(&serde_json::json!({"confirm": true}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "expected 200");
+    let json: serde_json::Value = resp.json().await.unwrap();
+    // Seed data has orphaned files (folder_id=NULL), so purged >= 0
+    let purged = json["data"]["purged"].as_i64().unwrap();
+    assert!(purged >= 0, "expected purged >= 0, got {}", purged);
+}
+
+/// Create orphaned files (folder_id=NULL) then purge them.
+#[tokio::test]
+async fn storage_purge_orphans_with_orphans() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Get baseline orphan count
+    let status_resp0 = client
+        .get(format!("{}/api/storage/status", base))
+        .send()
+        .await
+        .unwrap();
+    let status_json0: serde_json::Value = status_resp0.json().await.unwrap();
+    let baseline = status_json0["data"]["orphanedFileCount"].as_i64().unwrap();
+
+    // Insert an additional orphaned file (include NOT NULL column last_modified)
+    sqlx::query(
+        r#"INSERT INTO files (id, file_path, file_type, file_size, last_modified, title, artist, file_hash)
+           VALUES (100, '/orphan/test.flac', 'flac', 1000000, 1700000000, 'Orphan', 'Test', 'hash100')"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Verify status shows orphan count increased by 1
+    let status_resp = client
+        .get(format!("{}/api/storage/status", base))
+        .send()
+        .await
+        .unwrap();
+    let status_json: serde_json::Value = status_resp.json().await.unwrap();
+    let before = status_json["data"]["orphanedFileCount"].as_i64().unwrap();
+    assert_eq!(
+        before,
+        baseline + 1,
+        "expected orphan count = baseline + 1, got {} (baseline was {})",
+        before,
+        baseline
+    );
+
+    // Purge all orphans
+    let resp = client
+        .post(format!("{}/api/storage/purge-orphans", base))
+        .json(&serde_json::json!({"confirm": true}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "expected 200");
+    let json: serde_json::Value = resp.json().await.unwrap();
+    // All orphans are purged, including baseline
+    assert_eq!(
+        json["data"]["purged"].as_i64().unwrap(),
+        before,
+        "expected to purge {} orphans (all existing)",
+        before
+    );
+
+    // Verify status now shows 0
+    let status_resp2 = client
+        .get(format!("{}/api/storage/status", base))
+        .send()
+        .await
+        .unwrap();
+    let status_json2: serde_json::Value = status_resp2.json().await.unwrap();
+    let after = status_json2["data"]["orphanedFileCount"].as_i64().unwrap();
+    assert_eq!(after, 0, "expected 0 orphan count after purge");
+}
+
+/// Purging twice — second call returns {"purged": 0}.
+#[tokio::test]
+async fn storage_purge_orphans_idempotent() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Get baseline
+    let status_resp0 = client
+        .get(format!("{}/api/storage/status", base))
+        .send()
+        .await
+        .unwrap();
+    let status_json0: serde_json::Value = status_resp0.json().await.unwrap();
+    let baseline = status_json0["data"]["orphanedFileCount"].as_i64().unwrap();
+
+    // Insert 3 orphans with unique paths (UNIQUE constraint on file_path)
+    for i in 200..=202 {
+        let path = format!("/orphan/file{}.flac", i);
+        sqlx::query(
+            r#"INSERT INTO files (id, file_path, file_type, file_size, last_modified, title, artist, file_hash)
+               VALUES (?, ?, 'flac', 1000000, 1700000000, 'Orphan', 'Test', ?)"#,
+        )
+        .bind(i)
+        .bind(&path)
+        .bind(format!("hash{}", i))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // First purge — should remove all orphans (baseline + 3 new)
+    let resp1 = client
+        .post(format!("{}/api/storage/purge-orphans", base))
+        .json(&serde_json::json!({"confirm": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), 200);
+    let json1: serde_json::Value = resp1.json().await.unwrap();
+    assert_eq!(
+        json1["data"]["purged"].as_i64().unwrap(),
+        baseline + 3,
+        "expected to purge {} files (baseline {} + 3 new)",
+        baseline + 3,
+        baseline
+    );
+
+    // Second purge — should return 0
+    let resp2 = client
+        .post(format!("{}/api/storage/purge-orphans", base))
+        .json(&serde_json::json!({"confirm": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), 200);
+    let json2: serde_json::Value = resp2.json().await.unwrap();
+    assert_eq!(
+        json2["data"]["purged"].as_i64().unwrap(),
+        0,
+        "second purge should return 0"
+    );
+}
+
+/// Create orphaned files by inserting raw records (no folder_id), verify orphan count.
+#[tokio::test]
+async fn storage_orphan_count_after_folder_delete() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    // Verify baseline: no orphans from seed data
+    let status_resp = client
+        .get(format!("{}/api/storage/status", base))
+        .send()
+        .await
+        .unwrap();
+    let status_json: serde_json::Value = status_resp.json().await.unwrap();
+    let before = status_json["data"]["orphanedFileCount"].as_i64().unwrap();
+
+    // Insert orphaned files that lack folder_id (simulating stale records)
+    sqlx::query(
+        r#"INSERT INTO files (id, file_path, file_type, file_size, last_modified, title, artist, file_hash)
+           VALUES (400, '/test/orphan/file1.flac', 'flac', 2000000, 1700000000, 'Orphan1', 'ArtistA', 'hash400'),
+                  (401, '/test/orphan/file2.flac', 'flac', 3000000, 1700000000, 'Orphan2', 'ArtistB', 'hash401')"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Verify status shows orphan count increased
+    let status_resp2 = client
+        .get(format!("{}/api/storage/status", base))
+        .send()
+        .await
+        .unwrap();
+    let status_json2: serde_json::Value = status_resp2.json().await.unwrap();
+    let orphaned = status_json2["data"]["orphanedFileCount"].as_i64().unwrap();
+    assert_eq!(
+        orphaned,
+        before + 2,
+        "expected {} orphans ({} baseline + 2 new), got {}",
+        before + 2,
+        before,
+        orphaned
+    );
+
+    // Purge all orphans (baseline + 2 new)
+    let purge_resp = client
+        .post(format!("{}/api/storage/purge-orphans", base))
+        .json(&serde_json::json!({"confirm": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(purge_resp.status(), 200);
+    let purge_json: serde_json::Value = purge_resp.json().await.unwrap();
+    let purged = purge_json["data"]["purged"].as_i64().unwrap();
+    assert_eq!(
+        purged, orphaned,
+        "expected to purge {} orphans (all), got {}",
+        orphaned, purged
+    );
+
+    // Verify orphan count is now 0
+    let status_resp3 = client
+        .get(format!("{}/api/storage/status", base))
+        .send()
+        .await
+        .unwrap();
+    let status_json3: serde_json::Value = status_resp3.json().await.unwrap();
+    let after = status_json3["data"]["orphanedFileCount"].as_i64().unwrap();
+    assert_eq!(after, 0, "expected 0 orphans after purge");
+}

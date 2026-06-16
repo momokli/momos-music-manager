@@ -314,6 +314,7 @@ pub async fn scan_folder(
         folder.file_extensions,
         folder.max_depth,
         effective_mode,
+        Some(folder.id),
     )
     .await?;
 

@@ -14,7 +14,8 @@ export default defineConfig({
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
-    command: "cargo run -- serve --host 127.0.0.1 --port 3001",
+    // macOS provenance attr prevents binary from creating files; touch first.
+    command: "touch test-playwright.db && cargo run -- serve --host 127.0.0.1 --port 3001",
     cwd: "..", // run from project root
     url: "http://localhost:3001/api/health",
     reuseExistingServer: false,

@@ -44,30 +44,6 @@ pub struct PullCandidate {
     pub isrc: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StorageStatus {
-    pub local_file_count: i64,
-    pub tracked_file_count: i64,
-    pub local_size_bytes: i64,
-    pub tracked_size_bytes: i64,
-    pub local_stems: i64,
-    pub local_flacs: i64,
-    pub local_mp3s: i64,
-    pub local_wavs: i64,
-    pub local_other: i64,
-    pub local_stems_size: i64,
-    pub local_flacs_size: i64,
-    pub local_wavs_size: i64,
-    pub local_mp3s_size: i64,
-    pub backup_count: i64,
-    pub wav_source_dirs: i64,
-    pub prune_candidate_count: i64,
-    pub prune_candidate_bytes: i64,
-    pub wav_indexed: i64,
-    pub wav_backed_up: i64,
-}
-
 /// Size statistics for backpack-tagged files — used by the Backpack page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1082,6 +1058,8 @@ pub async fn get_storage_status(pool: &Pool<Sqlite>) -> Result<StorageStatus> {
     .await
     .unwrap_or(0);
 
+    let orphaned_file_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE folder_id IS NULL").fetch_one(pool).await.unwrap_or(0);
+
     Ok(StorageStatus {
         local_file_count,
         tracked_file_count,
@@ -1102,6 +1080,7 @@ pub async fn get_storage_status(pool: &Pool<Sqlite>) -> Result<StorageStatus> {
         prune_candidate_bytes,
         wav_indexed,
         wav_backed_up,
+        orphaned_file_count,
     })
 }
 
@@ -1152,6 +1131,7 @@ mod tests {
                 source_of INTEGER,
                 stem_type TEXT,
                 last_verified_local INTEGER,
+                folder_id INTEGER,
                 created_at INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL DEFAULT 0
             )",

@@ -134,6 +134,10 @@ pub struct File {
     pub stem_type: Option<String>,
     pub last_verified_local: Option<i64>,
 
+    /// The folder that discovered/tracks this file. NULL = orphaned (not
+    /// tracked by any active folder — import artifact or deleted folder).
+    pub folder_id: Option<i64>,
+
     // Timestamps
     pub created_at: i64,
     pub updated_at: i64,
@@ -229,6 +233,7 @@ pub struct StorageStatus {
     pub prune_candidate_bytes: i64,
     pub wav_indexed: i64,
     pub wav_backed_up: i64,
+    pub orphaned_file_count: i64,
 }
 
 // ============================================================================

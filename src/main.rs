@@ -501,7 +501,7 @@ async fn scan_single_file(pool: &Pool<Sqlite>, path_str: &str) -> Result<()> {
     println!();
 
     println!("Storing to database...");
-    let stored = momos_music_manager::db::scan_and_store_file(pool, Path::new(path_str)).await?;
+    let stored = momos_music_manager::db::scan_and_store_file(pool, Path::new(path_str), None).await?;
     println!("Stored with id: {}", stored.id);
     Ok(())
 }

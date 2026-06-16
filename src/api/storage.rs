@@ -345,6 +345,38 @@ async fn sync_backpack_handler(State(state): State<Arc<AppState>>) -> impl IntoR
     })
     .into_response()
 }
+// ── Purge Orphans ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct PurgeOrphansRequest {
+    #[serde(default)]
+    confirm: Option<bool>,
+}
+
+/// POST /api/storage/purge-orphans
+async fn purge_orphans_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PurgeOrphansRequest>,
+) -> impl IntoResponse {
+    if !body.confirm.unwrap_or(false) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                data: serde_json::json!({"error": "Must set confirm=true to purge orphaned files"}),
+            }),
+        )
+            .into_response();
+    }
+
+    match crate::db::files::purge_orphaned_files(&state.db).await {
+        Ok(count) => Json(ApiResponse {
+            data: serde_json::json!({"purged": count}),
+        })
+        .into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
 
 /// POST /api/files/{id}/pull-from-backup
 /// Copies a file from backup (NAS) to local disk.
@@ -752,6 +784,7 @@ pub(super) fn router() -> Router<Arc<AppState>> {
             "/api/storage/settings/format-priority",
             get(format_priority_get_handler).put(format_priority_put_handler),
         )
+                .route("/api/storage/purge-orphans", post(purge_orphans_handler))
         .route("/api/backup/test", get(backup_test_handler))
         .route("/api/backup/explore", get(backup_explore_handler))
         .route(

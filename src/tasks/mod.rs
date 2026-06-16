@@ -1586,6 +1586,7 @@ pub async fn start_scan_folder_task(
             file_extensions,
             max_depth,
             scan_mode,
+            Some(folder.id),
         )
         .await
         {

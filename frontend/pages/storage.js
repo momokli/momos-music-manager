@@ -100,8 +100,30 @@ function renderStatusCards(container, status) {
     `;
   }
 
+  const orphanCount = status.orphanedFileCount ?? 0;
+  const orphanHtml = orphanCount > 0 ? `
+    <div class="card" id="orphan-card">
+      <h3><i class="fas fa-ghost"></i> Ghost Records</h3>
+      <p class="help-text">
+        These files are in the database but not tracked by any active folder.
+        They're typically import artifacts from a different machine.
+      </p>
+      <div class="storage-metric">
+        <span class="metric-value">${orphanCount.toLocaleString()}</span>
+        <span class="metric-label">orphaned files</span>
+      </div>
+      <button class="btn btn-danger" id="purge-orphans-btn">
+        <i class="fas fa-eraser"></i> Purge Ghost Records
+      </button>
+      <p class="help-text" style="margin-top:0.5rem">
+        ⚠️ This permanently deletes these records from the database.
+        Backed-up files on the NAS are not affected.
+      </p>
+    </div>` : '';
+
   el.innerHTML = `
     ${warningHtml}
+    ${orphanHtml}
     <div class="storage-section">
       <h2 class="storage-section-title">Summary</h2>
       <div class="storage-cards">
@@ -761,6 +783,34 @@ function wireEvents(container) {
       } finally {
         backfillBtn.disabled = false;
         backfillBtn.innerHTML = '<i class="fas fa-sync"></i> Backfill Backup Sizes';
+      }
+      return;
+    }
+
+    // Purge ghost records
+    const purgeBtn = e.target.closest("#purge-orphans-btn");
+    if (purgeBtn) {
+      const count = state.status?.orphanedFileCount ?? 0;
+      if (!confirm(`Permanently delete ${count} orphaned records?\n\nThis cannot be undone.`)) {
+        return;
+      }
+      purgeBtn.disabled = true;
+      purgeBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Purging...';
+      try {
+        const resp = await fetchJSON("/api/storage/purge-orphans", {
+          method: "POST",
+          body: JSON.stringify({ confirm: true }),
+          headers: { "Content-Type": "application/json" },
+        });
+        showToast(`Purged ${resp.data.purged} ghost records`, "success");
+        // Remove the card from DOM; status updates naturally on next page visit
+        const card = document.getElementById("orphan-card");
+        if (card) card.remove();
+        if (state.status) state.status.orphanedFileCount = 0;
+      } catch (err) {
+        showToast(`Failed to purge: ${err.message}`, "error");
+        purgeBtn.disabled = false;
+        purgeBtn.innerHTML = '<i class="fas fa-eraser"></i> Purge Ghost Records';
       }
       return;
     }
