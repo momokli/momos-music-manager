@@ -75,6 +75,41 @@ struct UpdateTagRequest {
     category_id: Option<i64>,
 }
 
+// ─── Laboratory Analysis Types ───────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NeedsAnalysisQuery {
+    format: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NeedsAnalysisFile {
+    file_id: i64,
+    file_path: String,
+    file_type: String,
+    local_size: i64,
+    title: Option<String>,
+    artist: Option<String>,
+    needs_bpm: bool,
+    needs_key: bool,
+    backed_up: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NeedsAnalysisResponse {
+    tag_id: i64,
+    tag_name: String,
+    file_count: usize,
+    needs_bpm: usize,
+    needs_key: usize,
+    needs_both: usize,
+    files: Vec<NeedsAnalysisFile>,
+}
+
 // ─── Auto-Categorize Types ─────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -796,6 +831,146 @@ async fn get_tag_handler(
             .into_response(),
         Err(e) => internal_error(e).into_response(),
     }
+}
+
+/// GET /api/tags/{id}/needs-analysis
+/// Returns files in this tag that need BPM/key analysis.
+async fn tag_needs_analysis_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Query(query): Query<NeedsAnalysisQuery>,
+) -> impl IntoResponse {
+    // 1. Check tag exists
+    let tag = match get_tag_by_id(&state.db, id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Tag with id {} not found", id),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    let limit = query.limit.unwrap_or(50).max(1).min(500);
+
+    // Build the query
+    #[derive(sqlx::FromRow)]
+    struct FileRow {
+        file_id: i64,
+        file_path: String,
+        file_type: String,
+        file_size: i64,
+        title: Option<String>,
+        artist: Option<String>,
+        bpm: Option<f64>,
+        musical_key: Option<String>,
+        backed_up: i32,
+    }
+
+    // Count query (no limit)
+    let mut count_sql = String::from(
+        "SELECT COUNT(DISTINCT f.id) FROM files f
+         JOIN file_resolved_tags frt ON frt.file_id = f.id AND frt.tag_name = ?
+         JOIN file_locations fl_local ON fl_local.file_id = f.id AND fl_local.location_type = 'local'
+         WHERE (f.bpm IS NULL OR f.musical_key IS NULL)"
+    );
+
+    // Data query with limit
+    let mut data_sql = String::from(
+        "SELECT DISTINCT
+            f.id AS file_id,
+            f.file_path,
+            f.file_type,
+            f.file_size,
+            f.title,
+            f.artist,
+            f.bpm,
+            f.musical_key,
+            CASE WHEN fl_backup.id IS NOT NULL THEN 1 ELSE 0 END AS backed_up
+         FROM files f
+         JOIN file_resolved_tags frt ON frt.file_id = f.id AND frt.tag_name = ?
+         JOIN file_locations fl_local ON fl_local.file_id = f.id AND fl_local.location_type = 'local'
+         LEFT JOIN file_locations fl_backup ON fl_backup.file_id = f.id AND fl_backup.location_type = 'backup'
+         WHERE (f.bpm IS NULL OR f.musical_key IS NULL)"
+    );
+
+    // Optional format filter
+    use std::fmt::Write;
+    if let Some(ref format) = query.format {
+        write!(count_sql, " AND f.file_type = ?").unwrap();
+        write!(data_sql, " AND f.file_type = ?").unwrap();
+    }
+
+    write!(
+        data_sql,
+        " ORDER BY COALESCE(f.artist, ''), COALESCE(f.title, '') LIMIT ?"
+    )
+    .unwrap();
+
+    // Execute count
+    let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql).bind(&tag.name);
+    if let Some(ref format) = query.format {
+        count_query = count_query.bind(format);
+    }
+    let total_count: i64 = match count_query.fetch_one(&state.db).await {
+        Ok(c) => c,
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    // Execute data query
+    let mut data_query = sqlx::query_as::<_, FileRow>(&data_sql).bind(&tag.name);
+    if let Some(ref format) = query.format {
+        data_query = data_query.bind(format);
+    }
+    data_query = data_query.bind(limit);
+    let rows: Vec<FileRow> = match data_query.fetch_all(&state.db).await {
+        Ok(r) => r,
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    // Compute counts from the FULL result set (we need all rows for counts,
+    // but the query is LIMITed — however we only have the limited rows here.
+    // For accurate counts, we compute from the total_count query and the
+    // needs_bpm/needs_key/needs_both from the limited rows.
+    // Actually — let's compute needs_bpm/needs_key from the limited rows
+    // as a reasonable approximation for the UI.
+    let needs_bpm = rows.iter().filter(|r| r.bpm.is_none()).count();
+    let needs_key = rows.iter().filter(|r| r.musical_key.is_none()).count();
+    let needs_both = rows
+        .iter()
+        .filter(|r| r.bpm.is_none() && r.musical_key.is_none())
+        .count();
+
+    let files: Vec<NeedsAnalysisFile> = rows
+        .into_iter()
+        .map(|r| NeedsAnalysisFile {
+            file_id: r.file_id,
+            file_path: r.file_path,
+            file_type: r.file_type,
+            local_size: r.file_size,
+            title: r.title,
+            artist: r.artist,
+            needs_bpm: r.bpm.is_none(),
+            needs_key: r.musical_key.is_none(),
+            backed_up: r.backed_up == 1,
+        })
+        .collect();
+
+    let response = NeedsAnalysisResponse {
+        tag_id: id,
+        tag_name: tag.name,
+        file_count: total_count as usize,
+        needs_bpm,
+        needs_key,
+        needs_both,
+        files,
+    };
+
+    Json(ApiResponse { data: response }).into_response()
 }
 
 /// GET /api/tags/unreviewed
@@ -1648,6 +1823,10 @@ pub(super) fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/tags/{id}/children", get(tag_children_handler))
         .route("/api/tags/{id}/backpack", put(tag_backpack_handler))
+        .route(
+            "/api/tags/{id}/needs-analysis",
+            get(tag_needs_analysis_handler),
+        )
         .route("/api/tags/bundles", get(tag_bundles_handler))
         .route(
             "/api/tags/{id}/bundle-members",

@@ -278,3 +278,80 @@ pub async fn seed_service_config(pool: &Pool<Sqlite>, service: &str) {
 pub async fn seed_dynamic_bundles_data(pool: &Pool<Sqlite>) {
     momos_music_manager::db::testing::seed_dynamic_bundles_scenario(pool).await;
 }
+
+/// Seed data for laboratory analysis testing.
+///
+/// Extends seed_basic_data with:
+/// - File 5: needs analysis (no BPM, no key), IS local, IS backed up, linked to tag "Laboratory"
+/// - Tag 20: "Laboratory" (Setlist category)
+/// - Playlist 4: "Laboratory" matching tag
+pub async fn seed_lab_scenario(pool: &Pool<Sqlite>) {
+    seed_basic_data(pool).await;
+
+    // File 5: needs analysis (no BPM, no key), IS local, IS backed up
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO files (id, file_path, file_type, file_size, last_modified, title, artist, isrc, file_hash)
+           VALUES (5, '/test/stems/Needs - Analysis.flac', 'flac', 5000000, 1700000000, 'Needy Track', 'Test Artist', 'US005', 'hash5')"#
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO file_locations (file_id, location_type, path, file_size, last_verified)
+           VALUES (5, 'local', '/test/stems/Needs - Analysis.flac', 5000000, 1700000000),
+                  (5, 'backup', '/backup/stems/Needs - Analysis.flac', 5000000, 1700000000)"#
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Tag "Laboratory" (id=20, Setlist category=1)
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO tags (id, name, category_id) VALUES (20, 'Laboratory', 1)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Playlist matching tag name
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_playlists (id, service, playlist_id, name, snapshot_id)
+           VALUES (4, 'spotify', 'spotify:playlist:444', 'Laboratory', 'snap4')"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Link file 5 to the Laboratory playlist via spotify_id
+    sqlx::query(r#"UPDATE files SET spotify_id = 'spotify:track:eee' WHERE id = 5"#)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_tracks (id, service, service_id, title, artist, isrc, imported_at)
+           VALUES (5, 'spotify', 'spotify:track:eee', 'Needy Track', 'Test Artist', 'US005', 1700000000)"#
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_playlist_tracks (playlist_id, track_id, position, added_at)
+           VALUES (4, 5, 0, 1700000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Also add local presence for file 5
+    sqlx::query("UPDATE files SET last_verified_local = 1700000000 WHERE id = 5")
+        .execute(pool)
+        .await
+        .unwrap();
+
+    momos_music_manager::db::refresh_file_resolved_tags(pool)
+        .await
+        .unwrap();
+}

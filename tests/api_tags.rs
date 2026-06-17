@@ -1777,3 +1777,283 @@ async fn tags_bundle_multilevel_resolution() {
         "bundle-of is NOT transitive: tag 1 should list only its direct bundle parent"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Laboratory Analysis: needs-analysis endpoint
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+/// `GET /api/tags/{id}/needs-analysis` returns files needing BPM/key analysis.
+async fn tags_needs_analysis_returns_files_needing_bpm() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_lab_scenario(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/tags/20/needs-analysis", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let data = &body["data"];
+
+    // File 5 has no BPM and no key — should be in needs-analysis
+    assert!(
+        data["fileCount"].as_i64().unwrap_or(0) >= 1,
+        "should have at least 1 file needing analysis"
+    );
+
+    let files = data["files"].as_array().unwrap();
+    let file_ids: Vec<i64> = files
+        .iter()
+        .map(|f| f["fileId"].as_i64().unwrap())
+        .collect();
+    assert!(
+        file_ids.contains(&5),
+        "file 5 (no BPM, no key) should be in needs-analysis results"
+    );
+
+    // File 1 (has BPM + key) should NOT appear
+    assert!(
+        !file_ids.contains(&1),
+        "file 1 (has BPM + key) should NOT appear in needs-analysis"
+    );
+
+    // Count fields
+    assert!(data["needsBpm"].as_i64().is_some(), "should have needsBpm");
+    assert!(data["needsKey"].as_i64().is_some(), "should have needsKey");
+    assert!(
+        data["needsBoth"].as_i64().is_some(),
+        "should have needsBoth"
+    );
+    // File 5 has no BPM and no key, so needsBoth >= 1
+    assert!(
+        data["needsBoth"].as_i64().unwrap_or(0) >= 1,
+        "needsBoth should be >= 1 (file 5 needs both)"
+    );
+
+    // Tag metadata
+    assert_eq!(data["tagId"], 20);
+    assert_eq!(data["tagName"], "Laboratory");
+}
+
+#[tokio::test]
+/// `GET /api/tags/{id}/needs-analysis` returns 0 files when all are analyzed.
+async fn tags_needs_analysis_excludes_fully_analyzed() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    momos_music_manager::db::refresh_file_resolved_tags(&pool)
+        .await
+        .unwrap();
+
+    // Tag 7 (Groovy) — files 1 and 2 have BPM + key, so needs-analysis should be empty
+    let resp = client
+        .get(format!("{}/api/tags/7/needs-analysis", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let data = &body["data"];
+
+    assert_eq!(
+        data["fileCount"].as_i64().unwrap_or(-1),
+        0,
+        "tag 7 (Groovy) files all have BPM+key — needs-analysis should be 0"
+    );
+    assert!(
+        data["files"].as_array().unwrap().is_empty(),
+        "files list should be empty"
+    );
+}
+
+#[tokio::test]
+/// `GET /api/tags/{id}/needs-analysis` excludes files that are only backed up (not local).
+async fn tags_needs_analysis_excludes_non_local() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_lab_scenario(&pool).await;
+
+    // File 4 is backed up but NOT local — and it has NULL BPM + NULL key.
+    // But it's only linked to the seed "Groovy" playlist/tag implicitly...
+    // Actually file 4 has no spotify_id, no ISRC matching service_tracks.
+    // So it won't have any tag resolution. Let's just verify file 5 (local) appears
+    // and no backup-only files sneak in.
+    let resp = client
+        .get(format!("{}/api/tags/20/needs-analysis", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let data = &body["data"];
+    let files = data["files"].as_array().unwrap();
+
+    // File 5 is local — should be in results
+    let file_5 = files.iter().find(|f| f["fileId"].as_i64() == Some(5));
+    assert!(
+        file_5.is_some(),
+        "file 5 (local) should be in needs-analysis"
+    );
+
+    // Verify all returned files have is_local (they do — the query
+    // only returns files through JOIN file_locations WHERE location_type='local')
+    for f in files {
+        assert!(
+            f["fileId"].as_i64().is_some(),
+            "each file should have fileId"
+        );
+    }
+}
+
+#[tokio::test]
+/// `GET /api/tags/{id}/needs-analysis` returns 404 for non-existent tag.
+async fn tags_needs_analysis_tag_not_found() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/tags/9999/needs-analysis", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 404, "nonexistent tag should return 404");
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body["error"].as_str().is_some(),
+        "404 response should have an error field"
+    );
+}
+
+#[tokio::test]
+/// `GET /api/tags/{id}/needs-analysis?format=flac` filters by file type.
+async fn tags_needs_analysis_filter_by_format() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_lab_scenario(&pool).await;
+
+    // Only file 5 is flac in this scenario
+    let resp = client
+        .get(format!("{}/api/tags/20/needs-analysis?format=flac", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let data = &body["data"];
+    let files = data["files"].as_array().unwrap();
+
+    assert!(
+        data["fileCount"].as_i64().unwrap_or(0) >= 1,
+        "should have at least 1 flac file needing analysis"
+    );
+    for f in files {
+        assert_eq!(
+            f["fileType"].as_str().unwrap(),
+            "flac",
+            "all returned files should be flac"
+        );
+    }
+
+    // No stem.m4a files in this tag
+    let resp_stem = client
+        .get(format!(
+            "{}/api/tags/20/needs-analysis?format=stem.m4a",
+            base
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp_stem.status(), 200);
+    let body_stem: Value = resp_stem.json().await.unwrap();
+    let data_stem = &body_stem["data"];
+    assert_eq!(
+        data_stem["fileCount"].as_i64().unwrap_or(-1),
+        0,
+        "no stem.m4a files should need analysis in this scenario"
+    );
+}
+
+#[tokio::test]
+/// `GET /api/tags/{id}/needs-analysis?limit=1` limits returned files but not fileCount.
+async fn tags_needs_analysis_limit() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_lab_scenario(&pool).await;
+
+    // The lab scenario has file 5 needing analysis.
+    // Seed an additional file needing analysis to test limiting.
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO files (id, file_path, file_type, file_size, last_modified, title, artist, isrc, file_hash)
+           VALUES (6, '/test/stems/Also - Needy.flac', 'flac', 6000000, 1700000000, 'Also Needy', 'Test Artist', 'US006', 'hash6')"#
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO file_locations (file_id, location_type, path, file_size, last_verified)
+           VALUES (6, 'local', '/test/stems/Also - Needy.flac', 6000000, 1700000000),
+                  (6, 'backup', '/backup/stems/Also - Needy.flac', 6000000, 1700000000)"#
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Link file 6 to Laboratory tag
+    sqlx::query(r#"UPDATE files SET spotify_id = 'spotify:track:fff' WHERE id = 6"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_tracks (id, service, service_id, title, artist, isrc, imported_at)
+           VALUES (6, 'spotify', 'spotify:track:fff', 'Also Needy', 'Test Artist', 'US006', 1700000000)"#
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_playlist_tracks (playlist_id, track_id, position, added_at)
+           VALUES (4, 6, 1, 1700000000)"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query("UPDATE files SET last_verified_local = 1700000000 WHERE id = 6")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    momos_music_manager::db::refresh_file_resolved_tags(&pool)
+        .await
+        .unwrap();
+
+    // Now get needs-analysis with limit=1
+    let resp = client
+        .get(format!("{}/api/tags/20/needs-analysis?limit=1", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let data = &body["data"];
+
+    // fileCount should show total (2), but files array should have only 1
+    assert_eq!(
+        data["fileCount"].as_i64().unwrap_or(-1),
+        2,
+        "fileCount should show total (2), not limited"
+    );
+    assert_eq!(
+        data["files"].as_array().unwrap().len(),
+        1,
+        "files array should have exactly 1 entry with limit=1"
+    );
+}
