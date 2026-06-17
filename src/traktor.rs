@@ -81,6 +81,7 @@ pub struct ImportStats {
 /// Replace `:` with `/` then normalize with PathBuf to collapse
 /// multiple slashes into one. E.g. `/:Users/:momo/:Music/:stems/:`
 /// → `/Users/momo/Music/stems/`.
+#[allow(dead_code)]
 fn traktor_path_to_abs(dir: &str, file_name: &str) -> PathBuf {
     // Replace `:` with `/`, then use Path::components() to normalize
     // (collapses `///Users//momo//Music//stems//` → `/Users/momo/Music/stems`)
@@ -336,12 +337,18 @@ pub async fn import_traktor_metadata(
         return Ok(stats);
     }
 
-    // Build a lookup map: lowercased canonical path → (file_id, original_path)
-    let path_map: std::collections::HashMap<String, (i64, String)> = rows
+    // Build a lookup map: lowercased file basename → file_id
+    // Basename matching works across machines (e.g. MacBook vs LAN paths),
+    // since all filenames in the library are unique at the basename level.
+    let basename_map: std::collections::HashMap<String, i64> = rows
         .into_iter()
         .map(|(id, path)| {
-            let normalized = normalize_path(&path);
-            (normalized, (id, path))
+            let basename = std::path::Path::new(&path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            (basename, id)
         })
         .collect();
 
@@ -367,11 +374,11 @@ pub async fn import_traktor_metadata(
     let mut updates: Vec<UpdateRow> = vec![];
 
     for entry in entries {
-        let abs_path = traktor_path_to_abs(&entry.dir, &entry.file);
-        let abs_str = abs_path.to_string_lossy();
-        let normalized = normalize_path(&abs_str);
+        // Match by basename only (case-insensitive), ignoring the directory path.
+        // This allows Traktor imports from different machines (e.g. MacBook vs LAN).
+        let basename = entry.file.to_lowercase();
 
-        if let Some((file_id, _original_path)) = path_map.get(&normalized) {
+        if let Some(file_id) = basename_map.get(&basename) {
             matched += 1;
 
             let play_count = entry.play_count;
@@ -465,6 +472,7 @@ pub async fn import_traktor_metadata(
 /// Normalize a file path for case-insensitive matching:
 /// - Lowercase
 /// - Remove trailing slash (if any)
+#[allow(dead_code)]
 fn normalize_path(path: &str) -> String {
     let p = path.trim().to_lowercase();
     p.trim_end_matches('/').to_string()
@@ -856,6 +864,117 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(rating3, 0, "rating=0 should overwrite — user unrated in Traktor");
+    }
+
+    #[tokio::test]
+    async fn test_import_traktor_metadata_basename_match() {
+        use sqlx::SqlitePool;
+
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            r#"CREATE TABLE files (
+                id INTEGER PRIMARY KEY,
+                file_path TEXT NOT NULL UNIQUE,
+                file_hash TEXT NOT NULL DEFAULT '',
+                file_type TEXT NOT NULL DEFAULT 'flac',
+                file_size INTEGER NOT NULL DEFAULT 0,
+                last_modified INTEGER NOT NULL DEFAULT 0,
+                last_scanned INTEGER NOT NULL DEFAULT 0,
+                isrc TEXT,
+                title TEXT, artist TEXT, album TEXT,
+                bpm REAL, musical_key TEXT,
+                rating INTEGER NOT NULL DEFAULT 0,
+                play_count INTEGER NOT NULL DEFAULT 0,
+                last_played INTEGER,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // File at a completely different path than the Traktor entry
+        sqlx::query("INSERT INTO files (id, file_path) VALUES (1, '/some/totally/different/path/test.flac')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Traktor entry with unrelated dir — should match by basename
+        let entry = TraktorEntry {
+            dir: "/:unrelated/:path/:/".to_string(),
+            file: "test.flac".to_string(),
+            play_count: Some(3),
+            last_played_raw: None,
+            bpm: None,
+            musical_key: None,
+            rating: None,
+        };
+
+        let stats = import_traktor_metadata(&pool, &[entry]).await.unwrap();
+        assert_eq!(
+            stats.matched, 1,
+            "should match by basename despite completely different path"
+        );
+
+        let (play_count,): (i32,) =
+            sqlx::query_as("SELECT play_count FROM files WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(play_count, 3, "play_count should be updated");
+    }
+
+    #[tokio::test]
+    async fn test_import_traktor_metadata_basename_no_match_when_missing() {
+        use sqlx::SqlitePool;
+
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            r#"CREATE TABLE files (
+                id INTEGER PRIMARY KEY,
+                file_path TEXT NOT NULL UNIQUE,
+                file_hash TEXT NOT NULL DEFAULT '',
+                file_type TEXT NOT NULL DEFAULT 'flac',
+                file_size INTEGER NOT NULL DEFAULT 0,
+                last_modified INTEGER NOT NULL DEFAULT 0,
+                last_scanned INTEGER NOT NULL DEFAULT 0,
+                isrc TEXT,
+                title TEXT, artist TEXT, album TEXT,
+                bpm REAL, musical_key TEXT,
+                rating INTEGER NOT NULL DEFAULT 0,
+                play_count INTEGER NOT NULL DEFAULT 0,
+                last_played INTEGER,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Only insert a file with a different basename
+        sqlx::query("INSERT INTO files (id, file_path) VALUES (1, '/some/path/existing.flac')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Entry with a basename that does NOT exist in DB
+        let entry = TraktorEntry {
+            dir: "/:unrelated/:path/:/".to_string(),
+            file: "nonexistent.flac".to_string(),
+            play_count: Some(3),
+            last_played_raw: None,
+            bpm: None,
+            musical_key: None,
+            rating: None,
+        };
+
+        let stats = import_traktor_metadata(&pool, &[entry]).await.unwrap();
+        assert_eq!(
+            stats.matched, 0,
+            "should NOT match when basename doesn't exist in DB"
+        );
     }
 }
 
