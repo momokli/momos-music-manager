@@ -3,19 +3,21 @@
 use std::path::Path;
 
 use anyhow::Result;
-use sha2::{Digest, Sha256};
 use sqlx::{Pool, Sqlite};
 use std::fs;
 
 use super::types::File;
 
-/// Compute a SHA-256 hash of a file's contents.
+/// Compute a fast identity hash from mtime + file size.
 pub fn calculate_file_hash(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
-    let hash = hasher.finalize();
-    Ok(format!("{:x}", hash))
+    let metadata = fs::metadata(path)?;
+    let size = metadata.len();
+    let mtime = metadata
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Ok(format!("{}-{}", size, mtime))
 }
 
 /// Normalize and validate a folder path.
@@ -207,11 +209,16 @@ mod tests {
         std::fs::write(&path, b"hello world").unwrap();
 
         let hash = calculate_file_hash(&path).unwrap();
-        // SHA-256 of "hello world"
+        // Should be "size-mtime" format (11 bytes, then a dash, then a timestamp)
+        let parts: Vec<&str> = hash.split('-').collect();
         assert_eq!(
-            hash,
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+            parts.len(),
+            2,
+            "hash should be size-mtime format, got: {}",
+            hash
         );
+        assert_eq!(parts[0], "11", "size should be 11 bytes");
+        assert!(parts[1].parse::<u64>().is_ok(), "mtime should be numeric");
 
         std::fs::remove_file(&path).unwrap();
     }

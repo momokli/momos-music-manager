@@ -25,9 +25,13 @@ pub struct FolderWatcherConfig {
 
 impl Default for FolderWatcherConfig {
     fn default() -> Self {
+        let interval = std::env::var("MOMOS_FOLDER_WATCH_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300);
         Self {
-            scan_interval_seconds: 300, // 5 minutes
-            auto_start: true,
+            scan_interval_seconds: interval,
+            auto_start: interval > 0,
         }
     }
 }
@@ -66,6 +70,13 @@ impl FolderWatcher {
             return Ok(());
         }
 
+        if self.config.scan_interval_seconds == 0 {
+            self.is_running
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            info!("Folder watcher disabled (interval=0)");
+            return Ok(());
+        }
+
         info!(
             "Starting folder watcher with {} second interval",
             self.config.scan_interval_seconds
@@ -86,14 +97,8 @@ impl FolderWatcher {
         tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(interval_seconds));
 
-            // Run initial scan immediately
-            info!("Running initial folder scan...");
-            if let Err(e) = Self::scan_active_folders(&db_pool, &tm).await {
-                error!("Initial folder scan failed: {}", e);
-            }
-
             info!(
-                "Folder watcher started, next scan in {} seconds",
+                "Folder watcher started, first scan in {} seconds",
                 interval_seconds
             );
 

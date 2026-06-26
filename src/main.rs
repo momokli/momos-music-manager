@@ -161,7 +161,40 @@ async fn create_db_pool() -> Result<Pool<Sqlite>> {
 async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()> {
     let config = ServiceCredentials::load();
     let db = create_db_pool().await?;
-    let task_manager = TaskManager::new();
+
+    // Ensure task_history table exists (idempotent — safe on every startup)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS task_history (
+            id TEXT PRIMARY KEY,
+            task_type TEXT NOT NULL,
+            service TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            progress_percent REAL,
+            progress_message TEXT,
+            result_summary TEXT,
+            error_message TEXT,
+            logs TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL,
+            started_at INTEGER,
+            completed_at INTEGER,
+            updated_at INTEGER NOT NULL
+        )",
+    )
+    .execute(&db)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_task_history_created ON task_history(created_at DESC)",
+    )
+    .execute(&db)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_task_history_type ON task_history(task_type)")
+        .execute(&db)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_task_history_status ON task_history(status)")
+        .execute(&db)
+        .await?;
+
+    let task_manager = TaskManager::new_with_pool(db.clone());
 
     let public_url = public_url.or_else(|| config.server_public_url.clone());
 
@@ -501,7 +534,8 @@ async fn scan_single_file(pool: &Pool<Sqlite>, path_str: &str) -> Result<()> {
     println!();
 
     println!("Storing to database...");
-    let stored = momos_music_manager::db::scan_and_store_file(pool, Path::new(path_str), None).await?;
+    let stored =
+        momos_music_manager::db::scan_and_store_file(pool, Path::new(path_str), None).await?;
     println!("Stored with id: {}", stored.id);
     Ok(())
 }

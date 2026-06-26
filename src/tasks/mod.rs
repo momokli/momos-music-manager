@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use sqlx::{Pool, Sqlite};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -392,6 +393,10 @@ pub struct Task {
     pub created_at: Instant,
     /// Join handle for the background task
     pub join_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+    /// Summary set on successful completion (e.g. "Synced 150 tracks across 3 playlists")
+    pub result_summary: Arc<std::sync::Mutex<Option<String>>>,
+    /// Error message set on failure
+    pub error_message: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// Derive a conflict key from a TaskType.
@@ -439,6 +444,8 @@ impl Task {
             cancel_token: CancellationToken::new(),
             created_at: Instant::now(),
             join_handle: None,
+            result_summary: Arc::new(std::sync::Mutex::new(None)),
+            error_message: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -463,6 +470,8 @@ impl Task {
             cancel_token: CancellationToken::new(),
             created_at: Instant::now(),
             join_handle: None,
+            result_summary: Arc::new(std::sync::Mutex::new(None)),
+            error_message: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -551,6 +560,16 @@ impl Task {
             sub_items,
             logs,
             created_at_secs,
+            result_summary: self
+                .result_summary
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            error_message: self
+                .error_message
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         }
     }
 
@@ -598,6 +617,12 @@ pub struct TaskProgress {
     pub sub_items: Vec<ProgressItem>,
     pub logs: Vec<String>,
     pub created_at_secs: f64,
+    /// Summary set on successful completion
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_summary: Option<String>,
+    /// Error message set on failure
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 // ============================================================
@@ -609,6 +634,8 @@ pub struct TaskProgress {
 pub struct TaskManager {
     /// Map of task_id -> Task
     tasks: Arc<RwLock<HashMap<String, Task>>>,
+    /// Optional DB pool for persisting completed tasks to task_history
+    db: Option<sqlx::Pool<sqlx::Sqlite>>,
 }
 
 /// Error returned when a task cannot be started due to a conflict
@@ -619,18 +646,43 @@ pub enum TaskConflictError {
 }
 
 impl TaskManager {
-    /// Create a new task manager
+    /// Create a new task manager (no DB persistence)
     pub fn new() -> Self {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
+            db: None,
+        }
+    }
+
+    /// Create a new task manager with a DB pool for persisting
+    /// completed tasks to the `task_history` table.
+    pub fn new_with_pool(db: sqlx::Pool<sqlx::Sqlite>) -> Self {
+        Self {
+            tasks: Arc::new(RwLock::new(HashMap::new())),
+            db: Some(db),
+        }
+    }
+
+    /// Persist a task snapshot to the DB if a pool is configured.
+    async fn maybe_persist(&self, task: &Task) {
+        if let Some(ref pool) = self.db {
+            let progress = task.to_progress();
+            if let Err(e) = persist_task_to_db(pool, &progress).await {
+                tracing::warn!("Failed to persist task {} to history: {:#}", task.id, e);
+            }
         }
     }
 
     /// Register a new task unconditionally and return its ID.
     pub async fn start_task(&self, task: Task) -> String {
         let id = task.id.clone();
-        let mut tasks = self.tasks.write().await;
-        tasks.insert(id.clone(), task);
+        {
+            let mut tasks = self.tasks.write().await;
+            tasks.insert(id.clone(), task);
+        }
+        if let Some(task) = self.tasks.read().await.get(&id) {
+            self.maybe_persist(task).await;
+        }
         id
     }
 
@@ -641,26 +693,31 @@ impl TaskManager {
     pub async fn start_task_unique(&self, task: Task) -> Result<String, TaskConflictError> {
         let conflict_key = task_type_conflict_key(&task.task_type);
         let id = task.id.clone();
-        let mut tasks = self.tasks.write().await;
-        if let Some(ref key) = conflict_key {
-            for existing in tasks.values() {
-                if let Some(existing_key) = task_type_conflict_key(&existing.task_type)
-                    && &existing_key == key
-                {
-                    let status = existing
-                        .status
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
-                    if status == TaskStatus::Running || status == TaskStatus::Pending {
-                        return Err(TaskConflictError::AlreadyRunning {
-                            conflict_key: key.clone(),
-                        });
+        {
+            let mut tasks = self.tasks.write().await;
+            if let Some(ref key) = conflict_key {
+                for existing in tasks.values() {
+                    if let Some(existing_key) = task_type_conflict_key(&existing.task_type)
+                        && &existing_key == key
+                    {
+                        let status = existing
+                            .status
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone();
+                        if status == TaskStatus::Running || status == TaskStatus::Pending {
+                            return Err(TaskConflictError::AlreadyRunning {
+                                conflict_key: key.clone(),
+                            });
+                        }
                     }
                 }
             }
+            tasks.insert(id.clone(), task);
         }
-        tasks.insert(id.clone(), task);
+        if let Some(task) = self.tasks.read().await.get(&id) {
+            self.maybe_persist(task).await;
+        }
         Ok(id)
     }
 
@@ -672,15 +729,20 @@ impl TaskManager {
 
     /// Cancel a task by ID
     pub async fn cancel_task(&self, task_id: &str) -> anyhow::Result<()> {
-        let mut tasks = self.tasks.write().await;
-        if let Some(task) = tasks.get_mut(task_id) {
-            *task.status.lock().unwrap_or_else(|e| e.into_inner()) = TaskStatus::Cancelled;
-            task.add_log("Task cancelled by user".to_string());
-            task.cancel_token.cancel();
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Task not found: {}", task_id))
+        {
+            let mut tasks = self.tasks.write().await;
+            if let Some(task) = tasks.get_mut(task_id) {
+                *task.status.lock().unwrap_or_else(|e| e.into_inner()) = TaskStatus::Cancelled;
+                task.add_log("Task cancelled by user".to_string());
+                task.cancel_token.cancel();
+            } else {
+                return Err(anyhow::anyhow!("Task not found: {}", task_id));
+            }
         }
+        if let Some(task) = self.tasks.read().await.get(task_id) {
+            self.maybe_persist(task).await;
+        }
+        Ok(())
     }
 
     /// List all tasks (returns serializable snapshots, most recent first)
@@ -751,17 +813,27 @@ impl TaskManager {
 
     /// Update a task's status
     pub async fn update_task_status(&self, task_id: &str, status: TaskStatus) {
-        let tasks = self.tasks.read().await;
-        if let Some(task) = tasks.get(task_id) {
-            *task.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
+        {
+            let tasks = self.tasks.read().await;
+            if let Some(task) = tasks.get(task_id) {
+                *task.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
+            }
+        }
+        if let Some(task) = self.tasks.read().await.get(task_id) {
+            self.maybe_persist(task).await;
         }
     }
 
     /// Add a log message to a task
     pub async fn add_log(&self, task_id: &str, message: String) {
-        let tasks = self.tasks.read().await;
-        if let Some(task) = tasks.get(task_id) {
-            task.add_log(message);
+        {
+            let tasks = self.tasks.read().await;
+            if let Some(task) = tasks.get(task_id) {
+                task.add_log(message);
+            }
+        }
+        if let Some(task) = self.tasks.read().await.get(task_id) {
+            self.maybe_persist(task).await;
         }
     }
 
@@ -853,6 +925,152 @@ impl Default for TaskManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ============================================================
+// Task history persistence (SQLite)
+// ============================================================
+
+/// Persist a task snapshot to the `task_history` table.
+pub async fn persist_task_to_db(
+    pool: &Pool<Sqlite>,
+    progress: &TaskProgress,
+) -> anyhow::Result<()> {
+    let sub_items_json = serde_json::to_string(&progress.sub_items).unwrap_or_default();
+    let logs_json = serde_json::to_string(&progress.logs).unwrap_or_default();
+    let task_details_json = progress
+        .task_details
+        .as_ref()
+        .map(|d| serde_json::to_string(d).unwrap_or_default());
+
+    // Compute started_at / completed_at based on status
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let started_at = if progress.status != TaskStatus::Pending {
+        Some(now)
+    } else {
+        None
+    };
+    let completed_at = if matches!(
+        progress.status,
+        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+    ) {
+        Some(now)
+    } else {
+        None
+    };
+
+    sqlx::query(
+        r#"
+        INSERT OR REPLACE INTO task_history (
+            id, task_type, task_details, status, service, progress,
+            percent, sub_items, logs, result_summary, error_message,
+            started_at, completed_at, created_at_secs, persisted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
+        "#,
+    )
+    .bind(&progress.id)
+    .bind(&progress.task_type)
+    .bind(&task_details_json)
+    .bind(format!("{:?}", progress.status))
+    .bind(&progress.service)
+    .bind(&progress.progress)
+    .bind(progress.percent)
+    .bind(&sub_items_json)
+    .bind(&logs_json)
+    .bind(&progress.result_summary)
+    .bind(&progress.error_message)
+    .bind(started_at)
+    .bind(completed_at)
+    .bind(progress.created_at_secs)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Query task history from the `task_history` table with pagination and optional filters.
+pub async fn get_task_history(
+    pool: &Pool<Sqlite>,
+    limit: usize,
+    offset: usize,
+    status: Option<&str>,
+    task_type: Option<&str>,
+) -> anyhow::Result<(Vec<serde_json::Value>, usize)> {
+    // Build dynamic WHERE clauses
+    let mut where_clauses = Vec::new();
+    let mut count_clauses = Vec::new();
+
+    if let Some(s) = status {
+        where_clauses.push(format!("status = '{}'", s.replace('\'', "''")));
+        count_clauses.push(format!("status = '{}'", s.replace('\'', "''")));
+    }
+    if let Some(t) = task_type {
+        where_clauses.push(format!("task_type = '{}'", t.replace('\'', "''")));
+        count_clauses.push(format!("task_type = '{}'", t.replace('\'', "''")));
+    }
+
+    let where_sql = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", where_clauses.join(" AND "))
+    };
+    let count_where = if count_clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", count_clauses.join(" AND "))
+    };
+
+    // Get total count
+    let total: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM task_history {}",
+        count_where
+    ))
+    .fetch_one(pool)
+    .await?;
+
+    // Get paginated rows
+    let rows: Vec<serde_json::Value> = sqlx::query_as::<_, (String, String, Option<String>, String, Option<String>, String, Option<f32>, String, String, Option<String>, Option<String>, Option<i64>, Option<i64>, f64)>(
+        &format!(
+            "SELECT id, task_type, task_details, status, service, progress, percent, sub_items, logs, result_summary, error_message, started_at, completed_at, created_at_secs FROM task_history {} ORDER BY created_at_secs DESC LIMIT ? OFFSET ?",
+            where_sql
+        )
+    )
+    .bind(limit as i64)
+    .bind(offset as i64)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(id, tt, details, st, sv, prog, pct, sub, logs, rs, em, sa, ca, cat)| {
+        let sub_items: serde_json::Value =
+            serde_json::from_str(&sub).unwrap_or(serde_json::Value::Array(vec![]));
+        let logs_arr: serde_json::Value =
+            serde_json::from_str(&logs).unwrap_or(serde_json::Value::Array(vec![]));
+        let task_details: serde_json::Value = details
+            .and_then(|d| serde_json::from_str(&d).ok())
+            .unwrap_or(serde_json::Value::Null);
+        serde_json::json!({
+            "id": id,
+            "taskType": tt,
+            "taskDetails": task_details,
+            "status": st,
+            "service": sv,
+            "progress": prog,
+            "percent": pct,
+            "subItems": sub_items,
+            "logs": logs_arr,
+            "resultSummary": rs,
+            "errorMessage": em,
+            "startedAt": sa,
+            "completedAt": ca,
+            "createdAtSecs": cat,
+        })
+    })
+    .collect();
+
+    Ok((rows, total as usize))
 }
 
 // ============================================================

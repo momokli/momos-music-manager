@@ -68,77 +68,81 @@ pub async fn start_subscription_poller(
     }
 
     loop {
-        // Short sleep first so the outer task has a chance to register
-        // before the initial batch of work.
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-
         if cancel_token.is_cancelled() {
             info!("Subscription poller: cancellation requested, shutting down");
             break;
         }
 
-        // -- Fetch due subscriptions ---------------------------------------
-        let subscriptions = match db::get_due_subscriptions(&db).await {
-            Ok(subs) => subs,
-            Err(e) => {
-                error!(
-                    "Subscription poller: failed to query due subscriptions: {:#}",
-                    e
-                );
-                continue;
+        // Use a labelled block so that early exits (via `break 'cycle`)
+        // still reach the sleep at the bottom — prevents tight error loops.
+        'cycle: {
+            // -- Fetch due subscriptions ---------------------------------------
+            let subscriptions = match db::get_due_subscriptions(&db).await {
+                Ok(subs) => subs,
+                Err(e) => {
+                    error!(
+                        "Subscription poller: failed to query due subscriptions: {:#}",
+                        e
+                    );
+                    break 'cycle;
+                }
+            };
+
+            let due_count = subscriptions.len();
+            debug!(
+                "Subscription poller: found {} due subscription(s)",
+                due_count
+            );
+
+            // -- Create Spotify client once per cycle -----------------------------
+            let spotify_client = match SpotifyClient::from_stored_tokens(db.clone(), &credentials)
+                .await
+            {
+                Ok(client) => client,
+                Err(e) => {
+                    error!(
+                        "Subscription poller: failed to create Spotify client, skipping cycle: {:#}",
+                        e,
+                    );
+                    break 'cycle;
+                }
+            };
+
+            // -- Poll each due subscription ------------------------------------
+            for subscription in &subscriptions {
+                if cancel_token.is_cancelled() {
+                    break;
+                }
+
+                if let Err(e) = poll_subscribed_playlist(&db, &spotify_client, subscription).await {
+                    error!(
+                        "Subscription poller: error polling subscription {} (playlist_id={}): {:#}",
+                        subscription.id, subscription.playlist_id, e,
+                    );
+                    // Continue to the next subscription despite the error.
+                }
+
+                // Mark the subscription as polled (even on partial errors so we
+                // don't retry immediately and risk hitting rate limits).
+                if let Err(e) = db::update_subscription_last_polled(&db, subscription.id).await {
+                    error!(
+                        "Subscription poller: failed to update last_polled_at for subscription {}: {:#}",
+                        subscription.id, e,
+                    );
+                }
+
+                // Small delay between subscriptions to avoid rate limit bursts
+                tokio::time::sleep(Duration::from_millis(300)).await;
             }
-        };
 
-        let due_count = subscriptions.len();
-        debug!(
-            "Subscription poller: found {} due subscription(s)",
-            due_count
-        );
-
-        // -- Create Spotify client once per cycle -----------------------------
-        let spotify_client = match SpotifyClient::from_stored_tokens(db.clone(), &credentials).await
-        {
-            Ok(client) => client,
-            Err(e) => {
-                error!(
-                    "Subscription poller: failed to create Spotify client, skipping cycle: {:#}",
-                    e,
-                );
-                continue;
-            }
-        };
-
-        // -- Poll each due subscription ------------------------------------
-        for subscription in &subscriptions {
-            if cancel_token.is_cancelled() {
-                break;
-            }
-
-            if let Err(e) = poll_subscribed_playlist(&db, &spotify_client, subscription).await {
-                error!(
-                    "Subscription poller: error polling subscription {} (playlist_id={}): {:#}",
-                    subscription.id, subscription.playlist_id, e,
-                );
-                // Continue to the next subscription despite the error.
-            }
-
-            // Mark the subscription as polled (even on partial errors so we
-            // don't retry immediately and risk hitting rate limits).
-            if let Err(e) = db::update_subscription_last_polled(&db, subscription.id).await {
-                error!(
-                    "Subscription poller: failed to update last_polled_at for subscription {}: {:#}",
-                    subscription.id, e,
-                );
-            }
-
-            // Small delay between subscriptions to avoid rate limit bursts
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            info!(
+                "Subscription poller: checked {} due subscription(s)",
+                due_count,
+            );
         }
 
-        info!(
-            "Subscription poller: checked {} due subscription(s)",
-            due_count,
-        );
+        // Sleep 30s before next cycle (always reached, even on errors)
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     }
 
     info!("Subscription poller: stopped");

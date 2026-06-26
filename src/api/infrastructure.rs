@@ -119,6 +119,34 @@ async fn task_cancel_handler(
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct TaskHistoryQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
+    status: Option<String>,
+    #[serde(rename = "taskType")]
+    task_type: Option<String>,
+}
+
+async fn tasks_history_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TaskHistoryQuery>,
+) -> Json<serde_json::Value> {
+    let limit = query.limit.unwrap_or(50).min(200);
+    let offset = query.offset.unwrap_or(0);
+    let status = query.status.as_deref().filter(|s| !s.is_empty());
+    let task_type = query.task_type.as_deref().filter(|s| !s.is_empty());
+
+    match crate::tasks::get_task_history(&state.db, limit, offset, status, task_type).await {
+        Ok((rows, total)) => Json(serde_json::json!({
+            "data": { "tasks": rows, "total": total, "limit": limit, "offset": offset }
+        })),
+        Err(e) => Json(serde_json::json!({ "error": format!("{:#}", e) })),
+    }
+}
+
 async fn health_check_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use serde_json::json;
 
@@ -428,6 +456,7 @@ pub(super) fn router() -> Router<Arc<AppState>> {
         // Testing seed endpoint for Playwright E2E tests
         .route("/api/testing/seed", post(testing_seed_handler))
         .route("/api/tasks", get(tasks_list_handler))
+        .route("/api/tasks/history", get(tasks_history_handler))
         .route(
             "/api/tasks/{id}",
             get(task_handler).delete(task_cancel_handler),

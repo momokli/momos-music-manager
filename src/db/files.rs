@@ -150,6 +150,7 @@ fn extract_playback_stats_with_exiftool(path: &Path) -> (Option<i32>, Option<i64
         .arg("-PlayCount")
         .arg("-PlayDate")
         .arg(path)
+        .stderr(std::process::Stdio::null())
         .output()
     {
         Ok(o) if o.status.success() => o,
@@ -483,8 +484,14 @@ pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
         isrc = extract_tag_text(tag, ItemKey::Isrc);
     }
 
-    // Extract play count and last played via exiftool (handles all formats)
-    let (exif_play_count, exif_last_played) = extract_playback_stats_with_exiftool(path);
+    // Extract play count and last played via exiftool — only for formats that carry
+    // Apple-style PlayCount/PlayDate tags (M4A, MP3). FLAC, WAV, AIFF never have these.
+    let (exif_play_count, exif_last_played) =
+        if file_type == "flac" || file_type == "wav" || file_type == "aiff" || file_type == "aif" {
+            (None, None)
+        } else {
+            extract_playback_stats_with_exiftool(path)
+        };
     if exif_play_count.is_some() {
         play_count = exif_play_count;
     }
@@ -628,7 +635,41 @@ pub async fn extract_audio_metadata_from_file(path: &Path) -> Result<File> {
 // Scan & Store
 // ============================================================================
 
-pub async fn scan_and_store_file(pool: &Pool<Sqlite>, path: &Path, folder_id: Option<i64>) -> Result<File> {
+pub async fn scan_and_store_file(
+    pool: &Pool<Sqlite>,
+    path: &Path,
+    folder_id: Option<i64>,
+) -> Result<File> {
+    // Get current mtime before any expensive work
+    let current_mtime = std::fs::metadata(path)?
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let path_str = path.to_string_lossy().to_string();
+
+    // Check if file is already known and unchanged
+    let existing: Option<File> = sqlx::query_as::<_, File>(
+        "SELECT * FROM files WHERE file_path = ?1 AND last_modified = ?2",
+    )
+    .bind(&path_str)
+    .bind(current_mtime)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(mut existing_file) = existing {
+        // File unchanged — just bump last_scanned
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query("UPDATE files SET last_scanned = ?1 WHERE file_path = ?2")
+            .bind(now)
+            .bind(&path_str)
+            .execute(pool)
+            .await?;
+        existing_file.last_scanned = now;
+        return Ok(existing_file);
+    }
+
+    // File is new or changed — do full extraction
     let mut file = extract_audio_metadata_from_file(path).await?;
     file.folder_id = folder_id;
 
@@ -2313,11 +2354,9 @@ pub async fn cleanup_redundant_backpack_files(pool: &Pool<Sqlite>) -> Result<(us
 /// Files not tracked by any folder (folder_id IS NULL).
 /// These are import artifacts or remnants of deleted folders.
 pub async fn get_orphaned_file_count(pool: &Pool<Sqlite>) -> Result<i64> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM files WHERE folder_id IS NULL"
-    )
-    .fetch_one(pool)
-    .await?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE folder_id IS NULL")
+        .fetch_one(pool)
+        .await?;
     Ok(count)
 }
 
@@ -2325,11 +2364,9 @@ pub async fn get_orphaned_file_count(pool: &Pool<Sqlite>) -> Result<i64> {
 /// Deletes from: file_locations, file_resolved_tags, files.
 /// Returns count of deleted files.
 pub async fn purge_orphaned_files(pool: &Pool<Sqlite>) -> Result<i64> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM files WHERE folder_id IS NULL"
-    )
-    .fetch_one(pool)
-    .await?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE folder_id IS NULL")
+        .fetch_one(pool)
+        .await?;
 
     if count == 0 {
         return Ok(0);
@@ -2338,7 +2375,9 @@ pub async fn purge_orphaned_files(pool: &Pool<Sqlite>) -> Result<i64> {
     // Use a transaction with FK enforcement disabled to avoid cascade issues.
     // We guarantee delete order correctness: child tables before parent.
     let mut tx = pool.begin().await?;
-    sqlx::query("PRAGMA foreign_keys = OFF").execute(&mut *tx).await?;
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *tx)
+        .await?;
 
     // 1. file_locations (FK to files)
     sqlx::query(
@@ -2359,7 +2398,9 @@ pub async fn purge_orphaned_files(pool: &Pool<Sqlite>) -> Result<i64> {
         .execute(&mut *tx)
         .await?;
 
-    sqlx::query("PRAGMA foreign_keys = ON").execute(&mut *tx).await?;
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
 
     Ok(count)
@@ -3978,8 +4019,11 @@ mod tests {
     #[tokio::test]
     async fn test_migration_021_folder_id_backfill() {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool).await.unwrap();
-                create_files_table(&pool).await;
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .unwrap();
+        create_files_table(&pool).await;
         create_folders_table(&pool).await;
 
         let fid = insert_test_folder(&pool, "/music/stems").await;
@@ -3993,16 +4037,15 @@ mod tests {
         .await
         .unwrap();
 
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM files WHERE folder_id IS NOT NULL"
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE folder_id IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(count, 1, "file should have folder_id after backfill");
 
         let actual: i64 = sqlx::query_scalar(
-            "SELECT folder_id FROM files WHERE file_path = '/music/stems/artist/track.flac'"
+            "SELECT folder_id FROM files WHERE file_path = '/music/stems/artist/track.flac'",
         )
         .fetch_one(&pool)
         .await
@@ -4013,8 +4056,11 @@ mod tests {
     #[tokio::test]
     async fn test_migration_021_orphan_when_no_match() {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool).await.unwrap();
-                create_files_table(&pool).await;
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .unwrap();
+        create_files_table(&pool).await;
         create_folders_table(&pool).await;
 
         let _fid = insert_test_folder(&pool, "/music/stems").await;
@@ -4029,20 +4075,25 @@ mod tests {
         .await
         .unwrap();
 
-        let null_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM files WHERE folder_id IS NULL"
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(null_count, 1, "file with non-matching path should remain NULL");
+        let null_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE folder_id IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            null_count, 1,
+            "file with non-matching path should remain NULL"
+        );
     }
 
     #[tokio::test]
     async fn test_migration_021_nested_folders_longest_match() {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool).await.unwrap();
-                create_files_table(&pool).await;
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .unwrap();
+        create_files_table(&pool).await;
         create_folders_table(&pool).await;
 
         let parent_id = insert_test_folder(&pool, "/music").await;
@@ -4059,12 +4110,15 @@ mod tests {
         .unwrap();
 
         let actual: i64 = sqlx::query_scalar(
-            "SELECT folder_id FROM files WHERE file_path = '/music/stems/artist/track.flac'"
+            "SELECT folder_id FROM files WHERE file_path = '/music/stems/artist/track.flac'",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(actual, child_id, "should match the most specific folder path");
+        assert_eq!(
+            actual, child_id,
+            "should match the most specific folder path"
+        );
         assert_ne!(actual, parent_id, "should NOT match the parent folder");
     }
 
@@ -4080,9 +4134,12 @@ mod tests {
         // File with explicit folder_id
         let fid = insert_test_folder(&pool, "/music").await;
         insert_test_file(
-            &pool, "/music/test.flac", "flac",
-            &[("folder_id", &fid.to_string())]
-        ).await;
+            &pool,
+            "/music/test.flac",
+            "flac",
+            &[("folder_id", &fid.to_string())],
+        )
+        .await;
         let count = purge_orphaned_files(&pool).await.unwrap();
         assert_eq!(count, 0, "file with folder_id should not be purged");
     }
@@ -4090,7 +4147,10 @@ mod tests {
     #[tokio::test]
     async fn test_purge_orphaned_files_with_orphans() {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        sqlx::query("PRAGMA foreign_keys = OFF").execute(&pool).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .unwrap();
         create_files_table(&pool).await;
         create_folders_table(&pool).await;
         create_file_locations_table(&pool).await;
@@ -4102,9 +4162,12 @@ mod tests {
         let orphan_id = insert_test_file(&pool, "/orphan/file.flac", "flac", &[]).await;
         // Claimed file
         let claimed_id = insert_test_file(
-            &pool, "/music/test.flac", "flac",
-            &[("folder_id", &claimed_folder_id.to_string())]
-        ).await;
+            &pool,
+            "/music/test.flac",
+            "flac",
+            &[("folder_id", &claimed_folder_id.to_string())],
+        )
+        .await;
 
         // Add locations and tags for the orphan
         sqlx::query(
@@ -4137,33 +4200,28 @@ mod tests {
         assert_eq!(count, 1, "should purge exactly 1 orphan");
 
         // Verify orphan is gone
-        let orphan_exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM files WHERE id = ?"
-        )
-        .bind(orphan_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let orphan_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE id = ?")
+            .bind(orphan_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(orphan_exists, 0, "orphan file should be deleted");
 
         // Verify claimed file still exists
-        let claimed_exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM files WHERE id = ?"
-        )
-        .bind(claimed_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let claimed_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE id = ?")
+            .bind(claimed_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(claimed_exists, 1, "claimed file should survive");
 
         // Verify orphan's locations are also deleted
-        let loc_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM file_locations WHERE file_id = ?"
-        )
-        .bind(orphan_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let loc_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM file_locations WHERE file_id = ?")
+                .bind(orphan_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(loc_count, 0, "orphan's file_locations should be deleted");
     }
 
@@ -4189,7 +4247,7 @@ mod tests {
         // The file doesn't exist, so this will fail — but we can verify the
         // COALESCE logic by checking the DB directly with an UPDATE
         let updated = sqlx::query(
-            "UPDATE files SET file_size = 200, folder_id = COALESCE(NULL, folder_id) WHERE id = ?"
+            "UPDATE files SET file_size = 200, folder_id = COALESCE(NULL, folder_id) WHERE id = ?",
         )
         .bind(file_id)
         .execute(&pool)
@@ -4197,15 +4255,15 @@ mod tests {
         .unwrap();
         assert_eq!(updated.rows_affected(), 1, "update should work");
 
-        let current_fid: Option<i64> = sqlx::query_scalar(
-            "SELECT folder_id FROM files WHERE id = ?"
-        )
-        .bind(file_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let current_fid: Option<i64> =
+            sqlx::query_scalar("SELECT folder_id FROM files WHERE id = ?")
+                .bind(file_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
-            current_fid, Some(fid),
+            current_fid,
+            Some(fid),
             "COALESCE(NULL, folder_id) should preserve folder_id"
         );
     }
@@ -4227,15 +4285,15 @@ mod tests {
         .await
         .unwrap();
 
-        let current_fid: Option<i64> = sqlx::query_scalar(
-            "SELECT folder_id FROM files WHERE id = ?"
-        )
-        .bind(file_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let current_fid: Option<i64> =
+            sqlx::query_scalar("SELECT folder_id FROM files WHERE id = ?")
+                .bind(file_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
-            current_fid, Some(fid),
+            current_fid,
+            Some(fid),
             "folder_id should be set to the provided value"
         );
     }

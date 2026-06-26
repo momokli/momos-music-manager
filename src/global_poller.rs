@@ -59,8 +59,8 @@ pub async fn start_global_poller(
 
     info!("Global poller started (interval: {}s)", interval_secs);
 
-    // Wait one interval before first poll so the server has time to fully start
-    tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+    // Fixed 60s cold-start so the server has time to initialise before the first poll
+    tokio::time::sleep(Duration::from_secs(60)).await;
 
     loop {
         if cancel_token.is_cancelled() {
