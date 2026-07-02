@@ -1,6 +1,6 @@
 # Momo's Music Manager — Agent Guidance
 
-> **Last Updated**: 2026-06-10 — v0.8.0
+> **Last Updated**: 2026-07-02 — v0.9.0
 
 ---
 
@@ -53,7 +53,7 @@ When bundling features for a release:
 13. **Sync State**: In-memory `TaskManager` — tasks auto-pruned 5 min after completion
 14. **Config Priority** (highest wins): Env vars > `~/.config/momos-music-manager/config.toml` > built-in defaults
 15. **Server-Side Filtering**: All filters must be server-side on paginated pages. Client-side filtering after pagination breaks page counts.
-16. **Testing**: 645 tests (375 unit + 18 binary + 252 integration). Every endpoint tested, every query param covered. 59.28% line coverage target (goal: ≥75%). See `tests/README.md`.
+16. **Testing**: 744 tests (423 unit + 18 binary + 303 integration). Every endpoint tested, every query param covered. 59.28% line coverage target (goal: ≥75%). See `tests/README.md`.
 
 ---
 
@@ -148,7 +148,7 @@ Testing is **not optional**. Every feature must be validated at both the backend
   include "add/update integration test" as an acceptance criterion.**
 - **Coverage threshold**: ≥75% line coverage (via `cargo llvm-cov`). Run
   `cargo llvm-cov --fail-under-lines 75` before merging.
-- **659 tests**: 379 lib + 18 bin + 262 integration. See `tests/README.md` for
+- **744 tests**: 423 lib + 18 bin + 303 integration. See `tests/README.md` for
   the full breakdown.
 - **Unit tests** go in `#[cfg(test)] mod tests` within the source file for pure
   functions. Integration tests go in `tests/api_*.rs` files.
@@ -10095,26 +10095,26 @@ visible in the UI for purge.
 **Implicit relationship sites** (all use `file_path LIKE path || '%'`
 or `substr(file_path, 1, length(folder_path)) = folder_path`):
 
-| File             | Function                          | Line  |
-| ---------------- | --------------------------------- | ----- |
-| `db/folders.rs`  | `scan_folder` stale cleanup       | 338   |
-| `db/folders.rs`  | `get_folder_file_count`           | 375   |
-| `db/folders.rs`  | `get_folder_stats` total_files    | 421   |
-| `db/folders.rs`  | `get_folder_stats` total_size     | 429   |
-| `db/folders.rs`  | `get_folder_stats` stems count    | 437   |
-| `db/folders.rs`  | `get_folder_stats` flacs count    | 445   |
-| `db/folders.rs`  | `get_folder_stats` wavs count     | 453   |
-| `db/folders.rs`  | `get_folder_stats` mp3s count     | 461   |
-| `db/folders.rs`  | `get_folder_stats` other count    | 469   |
-| `db/folders.rs`  | `get_folder_backup_status` count  | 480   |
-| `db/folders.rs`  | `get_folder_backup_status` size   | 491   |
-| `db/folders.rs`  | WAV source dirs count         | 517   |
-| `db/folders.rs`  | WAV backed up count           | 527   |
-| `db/storage.rs`  | `get_prune_candidates`            | ~309  |
-| `db/storage.rs`  | `get_unbacked_up_files`           | ~466  |
-| `db/storage.rs`  | `clear_backup_status`             | ~510  |
-| `db/storage.rs`  | Another prune/storage query       | ~700  |
-| `tasks/mod.rs`   | `ScanWavSources` file listing     | ~2966 |
+| File            | Function                         | Line  |
+| --------------- | -------------------------------- | ----- |
+| `db/folders.rs` | `scan_folder` stale cleanup      | 338   |
+| `db/folders.rs` | `get_folder_file_count`          | 375   |
+| `db/folders.rs` | `get_folder_stats` total_files   | 421   |
+| `db/folders.rs` | `get_folder_stats` total_size    | 429   |
+| `db/folders.rs` | `get_folder_stats` stems count   | 437   |
+| `db/folders.rs` | `get_folder_stats` flacs count   | 445   |
+| `db/folders.rs` | `get_folder_stats` wavs count    | 453   |
+| `db/folders.rs` | `get_folder_stats` mp3s count    | 461   |
+| `db/folders.rs` | `get_folder_stats` other count   | 469   |
+| `db/folders.rs` | `get_folder_backup_status` count | 480   |
+| `db/folders.rs` | `get_folder_backup_status` size  | 491   |
+| `db/folders.rs` | WAV source dirs count            | 517   |
+| `db/folders.rs` | WAV backed up count              | 527   |
+| `db/storage.rs` | `get_prune_candidates`           | ~309  |
+| `db/storage.rs` | `get_unbacked_up_files`          | ~466  |
+| `db/storage.rs` | `clear_backup_status`            | ~510  |
+| `db/storage.rs` | Another prune/storage query      | ~700  |
+| `tasks/mod.rs`  | `ScanWavSources` file listing    | ~2966 |
 
 ### Part A: Add `folder_id` to Files (schema + scanner)
 
@@ -10198,14 +10198,14 @@ pub async fn scan_directory(pool: &Pool<Sqlite>, dir_path: &Path) -> Result<usiz
 
 **All call sites that need updating** (6 sites, verified via grep):
 
-| File:Line                              | Caller                          | folder_id value     |
-| -------------------------------------- | ------------------------------- | ------------------- |
-| `db/folders.rs:309`                    | `scan_folder()`                 | `Some(folder_id)`   |
-| `tasks/mod.rs:1581`                    | `start_scan_folder_task` worker | `Some(folder.id)`   |
-| `db/files.rs:865`                      | Inside `scan_directory_with_config()` loop | Pass through from param |
-| `db/files.rs:741`                      | `scan_directory()` wrapper      | `None`              |
-| `main.rs:504`                          | `scan_file` CLI subcommand      | `None`              |
-| `main.rs:463` (indirect, delegates)    | `scan_directory` CLI subcommand | (delegates to db::scan_directory) |
+| File:Line                           | Caller                                     | folder_id value                   |
+| ----------------------------------- | ------------------------------------------ | --------------------------------- |
+| `db/folders.rs:309`                 | `scan_folder()`                            | `Some(folder_id)`                 |
+| `tasks/mod.rs:1581`                 | `start_scan_folder_task` worker            | `Some(folder.id)`                 |
+| `db/files.rs:865`                   | Inside `scan_directory_with_config()` loop | Pass through from param           |
+| `db/files.rs:741`                   | `scan_directory()` wrapper                 | `None`                            |
+| `main.rs:504`                       | `scan_file` CLI subcommand                 | `None`                            |
+| `main.rs:463` (indirect, delegates) | `scan_directory` CLI subcommand            | (delegates to db::scan_directory) |
 
 **`src/watch.rs` — folder watcher**: No change needed — it calls
 `start_scan_folder_task()`, not raw scan functions. The task worker
@@ -10313,6 +10313,7 @@ async fn purge_orphans_handler(
 ```
 
 Route:
+
 ```rust
 .route("/api/storage/purge-orphans", post(purge_orphans_handler))
 ```
@@ -10332,8 +10333,8 @@ Add a card to the Storage page, shown ONLY when `orphanedFileCount > 0`:
 <div class="card" id="orphan-card">
   <h3><i class="fas fa-ghost"></i> Ghost Records</h3>
   <p class="help-text">
-    These files are in the database but not tracked by any active folder.
-    They're typically import artifacts from a different machine.
+    These files are in the database but not tracked by any active folder. They're
+    typically import artifacts from a different machine.
   </p>
   <div class="storage-metric">
     <span class="metric-value">${orphanedFileCount}</span>
@@ -10343,13 +10344,14 @@ Add a card to the Storage page, shown ONLY when `orphanedFileCount > 0`:
     <i class="fas fa-eraser"></i> Purge Ghost Records
   </button>
   <p class="help-text" style="margin-top:0.5rem">
-    ⚠️ This permanently deletes these records from the database.
-    Backed-up files on the NAS are not affected.
+    ⚠️ This permanently deletes these records from the database. Backed-up files on the
+    NAS are not affected.
   </p>
 </div>
 ```
 
 Click handler:
+
 1. Show confirmation dialog: "Permanently delete N orphaned records?"
 2. `POST /api/storage/purge-orphans` with `{ confirm: true }`
 3. On success: toast "Purged N ghost records", refresh page, card disappears
@@ -10361,19 +10363,19 @@ Click handler:
 
 ### Files to modify
 
-| File                             | Change                                                                                                                                |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/db/types.rs`                | Add `folder_id: Option<i64>` to `File` struct                                                                                         |
+| File                             | Change                                                                                                                                                             |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/db/types.rs`                | Add `folder_id: Option<i64>` to `File` struct                                                                                                                      |
 | `src/db/files.rs`                | Add `folder_id` param to `scan_and_store_file()` + `scan_directory_with_config()` + `scan_directory()`; add `get_orphaned_file_count()` + `purge_orphaned_files()` |
-| `src/db/folders.rs`              | Pass `Some(folder_id)` in `scan_folder()`                                                                                             |
-| `src/tasks/mod.rs`               | Pass `Some(folder.id)` in `start_scan_folder_task` worker (line ~1581)                                                                 |
-| `src/db/storage.rs`              | Add `orphaned_file_count` to `StorageStatus` + populate in `get_storage_status()`                                                     |
-| `src/main.rs`                    | Pass `None` in `scan_file` subcommand (line ~504); `scan_directory()` delegates unchanged                                             |
-| `src/api/storage.rs`             | Add `purge_orphans_handler` + route                                                                                                   |
-| `frontend/pages/storage.js`      | Add orphan card (conditional on `orphanedFileCount > 0`)                                                                              |
-| `frontend/style.css`             | `.btn-danger` styles (verify existing, add if missing)                                                                                |
-| `tests/api_storage.rs`           | Integration tests: orphan count, purge with/without confirm, purge empty, orphan count after folder delete (see test list below)     |
-| `frontend/tests/storage.spec.js` | Playwright: orphan card appears/disappears, purge flow                                                                                |
+| `src/db/folders.rs`              | Pass `Some(folder_id)` in `scan_folder()`                                                                                                                          |
+| `src/tasks/mod.rs`               | Pass `Some(folder.id)` in `start_scan_folder_task` worker (line ~1581)                                                                                             |
+| `src/db/storage.rs`              | Add `orphaned_file_count` to `StorageStatus` + populate in `get_storage_status()`                                                                                  |
+| `src/main.rs`                    | Pass `None` in `scan_file` subcommand (line ~504); `scan_directory()` delegates unchanged                                                                          |
+| `src/api/storage.rs`             | Add `purge_orphans_handler` + route                                                                                                                                |
+| `frontend/pages/storage.js`      | Add orphan card (conditional on `orphanedFileCount > 0`)                                                                                                           |
+| `frontend/style.css`             | `.btn-danger` styles (verify existing, add if missing)                                                                                                             |
+| `tests/api_storage.rs`           | Integration tests: orphan count, purge with/without confirm, purge empty, orphan count after folder delete (see test list below)                                   |
+| `frontend/tests/storage.spec.js` | Playwright: orphan card appears/disappears, purge flow                                                                                                             |
 
 ### TDD: Specific Tests
 
@@ -10381,36 +10383,36 @@ Tests are written FIRST and must fail before implementation.
 
 #### Unit tests (Agent A) — `src/db/files.rs` `#[cfg(test)]`:
 
-| # | Test name | What it proves |
-|---|-----------|----------------|
-| 1 | `test_migration_021_folder_id_backfill` | Backfill sets folder_id on all files matching a folder prefix |
-| 2 | `test_migration_021_no_folder_null_for_matched` | Files under tracked folders get non-NULL folder_id |
-| 3 | `test_migration_021_orphan_when_no_match` | Files not under any folder get folder_id=NULL |
-| 4 | `test_migration_021_nested_folders_longest_match` | File under deepest subfolder gets most specific parent |
-| 5 | `test_purge_orphaned_files_empty` | Returns 0 when no orphans exist (no-op) |
-| 6 | `test_purge_orphaned_files_with_orphans` | Purges file_locations → file_resolved_tags → files in correct FK order |
-| 7 | `test_purge_orphaned_files_preserves_claimed` | Files with folder_id set are not deleted |
-| 8 | `test_scan_and_store_file_preserves_folder_id` | COALESCE keeps existing folder_id on re-scan |
+| #   | Test name                                         | What it proves                                                         |
+| --- | ------------------------------------------------- | ---------------------------------------------------------------------- |
+| 1   | `test_migration_021_folder_id_backfill`           | Backfill sets folder_id on all files matching a folder prefix          |
+| 2   | `test_migration_021_no_folder_null_for_matched`   | Files under tracked folders get non-NULL folder_id                     |
+| 3   | `test_migration_021_orphan_when_no_match`         | Files not under any folder get folder_id=NULL                          |
+| 4   | `test_migration_021_nested_folders_longest_match` | File under deepest subfolder gets most specific parent                 |
+| 5   | `test_purge_orphaned_files_empty`                 | Returns 0 when no orphans exist (no-op)                                |
+| 6   | `test_purge_orphaned_files_with_orphans`          | Purges file_locations → file_resolved_tags → files in correct FK order |
+| 7   | `test_purge_orphaned_files_preserves_claimed`     | Files with folder_id set are not deleted                               |
+| 8   | `test_scan_and_store_file_preserves_folder_id`    | COALESCE keeps existing folder_id on re-scan                           |
 
 #### Integration tests (Agent B) — `tests/api_storage.rs`:
 
-| # | Test name | What it proves |
-|---|-----------|----------------|
-| 1 | `storage_orphan_count_when_none` | `orphanedFileCount` = 0 when all files are claimed |
-| 2 | `storage_orphan_count_after_folder_delete` | Count increases when a tracked folder is deleted |
-| 3 | `storage_purge_orphans_no_confirm` | 400 with error message when `confirm` is false or missing |
-| 4 | `storage_purge_orphans_confirm` | 200 + `{"purged": N}` when confirm=true |
-| 5 | `storage_purge_orphans_idempotent` | Second purge after first returns `{"purged": 0}` |
-| 6 | `storage_status_includes_orphaned_count` | `GET /api/storage/status` response includes `orphanedFileCount` |
+| #   | Test name                                  | What it proves                                                  |
+| --- | ------------------------------------------ | --------------------------------------------------------------- |
+| 1   | `storage_orphan_count_when_none`           | `orphanedFileCount` = 0 when all files are claimed              |
+| 2   | `storage_orphan_count_after_folder_delete` | Count increases when a tracked folder is deleted                |
+| 3   | `storage_purge_orphans_no_confirm`         | 400 with error message when `confirm` is false or missing       |
+| 4   | `storage_purge_orphans_confirm`            | 200 + `{"purged": N}` when confirm=true                         |
+| 5   | `storage_purge_orphans_idempotent`         | Second purge after first returns `{"purged": 0}`                |
+| 6   | `storage_status_includes_orphaned_count`   | `GET /api/storage/status` response includes `orphanedFileCount` |
 
 #### Playwright tests (Agent C) — `frontend/tests/storage.spec.js`:
 
-| # | Test name | What it proves |
-|---|-----------|----------------|
-| 1 | `ghost card hidden when no orphans` | Orphan card is NOT rendered when orphanedFileCount=0 |
-| 2 | `ghost card visible with orphans` | Orphan card appears when orphaned files exist |
-| 3 | `purge button shows confirmation` | Clicking purge opens confirmation dialog |
-| 4 | `purge succeeds and card disappears` | After confirm, card is removed and toast appears |
+| #   | Test name                            | What it proves                                       |
+| --- | ------------------------------------ | ---------------------------------------------------- |
+| 1   | `ghost card hidden when no orphans`  | Orphan card is NOT rendered when orphanedFileCount=0 |
+| 2   | `ghost card visible with orphans`    | Orphan card appears when orphaned files exist        |
+| 3   | `purge button shows confirmation`    | Clicking purge opens confirmation dialog             |
+| 4   | `purge succeeds and card disappears` | After confirm, card is removed and toast appears     |
 
 ### Acceptance Criteria
 
@@ -10451,13 +10453,14 @@ guarantees equivalent results. Also provides query performance improvement
 
 ### Agent Decomposition (TDD, 3 agents, zero file conflicts)
 
-| Agent | Files                                                                                   | Work                                                          | Tests            |
-| ----- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------- | ---------------- |
-| **A** | `migrations/021_*.sql`, `src/db/types.rs`, `src/db/files.rs`, `src/db/folders.rs`, `src/tasks/mod.rs` | Migration + File struct + scanner changes + purge DB functions + all 6 call sites | ~8 unit          |
-| **B** | `src/db/storage.rs`, `src/main.rs`, `src/api/storage.rs`, `tests/api_storage.rs`         | StorageStatus + main.rs scan-file + purge endpoint + integration tests | ~6 integration   |
-| **C** | `frontend/pages/storage.js`, `frontend/style.css`, `frontend/tests/storage.spec.js`      | Orphan card + purge button + Playwright tests                  | ~4 Playwright    |
+| Agent | Files                                                                                                 | Work                                                                              | Tests          |
+| ----- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | -------------- |
+| **A** | `migrations/021_*.sql`, `src/db/types.rs`, `src/db/files.rs`, `src/db/folders.rs`, `src/tasks/mod.rs` | Migration + File struct + scanner changes + purge DB functions + all 6 call sites | ~8 unit        |
+| **B** | `src/db/storage.rs`, `src/main.rs`, `src/api/storage.rs`, `tests/api_storage.rs`                      | StorageStatus + main.rs scan-file + purge endpoint + integration tests            | ~6 integration |
+| **C** | `frontend/pages/storage.js`, `frontend/style.css`, `frontend/tests/storage.spec.js`                   | Orphan card + purge button + Playwright tests                                     | ~4 Playwright  |
 
 Write scope verification — zero overlap:
+
 - Agent A: `src/db/types.rs`, `src/db/files.rs`, `src/db/folders.rs`, `src/tasks/mod.rs`, `migrations/`
 - Agent B: `src/db/storage.rs`, `src/main.rs`, `src/api/storage.rs`, `tests/`
 - Agent C: `frontend/` only
@@ -10570,8 +10573,8 @@ basenames on the LAN are unique.
 
 ### Files to modify
 
-| File | Change |
-|------|--------|
+| File             | Change                                                                                                    |
+| ---------------- | --------------------------------------------------------------------------------------------------------- |
 | `src/traktor.rs` | Replace `path_map` with `basename_map` in `import_traktor_metadata()` (~20 lines changed, lines ~327-375) |
 
 ### Acceptance Criteria
@@ -10609,6 +10612,7 @@ BPM/key/rating/play_count/last_played independently of file paths. The
 Traktor import would UPSERT into this table in addition to updating
 `files`. The Files page would COALESCE from `track_metadata`. This
 enables:
+
 - Metadata survives deleting and re-scanning files
 - Multiple file formats (stem + flac) share the same metadata
 - Import from any machine without needing files in DB at all
@@ -10647,13 +10651,13 @@ MacBook = on-demand client** for both playback (backpack) and analysis
 
 ### Current State
 
-| Layer | Status |
-|-------|--------|
-| NML basename matching | ✅ Works — 2,920 files matched from MacBook import |
-| NML cron sync (15 min) | ✅ MacBook → LAN |
-| Maintainer auto-import | ✅ Enabled, hourly cycle |
-| LAN file inventory | ⬜ Only 223/13,402 files on local disk — need NAS→LAN rsync |
-| API to query needs-analysis | ⬜ Not built yet |
+| Layer                       | Status                                                      |
+| --------------------------- | ----------------------------------------------------------- |
+| NML basename matching       | ✅ Works — 2,920 files matched from MacBook import          |
+| NML cron sync (15 min)      | ✅ MacBook → LAN                                            |
+| Maintainer auto-import      | ✅ Enabled, hourly cycle                                    |
+| LAN file inventory          | ⬜ Only 223/13,402 files on local disk — need NAS→LAN rsync |
+| API to query needs-analysis | ⬜ Not built yet                                            |
 
 ### Part A: API Endpoint
 
@@ -10693,6 +10697,7 @@ on the LAN's local disk.
 ```
 
 **SQL**: Files must be:
+
 - In the tag (via `file_resolved_tags.tag_name`)
 - Missing BPM OR missing key (`bpm IS NULL OR musical_key IS NULL`)
 - Present on LAN disk (`EXISTS file_locations WHERE location_type='local'`)
@@ -10751,17 +10756,18 @@ struct NeedsAnalysisFile {
 ```
 
 Route:
+
 ```rust
 .route("/api/tags/{id}/needs-analysis", get(tag_needs_analysis_handler))
 ```
 
 #### Error states
 
-| Case | Status | Body |
-|------|--------|------|
-| Tag not found | 404 | `{"error": "Tag not found"}` |
-| No files need analysis | 200 | Empty `files` array |
-| No files are local | 200 | Empty `files` array (tag exists but all on NAS only) |
+| Case                   | Status | Body                                                 |
+| ---------------------- | ------ | ---------------------------------------------------- |
+| Tag not found          | 404    | `{"error": "Tag not found"}`                         |
+| No files need analysis | 200    | Empty `files` array                                  |
+| No files are local     | 200    | Empty `files` array (tag exists but all on NAS only) |
 
 ### Part B: MacBook Script
 
@@ -10821,11 +10827,11 @@ echo "✓ Cleanup complete. Metadata will appear on LAN after next NML sync."
 
 ### Files to modify
 
-| File | Change |
-|------|--------|
-| `src/api/tags.rs` | Add `tag_needs_analysis_handler` + route + `NeedsAnalysisResponse`/`NeedsAnalysisFile` structs (~80 lines) |
-| `tests/api_tags.rs` | 5 integration tests (~120 lines) |
-| `scripts/lab-stage.sh` | New script (~50 lines) |
+| File                   | Change                                                                                                     |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `src/api/tags.rs`      | Add `tag_needs_analysis_handler` + route + `NeedsAnalysisResponse`/`NeedsAnalysisFile` structs (~80 lines) |
+| `tests/api_tags.rs`    | 5 integration tests (~120 lines)                                                                           |
+| `scripts/lab-stage.sh` | New script (~50 lines)                                                                                     |
 
 ### TDD: Tests (written FIRST, fail before implementation)
 
@@ -10834,6 +10840,7 @@ echo "✓ Cleanup complete. Metadata will appear on LAN after next NML sync."
 All tests use `seed_basic_data` + `refresh_file_resolved_tags()`.
 
 `seed_basic_data` provides files:
+
 - id=1: flac, BPM=128, key=4m, local+backup (FULLY analyzed)
 - id=2: stem.m4a, BPM=128.5, key=4m, local+backup (FULLY analyzed)
 - id=3: flac, BPM=140, key=8m, backup only (FULLY analyzed, NOT local)
@@ -10889,14 +10896,14 @@ pub async fn seed_lab_scenario(pool: &Pool<Sqlite>) {
 }
 ```
 
-| # | Test name | What it proves |
-|---|-----------|----------------|
-| 1 | `tags_needs_analysis_returns_files_needing_bpm` | File 5 (no BPM, no key) appears. File 1 (has BPM+key) does not. |
-| 2 | `tags_needs_analysis_excludes_fully_analyzed` | Files with both BPM and key are excluded |
-| 3 | `tags_needs_analysis_excludes_non_local` | File 4 (no BPM, no key, backup only) excluded because not local |
-| 4 | `tags_needs_analysis_tag_not_found` | `/api/tags/9999/needs-analysis` returns 404 |
-| 5 | `tags_needs_analysis_filter_by_format` | `?format=stem.m4a` returns only stems |
-| 6 | `tags_needs_analysis_counts_are_correct` | `needsBpm`, `needsKey`, `needsBoth`, `fileCount` match the files array |
+| #   | Test name                                       | What it proves                                                         |
+| --- | ----------------------------------------------- | ---------------------------------------------------------------------- |
+| 1   | `tags_needs_analysis_returns_files_needing_bpm` | File 5 (no BPM, no key) appears. File 1 (has BPM+key) does not.        |
+| 2   | `tags_needs_analysis_excludes_fully_analyzed`   | Files with both BPM and key are excluded                               |
+| 3   | `tags_needs_analysis_excludes_non_local`        | File 4 (no BPM, no key, backup only) excluded because not local        |
+| 4   | `tags_needs_analysis_tag_not_found`             | `/api/tags/9999/needs-analysis` returns 404                            |
+| 5   | `tags_needs_analysis_filter_by_format`          | `?format=stem.m4a` returns only stems                                  |
+| 6   | `tags_needs_analysis_counts_are_correct`        | `needsBpm`, `needsKey`, `needsBoth`, `fileCount` match the files array |
 
 ### Acceptance Criteria
 
@@ -10933,9 +10940,9 @@ pub async fn seed_lab_scenario(pool: &Pool<Sqlite>) {
 
 ### Agent Decomposition (2 agents, zero file conflicts)
 
-| Agent | Files | Work | Tests |
-|-------|-------|------|-------|
-| **A** | `src/api/tags.rs`, `tests/api_tags.rs`, `tests/common/mod.rs` | API endpoint + handler + integration tests + seed helper | ~6 integration |
-| **B** | `scripts/lab-stage.sh` | MacBook pull+clean script | Manual verification |
+| Agent | Files                                                         | Work                                                     | Tests               |
+| ----- | ------------------------------------------------------------- | -------------------------------------------------------- | ------------------- |
+| **A** | `src/api/tags.rs`, `tests/api_tags.rs`, `tests/common/mod.rs` | API endpoint + handler + integration tests + seed helper | ~6 integration      |
+| **B** | `scripts/lab-stage.sh`                                        | MacBook pull+clean script                                | Manual verification |
 
 All 2 agents can run in parallel — zero file conflicts.
