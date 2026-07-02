@@ -14,10 +14,11 @@ CREATE TABLE service_config_new (
     is_connected BOOLEAN NOT NULL DEFAULT 0,
     last_checked INTEGER,
     last_synced INTEGER,
-    remote_playlists_count INTEGER DEFAULT 0,
-    remote_tracks_count INTEGER DEFAULT 0,
-    created_at INTEGER DEFAULT (unixepoch()),
-    updated_at INTEGER DEFAULT (unixepoch())
+    remote_playlists_count INTEGER NOT NULL DEFAULT 0,
+        remote_tracks_count INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE(service)
 );
 
 -- Copy existing data
