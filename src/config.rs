@@ -52,6 +52,7 @@ struct TomlConfig {
     spotify: Option<SpotifyToml>,
     soundcloud: Option<SoundcloudToml>,
     youtube: Option<YoutubeToml>,
+    tidal: Option<TidalToml>,
     database: Option<DatabaseToml>,
     server: Option<ServerToml>,
     polling: Option<PollingToml>,
@@ -87,6 +88,13 @@ struct SoundcloudToml {
 struct YoutubeToml {
     api_key: Option<String>,
     playlist_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TidalToml {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    redirect_uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -127,6 +135,11 @@ pub struct ServiceCredentials {
     pub youtube_api_key: Option<String>,
     #[allow(dead_code)]
     pub youtube_playlist_id: Option<String>,
+
+    // Tidal OAuth credentials
+    pub tidal_client_id: Option<String>,
+    pub tidal_client_secret: Option<String>,
+    pub tidal_redirect_uri: String,
 
     // Database configuration
     pub database_url: String,
@@ -207,6 +220,40 @@ impl ServiceCredentials {
             "Spotify config: client-id={sid_src}, client-secret={ssec_src}, redirect-uri={sredir_src}"
         );
 
+        let has_toml_tidal = toml_config.tidal.is_some();
+        let tidal_id = env_or_toml_opt(
+            "TIDAL_CLIENT_ID",
+            toml_config.tidal.as_ref().and_then(|t| t.client_id.clone()),
+        );
+        let tidal_secret = env_or_toml_opt(
+            "TIDAL_CLIENT_SECRET",
+            toml_config
+                .tidal
+                .as_ref()
+                .and_then(|t| t.client_secret.clone()),
+        );
+        let tidal_redirect = env_or_toml(
+            "TIDAL_REDIRECT_URI",
+            toml_config
+                .tidal
+                .as_ref()
+                .and_then(|t| t.redirect_uri.clone()),
+        )
+        .unwrap_or_else(|| "http://localhost:3000/callback".to_string());
+
+        let tid_src =
+            Self::credential_source("TIDAL_CLIENT_ID", tidal_id.as_deref(), has_toml_tidal);
+        let tsec_src = Self::credential_source(
+            "TIDAL_CLIENT_SECRET",
+            tidal_secret.as_deref(),
+            has_toml_tidal,
+        );
+        let tredir_src =
+            Self::credential_source("TIDAL_REDIRECT_URI", Some(&tidal_redirect), has_toml_tidal);
+        info!(
+            "Tidal config: client-id={tid_src}, client-secret={tsec_src}, redirect-uri={tredir_src}"
+        );
+
         let credentials = Self {
             spotify_client_id: spotify_id,
             spotify_client_secret: spotify_secret,
@@ -238,6 +285,11 @@ impl ServiceCredentials {
                     .as_ref()
                     .and_then(|s| s.playlist_id.clone()),
             ),
+
+            // Tidal: env var > config.toml > (not configured)
+            tidal_client_id: tidal_id,
+            tidal_client_secret: tidal_secret,
+            tidal_redirect_uri: tidal_redirect,
 
             // Database: env var > config.toml > built-in default
             database_url: env_or_toml(
@@ -392,6 +444,11 @@ impl ServiceCredentials {
             youtube_api_key: env_var_optional("YOUTUBE_API_KEY"),
             youtube_playlist_id: env_var_optional("YOUTUBE_PLAYLIST_ID"),
 
+            tidal_client_id: env_var_optional("TIDAL_CLIENT_ID"),
+            tidal_client_secret: env_var_optional("TIDAL_CLIENT_SECRET"),
+            tidal_redirect_uri: env_var("TIDAL_REDIRECT_URI")
+                .unwrap_or_else(|_| "http://localhost:3000/callback".to_string()),
+
             database_url: env_var("DATABASE_URL").unwrap_or_else(|_| default_database_url()),
             server_host: env_var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
             server_port: env_var_optional("PORT")
@@ -520,6 +577,10 @@ impl ServiceCredentials {
         self.youtube_api_key.is_some()
     }
 
+    pub fn is_tidal_configured(&self) -> bool {
+        self.tidal_client_id.is_some() && self.tidal_client_secret.is_some()
+    }
+
     pub fn spotify_client_id(&self) -> anyhow::Result<&str> {
         self.spotify_client_id.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -550,6 +611,20 @@ impl ServiceCredentials {
         })
     }
 
+    pub fn tidal_client_id(&self) -> anyhow::Result<&str> {
+        self.tidal_client_id.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Tidal client ID not configured (set in config.toml or TIDAL_CLIENT_ID env var)"
+            )
+        })
+    }
+
+    pub fn tidal_client_secret(&self) -> anyhow::Result<&str> {
+        self.tidal_client_secret.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("Tidal client secret not configured (set in config.toml or TIDAL_CLIENT_SECRET env var)")
+        })
+    }
+
     /// Create a default ServiceCredentials for testing (no real credentials).
     pub fn defaults_for_test() -> Self {
         Self {
@@ -560,6 +635,9 @@ impl ServiceCredentials {
             soundcloud_user_id: None,
             youtube_api_key: None,
             youtube_playlist_id: None,
+            tidal_client_id: None,
+            tidal_client_secret: None,
+            tidal_redirect_uri: "http://localhost:3000/callback".to_string(),
             database_url: "sqlite::memory:".to_string(),
             server_host: "127.0.0.1".to_string(),
             server_port: 3000,
@@ -716,6 +794,46 @@ mod tests {
             ..ServiceCredentials::defaults_for_test()
         };
         assert!(!creds.is_youtube_configured());
+    }
+
+    // ── Tidal tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_tidal_defaults_for_test() {
+        let creds = ServiceCredentials::defaults_for_test();
+        assert!(creds.tidal_client_id.is_none());
+        assert!(creds.tidal_client_secret.is_none());
+        assert_eq!(creds.tidal_redirect_uri, "http://localhost:3000/callback");
+    }
+
+    #[test]
+    fn test_is_tidal_configured_with_id_and_secret() {
+        let creds = ServiceCredentials {
+            tidal_client_id: Some("tidal-id".to_string()),
+            tidal_client_secret: Some("tidal-secret".to_string()),
+            ..ServiceCredentials::defaults_for_test()
+        };
+        assert!(creds.is_tidal_configured());
+    }
+
+    #[test]
+    fn test_is_tidal_not_configured_without_secret() {
+        let creds = ServiceCredentials {
+            tidal_client_id: Some("tidal-id".to_string()),
+            tidal_client_secret: None,
+            ..ServiceCredentials::defaults_for_test()
+        };
+        assert!(!creds.is_tidal_configured());
+    }
+
+    #[test]
+    fn test_is_tidal_not_configured_without_id() {
+        let creds = ServiceCredentials {
+            tidal_client_id: None,
+            tidal_client_secret: Some("tidal-secret".to_string()),
+            ..ServiceCredentials::defaults_for_test()
+        };
+        assert!(!creds.is_tidal_configured());
     }
 
     // ── Helper functions ─────────────────────────────────────────────

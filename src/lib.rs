@@ -36,6 +36,7 @@ pub mod poller;
 pub mod scan_cache;
 pub mod spotify;
 pub mod tasks;
+pub mod tidal;
 pub mod traktor;
 pub mod watch;
 
