@@ -17,14 +17,25 @@ pub struct DeemixLoginResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct DeemixUser {
-    pub id: i64,
-    pub name: String,
-    pub picture: String,
-    pub license_token: String,
-    pub can_stream_hq: bool,
-    pub can_stream_lossless: bool,
-    pub country: String,
-    pub language: String,
+    /// The deemix API has changed over versions — newer versions return
+    /// `"user": {}` (empty object) after login. All fields are optional
+    /// to tolerate both old and new response shapes.
+    #[serde(default)]
+    pub id: Option<i64>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub picture: Option<String>,
+    #[serde(default)]
+    pub license_token: Option<String>,
+    #[serde(default)]
+    pub can_stream_hq: Option<bool>,
+    #[serde(default)]
+    pub can_stream_lossless: Option<bool>,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// Single queue item from GET /api/getQueue (keyed by uuid in response)
@@ -33,7 +44,9 @@ pub struct DeemixUser {
 pub struct DeemixQueueItem {
     #[serde(rename = "type", default)]
     pub item_type: String,
-    #[serde(default)]
+    /// Playlist or track id — deemix returns strings for playlists but integers
+    /// for individual tracks. This custom deserializer normalises both to String.
+    #[serde(default, deserialize_with = "deserialize_id_as_string")]
     pub id: String,
     #[serde(default)]
     pub bitrate: i64,
@@ -64,6 +77,42 @@ pub struct DeemixQueueItem {
     pub status: String,
     #[serde(rename = "extrasPath")]
     pub extras_path: Option<String>,
+}
+
+/// Custom deserializer for the `id` field — deemix returns strings for playlist
+/// IDs but raw integers for individual track IDs.
+fn deserialize_id_as_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct IdVisitor;
+    impl<'de> de::Visitor<'de> for IdVisitor {
+        type Value = String;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or integer")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> Result<String, E> {
+            Ok(v)
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+    }
+
+    deserializer.deserialize_any(IdVisitor)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

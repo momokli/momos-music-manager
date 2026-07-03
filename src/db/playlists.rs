@@ -843,6 +843,23 @@ pub async fn get_due_subscriptions(pool: &Pool<Sqlite>) -> Result<Vec<PlaylistSu
     Ok(rows)
 }
 
+/// Check if a deemix_downloads entry exists for the given Spotify playlist URL.
+///
+/// Used by the subscription poller to determine whether auto-download should
+/// be (re-)triggered — if a previous first-poll auto-download failed (e.g.,
+/// dead ARL), there will be no entry, and the next poll cycle needs to retry.
+pub async fn has_deemix_download_entry(
+    pool: &Pool<Sqlite>,
+    spotify_playlist_url: &str,
+) -> Result<bool> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM deemix_downloads WHERE spotify_playlist_url = ?")
+            .bind(spotify_playlist_url)
+            .fetch_one(pool)
+            .await?;
+    Ok(count > 0)
+}
+
 /// Update the last_polled_at timestamp to now.
 pub async fn update_subscription_last_polled(
     pool: &Pool<Sqlite>,

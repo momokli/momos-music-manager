@@ -233,12 +233,12 @@ async fn poll_subscribed_playlist(
             .context("Failed to update subscription playlist_id")?;
     }
 
-    // ── Snapshot-based skip: skip track fetch if unchanged ────────────────
-    // If the subscription already points to a service_playlist record, check
-    // the stored snapshot_id. If it matches the current one AND the local
-    // track count meets or exceeds our stored remote_unique_count, the
-    // playlist hasn't changed — no need to fetch tracks, which saves N
-    // paginated API calls per poll cycle.
+    // ── Snapshot-based skip: avoid track fetch if unchanged ──────────────
+    // We do NOT return early here — the auto-download block below must still
+    // have a chance to run (e.g. when a previous first-poll auto-download
+    // failed due to an expired ARL and no deemix_downloads entry exists yet).
+    let mut skip_track_fetch = false;
+
     if subscription.service_playlist_id == Some(db_playlist_id) {
         match db::get_subscription_playlist_info(db, db_playlist_id).await {
             Ok((stored_snapshot, remote_unique_count, _, _)) => {
@@ -251,6 +251,7 @@ async fn poll_subscribed_playlist(
                          snapshot unchanged, local={}, remote_unique={}",
                         playlist_name, local_count, remote_unique_count,
                     );
+                    skip_track_fetch = true;
                     // Update remote_track_count from metadata so it stays current
                     let remote_count = playlist.tracks.total as i64;
                     if let Ok(mut conn) = db.acquire().await {
@@ -262,10 +263,7 @@ async fn poll_subscribed_playlist(
                         )
                         .await;
                     }
-                    return Ok(());
-                }
-
-                if !snapshot_matches {
+                } else if !snapshot_matches {
                     debug!(
                         "Subscription poller: polling '{}' — snapshot changed \
                          (was {:?}, now {})",
@@ -290,167 +288,176 @@ async fn poll_subscribed_playlist(
     }
 
     // -- Stream tracks from Spotify and store new ones (with retry) --------
-    let track_stream = {
-        let mut attempt = 0;
-        loop {
-            match spotify_client
-                .get_playlist_tracks(&subscription.playlist_id)
-                .await
-            {
-                Ok(s) => break s,
-                Err(e) => {
-                    if let Some(raw_secs) = extract_retry_after_secs(&e) {
-                        let clamped = raw_secs.min(300);
-                        attempt += 1;
-                        if attempt >= 3 {
-                            return Err(e).context("Failed to get playlist tracks after 3 retries");
+    let mut new_tracks_found = false;
+
+    if !skip_track_fetch {
+        let track_stream = {
+            let mut attempt = 0;
+            loop {
+                match spotify_client
+                    .get_playlist_tracks(&subscription.playlist_id)
+                    .await
+                {
+                    Ok(s) => break s,
+                    Err(e) => {
+                        if let Some(raw_secs) = extract_retry_after_secs(&e) {
+                            let clamped = raw_secs.min(300);
+                            attempt += 1;
+                            if attempt >= 3 {
+                                return Err(e)
+                                    .context("Failed to get playlist tracks after 3 retries");
+                            }
+                            let sleep_secs = clamped + 1;
+                            warn!(
+                                "Subscription poller: rate limited fetching tracks for playlist '{}'. \
+                                 Retry-After: {} ({raw_secs}s total, clamped to {clamped}s), attempt {attempt}/3, waiting {sleep_secs}s",
+                                subscription.playlist_id,
+                                format_duration(raw_secs),
+                            );
+                            tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+                        } else {
+                            return Err(e).context("Failed to get playlist tracks");
                         }
-                        let sleep_secs = clamped + 1;
-                        warn!(
-                            "Subscription poller: rate limited fetching tracks for playlist '{}'. \
-                             Retry-After: {} ({raw_secs}s total, clamped to {clamped}s), attempt {attempt}/3, waiting {sleep_secs}s",
-                            subscription.playlist_id,
-                            format_duration(raw_secs),
-                        );
-                        tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
-                    } else {
-                        return Err(e).context("Failed to get playlist tracks");
                     }
                 }
             }
-        }
-    };
+        };
 
-    tokio::pin!(track_stream);
+        tokio::pin!(track_stream);
 
-    let mut position: i64 = 0;
-    let mut new_tracks_found = false;
+        let mut position: i64 = 0;
 
-    while let Some(item_result) = track_stream.next().await {
-        let item = match item_result {
-            Ok(item) => item,
-            Err(e) => {
-                warn!(
-                    "Subscription poller: error fetching track from '{}': {:#}",
-                    playlist_name, e,
-                );
+        while let Some(item_result) = track_stream.next().await {
+            let item = match item_result {
+                Ok(item) => item,
+                Err(e) => {
+                    warn!(
+                        "Subscription poller: error fetching track from '{}': {:#}",
+                        playlist_name, e,
+                    );
+                    continue;
+                }
+            };
+
+            // Handle tracks and episodes (store both so counts match).
+            let (track_info, is_episode) = match item.track {
+                Some(PlayableItem::Track(track)) => (TrackInfo::from(&track), false),
+                Some(PlayableItem::Episode(episode)) => (
+                    TrackInfo {
+                        id: episode.id.id().to_string(),
+                        name: episode.name.clone(),
+                        artists: episode.show.name.clone(),
+                        album: Some(episode.show.name.clone()),
+                        isrc: None,
+                        duration_ms: episode.duration.num_milliseconds(),
+                        track_number: None,
+                        disc_number: None,
+                        explicit: episode.explicit,
+                        popularity: None,
+                    },
+                    true,
+                ),
+                _ => continue,
+            };
+
+            if track_info.id.is_empty() {
+                debug!("Item '{}' has no Spotify ID, skipping", track_info.name);
                 continue;
             }
-        };
+            let track_service_id = track_info.id.clone();
 
-        // Handle tracks and episodes (store both so counts match).
-        let (track_info, is_episode) = match item.track {
-            Some(PlayableItem::Track(track)) => (TrackInfo::from(&track), false),
-            Some(PlayableItem::Episode(episode)) => (
-                TrackInfo {
-                    id: episode.id.id().to_string(),
-                    name: episode.name.clone(),
-                    artists: episode.show.name.clone(),
-                    album: Some(episode.show.name.clone()),
-                    isrc: None,
-                    duration_ms: episode.duration.num_milliseconds(),
-                    track_number: None,
-                    disc_number: None,
-                    explicit: episode.explicit,
-                    popularity: None,
-                },
-                true,
-            ),
-            _ => continue,
-        };
+            position += 1;
 
-        if track_info.id.is_empty() {
-            debug!("Item '{}' has no Spotify ID, skipping", track_info.name);
-            continue;
-        }
-        let track_service_id = track_info.id.clone();
-
-        position += 1;
-
-        // Check whether this track is already linked to the DB playlist.
-        let already_exists: bool = {
-            let row: Option<(i64,)> = sqlx::query_as(
-                "SELECT 1 FROM service_playlist_tracks spt \
+            // Check whether this track is already linked to the DB playlist.
+            let already_exists: bool = {
+                let row: Option<(i64,)> = sqlx::query_as(
+                    "SELECT 1 FROM service_playlist_tracks spt \
                  JOIN service_tracks st ON spt.track_id = st.id \
                  WHERE st.service = 'spotify' AND st.service_id = ? \
                    AND spt.playlist_id = ?",
-            )
-            .bind(&track_service_id)
-            .bind(db_playlist_id)
-            .fetch_optional(db)
-            .await
-            .context("Failed to check existing track association")?;
-
-            row.is_some()
-        };
-
-        if already_exists {
-            debug!(
-                "Item '{}' already in playlist '{}', skipping",
-                track_info.name, playlist_name,
-            );
-            continue;
-        }
-
-        // -- New item – store and link ------------------------------------
-        let added_at: Option<i64> = item.added_at.map(|dt| dt.timestamp());
-        let db_track_id = store_track_info_and_add_to_playlist(
-            db,
-            &track_info,
-            &subscription.playlist_id,
-            position,
-            added_at,
-        )
-        .await
-        .context("Failed to store item and add to playlist")?;
-
-        new_tracks_found = true;
-
-        // Build artist string for logging (already a comma-separated string from TrackInfo).
-        let artists = track_info.artists.clone();
-
-        // Find *other* playlists that already contain this track (i.e. all
-        // associations except the one we just created).
-        let other_playlists = {
-            let associations = db::get_track_playlist_associations(db, db_track_id)
+                )
+                .bind(&track_service_id)
+                .bind(db_playlist_id)
+                .fetch_optional(db)
                 .await
-                .context("Failed to query track playlist associations")?;
+                .context("Failed to check existing track association")?;
 
-            associations
-                .into_iter()
-                .filter(|(_, pl_id, _)| pl_id != &subscription.playlist_id)
-                .map(|(name, _, _)| name)
-                .collect::<Vec<_>>()
-        };
+                row.is_some()
+            };
 
-        if other_playlists.is_empty() {
-            info!(
-                "New {} '{}' by {} added to '{}'",
-                if is_episode { "episode" } else { "track" },
-                track_info.name,
-                artists,
-                playlist_name,
-            );
-        } else {
-            info!(
-                "New {} '{}' by {} added to '{}' (also in: {})",
-                if is_episode { "episode" } else { "track" },
-                track_info.name,
-                artists,
-                playlist_name,
-                other_playlists.join(", "),
-            );
+            if already_exists {
+                debug!(
+                    "Item '{}' already in playlist '{}', skipping",
+                    track_info.name, playlist_name,
+                );
+                continue;
+            }
+
+            // -- New item – store and link ------------------------------------
+            let added_at: Option<i64> = item.added_at.map(|dt| dt.timestamp());
+            let db_track_id = store_track_info_and_add_to_playlist(
+                db,
+                &track_info,
+                &subscription.playlist_id,
+                position,
+                added_at,
+            )
+            .await
+            .context("Failed to store item and add to playlist")?;
+
+            new_tracks_found = true;
+
+            // Build artist string for logging (already a comma-separated string from TrackInfo).
+            let artists = track_info.artists.clone();
+
+            // Find *other* playlists that already contain this track (i.e. all
+            // associations except the one we just created).
+            let other_playlists = {
+                let associations = db::get_track_playlist_associations(db, db_track_id)
+                    .await
+                    .context("Failed to query track playlist associations")?;
+
+                associations
+                    .into_iter()
+                    .filter(|(_, pl_id, _)| pl_id != &subscription.playlist_id)
+                    .map(|(name, _, _)| name)
+                    .collect::<Vec<_>>()
+            };
+
+            if other_playlists.is_empty() {
+                info!(
+                    "New {} '{}' by {} added to '{}'",
+                    if is_episode { "episode" } else { "track" },
+                    track_info.name,
+                    artists,
+                    playlist_name,
+                );
+            } else {
+                info!(
+                    "New {} '{}' by {} added to '{}' (also in: {})",
+                    if is_episode { "episode" } else { "track" },
+                    track_info.name,
+                    artists,
+                    playlist_name,
+                    other_playlists.join(", "),
+                );
+            }
         }
-    }
+    } // closes if !skip_track_fetch
 
-    // -- Auto-download via deemix on first poll or new tracks -----------
-    if subscription.last_polled_at.is_none() || new_tracks_found {
+    // -- Auto-download via deemix on first poll, new tracks, or missing entry ---
+    let deemix_url = format!(
+        "https://open.spotify.com/playlist/{}",
+        subscription.playlist_id
+    );
+    let has_deemix_entry = crate::db::has_deemix_download_entry(db, &deemix_url)
+        .await
+        .unwrap_or(false);
+
+    if subscription.last_polled_at.is_none() || new_tracks_found || !has_deemix_entry {
         match DeemixClient::from_db(db.clone()).await {
             Some(client) => {
-                let url = format!(
-                    "https://open.spotify.com/playlist/{}",
-                    subscription.playlist_id
-                );
+                let url = deemix_url;
                 match client.ensure_queued(&url).await {
                     Ok(()) => {
                         // Insert/update local deemix_downloads table so the

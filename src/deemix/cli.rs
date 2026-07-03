@@ -202,13 +202,17 @@ pub async fn run(cmd: DeemixCommand) -> Result<()> {
             let m = serde_json::json!({"host": host});
             let now = chrono::Utc::now().timestamp();
             sqlx::query("INSERT INTO service_config(service,access_token,metadata_json,is_connected,last_checked,updated_at,created_at)VALUES('deemix',?,?,1,?,?,COALESCE((SELECT created_at FROM service_config WHERE service='deemix'),?))ON CONFLICT(service)DO UPDATE SET access_token=excluded.access_token,metadata_json=excluded.metadata_json,is_connected=1,last_checked=excluded.last_checked,updated_at=excluded.updated_at").bind(&arl).bind(m.to_string()).bind(now).bind(now).bind(now).execute(&db).await?;
-            println!("✅ Connected as {} @ {}", r.user.name, host);
+            println!(
+                "✅ Connected as {} @ {}",
+                r.user.name.as_deref().unwrap_or("unknown"),
+                host
+            );
         }
         DeemixCommand::Status => {
             let db = connect_db().await?;
             let (c, l) = load_deemix(&db).await?;
             if let Some(ref r) = l {
-                println!("User: {}", r.user.name);
+                println!("User: {}", r.user.name.as_deref().unwrap_or("unknown"));
             }
             match c.get_queue().await {
                 Ok(q) => println!("Queue: {} items", q.len()),

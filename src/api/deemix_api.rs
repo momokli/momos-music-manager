@@ -69,25 +69,36 @@ async fn deemix_auth_handler(
             let metadata = serde_json::json!({"host": host});
             let now = chrono::Utc::now().timestamp();
 
-            let result = sqlx::query(
-                r#"
-                INSERT INTO service_config (service, access_token, metadata_json, is_connected, last_checked, updated_at, created_at)
-                VALUES ('deemix', ?, ?, 1, ?, ?, COALESCE((SELECT created_at FROM service_config WHERE service = 'deemix'), ?))
-                ON CONFLICT(service) DO UPDATE SET
-                    access_token = excluded.access_token,
-                    metadata_json = excluded.metadata_json,
-                    is_connected = 1,
-                    last_checked = excluded.last_checked,
-                    updated_at = excluded.updated_at
-                "#,
-            )
-            .bind(&request.arl)
-            .bind(metadata.to_string())
-            .bind(now)
-            .bind(now)
-            .bind(now)
-            .execute(&state.db)
-            .await;
+            // Use SELECT + INSERT/UPDATE instead of ON CONFLICT because the
+            // live DB may not have a UNIQUE constraint on service_config.service.
+            let existing: Option<i64> =
+                sqlx::query_scalar("SELECT id FROM service_config WHERE service = 'deemix'")
+                    .fetch_optional(&state.db)
+                    .await
+                    .unwrap_or(None);
+
+            let result = if existing.is_some() {
+                sqlx::query(
+                    "UPDATE service_config SET access_token = ?, metadata_json = ?, is_connected = 1, last_checked = ?, updated_at = ? WHERE service = 'deemix'",
+                )
+                .bind(&request.arl)
+                .bind(metadata.to_string())
+                .bind(now)
+                .bind(now)
+                .execute(&state.db)
+                .await
+            } else {
+                sqlx::query(
+                    "INSERT INTO service_config (service, access_token, metadata_json, is_connected, last_checked, updated_at, created_at) VALUES ('deemix', ?, ?, 1, ?, ?, ?)",
+                )
+                .bind(&request.arl)
+                .bind(metadata.to_string())
+                .bind(now)
+                .bind(now)
+                .bind(now)
+                .execute(&state.db)
+                .await
+            };
 
             match result {
                 Ok(_) => {
