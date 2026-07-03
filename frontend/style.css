@@ -698,6 +698,17 @@ body {
     border-color: var(--accent-hover);
 }
 
+.btn-accent {
+    background: var(--bg-card);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.btn-accent:hover:not(:disabled) {
+    background: var(--accent);
+    color: white;
+}
+
 .btn-green {
     background: var(--green);
     border-color: var(--green);

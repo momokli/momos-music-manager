@@ -2400,6 +2400,161 @@ async fn file_stream_handler(
     (StatusCode::OK, headers, buf).into_response()
 }
 
+// ── Stage for Conversion ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StageForConversionResponse {
+    staged: usize,
+    directory: String,
+}
+
+/// POST /api/files/stage-for-conversion
+/// Clears ~/Music/convert_to_stem/ and creates hardlinks for all files
+/// matching the given filter criteria. Used by the "Stage for Conversion"
+/// button on the Files page.
+async fn stage_for_conversion_handler(
+    State(state): State<Arc<AppState>>,
+    Json(filter): Json<FilesFilterAll>,
+) -> impl IntoResponse {
+    let target_dir = std::path::PathBuf::from(
+        std::env::var("HOME").unwrap_or_else(|_| "/Users/momo".to_string()),
+    )
+    .join("Music/convert_to_stem");
+
+    // Clear existing files in target directory
+    if target_dir.exists() {
+        let mut entries = match tokio::fs::read_dir(&target_dir).await {
+            Ok(e) => e,
+            Err(e) => {
+                return internal_error(format!("Failed to read target directory: {e}"))
+                    .into_response();
+            }
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("flac") {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
+    } else {
+        if let Err(e) = tokio::fs::create_dir_all(&target_dir).await {
+            return internal_error(format!("Failed to create target directory: {e}"))
+                .into_response();
+        }
+    }
+
+    // Build and execute the filtered query
+    let sql = build_files_filter_sql(&filter)
+        .replace("SELECT * FROM files", "SELECT file_path FROM files");
+    let mut q = sqlx::query_scalar::<_, String>(&sql);
+
+    if let Some(ref search) = filter.search
+        && !search.is_empty()
+    {
+        let pattern = format!("%{}%", search);
+        for _ in 0..8 {
+            q = q.bind(pattern.clone());
+        }
+    }
+
+    if let Some(bpm_min) = filter.bpm_min {
+        q = q.bind(bpm_min);
+    }
+    if let Some(bpm_max) = filter.bpm_max {
+        q = q.bind(bpm_max);
+    }
+
+    if let Some(ref key_str) = filter.key {
+        for k in key_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(k);
+        }
+    }
+
+    if let Some(ref services_str) = filter.selected_services {
+        for s in services_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(s);
+        }
+    }
+
+    if let Some(ref ft_str) = filter.file_types {
+        for t in ft_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(t);
+        }
+    }
+
+    if let Some(ref tags_str) = filter.tags
+        && !tags_str.is_empty()
+    {
+        for t in tags_str
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(t);
+        }
+    }
+
+    if let Some(ref pmv_cats) = filter.pmv_categories {
+        for c in pmv_cats
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        {
+            q = q.bind(c);
+        }
+    }
+
+    let file_paths: Vec<String> = match q.fetch_all(&state.db).await {
+        Ok(p) => p,
+        Err(e) => {
+            return internal_error(format!("Failed to query files: {e}")).into_response();
+        }
+    };
+
+    // Create hardlinks
+    let mut staged = 0usize;
+    for src_path in &file_paths {
+        let src = std::path::Path::new(src_path);
+        let basename = src.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if basename.is_empty() {
+            continue;
+        }
+        let dst = target_dir.join(basename);
+        match std::fs::hard_link(src, &dst) {
+            Ok(()) => staged += 1,
+            Err(e) => {
+                tracing::warn!("Failed to hardlink {} → {}: {e}", src_path, dst.display());
+            }
+        }
+    }
+
+    tracing::info!(
+        "Staged {staged} files for conversion in {}",
+        target_dir.display()
+    );
+
+    Json(ApiResponse {
+        data: StageForConversionResponse {
+            staged,
+            directory: target_dir.to_string_lossy().to_string(),
+        },
+    })
+    .into_response()
+}
+
 // ── Router ────────────────────────────────────────────────────────────────
 
 pub(super) fn router() -> Router<Arc<AppState>> {
@@ -2445,4 +2600,8 @@ pub(super) fn router() -> Router<Arc<AppState>> {
             post(files_write_comments_all_handler),
         )
         .route("/api/files/key-comparison", get(key_comparison_handler))
+        .route(
+            "/api/files/stage-for-conversion",
+            post(stage_for_conversion_handler),
+        )
 }

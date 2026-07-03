@@ -1968,6 +1968,13 @@ export async function init(container, signal, hashParams) {
       cls: "btn-primary",
       action: "write-comments",
     },
+    {
+      id: "stage-conversion",
+      label: "Stage for Conversion",
+      icon: "fas fa-flask",
+      cls: "btn-accent",
+      action: "stage-conversion",
+    },
   ]);
 
   // Render toolbar ONCE (stable, preserves focus)
@@ -1995,6 +2002,33 @@ export async function init(container, signal, hashParams) {
   const writeBtn = container.querySelector("#files-actions-write-comments");
   if (writeBtn) {
     writeBtn.onclick = () => writeCommentsForSelected(container, state);
+  }
+
+  // Wire Stage for Conversion button in actions panel
+  const stageBtn = container.querySelector("#files-actions-stage-conversion");
+  if (stageBtn) {
+    stageBtn.onclick = async () => {
+      const filter = buildFilterParams(state);
+      const originalHtml = stageBtn.innerHTML;
+      stageBtn.disabled = true;
+      stageBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Staging…';
+      try {
+        const resp = await fetchJSON("/api/files/stage-for-conversion", {
+          method: "POST",
+          body: JSON.stringify(filter),
+        });
+        const data = resp.data;
+        showToast(
+          `${data.staged} file(s) staged in ${data.directory}`,
+          data.staged > 0 ? "success" : "info",
+        );
+      } catch (err) {
+        showToast(`Staging failed: ${err.message}`, "error");
+      } finally {
+        stageBtn.disabled = false;
+        stageBtn.innerHTML = originalHtml;
+      }
+    };
   }
 
   // Initial fetch + render
