@@ -17,3 +17,4 @@ frontend/test-results/
 prod.db*
 test-playwright.db*
 library.db*
+AGENT.md
