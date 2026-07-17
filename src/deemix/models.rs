@@ -42,7 +42,11 @@ pub struct DeemixUser {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct DeemixQueueItem {
-    #[serde(rename = "type", default)]
+    #[serde(
+        rename = "type",
+        default,
+        deserialize_with = "deserialize_nullable_string"
+    )]
     pub item_type: String,
     /// Playlist or track id — deemix returns strings for playlists but integers
     /// for individual tracks. This custom deserializer normalises both to String.
@@ -50,11 +54,11 @@ pub struct DeemixQueueItem {
     pub id: String,
     #[serde(default)]
     pub bitrate: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub uuid: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub title: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub artist: String,
     pub cover: Option<String>,
     #[serde(default)]
@@ -71,9 +75,13 @@ pub struct DeemixQueueItem {
     pub errors: Vec<DeemixDownloadError>,
     #[serde(default)]
     pub files: Vec<DeemixDownloadedFile>,
-    #[serde(rename = "__type__", default)]
+    #[serde(
+        rename = "__type__",
+        default,
+        deserialize_with = "deserialize_nullable_string"
+    )]
     pub collection_type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub status: String,
     #[serde(rename = "extrasPath")]
     pub extras_path: Option<String>,
@@ -110,19 +118,68 @@ where
         fn visit_u64<E: de::Error>(self, v: u64) -> Result<String, E> {
             Ok(v.to_string())
         }
+
+        fn visit_none<E: de::Error>(self) -> Result<String, E> {
+            Ok(String::new())
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<String, E> {
+            Ok(String::new())
+        }
     }
 
     deserializer.deserialize_any(IdVisitor)
 }
 
+/// Deserializer for String fields that may be `null` in the JSON.
+/// Returns empty string for `null`, otherwise the string value.
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct NullableStringVisitor;
+    impl<'de> de::Visitor<'de> for NullableStringVisitor {
+        type Value = String;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or null")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> Result<String, E> {
+            Ok(v)
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<String, E> {
+            Ok(String::new())
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<String, E> {
+            Ok(String::new())
+        }
+    }
+
+    deserializer.deserialize_any(NullableStringVisitor)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct DeemixDownloadError {
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub message: String,
-    pub data: DeemixErrorData,
-    #[serde(default)]
+    pub data: Option<DeemixErrorData>,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub stack: String,
-    #[serde(rename = "type")]
+    #[serde(
+        rename = "type",
+        default,
+        deserialize_with = "deserialize_nullable_string"
+    )]
     pub error_type: String,
 }
 
@@ -130,7 +187,9 @@ pub struct DeemixDownloadError {
 #[allow(dead_code)]
 pub struct DeemixErrorData {
     pub id: serde_json::Value,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub title: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub artist: String,
 }
 
@@ -140,15 +199,19 @@ pub struct DeemixDownloadedFile {
     pub album_urls: Option<Vec<DeemixAlbumUrl>>,
     pub album_path: Option<String>,
     pub album_filename: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub filename: String,
-    pub data: DeemixTrackData,
+    pub data: Option<DeemixTrackData>,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct DeemixAlbumUrl {
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub url: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub ext: String,
 }
 
@@ -156,7 +219,9 @@ pub struct DeemixAlbumUrl {
 #[allow(dead_code)]
 pub struct DeemixTrackData {
     pub id: serde_json::Value,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub title: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub artist: String,
 }
 

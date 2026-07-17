@@ -12,6 +12,7 @@ use tokio::time;
 use tracing::{error, info, warn};
 
 use crate::db;
+use crate::tasks::{Task, TaskStatus, TaskType};
 
 /// Configuration for the folder watcher
 #[derive(Debug, Clone)]
@@ -162,15 +163,29 @@ impl FolderWatcher {
         pool: &Pool<Sqlite>,
         tm: &crate::tasks::TaskManager,
     ) -> Result<usize> {
+        let task_id = tm.start_task(Task::new(TaskType::FolderWatch, None)).await;
+        let watch_task_id = tm.start_task(Task::new(TaskType::FolderWatch, None)).await;
+        tm.update_task_status(&watch_task_id, TaskStatus::Running)
+            .await;
+
         // Get all active folders
         let folders = db::get_folders(pool).await?;
         let active_folders: Vec<_> = folders.into_iter().filter(|f| f.active).collect();
 
         if active_folders.is_empty() {
+            tm.add_log(&watch_task_id, "No active folders to scan".into())
+                .await;
+            tm.update_task_status(&watch_task_id, TaskStatus::Completed)
+                .await;
             info!("No active folders to scan");
             return Ok(0);
         }
 
+        tm.add_log(
+            &watch_task_id,
+            format!("Scanning {} active folder(s)...", active_folders.len()),
+        )
+        .await;
         info!("Scanning {} active folder(s)...", active_folders.len());
 
         let mut scanned_folders = 0;
@@ -187,6 +202,14 @@ impl FolderWatcher {
             .await
             {
                 Ok(task_id) => {
+                    tm.add_log(
+                        &watch_task_id,
+                        format!(
+                            "Started scan for folder '{}' (task: {})",
+                            folder.folder_path, task_id
+                        ),
+                    )
+                    .await;
                     info!(
                         "Started scan task {} for folder: {}",
                         task_id, folder.folder_path
@@ -194,6 +217,14 @@ impl FolderWatcher {
                     scanned_folders += 1;
                 }
                 Err(e) => {
+                    tm.add_log(
+                        &watch_task_id,
+                        format!(
+                            "ERROR: failed to scan folder '{}': {}",
+                            folder.folder_path, e
+                        ),
+                    )
+                    .await;
                     error!(
                         "Failed to start scan task for folder {}: {}",
                         folder.folder_path, e
@@ -201,6 +232,17 @@ impl FolderWatcher {
                 }
             }
         }
+
+        tm.add_log(
+            &watch_task_id,
+            format!(
+                "Folder watch cycle complete: {} folder(s) scanned",
+                scanned_folders
+            ),
+        )
+        .await;
+        tm.update_task_status(&watch_task_id, TaskStatus::Completed)
+            .await;
 
         info!(
             "Folder scan completed: {} folder(s) scanned via background tasks",

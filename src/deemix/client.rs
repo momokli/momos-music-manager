@@ -135,15 +135,20 @@ impl DeemixClient {
         serde_json::from_str::<DeemixQueueResponse>(&text)
             .map(|queue_resp| queue_resp.queue)
             .map_err(|e| {
-                let preview = if text.len() > 500 {
-                    format!("{}… ({} bytes total)", &text[..500], text.len())
-                } else {
-                    text.clone()
-                };
+                // Extract column from error message to show context around the failure
+                let col = e.to_string()
+                    .split("column ")
+                    .nth(1)
+                    .and_then(|s| s.split_whitespace().next())
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let start = col.saturating_sub(200);
+                let end = (col + 200).min(text.len());
+                let snippet = &text[start..end];
+                let pad = " ".repeat(col.saturating_sub(start));
                 anyhow::anyhow!(
-                    "Failed to parse getQueue response: {}. Preview: {}",
-                    e,
-                    preview
+                    "Failed to parse getQueue response at byte {}: {}\n\nContext (bytes {}-{}):\n{}\n{}^^^",
+                    col, e, start, end, snippet, pad
                 )
             })
     }

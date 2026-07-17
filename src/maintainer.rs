@@ -2,6 +2,8 @@ use sqlx::{FromRow, SqlitePool};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::tasks::{Task, TaskStatus, TaskType};
+
 /// Lightweight folder info for maintainer queries (avoids importing the full Folder struct).
 #[derive(Debug, FromRow)]
 struct FolderRow {
@@ -85,6 +87,16 @@ pub async fn start_maintainer(
         if cancel_token.is_cancelled() {
             return;
         }
+
+        let task_id = task_manager
+            .start_task(Task::new(TaskType::MaintainerCycle, None))
+            .await;
+        task_manager
+            .update_task_status(&task_id, TaskStatus::Running)
+            .await;
+        task_manager
+            .add_log(&task_id, "Maintainer cycle starting...".into())
+            .await;
 
         let now = chrono::Utc::now().timestamp();
 
@@ -497,6 +509,13 @@ pub async fn start_maintainer(
                 }
             }
         }
+
+        task_manager
+            .add_log(&task_id, "Maintainer cycle complete".into())
+            .await;
+        task_manager
+            .update_task_status(&task_id, TaskStatus::Completed)
+            .await;
     }
 }
 

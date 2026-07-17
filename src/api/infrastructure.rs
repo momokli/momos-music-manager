@@ -37,6 +37,7 @@ pub struct TasksQuery {
     pub sort: Option<String>,
     pub order: Option<String>,
     pub page_size: Option<usize>,
+    pub task_type: Option<String>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────
@@ -48,7 +49,8 @@ async fn version_handler() -> impl IntoResponse {
     }))
 }
 
-/// List tasks with pagination and optional status filter
+/// List tasks with pagination and optional status filter.
+/// Merges live in-memory tasks with persisted task_history.
 async fn tasks_list_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TasksQuery>,
@@ -65,15 +67,66 @@ async fn tasks_list_handler(
     });
     let sort = query.sort.clone();
     let order = query.order.clone();
+    let task_type_filter = query.task_type.clone();
 
-    let (tasks, total) = state
+    // 1. Get live in-memory tasks (Running/Pending + recently completed)
+    let (live_tasks, _live_total) = state
         .task_manager
-        .list_tasks_paginated(limit, offset, status_filter, sort, order)
+        .list_tasks_paginated(500, 0, status_filter.clone(), sort.clone(), order.clone())
         .await;
+
+    // Collect IDs of live tasks so we can deduplicate against history
+    let live_ids: Vec<String> = live_tasks.iter().map(|t| t.id.clone()).collect();
+
+    // 2. Get persisted history tasks (backfill for auto-pruned ones)
+    let history_status = query.status.clone();
+    let history_type = task_type_filter.clone();
+    let (history_tasks, _hist_total) = crate::tasks::get_task_history(
+        &state.db,
+        1000,
+        0,
+        history_status.as_deref(),
+        history_type.as_deref(),
+    )
+    .await
+    .unwrap_or_default();
+
+    // 3. Convert history entries to TaskProgress format and deduplicate
+    let mut all_tasks: Vec<crate::tasks::TaskProgress> = live_tasks;
+    for hist in &history_tasks {
+        if let Some(hist_id) = hist.get("id").and_then(|v| v.as_str()) {
+            if !live_ids.contains(&hist_id.to_string()) {
+                // Try to deserialize — if it fails, skip
+                if let Ok(task) = serde_json::from_value::<crate::tasks::TaskProgress>(hist.clone())
+                {
+                    all_tasks.push(task);
+                }
+            }
+        }
+    }
+
+    // 4. Sort by created_at DESC
+    all_tasks.sort_by(|a, b| {
+        b.created_at_secs
+            .partial_cmp(&a.created_at_secs)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // 5. Apply status filter (already applied to live; re-apply to merged set)
+    if let Some(ref filter) = status_filter.clone() {
+        all_tasks.retain(|t| t.status == *filter);
+    }
+
+    let total = all_tasks.len();
+    let paginated = all_tasks
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect::<Vec<_>>();
 
     Json(ApiResponse {
         data: serde_json::json!({
-            "tasks": tasks,
+            "tasks": paginated,
             "total": total,
             "limit": limit,
             "offset": offset,

@@ -37,6 +37,7 @@ use crate::spotify::client::SpotifyClient;
 use crate::spotify::models::TrackInfo;
 use crate::spotify::retry::extract_retry_after_secs;
 use crate::spotify::retry::format_duration;
+use crate::tasks::{Task, TaskManager, TaskStatus, TaskType};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -49,6 +50,7 @@ use crate::spotify::retry::format_duration;
 pub async fn start_global_poller(
     db: Pool<Sqlite>,
     config: ServiceCredentials,
+    task_manager: TaskManager,
     interval_secs: u64,
     cancel_token: CancellationToken,
 ) {
@@ -68,7 +70,7 @@ pub async fn start_global_poller(
             break;
         }
 
-        if let Err(e) = run_poll_cycle(&db, &config, &cancel_token).await {
+        if let Err(e) = run_poll_cycle(&db, &config, &task_manager, &cancel_token).await {
             error!("Global poller: poll cycle failed: {:#}", e);
         }
 
@@ -89,12 +91,26 @@ pub async fn start_global_poller(
 async fn run_poll_cycle(
     db: &Pool<Sqlite>,
     config: &ServiceCredentials,
+    task_manager: &TaskManager,
     cancel_token: &CancellationToken,
 ) -> Result<()> {
+    let task_id = task_manager
+        .start_task(Task::new(TaskType::GlobalPollCycle, Some("spotify".into())))
+        .await;
+    task_manager
+        .update_task_status(&task_id, TaskStatus::Running)
+        .await;
+
     // Create Spotify client
     let spotify_client = match SpotifyClient::from_stored_tokens(db.clone(), config).await {
         Ok(client) => client,
         Err(e) => {
+            task_manager
+                .add_log(&task_id, format!("Failed to create Spotify client: {}", e))
+                .await;
+            task_manager
+                .update_task_status(&task_id, TaskStatus::Failed)
+                .await;
             error!("Global poller: failed to create Spotify client: {:#}", e);
             return Err(e);
         }
@@ -340,8 +356,8 @@ async fn run_poll_cycle(
     }
 
     // ── Step 5: Summary ──────────────────────────────────────────────────
-    info!(
-        "Global poller: cycle complete — {} playlists ({} new, {} changed, {} skipped, {} deleted, {} new track(s))",
+    let summary = format!(
+        "{} playlists: {} new, {} changed, {} skipped, {} deleted, {} new track(s)",
         spotify_count,
         new_playlists,
         changed_playlists,
@@ -349,6 +365,8 @@ async fn run_poll_cycle(
         deleted_count,
         new_tracks_total,
     );
+    task_manager.add_log(&task_id, summary.clone()).await;
+    info!("Global poller: cycle complete — {}", summary);
 
     // ── Step 6: Refresh materialized tag tables if tracks were added ────
     if new_tracks_total > 0 {
@@ -362,6 +380,10 @@ async fn run_poll_cycle(
             );
         }
     }
+
+    task_manager
+        .update_task_status(&task_id, TaskStatus::Completed)
+        .await;
 
     Ok(())
 }

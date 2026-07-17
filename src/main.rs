@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use sqlx::{Pool, Sqlite, SqlitePool};
 use tokio::sync::Mutex;
 use tracing::info;
+use tracing_subscriber::prelude::*;
 
 use momos_music_manager::AppState;
 use momos_music_manager::config::ServiceCredentials;
@@ -70,13 +71,37 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("warn,momos_music_manager=info,lofty=error")
-            }),
-        )
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new("warn,momos_music_manager=info,lofty=error")
+    });
+
+    // File appender — daily rolling log in the app data directory
+    let log_dir = std::path::PathBuf::from(std::env::var("MOMOS_LOG_DIR").unwrap_or_else(|_| {
+        dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".local/share/momos-music-manager/logs")
+            .to_string_lossy()
+            .to_string()
+    }));
+    std::fs::create_dir_all(&log_dir).ok();
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "server.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    // Both stdout and file
+    let stdout_layer = tracing_subscriber::fmt::layer().with_ansi(true);
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(non_blocking);
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stdout_layer)
+        .with(file_layer)
         .init();
+
+    // Keep the guard alive for the duration of the program
+    std::mem::forget(_guard);
+
     dotenvy::dotenv_override().ok();
 
     let cli = Cli::parse();
@@ -242,10 +267,12 @@ async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()
         .unwrap_or(0);
 
     // Spawn subscription poller — polls subscribed playlists every 30s
+    let poller_tm = state.task_manager.clone();
     let poller_handle = tokio::spawn(async move {
         momos_music_manager::poller::start_subscription_poller(
             poller_db,
             poller_config,
+            poller_tm,
             poller_cancel,
             sub_count,
         )
@@ -267,10 +294,12 @@ async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()
 
     // Spawn global playlist poller
     if global_interval > 0 && global_poller_config.is_spotify_configured() {
+        let global_tm = state.task_manager.clone();
         tokio::spawn(async move {
             momos_music_manager::global_poller::start_global_poller(
                 global_poller_db,
                 global_poller_config,
+                global_tm,
                 global_interval,
                 global_cancel,
             )
@@ -425,48 +454,7 @@ async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()
     let auto_db = state.db.clone();
     let auto_tm = state.task_manager.clone();
     tokio::spawn(async move {
-        let interval = Duration::from_secs(600);
-        loop {
-            tokio::time::sleep(interval).await;
-            let folders: Vec<momos_music_manager::db::Folder> = match sqlx::query_as::<_, momos_music_manager::db::Folder>(
-                "SELECT * FROM folders WHERE auto_backup = 1 AND backup_path IS NOT NULL AND backup_path != ''"
-            )
-            .fetch_all(&auto_db)
-            .await
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!("Auto-backup: failed to query folders: {}", e);
-                    continue;
-                }
-            };
-            for folder in &folders {
-                let unbacked =
-                    match momos_music_manager::db::get_unbacked_up_files(&auto_db, folder.id).await
-                    {
-                        Ok(f) => f,
-                        Err(e) => {
-                            tracing::warn!(
-                                "Auto-backup: failed to check files for folder {}: {}",
-                                folder.id,
-                                e
-                            );
-                            continue;
-                        }
-                    };
-                if !unbacked.is_empty() {
-                    tracing::info!(
-                        "Auto-backup: folder '{}' has {} unbacked files — starting backup task",
-                        folder.folder_path,
-                        unbacked.len()
-                    );
-                    momos_music_manager::tasks::start_backup_folder_task(
-                        &auto_tm, &auto_db, folder.id,
-                    )
-                    .await;
-                }
-            }
-        }
+        momos_music_manager::auto_backup::start_auto_backup_poller(auto_db, auto_tm).await;
     });
 
     // Build the application with routes.

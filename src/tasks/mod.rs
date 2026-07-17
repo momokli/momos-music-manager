@@ -60,6 +60,19 @@ pub enum TaskType {
     BackpackSync,
     /// Verify backup records still exist on NAS (periodic integrity check)
     BackupVerify { folder_id: i64 },
+    /// Subscription poller: single subscription poll cycle
+    PollSubscription {
+        subscription_id: i64,
+        playlist_name: String,
+    },
+    /// Global poller: one full cycle checking all Spotify playlists
+    GlobalPollCycle,
+    /// Maintainer: one housekeeping cycle
+    MaintainerCycle,
+    /// Folder watcher: one scan-all-active-folders cycle
+    FolderWatch,
+    /// Auto-backup: one check-all-auto-backup-folders cycle
+    AutoBackupCheck,
 }
 
 /// What to sync for a service
@@ -181,7 +194,7 @@ pub enum TaskStatus {
 
 /// A sub-item within a task's progress (e.g. a single file in a batch write,
 /// a single playlist in a sync operation)
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProgressItem {
     /// Human-readable label for this sub-item
     pub label: String,
@@ -425,6 +438,11 @@ pub fn task_type_conflict_key(task_type: &TaskType) -> Option<String> {
         TaskType::PruneFiles { .. } => None, // prunes don't conflict — multiple can run
         TaskType::BackpackSync => Some("backpack_sync".to_string()),
         TaskType::BackupVerify { folder_id } => Some(format!("backup_verify:{}", folder_id)),
+        TaskType::PollSubscription { .. } => None,
+        TaskType::GlobalPollCycle => None,
+        TaskType::MaintainerCycle => None,
+        TaskType::FolderWatch => None,
+        TaskType::AutoBackupCheck => None,
     }
 }
 
@@ -589,6 +607,11 @@ impl Task {
             TaskType::PruneFiles { .. } => "prune_files".to_string(),
             TaskType::BackpackSync => "backpack_sync".to_string(),
             TaskType::BackupVerify { .. } => "backup_verify".to_string(),
+            TaskType::PollSubscription { .. } => "poll_subscription".to_string(),
+            TaskType::GlobalPollCycle => "global_poll_cycle".to_string(),
+            TaskType::MaintainerCycle => "maintainer_cycle".to_string(),
+            TaskType::FolderWatch => "folder_watch".to_string(),
+            TaskType::AutoBackupCheck => "auto_backup_check".to_string(),
         };
         (task_type_str, task_details)
     }
@@ -599,7 +622,7 @@ impl Task {
 // ============================================================
 
 /// Serializable progress snapshot for API responses
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskProgress {
     pub id: String,
     /// Machine-readable task type string (e.g. "spotify_sync", "write_comment", "scan_folder")
@@ -1120,6 +1143,13 @@ pub fn task_type_label(task_type: &TaskType) -> String {
         TaskType::BackupVerify { folder_id } => {
             format!("Verify backup records for folder #{}", folder_id)
         }
+        TaskType::PollSubscription { playlist_name, .. } => {
+            format!("Poll: {}", playlist_name)
+        }
+        TaskType::GlobalPollCycle => "Global poll cycle".to_string(),
+        TaskType::MaintainerCycle => "Maintainer cycle".to_string(),
+        TaskType::FolderWatch => "Folder watch".to_string(),
+        TaskType::AutoBackupCheck => "Auto-backup check".to_string(),
     }
 }
 

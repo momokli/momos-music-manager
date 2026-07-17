@@ -35,6 +35,7 @@ use crate::deemix::DeemixClient;
 use crate::spotify::client::SpotifyClient;
 use crate::spotify::models::TrackInfo;
 use crate::spotify::retry::{extract_retry_after_secs, format_duration};
+use crate::tasks::{Task, TaskManager, TaskStatus, TaskType};
 
 use std::time::Duration;
 
@@ -55,6 +56,7 @@ use std::time::Duration;
 pub async fn start_subscription_poller(
     db: Pool<Sqlite>,
     credentials: ServiceCredentials,
+    task_manager: TaskManager,
     cancel_token: CancellationToken,
     subscription_count: i64,
 ) {
@@ -114,7 +116,10 @@ pub async fn start_subscription_poller(
                     break;
                 }
 
-                if let Err(e) = poll_subscribed_playlist(&db, &spotify_client, subscription).await {
+                if let Err(e) =
+                    poll_subscribed_playlist(&db, &spotify_client, subscription, &task_manager)
+                        .await
+                {
                     error!(
                         "Subscription poller: error polling subscription {} (playlist_id={}): {:#}",
                         subscription.id, subscription.playlist_id, e,
@@ -165,7 +170,31 @@ async fn poll_subscribed_playlist(
     db: &Pool<Sqlite>,
     spotify_client: &SpotifyClient,
     subscription: &db::PlaylistSubscription,
+    task_manager: &TaskManager,
 ) -> Result<()> {
+    let playlist_name_for_task = subscription
+        .playlist_name
+        .clone()
+        .unwrap_or_else(|| subscription.playlist_id.clone());
+    let task_id = task_manager
+        .start_task(Task::new(
+            TaskType::PollSubscription {
+                subscription_id: subscription.id,
+                playlist_name: playlist_name_for_task.clone(),
+            },
+            Some("spotify".into()),
+        ))
+        .await;
+    task_manager
+        .update_task_status(&task_id, TaskStatus::Running)
+        .await;
+    task_manager
+        .add_log(
+            &task_id,
+            "Fetching playlist metadata from Spotify...".into(),
+        )
+        .await;
+
     // -- Fetch playlist metadata (with retry) -------------------------------
     let playlist = {
         let mut attempt = 0;
@@ -177,6 +206,9 @@ async fn poll_subscribed_playlist(
                         let clamped = raw_secs.min(300);
                         attempt += 1;
                         if attempt >= 3 {
+                            task_manager
+                                .update_task_status(&task_id, TaskStatus::Failed)
+                                .await;
                             return Err(e)
                                 .context("Failed to fetch playlist from Spotify after 3 retries");
                         }
@@ -189,6 +221,9 @@ async fn poll_subscribed_playlist(
                         );
                         tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
                     } else {
+                        task_manager
+                            .update_task_status(&task_id, TaskStatus::Failed)
+                            .await;
                         return Err(e).context("Failed to fetch playlist from Spotify");
                     }
                 }
@@ -198,6 +233,16 @@ async fn poll_subscribed_playlist(
 
     let playlist_name = &playlist.name;
     let playlist_description = playlist.description.as_deref();
+
+    task_manager
+        .add_log(
+            &task_id,
+            format!(
+                "Fetched: '{}', {} track(s) total",
+                playlist_name, playlist.tracks.total
+            ),
+        )
+        .await;
 
     debug!(
         "Polling playlist '{}' (spotify_id={})",
@@ -246,9 +291,11 @@ async fn poll_subscribed_playlist(
                 let snapshot_matches = stored_snapshot.as_deref() == Some(&playlist.snapshot_id);
 
                 if snapshot_matches && local_count >= remote_unique_count {
+                    task_manager
+                        .add_log(&task_id, "Snapshot unchanged; skipping track fetch".into())
+                        .await;
                     debug!(
-                        "Subscription poller: skipping track fetch for '{}' — \
-                         snapshot unchanged, local={}, remote_unique={}",
+                        "Subscription poller: skipping track fetch for '{}' — snapshot unchanged, local={}, remote_unique={}",
                         playlist_name, local_count, remote_unique_count,
                     );
                     skip_track_fetch = true;
@@ -264,12 +311,24 @@ async fn poll_subscribed_playlist(
                         .await;
                     }
                 } else if !snapshot_matches {
+                    task_manager
+                        .add_log(&task_id, "Snapshot changed; fetching tracks...".into())
+                        .await;
                     debug!(
                         "Subscription poller: polling '{}' — snapshot changed \
-                         (was {:?}, now {})",
+                                             (was {:?}, now {})",
                         playlist_name, stored_snapshot, playlist.snapshot_id,
                     );
                 } else {
+                    task_manager
+                        .add_log(
+                            &task_id,
+                            format!(
+                                "Stale counts (local={}, remote_unique={}); fetching tracks...",
+                                local_count, remote_unique_count
+                            ),
+                        )
+                        .await;
                     debug!(
                         "Subscription poller: polling '{}' — stale: local={}, remote_unique={}",
                         playlist_name, local_count, remote_unique_count,
@@ -304,6 +363,9 @@ async fn poll_subscribed_playlist(
                             let clamped = raw_secs.min(300);
                             attempt += 1;
                             if attempt >= 3 {
+                                task_manager
+                                    .update_task_status(&task_id, TaskStatus::Failed)
+                                    .await;
                                 return Err(e)
                                     .context("Failed to get playlist tracks after 3 retries");
                             }
@@ -316,6 +378,9 @@ async fn poll_subscribed_playlist(
                             );
                             tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
                         } else {
+                            task_manager
+                                .update_task_status(&task_id, TaskStatus::Failed)
+                                .await;
                             return Err(e).context("Failed to get playlist tracks");
                         }
                     }
@@ -445,6 +510,21 @@ async fn poll_subscribed_playlist(
         }
     } // closes if !skip_track_fetch
 
+    let track_summary = if new_tracks_found {
+        task_manager
+            .add_log(&task_id, "New tracks were found and stored".into())
+            .await;
+        "new tracks stored"
+    } else if skip_track_fetch {
+        // Already logged by snapshot check
+        "snapshot unchanged"
+    } else {
+        task_manager
+            .add_log(&task_id, "No new tracks found".into())
+            .await;
+        "no new tracks"
+    };
+
     // -- Auto-download via deemix on first poll, new tracks, or missing entry ---
     let deemix_url = format!(
         "https://open.spotify.com/playlist/{}",
@@ -455,11 +535,17 @@ async fn poll_subscribed_playlist(
         .unwrap_or(false);
 
     if subscription.last_polled_at.is_none() || new_tracks_found || !has_deemix_entry {
+        task_manager
+            .add_log(&task_id, "Deemix: attempting auto-download...".into())
+            .await;
         match DeemixClient::from_db(db.clone()).await {
             Some(client) => {
                 let url = deemix_url;
                 match client.ensure_queued(&url).await {
                     Ok(()) => {
+                        task_manager
+                            .add_log(&task_id, "Deemix: queued successfully".into())
+                            .await;
                         // Insert/update local deemix_downloads table so the
                         // Playlists page shows the correct status immediately
                         let now = std::time::SystemTime::now()
@@ -485,16 +571,26 @@ async fn poll_subscribed_playlist(
                             playlist_name,
                         );
                     }
-                    Err(e) => warn!(
-                        "Subscription poller: failed to trigger deemix download for '{}': {:#}",
-                        playlist_name, e,
-                    ),
+                    Err(e) => {
+                        task_manager
+                            .add_log(&task_id, format!("Deemix: FAILED — {}", e))
+                            .await;
+                        warn!(
+                            "Subscription poller: failed to trigger deemix download for '{}': {:#}",
+                            playlist_name, e,
+                        );
+                    }
                 }
             }
-            None => debug!(
-                "Subscription poller: deemix not configured, skipping auto-download for '{}'",
-                playlist_name,
-            ),
+            None => {
+                task_manager
+                    .add_log(&task_id, "Deemix: SKIPPED (not connected)".into())
+                    .await;
+                debug!(
+                    "Subscription poller: deemix not configured, skipping auto-download for '{}'",
+                    playlist_name,
+                );
+            }
         }
     }
 
@@ -526,6 +622,10 @@ async fn poll_subscribed_playlist(
             );
         }
     }
+
+    task_manager
+        .update_task_status(&task_id, TaskStatus::Completed)
+        .await;
 
     Ok(())
 }
