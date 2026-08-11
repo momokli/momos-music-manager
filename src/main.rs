@@ -75,32 +75,58 @@ async fn main() -> Result<()> {
         tracing_subscriber::EnvFilter::new("warn,momos_music_manager=info,lofty=error")
     });
 
-    // File appender — daily rolling log in the app data directory
-    let log_dir = std::path::PathBuf::from(std::env::var("MOMOS_LOG_DIR").unwrap_or_else(|_| {
-        dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".local/share/momos-music-manager/logs")
-            .to_string_lossy()
-            .to_string()
-    }));
-    std::fs::create_dir_all(&log_dir).ok();
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "server.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    // File appender — only enabled via MOMOS_LOG_FILE=1
+    // When set, logs at WARN level to a daily rolling file.
+    let _file_guard: Option<tracing_appender::non_blocking::WorkerGuard> =
+        match std::env::var("MOMOS_LOG_FILE").as_deref() {
+            Ok("1") | Ok("true") | Ok("yes") => {
+                let log_dir = std::path::PathBuf::from(
+                    std::env::var("MOMOS_LOG_DIR").unwrap_or_else(|_| {
+                        dirs::home_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join(".local/share/momos-music-manager/logs")
+                            .to_string_lossy()
+                            .to_string()
+                    }),
+                );
+                std::fs::create_dir_all(&log_dir).ok();
+                let file_appender = tracing_appender::rolling::daily(&log_dir, "server.log");
+                let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    // Both stdout and file
-    let stdout_layer = tracing_subscriber::fmt::layer().with_ansi(true);
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_ansi(false)
-        .with_writer(non_blocking);
+                let file_filter =
+                    tracing_subscriber::EnvFilter::new("warn");
+                let file_layer = tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(non_blocking)
+                    .with_filter(file_filter);
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(stdout_layer)
-        .with(file_layer)
-        .init();
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(
+                        tracing_subscriber::fmt::layer().with_ansi(true),
+                    )
+                    .with(file_layer)
+                    .init();
+
+                Some(guard)
+            }
+            _ => {
+                // stdout only
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(
+                        tracing_subscriber::fmt::layer().with_ansi(true),
+                    )
+                    .init();
+
+                None
+            }
+        };
 
     // Keep the guard alive for the duration of the program
-    std::mem::forget(_guard);
+    if let Some(guard) = _file_guard {
+        std::mem::forget(guard);
+    }
 
     dotenvy::dotenv_override().ok();
 
