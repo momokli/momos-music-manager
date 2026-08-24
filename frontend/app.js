@@ -37,6 +37,7 @@ const PAGE_MAP = {
   daily: "daily",
   "tag-bundles": "tag-bundles",
   "dynamic-bundles": "dynamic-bundles",
+  inbox: "inbox",
 };
 
 let currentPageId = null;

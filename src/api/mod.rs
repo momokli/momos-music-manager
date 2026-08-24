@@ -13,6 +13,7 @@ pub mod explorer;
 pub mod file_track_corrections;
 pub mod files;
 pub mod folders;
+pub mod inbox;
 pub mod infrastructure;
 pub mod playlists;
 pub mod services;
@@ -43,4 +44,5 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(tracks::router())
         .merge(dynamic_bundles::router())
         .merge(files::router())
+        .merge(inbox::router())
 }
