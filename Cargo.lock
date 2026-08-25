@@ -2739,7 +2739,7 @@ dependencies = [
  "unicode-normalization",
  "uuid",
  "walkdir",
-"webbrowser",
+ "webbrowser",
  "zip 1.1.4",
 ]
 
