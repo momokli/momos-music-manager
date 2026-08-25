@@ -1,10 +1,10 @@
 # Plan: Tag Roundtrip Inbox (komplettes Feature-Set)
 
-**Status**: foundation implemented + full feature set specced (this doc)
+**Status**: foundation implemented + full feature set implemented (this PR)
 **Branch**: `feat/tag-roundtrip-inbox`
-**Ready for review**: foundation yes; rename/merge/suggestions pending implementation
+**Ready for review**: yes — rename/merge/suggestions implemented, build+tests grün (abzgl. metaflac)
 **Depends on**: nothing
-**Migration needed**: ja (Tag-Staging/Mapping, siehe unten)
+**Migration needed**: ja — `023_tag_inbox.sql` (Tag-Staging/Mapping, via `sqlx::migrate!()` automatisch)
 
 ---
 
@@ -74,38 +74,41 @@ pub fn comment_fingerprint(comment: &str) -> String;
 
 ---
 
-## Neu zu implementieren (Full Feature Set)
+## Implementiert (Full Feature Set)
 
-### A. Tag-Vokabular / Similar-Matching
+### A. Tag-Vokabular / Similar-Matching (implementiert)
 
 - **Fuzzy-Default**: case-insensitive + Levenshtein ≤ 2 gegen bestehende Tag-Namen
   (Vorarbeit existiert: Migration `004_unique_tags_nocase.sql`, Branch
   `fix/tag-case-duplicates`).
-- Quelle der „bestehenden Tags": alle bereits in `files.comment` (resolved tags)
-  vorkommenden Tags, idealerweise normalisiert (lowercase).
-- Neues Endpoint oder Erweiterung von `/api/inbox`: pro Inbox-Item die neuen Tags
-  (`diff.tags_added`) mit `suggestions: [{tag, distance, count}]` liefern.
+- Quelle der „bestehenden Tags“: alle `tags`-Tabellen-Namen; File-Count pro
+  Vorschlag aus der materialisierten `file_resolved_tags`.
+- Erweiterung von `/api/inbox`: pro Inbox-Item die neuen Tags (`diff.tags_added` ∪
+  `diff.tags_removed`) mit `suggestions: [{tag, distance, count}]`.
 
-### B. Rename / Merge-Workflow (Staging)
+### B. Rename / Merge-Workflow (Staging) (implementiert)
 
-- Neue Tabelle (Migration `023_tag_inbox.sql`) für Inbox-Bearbeitung, z.B.:
-  `tag_inbox (id, file_id, raw_tag, action, target_tag, status, created_at)`.
+- Migration `023_tag_inbox.sql`: `tag_inbox (id, raw_tag, action, target_tag,
+  status, file_count, created_at, resolved_at)` — globale Entscheidung pro
+  Typo-Wortlaut.
 - **Rename**: `raw_tag` → neuer Wortlaut (Typo-Fix), assoziiert mit Track(s).
-- **Merge**: `raw_tag` → `target_tag` (bestehender Tag). Beim Commit werden alle
-  Tracks mit `raw_tag` auf `target_tag` umgetaggt; `raw_tag` verschwindet.
-- **Staging-Semantik**: Vor dem Commit ist der Mapping nur in der Inbox, nicht in den
-  geschriebenen Kommentaren. Beim nächsten Write (`write-comment` / Sync) wird der
-  kanonische Tag geschrieben.
-- API: `POST /api/inbox/rename`, `POST /api/inbox/merge`, `POST /api/inbox/dismiss`
-  (oder einheitlich `POST /api/inbox/resolve` mit `action`).
+- **Merge**: `raw_tag` → `target_tag` (bestehender Tag). Beim nächsten Write werden
+  alle Tracks mit `raw_tag` auf `target_tag` umgetaggt; `raw_tag` verschwindet aus
+  allen geschriebenen Kommentaren.
+- **Staging-Semantik**: Vor dem Write ist der Mapping nur in der Inbox, nicht in
+  den geschriebenen Kommentaren. Beim nächsten Write (`write-comment` / Sync) wird
+  der kanonische Tag geschrieben.
+- API: `POST /api/inbox/resolve` (einheitlich, `action` rename|merge|dismiss),
+  `GET /api/inbox/mappings`.
 
-### C. Frontend-Erweiterung
+### C. Frontend-Erweiterung (implementiert)
 
 - Inbox-UI: pro neuem Tag ein Inline-Edit (Rename) + Suggestions-Chips (klickbare
-  ähnliche Tags → Merge) + Dismiss-Button.
-- Merge/Rename wirkt sofort auf die Inbox-Ansicht (Refresh des Diffs).
+  ähnliche Tags → Merge) + Dismiss-Button; Active-Mappings-Strip über der Tabelle.
+- Merge/Rename wirkt sofort auf die Inbox-Ansicht (Refresh des Diffs mit staged
+  Target).
 
-### D. Write-Path-Härtung
+### D. Write-Path-Härtung (implementiert)
 
 - `write-comment` / Sync-Pfad respektiert offene Inbox-Mappings: ein gemappter Typo-Tag
   wird beim Schreiben durch den kanonischen Tag ersetzt. Kein Auto-Apply — nur wenn der
@@ -115,15 +118,44 @@ pub fn comment_fingerprint(comment: &str) -> String;
 
 ## Acceptance Criteria (Full Feature Set)
 
-- [ ] Roundtrip-Diff + Inbox-Liste + Count (Foundation, bereits grün)
-- [ ] `/api/inbox` liefert pro neuem Tag Similar-Suggestions (Levenshtein ≤ 2,
-      case-insensitive)
-- [ ] Rename eines neuen Tags in der Inbox persistiert den Mapping
-- [ ] Merge eines Typo-Tags in einen bestehenden Tag taggt ALLE betroffenen Tracks um
-- [ ] Typo-Wortlaut verschwindet nach Merge aus dem System (nur Inbox-Historie)
-- [ ] Vor Inbox-Bearbeitung: Tag nicht im System committed (Staging)
-- [ ] Kein Auto-Apply, kein zirkulärer Pfad
-- [ ] `cargo build` + `cargo test` grün (abzgl. vorbestehender metaflac-Tests)
+- [x] Roundtrip-Diff + Inbox-Liste + Count (Foundation, bereits grün)
+- [x] `/api/inbox` liefert pro neuem Tag Similar-Suggestions (Levenshtein ≤ 2,
+      case-insensitive) — `newTags[].suggestions[]`, inkl. File-Count pro Vorschlag
+- [x] Rename eines neuen Tags in der Inbox persistiert den Mapping
+      (`POST /api/inbox/resolve` mit `action=rename`)
+- [x] Merge eines Typo-Tags in einen bestehenden Tag taggt ALLE betroffenen Tracks um
+      (`action=merge`; Write-Pfad ersetzt den Typo überall durch den kanonischen Tag)
+- [x] Typo-Wortlaut verschwindet nach Merge aus dem System (nur Inbox-Historie/
+      `tag_inbox`; kein Auto-Apply, erst der nächste Write schreibt den kanonischen Tag)
+- [x] Vor Inbox-Bearbeitung: Tag nicht im System committed (Staging — Mapping liegt
+      nur in `tag_inbox`, die Tags-Tabelle/Vokabular wird nicht verändert)
+- [x] Kein Auto-Apply, kein zirkulärer Pfad (User entscheidet per Klick; Dismiss =
+      bewusst ignorieren)
+- [x] `cargo build` + `cargo test` grün (abzgl. vorbestehender metaflac-Tests;
+      `api_storage`-Concurrency-Tests sind vorbestehend flaky und berühren dieses
+      Feature nicht)
+
+## Implementierungsnotizen
+
+- **Similar-Matching**: `levenshtein_distance` (case-insensitive, char-wise) +
+  `similar_tags` in `src/comment.rs`; Distanz ≤ 2, Selbst-Match (Distanz 0)
+  ausgeschlossen. Vorschläge pro „neuem Tag“ = Tags aus `tags_added ∪ tags_removed`,
+  die noch nicht kanonisch im System stehen (oder als Kandidat für Click-to-Merge
+  in Frage kommen — auch ein bereits vorhandener Tag kann gemergt werden, wenn der
+  User ihn als Typo erkennt).
+- **Staging-Tabelle**: `tag_inbox (raw_tag UNIQUE COLLATE NOCASE, action,
+  target_tag, status, file_count, …)` — eine Entscheidung pro Typo-Wortlaut
+  („taucht nur noch 1× in der Inbox auf“).
+- **Write-Pfad**: `compute_target_comment` konsultiert offene rename/merge-Mappings
+  (`load_tag_inbox_mapping_map`); `apply_tag_mappings_to_target` ersetzt gemappte
+  Tags im generierten Target UND übernimmt gemappte getippte Tags aus dem
+  Stored-Comment (sonst würden sie beim Write stillschweigend verworfen).
+  Rename-auf-sich-selbst = „Tag behalten“ (File verlässt die Inbox ohne Write).
+- **Merge löscht KEINE Tags-Zeile**: Tracks hängen per Playlist-Chain an Tags; das
+  Löschen des Typo-Tags würde die Auflösung brechen und Tracks das Tag komplett
+  nehmen statt sie auf den kanonischen Tag umzutaggen. Der Mapping im Write-Pfad
+  retaggt alle Tracks korrekt und dauerhaft (Playlist-Typo wird bei jedem Target
+  auf den kanonischen Tag umgeschrieben).
 
 ---
 

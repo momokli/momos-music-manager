@@ -547,6 +547,120 @@ pub fn comment_fingerprint_opt(comment: Option<&str>) -> String {
     comment_fingerprint(comment.unwrap_or(""))
 }
 
+// ============================================================================
+// Fuzzy tag matching & tag-inbox mapping application (full feature set)
+// ============================================================================
+
+/// Case-insensitive Levenshtein distance between two strings.
+///
+/// Used for the inbox's similar-tag suggestions: a new/typo tag is matched
+/// against the existing tag vocabulary with distance ≤ 2 (spec default).
+/// Non-ASCII characters are compared by their lowercase form (char-wise).
+pub fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a
+        .chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect();
+    let b: Vec<char> = b
+        .chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect();
+    let (la, lb) = (a.len(), b.len());
+    if la == 0 {
+        return lb;
+    }
+    if lb == 0 {
+        return la;
+    }
+
+    let mut prev: Vec<usize> = (0..=lb).collect();
+    let mut curr = vec![0usize; lb + 1];
+    for i in 1..=la {
+        curr[0] = i;
+        for j in 1..=lb {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[lb]
+}
+
+/// Fuzzy-match `tag` against a list of existing tag names.
+///
+/// Criteria (spec default): case-insensitive Levenshtein distance ≤
+/// `max_distance`, excluding the tag itself (distance 0 — it already exists
+/// canonically and is not a typo of itself). Returns `(existing_tag, distance)`
+/// sorted by distance ascending, then name ascending.
+pub fn similar_tags(tag: &str, existing: &[String], max_distance: usize) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for candidate in existing {
+        let d = levenshtein_distance(tag, candidate);
+        if d == 0 || d > max_distance {
+            continue;
+        }
+        out.push((candidate.clone(), d));
+    }
+    out.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
+/// Apply open tag-inbox mappings (raw tag → canonical tag) to a generated
+/// target comment.
+///
+/// Staging semantics: resolving a new/typo tag in the inbox only records a
+/// decision (`tag_inbox` row). This function is what makes the canonical
+/// spelling appear on the next write:
+///
+/// 1. Every tag in the generated target matching a mapped raw tag is replaced
+///    by the mapped canonical tag.
+/// 2. Every tag in the STORED comment matching a mapped raw tag is ADDED to
+///    the target with its canonical spelling — a typed tag the user decided to
+///    keep/rename/merge is written instead of being silently dropped.
+///
+/// Tags without a mapping are left untouched (no auto-apply). Mappings are
+/// keyed by lowercase tag name. Returns the input unchanged when no mappings
+/// exist or the target is unparseable.
+pub fn apply_tag_mappings_to_target(
+    target: &str,
+    stored: Option<&str>,
+    mappings: &std::collections::HashMap<String, String>,
+) -> String {
+    if mappings.is_empty() {
+        return target.to_string();
+    }
+    let Some(mut parsed) = parse_comment(target) else {
+        return target.to_string();
+    };
+
+    // 1. Replace mapped tags present in the generated target.
+    let mut tags: HashSet<String> = HashSet::new();
+    for t in &parsed.tags {
+        match mappings.get(&t.to_lowercase()) {
+            Some(canonical) => {
+                tags.insert(canonical.clone());
+            }
+            None => {
+                tags.insert(t.clone());
+            }
+        }
+    }
+
+    // 2. Add canonical spellings for stored tags the user has mapped.
+    if let Some(stored_str) = stored
+        && let Some(stored_parsed) = parse_comment(stored_str)
+    {
+        for t in &stored_parsed.tags {
+            if let Some(canonical) = mappings.get(&t.to_lowercase()) {
+                tags.insert(canonical.clone());
+            }
+        }
+    }
+
+    parsed.tags = tags;
+    generate_comment(&parsed)
+}
+
 /// Get a specific service ID from a comment (e.g., "spotify")
 pub fn get_service_id_from_comment(comment: &str, service: &str) -> Option<String> {
     let source_ids = extract_all_source_ids_from_comment(comment);
@@ -1136,5 +1250,119 @@ mod tests {
         let generated = generate_from_parts('_', '_', '_', &["droid".into(), "house".into()], &[]);
         let reparsed = generate_comment(&parse_comment(&generated).unwrap());
         assert_eq!(comment_fingerprint(&generated), comment_fingerprint(&reparsed));
+    }
+
+    // ── Tag-inbox: levenshtein / similar_tags / mapping application ──────
+
+    #[test]
+    fn test_levenshtein_distance_basic() {
+        assert_eq!(levenshtein_distance("peak", "peak"), 0);
+        assert_eq!(levenshtein_distance("peek", "peak"), 1); // e→a
+        assert_eq!(levenshtein_distance("peeq", "peak"), 2); // eq→ak
+        assert_eq!(levenshtein_distance("aufbau", "aufbauen"), 2); // insert n
+        assert_eq!(levenshtein_distance("", "abc"), 3);
+        assert_eq!(levenshtein_distance("abc", ""), 3);
+        assert_eq!(levenshtein_distance("house", "droid"), 5);
+    }
+
+    #[test]
+    fn test_levenshtein_distance_case_insensitive() {
+        assert_eq!(levenshtein_distance("PEEK", "peak"), 1);
+        assert_eq!(levenshtein_distance("Groovy", "groovy"), 0);
+    }
+
+    #[test]
+    fn test_similar_tags_matches_and_self_exclusion() {
+        let existing: Vec<String> = vec![
+            "peak".into(),
+            "peek".into(),
+            "aufbauen".into(),
+            "house".into(),
+        ];
+        // Typo "peek" → suggests "peak" (distance 1), excludes itself.
+        let hits = similar_tags("peek", &existing, 2);
+        assert!(hits.contains(&("peak".to_string(), 1)));
+        assert!(!hits.iter().any(|(t, _)| t == "peek"), "self must be excluded");
+        // "aufbau" → "aufbauen" (distance 2).
+        assert!(similar_tags("aufbau", &existing, 2).contains(&("aufbauen".to_string(), 2)));
+        // "house" is too far from every candidate.
+        assert!(similar_tags("house", &existing, 2).is_empty());
+        // max_distance = 1 drops the distance-2 hit.
+        assert!(!similar_tags("aufbau", &existing, 1).contains(&("aufbauen".to_string(), 2)));
+    }
+
+    #[test]
+    fn test_similar_tags_sorted_by_distance_then_name() {
+        let existing: Vec<String> = vec!["aaa".into(), "aba".into(), "abb".into()];
+        let hits = similar_tags("aaa", &existing, 2);
+        assert_eq!(hits[0], ("aba".to_string(), 1));
+        // "abb": aaa→abb is 2 (a→a, a→b, a→b). Only one distance-2 candidate here.
+        assert!(hits.iter().all(|(_, d)| *d <= 2));
+    }
+
+    #[test]
+    fn test_apply_tag_mappings_merge_typo_into_canonical() {
+        use std::collections::HashMap;
+        let mut mappings = HashMap::new();
+        mappings.insert("peek".to_string(), "peak".to_string());
+
+        // Target from the playlist chain already has the canonical tag.
+        let target = "[_M_] peak sp:spotify:track:t1";
+        let stored = "[_M_] peek sp:spotify:track:t1";
+        assert_eq!(
+            apply_tag_mappings_to_target(target, Some(stored), &mappings),
+            "[_M_] peak sp:spotify:track:t1"
+        );
+
+        // Target has NO tags (tag only typed in the stored comment):
+        // the mapped canonical tag must be written, not silently dropped.
+        let target2 = "[___] sp:spotify:track:t2";
+        let stored2 = "[___] peek sp:spotify:track:t2";
+        assert_eq!(
+            apply_tag_mappings_to_target(target2, Some(stored2), &mappings),
+            "[___] peak sp:spotify:track:t2"
+        );
+
+        // Playlist-typo case: target resolves the raw tag, mapping rewrites it.
+        let target3 = "[___] peek sp:spotify:track:t3";
+        assert_eq!(
+            apply_tag_mappings_to_target(target3, Some("[___] sp:spotify:track:t3"), &mappings),
+            "[___] peak sp:spotify:track:t3"
+        );
+    }
+
+    #[test]
+    fn test_apply_tag_mappings_rename_to_self_keeps_tag() {
+        use std::collections::HashMap;
+        let mut mappings = HashMap::new();
+        mappings.insert("aufbau".to_string(), "aufbau".to_string());
+
+        // Rename-to-self = "keep this typed tag": the write must not drop it.
+        let target = "[___] sp:spotify:track:t4";
+        let stored = "[___] aufbau sp:spotify:track:t4";
+        assert_eq!(
+            apply_tag_mappings_to_target(target, Some(stored), &mappings),
+            "[___] aufbau sp:spotify:track:t4"
+        );
+    }
+
+    #[test]
+    fn test_apply_tag_mappings_no_mapping_no_change() {
+        use std::collections::HashMap;
+        let mappings = HashMap::new();
+        let target = "[___] house sp:spotify:track:t5";
+        assert_eq!(
+            apply_tag_mappings_to_target(target, Some("[___] peek sp:spotify:track:t5"), &mappings),
+            target
+        );
+        // Unparseable target is returned untouched.
+        assert_eq!(
+            apply_tag_mappings_to_target("[A1B] raw garbage", None, &{
+                let mut m = HashMap::new();
+                m.insert("peek".to_string(), "peak".to_string());
+                m
+            }),
+            "[A1B] raw garbage"
+        );
     }
 }

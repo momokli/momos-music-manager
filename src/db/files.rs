@@ -1209,7 +1209,7 @@ pub async fn compute_target_comment(pool: &Pool<Sqlite>, file_id: i64) -> Result
     let mood_char = if mood_present { 'M' } else { '_' };
     let vibe_char = if vibe_present { 'V' } else { '_' };
 
-    Ok(generate_target_comment(
+    let comment = generate_target_comment(
         phase_char,
         mood_char,
         vibe_char,
@@ -1217,7 +1217,22 @@ pub async fn compute_target_comment(pool: &Pool<Sqlite>, file_id: i64) -> Result
         file.spotify_id.as_deref(),
         file.soundcloud_id.as_deref(),
         file.youtube_id.as_deref(),
-    ))
+    );
+
+    // Tag-inbox staging: open rename/merge mappings rewrite the canonical
+    // spelling on the next write (no auto-apply — only decisions the user
+    // made in the inbox are honored). Typed tags the user resolved are kept
+    // with their canonical spelling instead of being silently dropped.
+    let mappings = crate::db::load_tag_inbox_mapping_map(pool).await?;
+    if !mappings.is_empty() {
+        return Ok(crate::comment::apply_tag_mappings_to_target(
+            &comment,
+            file.comment.as_deref(),
+            &mappings,
+        ));
+    }
+
+    Ok(comment)
 }
 
 /// Batch version of `compute_target_comment`. Fetches ALL resolved tags for ALL given
