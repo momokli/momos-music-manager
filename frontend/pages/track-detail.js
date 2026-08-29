@@ -9,12 +9,15 @@
  */
 
 import { fetchJSON } from "../shared/api.js";
+import { showToast } from "../shared/components.js";
 
 /* ------------------------------------------------------------------ */
 /*  State                                                              */
 /* ------------------------------------------------------------------ */
 
 let abortController = null;
+let currentTrackId = null;
+let typeaheadTimer = null;
 
 /* ------------------------------------------------------------------ */
 /*  Initialization                                                     */
@@ -32,10 +35,13 @@ export async function init(container, signal) {
 
   container.innerHTML = renderLoading();
 
+  currentTrackId = id;
+
   try {
     const resp = await fetchJSON(`/api/tracks/${id}/detail`, { signal: combinedSignal });
     const data = resp.data || resp;
     container.innerHTML = renderPage(data);
+    wireCorrectionEvents(container, id);
   } catch (err) {
     if (combinedSignal.aborted) return;
     container.innerHTML = renderError(`Failed to load: ${err.message}`);
@@ -164,6 +170,16 @@ function renderFileCards(files, track) {
     <div class="detail-file-list">
       ${files.map((f) => renderFileCard(f, track)).join("")}
     </div>
+    <div class="link-file-typeahead">
+      <input
+        type="text"
+        class="input-text input-search"
+        id="link-file-search"
+        placeholder="Link a file… (search by name)"
+        autocomplete="off"
+      />
+      <div class="tag-dropdown" id="link-file-dropdown"></div>
+    </div>
   `;
 }
 
@@ -193,6 +209,9 @@ function renderFileCard(f, track) {
       <div class="detail-file-card-header">
         <span class="service-badge">${escHtml(f.fileType ? f.fileType.toUpperCase() : "FILE")}</span>
         <span class="detail-file-title">${escHtml(f.title || f.filePath?.split("/").pop() || "—")}</span>
+        <button class="disconnect-btn" data-file-id="${f.id}" title="Disconnect this file from track">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
       </div>
       <table class="detail-kv">
         <tbody>
@@ -291,6 +310,162 @@ function renderPlaylists(playlists) {
         .join("")}
     </div>
   `;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Correction Events                                                  */
+/* ------------------------------------------------------------------ */
+
+function wireCorrectionEvents(container, trackId) {
+  // Disconnect button clicks
+  container.querySelectorAll(".disconnect-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const fileId = parseInt(btn.dataset.fileId, 10);
+      if (!fileId) return;
+      await disconnectFile(fileId, trackId, btn);
+    });
+  });
+
+  // Typeahead input
+  const searchInput = container.querySelector("#link-file-search");
+  const dropdown = container.querySelector("#link-file-dropdown");
+  if (!searchInput || !dropdown) return;
+
+  searchInput.addEventListener("input", () => {
+    clearTimeout(typeaheadTimer);
+    const q = searchInput.value.trim();
+    if (q.length < 2) {
+      dropdown.classList.remove("open");
+      dropdown.innerHTML = "";
+      return;
+    }
+    typeaheadTimer = setTimeout(
+      () => searchFilesForLinking(q, dropdown, trackId, searchInput),
+      250,
+    );
+  });
+
+  // Keyboard navigation
+  searchInput.addEventListener("keydown", (e) => {
+    const items = dropdown.querySelectorAll(".tag-dropdown-item");
+    const active = dropdown.querySelector(".tag-dropdown-item.active");
+    let idx = Array.from(items).indexOf(active);
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      idx = Math.min(idx + 1, items.length - 1);
+      items.forEach((it) => it.classList.remove("active"));
+      if (items[idx]) items[idx].classList.add("active");
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      idx = Math.max(idx - 1, 0);
+      items.forEach((it) => it.classList.remove("active"));
+      if (items[idx]) items[idx].classList.add("active");
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (active) active.click();
+    } else if (e.key === "Escape") {
+      dropdown.classList.remove("open");
+      dropdown.innerHTML = "";
+      searchInput.blur();
+    }
+  });
+
+  // Click outside closes dropdown
+  document.addEventListener("click", (e) => {
+    if (!searchInput.contains(e.target) && !dropdown.contains(e.target)) {
+      dropdown.classList.remove("open");
+      dropdown.innerHTML = "";
+    }
+  });
+}
+
+async function disconnectFile(fileId, trackId, btn) {
+  const origHtml = btn.innerHTML;
+  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+  btn.disabled = true;
+  try {
+    await fetchJSON(`/api/files/${fileId}/track-corrections`, {
+      method: "PUT",
+      body: JSON.stringify({
+        corrections: [{ trackId, linkType: "exclude" }],
+      }),
+    });
+    showToast("File disconnected from track", "success");
+    // Re-fetch the page
+    await refreshDetail();
+  } catch (err) {
+    showToast(`Failed: ${err.message}`, "error");
+    btn.innerHTML = origHtml;
+    btn.disabled = false;
+  }
+}
+
+async function searchFilesForLinking(q, dropdown, trackId, searchInput) {
+  try {
+    const resp = await fetchJSON(
+      `/api/files?search=${encodeURIComponent(q)}&isLocal=true&limit=10`,
+    );
+    const files = resp.data || [];
+    if (files.length === 0) {
+      dropdown.innerHTML = '<div class="tag-dropdown-empty">No files found</div>';
+      dropdown.classList.add("open");
+      return;
+    }
+    dropdown.innerHTML = files
+      .map(
+        (f) =>
+          `<div class="tag-dropdown-item" data-file-id="${f.id}">${escHtml(f.artist || "")} — ${escHtml(f.title || f.filePath?.split("/").pop() || "")}</div>`,
+      )
+      .join("");
+    dropdown.classList.add("open");
+
+    // Wire clicks on dropdown items
+    dropdown.querySelectorAll(".tag-dropdown-item").forEach((item) => {
+      item.addEventListener("click", async () => {
+        const fileId = parseInt(item.dataset.fileId, 10);
+        if (!fileId) return;
+        await linkFile(fileId, trackId, searchInput, dropdown);
+      });
+    });
+  } catch (err) {
+    dropdown.innerHTML = `<div class="tag-dropdown-empty">Error: ${escHtml(err.message)}</div>`;
+    dropdown.classList.add("open");
+  }
+}
+
+async function linkFile(fileId, trackId, searchInput, dropdown) {
+  dropdown.classList.remove("open");
+  dropdown.innerHTML = "";
+  searchInput.value = "";
+  searchInput.placeholder = "Linking…";
+  try {
+    await fetchJSON(`/api/files/${fileId}/track-corrections`, {
+      method: "PUT",
+      body: JSON.stringify({
+        corrections: [{ trackId, linkType: "include" }],
+      }),
+    });
+    showToast("File linked to track", "success");
+    await refreshDetail();
+  } catch (err) {
+    showToast(`Failed: ${err.message}`, "error");
+    searchInput.placeholder = "Link a file… (search by name)";
+  }
+}
+
+async function refreshDetail() {
+  if (!currentTrackId) return;
+  const container = document.getElementById("main-content");
+  if (!container) return;
+  try {
+    const resp = await fetchJSON(`/api/tracks/${currentTrackId}/detail`);
+    const data = resp.data || resp;
+    container.innerHTML = renderPage(data);
+    wireCorrectionEvents(container, currentTrackId);
+  } catch (err) {
+    showToast(`Failed to refresh: ${err.message}`, "error");
+  }
 }
 
 /* ------------------------------------------------------------------ */

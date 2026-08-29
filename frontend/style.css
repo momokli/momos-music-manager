@@ -4770,6 +4770,45 @@ th.drop-target {
     width: 30%;
 }
 
+/* ── File↔Track Correction Buttons ────── */
+.disconnect-btn {
+    margin-left: auto;
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    transition:
+        color var(--transition),
+        border-color var(--transition),
+        background var(--transition);
+}
+.disconnect-btn:hover {
+    color: var(--red);
+    border-color: var(--red);
+    background: rgba(239, 68, 68, 0.1);
+}
+.disconnect-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+/* ── Link-file Typeahead ───────────────  */
+.link-file-typeahead {
+    margin-top: 0.75rem;
+    position: relative;
+}
+.link-file-typeahead .input-search {
+    width: 100%;
+}
+
 /* Archive toggle button for playlist-track-archive */
 .archive-toggle-btn {
     cursor: pointer;

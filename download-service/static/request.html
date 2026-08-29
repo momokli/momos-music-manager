@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1.0, user-scalable=no"
+        />
+        <title>Song Requests</title>
+        <style>
+            :root {
+                --bg: #0c0a09;
+                --card: #1c1917;
+                --border: #292524;
+                --text: #d6d3d1;
+                --muted: #78716c;
+                --emerald: #10b981;
+                --amber: #f59e0b;
+                --rose: #f43f5e;
+            }
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            body {
+                font-family: Georgia, serif;
+                background: var(--bg);
+                color: var(--text);
+                min-height: 100dvh;
+                -webkit-tap-highlight-color: transparent;
+            }
+            .app {
+                max-width: 480px;
+                margin: 0 auto;
+                min-height: 100dvh;
+                display: flex;
+                flex-direction: column;
+                border-left: 1px solid var(--border);
+                border-right: 1px solid var(--border);
+            }
+            header {
+                padding: 1.5rem 1rem 1rem;
+                text-align: center;
+                border-bottom: 2px solid var(--border);
+                position: sticky;
+                top: 0;
+                background: var(--bg);
+                z-index: 10;
+            }
+            header .line {
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                height: 3px;
+                background: linear-gradient(
+                    90deg,
+                    var(--border),
+                    var(--emerald),
+                    var(--border)
+                );
+            }
+            header h1 {
+                font-size: 1.4rem;
+                font-weight: 700;
+            }
+            main {
+                flex: 1;
+                padding: 1rem;
+                overflow-y: auto;
+            }
+            nav {
+                display: flex;
+                border-top: 2px solid var(--border);
+                position: sticky;
+                bottom: 0;
+                background: var(--bg);
+                padding: 0.5rem;
+                padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+                z-index: 10;
+            }
+            nav button {
+                flex: 1;
+                padding: 0.75rem;
+                background: none;
+                border: 1px solid transparent;
+                color: var(--muted);
+                font-family: "Courier New", monospace;
+                font-size: 0.65rem;
+                text-transform: uppercase;
+                letter-spacing: 0.1em;
+                cursor: pointer;
+            }
+            nav button.active {
+                background: rgba(255, 255, 255, 0.03);
+                border-color: var(--border);
+                color: var(--emerald);
+            }
+            .search-wrap {
+                position: relative;
+                margin-bottom: 1rem;
+            }
+            .search-wrap input {
+                width: 100%;
+                padding: 0.9rem 1rem 0.9rem 2.75rem;
+                background: rgba(255, 255, 255, 0.03);
+                border: 1px solid var(--border);
+                color: var(--emerald);
+                font-family: "Courier New", monospace;
+                font-size: 0.85rem;
+                outline: none;
+            }
+            .search-wrap input:focus {
+                border-color: var(--emerald);
+            }
+            .search-wrap .icon {
+                position: absolute;
+                left: 1rem;
+                top: 50%;
+                transform: translateY(-50%);
+                color: var(--emerald);
+                opacity: 0.5;
+            }
+            .search-hint {
+                text-align: center;
+                padding: 2rem 0;
+                color: var(--muted);
+                font-style: italic;
+            }
+            .card {
+                display: flex;
+                align-items: center;
+                gap: 0.75rem;
+                padding: 0.75rem;
+                background: var(--card);
+                border: 1px solid var(--border);
+                margin-bottom: 0.5rem;
+            }
+            .card img {
+                width: 52px;
+                height: 52px;
+                object-fit: cover;
+                border: 1px solid var(--border);
+                flex-shrink: 0;
+                background: #1c1917;
+            }
+            .card .info {
+                flex: 1;
+                min-width: 0;
+            }
+            .card .title {
+                font-size: 0.85rem;
+                font-weight: 700;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            .card .artist {
+                font-size: 0.75rem;
+                color: var(--muted);
+                font-style: italic;
+            }
+            .badge {
+                display: inline-block;
+                font-family: "Courier New", monospace;
+                font-size: 0.55rem;
+                padding: 0.15rem 0.4rem;
+                border: 1px solid var(--border);
+                margin-top: 0.3rem;
+            }
+            .badge::before {
+                content: "";
+                display: inline-block;
+                width: 6px;
+                height: 6px;
+                border-radius: 50%;
+                margin-right: 4px;
+                vertical-align: middle;
+            }
+            .badge.spotify {
+                color: #1db954;
+                border-color: #1db95440;
+            }
+            .badge.spotify::before {
+                background: #1db954;
+            }
+            .badge.youtube {
+                color: #f00;
+                border-color: #f0040;
+            }
+            .badge.youtube::before {
+                background: #f00;
+            }
+            .badge.soundcloud {
+                color: #FC3D0A;
+                border-color: #FC3D0A40;
+            }
+            .badge.soundcloud::before {
+                background: #FC3D0A;
+            }
+            .btn {
+                padding: 0.5rem 0.75rem;
+                font-family: "Courier New", monospace;
+                font-size: 0.65rem;
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+                border: 1px solid var(--emerald);
+                background: transparent;
+                color: var(--emerald);
+                cursor: pointer;
+                white-space: nowrap;
+                flex-shrink: 0;
+                background: #1c1917;
+            }
+            .btn:active {
+                transform: scale(0.96);
+            }
+            .btn.requested {
+                border-color: var(--amber);
+                color: var(--amber);
+            }
+            .btn:disabled {
+                opacity: 0.3;
+                cursor: not-allowed;
+            }
+            .status {
+                font-family: "Courier New", monospace;
+                font-size: 0.6rem;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+                margin-top: 0.2rem;
+            }
+            .status.ready {
+                color: #059669;
+            }
+            .status.failed {
+                color: var(--rose);
+            }
+            .status.pending,
+            .status.stage2_deemix,
+            .status.stage3_spotdl {
+                color: var(--amber);
+            }
+            .toast {
+                position: fixed;
+                bottom: 5rem;
+                left: 50%;
+                transform: translateX(-50%);
+                background: var(--card);
+                border: 1px solid var(--emerald);
+                color: var(--emerald);
+                padding: 0.5rem 1rem;
+                font-family: "Courier New", monospace;
+                font-size: 0.7rem;
+                z-index: 100;
+                opacity: 0;
+                transition: opacity 0.3s;
+                pointer-events: none;
+            }
+            .toast.show {
+                opacity: 1;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="app">
+            <header>
+                <div class="line"></div>
+                <h1 id="event-name">Song Requests</h1>
+            </header>
+            <main>
+                <div id="tab-search">
+                    <div class="search-wrap">
+                        <span class="icon">&#x1F50D;</span
+                        ><input
+                            type="text"
+                            id="search-input"
+                            placeholder="What song do you wanna hear?"
+                            autocomplete="off"
+                        />
+                    </div>
+                    <div id="search-results"></div>
+                    <div class="search-hint" id="search-hint">
+                        Type at least 2 characters
+                    </div>
+                </div>
+                <div id="tab-requests" style="display: none">
+                    <div id="requests-list"></div>
+                </div>
+            </main>
+            <nav>
+                <button class="active" data-tab="search">&#x1F50D; Search</button>
+                <button data-tab="requests" id="requests-tab-btn">
+                    &#x1F4CB; Requests <span></span>
+                </button>
+            </nav>
+        </div>
+        <div class="toast" id="toast"></div>
+        <script>
+            var API = window.location.origin;
+            var EVENT = localStorage.getItem("req_event_name") || "Song Requests";
+            var MAX = parseInt(localStorage.getItem("req_max") || "5");
+            document.getElementById("event-name").textContent = EVENT;
+            document.title = EVENT;
+            var myCount = parseInt(localStorage.getItem("req_my_count") || "0");
+            function updateCount() {
+                fetch(API + "/stats").then(function(r){return r.json()}).then(function(d){
+                    var el = document.getElementById("requests-tab-btn").querySelector("span");
+                    var total = d.total || 0;
+                    el.textContent = total > 0 ? "(" + total + ")" : "";
+                }).catch(function(){});
+            }
+
+            document.querySelectorAll("nav button").forEach(function (b) {
+                b.addEventListener("click", function () {
+                    document.querySelectorAll("nav button").forEach(function (x) {
+                        x.classList.remove("active");
+                    });
+                    b.classList.add("active");
+                    var t = b.dataset.tab;
+                    document.getElementById("tab-search").style.display =
+                        t === "search" ? "" : "none";
+                    document.getElementById("tab-requests").style.display =
+                        t === "requests" ? "" : "none";
+                    if (t === "requests") fetchRequests();
+                });
+            });
+
+            var searchInput = document.getElementById("search-input"),
+                resultsEl = document.getElementById("search-results"),
+                hint = document.getElementById("search-hint"),
+                timeout = null;
+            searchInput.addEventListener("input", function () {
+                var q = searchInput.value.trim();
+                if (q.length < 2) {
+                    resultsEl.innerHTML = "";
+                    hint.style.display = "";
+                    return;
+                }
+                hint.style.display = "none";
+                resultsEl.innerHTML = '<div class="search-hint">Searching...</div>';
+                clearTimeout(timeout);
+                timeout = setTimeout(function () {
+                    doSearch(q);
+                }, 300);
+            });
+            async function doSearch(q) {
+                try {
+                    var r = await fetch(
+                        API + "/search?q=" + encodeURIComponent(q) + "&limit=5",
+                    );
+                    if (!r.ok) throw Error("fail");
+                    var d = await r.json();
+                    render(d);
+                } catch (e) {
+                    resultsEl.innerHTML = '<div class="search-hint">Not available</div>';
+                }
+            }
+            function render(data) {
+                var results = data.results || [];
+                if (!results.length) {
+                    resultsEl.innerHTML = '<div class="search-hint">Nothing found</div>';
+                    return;
+                }
+                var h = "";
+                for (var i = 0; i < results.length; i++) {
+                    var t = results[i],
+                        atLimit = myCount >= MAX,
+                        src = t.source || "spotify";
+                    h +=
+                        '<div class="card"><img src="' +
+                        esc(t.coverUrl || "") +
+                        '"><div class="info"><div class="title">' +
+                        esc(t.title) +
+                        '</div><div class="artist">' +
+                        esc(t.artist) +
+                        '</div><span class="badge ' +
+                        src +
+                        '">' +
+                        svgIcon(src) +
+                        src.toUpperCase() + '</span>' + <span style="font-size:.6rem;color:var(--muted)">' + fm(t.durationMs||0) + '</span>' +
+                        '</span></div><button class="btn' +
+                        (atLimit ? " requested" : "") +
+                        '" data-url="' +
+                        esc(t.spotifyUrl || t.sourceUrl || "") +
+                        '" data-title="' +
+                        esc(t.title) +
+                        '" ' +
+                        (atLimit ? "disabled" : "") +
+                        ">" +
+                        (atLimit ? "Wanted" : "Want") +
+                        "</button></div>";
+                }
+                resultsEl.innerHTML = h;
+                resultsEl.querySelectorAll(".btn:not([disabled])").forEach(function (b) {
+                    b.addEventListener("click", function () {
+                        request(b);
+                    });
+                });
+            }
+
+            async function request(btn) {
+                if (myCount >= MAX) {
+                    toast("Max " + MAX + " songs");
+                    return;
+                }
+                myCount++;
+                localStorage.setItem("req_my_count", myCount.toString());
+                updateCount();
+                btn.disabled = true;
+                btn.classList.add("requested");
+                btn.textContent = "Wanted";
+                toast('"' + btn.dataset.title + '" sent!');
+                try {
+                    await fetch(API + "/download", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ url: btn.dataset.url }),
+                    });
+                } catch (e) {}
+            }
+            async function fetchRequests() {
+                try {
+                    var r = await fetch(API + "/queue");
+                    if (!r.ok) return;
+                    var d = await r.json();
+                    renderRequests(d.tasks || []);
+                } catch (e) {}
+            }
+            function renderRequests(tasks) {
+                var el = document.getElementById("requests-list");
+                if (!tasks.length) {
+                    el.innerHTML = '<div class="search-hint">No requests yet</div>';
+                    return;
+                }
+                tasks.sort(function (a, b) {
+                    if (a.status === "ready" && b.status !== "ready") return -1;
+                    if (a.status !== "ready" && b.status === "ready") return 1;
+                    return 0;
+                });
+                el.innerHTML = tasks
+                    .map(function (t) {
+                        var s = t.status || "pending";
+                        return (
+                            '<div class="card"><img src="' +
+                            esc(t.cover_url || "") +
+                            '"><div class="info"><div class="title">' +
+                            esc(t.title || t.artist || "Downloading...") +
+                            '</div><div class="artist">' +
+                            esc(t.artist || "") +
+                            '</div><div class="status ' +
+                            s +
+                            '">' +
+                            icon(s) +
+                            " " +
+                            s +
+                            "</div></div></div>"
+                        );
+                    })
+                    .join("");
+            }
+            function fm(ms){if(!ms)return"";var m=Math.floor(ms/60000),s=Math.floor((ms%60000)/1000);return m+":"+(s<10?"0":"")+s}
+            function svgIcon(s) {
+                if (s === "spotify") return '<svg viewBox="0 0 24 24" fill="#1DB954"><path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.019.599-1.559.3z"/><\/svg>';
+                if (s === "youtube") return '<svg viewBox="0 0 24 24" fill="#FF0000"><path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/><\/svg>';
+                if (s === "soundcloud") return '<svg viewBox="0 0 24 24" fill="#FC3D0A"><path d="M1.175 12.475l.005 2.893-.005.024c-.005.022-.027.205-.027.205.15 2.38 2.103 4.261 4.513 4.316l11.365-.003c3.822-.178 6.825-3.347 6.834-7.202.009-3.872-3.015-7.024-6.868-7.024-.556 0-1.097.067-1.617.195-.614-2.273-2.658-3.91-5.057-3.879-2.832.034-5.125 2.338-5.143 5.187v3.388zm2.934-.153l-.005 2.618c0 .052.042.094.094.094h.147a.094.094 0 0 0 .094-.094l.005-2.618a.094.094 0 0 0-.094-.094h-.147a.094.094 0 0 0-.094.094zm2.159-1.865l-.009 4.483c0 .052.042.094.094.094h.147a.094.094 0 0 0 .094-.094l.009-4.483a.094.094 0 0 0-.094-.094h-.147a.094.094 0 0 0-.094.094z"/><\/svg>';
+                return '';
+            }
+            function esc(s) {
+                var d = document.createElement("div");
+                d.textContent = s || "";
+                return d.innerHTML;
+            }
+            function icon(s) {
+                return (
+                    {
+                        ready: "ok",
+                        failed: "x",
+                        pending: "...",
+                        stage2_deemix: "v",
+                        stage3_spotdl: "v",
+                    }[s] || "..."
+                );
+            }
+            function toast(m) {
+                var e = document.getElementById("toast");
+                e.textContent = m;
+                e.classList.add("show");
+                setTimeout(function () {
+                    e.classList.remove("show");
+                }, 2500);
+            }
+            setInterval(function () {
+                if (document.getElementById("tab-requests").style.display !== "none")
+                    fetchRequests();
+            }, 15000);
+            fetchRequests();
+            updateCount();
+        </script>
+    </body>
+</html>

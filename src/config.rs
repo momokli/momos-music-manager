@@ -56,6 +56,8 @@ struct TomlConfig {
     server: Option<ServerToml>,
     polling: Option<PollingToml>,
     maintainer: Option<MaintainerToml>,
+    telemetry: Option<TelemetryToml>,
+    telemetry_receiver: Option<TelemetryReceiverToml>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,6 +107,22 @@ struct MaintainerToml {
     traktor_import_enabled: Option<bool>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct TelemetryToml {
+    enabled: Option<bool>,
+    base_url: Option<String>,
+    token: Option<String>,
+    instance: Option<String>,
+    interval_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TelemetryReceiverToml {
+    bind: Option<String>,
+    base_dir: Option<String>,
+    token: Option<String>,
+}
+
 // ── Runtime representation ─────────────────────────────────────────────────
 
 /// Service credentials used throughout the application.
@@ -148,6 +166,18 @@ pub struct ServiceCredentials {
     pub maintainer_auto_prune: bool,
     pub maintainer_auto_cleanup_dirs: bool,
     pub maintainer_traktor_import_enabled: bool,
+
+    // Telemetry (client push)
+    pub telemetry_enabled: bool,
+    pub telemetry_base_url: Option<String>,
+    pub telemetry_token: Option<String>,
+    pub telemetry_instance: String,
+    pub telemetry_interval_secs: u64,
+
+    // Telemetry receiver (collector)
+    pub telemetry_receiver_bind: String,
+    pub telemetry_receiver_base_dir: String,
+    pub telemetry_receiver_token: Option<String>,
 }
 
 impl ServiceCredentials {
@@ -354,6 +384,66 @@ impl ServiceCredentials {
                     .and_then(|m| m.traktor_import_enabled)
             })
             .unwrap_or(true),
+
+            // Telemetry (client push)
+            telemetry_enabled: std::env::var("MOMOS_TELEMETRY_ENABLED")
+                .ok()
+                .and_then(|v| v.parse::<bool>().ok())
+                .or_else(|| toml_config.telemetry.as_ref().and_then(|t| t.enabled))
+                .unwrap_or(false),
+
+            telemetry_base_url: env_or_toml_opt(
+                "MOMOS_TELEMETRY_BASE_URL",
+                toml_config
+                    .telemetry
+                    .as_ref()
+                    .and_then(|t| t.base_url.clone()),
+            ),
+            telemetry_token: env_or_toml_opt(
+                "MOMOS_TELEMETRY_TOKEN",
+                toml_config.telemetry.as_ref().and_then(|t| t.token.clone()),
+            ),
+            telemetry_instance: env_or_toml(
+                "MOMOS_TELEMETRY_INSTANCE",
+                toml_config
+                    .telemetry
+                    .as_ref()
+                    .and_then(|t| t.instance.clone()),
+            )
+            .unwrap_or_else(|| "macbook".to_string()),
+
+            telemetry_interval_secs: std::env::var("MOMOS_TELEMETRY_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .or_else(|| toml_config.telemetry.as_ref().and_then(|t| t.interval_secs))
+                .unwrap_or(0),
+
+            // Telemetry receiver (collector)
+            telemetry_receiver_bind: env_or_toml(
+                "MOMOS_TELEMETRY_RECEIVER_BIND",
+                toml_config
+                    .telemetry_receiver
+                    .as_ref()
+                    .and_then(|r| r.bind.clone()),
+            )
+            .unwrap_or_else(|| "127.0.0.1:8330".to_string()),
+
+            telemetry_receiver_base_dir: env_or_toml(
+                "MOMOS_TELEMETRY_RECEIVER_BASE_DIR",
+                toml_config
+                    .telemetry_receiver
+                    .as_ref()
+                    .and_then(|r| r.base_dir.clone()),
+            )
+            .unwrap_or_else(default_telemetry_base_dir),
+
+            telemetry_receiver_token: env_or_toml_opt(
+                "MOMOS_TELEMETRY_RECEIVER_TOKEN",
+                toml_config
+                    .telemetry_receiver
+                    .as_ref()
+                    .and_then(|r| r.token.clone()),
+            ),
         };
 
         info!(
@@ -370,6 +460,15 @@ impl ServiceCredentials {
             credentials.maintainer_auto_prune,
             credentials.maintainer_auto_cleanup_dirs,
             credentials.maintainer_traktor_import_enabled,
+        );
+
+        info!(
+            "Telemetry config: enabled={}, base_url={:?}, instance={}, interval={}s (receiver_bind={})",
+            credentials.telemetry_enabled,
+            credentials.telemetry_base_url,
+            credentials.telemetry_instance,
+            credentials.telemetry_interval_secs,
+            credentials.telemetry_receiver_bind,
         );
 
         credentials
@@ -431,6 +530,22 @@ impl ServiceCredentials {
             )
             .and_then(|v| v.parse().ok())
             .unwrap_or(true),
+
+            telemetry_enabled: env_var_optional("MOMOS_TELEMETRY_ENABLED")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
+            telemetry_base_url: env_var_optional("MOMOS_TELEMETRY_BASE_URL"),
+            telemetry_token: env_var_optional("MOMOS_TELEMETRY_TOKEN"),
+            telemetry_instance: env_var_optional("MOMOS_TELEMETRY_INSTANCE")
+                .unwrap_or_else(|| "macbook".to_string()),
+            telemetry_interval_secs: env_var_optional("MOMOS_TELEMETRY_INTERVAL_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            telemetry_receiver_bind: env_var_optional("MOMOS_TELEMETRY_RECEIVER_BIND")
+                .unwrap_or_else(|| "127.0.0.1:8330".to_string()),
+            telemetry_receiver_base_dir: env_var_optional("MOMOS_TELEMETRY_RECEIVER_BASE_DIR")
+                .unwrap_or_else(default_telemetry_base_dir),
+            telemetry_receiver_token: env_var_optional("MOMOS_TELEMETRY_RECEIVER_TOKEN"),
         }
     }
 
@@ -572,6 +687,14 @@ impl ServiceCredentials {
             maintainer_auto_prune: false,
             maintainer_auto_cleanup_dirs: false,
             maintainer_traktor_import_enabled: false,
+            telemetry_enabled: false,
+            telemetry_base_url: None,
+            telemetry_token: None,
+            telemetry_instance: "macbook".to_string(),
+            telemetry_interval_secs: 0,
+            telemetry_receiver_bind: "127.0.0.1:8330".to_string(),
+            telemetry_receiver_base_dir: "/tmp/momos-analytics".to_string(),
+            telemetry_receiver_token: None,
         }
     }
 }
@@ -622,6 +745,11 @@ fn env_or_toml_port(name: &str, toml_value: Option<u16>) -> Option<u16> {
 fn default_database_url() -> String {
     let expanded = shellexpand::tilde("~/.local/share/momos-music-manager/library.db");
     format!("sqlite:{}", expanded)
+}
+
+/// Built-in default telemetry collector directory.
+fn default_telemetry_base_dir() -> String {
+    shellexpand::tilde("~/.local/share/momos-music-manager/analytics").to_string()
 }
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ use crate::db::{
     File, compute_target_comment, compute_target_comments_batch, find_tag_similar_tracks,
     get_file_detail, get_file_variants, get_key_comparison,
 };
+use crate::external_tools::resolve_tool;
 use crate::tasks::start_write_comment_task;
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -2308,7 +2309,7 @@ async fn file_stream_handler(
     // If the first audio stream is stereo (2ch), use it directly.
     // If it's mono (1ch), it's a stem — mix ALL streams together.
     if is_stem_m4a {
-        let stream0_channels: Option<u32> = TokioCommand::new("ffprobe")
+        let stream0_channels: Option<u32> = TokioCommand::new(resolve_tool("ffprobe"))
             .args([
                 "-v",
                 "error",
@@ -2333,7 +2334,7 @@ async fn file_stream_handler(
 
         let is_master_at_0 = stream0_channels == Some(2);
 
-        let mut cmd = TokioCommand::new("ffmpeg");
+        let mut cmd = TokioCommand::new(resolve_tool("ffmpeg"));
         cmd.args(["-i", file_path]);
 
         if is_master_at_0 {
@@ -2603,5 +2604,11 @@ pub(super) fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/files/stage-for-conversion",
             post(stage_for_conversion_handler),
+        )
+        // File-track correction overrides (manual file↔track linking)
+        .route(
+            "/api/files/{id}/track-corrections",
+            get(crate::api::file_track_corrections::file_track_corrections_get)
+                .put(crate::api::file_track_corrections::file_track_corrections_put),
         )
 }

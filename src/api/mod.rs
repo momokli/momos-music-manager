@@ -10,6 +10,7 @@ pub mod deemix_api;
 pub mod digging;
 pub mod dynamic_bundles;
 pub mod explorer;
+pub mod file_track_corrections;
 pub mod files;
 pub mod folders;
 pub mod infrastructure;

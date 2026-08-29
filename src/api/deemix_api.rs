@@ -184,8 +184,14 @@ async fn deemix_queue_handler(
             _ => "queued",
         };
         let _ = sqlx::query(
-            "INSERT OR IGNORE INTO deemix_downloads (spotify_playlist_url, playlist_name, status, track_count_total, track_count_downloaded, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO deemix_downloads (spotify_playlist_url, playlist_name, status, track_count_total, track_count_downloaded, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(spotify_playlist_url) DO UPDATE SET
+                 playlist_name = excluded.playlist_name,
+                 status = excluded.status,
+                 track_count_total = excluded.track_count_total,
+                 track_count_downloaded = excluded.track_count_downloaded,
+                 updated_at = excluded.updated_at",
         )
         .bind(&url)
         .bind(&item.title)

@@ -1829,4 +1829,10 @@ pub(super) fn router() -> Router<Arc<AppState>> {
         .route("/api/tracks/{id}", get(track_handler))
         .route("/api/tracks/{id}/detail", get(track_detail_handler))
         .route("/api/tracks/{id}/backpack", post(track_backpack_handler))
+        // Track-file correction overrides (manual file↔track linking)
+        .route(
+            "/api/tracks/{id}/file-corrections",
+            get(crate::api::file_track_corrections::track_file_corrections_get)
+                .put(crate::api::file_track_corrections::track_file_corrections_put),
+        )
 }

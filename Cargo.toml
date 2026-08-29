@@ -1,6 +1,6 @@
 [package]
 name = "momos-music-manager"
-version = "0.9.0"
+version = "1.0.0"
 edition = "2024"
 description = "Momo's Music Manager - Multi-service library sync and harmonic discovery for DJs"
 
@@ -24,7 +24,7 @@ tower = "0.5.2"
 hyper = "1.7.0"
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 futures = "0.3"
-reqwest = { version = "0.12", features = ["json", "cookies"] }
+reqwest = { version = "0.12", features = ["json", "cookies", "stream"] }
 dotenvy = "0.15"
 clap = { version = "4.5.50", features = ["derive"] }
 sha2 = "0.10"
@@ -33,7 +33,6 @@ walkdir = "2.5"
 shellexpand = "3.1"
 tempfile = "3.8"
 soundcloud-rs = "0.14.0"
-youtube = "0.1.1"
 roxmltree = "0.20"
 lofty = "0.20"
 tokio-tungstenite = "0.21"
@@ -43,6 +42,11 @@ toml = "0.8"
 dirs = "6.0"
 rust-embed = "8"
 unicode-normalization = "0.1"
+webbrowser = "1"
+tray-icon = "0.24.2"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
 
 # ML / Embeddings
 candle-core = "0.8"
@@ -53,3 +57,15 @@ tokenizers = "0.21"
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[package.metadata.bundle]
+name = "Momo's Music Manager"
+identifier = "com.momo.music-manager"
+icon = ["resources/icon.icns"]
+category = "Music"
+short_description = "Multi-service music library management for DJs"
+long_description = "Momo's Music Manager — Multi-service library sync, harmonic matching, tag organization, and Traktor integration for DJs."
+osx_minimum_system_version = "13.0"
+
+[package.metadata.bundle.settings.macos]
+LSUIElement = true

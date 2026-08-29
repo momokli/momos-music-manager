@@ -1,0 +1,12 @@
+# Add this block to the server's Caddyfile (~/caddy/Caddyfile), then reload:
+#   cd ~/caddy && docker compose restart caddy
+# (or, if Caddy runs as the "mellon-caddy" container:
+#   docker exec mellon-caddy caddy reload --config /etc/caddy/Caddyfile)
+
+telemetry.music.klimk.es {
+    reverse_proxy 127.0.0.1:8330
+    encode gzip
+}
+
+# Also mark telemetry.music.klimk.es as used in ~/home_domains.txt.
+# *.klimk.es TLS is auto-provisioned by Caddy via Cloudflare DNS.

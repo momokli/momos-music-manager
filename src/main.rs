@@ -12,13 +12,16 @@ use momos_music_manager::AppState;
 use momos_music_manager::config::ServiceCredentials;
 use momos_music_manager::tasks::TaskManager;
 
+#[cfg(target_os = "macos")]
+mod tray;
+
 #[derive(Parser)]
 #[command(name = "momos-music-manager")]
 #[command(about = "Momo's Music Manager - Multi-service library sync for DJs")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -31,6 +34,8 @@ enum Commands {
         port: Option<u16>,
         #[arg(long)]
         public_url: Option<String>,
+        #[arg(long, default_value_t = false)]
+        no_browser: bool,
     },
     /// Scan and import files from directory
     Scan {
@@ -65,17 +70,20 @@ enum Commands {
         #[command(subcommand)]
         command: momos_music_manager::deemix::cli::DeemixCommand,
     },
+    /// Telemetry: push DB snapshots or run the collector
+    Telemetry {
+        #[command(subcommand)]
+        command: momos_music_manager::telemetry::TelemetryCommand,
+    },
 }
 
 // ── CLI entry point ────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new("warn,momos_music_manager=info,lofty=error")
     });
 
-    // File appender — daily rolling log in the app data directory
     let log_dir = std::path::PathBuf::from(std::env::var("MOMOS_LOG_DIR").unwrap_or_else(|_| {
         dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -87,7 +95,6 @@ async fn main() -> Result<()> {
     let file_appender = tracing_appender::rolling::daily(&log_dir, "server.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
-    // Both stdout and file
     let stdout_layer = tracing_subscriber::fmt::layer().with_ansi(true);
     let file_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
@@ -99,42 +106,93 @@ async fn main() -> Result<()> {
         .with(file_layer)
         .init();
 
-    // Keep the guard alive for the duration of the program
     std::mem::forget(_guard);
-
     dotenvy::dotenv_override().ok();
 
     let cli = Cli::parse();
 
-    match cli.command {
+    // Default to Serve when no subcommand (Finder .app launch has no args)
+    let command = cli.command.unwrap_or(Commands::Serve {
+        host: None,
+        port: None,
+        public_url: None,
+        no_browser: false,
+    });
+
+    match command {
         Commands::Serve {
             host,
             port,
             public_url,
+            no_browser,
         } => {
             let host = host.unwrap_or_else(|| ServiceCredentials::load().server_host);
             let port = port.unwrap_or_else(|| ServiceCredentials::load().server_port);
-            serve(host, port, public_url).await?;
+
+            #[cfg(target_os = "macos")]
+            {
+                let _ = no_browser; // used on non-macOS path only
+                let (tx, rx) = std::sync::mpsc::channel::<tray::ServerShutdown>();
+                let h = host.clone();
+                let p = port;
+                let pu = public_url.clone();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+                    rt.block_on(async {
+                        if let Err(e) = serve(h, p, pu, true).await {
+                            tracing::error!("Server exited with error: {}", e);
+                        }
+                    });
+                    let _ = tx.send(tray::ServerShutdown);
+                });
+
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    tray::run(host, port, rx);
+                }));
+                return Ok(());
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+                rt.block_on(serve(host, port, public_url, no_browser))?;
+                return Ok(());
+            }
         }
         Commands::Scan { directory } => {
-            let db = create_db_pool().await?;
-            scan_directory(&db, &directory).await?;
+            let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+            rt.block_on(async {
+                let db = create_db_pool().await?;
+                scan_directory(&db, &directory).await
+            })?;
         }
         Commands::DbStatus => {
-            let db = create_db_pool().await?;
-            db_status(&db).await?;
+            let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+            rt.block_on(async {
+                let db = create_db_pool().await?;
+                db_status(&db).await
+            })?;
         }
         Commands::ScanFile { path } => {
-            let db = create_db_pool().await?;
-            scan_single_file(&db, &path).await?;
+            let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+            rt.block_on(async {
+                let db = create_db_pool().await?;
+                scan_single_file(&db, &path).await
+            })?;
         }
         Commands::Dump { output } => {
-            let db = create_db_pool().await?;
-            momos_music_manager::dump::export_dump(&db, &output).await?;
+            let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+            rt.block_on(async {
+                let db = create_db_pool().await?;
+                momos_music_manager::dump::export_dump(&db, &output).await
+            })?;
         }
         Commands::Restore { input } => {
-            let db = create_db_pool().await?;
-            momos_music_manager::dump::import_dump(&db, &input).await?;
+            let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+            rt.block_on(async {
+                let db = create_db_pool().await?;
+                momos_music_manager::dump::import_dump(&db, &input).await
+            })?;
         }
         Commands::InstallLaunchAgent => {
             #[cfg(target_os = "macos")]
@@ -166,7 +224,12 @@ async fn main() -> Result<()> {
             println!("Launch agents are only supported on macOS");
         }
         Commands::Deemix { command } => {
-            momos_music_manager::deemix::cli::run(command).await?;
+            let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+            rt.block_on(momos_music_manager::deemix::cli::run(command))?;
+        }
+        Commands::Telemetry { command } => {
+            let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+            rt.block_on(momos_music_manager::telemetry::run(command))?;
         }
     }
 
@@ -183,7 +246,12 @@ async fn create_db_pool() -> Result<Pool<Sqlite>> {
 }
 
 /// Start the HTTP server with all background tasks.
-async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()> {
+async fn serve(
+    host: String,
+    port: u16,
+    public_url: Option<String>,
+    no_browser: bool,
+) -> Result<()> {
     let config = ServiceCredentials::load();
     let db = create_db_pool().await?;
 
@@ -240,6 +308,10 @@ async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()
     let maint_traktor_import = config.maintainer_traktor_import_enabled;
     let maint_tm = task_manager.clone();
     let maint_cancel = poller_cancel.clone();
+
+    let telemetry_interval = config.telemetry_interval_secs;
+    let telemetry_enabled = config.telemetry_enabled;
+    let telemetry_config = config.clone();
 
     let state = Arc::new(AppState {
         db,
@@ -457,6 +529,26 @@ async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()
         momos_music_manager::auto_backup::start_auto_backup_poller(auto_db, auto_tm).await;
     });
 
+    // Telemetry loop: periodic DB snapshot + metadata push
+    if telemetry_enabled && telemetry_interval > 0 {
+        let tel_db = state.db.clone();
+        let tel_tm = state.task_manager.clone();
+        tokio::spawn(async move {
+            momos_music_manager::telemetry::start_telemetry_loop(
+                tel_db,
+                telemetry_config,
+                tel_tm,
+                telemetry_interval,
+            )
+            .await;
+        });
+        info!("Telemetry loop started (interval: {}s)", telemetry_interval);
+    } else {
+        info!(
+            "Telemetry loop disabled (enabled={telemetry_enabled}, interval={telemetry_interval}s)"
+        );
+    }
+
     // Build the application with routes.
     let app = momos_music_manager::build_router(state);
 
@@ -468,6 +560,15 @@ async fn serve(host: String, port: u16, public_url: Option<String>) -> Result<()
         "🚀 Momo's Music Manager v{} started",
         env!("CARGO_PKG_VERSION")
     );
+
+    // Auto-open browser on startup (unless --no-browser)
+    if !no_browser {
+        let url = format!("http://{}:{}", host, port);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let _ = webbrowser::open(&url);
+        });
+    }
 
     axum::serve(listener, app).await?;
 
@@ -675,6 +776,10 @@ mod tests {
             "help should mention 'db-status'"
         );
         assert!(help.contains("deemix"), "help should mention 'deemix'");
+        assert!(
+            help.contains("telemetry"),
+            "help should mention 'telemetry'"
+        );
     }
 
     #[test]
@@ -723,6 +828,32 @@ mod tests {
             result.is_err(),
             "deemix without a sub-subcommand should fail"
         );
+    }
+
+    #[test]
+    fn test_cli_telemetry_requires_subcommand() {
+        // The `telemetry` subcommand has its own sub-subcommands
+        let result = Cli::command().try_get_matches_from(args(&["telemetry"]));
+        assert!(
+            result.is_err(),
+            "telemetry without a sub-subcommand should fail"
+        );
+    }
+
+    #[test]
+    fn test_cli_telemetry_push_parses() {
+        let matches = Cli::command()
+            .try_get_matches_from(args(&["telemetry", "push"]))
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("telemetry"));
+    }
+
+    #[test]
+    fn test_cli_telemetry_receive_parses() {
+        let matches = Cli::command()
+            .try_get_matches_from(args(&["telemetry", "receive"]))
+            .unwrap();
+        assert_eq!(matches.subcommand_name(), Some("telemetry"));
     }
 
     #[tokio::test]
