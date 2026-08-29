@@ -2605,4 +2605,10 @@ pub(super) fn router() -> Router<Arc<AppState>> {
             "/api/files/stage-for-conversion",
             post(stage_for_conversion_handler),
         )
+        // File-track correction overrides (manual file↔track linking)
+        .route(
+            "/api/files/{id}/track-corrections",
+            get(crate::api::file_track_corrections::file_track_corrections_get)
+                .put(crate::api::file_track_corrections::file_track_corrections_put),
+        )
 }

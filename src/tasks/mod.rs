@@ -73,6 +73,8 @@ pub enum TaskType {
     FolderWatch,
     /// Auto-backup: one check-all-auto-backup-folders cycle
     AutoBackupCheck,
+    /// Telemetry: push a DB snapshot + metadata to the collector
+    TelemetryPush,
 }
 
 /// What to sync for a service
@@ -443,6 +445,7 @@ pub fn task_type_conflict_key(task_type: &TaskType) -> Option<String> {
         TaskType::MaintainerCycle => None,
         TaskType::FolderWatch => None,
         TaskType::AutoBackupCheck => None,
+        TaskType::TelemetryPush => None,
     }
 }
 
@@ -612,6 +615,7 @@ impl Task {
             TaskType::MaintainerCycle => "maintainer_cycle".to_string(),
             TaskType::FolderWatch => "folder_watch".to_string(),
             TaskType::AutoBackupCheck => "auto_backup_check".to_string(),
+            TaskType::TelemetryPush => "telemetry_push".to_string(),
         };
         (task_type_str, task_details)
     }
@@ -1150,6 +1154,7 @@ pub fn task_type_label(task_type: &TaskType) -> String {
         TaskType::MaintainerCycle => "Maintainer cycle".to_string(),
         TaskType::FolderWatch => "Folder watch".to_string(),
         TaskType::AutoBackupCheck => "Auto-backup check".to_string(),
+        TaskType::TelemetryPush => "Telemetry push".to_string(),
     }
 }
 

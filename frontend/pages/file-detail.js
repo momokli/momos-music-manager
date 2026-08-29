@@ -9,12 +9,14 @@
  */
 
 import { fetchJSON } from "../shared/api.js";
+import { showToast } from "../shared/components.js";
 
 /* ------------------------------------------------------------------ */
 /*  State                                                              */
 /* ------------------------------------------------------------------ */
 
 let abortController = null;
+let currentFileId = null;
 
 /* ------------------------------------------------------------------ */
 /*  Initialization                                                     */
@@ -31,6 +33,8 @@ export async function init(container, signal) {
   const combinedSignal = signal || abortController.signal;
 
   container.innerHTML = renderLoading();
+
+  currentFileId = id;
 
   let data;
   let variants;
@@ -57,6 +61,7 @@ export async function init(container, signal) {
   }
 
   container.innerHTML = renderPage(data, variants);
+  wireCorrectionEvents(container, id);
 }
 
 /* ------------------------------------------------------------------ */
@@ -213,6 +218,9 @@ function renderTrackCard(t, file) {
         <span class="detail-track-title">${escHtml(t.title || "—")}</span>
         <span class="detail-track-artist">${escHtml(t.artist || "")}</span>
         <span class="detail-track-pop">${t.popularity != null ? `${t.popularity}/100` : ""}</span>
+        <button class="disconnect-btn" data-track-id="${t.id}" title="Disconnect this track from file">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
       </div>
       <table class="detail-kv">
         <tbody>
@@ -325,6 +333,61 @@ function renderVariantCard(v) {
       ${backupIcon}
     </div>
   `;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Correction Events                                                  */
+/* ------------------------------------------------------------------ */
+
+function wireCorrectionEvents(container, fileId) {
+  container.querySelectorAll(".disconnect-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const trackId = parseInt(btn.dataset.trackId, 10);
+      if (!trackId) return;
+      await disconnectTrack(fileId, trackId, btn);
+    });
+  });
+}
+
+async function disconnectTrack(fileId, trackId, btn) {
+  const origHtml = btn.innerHTML;
+  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+  btn.disabled = true;
+  try {
+    await fetchJSON(`/api/files/${fileId}/track-corrections`, {
+      method: "PUT",
+      body: JSON.stringify({
+        corrections: [{ trackId, linkType: "exclude" }],
+      }),
+    });
+    showToast("Track disconnected from file", "success");
+    await refreshDetail();
+  } catch (err) {
+    showToast(`Failed: ${err.message}`, "error");
+    btn.innerHTML = origHtml;
+    btn.disabled = false;
+  }
+}
+
+async function refreshDetail() {
+  if (!currentFileId) return;
+  const container = document.getElementById("main-content");
+  if (!container) return;
+  try {
+    const resp = await fetchJSON(`/api/files/${currentFileId}/detail`);
+    const data = resp.data || resp;
+
+    let variants = null;
+    try {
+      const vResp = await fetchJSON(`/api/files/${currentFileId}/variants`);
+      variants = vResp.data || vResp;
+    } catch (_) {}
+
+    container.innerHTML = renderPage(data, variants);
+    wireCorrectionEvents(container, currentFileId);
+  } catch (err) {
+    showToast(`Failed to refresh: ${err.message}`, "error");
+  }
 }
 
 /* ------------------------------------------------------------------ */

@@ -3,7 +3,7 @@ use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{StatusCode, header},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 
@@ -527,5 +527,10 @@ pub(super) fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/tag-similarities/status",
             get(tag_similarities_status_handler),
+        )
+        // File-track correction deletion
+        .route(
+            "/api/file-track-corrections/{id}",
+            delete(crate::api::file_track_corrections::correction_delete),
         )
 }

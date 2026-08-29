@@ -1883,3 +1883,179 @@ mod tests {
         assert!(assocs.is_empty());
     }
 }
+
+// ── Download Guarantor helpers ──
+
+/// UPSERT a deemix_downloads row from actual queue data.
+///
+/// Uses ON CONFLICT DO UPDATE so existing rows get updated with real
+/// download counts (vs the old INSERT OR IGNORE which left rows stale).
+pub async fn upsert_deemix_download(
+    pool: &Pool<Sqlite>,
+    spotify_url: &str,
+    playlist_name: &str,
+    status: &str,
+    track_count_total: i64,
+    track_count_downloaded: i64,
+    error_json: Option<&str>,
+) -> anyhow::Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        r#"
+        INSERT INTO deemix_downloads
+            (spotify_playlist_url, playlist_name, status, track_count_total,
+             track_count_downloaded, error_message, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(spotify_playlist_url) DO UPDATE SET
+            playlist_name = excluded.playlist_name,
+            status = excluded.status,
+            track_count_total = excluded.track_count_total,
+            track_count_downloaded = excluded.track_count_downloaded,
+            error_message = excluded.error_message,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(spotify_url)
+    .bind(playlist_name)
+    .bind(status)
+    .bind(track_count_total)
+    .bind(track_count_downloaded)
+    .bind(error_json)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Get all deemix_downloads entries with zero downloads (zombies).
+///
+/// Returns Vec<(db_id, spotify_playlist_url)> for entries where
+/// track_count_downloaded == 0.
+pub async fn get_zombie_deemix_entries(pool: &Pool<Sqlite>) -> anyhow::Result<Vec<(i64, String)>> {
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        r#"
+        SELECT id, spotify_playlist_url
+        FROM deemix_downloads
+        WHERE track_count_downloaded = 0
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Find a file in the flacs dir by fuzzy artist+title match.
+///
+/// Matches by normalising both the query and the file's `Artist - Title`
+/// filename (the convention used by deemix / spotDL output).
+/// Returns the file id if a match is found, `None` otherwise.
+pub async fn find_file_by_artist_title(
+    pool: &Pool<Sqlite>,
+    artist: &str,
+    title: &str,
+) -> anyhow::Result<Option<i64>> {
+    let normalized_input = normalize_for_fuzzy_inner(artist, title);
+
+    // Search both flacs (deemix) and mp3 (spotDL) directories
+    for dir_prefix in &["/Users/momo/Music/flacs", "/Users/momo/Music/mp3"] {
+        let files: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, file_path FROM files WHERE file_path LIKE ? || '/%'")
+                .bind(dir_prefix)
+                .fetch_all(pool)
+                .await?;
+
+        for (file_id, file_path) in &files {
+            let filename = std::path::Path::new(file_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+
+            if let Some((file_artist, file_title)) = filename.split_once(" - ") {
+                let normalized_file = normalize_for_fuzzy_inner(file_artist, file_title);
+                if normalized_input == normalized_file {
+                    return Ok(Some(*file_id));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Normalize artist + title for fuzzy comparison.
+///
+/// Lowercase, strip non-alphanumeric (keeping spaces/hyphens), collapse whitespace.
+fn normalize_for_fuzzy_inner(artist: &str, title: &str) -> String {
+    let combined = format!("{} - {}", artist, title);
+    let mut result = String::with_capacity(combined.len());
+
+    for ch in combined.chars() {
+        match ch {
+            c if c.is_alphanumeric() || c == ' ' || c == '-' => {
+                result.push(c.to_ascii_lowercase());
+            }
+            _ => {
+                if !result.ends_with(' ') {
+                    result.push(' ');
+                }
+            }
+        }
+    }
+
+    result.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Create a direct file→track link bypassing the ISRC requirement.
+///
+/// Updates the file's service-specific ID column (spotify_id, soundcloud_id, etc.)
+/// to match the track's service_id. This causes `v_file_track_link` to resolve the
+/// link automatically without needing a matching ISRC.
+pub async fn link_file_to_track_direct(
+    pool: &Pool<Sqlite>,
+    file_id: i64,
+    track_id: i64,
+) -> anyhow::Result<()> {
+    // For now, create a 'local' service relationship: set the file's service_id
+    // to match the track's service + service_id so v_file_track_link resolves.
+    let track: (String, String) =
+        sqlx::query_as("SELECT service, service_id FROM service_tracks WHERE id = ?")
+            .bind(track_id)
+            .fetch_one(pool)
+            .await?;
+
+    let (service, service_id) = track;
+    match service.as_str() {
+        "spotify" => {
+            sqlx::query("UPDATE files SET spotify_id = ? WHERE id = ?")
+                .bind(&service_id)
+                .bind(file_id)
+                .execute(pool)
+                .await?;
+        }
+        "soundcloud" => {
+            sqlx::query("UPDATE files SET soundcloud_id = ? WHERE id = ?")
+                .bind(&service_id)
+                .bind(file_id)
+                .execute(pool)
+                .await?;
+        }
+        "youtube" => {
+            sqlx::query("UPDATE files SET youtube_id = ? WHERE id = ?")
+                .bind(&service_id)
+                .bind(file_id)
+                .execute(pool)
+                .await?;
+        }
+        _ => {
+            anyhow::bail!(
+                "Cannot link file {} to track {}: unknown service '{}'",
+                file_id,
+                track_id,
+                service
+            );
+        }
+    }
+
+    Ok(())
+}

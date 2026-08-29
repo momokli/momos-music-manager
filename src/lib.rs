@@ -29,6 +29,7 @@ pub mod config;
 pub mod db;
 pub mod deemix;
 pub mod digging;
+pub mod download_guarantor;
 pub mod dump;
 pub mod embeddings;
 pub mod external_tools;
@@ -38,6 +39,7 @@ pub mod poller;
 pub mod scan_cache;
 pub mod spotify;
 pub mod tasks;
+pub mod telemetry;
 pub mod traktor;
 pub mod watch;
 

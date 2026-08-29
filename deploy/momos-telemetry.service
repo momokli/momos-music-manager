@@ -1,0 +1,28 @@
+[Unit]
+Description=Momo's Music Manager — Telemetry Receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=momo
+
+# Receiver is loopback-only — Caddy proxies telemetry.music.klimk.es to it.
+Environment="RUST_LOG=info"
+Environment="MOMOS_TELEMETRY_RECEIVER_BIND=127.0.0.1:8330"
+Environment="MOMOS_TELEMETRY_RECEIVER_BASE_DIR=/home/momo/momos-analytics"
+
+# SECRET — set in a drop-in override, never commit the token:
+#   sudo systemctl edit momos-telemetry
+#   [Service]
+#   Environment="MOMOS_TELEMETRY_RECEIVER_TOKEN=<token>"
+# If unset, the receiver runs in dev mode (no auth) and logs a warning.
+
+ExecStart=/home/momo/momos-music-manager/target/release/momos-music-manager telemetry receive
+
+Restart=always
+RestartSec=10
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

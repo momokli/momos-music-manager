@@ -1,0 +1,29 @@
+# Download Service Configuration
+# Copy to config.toml and fill in your values.
+
+[deemix]
+# ARL from Deezer browser login (see README for extraction guide)
+arl = "your-arl-here"
+# deemix-pyweb base URL (default for local install)
+base_url = "http://localhost:6595"
+
+[spotify]
+# Client Credentials from https://developer.spotify.com/dashboard
+client_id = "your-spotify-client-id"
+client_secret = "your-spotify-client-secret"
+
+[spotdl]
+# Path to spotDL executable or just "spotdl" if in PATH
+executable = "spotdl"
+# Cookie file for YouTube auth (optional, avoids rate limits)
+cookie_file = ""
+
+[downloads]
+# Output directory for finished downloads
+output_dir = "/opt/download-service/downloads/tracks"
+# Preferred bitrate for deemix: 128, 320, FLAC
+deemix_bitrate = "320"
+# Preferred bitrate for spotDL: 128, 192, 256, 320
+spotdl_bitrate = "128"
+# Maximum download time per track (seconds)
+timeout_seconds = 180

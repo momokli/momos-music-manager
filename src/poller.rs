@@ -533,8 +533,28 @@ async fn poll_subscribed_playlist(
     let has_deemix_entry = crate::db::has_deemix_download_entry(db, &deemix_url)
         .await
         .unwrap_or(false);
+    // Also check if the entry is a zombie (exists but 0 downloads —
+    // e.g. auto-download was attempted but the ARL was expired).
+    let has_zero_downloads = if has_deemix_entry {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT track_count_downloaded FROM deemix_downloads WHERE spotify_playlist_url = ?",
+        )
+        .bind(&deemix_url)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(-1)
+            == 0
+    } else {
+        false
+    };
 
-    if subscription.last_polled_at.is_none() || new_tracks_found || !has_deemix_entry {
+    if subscription.last_polled_at.is_none()
+        || new_tracks_found
+        || !has_deemix_entry
+        || has_zero_downloads
+    {
         task_manager
             .add_log(&task_id, "Deemix: attempting auto-download...".into())
             .await;

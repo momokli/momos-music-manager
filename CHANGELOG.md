@@ -4,6 +4,27 @@ All notable changes to Momo's Music Manager.
 
 ---
 
+## [1.0.0] — 2026-08-11
+
+### Added
+
+- **macOS App Bundle**: Ships as a double-clickable `.app` with universal binary
+  (Apple Silicon + Intel via `lipo`). Drag-to-install DMG distribution.
+  Auto-opens browser on launch (`--no-browser` flag to disable).
+  `LSUIElement = true` — runs in background, no dock icon.
+- **GitHub CI Release Workflow**: Automatic DMG builds on `v*` tag pushes.
+  Creates universal binary, `.app` bundle, and DMG via `create-dmg`.
+- **`cargo-bundle` support**: `[package.metadata.bundle]` in `Cargo.toml` for
+  automated `.app` bundle generation.
+
+### Changed
+
+- **Removed dead `youtube = "0.1.1"` dependency** — crate was yanked from
+  crates.io and never used in source.
+- **Version bumped to 1.0.0** — first shippable release.
+
+---
+
 ## [0.9.0] — 2026-07-02
 
 ### Added

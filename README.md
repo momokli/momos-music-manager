@@ -72,6 +72,37 @@ playlist_id  = "your_youtube_playlist_id"
 
 ---
 
+## Installation
+
+### macOS (DMG)
+
+Download the latest `Momo's-Music-Manager-v*.dmg` from
+[GitHub Releases](https://github.com/momo/momos-music-manager/releases).
+
+1. Open the DMG
+2. Drag **Momo's Music Manager** to the **Applications** folder
+3. Double-click the app — the server starts and your browser opens to the dashboard
+
+> **First launch**: macOS Gatekeeper may block unsigned apps. Right-click the app
+> and select **Open**, then click **Open** in the dialog.
+
+The server runs in the background (no dock icon). Re-opening the app just brings
+back the browser. To stop the server, use Activity Monitor or `pkill momos-music-manager`.
+
+Logs: `~/Library/Logs/momos-music-manager/`
+Config: `~/.config/momos-music-manager/config.toml`
+Database: `~/.local/share/momos-music-manager/library.db`
+
+### From Source
+
+```bash
+# Start the server (frontend embedded, one binary)
+cargo run -- serve
+
+# Open in browser
+open http://localhost:3000
+```
+
 ## Deployment
 
 ### Database path
@@ -80,6 +111,21 @@ By default, the database is stored at `~/.local/share/momos-music-manager/librar
 Override via `[database].url` in config.toml or the `DATABASE_URL` env var.
 
 ### macOS Launch Agent (auto-start)
+
+Install a launchd agent to start the server automatically on login:
+
+```bash
+# Install (creates plist + loads into launchd)
+cargo run -- install-launch-agent
+
+# Check status
+cargo run -- service-status
+
+# Uninstall
+cargo run -- uninstall-launch-agent
+```
+
+### macOS Launch Agent (auto-start on login)
 
 Install a launchd agent to start the server automatically on login:
 
