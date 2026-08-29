@@ -1,6 +1,6 @@
 # Momo's Music Manager — Agent Guidance
 
-> **Last Updated**: 2026-08-29 — v1.0.0 (release prep: merged feat/fix branches into review/all-features, ADRs 053–057)
+> **Last Updated**: 2026-08-29 — v1.0.1 (release prep: merged feat/fix branches into review/all-features, ADRs 053–057)
 
 ---
 

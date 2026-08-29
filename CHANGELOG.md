@@ -4,7 +4,7 @@ All notable changes to Momo's Music Manager.
 
 ---
 
-## [1.0.0] — 2026-08-11
+## [1.0.1] — 2026-08-29
 
 ### Added
 
@@ -37,7 +37,7 @@ All notable changes to Momo's Music Manager.
 
 - **Removed dead `youtube = "0.1.1"` dependency** — crate was yanked from
   crates.io and never used in source.
-- **Version bumped to 1.0.0** — first shippable release.
+- **Version bumped to 1.0.1** — first shippable release.
 
 ### Fixed
 

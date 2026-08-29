@@ -1,4 +1,4 @@
-# Plan: macOS Shippable Application (v1.0.0)
+# Plan: macOS Shippable Application (v1.0.1)
 
 **Status**: done
 **Branch**: `feat/macos-app-bundle`
@@ -42,7 +42,7 @@ app detects the already-running server (port 3000 bound) and just opens the brow
 - Database: `~/.local/share/momos-music-manager/library.db`
 - Config: `~/.config/momos-music-manager/config.toml`
 - Logs: `~/Library/Logs/momos-music-manager/`
-- Version: **1.0.0** (first shippable release)
+- Version: **1.0.1** (first shippable release)
 
 ---
 
@@ -91,7 +91,7 @@ app detects the already-running server (port 3000 bound) and just opens the brow
 | File           | Change                                                                        |
 | -------------- | ----------------------------------------------------------------------------- |
 | `README.md`    | Add "macOS Installation" section with download + drag-to-install instructions |
-| `CHANGELOG.md` | v1.0.0 entry                                                                  |
+| `CHANGELOG.md` | v1.0.1 entry                                                                  |
 
 ---
 
@@ -100,7 +100,7 @@ app detects the already-running server (port 3000 bound) and just opens the brow
 - [ ] `cargo build` passes
 - [ ] `cargo test` passes
 - [ ] `cd frontend && npx playwright test` passes
-- [ ] `scripts/package-macos.sh` produces `target/Momo's-Music-Manager-v1.0.0.dmg` (universal)
+- [ ] `scripts/package-macos.sh` produces `target/Momo's-Music-Manager-v1.0.1.dmg` (universal)
 - [ ] Opening the DMG shows the app + symlink to /Applications
 - [ ] Dragging to /Applications and double-clicking: server starts, browser opens to dashboard
 - [ ] Re-opening the app (server already running): just opens browser, no duplicate server
@@ -120,6 +120,6 @@ app detects the already-running server (port 3000 bound) and just opens the brow
 ## Open Questions (Resolved)
 
 1. **Database path**: `~/.local/share/momos-music-manager/library.db` ✅
-2. **Version**: 1.0.0 ✅
+2. **Version**: 1.0.1 ✅
 3. **Universal binary**: yes, single DMG via `lipo` ✅
 4. **First-run UX**: dashboard as-is ✅
