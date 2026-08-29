@@ -31,6 +31,7 @@ pub mod deemix;
 pub mod digging;
 pub mod dump;
 pub mod embeddings;
+pub mod external_tools;
 pub mod global_poller;
 pub mod maintainer;
 pub mod poller;

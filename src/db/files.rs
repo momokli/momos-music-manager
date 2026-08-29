@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 use super::*;
 use crate::audio_extensions::AudioExtension;
 use crate::db::calculate_file_hash;
+use crate::external_tools::resolve_tool;
 use crate::scan_cache;
 
 // ============================================================================
@@ -79,7 +80,7 @@ fn extract_mp4_metadata_with_exiftool(
 
     tracing::debug!("Calling exiftool for: {:?}", path);
 
-    let output = Command::new("exiftool")
+    let output = Command::new(resolve_tool("exiftool"))
         .arg("-json")
         .arg("-Title")
         .arg("-Artist")
@@ -145,7 +146,7 @@ fn extract_mp4_metadata_with_exiftool(
 fn extract_playback_stats_with_exiftool(path: &Path) -> (Option<i32>, Option<i64>) {
     use std::process::Command;
 
-    let output = match Command::new("exiftool")
+    let output = match Command::new(resolve_tool("exiftool"))
         .arg("-json")
         .arg("-PlayCount")
         .arg("-PlayDate")
@@ -1032,7 +1033,7 @@ pub async fn update_file_comment(pool: &Pool<Sqlite>, file_id: i64, comment: &st
 pub async fn read_comment_from_file(file_path: &str) -> Result<Option<String>> {
     use std::process::Command;
 
-    let output = Command::new("exiftool")
+    let output = Command::new(resolve_tool("exiftool"))
         .arg("-json")
         .arg("-Comment")
         .arg(file_path)
@@ -1066,7 +1067,7 @@ pub async fn write_comment_to_file(file_path: &str, comment: &str) -> Result<()>
     if is_flac {
         // --remove-tag first: metaflac --set-tag APPENDS by default.
         // Without --remove-tag, old COMMENT tags accumulate on every write.
-        let output = Command::new("metaflac")
+        let output = Command::new(resolve_tool("metaflac"))
             .arg("--remove-tag=COMMENT")
             .arg("--set-tag")
             .arg(format!("COMMENT={}", comment))
@@ -1079,7 +1080,7 @@ pub async fn write_comment_to_file(file_path: &str, comment: &str) -> Result<()>
         }
     } else {
         let comment_tag = format!("-Comment={}", comment);
-        let output = Command::new("exiftool")
+        let output = Command::new(resolve_tool("exiftool"))
             .arg("-overwrite_original")
             .arg(&comment_tag)
             .arg(file_path)
