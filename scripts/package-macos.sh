@@ -90,6 +90,7 @@ cp -R "${BUNDLE_DIR}" "${STAGING}/"
 
 if command -v create-dmg &> /dev/null; then
     create-dmg \
+        --overwrite \
         --volname "${APP_NAME}" \
         --window-pos 200 120 \
         --window-size 600 400 \
