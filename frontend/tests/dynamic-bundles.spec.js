@@ -45,8 +45,11 @@ test.describe("Dynamic Bundles Page", () => {
     // Click the first dropdown item
     const firstItem = dropdown.locator(".tag-dropdown-item").first();
     await firstItem.click();
-    // Verify the chip appeared
-    await expect(page.locator('[data-base-tag-name="Groovy"]')).toBeVisible({ timeout: 3000 });
+    // Verify the chip appeared (scope to .tag-chip so the remove "×" button,
+    // which also carries data-base-tag-name, doesn't cause a strict-mode clash)
+    await expect(page.locator('.tag-chip[data-base-tag-name="Groovy"]')).toBeVisible({
+      timeout: 3000,
+    });
 
     // Set BPM range
     await page.locator("#db-edit-bpm-min").fill("140");
