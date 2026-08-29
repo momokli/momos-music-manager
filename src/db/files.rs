@@ -1033,6 +1033,14 @@ pub async fn update_file_comment(pool: &Pool<Sqlite>, file_id: i64, comment: &st
 pub async fn read_comment_from_file(file_path: &str) -> Result<Option<String>> {
     use std::process::Command;
 
+    // MP3 comments are written via `lofty` (see `write_mp3_comment`), so read
+    // them the same way.  exiftool renders lofty's ID3v2 COMM frame as
+    // "Comment-xxx" (lofty pins the language to "XXX"), so exiftool would not
+    // see the value we wrote.
+    if file_path.to_lowercase().ends_with(".mp3") {
+        return read_mp3_comment_from_file(file_path);
+    }
+
     let output = Command::new(resolve_tool("exiftool"))
         .arg("-json")
         .arg("-Comment")
@@ -1055,14 +1063,32 @@ pub async fn read_comment_from_file(file_path: &str) -> Result<Option<String>> {
     Ok(comment)
 }
 
+/// Read the comment tag of an MP3 file via `lofty` (ID3v2).
+///
+/// This mirrors `write_mp3_comment` so the read/write paths stay consistent:
+/// lofty maps the ID3v2 COMM frame to `ItemKey::Comment`.
+fn read_mp3_comment_from_file(file_path: &str) -> Result<Option<String>> {
+    let tagged_file =
+        read_from_path(file_path).map_err(|e| anyhow!("Failed to read MP3 comment: {}", e))?;
+
+    Ok(tagged_file
+        .primary_tag()
+        .and_then(|tag| tag.get_string(&ItemKey::Comment))
+        .map(String::from))
+}
+
 /// Write comment to file using exiftool.
 ///
 /// FLAC files use `metaflac` because the macOS build of exiftool does
-/// not include FLAC write support.  All other formats use exiftool.
+/// not include FLAC write support.  MP3 files use `lofty` (ID3v2) because
+/// exiftool reports "Writing of MP3 files is not yet supported".  All other
+/// formats use exiftool.
 pub async fn write_comment_to_file(file_path: &str, comment: &str) -> Result<()> {
     use std::process::Command;
 
-    let is_flac = file_path.to_lowercase().ends_with(".flac");
+    let lower = file_path.to_lowercase();
+    let is_flac = lower.ends_with(".flac");
+    let is_mp3 = lower.ends_with(".mp3");
 
     if is_flac {
         // --remove-tag first: metaflac --set-tag APPENDS by default.
@@ -1078,6 +1104,8 @@ pub async fn write_comment_to_file(file_path: &str, comment: &str) -> Result<()>
             let error = String::from_utf8_lossy(&output.stderr);
             return Err(anyhow::anyhow!("Failed to write FLAC comment: {}", error));
         }
+    } else if is_mp3 {
+        write_mp3_comment(file_path, comment)?;
     } else {
         let comment_tag = format!("-Comment={}", comment);
         let output = Command::new(resolve_tool("exiftool"))
@@ -1091,6 +1119,39 @@ pub async fn write_comment_to_file(file_path: &str, comment: &str) -> Result<()>
             return Err(anyhow::anyhow!("Failed to write comment: {}", error));
         }
     }
+
+    Ok(())
+}
+
+/// Write the comment tag of an MP3 file via `lofty` (ID3v2).
+///
+/// exiftool cannot write MP3 files, so we use the same library that reads
+/// ID3v2 tags during scanning.  `insert_text` replaces any existing item with
+/// the same key, so repeated writes are idempotent and never accumulate
+/// duplicate COMM frames.
+///
+/// NOTE: lofty writes ID3v2 COMM frames with language "XXX" (its MPEG write
+/// path ignores the language field).  This is fine because we also READ MP3
+/// comments via lofty (see `read_mp3_comment_from_file`), which maps any COMM
+/// frame back to `ItemKey::Comment` regardless of language.
+fn write_mp3_comment(file_path: &str, comment: &str) -> Result<()> {
+    use lofty::config::WriteOptions;
+
+    let mut tagged_file = read_from_path(file_path)
+        .map_err(|e| anyhow!("Failed to read MP3 for comment write: {}", e))?;
+
+    let tag_type = tagged_file.primary_tag_type();
+    if let Some(tag) = tagged_file.primary_tag_mut() {
+        tag.insert_text(ItemKey::Comment, comment.to_string());
+    } else {
+        let mut tag = lofty::tag::Tag::new(tag_type);
+        tag.insert_text(ItemKey::Comment, comment.to_string());
+        tagged_file.insert_tag(tag);
+    }
+
+    tagged_file
+        .save_to_path(file_path, WriteOptions::default())
+        .map_err(|e| anyhow!("Failed to write MP3 comment: {}", e))?;
 
     Ok(())
 }
@@ -3982,6 +4043,44 @@ mod tests {
         assert_eq!(count, 1, "idempotent: should still have 1 COMMENT tag");
         let val = get_comment_tag(&tmp);
         assert_eq!(val.as_deref(), Some(comment));
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    fn test_mp3_path() -> std::path::PathBuf {
+        fixtures_dir().join("test.mp3")
+    }
+
+    /// Test: write_comment_to_file on MP3 must write the ID3v2 comment via
+    /// `lofty` (exiftool cannot write MP3), replacing any existing comment.
+    #[tokio::test]
+    async fn test_write_comment_to_file_mp3() {
+        let src = test_mp3_path();
+        assert!(src.exists(), "test fixture missing: {:?}", src);
+
+        let tmp = std::env::temp_dir().join("mmm_test_mp3.mp3");
+        std::fs::copy(&src, &tmp).unwrap();
+
+        let new_comment = "[PMV] mp3 test";
+        write_comment_to_file(&tmp.to_string_lossy(), new_comment)
+            .await
+            .expect("write_comment_to_file should succeed for MP3");
+
+        // Verify via the canonical read path (lofty, used by both the scanner
+        // and `read_comment_from_file` for MP3 files).
+        let exif = read_comment_from_file(&tmp.to_string_lossy())
+            .await
+            .expect("read_comment_from_file should succeed");
+        assert_eq!(exif.as_deref(), Some(new_comment));
+
+        // Idempotence: writing again must not create duplicate comment frames.
+        write_comment_to_file(&tmp.to_string_lossy(), new_comment)
+            .await
+            .unwrap();
+        let exif_after = read_comment_from_file(&tmp.to_string_lossy())
+            .await
+            .unwrap();
+        assert_eq!(exif_after.as_deref(), Some(new_comment));
 
         let _ = std::fs::remove_file(&tmp);
     }
