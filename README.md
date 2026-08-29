@@ -449,7 +449,7 @@ Open Traktor → run "Consistency Check" over all tracks → Comments visible �
 | Route              | Module                     | Description                              |
 | ------------------ | -------------------------- | ---------------------------------------- |
 | `#dashboard`       | `pages/dashboard.js`       | Stats + Services dashboard               |
-| `#files`           | `pages/files.js`           | Local files with BPM/Key, comment status |
+| `#files`           | `pages/files.js`           | Local files with BPM/Key, comment status, stem-missing filter |
 | `#tracks`          | `pages/tracks.js`          | Service tracks, playlist/tag/PMV filter  |
 | `#playlists`       | `pages/playlists.js`       | All service playlists                    |
 | `#tags`            | `pages/tags.js`            | Tags (paginated list)                    |
