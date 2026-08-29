@@ -1043,3 +1043,68 @@ _Phase 2 (v0.3.2)_: Extract `extract_retry_after_secs` and `client_error_retry_a
 **Decision**: New `src/global_poller.rs` background task running at a configurable interval (default 900s/15min). Uses Spotify's `snapshot_id` for cheap change detection: fetches all user playlists (paginated), compares each `snapshot_id` against the stored DB value, and only fetches tracks for playlists where the snapshot changed or the playlist is new. New `snapshot_id` column on `service_playlists` (migration 006, consolidated). Configurable via `[polling].global_interval_secs` in `config.toml` or `MOMOS_GLOBAL_POLL_INTERVAL_SECS` env var (0 = disabled). Detects deleted playlists and logs them with `warn!`. 429 rate limits handled with retry + backoff. 200ms delay between playlist syncs.
 
 **Consequences**: All playlists stay up-to-date automatically. Snapshot-based detection minimizes API traffic (~14 calls per cycle for 200 playlists with 5 changes). New playlists are auto-discovered. Deleted playlists are detected and logged. Rate-limit safe by design.
+
+---
+
+## ADR-053: Download Guarantor (100% File Coverage)
+
+**Date**: 2026-08-29
+**Status**: Accepted (implemented)
+
+**Context**: Subscribed Spotify playlists could end up with tracks that had no linked local file — download queues stalled, deemix entries went zombie, and there was no single place that guaranteed every track eventually had a file.
+
+**Decision**: New `src/download_guarantor.rs` background task running every 10 minutes. Two phases: (1) poll the deemix-pyweb API and UPSERT real download status into `deemix_downloads`, detecting stuck/zombie entries; (2) for every track in every subscribed playlist without a linked file, re-queue via deemix first, then fall back to spotDL (YouTube). Ships alongside the standalone `download-service/` Python pipeline (FastAPI + deemix/spotDL/Spotify clients) that performs the actual downloads.
+
+**Consequences**: File coverage converges to 100% without manual intervention. Failed downloads are automatically retried across two independent sources. Adds a runtime dependency on the deemix-pyweb service and spotDL CLI.
+
+---
+
+## ADR-054: Telemetry Analytics Push
+
+**Date**: 2026-08-29
+**Status**: Accepted (implemented)
+
+**Context**: There was no visibility into the single production instance's health — failed tasks, error logs, and table sizes were invisible without SSHing in and poking at the SQLite DB.
+
+**Decision**: The prod instance periodically pushes a self-describing telemetry bundle over HTTPS to a small receiver on the LAN server. The core payload is a consistent SQLite full snapshot via `VACUUM INTO`, plus logs, `task_history`, aggregated metrics, and redacted instance metadata. Implemented in `src/telemetry/` (metrics, receiver client, scheduler) with a systemd unit (`deploy/momos-telemetry.service`) and Caddy snippet for the receiver. No schema migration required (reuses `task_history` from migration 022).
+
+**Consequences**: The SQLite snapshots double as an off-machine DB backup. A LAN-side analyzer (openclaw) can read the latest snapshot directly for error/task/orphan statistics. Requires the receiver to be reachable; push is best-effort and does not block startup.
+
+---
+
+## ADR-055: macOS Menu Bar Tray Icon
+
+**Date**: 2026-08-29
+**Status**: Accepted (implemented)
+
+**Context**: The `.app` runs headless (`LSUIElement = true`, no Dock icon), so there was no way to see server status or quit the app without killing the process.
+
+**Decision**: Add a menu bar tray icon via `tray-icon` + `tao` (native AppKit bindings, no WebKit). The Tao event loop owns the main thread (required for `NSStatusBar`), and the Axum server + all background tasks are moved onto a Tokio runtime in a spawned thread. Tray menu provides "Open Dashboard" (opens `http://localhost:3000`) and "Quit".
+
+**Consequences**: Users can now see status and cleanly quit from the menu bar. `main()` is restructured so the runtime no longer owns the main thread — background tasks must be spawned explicitly. Adds ~3.5 MB binary size, no GPU overhead.
+
+---
+
+## ADR-056: File↔Track Corrections
+
+**Date**: 2026-08-29
+**Status**: Accepted (implemented)
+
+**Context**: Automatic file↔track linking (`v_file_track_link`) matched on ISRC/service IDs, but users sometimes needed to override it — e.g. force-link a file to a specific track, or prevent a wrong automatic link.
+
+**Decision**: Add explicit `include`/`exclude` corrections that override automatic linking, stored in a new `file_track_corrections` table (migration 023). New endpoints: `GET/PUT /api/files/{id}/track-corrections`, `GET/PUT /api/tracks/{id}/file-corrections`, and `DELETE /api/file-track-corrections/{id}`. The Track/File detail pages gain a "disconnect" button and a link-file typeahead.
+
+**Consequences**: Users can correct mis-links without editing the DB. Corrections win over automatic ISRC matching. Requires migration 023 (additive).
+
+---
+
+## ADR-057: External Tool Path Resolution
+
+**Date**: 2026-08-29
+**Status**: Accepted (implemented)
+
+**Context**: The app shells out to `metaflac`, `exiftool`, `ffmpeg`, and `ffprobe`. When launched as a macOS GUI `.app` (Finder/Dock), the process inherits a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`) that omits Homebrew's `/opt/homebrew/bin`, so `Command::new("metaflac")` failed with "No such file or directory (os error 2)" even though the tools were installed.
+
+**Decision**: Add `src/external_tools.rs` with `resolve_tool()`, which resolves a tool name to an absolute path across common install locations (`/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, and their sbin variants), falling back to the bare name. Use it for `metaflac`/`exiftool` in `src/db/files.rs` and `ffmpeg`/`ffprobe` in `src/api/files.rs`.
+
+**Consequences**: Comment writing, metadata extraction, and stem streaming work regardless of how the app was launched. No longer relies on `PATH` for Homebrew tools. System tools (`rsync`, `ssh`) remain on the minimal `PATH` and are unchanged.

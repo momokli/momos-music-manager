@@ -1,6 +1,6 @@
 # Plan: macOS Menu Bar Tray Icon
 
-**Status**: proposed
+**Status**: done
 **Branch**: `feat/tray-icon`
 **Ready for review**: yes
 **Depends on**: `feat/macos-app-bundle` (LSUIElement, .app bundle structure)
@@ -66,12 +66,12 @@ platforms, `main()` runs tokio directly (current behavior, unchanged).
 
 ## Files to modify/create
 
-| File | Change |
-|------|--------|
-| `Cargo.toml` | Add `tray-icon = "0.24"`, `tao = "0.36"`, `image = { version = "0.25", default-features = false, features = ["png"] }` |
-| `src/main.rs` | Restructure `main()`: `#[cfg(macos)]` → tao event loop on main + server on bg thread; `#[cfg(not(macos))]` → existing tokio-on-main |
-| `src/tray.rs` | **New** — tray icon creation, menu event handling, `UserEvent` enum |
-| `resources/tray-icon.png` | **New** — 22×22 RGBA PNG (template image, adapts to dark/light mode) |
+| File                      | Change                                                                                                                              |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `Cargo.toml`              | Add `tray-icon = "0.24"`, `tao = "0.36"`, `image = { version = "0.25", default-features = false, features = ["png"] }`              |
+| `src/main.rs`             | Restructure `main()`: `#[cfg(macos)]` → tao event loop on main + server on bg thread; `#[cfg(not(macos))]` → existing tokio-on-main |
+| `src/tray.rs`             | **New** — tray icon creation, menu event handling, `UserEvent` enum                                                                 |
+| `resources/tray-icon.png` | **New** — 22×22 RGBA PNG (template image, adapts to dark/light mode)                                                                |
 
 ---
 
@@ -97,6 +97,7 @@ Simpler: `tray-icon` v0.24 supports loading from PNG bytes directly via the `png
 ### Step 2: Create tray module (`src/tray.rs`)
 
 Handles:
+
 - Creating the tray icon with menu on `StartCause::Init`
 - Dispatching menu events (`Open Dashboard` → `webbrowser::open`, `Quit` → shutdown)
 - `LSUIElement = true` — no dock icon, menu bar only (already in Info.plist)
@@ -164,9 +165,9 @@ before exiting — but for v1, SIGTERM-on-exit is fine (SQLite is crash-safe).
 
 ## Risks
 
-| Risk | Mitigation |
-|------|------------|
+| Risk                                         | Mitigation                                                                                  |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | Tao event loop + Tokio thread lifecycle bugs | The pattern is well-tested (Tauri uses it). Test manual quit, SIGTERM, and crash scenarios. |
-| `objc2` version conflicts | Pin `tray-icon = "0.24"` explicitly; `tao` and `tray-icon` share the same `objc2` ecosystem |
-| Background thread panic doesn't kill tray | Add a channel so the tray can detect server death and show an error state |
-| DMG still works after restructure | `.app` bundle just launches the binary — no change to Info.plist or packaging |
+| `objc2` version conflicts                    | Pin `tray-icon = "0.24"` explicitly; `tao` and `tray-icon` share the same `objc2` ecosystem |
+| Background thread panic doesn't kill tray    | Add a channel so the tray can detect server death and show an error state                   |
+| DMG still works after restructure            | `.app` bundle just launches the binary — no change to Info.plist or packaging               |

@@ -263,21 +263,22 @@ Open Traktor → run "Consistency Check" over all tracks → Comments visible �
 
 ## API Endpoints
 
-| Group     | Base Path                               |
-| --------- | --------------------------------------- |
-| Files     | `GET/POST /api/files`                   |
-| Tracks    | `GET /api/tracks`                       |
-| Playlists | `GET /api/playlists`                    |
-| Tags      | `CRUD /api/tags`, `/api/tag-categories` |
-| Folders   | `CRUD /api/folders`                     |
-| Services  | `GET/POST /api/services/{service}/...`  |
-| Tasks     | `GET/DELETE /api/tasks`                 |
-| Data      | `GET /api/dump`, `POST /api/restore`    |
-| Curation  | `GET /api/tags/curation-queue`          |
-| Version   | `GET /api/version`                      |
-| Parents   | `GET/PUT /api/tags/{id}/parents`        |
-| Digging   | `GET/POST /api/digging/...`             |
-| Health    | `GET /api/health`                       |
+| Group       | Base Path                                                                        |
+| ----------- | -------------------------------------------------------------------------------- |
+| Files       | `GET/POST /api/files`                                                            |
+| Tracks      | `GET /api/tracks`                                                                |
+| Playlists   | `GET /api/playlists`                                                             |
+| Tags        | `CRUD /api/tags`, `/api/tag-categories`                                          |
+| Folders     | `CRUD /api/folders`                                                              |
+| Services    | `GET/POST /api/services/{service}/...`                                           |
+| Tasks       | `GET/DELETE /api/tasks`                                                          |
+| Data        | `GET /api/dump`, `POST /api/restore`                                             |
+| Curation    | `GET /api/tags/curation-queue`                                                   |
+| Version     | `GET /api/version`                                                               |
+| Parents     | `GET/PUT /api/tags/{id}/parents`                                                 |
+| Corrections | `GET/PUT /api/files/{id}/track-corrections`, `/api/tracks/{id}/file-corrections` |
+| Digging     | `GET/POST /api/digging/...`                                                      |
+| Health      | `GET /api/health`                                                                |
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
 
@@ -310,6 +311,11 @@ momos-music-manager/
 │   ├── poller.rs           # Playlist subscription poller
 │   ├── traktor.rs          # Traktor collection.nml parser
 │   ├── watch.rs            # Folder watcher (optional)
+│   ├── download_guarantor.rs # Auto-remediation for 100% file coverage
+│   ├── external_tools.rs   # Resolve metaflac/exiftool/ffmpeg/ffprobe paths
+│   ├── global_poller.rs    # Global playlist poller
+│   ├── tray.rs             # macOS menu bar tray icon
+│   ├── telemetry/          # HTTPS telemetry push + receiver
 │   ├── spotify/            # Spotify OAuth + Sync
 │   │   ├── client.rs
 │   │   ├── models.rs
@@ -317,6 +323,8 @@ momos-music-manager/
 │   │   └── sync_worker.rs
 │   └── tasks/              # TaskManager + workers
 │       └── mod.rs
+├── download-service/       # Python download pipeline (deemix + spotDL)
+├── scripts/                # macOS packaging + helper scripts
 ├── frontend/               # SPA (embedded via rust-embed)
 │   ├── index.html          # Shell
 │   ├── app.js              # Hash router
@@ -363,7 +371,7 @@ momos-music-manager/
 - **Delete old DB files** after schema changes: `rm -f app.db*`
 - **Column config**: uses `columnConfig_v2_` localStorage key (pixel-based); old percentage-based config is ignored
 - If you see "migration 27" errors: delete all DB files and restart
-- Migrations are additive (`001_initial_schema.sql` through `005_v_playlist_tag_category.sql`)
+- Migrations are additive (`001_initial_schema.sql` through `023_file_track_corrections.sql`)
 - SoundCloud and YouTube OAuth are not yet implemented
 - Playlist subscriptions poll every 30 seconds in the background
 - The digging page (`digging.html`) is a standalone page, not part of the SPA

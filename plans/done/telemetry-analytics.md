@@ -1,6 +1,6 @@
 # Plan: telemetry-analytics
 
-**Status**: in-progress
+**Status**: done
 **Branch**: `feat/telemetry-analytics`
 **Ready for review**: no
 **Depends on**: nothing (nutzt `VACUUM INTO`, `tracing`-Logs, `task_history`, `axum`+`reqwest`)

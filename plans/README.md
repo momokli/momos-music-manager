@@ -1,6 +1,6 @@
 # Active Plans
 
-**50 done** · **0 in progress** · **19 proposed**
+**52 done** · **0 in progress** · **17 proposed**
 
 ## Proposed
 
@@ -21,8 +21,6 @@
 - [traktor-basename-matching](proposed/traktor-basename-matching.md) — `feat/traktor-basename-matching`
 - [laboratory-analysis-pipeline](proposed/laboratory-analysis-pipeline.md) — `feat/laboratory-analysis`
 - [fix-deemix-auto-download-retry](proposed/fix-deemix-auto-download-retry.md) — `fix/deemix-auto-download-retry`
-- [tray-icon](proposed/tray-icon.md) — `feat/tray-icon`
-- [telemetry-analytics](proposed/telemetry-analytics.md) — `feat/telemetry-analytics`
 
 ## Done
 
@@ -76,3 +74,5 @@
 - [download-guarantor](done/download-guarantor.md) — `feat/download-guarantor`
 - [file-track-corrections](done/file-track-corrections.md) — `feat/file-track-corrections`
 - [macos-shippable-app](done/macos-shippable-app.md) — `feat/macos-app-bundle`
+- [tray-icon](done/tray-icon.md) — `feat/tray-icon`
+- [telemetry-analytics](done/telemetry-analytics.md) — `feat/telemetry-analytics`

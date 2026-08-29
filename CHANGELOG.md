@@ -16,12 +16,36 @@ All notable changes to Momo's Music Manager.
   Creates universal binary, `.app` bundle, and DMG via `create-dmg`.
 - **`cargo-bundle` support**: `[package.metadata.bundle]` in `Cargo.toml` for
   automated `.app` bundle generation.
+- **Download Guarantor**: Aggressive auto-remediation background task that
+  guarantees 100% file coverage for subscribed Spotify playlists — deemix first,
+  spotDL (YouTube) fallback. Ships with the standalone `download-service/`
+  Python pipeline (deemix + spotDL + Spotify clients).
+- **Telemetry**: The prod instance periodically pushes a self-describing bundle
+  (consistent SQLite full snapshot via `VACUUM INTO`, logs, task history, and
+  redacted metrics) over HTTPS to a small receiver on the LAN server.
+- **macOS Menu Bar Tray Icon**: Menu bar icon showing server status with
+  "Open Dashboard" and "Quit" actions. Restructures `main()` so the Tao event
+  loop owns the main thread while the Axum server + background tasks run on a
+  spawned Tokio runtime.
+- **File↔Track Corrections** (migration 023): Manual `include`/`exclude`
+  overrides for the automatic file↔track linking. New endpoints
+  `GET/PUT /api/files/{id}/track-corrections`,
+  `GET/PUT /api/tracks/{id}/file-corrections`, plus disconnect/re-link UI on the
+  Track and File detail pages.
 
 ### Changed
 
 - **Removed dead `youtube = "0.1.1"` dependency** — crate was yanked from
   crates.io and never used in source.
 - **Version bumped to 1.0.0** — first shippable release.
+
+### Fixed
+
+- **External tool path resolution**: `metaflac`, `exiftool`, `ffmpeg`, and
+  `ffprobe` are now resolved to absolute paths (Homebrew/MacPorts locations).
+  Fixes "No such file or directory (os error 2)" when writing comments or
+  reading metadata/streaming from a GUI-launched app (which inherits a minimal
+  `PATH`).
 
 ---
 
