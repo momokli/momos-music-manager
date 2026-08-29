@@ -1108,3 +1108,22 @@ _Phase 2 (v0.3.2)_: Extract `extract_retry_after_secs` and `client_error_retry_a
 **Decision**: Add `src/external_tools.rs` with `resolve_tool()`, which resolves a tool name to an absolute path across common install locations (`/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, and their sbin variants), falling back to the bare name. Use it for `metaflac`/`exiftool` in `src/db/files.rs` and `ffmpeg`/`ffprobe` in `src/api/files.rs`.
 
 **Consequences**: Comment writing, metadata extraction, and stem streaming work regardless of how the app was launched. No longer relies on `PATH` for Homebrew tools. System tools (`rsync`, `ssh`) remain on the minimal `PATH` and are unchanged.
+
+---
+
+## ADR-058: Per-Format Comment Writers (lofty for MP3 only)
+
+**Date**: 2026-08-29
+**Status**: Accepted (implemented)
+
+**Context**: `write_comment_to_file` shelled out to `exiftool` for everything except FLAC. The Homebrew exiftool build reports `Writing of MP3 files is not yet supported`, so MP3 comment writes always failed. We considered unifying all comment writes on `lofty` (already used to read tags during scans), which does support writing FLAC/WAV/AIFF/M4A/MP3.
+
+**Decision**: Keep the mixed writer, add `lofty` only for MP3:
+
+- FLAC → `metaflac` (`--remove-tag=COMMENT --set-tag COMMENT=...`) — lossless, touches only the `COMMENT` field.
+- MP3 → `lofty` (ID3v2 `COMM` frame) — the only in-tree option, since exiftool cannot write MP3 and ffmpeg writes a `TXXX:comment` frame that lofty doesn't read as `ItemKey::Comment`.
+- M4A/WAV/AIFF → `exiftool` (unchanged).
+
+MP3 comment _reads_ also go through `lofty` (`read_comment_from_file` branches on `.mp3`). This is required for consistency: lofty writes the ID3v2 `COMM` frame with language `"XXX"` (its MPEG write path ignores the language field), which exiftool renders as `Comment-xxx` rather than `Comment`.
+
+**Consequences**: Do **not** unify on `lofty` for writes — its Vorbis-comment round-trip is not lossless (it remaps `ORGANIZATION` → `LABEL`), which would corrupt FLAC tags. MP3 is an accepted exception because there is no lossless in-tree alternative and testing confirmed other ID3v2 frames are preserved.
