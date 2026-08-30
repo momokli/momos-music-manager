@@ -179,7 +179,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          VERSION=$(grep -oE 'momos-music-manager-[0-9]+\.[0-9]+\.[0-9]+' momos-music-manager-*.tar.gz | head -1 | sed 's/momos-music-manager-//')
+          VERSION=$(ls momos-music-manager-*.tar.gz | head -1 | sed -E 's/momos-music-manager-([0-9]+\.[0-9]+\.[0-9]+)-.*/\1/')
           echo "Version: ${VERSION}"
 
           if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
