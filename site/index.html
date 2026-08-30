@@ -54,37 +54,37 @@
             <section class="section" id="features">
                 <div class="container">
                     <h2 class="section-title">What it does</h2>
-                    <p class="section-sub">A local-first library hub that keeps your Spotify, SoundCloud and file collection in sync, and your DJ software speaking the same language.</p>
+                    <p class="section-sub">One local library for Spotify, SoundCloud and your files, in sync with your DJ software.</p>
                     <div class="feature-grid">
                         <div class="feature-card">
                             <div class="feature-icon sc">🔄</div>
                             <h3>Library sync</h3>
-                            <p>Sync playlists and tracks from <strong>Spotify</strong> and <strong>SoundCloud</strong> into one local library. Subscribe to playlists, track changes, and keep everything in a single SQLite database.</p>
+                            <p>Sync Spotify and SoundCloud playlists and tracks into one local library. Subscribe to playlists, track changes.</p>
                         </div>
                         <div class="feature-card">
                             <div class="feature-icon hm">🎵</div>
                             <h3>Harmonic matching</h3>
-                            <p>BPM &amp; key detection with Camelot-wheel compatibility. Compare keys between Traktor and Spotify, discover harmonic matches, and build sets that stay in key.</p>
+                            <p>BPM &amp; key detection with Camelot-wheel matching. Build sets that stay in key.</p>
                         </div>
                         <div class="feature-card">
                             <div class="feature-icon tag">🏷️</div>
                             <h3>Tag organization</h3>
-                            <p>Free-form tags with categories and parent relations, plus AI-assisted auto-categorization powered by a <strong>local</strong> embedding model (all-MiniLM-L6-v2) that runs entirely on your machine, no cloud, no API keys. Tags map to playlists by name, and get written into ID3 comments for use in any DJ software.</p>
+                            <p>Free-form tags with categories and parent relations. Auto-categorization runs a <strong>local</strong> embedding model, no cloud. Tags map to playlists and land in your ID3 comments.</p>
                         </div>
                         <div class="feature-card">
                             <div class="feature-icon tr">🎧</div>
                             <h3>Traktor integration</h3>
-                            <p>Import your <code>collection.nml</code>, run consistency checks, and write BPM/key/comment metadata back so Traktor Smart Lists just work.</p>
+                            <p>Import <code>collection.nml</code> and write BPM/key/comment back. Traktor Smart Lists just work.</p>
                         </div>
                         <div class="feature-card">
                             <div class="feature-icon web">🖥️</div>
                             <h3>Web UI, locally</h3>
-                            <p>A fast, dark-themed single-page app served by the app itself, no Node, no Python, no separate dev server. One binary, one port, <code>localhost:3000</code>.</p>
+                            <p>A fast, dark single-page app. One binary, one port, <code>localhost:3000</code>.</p>
                         </div>
                         <div class="feature-card">
                             <div class="feature-icon mac">🍎</div>
                             <h3>Native macOS app</h3>
-                            <p>Menu-bar app with a universal DMG installer. Starts on login, runs in the background, re-opens your browser dashboard. Ad-hoc signed, details in the download section.</p>
+                            <p>Menu-bar app with a universal DMG. Starts on login, runs in the background.</p>
                         </div>
                     </div>
                 </div>
@@ -121,8 +121,7 @@
                 <div class="container">
                     <h2 class="section-title">Download</h2>
                     <p class="section-sub">
-                        Rolling build of the current <code>main</code> branch, rebuilt on
-                        every push. All platforms, direct links, SHA256 checksums included.
+                        Rolling build of <code>main</code>, rebuilt on every push.
                     </p>
 
                     <div class="platform-grid">
@@ -211,8 +210,7 @@
                         <div class="note-card note-warn">
                             <h3>🍎 macOS: first launch</h3>
                             <p>
-                                The DMG is <strong>ad-hoc signed and not notarized</strong>, so Gatekeeper
-                                may block it. Expected for a hobby project without an Apple Developer account:
+                                Unsigned and not notarized, so Gatekeeper may block it:
                             </p>
                             <ol>
                                 <li>Download and open the DMG.</li>
@@ -220,29 +218,23 @@
                                 <li>First start: <strong>right-click</strong> the app → <strong>Open</strong> → <strong>Open</strong>.</li>
                             </ol>
                             <p class="note-muted">
-                                The app runs in the menu bar (no dock icon) and opens your browser at
-                                <code>localhost:3000</code>. Notarization is planned,
+                                Runs in the menu bar, opens your browser at <code>localhost:3000</code>. Notarization planned,
                                 <a href="https://github.com/momokli/momos-music-manager/blob/main/docs/RELEASE-ROADMAP.md#m4--macos-notarization-gatekeeper" target="_blank" rel="noopener">roadmap M4</a>.
                             </p>
                         </div>
                         <div class="note-card note-warn">
                             <h3>🪟 Windows: SmartScreen</h3>
                             <p>
-                                Builds are <strong>unsigned</strong>, so SmartScreen/Defender may show
+                                Unsigned, so SmartScreen may show
                                 “Windows protected your PC”. Click <strong>More info</strong> →
-                                <strong>Run anyway</strong>. The zip contains
-                                <code>momos-music-manager.exe</code>, <code>README.md</code>, <code>VERSION</code>
-                                and <code>RUN.txt</code>, no installer. Code signing is planned,
+                                <strong>Run anyway</strong>. Code signing planned,
                                 <a href="https://github.com/momokli/momos-music-manager/blob/main/docs/RELEASE-ROADMAP.md#m3--windows-code-signing-smartscreen" target="_blank" rel="noopener">roadmap M3</a>.
                             </p>
                         </div>
                         <div class="note-card note-ok">
                             <h3>🐧 Linux: portable archive</h3>
                             <p>
-                                Portable <code>tar.gz</code> with the binary, <code>INSTALL.txt</code> and a
-                                <code>systemd</code> unit (<code>deploy/momos-music-manager.service</code>) for
-                                headless server mode. No GUI, the app serves its web UI on
-                                <code>localhost:3000</code>. AppImage/Flatpak is planned,
+                                Portable <code>tar.gz</code> with a <code>systemd</code> unit for headless mode. AppImage/Flatpak planned,
                                 <a href="https://github.com/momokli/momos-music-manager/blob/main/docs/RELEASE-ROADMAP.md#m5--linux-appimage--flatpak" target="_blank" rel="noopener">roadmap M5</a>.
                             </p>
                         </div>
