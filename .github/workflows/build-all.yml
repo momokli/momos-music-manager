@@ -172,12 +172,6 @@ jobs:
           merge-multiple: true
       - name: Show artifacts
         run: ls -lh dist/
-      - name: Aggregate SHA256SUMS
-        run: |
-          cd dist
-          cat momos-music-manager-*.sha256 > SHA256SUMS
-          echo "--- SHA256SUMS ---"
-          cat SHA256SUMS
       - name: Publish to latest-main (rolling) or tag release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -196,9 +190,24 @@ jobs:
                 --title "Latest main build (rolling)" \
                 --notes "Automatischer Build des aktuellen main-Standes für alle Plattformen. Ad-hoc-signiert, nicht notarized."
             fi
-            # Stable name for the landing page download button (macOS).
+
+            # Stable names for the landing page download buttons. The versioned
+            # assets change with every release; the site links to these names,
+            # so they must stay constant across main builds.
             cp "momos-music-manager-${VERSION}-macos-universal.dmg" "Momo-s-Music-Manager-latest.dmg"
-            gh release upload "${RELEASE}" "Momo-s-Music-Manager-latest.dmg" --clobber
+            cp "momos-music-manager-${VERSION}-windows-x64.zip" "momos-music-manager-latest-windows-x64.zip"
+            cp "momos-music-manager-${VERSION}-windows-arm64.zip" "momos-music-manager-latest-windows-arm64.zip"
+            cp "momos-music-manager-${VERSION}-linux-x64.tar.gz" "momos-music-manager-latest-linux-x64.tar.gz"
+            cp "momos-music-manager-${VERSION}-linux-arm64.tar.gz" "momos-music-manager-latest-linux-arm64.tar.gz"
+
+            # Matching checksums for the stable names (content-identical to the
+            # versioned artifacts, but the file name inside the .sha256 matters
+            # for `sha256sum -c`).
+            sha256sum "Momo-s-Music-Manager-latest.dmg" > "Momo-s-Music-Manager-latest.dmg.sha256"
+            sha256sum momos-music-manager-latest-windows-x64.zip > momos-music-manager-latest-windows-x64.zip.sha256
+            sha256sum momos-music-manager-latest-windows-arm64.zip > momos-music-manager-latest-windows-arm64.zip.sha256
+            sha256sum momos-music-manager-latest-linux-x64.tar.gz > momos-music-manager-latest-linux-x64.tar.gz.sha256
+            sha256sum momos-music-manager-latest-linux-arm64.tar.gz > momos-music-manager-latest-linux-arm64.tar.gz.sha256
           else
             RELEASE="${GITHUB_REF#refs/tags/}"
             if ! gh release view "${RELEASE}" >/dev/null 2>&1; then
@@ -206,6 +215,20 @@ jobs:
             fi
           fi
 
-          # Upload every platform artifact (schema names + per-file checksums + aggregate).
+          # Aggregate checksum file: versioned + stable entries on main,
+          # versioned-only on tag releases.
+          SHA_FILES=( momos-music-manager-*.sha256 )
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            SHA_FILES+=( Momo-s-Music-Manager-latest.dmg.sha256 )
+          fi
+          cat "${SHA_FILES[@]}" > SHA256SUMS
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
+          # Upload every platform artifact (schema names + stable names +
+          # per-file checksums + aggregate).
           gh release upload "${RELEASE}" momos-music-manager-* SHA256SUMS --clobber
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            gh release upload "${RELEASE}" Momo-s-Music-Manager-latest.dmg Momo-s-Music-Manager-latest.dmg.sha256 --clobber
+          fi
           echo "Uploaded to ${RELEASE}"

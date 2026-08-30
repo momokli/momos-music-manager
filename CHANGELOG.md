@@ -8,6 +8,17 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **Landing-Page-Downloads für alle Plattformen**: `site/` bietet jetzt
+  Download-Buttons für macOS (Universal-DMG), Windows (x64 + arm64) und Linux
+  (x64 + arm64) aus dem rolling `latest-main`-Release, jeweils mit
+  SHA256-Checksummen-Link und Verifikations-Anleitung. CI publiziert dafür
+  stabile Artefakt-Namen (`momos-music-manager-latest-<os>-<arch>.<ext>`,
+  `Momo-s-Music-Manager-latest.dmg.sha256`) und erweitert das aggregierte
+  `SHA256SUMS` um diese Einträge.
+- **docs/RELEASE-ROADMAP.md**: iterative Roadmap für die Verteilungs-Strategie
+  (M1 Downloads alle Plattformen ✅, M2 versionierte Releases, M3 Windows
+  Code-Signing, M4 macOS Notarization, M5 Linux AppImage/Flatpak, M6 optional
+  Autoupdater) — jeder Milestone einzeln abarbeitbar mit Definition of Done.
 - **Linux support**: Self-contained release builds (SQLite bundled via sqlx,
   TLS via rustls — no system sqlite/openssl dev packages needed). New
   `scripts/package-linux.sh` produces a portable `tar.gz` + `SHA256SUMS`,
@@ -26,6 +37,7 @@ All notable changes to Momo's Music Manager.
 
 ### Changed
 
+- `docs/PLATFORM-SUPPORT.md`: Landing-Page-Status auf erledigt aktualisiert.
 - TLS stack switched from native-tls/OpenSSL to **rustls** (reqwest, hf-hub,
   rspotify) — enables clean Linux cross-compilation to ARM64 and removes the
   OpenSSL system dependency on Linux.

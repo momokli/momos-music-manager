@@ -26,17 +26,21 @@ deployed to GitHub Pages:
 - **Deploy:** [`.github/workflows/pages.yml`](.github/workflows/pages.yml) —
   runs on every push to `main` that touches `site/**`
 
-The **Download** button points at the stable DMG asset
-`Momo-s-Music-Manager-latest.dmg` on the rolling `latest-main` pre-release
-(the CI uploads it under that stable name on every main build), plus a
-secondary link to the release page:
+The landing page now has **download buttons for all supported platforms**
+(macOS universal DMG, Windows x64 + arm64 zip, Linux x64 + arm64 tar.gz),
+each with a SHA256 checksum link and verification instructions, pointing at
+**stable asset names** on the rolling `latest-main` pre-release (the CI
+uploads e.g. `momos-music-manager-latest-linux-x64.tar.gz` under that stable
+name on every main build):
 
-- <https://github.com/momokli/momos-music-manager/releases/download/latest-main/Momo-s-Music-Manager-latest.dmg>
 - <https://github.com/momokli/momos-music-manager/releases/tag/latest-main>
+- <https://github.com/momokli/momos-music-manager/releases/download/latest-main/SHA256SUMS>
 
-The `latest-main` release also carries **Linux (x64 + arm64) tar.gz and
+The `latest-main` release carries **Linux (x64 + arm64) tar.gz and
 Windows (x64 + arm64) zip** artifacts with checksums — see
-[docs/PLATFORM-SUPPORT.md](docs/PLATFORM-SUPPORT.md) for the full matrix.
+[docs/PLATFORM-SUPPORT.md](docs/PLATFORM-SUPPORT.md) for the full matrix and
+[docs/RELEASE-ROADMAP.md](docs/RELEASE-ROADMAP.md) for the iterative next
+steps (versioned releases, code signing, notarization, AppImage).
 
 A custom domain (e.g. `mmm.simonklimke.de`) is intentionally **not** configured
 — the DNS entry is managed by the home `home_domains.txt` script on the
