@@ -240,6 +240,25 @@ fn main() -> Result<()> {
 async fn create_db_pool() -> Result<Pool<Sqlite>> {
     let config = ServiceCredentials::load();
     let url = &config.database_url;
+
+    // sqlx does not create the SQLite file by default (create_if_missing=false).
+    // Make fresh installs work everywhere (Linux server mode, packaged binaries):
+    // create the parent directory and the empty DB file before connecting.
+    if let Some(rest) = url.strip_prefix("sqlite:") {
+        let path = rest.split('?').next().unwrap_or(rest);
+        if !path.is_empty() && path != ":memory:" {
+            let path = std::path::Path::new(path);
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+            }
+            if !path.exists() {
+                tokio::fs::File::create(path).await?;
+            }
+        }
+    }
+
     let pool = SqlitePool::connect(url).await?;
     momos_music_manager::db::init_db(&pool).await?;
     Ok(pool)

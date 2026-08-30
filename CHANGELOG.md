@@ -4,6 +4,34 @@ All notable changes to Momo's Music Manager.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Linux support**: Self-contained release builds (SQLite bundled via sqlx,
+  TLS via rustls — no system sqlite/openssl dev packages needed). New
+  `scripts/package-linux.sh` produces a portable `tar.gz` + `SHA256SUMS`,
+  ships a systemd unit for headless server mode. README documents Linux
+  build/run/systemd.
+- **Windows support**: `scripts/package-windows.ps1` produces a `zip` + sha256
+  for x64 and ARM64 (hosted `windows-11-arm` runner).
+- **Cross-platform CI**: `.github/workflows/build-all.yml` builds Linux x64,
+  Linux ARM64 (cross), Windows x64, Windows ARM64 and macOS universal on every
+  `main` push (rolling `latest-main` release) and on `v*` tags — artifacts
+  named `momos-music-manager-<version>-<os>-<arch>.<ext>` with per-file
+  `.sha256` and aggregated `SHA256SUMS`.
+- **`docs/PLATFORM-SUPPORT.md`**: Platform matrix for all 6 targets (build,
+  toolchain, packaging, CI, signing/security per platform) with priorities and
+  honest "open" items.
+
+### Changed
+
+- TLS stack switched from native-tls/OpenSSL to **rustls** (reqwest, hf-hub,
+  rspotify) — enables clean Linux cross-compilation to ARM64 and removes the
+  OpenSSL system dependency on Linux.
+
+---
+
 ## [1.0.1] — 2026-08-29
 
 ### Added

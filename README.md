@@ -34,6 +34,10 @@ secondary link to the release page:
 - <https://github.com/momokli/momos-music-manager/releases/download/latest-main/Momo-s-Music-Manager-latest.dmg>
 - <https://github.com/momokli/momos-music-manager/releases/tag/latest-main>
 
+The `latest-main` release also carries **Linux (x64 + arm64) tar.gz and
+Windows (x64 + arm64) zip** artifacts with checksums — see
+[docs/PLATFORM-SUPPORT.md](docs/PLATFORM-SUPPORT.md) for the full matrix.
+
 A custom domain (e.g. `mmm.simonklimke.de`) is intentionally **not** configured
 — the DNS entry is managed by the home `home_domains.txt` script on the
 Fritz!Box and would collide with it. It can be added later via a `CNAME` file
@@ -43,9 +47,11 @@ plus a DNS exception.
 
 ### Prerequisites
 
-- Rust 1.80+ (and Cargo)
-- SQLite 3.x
+- Rust 1.85+ (and Cargo) — the project uses the Rust 2024 edition
 - Spotify Developer Account (optional, only for sync features)
+
+SQLite is compiled in (sqlx `bundled`) and TLS uses rustls — **no system
+SQLite/OpenSSL development packages needed** on any platform.
 
 No Python, Node.js, or separate dev server needed. The entire frontend is embedded in the binary via `rust-embed`.
 
@@ -115,18 +121,19 @@ Download the latest `Momo's-Music-Manager-v*.dmg` from
 
 #### Latest main (rolling build)
 
-Every push to `main` triggers a CI build that packages the current state as a
-macOS DMG and publishes it as a rolling pre-release:
+Every push to `main` triggers a CI build that packages the current state for
+**all platforms** (Linux x64/arm64, Windows x64/arm64, macOS universal) and
+publishes them as a rolling pre-release:
 
 - **Download:** <https://github.com/momokli/momos-music-manager/releases/tag/latest-main>
-- **Filename:** `Momo's-Music-Manager-v<VERSION>-main-<7-char-commit-sha>.dmg` — the
-  short commit SHA identifies the exact state, and the `-main-` suffix avoids name
-  collisions with tagged releases.
+- **Naming:** `momos-music-manager-<version>-<os>-<arch>.<ext>` (+ `.sha256` per file,
+  aggregate `SHA256SUMS`); macOS additionally as `Momo's-Music-Manager-v<VERSION>-main-<7-char-commit-sha>.dmg`
+  — the short commit SHA identifies the exact state.
 
-Same caveat as the tagged releases: this is an **ad-hoc signed, not notarized**
-build, so macOS Gatekeeper may block it on first launch — right-click the app and
-select **Open**. The DMG is also attached as a CI artifact
-(`momos-music-manager-dmg`) to the workflow run.
+Same caveat as the tagged releases: macOS builds are **ad-hoc signed, not
+notarized**, so Gatekeeper may block them on first launch — right-click the app
+and select **Open**. Windows builds are unsigned (SmartScreen warning possible).
+Artifacts are also attached to the workflow run (`mmm-<os>-<arch>`).
 
 The server runs in the background (no dock icon). Re-opening the app just brings
 back the browser. To stop the server, use Activity Monitor or `pkill momos-music-manager`.
@@ -134,6 +141,72 @@ back the browser. To stop the server, use Activity Monitor or `pkill momos-music
 Logs: `~/Library/Logs/momos-music-manager/`
 Config: `~/.config/momos-music-manager/config.toml`
 Database: `~/.local/share/momos-music-manager/library.db`
+
+### Linux (tar.gz)
+
+Grab `momos-music-manager-<version>-linux-x64.tar.gz` (or `-linux-arm64` for
+ARM — Raspberry Pi, NAS, ARM servers) from
+[GitHub Releases](https://github.com/momokli/momos-music-manager/releases/tag/latest-main),
+verify the checksum, unpack and run — the binary is fully self-contained
+(SQLite and TLS compiled in, no system libs beyond the base OS):
+
+```bash
+curl -LO https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-1.0.1-linux-x64.tar.gz
+curl -LO https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-1.0.1-linux-x64.tar.gz.sha256
+sha256sum -c momos-music-manager-1.0.1-linux-x64.tar.gz.sha256
+tar -xzf momos-music-manager-1.0.1-linux-x64.tar.gz
+```
+
+Run the server (headless — no GUI, no tray on Linux):
+
+```bash
+./momos-music-manager serve --host 0.0.0.0 --port 3000 --no-browser
+# open http://<host>:3000 in any browser
+```
+
+#### Build from source on Linux
+
+```bash
+# Debian/Ubuntu: nothing extra needed (SQLite bundled, TLS via rustls)
+cargo build --release
+target/release/momos-music-manager serve --host 127.0.0.1 --port 3000 --no-browser
+```
+
+Cross-build for ARM64 (needs the cross C compiler):
+
+```bash
+sudo apt-get install gcc-aarch64-linux-gnu
+CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ \
+  cargo build --release --target aarch64-unknown-linux-gnu
+```
+
+#### Systemd (server mode, auto-start)
+
+The package ships a systemd unit (`deploy/momos-music-manager.service`, also in
+the tar.gz under `deploy/`) for running the headless server as a service:
+
+```bash
+sudo install -m 0644 deploy/momos-music-manager.service /etc/systemd/system/
+sudo systemctl edit momos-music-manager   # set User + secrets (SPOTIFY_*, etc.)
+sudo systemctl daemon-reload
+sudo systemctl enable --now momos-music-manager
+sudo systemctl status momos-music-manager
+```
+
+### Windows (zip)
+
+Download `momos-music-manager-<version>-windows-x64.zip` (or `-windows-arm64`)
+from the [latest-main release](https://github.com/momokli/momos-music-manager/releases/tag/latest-main),
+unzip, and run from a terminal:
+
+```powershell
+.\momos-music-manager.exe serve --host 0.0.0.0 --port 3000 --no-browser
+# open http://<host>:3000
+```
+
+> Note: builds are unsigned — SmartScreen may show a warning ("More info → Run
+yet"). For background operation use Task Scheduler or NSSM.
 
 ### From Source
 
@@ -228,6 +301,9 @@ cargo run -- --version
 ## Development
 
 ```bash
+# Run the test suite (some tests shell out to external tools)
+# Debian/Ubuntu: sudo apt-get install flac exiftool ffmpeg
+cargo test
 # Clean DB (for schema changes)
 rm -f app.db && cargo run -- serve
 
@@ -366,7 +442,7 @@ momos-music-manager/
 │   └── tasks/              # TaskManager + workers
 │       └── mod.rs
 ├── download-service/       # Python download pipeline (deemix + spotDL)
-├── scripts/                # macOS packaging + helper scripts
+├── scripts/                # Packaging: macOS DMG, Linux tar.gz, Windows zip
 ├── frontend/               # SPA (embedded via rust-embed)
 │   ├── index.html          # Shell
 │   ├── app.js              # Hash router

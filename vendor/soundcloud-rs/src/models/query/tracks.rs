@@ -1,0 +1,24 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct TracksQuery {
+    pub q: Option<String>,
+    pub ids: Option<String>,
+    pub urns: Option<String>,
+    pub genres: Option<String>,
+    pub tags: Option<String>,
+    pub bpm: Option<String>,
+    pub duration: Option<String>,
+    pub created_at: Option<String>,
+    pub access: Option<String>,
+    pub limit: Option<i32>,
+    pub offset: Option<i32>,
+    pub linked_partitioning: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct Paging {
+    pub limit: Option<i32>,
+    pub offset: Option<i32>,
+    pub linked_partitioning: Option<bool>,
+}
