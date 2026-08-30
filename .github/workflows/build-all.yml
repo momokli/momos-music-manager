@@ -27,6 +27,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
+          # Keep caches per runner image: ubuntu-22.04 (glibc 2.35) artifacts
+          # must not be reused from ubuntu-latest (glibc 2.39) runs.
+          key: runner-image-22.04
       - name: Package tar.gz + sha256
         run: ./scripts/package-linux.sh x86_64-unknown-linux-gnu
       - name: Upload artifact
@@ -53,6 +56,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
+          # Keep caches per runner image (see linux-x64 job).
+          key: runner-image-22.04
       - name: Package tar.gz + sha256 (cross)
         env:
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
