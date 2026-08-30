@@ -13,8 +13,8 @@ in Toolchain, Paketierung und CI, nicht im Code.
 
 | # | Plattform         | Target-Triple                | Build | Cross-Toolchain | Paketierung | CI-Runner | Status |
 |---|-------------------|------------------------------|-------|-----------------|-------------|-----------|--------|
-| 1 | Linux x64         | `x86_64-unknown-linux-gnu`   | ✅ | nativ (keine)   | ✅ tar.gz  | `ubuntu-latest` | ✅ **fertig** |
-| 2 | Linux ARM64       | `aarch64-unknown-linux-gnu`  | ✅ | ✅ `gcc-aarch64-linux-gnu` | ✅ tar.gz | `ubuntu-latest` (cross) | ✅ **fertig** |
+| 1 | Linux x64         | `x86_64-unknown-linux-gnu`   | ✅ | nativ (keine)   | ✅ tar.gz  | `ubuntu-22.04` | ✅ **fertig** |
+| 2 | Linux ARM64       | `aarch64-unknown-linux-gnu`  | ✅ | ✅ `gcc-aarch64-linux-gnu` | ✅ tar.gz | `ubuntu-22.04` (cross) | ✅ **fertig** |
 | 3 | Windows x64       | `x86_64-pc-windows-msvc`     | ✅ | nativ (keine)   | ✅ zip     | `windows-latest` | ✅ **fertig** |
 | 4 | Windows ARM64     | `aarch64-pc-windows-msvc`    | ✅ | nativ (ARM-Runner) | ✅ zip | `windows-11-arm` (hosted, seit 2025) | ✅ **fertig** |
 | 5 | macOS Intel       | `x86_64-apple-darwin`        | ✅ | nativ           | ✅ DMG     | `macos-latest` | ✅ **fertig** (wie bisher) |
@@ -53,8 +53,8 @@ Namensschema (CI): `momos-music-manager-<version>-<os>-<arch>.<ext>`
 
 | Plattform | Runner | Anmerkung |
 |---|---|---|
-| Linux x64 | `ubuntu-latest` | nativ |
-| Linux ARM64 | `ubuntu-latest` + `aarch64-unknown-linux-gnu` | Cross-Compile, braucht `gcc-aarch64-linux-gnu` |
+| Linux x64 | `ubuntu-22.04` | nativ; glibc 2.35 → läuft auf Ubuntu 22.04+/Debian 12+ (portabler als ubuntu-latest/glibc 2.39) |
+| Linux ARM64 | `ubuntu-22.04` + `aarch64-unknown-linux-gnu` | Cross-Compile, braucht `gcc-aarch64-linux-gnu` + `g++-aarch64-linux-gnu` |
 | Windows x64 | `windows-latest` | nativ MSVC |
 | Windows ARM64 | `windows-11-arm` | **hosted ARM64-Runner existiert seit 2025** — wird direkt genutzt (kein Cross, kein self-hosted nötig) |
 | macOS Intel + ARM | `macos-latest` | ein Runner baut beide Targets + lipo |
@@ -98,6 +98,7 @@ Workflow: `.github/workflows/build-all.yml` — läuft bei Push auf `main`
 | **Windows-Dienst-Installation** (NSSM-Script) | 🟡 nur dokumentiert | klein | kein Blocker |
 | **Windows ARM64 auf älteren Runnern** | ✅ gelöst | — | `windows-11-arm` ist Standard-Hosted-Runner; Fallback wäre self-hosted |
 | **Linux ARM64 nativ bauen** | 🟡 Cross reicht | klein | Alternativ-Runner `ubuntu-24.04-arm` existiert (hosted) — aktuell Cross gewählt, da schneller/konsistenter Cache |
+| **Linux glibc-Baseline** | 🟡 Ubuntu 22.04 (glibc 2.35) | klein | statische musl-Builds wären noch portabler (offen, nicht priorisiert) |
 | **Landing Page** (`site/`) | 🟡 zeigt nur macOS-DMG | klein | Download-Buttons für Linux/Windows ergänzen (nächster Schritt) |
 | **Autoupdater** | ❌ nicht geplant | hoch | außerhalb Scope |
 

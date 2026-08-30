@@ -18,7 +18,7 @@ concurrency:
 jobs:
   linux-x64:
     name: Linux x64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -40,7 +40,7 @@ jobs:
 
   linux-arm64:
     name: Linux ARM64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: Install aarch64 cross toolchain
