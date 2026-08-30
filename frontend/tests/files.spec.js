@@ -154,11 +154,11 @@ test.describe("Files Page", () => {
     }
   });
 
-  test("stem missing filter shows only files without stems", async ({ page }) => {
+  test("stems filter shows only files without stems", async ({ page }) => {
     // files_filter scenario: files 1-4 + 30-32.
     // File 1 (flac US001) has a stem, file 2 IS the stem,
     // files 3, 4, 30, 31, 32 are flac without stems → expect 5 files.
-    await page.goto("/#files?stemMissing=true");
+    await page.goto("/#files?stems=true");
     await page.waitForSelector("#files-content table tbody tr", { timeout: 8000 });
 
     // Total in stats row must be 5
@@ -178,20 +178,20 @@ test.describe("Files Page", () => {
     expect(await rows.count()).toBe(5);
   });
 
-  test("stem missing filter combines with backup filter", async ({ page }) => {
-    // All stem-missing files (3, 4, 30, 31, 32) are backed up → still 5.
+  test("stems filter combines with backup filter", async ({ page }) => {
+    // All stems-filter files (3, 4, 30, 31, 32) are backed up → still 5.
     // File 1 has a stem, file 2 is a stem → excluded regardless of backup.
-    await page.goto("/#files?stemMissing=true&backedUp=true");
+    await page.goto("/#files?stems=true&backedUp=true");
     await page.waitForSelector("#files-content table tbody tr", { timeout: 8000 });
 
     const statsText = await page.locator("#files-content .stats-row strong").textContent();
     expect(parseInt(statsText, 10)).toBe(5);
   });
 
-  test("stem missing filter excludes local-only stems", async ({ page }) => {
-    // stemMissing=true & isLocal=true: stem-missing files are backup-only
+  test("stems filter excludes local-only stems", async ({ page }) => {
+    // stems=true & isLocal=true: stems-filter files are backup-only
     // (files 3,4,30,31,32 have no local entry) → expect 0 files.
-    await page.goto("/#files?stemMissing=true&isLocal=true");
+    await page.goto("/#files?stems=true&isLocal=true");
     await page.waitForTimeout(800);
 
     const statsText = await page.locator("#files-content .stats-row strong").textContent();

@@ -6,7 +6,7 @@
 //!
 //! Seed data layout (see `common::seed_basic_data`):
 //!
-//! | File | Type     | ISRC  | BPM  | Key | Title      | Artist   | Local? | Backup? | Has stem? | safeToDelete? | Stem missing? |
+//! | File | Type     | ISRC  | BPM  | Key | Title      | Artist   | Local? | Backup? | Has stem? | safeToDelete? | Stems? |
 //! |------|----------|-------|------|-----|------------|----------|--------|---------|-----------|---------------|---------------|
 //! | 1    | flac     | US001 | 128.0| 4m  | Title One  | Artist A | yes    | yes     | yes       | yes           | no            |
 //! | 2    | stem.m4a | US001 | 128.5| 4m  | Title One  | Artist A | yes    | yes     | no (it IS the stem) | no        | no (it IS the stem) |
@@ -679,25 +679,25 @@ async fn files_filter_safe_to_delete() {
     assert_eq!(files[0]["hasStem"], true);
 }
 
-// ─── Filter: stemMissing ────────────────────────────────────────────────
+// ─── Filter: stems ────────────────────────────────────────────────
 
 #[tokio::test]
-/// `?stemMissing=true` returns non-stem files whose track has no stem.m4a
+/// `?stems=true` returns non-stem files whose track has no stem.m4a
 /// with the same ISRC.
 ///
 /// Seed data: file 1 (flac US001) HAS a stem (file 2), file 2 IS the stem,
 /// files 3 (US002) and 4 (US999) have no stem. Expect files 3 and 4 only.
-async fn files_filter_stem_missing() {
+async fn files_filter_stems() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
 
     let resp = client
-        .get(format!("{}/api/files?limit=5&stemMissing=true", base))
+        .get(format!("{}/api/files?limit=5&stems=true", base))
         .send()
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 200, "expected 200 OK for stemMissing=true");
+    assert_eq!(resp.status(), 200, "expected 200 OK for stems=true");
 
     let json: Value = resp.json().await.unwrap();
     let files = json["data"].as_array().unwrap();
@@ -705,7 +705,7 @@ async fn files_filter_stem_missing() {
     assert_eq!(
         files.len(),
         2,
-        "stemMissing=true should return 2 files (3 and 4)"
+        "stems=true should return 2 files (3 and 4)"
     );
     let ids: Vec<i64> = files.iter().map(|f| f["id"].as_i64().unwrap()).collect();
     assert!(ids.contains(&3), "file 3 (flac US002, no stem) must be included");
@@ -715,31 +715,31 @@ async fn files_filter_stem_missing() {
     for f in files {
         assert_eq!(
             f["fileType"], "flac",
-            "stem-missing files must not be stem.m4a themselves"
+            "stems-filter files must not be stem.m4a themselves"
         );
         assert_eq!(
             f["hasStem"], false,
-            "stem-missing files must have hasStem=false"
+            "stems-filter files must have hasStem=false"
         );
     }
 }
 
 #[tokio::test]
-/// `?stemMissing=false` returns the inverse: stem files plus files that
+/// `?stems=false` returns the inverse: stem files plus files that
 /// already have a stem.m4a for the same track.
 ///
 /// Seed data: file 1 (has stem) and file 2 (is the stem). Expect 2 files.
-async fn files_filter_stem_missing_false() {
+async fn files_filter_stems_false() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
 
     let resp = client
-        .get(format!("{}/api/files?limit=5&stemMissing=false", base))
+        .get(format!("{}/api/files?limit=5&stems=false", base))
         .send()
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 200, "expected 200 OK for stemMissing=false");
+    assert_eq!(resp.status(), 200, "expected 200 OK for stems=false");
 
     let json: Value = resp.json().await.unwrap();
     let files = json["data"].as_array().unwrap();
@@ -747,7 +747,7 @@ async fn files_filter_stem_missing_false() {
     assert_eq!(
         files.len(),
         2,
-        "stemMissing=false should return 2 files (1 and 2)"
+        "stems=false should return 2 files (1 and 2)"
     );
     let ids: Vec<i64> = files.iter().map(|f| f["id"].as_i64().unwrap()).collect();
     assert!(ids.contains(&1), "file 1 has a stem and must be included");
@@ -757,18 +757,18 @@ async fn files_filter_stem_missing_false() {
 }
 
 #[tokio::test]
-/// `stemMissing` combines with the other filters: `?stemMissing=true&isLocal=true`
-/// narrows the stem-missing set by the local-presence filter.
+/// `stems` combines with the other filters: `?stems=true&isLocal=true`
+/// narrows the stems filter set by the local-presence filter.
 ///
-/// Seed data: files 3 and 4 are stem-missing but NOT local (backup only);
-/// files 1 and 2 are local but not stem-missing. Expect 0 files.
-async fn files_filter_stem_missing_combined_with_local() {
+/// Seed data: files 3 and 4 are stems-filter matches but NOT local (backup only);
+/// files 1 and 2 are local but do not match the stems filter. Expect 0 files.
+async fn files_filter_stems_combined_with_local() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
 
     let resp = client
         .get(format!(
-            "{}/api/files?limit=5&stemMissing=true&isLocal=true",
+            "{}/api/files?limit=5&stems=true&isLocal=true",
             base
         ))
         .send()
@@ -782,13 +782,13 @@ async fn files_filter_stem_missing_combined_with_local() {
     assert_eq!(
         files.len(),
         0,
-        "stemMissing=true & isLocal=true should return 0 files (no overlap)"
+        "stems=true & isLocal=true should return 0 files (no overlap)"
     );
 
-    // Backup filter combines too: all stem-missing files are backed up
+    // Backup filter combines too: all stems-filter files are backed up
     let resp2 = client
         .get(format!(
-            "{}/api/files?limit=5&stemMissing=true&backedUp=true",
+            "{}/api/files?limit=5&stems=true&backedUp=true",
             base
         ))
         .send()
@@ -799,19 +799,19 @@ async fn files_filter_stem_missing_combined_with_local() {
     assert_eq!(
         files2.len(),
         2,
-        "stemMissing=true & backedUp=true should return 2 files (3 and 4)"
+        "stems=true & backedUp=true should return 2 files (3 and 4)"
     );
 }
 
 #[tokio::test]
-/// `GET /api/files/count?stemMissing=true` matches the filtered list length,
-/// proving the count query applies the stem-missing filter too.
-async fn files_count_stem_missing_matches_list() {
+/// `GET /api/files/count?stems=true` matches the filtered list length,
+/// proving the count query applies the stems filter too.
+async fn files_count_stems_matches_list() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
 
     let list_resp = client
-        .get(format!("{}/api/files?limit=5&stemMissing=true", base))
+        .get(format!("{}/api/files?limit=5&stems=true", base))
         .send()
         .await
         .unwrap();
@@ -819,7 +819,7 @@ async fn files_count_stem_missing_matches_list() {
     let list_count = list_json["data"].as_array().unwrap().len();
 
     let count_resp = client
-        .get(format!("{}/api/files/count?stemMissing=true", base))
+        .get(format!("{}/api/files/count?stems=true", base))
         .send()
         .await
         .unwrap();
@@ -835,12 +835,12 @@ async fn files_count_stem_missing_matches_list() {
 
     assert_eq!(
         count_value, list_count,
-        "/api/files/count?stemMissing=true ({}) must match filtered list length ({})",
+        "/api/files/count?stems=true ({}) must match filtered list length ({})",
         count_value, list_count
     );
     assert_eq!(
         count_value, 2,
-        "stemMissing=true should give count of 2 (files 3 and 4)"
+        "stems=true should give count of 2 (files 3 and 4)"
     );
 }
 
