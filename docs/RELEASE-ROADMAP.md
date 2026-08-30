@@ -26,12 +26,12 @@ Ausgangslage (Bestandsaufnahme, 2026-08-30):
 
 | # | Milestone | Kernnutzen | Aufwand | Status |
 |---|-----------|-----------|---------|--------|
-| [M1](#m1-download-sektion-für-alle-6-artefakte--sha256) | Download-Sektion für alle 6 Artefakte + SHA256 (rolling) | Besucher laden jede Plattform direkt von der Landing-Page, mit Checksummen-Verifikation | S | ✅ **umgesetzt** (PR #13) |
-| [M2](#m2-release-spezifische-seiten--assets-pro-tag) | Release-spezifische Seiten/Assets pro Tag (`v*`) | Stabile, versionierte Downloads mit Changelog statt ewig wachsendem Rolling-Release | M | 🟡 offen |
-| [M3](#m3-windows-code-signing-smartscreen) | Windows Code-Signing (SmartScreen) | Keine „Unbekannter Herausgeber"-Warnung mehr | M | ❌ offen |
-| [M4](#m4-macos-notarization-gatekeeper) | macOS Notarization (Gatekeeper) | Doppelklick-Installation ohne Rechtsklick-Trick | M | ❌ offen |
-| [M5](#m5-linux-appimage--flatpak) | Linux AppImage / Flatpak | Desktop-Integration (Icon, .desktop, App-Store) statt nacktem tar.gz | M | 🟡 geplant |
-| [M6](#m6-optional-autoupdater) | Autoupdater (optional) | App aktualisiert sich selbst | L | ⏸️ optional |
+| [M1](#m1--download-sektion-für-alle-6-artefakte--sha256) | Download-Sektion für alle 6 Artefakte + SHA256 (rolling) | Besucher laden jede Plattform direkt von der Landing-Page, mit Checksummen-Verifikation | S | ✅ **umgesetzt** (PR #13) |
+| [M2](#m2--release-spezifische-seitenassets-pro-tag) | Release-spezifische Seiten/Assets pro Tag (`v*`) | Stabile, versionierte Downloads mit Changelog statt ewig wachsendem Rolling-Release | M | 🟡 offen |
+| [M3](#m3--windows-code-signing-smartscreen) | Windows Code-Signing (SmartScreen) | Keine „Unbekannter Herausgeber"-Warnung mehr | M | ❌ offen |
+| [M4](#m4--macos-notarization-gatekeeper) | macOS Notarization (Gatekeeper) | Doppelklick-Installation ohne Rechtsklick-Trick | M | ❌ offen |
+| [M5](#m5--linux-appimage--flatpak) | Linux AppImage / Flatpak | Desktop-Integration (Icon, .desktop, App-Store) statt nacktem tar.gz | M | 🟡 geplant |
+| [M6](#m6--autoupdater-optional) | Autoupdater (optional) | App aktualisiert sich selbst | L | ⏸️ optional |
 
 Legende: ✅ umgesetzt · 🟡 offen/geplant · ❌ offen (blockiert/aufwendig) · ⏸️ optional
 
