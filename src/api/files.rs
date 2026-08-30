@@ -665,14 +665,21 @@ fn build_files_filter_sql(filter: &FilesFilterAll) -> String {
     }
 
     // Stem missing filter: non-stem files whose track has no stem.m4a with the same ISRC
-    if let Some(true) = filter.stem_missing {
-        sql.push_str(" AND files.file_type != 'stem.m4a'");
-        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.isrc != '' AND f2.file_type = 'stem.m4a')");
-    } else if let Some(false) = filter.stem_missing {
-        sql.push_str(" AND (files.file_type = 'stem.m4a' OR EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.isrc != '' AND f2.file_type = 'stem.m4a'))");
-    }
+    append_stem_missing_filter(&mut sql, filter.stem_missing);
 
     sql
+}
+
+/// Append the "stem missing" filter to a files SQL query.
+/// `Some(true)`: non-stem files whose track has no `stem.m4a` with the same ISRC.
+/// `Some(false)`: stem files plus files that already have a `stem.m4a` for the track.
+fn append_stem_missing_filter(sql: &mut String, stem_missing: Option<bool>) {
+    if let Some(true) = stem_missing {
+        sql.push_str(" AND files.file_type != 'stem.m4a'");
+        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.isrc != '' AND f2.file_type = 'stem.m4a')");
+    } else if let Some(false) = stem_missing {
+        sql.push_str(" AND (files.file_type = 'stem.m4a' OR EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.isrc != '' AND f2.file_type = 'stem.m4a'))");
+    }
 }
 
 /// POST /api/files/needs-comment-count-all
@@ -1305,12 +1312,7 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
     }
 
     // Stem missing filter: non-stem files whose track has no stem.m4a with the same ISRC
-    if let Some(true) = query.stem_missing {
-        sql.push_str(" AND files.file_type != 'stem.m4a'");
-        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.isrc != '' AND f2.file_type = 'stem.m4a')");
-    } else if let Some(false) = query.stem_missing {
-        sql.push_str(" AND (files.file_type = 'stem.m4a' OR EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.isrc != '' AND f2.file_type = 'stem.m4a'))");
-    }
+    append_stem_missing_filter(&mut sql, query.stem_missing);
 
     apply_sort(
         &mut sql,
@@ -1779,12 +1781,7 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
     }
 
     // Stem missing filter: non-stem files whose track has no stem.m4a with the same ISRC
-    if let Some(true) = query.stem_missing {
-        sql.push_str(" AND files.file_type != 'stem.m4a'");
-        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.isrc != '' AND f2.file_type = 'stem.m4a')");
-    } else if let Some(false) = query.stem_missing {
-        sql.push_str(" AND (files.file_type = 'stem.m4a' OR EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.isrc != '' AND f2.file_type = 'stem.m4a'))");
-    }
+    append_stem_missing_filter(&mut sql, query.stem_missing);
 
     let mut q = sqlx::query(&sql);
 
