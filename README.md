@@ -86,6 +86,21 @@ Download the latest `Momo's-Music-Manager-v*.dmg` from
 > **First launch**: macOS Gatekeeper may block unsigned apps. Right-click the app
 > and select **Open**, then click **Open** in the dialog.
 
+#### Latest main (rolling build)
+
+Every push to `main` triggers a CI build that packages the current state as a
+macOS DMG and publishes it as a rolling pre-release:
+
+- **Download:** <https://github.com/momokli/momos-music-manager/releases/tag/latest-main>
+- **Filename:** `Momo's-Music-Manager-v<VERSION>-main-<7-char-commit-sha>.dmg` — the
+  short commit SHA identifies the exact state, and the `-main-` suffix avoids name
+  collisions with tagged releases.
+
+Same caveat as the tagged releases: this is an **ad-hoc signed, not notarized**
+build, so macOS Gatekeeper may block it on first launch — right-click the app and
+select **Open**. The DMG is also attached as a CI artifact
+(`momos-music-manager-dmg`) to the workflow run.
+
 The server runs in the background (no dock icon). Re-opening the app just brings
 back the browser. To stop the server, use Activity Monitor or `pkill momos-music-manager`.
 
