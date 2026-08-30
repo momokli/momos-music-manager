@@ -43,10 +43,6 @@ dirs = "6.0"
 rust-embed = "8"
 unicode-normalization = "0.1"
 webbrowser = "1"
-tray-icon = "0.24.2"
-objc2 = "0.6"
-objc2-foundation = "0.3"
-objc2-app-kit = "0.3"
 
 # ML / Embeddings
 candle-core = "0.8"
@@ -54,6 +50,14 @@ candle-transformers = "0.8"
 candle-nn = "0.8"
 hf-hub = "0.4"
 tokenizers = "0.21"
+
+# macOS-only (menu bar tray icon). Cfg-gated so the project builds on Linux
+# (used for CI integration tests, Playwright screenshots, and the landing page).
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = "0.24.2"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
 
 [dev-dependencies]
 tokio-test = "0.4"
