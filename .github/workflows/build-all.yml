@@ -1,0 +1,206 @@
+name: Build all platforms
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-all-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-x64:
+    name: Linux x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Package tar.gz + sha256
+        run: ./scripts/package-linux.sh x86_64-unknown-linux-gnu
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmm-linux-x64
+          path: |
+            target/momos-music-manager-*-linux-x64.tar.gz
+            target/momos-music-manager-*-linux-x64.tar.gz.sha256
+          if-no-files-found: error
+
+  linux-arm64:
+    name: Linux ARM64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install aarch64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Package tar.gz + sha256 (cross)
+        env:
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          # rust-lld chokes on --fix-cortex-a53-843419 for aarch64 on x86_64 hosts;
+          # use the GNU cross linker for the final link instead.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: ./scripts/package-linux.sh aarch64-unknown-linux-gnu
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmm-linux-arm64
+          path: |
+            target/momos-music-manager-*-linux-arm64.tar.gz
+            target/momos-music-manager-*-linux-arm64.tar.gz.sha256
+          if-no-files-found: error
+
+  windows-x64:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Build release
+        run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Package zip + sha256
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -TargetTriple x86_64-pc-windows-msvc
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmm-windows-x64
+          path: |
+            target/momos-music-manager-*-windows-x64.zip
+            target/momos-music-manager-*-windows-x64.zip.sha256
+          if-no-files-found: error
+
+  # GitHub-hosted ARM64 Windows runner (windows-11-arm) — available since 2025.
+  windows-arm64:
+    name: Windows ARM64
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Build release
+        run: cargo build --release --target aarch64-pc-windows-msvc
+      - name: Package zip + sha256
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -TargetTriple aarch64-pc-windows-msvc
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmm-windows-arm64
+          path: |
+            target/momos-music-manager-*-windows-arm64.zip
+            target/momos-music-manager-*-windows-arm64.zip.sha256
+          if-no-files-found: error
+
+  macos-universal:
+    name: macOS Universal (Intel + ARM)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Install create-dmg
+        run: brew install create-dmg
+      - name: Package DMG (universal)
+        run: ./scripts/package-macos.sh
+      - name: Rename to schema + sha256
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c "import sys,json; print(json.load(sys.stdin)['packages'][0]['version'])")
+          BASE="target/Momo's-Music-Manager-v${VERSION}.dmg"
+          SCHEMA="target/momos-music-manager-${VERSION}-macos-universal.dmg"
+          cp "$BASE" "$SCHEMA"
+          (cd target && sha256sum "$(basename "$SCHEMA")" > "momos-music-manager-${VERSION}-macos-universal.dmg.sha256")
+          ls -lh "$SCHEMA"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmm-macos-universal
+          path: |
+            target/momos-music-manager-*-macos-universal.dmg
+            target/momos-music-manager-*-macos-universal.dmg.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish release assets
+    needs: [linux-x64, linux-arm64, windows-x64, windows-arm64, macos-universal]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Show artifacts
+        run: ls -lh dist/
+      - name: Aggregate SHA256SUMS
+        run: |
+          cd dist
+          cat momos-music-manager-*.sha256 > SHA256SUMS
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+      - name: Publish to latest-main (rolling) or tag release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd dist
+          VERSION=$(grep -oE 'momos-music-manager-[0-9]+\.[0-9]+\.[0-9]+' momos-music-manager-*.tar.gz | head -1 | sed 's/momos-music-manager-//')
+          echo "Version: ${VERSION}"
+
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            RELEASE="latest-main"
+            if ! gh release view "${RELEASE}" >/dev/null 2>&1; then
+              gh release create "${RELEASE}" \
+                --prerelease \
+                --target main \
+                --title "Latest main build (rolling)" \
+                --notes "Automatischer Build des aktuellen main-Standes für alle Plattformen. Ad-hoc-signiert, nicht notarized."
+            fi
+            # Stable name for the landing page download button (macOS).
+            cp "momos-music-manager-${VERSION}-macos-universal.dmg" "Momo-s-Music-Manager-latest.dmg"
+            gh release upload "${RELEASE}" "Momo-s-Music-Manager-latest.dmg" --clobber
+          else
+            RELEASE="${GITHUB_REF#refs/tags/}"
+            if ! gh release view "${RELEASE}" >/dev/null 2>&1; then
+              gh release create "${RELEASE}" --generate-notes --title "${RELEASE}"
+            fi
+          fi
+
+          # Upload every platform artifact (schema names + per-file checksums + aggregate).
+          gh release upload "${RELEASE}" momos-music-manager-* SHA256SUMS --clobber
+          echo "Uploaded to ${RELEASE}"

@@ -16,7 +16,7 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = {version = "0.3", features = ["env-filter", "fmt", "registry"]}
 tracing-appender = "0.2"
-rspotify = "0.15.1"
+rspotify = { version = "0.15.1", default-features = false, features = ["client-reqwest", "reqwest-rustls-tls"] }
 axum = { version = "0.8.6", features = ["ws", "multipart"] }
 askama = "0.14"
 
@@ -24,7 +24,7 @@ tower = "0.5.2"
 hyper = "1.7.0"
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 futures = "0.3"
-reqwest = { version = "0.12", features = ["json", "cookies", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "stream", "rustls-tls"] }
 dotenvy = "0.15"
 clap = { version = "4.5.50", features = ["derive"] }
 sha2 = "0.10"
@@ -48,7 +48,7 @@ webbrowser = "1"
 candle-core = "0.8"
 candle-transformers = "0.8"
 candle-nn = "0.8"
-hf-hub = "0.4"
+hf-hub = { version = "0.4", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
 tokenizers = "0.21"
 
 # macOS-only (menu bar tray icon). Cfg-gated so the project builds on Linux
@@ -73,3 +73,9 @@ osx_minimum_system_version = "13.0"
 
 [package.metadata.bundle.settings.macos]
 LSUIElement = true
+
+# soundcloud-rs (vendored): upstream enables reqwest default-tls (native-tls/OpenSSL),
+# which breaks Linux cross-compilation to ARM64 and adds a system OpenSSL dependency.
+# Patch: reqwest with rustls-tls only.
+[patch.crates-io]
+soundcloud-rs = { path = "vendor/soundcloud-rs" }
