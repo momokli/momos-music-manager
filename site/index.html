@@ -207,32 +207,6 @@
                         </div>
                     </div>
 
-                    <div class="verify">
-                        <h3>Verify your download (SHA256)</h3>
-                        <p>
-                            Every artifact ships with a <code>.sha256</code> file and is listed in the
-                            aggregate <a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/SHA256SUMS">SHA256SUMS</a>.
-                            Compare the hash of the file you downloaded with the published checksum:
-                        </p>
-                        <div class="verify-grid">
-                            <div class="verify-os">
-                                <h4>macOS</h4>
-                                <pre>shasum -a 256 Momo-s-Music-Manager-latest.dmg</pre>
-                                <p class="verify-note">…then compare with the linked <code>.sha256</code> file.</p>
-                            </div>
-                            <div class="verify-os">
-                                <h4>Linux</h4>
-                                <pre>curl -fLO https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-x64.tar.gz.sha256
-sha256sum -c momos-music-manager-latest-linux-x64.tar.gz.sha256</pre>
-                            </div>
-                            <div class="verify-os">
-                                <h4>Windows (PowerShell)</h4>
-                                <pre>Get-FileHash .\momos-music-manager-latest-windows-x64.zip -Algorithm SHA256</pre>
-                                <p class="verify-note">…then compare with the linked <code>.sha256</code> file.</p>
-                            </div>
-                        </div>
-                    </div>
-
                     <div class="platform-notes">
                         <div class="note-card note-warn">
                             <h3>🍎 macOS — first launch</h3>
@@ -297,7 +271,7 @@ sha256sum -c momos-music-manager-latest-linux-x64.tar.gz.sha256</pre>
                 </nav>
             </div>
             <div class="container footer-bottom">
-                <p>built with <span aria-hidden="true">❤️</span> by <a href="https://github.com/momokli/momos-music-manager" target="_blank" rel="noopener">@momokli</a></p>
+                <p>built with <span aria-hidden="true">❤️</span>by <a href="https://github.com/momokli/momos-music-manager" target="_blank" rel="noopener">@momokli</a></p>
             </div>
         </footer>
     </body>
