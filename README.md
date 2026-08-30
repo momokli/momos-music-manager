@@ -1,4 +1,4 @@
-# momos music manager
+# momo's music manager
 
 > Multi-service music library management for DJs — local files + Spotify streaming with harmonic matching, tag organization, and Traktor integration.
 
@@ -117,7 +117,7 @@ Download the latest `Momo's-Music-Manager-v*.dmg` from
 [GitHub Releases](https://github.com/momo/momos-music-manager/releases).
 
 1. Open the DMG
-2. Drag **momos music manager** to the **Applications** folder
+2. Drag **momo's music manager** to the **Applications** folder
 3. Double-click the app — the server starts and your browser opens to the dashboard
 
 > **First launch**: macOS Gatekeeper may block unsigned apps. Right-click the app
