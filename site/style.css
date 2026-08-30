@@ -320,65 +320,197 @@ code {
 
 /* ─── Download ───────────────────────────────────────────── */
 
-.download-card {
+.platform-grid {
     display: grid;
-    grid-template-columns: 1.3fr 1fr;
-    gap: 26px;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 18px;
+    margin-bottom: 28px;
+}
+
+.platform-card {
+    display: flex;
+    flex-direction: column;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 34px;
+    border-radius: 14px;
+    padding: 22px;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.platform-card:hover {
+    border-color: var(--border-strong);
+    transform: translateY(-2px);
 }
 
-.download-label {
-    font-size: 0.85rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-subtle);
-    margin-bottom: 14px;
+.platform-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
 }
 
-.download-main .btn-xl {
-    margin-bottom: 14px;
+.platform-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    background: var(--accent-bg);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.15rem;
+    flex-shrink: 0;
 }
 
-.download-sub {
-    font-size: 0.88rem;
+.platform-head h3 {
+    font-size: 1.02rem;
+    font-weight: 600;
+}
+
+.platform-arch {
+    font-size: 0.8rem;
     color: var(--text-muted);
+}
+
+.btn-dl {
+    justify-content: center;
+    padding: 11px 16px;
+    font-size: 0.88rem;
+    margin-bottom: 12px;
+}
+
+.platform-meta {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+
+.platform-sha {
+    font-size: 0.82rem;
+}
+
+.platform-sha a {
+    color: var(--text-subtle);
+}
+.platform-sha a:hover {
+    color: var(--accent);
+}
+
+/* SHA256 verification block */
+
+.verify {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px 26px;
+    margin-bottom: 28px;
+}
+
+.verify h3 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.verify > p {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+    max-width: 760px;
+    margin-bottom: 18px;
+}
+
+.verify-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 14px;
+}
+
+.verify-os {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+}
+
+.verify-os h4 {
+    font-size: 0.82rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-subtle);
     margin-bottom: 10px;
 }
 
-.download-alt {
-    font-size: 0.88rem;
+.verify-os pre {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    line-height: 1.55;
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    white-space: pre;
+}
+
+.verify-note {
+    margin-top: 8px;
+    font-size: 0.78rem;
     color: var(--text-subtle);
 }
 
-.gatekeeper {
-    background: rgba(245, 158, 11, 0.06);
-    border: 1px solid rgba(245, 158, 11, 0.25);
+/* Per-platform notes (macOS Gatekeeper, Windows SmartScreen, Linux) */
+
+.platform-notes {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 18px;
+    margin-bottom: 26px;
+}
+
+.note-card {
     border-radius: 12px;
-    padding: 20px 22px;
+    padding: 18px 20px;
 }
 
-.gatekeeper h3 {
-    font-size: 0.98rem;
-    color: var(--yellow);
-    margin-bottom: 10px;
+.note-card h3 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-bottom: 8px;
 }
 
-.gatekeeper p,
-.gatekeeper li {
-    font-size: 0.88rem;
+.note-card p,
+.note-card li {
+    font-size: 0.86rem;
     color: var(--text-secondary);
 }
 
-.gatekeeper ol {
-    margin: 10px 0 10px 18px;
+.note-card ol {
+    margin: 8px 0 8px 18px;
 }
 
-.gatekeeper-note {
-    margin-top: 10px;
+.note-warn {
+    background: rgba(245, 158, 11, 0.06);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+}
+.note-warn h3 {
+    color: var(--yellow);
+}
+
+.note-ok {
+    background: rgba(16, 185, 129, 0.06);
+    border: 1px solid rgba(16, 185, 129, 0.25);
+}
+.note-ok h3 {
+    color: var(--green);
+}
+
+.note-muted {
+    margin-top: 8px;
     color: var(--text-muted);
+}
+
+.download-alt-center {
+    text-align: center;
 }
 
 /* ─── Footer ─────────────────────────────────────────────── */
@@ -440,9 +572,6 @@ code {
 /* ─── Responsive ─────────────────────────────────────────── */
 
 @media (max-width: 760px) {
-    .download-card {
-        grid-template-columns: 1fr;
-    }
     .shot-grid {
         grid-template-columns: 1fr;
     }
