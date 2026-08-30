@@ -99,7 +99,7 @@ Workflow: `.github/workflows/build-all.yml` — läuft bei Push auf `main`
 | **Windows ARM64 auf älteren Runnern** | ✅ gelöst | — | `windows-11-arm` ist Standard-Hosted-Runner; Fallback wäre self-hosted |
 | **Linux ARM64 nativ bauen** | 🟡 Cross reicht | klein | Alternativ-Runner `ubuntu-24.04-arm` existiert (hosted) — aktuell Cross gewählt, da schneller/konsistenter Cache |
 | **Linux glibc-Baseline** | 🟡 Ubuntu 22.04 (glibc 2.35) | klein | statische musl-Builds wären noch portabler (offen, nicht priorisiert) |
-| **Landing Page** (`site/`) | ✅ alle 6 Artefakte + SHA256 | klein | erledigt (PR #8): Download-Buttons für macOS/Windows/Linux + Verifikation; stabile Artefakt-Namen im CI. Versionierte Releases: [RELEASE-ROADMAP.md](RELEASE-ROADMAP.md) M2 |
+| **Landing Page** (`site/`) | ✅ alle 6 Artefakte + SHA256 | klein | erledigt (PR #13): Download-Buttons für macOS/Windows/Linux + Verifikation; stabile Artefakt-Namen im CI. Versionierte Releases: [RELEASE-ROADMAP.md](RELEASE-ROADMAP.md) M2 |
 | **Autoupdater** | ❌ nicht geplant | hoch | außerhalb Scope |
 
 ## Verifikations-Stand

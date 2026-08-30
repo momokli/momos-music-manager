@@ -26,7 +26,7 @@ Ausgangslage (Bestandsaufnahme, 2026-08-30):
 
 | # | Milestone | Kernnutzen | Aufwand | Status |
 |---|-----------|-----------|---------|--------|
-| [M1](#m1-download-sektion-für-alle-6-artefakte--sha256) | Download-Sektion für alle 6 Artefakte + SHA256 (rolling) | Besucher laden jede Plattform direkt von der Landing-Page, mit Checksummen-Verifikation | S | ✅ **umgesetzt** (PR #8) |
+| [M1](#m1-download-sektion-für-alle-6-artefakte--sha256) | Download-Sektion für alle 6 Artefakte + SHA256 (rolling) | Besucher laden jede Plattform direkt von der Landing-Page, mit Checksummen-Verifikation | S | ✅ **umgesetzt** (PR #13) |
 | [M2](#m2-release-spezifische-seiten--assets-pro-tag) | Release-spezifische Seiten/Assets pro Tag (`v*`) | Stabile, versionierte Downloads mit Changelog statt ewig wachsendem Rolling-Release | M | 🟡 offen |
 | [M3](#m3-windows-code-signing-smartscreen) | Windows Code-Signing (SmartScreen) | Keine „Unbekannter Herausgeber"-Warnung mehr | M | ❌ offen |
 | [M4](#m4-macos-notarization-gatekeeper) | macOS Notarization (Gatekeeper) | Doppelklick-Installation ohne Rechtsklick-Trick | M | ❌ offen |
@@ -44,7 +44,7 @@ Download-Buttons aus dem rolling `latest-main`-Release — macOS Universal-DMG,
 Windows x64 + arm64, Linux x64 + arm64 — jeweils mit SHA256-Checksummen-Link
 und kurzer Verifikations-Anleitung. Kein „weiter zur Release-Seite" mehr nötig.
 
-**Umgesetzt in PR #8** (Branch `feature/site-downloads-roadmap`):
+**Umgesetzt in PR #13** (Branch `feature/site-downloads-roadmap`):
 
 - `site/index.html`: neue Download-Sektion mit 5 Paket-Karten (macOS universal,
   Windows x64/arm64, Linux x64/arm64) + SHA256-Block mit Befehlen für
