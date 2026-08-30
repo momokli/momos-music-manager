@@ -412,6 +412,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — Architectural Decision Records
 - [`docs/COMMENT_SYSTEM.md`](docs/COMMENT_SYSTEM.md) — Comment format specification
 - [`docs/TASK_MANAGER.md`](docs/TASK_MANAGER.md) — Task manager design
+- [`docs/USER_STORY.md`](docs/USER_STORY.md) — Core user story
 
 ---
 
