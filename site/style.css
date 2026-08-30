@@ -1,0 +1,452 @@
+/* Momo's Music Manager — landing page.
+ * Dark theme matching the app (see frontend/style.css design tokens). */
+
+:root {
+    --bg: #0b0d12;
+    --surface: #14181f;
+    --surface-hover: #1a1f2a;
+    --border: #1e293b;
+    --border-strong: #334155;
+    --text: #e2e8f0;
+    --text-secondary: #cbd5e1;
+    --text-muted: #94a3b8;
+    --text-subtle: #64748b;
+    --accent: #6366f1;
+    --accent-hover: #5558e6;
+    --accent-bg: rgba(99, 102, 241, 0.12);
+    --green: #10b981;
+    --red: #ef4444;
+    --yellow: #f59e0b;
+    --radius: 10px;
+    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", monospace;
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html {
+    scroll-behavior: smooth;
+}
+
+body {
+    font-family: var(--font-sans);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+}
+
+img {
+    max-width: 100%;
+    display: block;
+}
+
+a {
+    color: var(--accent);
+    text-decoration: none;
+}
+a:hover {
+    text-decoration: underline;
+}
+
+code {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+}
+
+.container {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 0 24px;
+}
+
+/* ─── Header ─────────────────────────────────────────────── */
+
+.site-header {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: rgba(11, 13, 18, 0.85);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+}
+
+.header-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 60px;
+}
+
+.brand img {
+    height: 28px;
+    width: auto;
+}
+
+.site-nav {
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    font-size: 0.92rem;
+}
+
+.site-nav a {
+    color: var(--text-secondary);
+}
+.site-nav a:hover {
+    color: var(--text);
+    text-decoration: none;
+}
+
+.site-nav .nav-gh {
+    color: var(--accent);
+}
+
+/* ─── Hero ───────────────────────────────────────────────── */
+
+.hero {
+    padding: 72px 0 64px;
+    text-align: center;
+    background:
+        radial-gradient(ellipse 70% 55% at 50% -10%, rgba(99, 102, 241, 0.16), transparent 70%),
+        var(--bg);
+    border-bottom: 1px solid var(--border);
+}
+
+.hero-logo {
+    width: 150px;
+    margin: 0 auto 18px;
+    filter: drop-shadow(0 8px 30px rgba(99, 102, 241, 0.35));
+}
+
+.hero h1 {
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 14px;
+}
+
+.tagline {
+    font-size: clamp(1rem, 2.2vw, 1.25rem);
+    color: var(--text-muted);
+    max-width: 620px;
+    margin: 0 auto 34px;
+}
+
+.hero-actions {
+    display: flex;
+    gap: 14px;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
+.hero-note {
+    margin-top: 18px;
+    font-size: 0.85rem;
+    color: var(--text-subtle);
+}
+
+/* ─── Buttons ────────────────────────────────────────────── */
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    font-weight: 600;
+    border-radius: var(--radius);
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    text-decoration: none;
+}
+.btn:hover {
+    text-decoration: none;
+}
+
+.btn-primary {
+    background: var(--accent);
+    color: #fff;
+    box-shadow: 0 6px 22px rgba(99, 102, 241, 0.35);
+}
+.btn-primary:hover {
+    background: var(--accent-hover);
+    transform: translateY(-1px);
+}
+
+.btn-ghost {
+    background: transparent;
+    color: var(--text-secondary);
+    border-color: var(--border-strong);
+}
+.btn-ghost:hover {
+    color: var(--text);
+    border-color: var(--text-subtle);
+}
+
+.btn-lg {
+    padding: 13px 24px;
+    font-size: 1rem;
+}
+.btn-xl {
+    padding: 16px 30px;
+    font-size: 1.05rem;
+}
+
+/* ─── Sections ───────────────────────────────────────────── */
+
+.section {
+    padding: 64px 0;
+}
+
+.section-alt {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+}
+
+.section-title {
+    font-size: clamp(1.5rem, 3vw, 2rem);
+    font-weight: 700;
+    text-align: center;
+    margin-bottom: 10px;
+}
+
+.section-sub {
+    text-align: center;
+    color: var(--text-muted);
+    max-width: 640px;
+    margin: 0 auto 42px;
+}
+
+/* ─── Feature grid ───────────────────────────────────────── */
+
+.feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 18px;
+}
+
+.feature-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.feature-card:hover {
+    border-color: var(--border-strong);
+    transform: translateY(-2px);
+}
+
+.feature-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.25rem;
+    margin-bottom: 14px;
+}
+.feature-icon.sc {
+    background: rgba(29, 185, 84, 0.15);
+}
+.feature-icon.hm {
+    background: rgba(139, 92, 246, 0.15);
+}
+.feature-icon.tag {
+    background: rgba(99, 102, 241, 0.15);
+}
+.feature-icon.tr {
+    background: rgba(245, 158, 11, 0.15);
+}
+.feature-icon.web {
+    background: rgba(16, 185, 129, 0.15);
+}
+.feature-icon.mac {
+    background: rgba(148, 163, 184, 0.15);
+}
+
+.feature-card h3 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.feature-card p {
+    font-size: 0.92rem;
+    color: var(--text-muted);
+}
+
+/* ─── Screenshots ────────────────────────────────────────── */
+
+.shot-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 22px;
+}
+
+.shot {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    overflow: hidden;
+    transition: border-color 0.15s ease;
+}
+.shot:hover {
+    border-color: var(--border-strong);
+}
+
+.shot a img {
+    width: 100%;
+    border-bottom: 1px solid var(--border);
+}
+
+.shot figcaption {
+    padding: 12px 16px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
+/* ─── Download ───────────────────────────────────────────── */
+
+.download-card {
+    display: grid;
+    grid-template-columns: 1.3fr 1fr;
+    gap: 26px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 34px;
+}
+
+.download-label {
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-subtle);
+    margin-bottom: 14px;
+}
+
+.download-main .btn-xl {
+    margin-bottom: 14px;
+}
+
+.download-sub {
+    font-size: 0.88rem;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+}
+
+.download-alt {
+    font-size: 0.88rem;
+    color: var(--text-subtle);
+}
+
+.gatekeeper {
+    background: rgba(245, 158, 11, 0.06);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    border-radius: 12px;
+    padding: 20px 22px;
+}
+
+.gatekeeper h3 {
+    font-size: 0.98rem;
+    color: var(--yellow);
+    margin-bottom: 10px;
+}
+
+.gatekeeper p,
+.gatekeeper li {
+    font-size: 0.88rem;
+    color: var(--text-secondary);
+}
+
+.gatekeeper ol {
+    margin: 10px 0 10px 18px;
+}
+
+.gatekeeper-note {
+    margin-top: 10px;
+    color: var(--text-muted);
+}
+
+/* ─── Footer ─────────────────────────────────────────────── */
+
+.site-footer {
+    border-top: 1px solid var(--border);
+    padding: 34px 0 22px;
+    background: var(--surface);
+}
+
+.footer-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin-bottom: 20px;
+}
+
+.footer-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.footer-brand img {
+    height: 20px;
+    width: auto;
+}
+.footer-brand span {
+    font-size: 0.8rem;
+    color: var(--text-subtle);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 2px 10px;
+}
+
+.footer-links {
+    display: flex;
+    gap: 18px;
+    font-size: 0.88rem;
+}
+.footer-links a {
+    color: var(--text-muted);
+}
+.footer-links a:hover {
+    color: var(--text);
+    text-decoration: none;
+}
+
+.footer-bottom {
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+}
+.footer-bottom p {
+    font-size: 0.8rem;
+    color: var(--text-subtle);
+}
+
+/* ─── Responsive ─────────────────────────────────────────── */
+
+@media (max-width: 760px) {
+    .download-card {
+        grid-template-columns: 1fr;
+    }
+    .shot-grid {
+        grid-template-columns: 1fr;
+    }
+    .hero {
+        padding: 52px 0 44px;
+    }
+}

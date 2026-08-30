@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Momo's Music Manager — Library sync &amp; harmonic discovery for DJs</title>
+        <meta
+            name="description"
+            content="Momo's Music Manager — Multi-service library sync and harmonic discovery for DJs. Spotify &amp; SoundCloud sync, harmonic matching, tag organization, and Traktor integration."
+        />
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <header class="site-header">
+            <div class="container header-inner">
+                <a class="brand" href="#top">
+                    <img src="assets/logo-text-only.png" alt="Momo's Music Manager" />
+                </a>
+                <nav class="site-nav">
+                    <a href="#features">Features</a>
+                    <a href="#screenshots">Screenshots</a>
+                    <a href="#download">Download</a>
+                    <a class="nav-gh" href="https://github.com/momokli/momos-music-manager" target="_blank" rel="noopener">GitHub</a>
+                </nav>
+            </div>
+        </header>
+
+        <main id="top">
+            <!-- ─── Hero ─────────────────────────────────────────── -->
+            <section class="hero">
+                <div class="container hero-inner">
+                    <img class="hero-logo" src="assets/logo_cutted_out.png" alt="" />
+                    <h1>Momo's Music Manager</h1>
+                    <p class="tagline">
+                        Multi-service library sync and harmonic discovery for DJs.
+                        One local library, every service, always in key.
+                    </p>
+                    <div class="hero-actions">
+                        <a class="btn btn-primary btn-lg" href="#download">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            Download for macOS
+                        </a>
+                        <a class="btn btn-ghost btn-lg" href="https://github.com/momokli/momos-music-manager/releases/tag/latest-main" target="_blank" rel="noopener">
+                            View latest release
+                        </a>
+                    </div>
+                    <p class="hero-note">
+                        Rolling build of the current <code>main</code> branch · v1.0.1 ·
+                        Apple Silicon + Intel (universal DMG)
+                    </p>
+                </div>
+            </section>
+
+            <!-- ─── Features ─────────────────────────────────────── -->
+            <section class="section" id="features">
+                <div class="container">
+                    <h2 class="section-title">What it does</h2>
+                    <p class="section-sub">A local-first library hub that keeps your Spotify, SoundCloud and file collection in sync — and your DJ software speaking the same language.</p>
+                    <div class="feature-grid">
+                        <div class="feature-card">
+                            <div class="feature-icon sc">🔄</div>
+                            <h3>Library sync</h3>
+                            <p>Sync playlists and tracks from <strong>Spotify</strong> and <strong>SoundCloud</strong> into one local library. Subscribe to playlists, track changes, and keep everything in a single SQLite database.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon hm">🎵</div>
+                            <h3>Harmonic matching</h3>
+                            <p>BPM &amp; key detection with Camelot-wheel compatibility. Compare keys between Traktor and Spotify, discover harmonic matches, and build sets that stay in key.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon tag">🏷️</div>
+                            <h3>Tag organization</h3>
+                            <p>Free-form tags with categories, parent relations and AI-assisted auto-categorization. Tags map to playlists by name, and get written into ID3 comments for use in any DJ software.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon tr">🎧</div>
+                            <h3>Traktor integration</h3>
+                            <p>Import your <code>collection.nml</code>, run consistency checks, and write BPM/key/comment metadata back so Traktor Smart Lists just work.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon web">🖥️</div>
+                            <h3>Web UI, locally</h3>
+                            <p>A fast, dark-themed single-page app served by the app itself — no Node, no Python, no separate dev server. One binary, one port, <code>localhost:3000</code>.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon mac">🍎</div>
+                            <h3>Native macOS app</h3>
+                            <p>Menu-bar app with a universal DMG installer. Starts on login, runs in the background, re-opens your browser dashboard. Ad-hoc signed — details in the download section.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ─── Screenshots ──────────────────────────────────── -->
+            <section class="section section-alt" id="screenshots">
+                <div class="container">
+                    <h2 class="section-title">Screenshots</h2>
+                    <p class="section-sub">The dashboard and library pages, straight from the running app.</p>
+                    <div class="shot-grid">
+                        <figure class="shot">
+                            <a href="screenshots/dashboard.png" target="_blank"><img src="screenshots/dashboard.png" alt="Dashboard with library stats and service status" loading="lazy" /></a>
+                            <figcaption>Dashboard — library stats, service status, folders</figcaption>
+                        </figure>
+                        <figure class="shot">
+                            <a href="screenshots/files.png" target="_blank"><img src="screenshots/files.png" alt="Local files table with BPM, key and comment status" loading="lazy" /></a>
+                            <figcaption>Files — local library with BPM/key and comment status</figcaption>
+                        </figure>
+                        <figure class="shot">
+                            <a href="screenshots/tracks.png" target="_blank"><img src="screenshots/tracks.png" alt="Tracks view with playlist and tag filters" loading="lazy" /></a>
+                            <figcaption>Tracks — service tracks with playlist/tag/PMV filters</figcaption>
+                        </figure>
+                        <figure class="shot">
+                            <a href="screenshots/tags.png" target="_blank"><img src="screenshots/tags.png" alt="Tag organization table" loading="lazy" /></a>
+                            <figcaption>Tags — organization with categories</figcaption>
+                        </figure>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ─── Download ─────────────────────────────────────── -->
+            <section class="section" id="download">
+                <div class="container">
+                    <h2 class="section-title">Download</h2>
+                    <div class="download-card">
+                        <div class="download-main">
+                            <p class="download-label">Latest macOS build · rolling <code>main</code></p>
+                            <a class="btn btn-primary btn-xl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/Momo-s-Music-Manager-latest.dmg">
+                                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                Momo's-Music-Manager-latest.dmg
+                            </a>
+                            <p class="download-sub">
+                                ~100 MB · universal (Apple Silicon + Intel) · rebuilt on every push to <code>main</code>
+                            </p>
+                            <p class="download-alt">
+                                Prefer the release page?
+                                <a href="https://github.com/momokli/momos-music-manager/releases/tag/latest-main" target="_blank" rel="noopener">github.com/momokli/momos-music-manager/releases/tag/latest-main</a>
+                            </p>
+                        </div>
+                        <div class="gatekeeper">
+                            <h3>⚠️ First launch on macOS</h3>
+                            <p>
+                                The DMG is <strong>ad-hoc signed and not notarized</strong>, so
+                                Gatekeeper may block it. Don't worry — this is expected for a hobby
+                                project without an Apple Developer account:
+                            </p>
+                            <ol>
+                                <li>Download and open the DMG.</li>
+                                <li>Drag <strong>Momo's Music Manager</strong> into <strong>Applications</strong>.</li>
+                                <li>First start: <strong>right-click</strong> the app → <strong>Open</strong> → <strong>Open</strong>.</li>
+                            </ol>
+                            <p class="gatekeeper-note">
+                                The app runs in the menu bar (no dock icon) and opens your browser at
+                                <code>localhost:3000</code>.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="site-footer">
+            <div class="container footer-inner">
+                <div class="footer-brand">
+                    <img src="assets/logo-text-only.png" alt="Momo's Music Manager" />
+                    <span>v1.0.1</span>
+                </div>
+                <nav class="footer-links">
+                    <a href="https://github.com/momokli/momos-music-manager" target="_blank" rel="noopener">Repository</a>
+                    <a href="https://github.com/momokli/momos-music-manager/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
+                    <a href="https://github.com/momokli/momos-music-manager/blob/main/README.md" target="_blank" rel="noopener">README</a>
+                    <a href="https://github.com/momokli/momos-music-manager/releases" target="_blank" rel="noopener">Releases</a>
+                </nav>
+            </div>
+            <div class="container footer-bottom">
+                <p>Built for DJs who care about their library. Fork of Spotify Mirror.</p>
+            </div>
+        </footer>
+    </body>
+</html>

@@ -14,6 +14,33 @@ cargo run -- serve
 open http://localhost:3000
 ```
 
+---
+
+## Website / Landing Page
+
+The project has a static landing page (features, screenshots, download button)
+deployed to GitHub Pages:
+
+- **URL:** <https://momokli.github.io/momos-music-manager/>
+- **Source:** [`site/`](site/) — plain HTML/CSS, no build step
+- **Deploy:** [`.github/workflows/pages.yml`](.github/workflows/pages.yml) —
+  runs on every push to `main` that touches `site/**`
+
+The **Download** button points at the stable DMG asset
+`Momo-s-Music-Manager-latest.dmg` on the rolling `latest-main` pre-release
+(the CI uploads it under that stable name on every main build), plus a
+secondary link to the release page:
+
+- <https://github.com/momokli/momos-music-manager/releases/download/latest-main/Momo-s-Music-Manager-latest.dmg>
+- <https://github.com/momokli/momos-music-manager/releases/tag/latest-main>
+
+A custom domain (e.g. `mmm.simonklimke.de`) is intentionally **not** configured
+— the DNS entry is managed by the home `home_domains.txt` script on the
+Fritz!Box and would collide with it. It can be added later via a `CNAME` file
+plus a DNS exception.
+
+---
+
 ### Prerequisites
 
 - Rust 1.80+ (and Cargo)
