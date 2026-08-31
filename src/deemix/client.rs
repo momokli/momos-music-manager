@@ -188,14 +188,24 @@ impl DeemixClient {
 
     /// Status values that mean deemix is still actively working on a download.
     /// When found, we skip retry to avoid interrupting the download.
-    const ACTIVE_DOWNLOAD_STATUSES: &'static [&'static str] =
-        &["queued", "downloading", "processing"];
+    ///
+    /// deemix-pyweb's actual queue statuses are: `inQueue` (waiting),
+    /// `downloading`, `withErrors`, `completed`, and `failed`. Only the first
+    /// two mean "still working"; everything else is terminal and safe to retry.
+    const ACTIVE_DOWNLOAD_STATUSES: &'static [&'static str] = &["inqueue", "downloading"];
+
+    /// Whether a deemix-pyweb queue status means the download is still active
+    /// (i.e. we should NOT retry it). Pure helper so the status contract can be
+    /// unit-tested without spinning up an HTTP client.
+    fn is_active_download_status(status: &str) -> bool {
+        Self::ACTIVE_DOWNLOAD_STATUSES.contains(&status.to_lowercase().as_str())
+    }
 
     /// Ensure a Spotify playlist URL is queued for download.
     ///
-    /// - **Already in queue + actively downloading** (`queued`, `downloading`, `processing`): skip entirely
+    /// - **Already in queue + active** (`inQueue`, `downloading`): skip entirely
     ///   to avoid stopping an in-progress download via retry.
-    /// - **Already in queue + terminal** (`finished`, `failed`, `error`, `cancelled`): call
+    /// - **Already in queue + terminal** (`completed`, `withErrors`, `failed`): call
     ///   `retry_download` to re-scan for new tracks.
     /// - **Not in queue**: adds it fresh via `add_to_queue`.
     pub async fn ensure_queued(&self, spotify_url: &str) -> Result<()> {
@@ -204,8 +214,7 @@ impl DeemixClient {
         for (uuid, item) in &queue {
             let item_url = format!("https://open.spotify.com/playlist/{}", item.id);
             if item_url == spotify_url {
-                let status = item.status.to_lowercase();
-                if Self::ACTIVE_DOWNLOAD_STATUSES.contains(&status.as_str()) {
+                if Self::is_active_download_status(&item.status) {
                     info!(
                         "Deemix download already in progress for {} (status: {}), skipping",
                         spotify_url, item.status,
@@ -374,5 +383,39 @@ impl DeemixClient {
             action_result.errid.as_deref().unwrap_or("unknown"),
             text
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeemixClient;
+
+    #[test]
+    fn active_statuses_are_not_retried() {
+        // deemix-pyweb's real "still working" statuses.
+        assert!(DeemixClient::is_active_download_status("inQueue"));
+        assert!(DeemixClient::is_active_download_status("downloading"));
+    }
+
+    #[test]
+    fn active_status_check_is_case_insensitive() {
+        assert!(DeemixClient::is_active_download_status("INQUEUE"));
+        assert!(DeemixClient::is_active_download_status("Downloading"));
+    }
+
+    #[test]
+    fn terminal_statuses_are_retried() {
+        assert!(!DeemixClient::is_active_download_status("completed"));
+        assert!(!DeemixClient::is_active_download_status("withErrors"));
+        assert!(!DeemixClient::is_active_download_status("failed"));
+    }
+
+    #[test]
+    fn legacy_mistaken_statuses_are_not_active() {
+        // The old list used "queued" and "processing", which deemix-pyweb never
+        // emits. These must NOT be treated as active, otherwise an inQueue item
+        // would be retried every poll cycle.
+        assert!(!DeemixClient::is_active_download_status("queued"));
+        assert!(!DeemixClient::is_active_download_status("processing"));
     }
 }

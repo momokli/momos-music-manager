@@ -110,15 +110,26 @@ pub async fn start_subscription_poller(
                 }
             };
 
+            // -- Create Deemix client once per cycle -----------------------------
+            // A single client reuses the reqwest cookie jar across all subscriptions,
+            // so the deemix-pyweb session (connect.sid) survives the whole cycle
+            // instead of triggering a NotLoggedIn → re-auth on every subscription.
+            let deemix_client = DeemixClient::from_db(db.clone()).await;
+
             // -- Poll each due subscription ------------------------------------
             for subscription in &subscriptions {
                 if cancel_token.is_cancelled() {
                     break;
                 }
 
-                if let Err(e) =
-                    poll_subscribed_playlist(&db, &spotify_client, subscription, &task_manager)
-                        .await
+                if let Err(e) = poll_subscribed_playlist(
+                    &db,
+                    &spotify_client,
+                    &deemix_client,
+                    subscription,
+                    &task_manager,
+                )
+                .await
                 {
                     error!(
                         "Subscription poller: error polling subscription {} (playlist_id={}): {:#}",
@@ -169,6 +180,7 @@ pub async fn start_subscription_poller(
 async fn poll_subscribed_playlist(
     db: &Pool<Sqlite>,
     spotify_client: &SpotifyClient,
+    deemix_client: &Option<DeemixClient>,
     subscription: &db::PlaylistSubscription,
     task_manager: &TaskManager,
 ) -> Result<()> {
@@ -558,7 +570,7 @@ async fn poll_subscribed_playlist(
         task_manager
             .add_log(&task_id, "Deemix: attempting auto-download...".into())
             .await;
-        match DeemixClient::from_db(db.clone()).await {
+        match deemix_client {
             Some(client) => {
                 let url = deemix_url;
                 match client.ensure_queued(&url).await {
