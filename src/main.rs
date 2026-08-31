@@ -18,7 +18,7 @@ mod tray;
 #[derive(Parser)]
 #[command(name = "momos-music-manager")]
 #[command(about = "Momo's Music Manager - Multi-service library sync for DJs")]
-#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(version = env!("MMM_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -675,7 +675,7 @@ async fn serve(
     info!("Listening on http://{addr}/", addr = actual_addr);
     info!(
         "🚀 Momo's Music Manager v{} started",
-        env!("CARGO_PKG_VERSION")
+        env!("MMM_VERSION")
     );
 
     // Auto-open browser on startup (unless --no-browser)

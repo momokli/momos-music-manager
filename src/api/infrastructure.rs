@@ -45,7 +45,7 @@ pub struct TasksQuery {
 /// GET /api/version — returns the application version from Cargo.toml
 async fn version_handler() -> impl IntoResponse {
     Json(serde_json::json!({
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": env!("MMM_VERSION"),
     }))
 }
 
