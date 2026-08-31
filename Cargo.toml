@@ -37,12 +37,22 @@ roxmltree = "0.20"
 lofty = "0.20"
 tokio-tungstenite = "0.21"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
+async-trait = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 toml = "0.8"
 dirs = "6.0"
 rust-embed = "8"
 unicode-normalization = "0.1"
 webbrowser = "1"
+
+# Autoupdater (M6): Ed25519 (minisign-format) manifest verification + atomic self-update
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+blake2 = "0.10"
+semver = "1"
+flate2 = "1"
+tar = "0.4"
+# deflate-only (pure Rust, no C deps): PowerShell Compress-Archive zips use deflate.
+zip = { version = "1", default-features = false, features = ["deflate"] }
 
 # ML / Embeddings
 candle-core = "0.8"
@@ -61,6 +71,7 @@ objc2-app-kit = "0.3"
 
 [dev-dependencies]
 tokio-test = "0.4"
+rand = "0.8"
 
 [package.metadata.bundle]
 name = "Momo's Music Manager"

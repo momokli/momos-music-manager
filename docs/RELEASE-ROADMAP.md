@@ -31,7 +31,7 @@ Ausgangslage (Bestandsaufnahme, 2026-08-30):
 | [M3](#m3--windows-code-signing-smartscreen) | Windows Code-Signing (SmartScreen) | Keine „Unbekannter Herausgeber"-Warnung mehr | M | ❌ offen |
 | [M4](#m4--macos-notarization-gatekeeper) | macOS Notarization (Gatekeeper) | Doppelklick-Installation ohne Rechtsklick-Trick | M | ❌ offen |
 | [M5](#m5--linux-appimage--flatpak) | Linux AppImage / Flatpak | Desktop-Integration (Icon, .desktop, App-Store) statt nacktem tar.gz | M | 🟡 geplant |
-| [M6](#m6--autoupdater-optional) | Autoupdater (optional) | App aktualisiert sich selbst | L | ⏸️ optional |
+| [M6](#m6--autoupdater) | Autoupdater | App aktualisiert sich selbst (verifiziert) | L | ✅ **v1 umgesetzt** (PR #14); Delta/Multi-Channel später |
 
 Legende: ✅ umgesetzt · 🟡 offen/geplant · ❌ offen (blockiert/aufwendig) · ⏸️ optional
 
@@ -215,26 +215,74 @@ für Desktop-Nutzer.
 
 ---
 
-## M6 — Autoupdater (optional)
+## M6 — Autoupdater
 
-**Ziel:** Die App prüft selbst auf neue Versionen (rolling `latest-main` oder
-neuester Tag) und aktualisiert sich — mit Signatur-/Checksummen-Verifikation
-vor der Installation.
+**Ziel:** Die App prüft selbst auf neue Versionen (rolling `latest-main`) und
+aktualisiert sich — mit Signatur-/Checksummen-Verifikation **vor** der
+Installation.
 
-**Hinweis:** In [`docs/PLATFORM-SUPPORT.md`](PLATFORM-SUPPORT.md) aktuell als
-„nicht geplant" markiert. Aufwand hoch (pro Plattform: Download, atomarer
-Austausch, Rollback, Service-Neustart). Sollte **erst nach M3/M4** (Signing)
-begonnen werden, da Update-Pipelines ohne Signaturprüfung ein Sicherheitsrisiko
-sind.
+**Umgesetzt in PR #14** (Branch `feature/autoupdater`, Issue
+[#11](https://github.com/momokli/momos-music-manager/issues/11)):
 
-**Definition of Done (M6) — nur falls priorisiert:**
+- **Update-Check** gegen `latest-main`: lädt `SHA256SUMS` + `SHA256SUMS.minisig`,
+  verifiziert die **Ed25519-Signatur (minisign-Format)** mit dem im Binary
+  eingebetteten Public Key (`src/autoupdate/keys.rs`, Spiegel in
+  `scripts/minisign.pub`), löst das Plattform-Artefakt
+  (`momos-music-manager-latest-<os>-<arch>.<ext>`) auf und vergleicht die
+  Version (semver) mit der laufenden Binary.
+- **CI (Publish-Job)**: signiert `SHA256SUMS` nach dem Aggregieren
+  (Reihenfolge kompatibel mit späterem M3/M4: sign → zip/dmg → sha256 →
+  Manifest signieren) und lädt `SHA256SUMS.minisig` hoch. Secret:
+  `MINISIGN_SECRET_KEY` (base64 der `minisign.key`). Ohne Secret bleibt das
+  Manifest unsigned und der Autoupdater lehnt es ab (safe default, CI-Warnung).
+- **Signatur-/Checksummen-Prüfung vor dem Austausch**: Ed25519 über das
+  Manifest, dann SHA256 je Artefakt, dann atomarer Swap (`rename`, alte Binary
+  als `momos-music-manager.bak`, Marker `update-state.json`).
+- **Health-Check nach Neustart**: die neue Binary muss eine Grace-Periode
+  (default 60 s, konfigurierbar) überleben inkl. Selbst-Probe von
+  `/api/health`; dann wird der Update committet (`.bak` + Marker entfernt).
+  Schlägt die neue Version wiederholt fehl → **Auto-Rollback**; manuell
+  jederzeit `momos-music-manager update rollback`.
+- **Opt-out**: `serve --no-autoupdate`, `MOMOS_AUTOUPDATE_ENABLED=false`
+  (Env) oder `[autoupdate] enabled = false` (config.toml).
+- **CLI**: `update check | apply | rollback | status`.
+- **Signing-Key**: projekteigener Ed25519-Schlüssel (minisign) über
+  `SHA256SUMS` — bewusst **statt** „nutzt M3/M4" (siehe DoD-Korrektur unten),
+  damit der Autoupdater nicht auf Code-Signing/Notarization (M3/M4) warten
+  muss. M3/M4 bleiben für OS-Vertrauen (SmartScreen/Gatekeeper) separat
+  sinnvoll.
+- **Doku**: README (Auto-Updates-Sektion, Env-Variablen, CLI),
+  `docs/PLATFORM-SUPPORT.md` (Status + Verifikation), ADR-059, CHANGELOG.
+- **Tests**: 34 neue Tests — minisign-Fixtures (mit echtem minisign-CLI
+  erzeugt, inkl. prehashed „ED"-Format 0.12), Signatur-/SHA256-/Manifest-
+  Verifikation, Swap-/Rollback-State-Machine, End-to-End gegen lokalen
+  HTTP-Server. Manuell E2E-verifiziert (check/apply/rollback + Health-Commit
+  + Auto-Rollback gegen lokales Release-Repo).
 
-- [ ] Update-Check gegen `latest-main` (Version aus Asset-Namen/`SHA256SUMS`).
-- [ ] Signatur-/Checksummen-Prüfung **vor** dem Austausch (nutzt M3/M4).
-- [ ] Opt-out möglich; Fehler führen zu sauberem Rollback.
-- [ ] Dokumentation (README, PLATFORM-SUPPORT).
+**Definition of Done (M6) — Status:**
 
-**Aufwand:** L · **Blockiert durch:** M3/M4 (Signaturprüfung) · **Status:** ⏸️ optional.
+- [x] Update-Check gegen `latest-main` (Version aus Asset-Namen/`SHA256SUMS`).
+- [x] Signatur-/Checksummen-Prüfung **vor** dem Austausch — **nutzt
+      projekteigenen Ed25519-Schlüssel (minisign) über `SHA256SUMS`**
+      (DoD-Korrektur: die ursprüngliche Formulierung „nutzt M3/M4" ist damit
+      ersetzt; M3/M4 sind OS-Signaturen und für die Update-Integrität nicht
+      erforderlich).
+- [x] Opt-out möglich; Fehler führen zu sauberem Rollback.
+- [x] Dokumentation (README, PLATFORM-SUPPORT, RELEASE-ROADMAP).
+
+**Bewusst verschoben (nicht Teil von M6 v1):**
+
+- M3/M4-OS-Signaturen (SmartScreen/Notarization) — separater Milestone.
+- Delta-Updates (nur volle Artefakte).
+- Auto-Update ohne Nutzer-Sichtbarkeit (Startup-Check informiert nur;
+  `apply` ist explizit).
+- Multi-Channel (nur `latest-main`; Base-URL per Env/Config übersteuerbar).
+- macOS: Swap innerhalb des `.app`-Bundles (v1 lädt + verifiziert den DMG und
+  zeigt den Pfad zur manuellen Installation).
+- Windows: Swap nur bei gestopptem Server möglich (Laufzeit-Lock der exe).
+
+**Aufwand:** L (v1) · **Abhängigkeiten:** M1 (rolling `latest-main` + stabile
+Artefakt-Namen) — erfüllt · **Status:** ✅ v1 umgesetzt (PR #14).
 **Referenz-Issue:** [#11](https://github.com/momokli/momos-music-manager/issues/11)
 
 ---

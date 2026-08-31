@@ -87,6 +87,10 @@ Workflow: `.github/workflows/build-all.yml` — läuft bei Push auf `main`
 - Linux/Windows/macOS-Artefakte landen im `latest-main`-Release und bei Tag-Releases, inkl. Checksummen.
 - Linux: Binär startet headless, Health/API-Endpunkte antworten (Server-Smoke-Test).
 - Linux-Server-Modus via mitgelieferter systemd-Unit.
+- Autoupdater (M6 v1): Update-Check gegen `latest-main` (Ed25519-signiertes
+  `SHA256SUMS` via minisign), SHA256-Verifikation vor Austausch, atomarer Swap
+  mit `.bak` + Health-Grace + Auto-Rollback, Opt-out — siehe
+  [README](README.md) und [RELEASE-ROADMAP.md](RELEASE-ROADMAP.md) M6.
 
 ## Was fehlt / offen (ehrlich markiert)
 
@@ -100,7 +104,7 @@ Workflow: `.github/workflows/build-all.yml` — läuft bei Push auf `main`
 | **Linux ARM64 nativ bauen** | 🟡 Cross reicht | klein | Alternativ-Runner `ubuntu-24.04-arm` existiert (hosted) — aktuell Cross gewählt, da schneller/konsistenter Cache |
 | **Linux glibc-Baseline** | 🟡 Ubuntu 22.04 (glibc 2.35) | klein | statische musl-Builds wären noch portabler (offen, nicht priorisiert) |
 | **Landing Page** (`site/`) | ✅ alle 6 Artefakte + SHA256 | klein | erledigt (PR #13): Download-Buttons für macOS/Windows/Linux + Verifikation; stabile Artefakt-Namen im CI. Versionierte Releases: [RELEASE-ROADMAP.md](RELEASE-ROADMAP.md) M2 |
-| **Autoupdater** | ❌ nicht geplant | hoch | außerhalb Scope |
+| **Autoupdater (M6 v1)** | ✅ Linux/Windows: Check + signierter Download + atomarer Austausch + Rollback; macOS: verifizierter Download | mittel | erledigt (PR #14): Ed25519-signiertes `SHA256SUMS` (minisign) im Publish-Job; Prüf-Reihenfolge sign→zip/dmg→sha256→Manifest; Opt-out (`--no-autoupdate`/Env/Config); `.bak` + Health-Grace + Auto-Rollback. Offen: macOS-Swap im `.app`-Bundle (M4), Delta-Updates, Multi-Channel |
 
 ## Verifikations-Stand
 
@@ -109,6 +113,10 @@ Workflow: `.github/workflows/build-all.yml` — läuft bei Push auf `main`
 - CI: 5 Build-Jobs (Linux x64/arm64, Windows x64/arm64, macOS universal) + Publish-Job.
 - Artefakt-Nachweis: `latest-main`-Release enthält Dateien im Schema
   `momos-music-manager-<version>-<os>-<arch>.<ext>` inkl. `.sha256` und aggregierter `SHA256SUMS`.
+- Autoupdater (M6 v1): Update-/Verifikations-Logik unit-getestet (minisign-Fixtures,
+  Signatur/SHA256/Manifest-Parsing, Swap-/Rollback-State-Machine) + End-to-End gegen
+  lokalen HTTP-Server und `serve`-Startup (Health-Commit & Auto-Rollback manuell
+  verifiziert, siehe PR #14).
 
 ## Repo-Struktur (relevant)
 
@@ -116,7 +124,8 @@ Workflow: `.github/workflows/build-all.yml` — läuft bei Push auf `main`
 scripts/package-linux.sh      # Linux tar.gz + SHA256SUMS (nativ oder cross)
 scripts/package-windows.ps1   # Windows zip + SHA256
 scripts/package-macos.sh      # macOS Universal-DMG (bestehend)
-.github/workflows/build-all.yml  # Matrix: 5 Build-Jobs + Publish (inkl. stabiler `-latest-`-Namen)
+scripts/minisign.pub          # Öffentlicher Ed25519-Schlüssel (Autoupdater, M6)
+.github/workflows/build-all.yml  # Matrix: 5 Build-Jobs + Publish (inkl. stabiler `-latest-`-Namen + Manifest-Signatur)
 docs/PLATFORM-SUPPORT.md      # dieses Dokument
 docs/RELEASE-ROADMAP.md       # iterative Roadmap: Downloads, Signing, Notarization, AppImage, Autoupdate
 deploy/momos-music-manager.service  # systemd-Unit (Server-Modus)

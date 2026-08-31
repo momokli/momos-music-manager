@@ -29,6 +29,16 @@
 //! [youtube]
 //! api_key      = "your_youtube_api_key"
 //! playlist_id  = "your_youtube_playlist_id"
+//!
+//! [telemetry_receiver]
+//! bind = "127.0.0.1:8330"
+//! base_dir = "~/.local/share/momos-music-manager/analytics"
+//! token = "secret-collector-token"
+//!
+//! [autoupdate]
+//! enabled = true
+//! base_url = "https://github.com/momokli/momos-music-manager/releases/download/latest-main"
+//! health_grace_secs = 60
 //! ```
 //!
 //! # Backward compatibility
@@ -58,6 +68,7 @@ struct TomlConfig {
     maintainer: Option<MaintainerToml>,
     telemetry: Option<TelemetryToml>,
     telemetry_receiver: Option<TelemetryReceiverToml>,
+    autoupdate: Option<AutoupdateToml>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -123,6 +134,13 @@ struct TelemetryReceiverToml {
     token: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct AutoupdateToml {
+    enabled: Option<bool>,
+    base_url: Option<String>,
+    health_grace_secs: Option<u64>,
+}
+
 // ── Runtime representation ─────────────────────────────────────────────────
 
 /// Service credentials used throughout the application.
@@ -178,6 +196,11 @@ pub struct ServiceCredentials {
     pub telemetry_receiver_bind: String,
     pub telemetry_receiver_base_dir: String,
     pub telemetry_receiver_token: Option<String>,
+
+    // Autoupdater (M6)
+    pub autoupdate_enabled: bool,
+    pub autoupdate_base_url: String,
+    pub autoupdate_health_grace_secs: u64,
 }
 
 impl ServiceCredentials {
@@ -444,7 +467,39 @@ impl ServiceCredentials {
                     .as_ref()
                     .and_then(|r| r.token.clone()),
             ),
+
+            // Autoupdater (M6): env var > config.toml > built-in default
+            autoupdate_enabled: std::env::var("MOMOS_AUTOUPDATE_ENABLED")
+                .ok()
+                .and_then(|v| v.parse::<bool>().ok())
+                .or_else(|| toml_config.autoupdate.as_ref().and_then(|a| a.enabled))
+                .unwrap_or(true),
+            autoupdate_base_url: env_or_toml(
+                "MOMOS_AUTOUPDATE_BASE_URL",
+                toml_config
+                    .autoupdate
+                    .as_ref()
+                    .and_then(|a| a.base_url.clone()),
+            )
+            .unwrap_or_else(|| crate::autoupdate::DEFAULT_BASE_URL.to_string()),
+            autoupdate_health_grace_secs: std::env::var("MOMOS_AUTOUPDATE_HEALTH_GRACE_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .or_else(|| {
+                    toml_config
+                        .autoupdate
+                        .as_ref()
+                        .and_then(|a| a.health_grace_secs)
+                })
+                .unwrap_or(crate::autoupdate::DEFAULT_HEALTH_GRACE_SECS),
         };
+
+        info!(
+            "Autoupdate config: enabled={}, base_url={}, health_grace_secs={}s",
+            credentials.autoupdate_enabled,
+            credentials.autoupdate_base_url,
+            credentials.autoupdate_health_grace_secs,
+        );
 
         info!(
             "Polling config: global_interval={}s, cold_start_threshold={}s",
@@ -546,6 +601,15 @@ impl ServiceCredentials {
             telemetry_receiver_base_dir: env_var_optional("MOMOS_TELEMETRY_RECEIVER_BASE_DIR")
                 .unwrap_or_else(default_telemetry_base_dir),
             telemetry_receiver_token: env_var_optional("MOMOS_TELEMETRY_RECEIVER_TOKEN"),
+
+            autoupdate_enabled: env_var_optional("MOMOS_AUTOUPDATE_ENABLED")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(true),
+            autoupdate_base_url: env_var_optional("MOMOS_AUTOUPDATE_BASE_URL")
+                .unwrap_or_else(|| crate::autoupdate::DEFAULT_BASE_URL.to_string()),
+            autoupdate_health_grace_secs: env_var_optional("MOMOS_AUTOUPDATE_HEALTH_GRACE_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(crate::autoupdate::DEFAULT_HEALTH_GRACE_SECS),
         }
     }
 
@@ -695,6 +759,9 @@ impl ServiceCredentials {
             telemetry_receiver_bind: "127.0.0.1:8330".to_string(),
             telemetry_receiver_base_dir: "/tmp/momos-analytics".to_string(),
             telemetry_receiver_token: None,
+            autoupdate_enabled: false,
+            autoupdate_base_url: crate::autoupdate::DEFAULT_BASE_URL.to_string(),
+            autoupdate_health_grace_secs: 5,
         }
     }
 }
