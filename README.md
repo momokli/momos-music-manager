@@ -112,7 +112,7 @@ enabled = true
 | `PORT`                  | Server port                                         |
 | `RUST_LOG`              | Log level (debug, info, warn, error)                |
 | `MOMOS_AUTOUPDATE_ENABLED` | Enable the startup update check (`true`/`false`, default `true`) |
-| `MOMOS_AUTOUPDATE_BASE_URL` | Release channel base URL (default: `latest-main` on GitHub) |
+| `MOMOS_AUTOUPDATE_BASE_URL` | Autoupdate channel base URL (default is channel-dependent: dev builds → `latest-main`, release builds → `releases/latest`; see [docs/versioning.md](docs/versioning.md)) |
 | `MOMOS_AUTOUPDATE_HEALTH_GRACE_SECS` | Seconds the new binary must stay healthy before an update is committed (default `60`) |
 
 ---
@@ -138,9 +138,11 @@ Every push to `main` triggers a CI build that packages the current state for
 publishes them as a rolling pre-release:
 
 - **Download:** <https://github.com/momokli/momos-music-manager/releases/tag/latest-main>
-- **Naming:** `momos-music-manager-<version>-<os>-<arch>.<ext>` (+ `.sha256` per file,
-  aggregate `SHA256SUMS`); macOS additionally as `Momo's-Music-Manager-v<VERSION>-main-<7-char-commit-sha>.dmg`
-  — the short commit SHA identifies the exact state.
+- **Naming:** versioned `momos-music-manager-<version>-<os-arch>.<ext>` (dev builds:
+  `<cargo-version>-dev+<sha8>`, the short commit SHA identifies the exact state) plus
+  stable `momos-music-manager-latest-<os-arch>.<ext>` names, each with a `.sha256`
+  file; aggregate `SHA256SUMS` + `SHA256SUMS.minisig`. Full schema, channels and the
+  release process: [docs/versioning.md](docs/versioning.md).
 
 Same caveat as the tagged releases: macOS builds are **ad-hoc signed, not
 notarized**, so Gatekeeper may block them on first launch — right-click the app
@@ -163,10 +165,10 @@ verify the checksum, unpack and run — the binary is fully self-contained
 (SQLite and TLS compiled in, no system libs beyond the base OS):
 
 ```bash
-curl -LO https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-1.0.1-linux-x64.tar.gz
-curl -LO https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-1.0.1-linux-x64.tar.gz.sha256
-sha256sum -c momos-music-manager-1.0.1-linux-x64.tar.gz.sha256
-tar -xzf momos-music-manager-1.0.1-linux-x64.tar.gz
+curl -LO https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-x64.tar.gz
+curl -LO https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-x64.tar.gz.sha256
+sha256sum -c momos-music-manager-latest-linux-x64.tar.gz.sha256
+tar -xzf momos-music-manager-latest-linux-x64.tar.gz
 ```
 
 Run the server (headless — no GUI, no tray on Linux):
@@ -234,9 +236,17 @@ open http://localhost:3000
 
 ### Auto-Updates (M6)
 
-The app can update itself from the rolling `latest-main` release. Updates are
-**never installed silently**: the startup check only reports, and the actual
-install is explicit (`momos-music-manager update apply`).
+The app can update itself. Two channels exist, and a build never auto-updates
+across them (channel guards):
+
+- **Dev builds** (`<version>-dev+<sha8>`, rolling `main`) check the
+  `latest-main` pre-release — every push to `main` is offered as an update
+  (detected via the commit SHA in the version).
+- **Release builds** (plain semver, tagged `v*`) check the newest release via
+  `releases/latest`.
+
+Updates are **never installed silently**: the startup check only reports, and
+the actual install is explicit (`momos-music-manager update apply`).
 
 Verification chain (nothing is installed unless every step passes):
 
@@ -244,8 +254,10 @@ Verification chain (nothing is installed unless every step passes):
 2. Verify the **Ed25519 signature** (minisign format) of the manifest with the
    public key embedded in the binary (`src/autoupdate/keys.rs`, mirrored in
    `scripts/minisign.pub`).
-3. Resolve the platform artifact (`momos-music-manager-latest-<os>-<arch>.<ext>`)
-   and compare versions (semver) against the running build.
+3. Resolve the platform artifact by its **versioned** name
+   (`momos-music-manager-<version>-<os-arch>.<ext>`) and compare versions
+   (semver) against the running build; a channel mismatch (dev ↔ release) is
+   refused.
 4. On `update apply`: download the artifact, verify its **SHA256** against the
    signed manifest, extract the binary — and only then swap.
 
@@ -267,7 +279,7 @@ momos-music-manager update apply
 # restore the previous binary from .bak
 momos-music-manager update rollback
 
-# current version, channel, pending update state
+# current version, channel (base URL), pending update state
 momos-music-manager update status
 ```
 
