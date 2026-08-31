@@ -1,0 +1,134 @@
+name: Repair release assets
+
+# One-shot repair for a mislabeled tag release: renames the versioned assets
+# from the old (embedded) version to the tag version, regenerates per-asset
+# checksums + the aggregate SHA256SUMS, re-signs the manifest and removes the
+# stale old-version assets.
+#
+# Background (v1.1.0): the tag build read the version from Cargo.toml (1.0.1),
+# so the release carries momos-music-manager-1.0.1-* assets although the tag
+# is v1.1.0. The embedded version string of the binaries cannot be fixed
+# without a rebuild (see docs/versioning.md) — this workflow makes the asset
+# naming + signed manifest consistent so the release channel resolves
+# v1.1.0 correctly.
+#
+# Runs from the default branch on purpose: it needs the new packaging code
+# and scripts/minisign.pub.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to repair, e.g. v1.1.0"
+        required: true
+      old_version:
+        description: "Version currently embedded in the asset names, e.g. 1.0.1"
+        required: false
+        default: "1.0.1"
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    name: Repair ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    steps:
+      # Only scripts/minisign.pub is needed from the repo.
+      - uses: actions/checkout@v4
+
+      - name: Install minisign (pinned release binary)
+        run: |
+          curl -fsSL -o /tmp/minisign.tar.gz https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          tar xzf /tmp/minisign.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/minisign-linux/x86_64/minisign /usr/local/bin/minisign
+          minisign -V | head -1
+
+      - name: Rename, re-checksum, re-sign and upload
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          TAG: ${{ inputs.tag }}
+          OLD_VERSION: ${{ inputs.old_version }}
+        run: |
+          set -euo pipefail
+
+          [[ "${TAG}" == v* ]] || { echo "::error::tag must start with 'v' (e.g. v1.1.0)"; exit 1; }
+          NEW_VERSION="${TAG#v}"
+          [[ "${NEW_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::cannot derive semver from tag ${TAG}"; exit 1; }
+          echo "Repairing ${TAG}: momos-music-manager-${OLD_VERSION}-* -> momos-music-manager-${NEW_VERSION}-*"
+
+          # Remember the stale (old-version) assets for deletion after upload —
+          # including their old .sha256 files.
+          gh release view "${TAG}" --json assets -q '.assets[].name' \
+            | grep "^momos-music-manager-${OLD_VERSION}" > /tmp/stale.txt || true
+          echo "--- stale assets ---"
+          cat /tmp/stale.txt
+
+          # Download the versioned assets only (no stable names on tag releases).
+          gh release download "${TAG}" -p 'momos-music-manager-*' -D repair/ --clobber
+          cd repair
+
+          # Old per-asset checksums are regenerated below with new names.
+          rm -f momos-music-manager-${OLD_VERSION}-*.sha256
+
+          # Rename the version place in every asset (tar.gz/zip/dmg).
+          for f in momos-music-manager-${OLD_VERSION}-*; do
+            new="${f/${OLD_VERSION}/${NEW_VERSION}}"
+            echo "rename: ${f} -> ${new}"
+            mv "${f}" "${new}"
+          done
+
+          # Regenerate per-asset checksums.
+          shopt -s nullglob
+          ASSETS=( momos-music-manager-${NEW_VERSION}-* )
+          [[ ${#ASSETS[@]} -gt 0 ]] || { echo "::error::no assets after rename"; exit 1; }
+          for f in "${ASSETS[@]}"; do
+            [[ "${f}" == *.sha256 ]] && continue
+            sha256sum "${f}" > "${f}.sha256"
+          done
+
+          # Aggregate manifest (same layout as build-all.yml).
+          cat momos-music-manager-${NEW_VERSION}-*.sha256 > SHA256SUMS
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
+          # Sign the manifest (identical flow to build-all.yml). Hard-fail
+          # without the secret: an unsigned manifest breaks every autoupdater.
+          if [[ -z "${MINISIGN_SECRET_KEY:-}" ]]; then
+            echo "::error::MINISIGN_SECRET_KEY not set — refusing to publish unsigned manifest. Set the secret (base64 of the minisign.key) and re-run the workflow."
+            exit 1
+          fi
+          echo "${MINISIGN_SECRET_KEY}" | base64 -d > /tmp/mmm-minisign.key
+          minisign -S -s /tmp/mmm-minisign.key -m SHA256SUMS
+          echo "--- Self-verify against committed public key ---"
+          minisign -V -p "${GITHUB_WORKSPACE}/scripts/minisign.pub" -m SHA256SUMS
+          rm -f /tmp/mmm-minisign.key
+
+          cd "${GITHUB_WORKSPACE}"
+          gh release upload "${TAG}" repair/momos-music-manager-${NEW_VERSION}-* repair/SHA256SUMS repair/SHA256SUMS.minisig --clobber
+
+          # Remove every old-version asset (incl. old .sha256 files).
+          if [[ -s /tmp/stale.txt ]]; then
+            while IFS= read -r asset; do
+              echo "Deleting stale asset: ${asset}"
+              gh release delete-asset "${TAG}" "${asset}" --yes
+            done < /tmp/stale.txt
+          fi
+
+      - name: Verify repair
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          OLD_VERSION: ${{ inputs.old_version }}
+        run: |
+          set -euo pipefail
+          echo "--- assets of ${TAG} ---"
+          gh release view "${TAG}" --json assets -q '.assets[].name'
+          if gh release view "${TAG}" --json assets -q '.assets[].name' | grep -q "^momos-music-manager-${OLD_VERSION}"; then
+            echo "::error::stale momos-music-manager-${OLD_VERSION}-* assets remain"
+            exit 1
+          fi
+          gh release download "${TAG}" -p 'SHA256SUMS' -p 'SHA256SUMS.minisig' -D verify/ --clobber
+          minisign -V -p scripts/minisign.pub -m verify/SHA256SUMS
+          echo "Repair of ${TAG} verified OK."
