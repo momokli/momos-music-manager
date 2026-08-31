@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// Represents a parsed comment with structured data
@@ -379,6 +380,285 @@ pub fn extract_all_source_ids_from_comment(comment: &str) -> Vec<String> {
     }
 
     source_ids
+}
+
+// ============================================================================
+// Comment Diff & Fingerprint (tag roundtrip inbox)
+// ============================================================================
+
+/// Structured diff between the canonical DB comment and the on-disk comment.
+/// Works on the PARSED structure (phase/mood/vibe + tags + source_ids), never
+/// on the raw string alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentDiff {
+    /// Tags present on disk but missing in DB (user added them in Traktor).
+    pub tags_added: Vec<String>,
+    /// Tags present in DB but missing on disk (user removed them in Traktor).
+    pub tags_removed: Vec<String>,
+    /// Phase indicator change: (db_char, disk_char).
+    pub phase_changed: Option<(char, char)>,
+    /// Mood indicator change: (db_char, disk_char).
+    pub mood_changed: Option<(char, char)>,
+    /// Vibe indicator change: (db_char, disk_char).
+    pub vibe_changed: Option<(char, char)>,
+    /// Source IDs present on disk but missing in DB.
+    pub source_ids_added: Vec<String>,
+    /// Source IDs present in DB but missing on disk.
+    pub source_ids_removed: Vec<String>,
+    /// True when the disk comment could not be parsed AND its raw text differs
+    /// from the canonical DB comment. In that case the delta cannot be expressed
+    /// structurally — the raw disk comment is offered as a `comment` entry.
+    pub raw_comment_changed: bool,
+}
+
+impl CommentDiff {
+    /// A diff is empty when disk and DB represent the same parsed comment.
+    pub fn is_empty(&self) -> bool {
+        self.tags_added.is_empty()
+            && self.tags_removed.is_empty()
+            && self.phase_changed.is_none()
+            && self.mood_changed.is_none()
+            && self.vibe_changed.is_none()
+            && self.source_ids_added.is_empty()
+            && self.source_ids_removed.is_empty()
+            && !self.raw_comment_changed
+    }
+
+    /// Total number of discrete deltas (used for logging/UI counts).
+    pub fn delta_count(&self) -> usize {
+        self.tags_added.len()
+            + self.tags_removed.len()
+            + self.phase_changed.map(|_| 1).unwrap_or(0)
+            + self.mood_changed.map(|_| 1).unwrap_or(0)
+            + self.vibe_changed.map(|_| 1).unwrap_or(0)
+            + self.source_ids_added.len()
+            + self.source_ids_removed.len()
+            + usize::from(self.raw_comment_changed)
+    }
+}
+
+fn char_diff(db: char, disk: char) -> Option<(char, char)> {
+    if db == disk {
+        None
+    } else {
+        Some((db, disk))
+    }
+}
+
+/// Diff two parsed comments: canonical DB state vs. on-disk state.
+/// `db` is the canonical comment, `disk` is what Traktor wrote to the file.
+pub fn diff_comments(db: &ParsedComment, disk: &ParsedComment) -> CommentDiff {
+    let tags_added: Vec<String> = disk
+        .tags
+        .difference(&db.tags)
+        .cloned()
+        .collect::<Vec<_>>();
+    let tags_removed: Vec<String> = db
+        .tags
+        .difference(&disk.tags)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let source_ids_added: Vec<String> = disk
+        .source_ids
+        .iter()
+        .filter(|id| !db.source_ids.contains(id))
+        .cloned()
+        .collect();
+    let source_ids_removed: Vec<String> = db
+        .source_ids
+        .iter()
+        .filter(|id| !disk.source_ids.contains(id))
+        .cloned()
+        .collect();
+
+    CommentDiff {
+        tags_added: sorted_vec(tags_added),
+        tags_removed: sorted_vec(tags_removed),
+        phase_changed: char_diff(db.phase, disk.phase),
+        mood_changed: char_diff(db.mood, disk.mood),
+        vibe_changed: char_diff(db.vibe, disk.vibe),
+        source_ids_added: sorted_vec(source_ids_added),
+        source_ids_removed: sorted_vec(source_ids_removed),
+        raw_comment_changed: false,
+    }
+}
+
+/// Diff canonical DB comment vs. on-disk comment by raw strings.
+///
+/// - Both parseable → structural `diff_comments`.
+/// - Disk unparseable & raw differs from the canonical DB comment string
+///   → `raw_comment_changed = true` (candidate = raw disk text).
+/// - Empty/Nothing → empty diff.
+pub fn diff_comment_strings(db: Option<&str>, disk: Option<&str>) -> CommentDiff {
+    // A missing/empty comment is the canonical empty state — parseable.
+    // Only genuinely unparseable raw strings fall through to the raw path.
+    let db_parsed = match db {
+        Some(s) => parse_comment(s),
+        None => Some(ParsedComment::empty()),
+    };
+    let disk_parsed = match disk {
+        Some(s) => parse_comment(s),
+        None => Some(ParsedComment::empty()),
+    };
+
+    match (db_parsed, disk_parsed) {
+        (Some(db_p), Some(disk_p)) => diff_comments(&db_p, &disk_p),
+        // One side unparseable: fall back to raw comparison. If the raw text
+        // differs, the disk side is offered as an opaque `comment` delta.
+        (db_p, disk_p) => {
+            let db_raw = db.map(|s| s.trim()).unwrap_or("");
+            let disk_raw = disk.map(|s| s.trim()).unwrap_or("");
+            let structurally_same = db_p.is_some() && disk_p.is_none() && db_raw == disk_raw;
+            let mut diff = CommentDiff::default();
+            diff.raw_comment_changed = db_raw != disk_raw && !structurally_same;
+            diff
+        }
+    }
+}
+
+fn sorted_vec(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
+/// Stable fingerprint of a comment: SHA-256 over the canonical regenerated
+/// form (`parse → generate`). Formatting/ordering differences produce the same
+/// fingerprint. Unparseable comments are hashed as their trimmed raw text.
+pub fn comment_fingerprint(comment: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let canonical = match parse_comment(comment) {
+        Some(parsed) => generate_comment(&parsed),
+        None => comment.trim().to_string(),
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    let digest = hasher.finalize();
+    // Hex digest, truncated to 32 chars for compact storage.
+    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+    hex[..32].to_string()
+}
+
+/// Fingerprint of a `None`/empty comment (the canonical empty state).
+pub fn comment_fingerprint_opt(comment: Option<&str>) -> String {
+    comment_fingerprint(comment.unwrap_or(""))
+}
+
+// ============================================================================
+// Fuzzy tag matching & tag-inbox mapping application (full feature set)
+// ============================================================================
+
+/// Case-insensitive Levenshtein distance between two strings.
+///
+/// Used for the inbox's similar-tag suggestions: a new/typo tag is matched
+/// against the existing tag vocabulary with distance ≤ 2 (spec default).
+/// Non-ASCII characters are compared by their lowercase form (char-wise).
+pub fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a
+        .chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect();
+    let b: Vec<char> = b
+        .chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect();
+    let (la, lb) = (a.len(), b.len());
+    if la == 0 {
+        return lb;
+    }
+    if lb == 0 {
+        return la;
+    }
+
+    let mut prev: Vec<usize> = (0..=lb).collect();
+    let mut curr = vec![0usize; lb + 1];
+    for i in 1..=la {
+        curr[0] = i;
+        for j in 1..=lb {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[lb]
+}
+
+/// Fuzzy-match `tag` against a list of existing tag names.
+///
+/// Criteria (spec default): case-insensitive Levenshtein distance ≤
+/// `max_distance`, excluding the tag itself (distance 0 — it already exists
+/// canonically and is not a typo of itself). Returns `(existing_tag, distance)`
+/// sorted by distance ascending, then name ascending.
+pub fn similar_tags(tag: &str, existing: &[String], max_distance: usize) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for candidate in existing {
+        let d = levenshtein_distance(tag, candidate);
+        if d == 0 || d > max_distance {
+            continue;
+        }
+        out.push((candidate.clone(), d));
+    }
+    out.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
+/// Apply open tag-inbox mappings (raw tag → canonical tag) to a generated
+/// target comment.
+///
+/// Staging semantics: resolving a new/typo tag in the inbox only records a
+/// decision (`tag_inbox` row). This function is what makes the canonical
+/// spelling appear on the next write:
+///
+/// 1. Every tag in the generated target matching a mapped raw tag is replaced
+///    by the mapped canonical tag.
+/// 2. Every tag in the STORED comment matching a mapped raw tag is ADDED to
+///    the target with its canonical spelling — a typed tag the user decided to
+///    keep/rename/merge is written instead of being silently dropped.
+///
+/// Tags without a mapping are left untouched (no auto-apply). Mappings are
+/// keyed by lowercase tag name. Returns the input unchanged when no mappings
+/// exist or the target is unparseable.
+pub fn apply_tag_mappings_to_target(
+    target: &str,
+    stored: Option<&str>,
+    mappings: &std::collections::HashMap<String, String>,
+) -> String {
+    if mappings.is_empty() {
+        return target.to_string();
+    }
+    let Some(mut parsed) = parse_comment(target) else {
+        return target.to_string();
+    };
+
+    // 1. Replace mapped tags present in the generated target.
+    let mut tags: HashSet<String> = HashSet::new();
+    for t in &parsed.tags {
+        match mappings.get(&t.to_lowercase()) {
+            Some(canonical) => {
+                tags.insert(canonical.clone());
+            }
+            None => {
+                tags.insert(t.clone());
+            }
+        }
+    }
+
+    // 2. Add canonical spellings for stored tags the user has mapped.
+    if let Some(stored_str) = stored
+        && let Some(stored_parsed) = parse_comment(stored_str)
+    {
+        for t in &stored_parsed.tags {
+            if let Some(canonical) = mappings.get(&t.to_lowercase()) {
+                tags.insert(canonical.clone());
+            }
+        }
+    }
+
+    parsed.tags = tags;
+    generate_comment(&parsed)
 }
 
 /// Get a specific service ID from a comment (e.g., "spotify")
@@ -815,5 +1095,274 @@ mod tests {
         let comment = "\"only tags here\"";
         let ids = extract_all_source_ids_from_comment(comment);
         assert!(ids.is_empty());
+    }
+
+    // ── diff_comments tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_diff_comments_empty_when_identical() {
+        let db = parse_comment("[PMV] house sunny sp:abc").unwrap();
+        let disk = parse_comment("[PMV] house sunny sp:abc").unwrap();
+        let diff = diff_comments(&db, &disk);
+        assert!(diff.is_empty(), "identical comments must diff empty");
+        assert_eq!(diff.delta_count(), 0);
+    }
+
+    #[test]
+    fn test_diff_comments_empty_when_equal_up_to_order_and_case() {
+        // Tags are lowercased + deduped by the parser; ordering is irrelevant.
+        let db = parse_comment("[PMV] sunny house sp:abc").unwrap();
+        let disk = parse_comment("[PMV] HOUSE sunny sp:abc").unwrap();
+        let diff = diff_comments(&db, &disk);
+        assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn test_diff_comments_tag_added_and_removed() {
+        let db = parse_comment("[___] house sunny").unwrap();
+        let disk = parse_comment("[___] house droid").unwrap();
+        let diff = diff_comments(&db, &disk);
+        assert_eq!(diff.tags_added, vec!["droid"]);
+        assert_eq!(diff.tags_removed, vec!["sunny"]);
+        assert!(diff.phase_changed.is_none());
+        assert!(diff.source_ids_added.is_empty());
+        assert_eq!(diff.delta_count(), 2);
+    }
+
+    #[test]
+    fn test_diff_comments_pmv_changes() {
+        let db = parse_comment("[___] house").unwrap();
+        let disk = parse_comment("[P_V] house").unwrap();
+        let diff = diff_comments(&db, &disk);
+        assert_eq!(diff.phase_changed, Some(('_', 'P')));
+        assert_eq!(diff.mood_changed, None);
+        assert_eq!(diff.vibe_changed, Some(('_', 'V')));
+        assert!(diff.tags_added.is_empty());
+        assert!(diff.tags_removed.is_empty());
+    }
+
+    #[test]
+    fn test_diff_comments_pmv_removed() {
+        let db = parse_comment("[PMV] house").unwrap();
+        let disk = parse_comment("[_M_] house").unwrap();
+        let diff = diff_comments(&db, &disk);
+        assert_eq!(diff.phase_changed, Some(('P', '_')));
+        assert_eq!(diff.vibe_changed, Some(('V', '_')));
+        assert_eq!(diff.mood_changed, None);
+    }
+
+    #[test]
+    fn test_diff_comments_source_ids() {
+        let db = parse_comment("[___] house sp:abc").unwrap();
+        let disk = parse_comment("[___] house sp:abc sc:def").unwrap();
+        let diff = diff_comments(&db, &disk);
+        assert_eq!(diff.source_ids_added, vec!["sc:def"]);
+        assert!(diff.source_ids_removed.is_empty());
+
+        let diff2 = diff_comments(&disk, &db);
+        assert_eq!(diff2.source_ids_removed, vec!["sc:def"]);
+        assert!(diff2.source_ids_added.is_empty());
+    }
+
+    #[test]
+    fn test_diff_comments_multiword_quoted_tags() {
+        let db = parse_comment("[___] house").unwrap();
+        let disk = parse_comment("[___] house \"zu späßen aufgelegt\"").unwrap();
+        let diff = diff_comments(&db, &disk);
+        assert_eq!(diff.tags_added, vec!["zu späßen aufgelegt"]);
+    }
+
+    #[test]
+    fn test_diff_comment_strings_unparseable_disk() {
+        // "[XYZ] ..." fails PMV validation → parse_comment returns None.
+        let db = "[___] house";
+        let disk = "[XYZ] raw junk";
+        let diff = diff_comment_strings(Some(db), Some(disk));
+        assert!(diff.raw_comment_changed, "unparseable differing disk must flag raw change");
+        assert!(diff.tags_added.is_empty());
+
+        // Same raw text on both sides → no diff even though disk is unparseable.
+        let same = "[XYZ] raw junk";
+        let diff2 = diff_comment_strings(Some(same), Some(same));
+        assert!(diff2.is_empty());
+    }
+
+    #[test]
+    fn test_diff_comment_strings_empty_sides() {
+        let diff = diff_comment_strings(None, Some(""));
+        assert!(diff.is_empty());
+
+        let diff2 = diff_comment_strings(None, Some("[___] house"));
+        assert_eq!(diff2.tags_added, vec!["house"]);
+    }
+
+    // ── comment_fingerprint tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_comment_fingerprint_stable() {
+        let fp1 = comment_fingerprint("[PMV] house sunny sp:abc");
+        let fp2 = comment_fingerprint("[PMV] house sunny sp:abc");
+        assert_eq!(fp1, fp2);
+        assert_eq!(fp1.len(), 32);
+    }
+
+    #[test]
+    fn test_comment_fingerprint_canonical() {
+        // Same parsed content, different raw formatting/order → same fingerprint.
+        let fp1 = comment_fingerprint("[PMV] house sunny sp:abc");
+        let fp2 = comment_fingerprint("[PMV] sunny house sp:abc");
+        assert_eq!(fp1, fp2);
+
+        // Case differences normalize (tags are lowercased).
+        let fp3 = comment_fingerprint("[PMV] HOUSE Sunny sp:abc");
+        assert_eq!(fp1, fp3);
+    }
+
+    #[test]
+    fn test_comment_fingerprint_distinguishes_content() {
+        let fp1 = comment_fingerprint("[___] house");
+        let fp2 = comment_fingerprint("[___] house sunny");
+        assert_ne!(fp1, fp2);
+
+        let fp3 = comment_fingerprint("[P__] house");
+        assert_ne!(fp1, fp3);
+    }
+
+    #[test]
+    fn test_comment_fingerprint_unparseable_raw() {
+        let fp1 = comment_fingerprint("[XYZ] junk");
+        let fp2 = comment_fingerprint("[XYZ] junk");
+        assert_eq!(fp1, fp2);
+        let fp3 = comment_fingerprint("[XYZ] other");
+        assert_ne!(fp1, fp3);
+    }
+
+    #[test]
+    fn test_comment_fingerprint_empty() {
+        let fp1 = comment_fingerprint("");
+        let fp2 = comment_fingerprint("   ");
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn test_comment_fingerprint_roundtrip_equivalence() {
+        // A generated comment and its parse→generate form share a fingerprint.
+        let generated = generate_from_parts('_', '_', '_', &["droid".into(), "house".into()], &[]);
+        let reparsed = generate_comment(&parse_comment(&generated).unwrap());
+        assert_eq!(comment_fingerprint(&generated), comment_fingerprint(&reparsed));
+    }
+
+    // ── Tag-inbox: levenshtein / similar_tags / mapping application ──────
+
+    #[test]
+    fn test_levenshtein_distance_basic() {
+        assert_eq!(levenshtein_distance("peak", "peak"), 0);
+        assert_eq!(levenshtein_distance("peek", "peak"), 1); // e→a
+        assert_eq!(levenshtein_distance("peeq", "peak"), 2); // eq→ak
+        assert_eq!(levenshtein_distance("aufbau", "aufbauen"), 2); // insert n
+        assert_eq!(levenshtein_distance("", "abc"), 3);
+        assert_eq!(levenshtein_distance("abc", ""), 3);
+        assert_eq!(levenshtein_distance("house", "droid"), 5);
+    }
+
+    #[test]
+    fn test_levenshtein_distance_case_insensitive() {
+        assert_eq!(levenshtein_distance("PEEK", "peak"), 1);
+        assert_eq!(levenshtein_distance("Groovy", "groovy"), 0);
+    }
+
+    #[test]
+    fn test_similar_tags_matches_and_self_exclusion() {
+        let existing: Vec<String> = vec![
+            "peak".into(),
+            "peek".into(),
+            "aufbauen".into(),
+            "house".into(),
+        ];
+        // Typo "peek" → suggests "peak" (distance 1), excludes itself.
+        let hits = similar_tags("peek", &existing, 2);
+        assert!(hits.contains(&("peak".to_string(), 1)));
+        assert!(!hits.iter().any(|(t, _)| t == "peek"), "self must be excluded");
+        // "aufbau" → "aufbauen" (distance 2).
+        assert!(similar_tags("aufbau", &existing, 2).contains(&("aufbauen".to_string(), 2)));
+        // "house" is too far from every candidate.
+        assert!(similar_tags("house", &existing, 2).is_empty());
+        // max_distance = 1 drops the distance-2 hit.
+        assert!(!similar_tags("aufbau", &existing, 1).contains(&("aufbauen".to_string(), 2)));
+    }
+
+    #[test]
+    fn test_similar_tags_sorted_by_distance_then_name() {
+        let existing: Vec<String> = vec!["aaa".into(), "aba".into(), "abb".into()];
+        let hits = similar_tags("aaa", &existing, 2);
+        assert_eq!(hits[0], ("aba".to_string(), 1));
+        // "abb": aaa→abb is 2 (a→a, a→b, a→b). Only one distance-2 candidate here.
+        assert!(hits.iter().all(|(_, d)| *d <= 2));
+    }
+
+    #[test]
+    fn test_apply_tag_mappings_merge_typo_into_canonical() {
+        use std::collections::HashMap;
+        let mut mappings = HashMap::new();
+        mappings.insert("peek".to_string(), "peak".to_string());
+
+        // Target from the playlist chain already has the canonical tag.
+        let target = "[_M_] peak sp:spotify:track:t1";
+        let stored = "[_M_] peek sp:spotify:track:t1";
+        assert_eq!(
+            apply_tag_mappings_to_target(target, Some(stored), &mappings),
+            "[_M_] peak sp:spotify:track:t1"
+        );
+
+        // Target has NO tags (tag only typed in the stored comment):
+        // the mapped canonical tag must be written, not silently dropped.
+        let target2 = "[___] sp:spotify:track:t2";
+        let stored2 = "[___] peek sp:spotify:track:t2";
+        assert_eq!(
+            apply_tag_mappings_to_target(target2, Some(stored2), &mappings),
+            "[___] peak sp:spotify:track:t2"
+        );
+
+        // Playlist-typo case: target resolves the raw tag, mapping rewrites it.
+        let target3 = "[___] peek sp:spotify:track:t3";
+        assert_eq!(
+            apply_tag_mappings_to_target(target3, Some("[___] sp:spotify:track:t3"), &mappings),
+            "[___] peak sp:spotify:track:t3"
+        );
+    }
+
+    #[test]
+    fn test_apply_tag_mappings_rename_to_self_keeps_tag() {
+        use std::collections::HashMap;
+        let mut mappings = HashMap::new();
+        mappings.insert("aufbau".to_string(), "aufbau".to_string());
+
+        // Rename-to-self = "keep this typed tag": the write must not drop it.
+        let target = "[___] sp:spotify:track:t4";
+        let stored = "[___] aufbau sp:spotify:track:t4";
+        assert_eq!(
+            apply_tag_mappings_to_target(target, Some(stored), &mappings),
+            "[___] aufbau sp:spotify:track:t4"
+        );
+    }
+
+    #[test]
+    fn test_apply_tag_mappings_no_mapping_no_change() {
+        use std::collections::HashMap;
+        let mappings = HashMap::new();
+        let target = "[___] house sp:spotify:track:t5";
+        assert_eq!(
+            apply_tag_mappings_to_target(target, Some("[___] peek sp:spotify:track:t5"), &mappings),
+            target
+        );
+        // Unparseable target is returned untouched.
+        assert_eq!(
+            apply_tag_mappings_to_target("[A1B] raw garbage", None, &{
+                let mut m = HashMap::new();
+                m.insert("peek".to_string(), "peak".to_string());
+                m
+            }),
+            "[A1B] raw garbage"
+        );
     }
 }

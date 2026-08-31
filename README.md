@@ -408,6 +408,25 @@ cargo run -- dump
 cargo run -- restore
 ```
 
+### Running the test suite
+
+```bash
+cargo test
+```
+
+The FLAC comment round-trip tests in `src/db/files.rs`
+(`test_write_comment_to_file_*`) shell out to the `metaflac` binary (part of
+the `flac` package). When `metaflac` is not on `PATH` (e.g. minimal CI
+containers), those tests **skip** with a notice instead of failing — install
+`flac` to actually exercise them:
+
+```bash
+# Debian/Ubuntu
+sudo apt install flac
+# macOS (Homebrew)
+brew install flac
+```
+
 ---
 
 ## DJ Workflow

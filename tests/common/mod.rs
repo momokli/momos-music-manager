@@ -97,11 +97,19 @@ pub fn test_app_state(pool: Pool<Sqlite>) -> Arc<AppState> {
 /// Create a full test app (DB + migrations + router + running server).
 /// Returns (reqwest Client, base URL, DB pool) for hitting endpoints and seeding.
 pub async fn spawn_test_app() -> (reqwest::Client, String, Pool<Sqlite>) {
+    let (client, base, pool, _state) = spawn_test_app_with_state().await;
+    (client, base, pool)
+}
+
+/// Like [`spawn_test_app`], but also returns the shared [`Arc<AppState>`] so
+/// tests can synchronize deterministically on server-side state (e.g. the
+/// task manager's concurrency guard) instead of relying on timing/races.
+pub async fn spawn_test_app_with_state() -> (reqwest::Client, String, Pool<Sqlite>, Arc<AppState>) {
     use std::time::Duration;
 
     let pool = create_test_db().await;
     let state = test_app_state(pool.clone());
-    let app = momos_music_manager::build_router(state);
+    let app = momos_music_manager::build_router(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -123,7 +131,7 @@ pub async fn spawn_test_app() -> (reqwest::Client, String, Pool<Sqlite>) {
             .map(|r| r.status().is_success())
             .unwrap_or(false)
         {
-            return (client, base, pool);
+            return (client, base, pool, state);
         }
         if attempt == 0 {
             continue; // first attempt is instant
