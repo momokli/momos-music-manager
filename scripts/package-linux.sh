@@ -20,7 +20,8 @@ cd "$(dirname "$0")/.."
 TARGET_TRIPLE="${1:-$(rustc -vV | sed -n 's/^host: //p')}"
 HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 APP_NAME="momos-music-manager"
-VERSION=$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['packages'][0]['version'])")
+# Effective version: MMM_VERSION (set by CI) wins; local fallback = Cargo.toml.
+VERSION="${MMM_VERSION:-$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['packages'][0]['version'])")}"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 if [ "${TARGET_TRIPLE}" = "${HOST_TRIPLE}" ]; then
   RELEASE_DIR="${TARGET_DIR}/release"

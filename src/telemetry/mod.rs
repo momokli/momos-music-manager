@@ -233,7 +233,7 @@ async fn build_meta_payload(
     Ok(MetaPayload {
         instance: InstanceMeta {
             hostname: hostname(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: env!("MMM_VERSION").to_string(),
             instance: instance.to_string(),
             ts: ts.to_string(),
             db_size_bytes: db_size,

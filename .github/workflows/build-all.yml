@@ -30,6 +30,8 @@ jobs:
           # Keep caches per runner image: ubuntu-22.04 (glibc 2.35) artifacts
           # must not be reused from ubuntu-latest (glibc 2.39) runs.
           key: runner-image-22.04
+      - name: Resolve version
+        run: echo "MMM_VERSION=$(bash scripts/resolve-version.sh)" >> "$GITHUB_ENV"
       - name: Package tar.gz + sha256
         run: ./scripts/package-linux.sh x86_64-unknown-linux-gnu
       - name: Upload artifact
@@ -66,6 +68,8 @@ jobs:
           # use the GNU cross linker for the final link instead.
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: ./scripts/package-linux.sh aarch64-unknown-linux-gnu
+      - name: Resolve version
+        run: echo "MMM_VERSION=$(bash scripts/resolve-version.sh)" >> "$GITHUB_ENV"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -86,6 +90,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
+      - name: Resolve version
+        shell: bash
+        run: echo "MMM_VERSION=$(bash scripts/resolve-version.sh)" >> "$GITHUB_ENV"
       - name: Build release
         run: cargo build --release --target x86_64-pc-windows-msvc
       - name: Package zip + sha256
@@ -112,6 +119,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
+      - name: Resolve version
+        shell: bash
+        run: echo "MMM_VERSION=$(bash scripts/resolve-version.sh)" >> "$GITHUB_ENV"
       - name: Build release
         run: cargo build --release --target aarch64-pc-windows-msvc
       - name: Package zip + sha256
@@ -139,15 +149,16 @@ jobs:
           workspaces: . -> target
       - name: Install create-dmg
         run: brew install create-dmg
+      - name: Resolve version
+        run: echo "MMM_VERSION=$(bash scripts/resolve-version.sh)" >> "$GITHUB_ENV"
       - name: Package DMG (universal)
         run: ./scripts/package-macos.sh
       - name: Rename to schema + sha256
         run: |
-          VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c "import sys,json; print(json.load(sys.stdin)['packages'][0]['version'])")
-          BASE="target/Momo's-Music-Manager-v${VERSION}.dmg"
-          SCHEMA="target/momos-music-manager-${VERSION}-macos-universal.dmg"
+          BASE="target/Momo's-Music-Manager-v${MMM_VERSION}.dmg"
+          SCHEMA="target/momos-music-manager-${MMM_VERSION}-macos-universal.dmg"
           cp "$BASE" "$SCHEMA"
-          (cd target && sha256sum "$(basename "$SCHEMA")" > "momos-music-manager-${VERSION}-macos-universal.dmg.sha256")
+          (cd target && sha256sum "$(basename "$SCHEMA")" > "momos-music-manager-${MMM_VERSION}-macos-universal.dmg.sha256")
           ls -lh "$SCHEMA"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -161,10 +172,14 @@ jobs:
   publish:
     name: Publish release assets
     needs: [linux-x64, linux-arm64, windows-x64, windows-arm64, macos-universal]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    # workflow_dispatch on main enables test publishes without a push.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # resolve-version.sh needs `cargo metadata` (dev version basis).
+      - name: Install Rust (for resolve-version.sh)
+        uses: dtolnay/rust-toolchain@stable
       - name: Install minisign (pinned release binary)
         run: |
           curl -fsSL -o /tmp/minisign.tar.gz https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
@@ -184,9 +199,11 @@ jobs:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           set -euo pipefail
-          cd dist
-          VERSION=$(ls momos-music-manager-*.tar.gz | head -1 | sed -E 's/momos-music-manager-([0-9]+\.[0-9]+\.[0-9]+)-.*/\1/')
+          # Single source of truth for the version (tag = truth for releases,
+          # <cargo>-dev+<sha8> for main) — see scripts/resolve-version.sh.
+          VERSION="$(bash scripts/resolve-version.sh)"
           echo "Version: ${VERSION}"
+          cd dist
 
           if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
             RELEASE="latest-main"
@@ -299,3 +316,45 @@ jobs:
           done
           gh release upload "${RELEASE}" "${UPLOAD_FILES[@]}" --clobber
           echo "Uploaded to ${RELEASE}"
+
+      # Rolling `latest-main` accumulates stale versioned assets from previous
+      # builds and legacy `Momo.s-Music-Manager-*` names (3 assets live there
+      # today). Remove everything that does not belong to the current schema:
+      # keep stable `*-latest-*` names, current versioned assets, SHA256SUMS.
+      - name: Cleanup stale assets (latest-main)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="$(bash scripts/resolve-version.sh)"
+          RELEASE="latest-main"
+          : > /tmp/stale.txt
+          while IFS= read -r asset; do
+            case "${asset}" in
+              SHA256SUMS*|Momo-s-Music-Manager-latest*|momos-music-manager-latest-*)
+                continue
+                ;;
+              Momo.s-*)
+                echo "${asset}" >> /tmp/stale.txt
+                ;;
+              momos-music-manager-*)
+                # momos-music-manager-<version>-<os-arch>.<ext> — cut the
+                # os-arch/ext suffix (version may contain `-dev+`).
+                base="${asset#momos-music-manager-}"
+                ver="${base%-*}"
+                ver="${ver%-*}"
+                if [[ "${ver}" != "${VERSION}" ]]; then
+                  echo "${asset}" >> /tmp/stale.txt
+                fi
+                ;;
+            esac
+          done < <(gh release view "${RELEASE}" --json assets -q '.assets[].name')
+          if [[ -s /tmp/stale.txt ]]; then
+            while IFS= read -r asset; do
+              echo "Deleting stale asset: ${asset}"
+              gh release delete-asset "${RELEASE}" "${asset}" --yes
+            done < /tmp/stale.txt
+          else
+            echo "No stale assets."
+          fi

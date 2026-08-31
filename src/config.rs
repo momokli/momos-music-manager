@@ -37,6 +37,9 @@
 //!
 //! [autoupdate]
 //! enabled = true
+//! # Default base_url is channel-dependent (see docs/versioning.md):
+//! # dev builds -> latest-main, release builds -> releases/latest.
+//! # Only set this to override the channel default.
 //! base_url = "https://github.com/momokli/momos-music-manager/releases/download/latest-main"
 //! health_grace_secs = 60
 //! ```
@@ -468,7 +471,11 @@ impl ServiceCredentials {
                     .and_then(|r| r.token.clone()),
             ),
 
-            // Autoupdater (M6): env var > config.toml > built-in default
+            // Autoupdater (M6): env var > config.toml > built-in default.
+            // The default base URL is channel-dependent (dev → latest-main,
+            // release → releases/latest) and is resolved in
+            // `autoupdate::UpdateSettings::from_config` when the value still
+            // equals the built-in dev default (see docs/versioning.md).
             autoupdate_enabled: std::env::var("MOMOS_AUTOUPDATE_ENABLED")
                 .ok()
                 .and_then(|v| v.parse::<bool>().ok())

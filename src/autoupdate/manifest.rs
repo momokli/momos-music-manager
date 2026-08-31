@@ -4,13 +4,13 @@
 //! **stable** name for the current rolling build:
 //!
 //! ```text
-//! <hash>  momos-music-manager-1.0.1-linux-x64.tar.gz
+//! <hash>  momos-music-manager-1.1.0-dev+abc1234-linux-x64.tar.gz
 //! <hash>  momos-music-manager-latest-linux-x64.tar.gz
 //! ```
 //!
-//! The updater resolves the artifact for the current platform via the stable
-//! `-latest-` name and derives the published version from the matching
-//! versioned entry.
+//! The updater resolves the artifact for the current platform via the
+//! **versioned** name (derived from the parsed version) and reads the
+//! published version from that same entry.
 
 use std::collections::HashMap;
 
@@ -86,32 +86,26 @@ impl Manifest {
     }
 
     /// Version published for `os_arch` (e.g. `linux-x64`): find the versioned
-    /// entry whose artifact base matches, i.e. strip the `latest` middle
-    /// segment from the stable name and locate the same artifact with a
-    /// concrete `x.y.z` version.
+    /// entry, strip the platform suffix from the **last** `-<os_arch>.`
+    /// occurrence and parse the remaining version string (`1.1.0` or
+    /// `1.1.0-dev+abc1234`). The `-latest-` entry fails semver parsing
+    /// (`latest`) and is skipped.
     pub fn version_for(&self, os_arch: &str) -> Result<Version, ManifestError> {
-        let stable = format!("momos-music-manager-latest-{os_arch}");
         let prefix = "momos-music-manager-";
-        let mut candidates: Vec<&String> = self
-            .entries
-            .keys()
-            .filter(|name| name.starts_with(prefix) && name.contains(os_arch))
-            .collect();
-        candidates.retain(|name| *name != &stable);
-        // Prefer exact `-<os_arch>.` suffix matches over substring accidents
-        // (e.g. `linux-x64` vs `linux-x64-extra`). The stable `-latest-` entry
-        // also contains this pattern, but its version segment (`latest`) fails
-        // semver parsing and is skipped below.
         let suffix = format!("-{os_arch}.");
-        candidates.retain(|name| name.contains(&suffix));
-
-        for name in candidates {
-            let rest = name.strip_prefix(prefix).unwrap_or_default();
-            // rest looks like `<version>-<os_arch>.<ext>`
-            if let Some((ver, _)) = rest.split_once('-') {
-                if let Ok(v) = Version::parse(ver) {
-                    return Ok(v);
-                }
+        for name in self.entries.keys() {
+            let Some(rest) = name.strip_prefix(prefix) else {
+                continue;
+            };
+            // The version itself may contain `-` (e.g. `1.1.0-dev+abc1234`),
+            // so cut at the LAST `-<os_arch>.` — the artifact extension
+            // boundary — not the first `-`.
+            let Some(idx) = rest.rfind(&suffix) else {
+                continue;
+            };
+            let version_str = &rest[..idx];
+            if let Ok(v) = Version::parse(version_str) {
+                return Ok(v);
             }
         }
         Err(ManifestError::VersionNotFound {
@@ -148,6 +142,41 @@ efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef  momos-music-mana
         let m = Manifest::parse(SAMPLE).unwrap();
         assert_eq!(m.version_for("linux-x64").unwrap(), Version::new(1, 0, 1));
         assert!(m.version_for("windows-x64").is_err());
+    }
+
+    #[test]
+    fn extracts_dev_version_with_build_metadata() {
+        // Dev artifact: `1.1.0-dev+abc1234` contains `-` (pre-release) and
+        // `+` (build metadata) — must parse as the full version string, not
+        // be cut at the first `-`.
+        let text = "\
+abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234  momos-music-manager-1.1.0-dev+abc1234-linux-x64.tar.gz
+efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef  momos-music-manager-latest-linux-x64.tar.gz
+";
+        let m = Manifest::parse(text).unwrap();
+        assert_eq!(
+            m.version_for("linux-x64").unwrap(),
+            Version::parse("1.1.0-dev+abc1234").unwrap()
+        );
+        // Build metadata survives the round-trip.
+        assert_eq!(
+            m.version_for("linux-x64").unwrap().to_string(),
+            "1.1.0-dev+abc1234"
+        );
+    }
+
+    #[test]
+    fn skips_latest_entries_and_unknown_os_arch() {
+        // The stable `-latest-` entry must not be picked as the version, and
+        // an os_arch that has no versioned entry yields VersionNotFound.
+        let m = Manifest::parse(SAMPLE).unwrap();
+        assert_eq!(m.version_for("macos-universal").unwrap(), Version::new(1, 0, 1));
+        assert_eq!(
+            m.version_for("windows-x64").unwrap_err(),
+            ManifestError::VersionNotFound {
+                os_arch: "windows-x64".to_string()
+            }
+        );
     }
 
     #[test]

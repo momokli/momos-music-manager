@@ -21,7 +21,12 @@ if ($TargetTriple -eq "") {
 }
 
 $AppName = "momos-music-manager"
-$Version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+# Effective version: MMM_VERSION (set by CI) wins; local fallback = Cargo.toml.
+if ($env:MMM_VERSION) {
+    $Version = $env:MMM_VERSION
+} else {
+    $Version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+}
 $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target" }
 $ReleaseDir = Join-Path (Join-Path $TargetDir $TargetTriple) "release"
 $BinPath = Join-Path $ReleaseDir "$AppName.exe"

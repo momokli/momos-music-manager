@@ -8,6 +8,21 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **Nachhaltiges Versioning-Konzept**: Release-Builds beziehen ihre Version
+  aus dem Git-Tag (`v1.2.0` → `1.2.0`), Dev-Builds aus der Cargo.toml-Basis
+  + Commit-SHA (`1.1.0-dev+<sha8>`, rolling `main`). Mechanik: `build.rs`
+  injiziert `MMM_VERSION` (Env, Fallback Cargo.toml),
+  `scripts/resolve-version.sh` ist die einzige CI-Versionsquelle,
+  Packaging-Skripte versionieren aus `MMM_VERSION`. CI benennt Assets nach
+  Schema (`momos-music-manager-<version>-<os-arch>.<ext>`, Dev zusätzlich
+  stabile `-latest-`-Namen), publiziert versionierte Dev-Assets inkl.
+  signiertem Manifest und räumt stale/legacy Assets aus `latest-main` auf.
+  Autoupdater-Kanäle: Dev → `latest-main`, Release → `releases/latest`,
+  mit Kanal-Guards (kein automatischer dev↔release-Wechsel) und
+  rolling-Vergleich über den SHA. Doku: `docs/versioning.md`
+  (Schema, Kanäle, Release-Runbook, Alt-Tag-Repair),
+  `repair-release.yml` für die v1.1.0-Nachbesserung (Assets
+  `1.0.1` → `1.1.0`, Neu-Signatur des Manifests).
 - **Autoupdater (M6 v1)**: self-update gegen das rolling `latest-main`-Release
   mit strikter Verifikationskette — Ed25519-Signatur (minisign-Format) über
   das `SHA256SUMS`-Manifest (Pubkey im Binary eingebettet, Spiegel in
