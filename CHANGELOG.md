@@ -8,6 +8,20 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **Autoupdater (M6 v1)**: self-update gegen das rolling `latest-main`-Release
+  mit strikter Verifikationskette — Ed25519-Signatur (minisign-Format) über
+  das `SHA256SUMS`-Manifest (Pubkey im Binary eingebettet, Spiegel in
+  `scripts/minisign.pub`), SHA256 je Artefakt, dann atomarer Austausch mit
+  `.bak` + `update-state.json`-Marker, Health-Grace nach Neustart (mit
+  Selbst-Probe von `/api/health`), Auto-Rollback bei wiederholten Fehlstarts,
+  manuelles `update rollback`. Neue CLI: `update check | apply | rollback |
+  status`. Opt-out: `serve --no-autoupdate`, `MOMOS_AUTOUPDATE_ENABLED=false`,
+  `[autoupdate] enabled = false`. CI (Publish-Job) signiert das Manifest mit
+  dem Secret `MINISIGN_SECRET_KEY` (base64 der `minisign.key`) und lädt
+  `SHA256SUMS.minisig` hoch; ohne Secret bleibt es unsigned und der
+  Autoupdater lehnt Updates ab (safe default). macOS v1: verifizierter
+  Download (kein Swap im `.app`-Bundle); Windows: Swap bei gestopptem Server.
+  Doku: README, PLATFORM-SUPPORT, RELEASE-ROADMAP (M6), ADR-059.
 - **Landing-Page-Downloads für alle Plattformen**: `site/` bietet jetzt
   Download-Buttons für macOS (Universal-DMG), Windows (x64 + arm64) und Linux
   (x64 + arm64) aus dem rolling `latest-main`-Release, jeweils mit

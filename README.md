@@ -92,6 +92,11 @@ user_id  = "your_soundcloud_user_id"
 [youtube]
 api_key      = "your_youtube_api_key"
 playlist_id  = "your_youtube_playlist_id"
+
+[autoupdate]
+enabled = true
+# base_url = "https://github.com/momokli/momos-music-manager/releases/download/latest-main"
+# health_grace_secs = 60
 ```
 
 ### Environment variables (override config.toml)
@@ -106,6 +111,9 @@ playlist_id  = "your_youtube_playlist_id"
 | `HOST`                  | Server bind address                                 |
 | `PORT`                  | Server port                                         |
 | `RUST_LOG`              | Log level (debug, info, warn, error)                |
+| `MOMOS_AUTOUPDATE_ENABLED` | Enable the startup update check (`true`/`false`, default `true`) |
+| `MOMOS_AUTOUPDATE_BASE_URL` | Release channel base URL (default: `latest-main` on GitHub) |
+| `MOMOS_AUTOUPDATE_HEALTH_GRACE_SECS` | Seconds the new binary must stay healthy before an update is committed (default `60`) |
 
 ---
 
@@ -224,6 +232,62 @@ open http://localhost:3000
 
 ## Deployment
 
+### Auto-Updates (M6)
+
+The app can update itself from the rolling `latest-main` release. Updates are
+**never installed silently**: the startup check only reports, and the actual
+install is explicit (`momos-music-manager update apply`).
+
+Verification chain (nothing is installed unless every step passes):
+
+1. Download `SHA256SUMS` + `SHA256SUMS.minisig` over HTTPS (rustls).
+2. Verify the **Ed25519 signature** (minisign format) of the manifest with the
+   public key embedded in the binary (`src/autoupdate/keys.rs`, mirrored in
+   `scripts/minisign.pub`).
+3. Resolve the platform artifact (`momos-music-manager-latest-<os>-<arch>.<ext>`)
+   and compare versions (semver) against the running build.
+4. On `update apply`: download the artifact, verify its **SHA256** against the
+   signed manifest, extract the binary — and only then swap.
+
+Swap safety (Linux/Windows): the previous binary is kept as
+`momos-music-manager.bak` next to the new one, with an `update-state.json`
+marker. On the next start the new binary must survive a health grace period
+(default 60 s, with a self-probe of `/api/health`); then the update is
+committed (`.bak` removed). If the new binary repeatedly fails to become
+healthy, the updater **auto-rolls back** to the previous version. Manual
+rollback is always available:
+
+```bash
+# check for updates (verifies the signed manifest, no download)
+momos-music-manager update check
+
+# download + verify + install (restart the server afterwards)
+momos-music-manager update apply
+
+# restore the previous binary from .bak
+momos-music-manager update rollback
+
+# current version, channel, pending update state
+momos-music-manager update status
+```
+
+Opt-out: `--no-autoupdate` on `serve`, or `MOMOS_AUTOUPDATE_ENABLED=false`
+(env / `[autoupdate] enabled = false` in config.toml). The update check also
+runs automatically on `serve` startup (10 s after boot) and logs the result.
+
+> **macOS**: the updater downloads and verifies the universal DMG, but does not
+> swap binaries inside the `.app` bundle yet (requires M4/notarization work) —
+> it prints the verified download path for manual installation.
+>
+> **Windows**: replacing a *running* executable is not allowed — stop the
+> server before `update apply` (the error message tells you).
+>
+> **Signing key**: the manifest is signed in CI with the `MINISIGN_SECRET_KEY`
+> secret (base64 of the `minisign.key` file, see
+> [`docs/RELEASE-ROADMAP.md`](docs/RELEASE-ROADMAP.md) M6 for generation &
+> rotation). If the secret is not configured, artifacts stay unsigned and the
+> updater **refuses** them (safe default).
+
 ### Database path
 
 By default, the database is stored at `~/.local/share/momos-music-manager/library.db`.
@@ -280,7 +344,13 @@ cargo run -- serve --public-url https://mmm.mydomain.de
 
 ```bash
 # Start server
-cargo run -- serve [--host 127.0.0.1] [--port 3000] [--public-url URL]
+cargo run -- serve [--host 127.0.0.1] [--port 3000] [--public-url URL] [--no-autoupdate]
+
+# Self-update (M6)
+cargo run -- update check
+cargo run -- update apply
+cargo run -- update rollback
+cargo run -- update status
 
 # Database management
 cargo run -- db-status
