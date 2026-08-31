@@ -15,8 +15,8 @@ pub mod verify;
 
 pub use swap::RecoveryAction;
 pub use verify::{
-    ApplyOutcome, DEFAULT_BASE_URL, DEFAULT_HEALTH_GRACE_SECS, HttpFetcher, UpdateError,
-    UpdateInfo, UpdateSettings, UpdateStatus,
+    ApplyOutcome, DEFAULT_BASE_URL, DEFAULT_HEALTH_GRACE_SECS, DEFAULT_RELEASE_BASE_URL,
+    HttpFetcher, UpdateError, UpdateInfo, UpdateSettings, UpdateStatus,
 };
 
 /// Run the startup recovery for a pending update and return what the caller
@@ -24,7 +24,7 @@ pub use verify::{
 pub fn startup_recovery() -> RecoveryAction {
     let dir = swap::exe_dir();
     let binary_name = swap::exe_name();
-    match swap::recovery_action(&dir, env!("CARGO_PKG_VERSION"), &binary_name) {
+    match swap::recovery_action(&dir, env!("MMM_VERSION"), &binary_name) {
         Ok(action) => action,
         Err(e) => {
             tracing::warn!("autoupdate: recovery check failed: {e}");

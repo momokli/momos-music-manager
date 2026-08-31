@@ -256,7 +256,7 @@ fn main() -> Result<()> {
         }
         Commands::Update { command } => {
             use momos_music_manager::autoupdate::{
-                ApplyOutcome, HttpFetcher, UpdateSettings, UpdateStatus,
+                ApplyOutcome, HttpFetcher, UpdateError, UpdateSettings, UpdateStatus,
             };
             let config = ServiceCredentials::load();
             let settings = UpdateSettings::from_config(&config)?;
@@ -281,23 +281,47 @@ fn main() -> Result<()> {
                     UpdateStatus::UnsupportedPlatform => {
                         println!("Autoupdate is not supported on this platform yet.");
                     }
+                    UpdateStatus::ChannelMismatch {
+                        current_version,
+                        available_version,
+                    } => {
+                        if current_version.contains("-dev+") {
+                            println!("Channel mismatch: current dev build v{current_version} — latest published is a stable release v{available_version}.");
+                            println!("Dev builds never auto-update to stable releases — please install the release manually.");
+                        } else {
+                            println!("Channel mismatch: current release build v{current_version} — latest published is a dev build v{available_version}.");
+                            println!("Release builds only auto-install semver releases; dev builds are tracked on the rolling latest-main channel.");
+                        }
+                    }
                 },
                 UpdateCommand::Apply => match rt.block_on(UpdateStatus::apply(
                     &settings, &fetcher,
-                ))? {
-                    ApplyOutcome::Installed {
+                )) {
+                    Ok(ApplyOutcome::Installed {
                         new_version,
                         old_version,
-                    } => {
+                    }) => {
                         println!("Update installed: v{old_version} → v{new_version}");
                         println!("Restart the server to activate (systemd: `sudo systemctl restart momos-music-manager`).");
                         println!("The previous binary is kept as `momos-music-manager.bak` and removed automatically once the new version passes its health check.");
                     }
-                    ApplyOutcome::DownloadedOnly { path, version } => {
+                    Ok(ApplyOutcome::DownloadedOnly { path, version }) => {
                         println!("Verified download for v{version} saved to:");
                         println!("  {}", path.display());
                         println!("macOS auto-install (inside the .app bundle) is not supported yet — open the DMG and drag the app to Applications.");
                     }
+                    Err(UpdateError::ChannelMismatch {
+                        current_version,
+                        available_version,
+                    }) => {
+                        println!("Update not installed: channel mismatch (current v{current_version} vs available v{available_version}).");
+                        if current_version.contains("-dev+") {
+                            println!("Dev builds never auto-update to stable releases — please install the release manually.");
+                        } else {
+                            println!("Release builds only auto-install semver releases; dev builds are tracked on the rolling latest-main channel.");
+                        }
+                    }
+                    Err(e) => return Err(e.into()),
                 },
                 UpdateCommand::Rollback => {
                     momos_music_manager::autoupdate::perform_rollback()?;
