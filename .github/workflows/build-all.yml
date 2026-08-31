@@ -239,20 +239,63 @@ jobs:
           # file (generate: minisign -G -p scripts/minisign.pub -s … -W).
           # Public key: scripts/minisign.pub (matches the key embedded in the
           # binary at src/autoupdate/keys.rs).
-          if [[ -n "${MINISIGN_SECRET_KEY:-}" ]]; then
-            echo "${MINISIGN_SECRET_KEY}" | base64 -d > /tmp/mmm-minisign.key
-            minisign -S -s /tmp/mmm-minisign.key -m SHA256SUMS
-            echo "--- Self-verify against committed public key ---"
-            minisign -V -p "${GITHUB_WORKSPACE}/scripts/minisign.pub" -m SHA256SUMS
-            rm -f /tmp/mmm-minisign.key
-          else
-            echo "::warning::MINISIGN_SECRET_KEY not set — SHA256SUMS stays UNSIGNED; the autoupdater will refuse it. Set the secret to enable signed auto-updates."
+          #
+          # Hard-fail when the key is missing: publishing an unsigned
+          # `latest-main` would silently break every autoupdating client
+          # (they refuse unsigned manifests), so a red build is the safe
+          # default — no key, no publish.
+          if [[ -z "${MINISIGN_SECRET_KEY:-}" ]]; then
+            echo "::error::MINISIGN_SECRET_KEY not set — refusing to publish unsigned release; the autoupdater would reject it. Set the secret (base64 of the minisign.key) and re-run the workflow."
+            exit 1
           fi
+
+          echo "${MINISIGN_SECRET_KEY}" | base64 -d > /tmp/mmm-minisign.key
+          minisign -S -s /tmp/mmm-minisign.key -m SHA256SUMS
+          echo "--- Self-verify against committed public key ---"
+          minisign -V -p "${GITHUB_WORKSPACE}/scripts/minisign.pub" -m SHA256SUMS
+          rm -f /tmp/mmm-minisign.key
 
           # Upload every platform artifact (schema names + stable names +
           # per-file checksums + aggregate + manifest signature).
-          gh release upload "${RELEASE}" momos-music-manager-* SHA256SUMS SHA256SUMS.minisig --clobber
+          #
+          # The file names are deterministic (fixed by the build/package jobs
+          # and the stable-name copies above), so list them explicitly instead
+          # of using shell globs: an unmatched glob is passed through literally
+          # and `gh release upload` then fails with "no matches found" — this
+          # is exactly what happened when SHA256SUMS.minisig did not exist.
+          UPLOAD_FILES=(
+            "momos-music-manager-${VERSION}-macos-universal.dmg"
+            "momos-music-manager-${VERSION}-macos-universal.dmg.sha256"
+            "momos-music-manager-${VERSION}-windows-x64.zip"
+            "momos-music-manager-${VERSION}-windows-x64.zip.sha256"
+            "momos-music-manager-${VERSION}-windows-arm64.zip"
+            "momos-music-manager-${VERSION}-windows-arm64.zip.sha256"
+            "momos-music-manager-${VERSION}-linux-x64.tar.gz"
+            "momos-music-manager-${VERSION}-linux-x64.tar.gz.sha256"
+            "momos-music-manager-${VERSION}-linux-arm64.tar.gz"
+            "momos-music-manager-${VERSION}-linux-arm64.tar.gz.sha256"
+            SHA256SUMS
+            SHA256SUMS.minisig
+          )
           if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
-            gh release upload "${RELEASE}" Momo-s-Music-Manager-latest.dmg Momo-s-Music-Manager-latest.dmg.sha256 --clobber
+            UPLOAD_FILES+=(
+              "Momo-s-Music-Manager-latest.dmg"
+              "Momo-s-Music-Manager-latest.dmg.sha256"
+              "momos-music-manager-latest-windows-x64.zip"
+              "momos-music-manager-latest-windows-x64.zip.sha256"
+              "momos-music-manager-latest-windows-arm64.zip"
+              "momos-music-manager-latest-windows-arm64.zip.sha256"
+              "momos-music-manager-latest-linux-x64.tar.gz"
+              "momos-music-manager-latest-linux-x64.tar.gz.sha256"
+              "momos-music-manager-latest-linux-arm64.tar.gz"
+              "momos-music-manager-latest-linux-arm64.tar.gz.sha256"
+            )
           fi
+          for f in "${UPLOAD_FILES[@]}"; do
+            if [[ ! -f "${f}" ]]; then
+              echo "::error::Missing file for upload: ${f}"
+              exit 1
+            fi
+          done
+          gh release upload "${RELEASE}" "${UPLOAD_FILES[@]}" --clobber
           echo "Uploaded to ${RELEASE}"
