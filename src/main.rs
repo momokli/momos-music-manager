@@ -36,6 +36,9 @@ enum Commands {
         public_url: Option<String>,
         #[arg(long, default_value_t = false)]
         no_browser: bool,
+        /// Disable the startup update check (overrides MOMOS_AUTOUPDATE_ENABLED)
+        #[arg(long, default_value_t = false)]
+        no_autoupdate: bool,
     },
     /// Scan and import files from directory
     Scan {
@@ -75,6 +78,23 @@ enum Commands {
         #[command(subcommand)]
         command: momos_music_manager::telemetry::TelemetryCommand,
     },
+    /// Self-update (M6): check, apply, rollback
+    Update {
+        #[command(subcommand)]
+        command: UpdateCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum UpdateCommand {
+    /// Check for updates against latest-main (verifies the signed manifest)
+    Check,
+    /// Download + verify + install the latest version (swap with backup)
+    Apply,
+    /// Restore the previous binary from the .bak backup
+    Rollback,
+    /// Show current version, platform artifact and updater state
+    Status,
 }
 
 // ── CLI entry point ────────────────────────────────────────────────────────
@@ -117,6 +137,7 @@ fn main() -> Result<()> {
         port: None,
         public_url: None,
         no_browser: false,
+        no_autoupdate: false,
     });
 
     match command {
@@ -125,6 +146,7 @@ fn main() -> Result<()> {
             port,
             public_url,
             no_browser,
+            no_autoupdate,
         } => {
             let host = host.unwrap_or_else(|| ServiceCredentials::load().server_host);
             let port = port.unwrap_or_else(|| ServiceCredentials::load().server_port);
@@ -136,10 +158,11 @@ fn main() -> Result<()> {
                 let h = host.clone();
                 let p = port;
                 let pu = public_url.clone();
+                let no_au = no_autoupdate;
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
                     rt.block_on(async {
-                        if let Err(e) = serve(h, p, pu, true).await {
+                        if let Err(e) = serve(h, p, pu, true, no_au).await {
                             tracing::error!("Server exited with error: {}", e);
                         }
                     });
@@ -155,7 +178,7 @@ fn main() -> Result<()> {
             #[cfg(not(target_os = "macos"))]
             {
                 let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
-                rt.block_on(serve(host, port, public_url, no_browser))?;
+                rt.block_on(serve(host, port, public_url, no_browser, no_autoupdate))?;
                 return Ok(());
             }
         }
@@ -231,6 +254,76 @@ fn main() -> Result<()> {
             let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
             rt.block_on(momos_music_manager::telemetry::run(command))?;
         }
+        Commands::Update { command } => {
+            use momos_music_manager::autoupdate::{
+                ApplyOutcome, HttpFetcher, UpdateSettings, UpdateStatus,
+            };
+            let config = ServiceCredentials::load();
+            let settings = UpdateSettings::from_config(&config)?;
+            let fetcher = HttpFetcher::new();
+            let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+            match command {
+                UpdateCommand::Check => match rt.block_on(UpdateStatus::check(
+                    &settings, &fetcher,
+                ))? {
+                    UpdateStatus::UpToDate => {
+                        println!("Up to date (v{})", settings.current_version);
+                    }
+                    UpdateStatus::UpdateAvailable(info) => {
+                        println!("Update available: v{} (current: v{})", info.version, settings.current_version);
+                        println!("  artifact: {}", info.artifact_name);
+                        println!("  sha256:   {}", info.sha256);
+                        println!("  Run `momos-music-manager update apply` to install.");
+                    }
+                    UpdateStatus::Disabled => {
+                        println!("Autoupdate is disabled (set MOMOS_AUTOUPDATE_ENABLED=true to enable).");
+                    }
+                    UpdateStatus::UnsupportedPlatform => {
+                        println!("Autoupdate is not supported on this platform yet.");
+                    }
+                },
+                UpdateCommand::Apply => match rt.block_on(UpdateStatus::apply(
+                    &settings, &fetcher,
+                ))? {
+                    ApplyOutcome::Installed {
+                        new_version,
+                        old_version,
+                    } => {
+                        println!("Update installed: v{old_version} → v{new_version}");
+                        println!("Restart the server to activate (systemd: `sudo systemctl restart momos-music-manager`).");
+                        println!("The previous binary is kept as `momos-music-manager.bak` and removed automatically once the new version passes its health check.");
+                    }
+                    ApplyOutcome::DownloadedOnly { path, version } => {
+                        println!("Verified download for v{version} saved to:");
+                        println!("  {}", path.display());
+                        println!("macOS auto-install (inside the .app bundle) is not supported yet — open the DMG and drag the app to Applications.");
+                    }
+                },
+                UpdateCommand::Rollback => {
+                    momos_music_manager::autoupdate::perform_rollback()?;
+                    println!("Rolled back to the previous version. Restart the server to activate.");
+                }
+                UpdateCommand::Status => {
+                    use momos_music_manager::autoupdate::swap;
+                    println!("Current version : v{}", settings.current_version);
+                    println!("Platform artifact: {} ({})", settings.artifact.os_arch, settings.artifact.ext);
+                    println!("Update channel   : {}", settings.base_url);
+                    println!("Enabled          : {}", settings.enabled);
+                    let dir = swap::exe_dir();
+                    println!("Install dir      : {}", dir.display());
+                    match swap::read_marker(&dir) {
+                        Ok(Some(m)) => println!(
+                            "Pending update  : v{} → v{} (start_count={}, committed={})",
+                            m.old_version, m.new_version, m.start_count, m.committed
+                        ),
+                        Ok(None) => println!("Pending update  : none"),
+                        Err(e) => println!("Pending update  : unreadable ({e})"),
+                    }
+                    let bak = swap::backup_path(&dir, &settings.artifact.binary_name);
+                    println!("Backup binary   : {}", if bak.exists() { "present" } else { "absent" });
+                }
+            }
+        }
     }
 
     Ok(())
@@ -270,6 +363,7 @@ async fn serve(
     port: u16,
     public_url: Option<String>,
     no_browser: bool,
+    no_autoupdate: bool,
 ) -> Result<()> {
     let config = ServiceCredentials::load();
     let db = create_db_pool().await?;
@@ -331,6 +425,10 @@ async fn serve(
     let telemetry_interval = config.telemetry_interval_secs;
     let telemetry_enabled = config.telemetry_enabled;
     let telemetry_config = config.clone();
+
+    // Autoupdater (M6) settings — captured before `config` moves into AppState.
+    let au_grace_secs = config.autoupdate_health_grace_secs;
+    let au_enabled = config.autoupdate_enabled;
 
     let state = Arc::new(AppState {
         db,
@@ -586,6 +684,71 @@ async fn serve(
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             let _ = webbrowser::open(&url);
+        });
+    }
+
+    // ── Autoupdater (M6) ────────────────────────────────────────────────
+    // 1. Complete/undo a pending update (health-checked commit or rollback).
+    //    Runs regardless of the enabled flag so an in-flight update always
+    //    resolves.
+    let au_grace = au_grace_secs;
+    let au_port = actual_addr.port();
+    tokio::spawn(async move {
+        use momos_music_manager::autoupdate::{RecoveryAction, commit_after_grace};
+        match momos_music_manager::autoupdate::startup_recovery() {
+            RecoveryAction::None => {}
+            RecoveryAction::CommitAfterGrace { new_version } => {
+                tracing::info!(
+                    "autoupdate: new version v{new_version} started — health check in {au_grace}s"
+                );
+                commit_after_grace(au_grace, Some(au_port)).await;
+            }
+            RecoveryAction::AutoRollback { old_version } => {
+                tracing::warn!(
+                    "autoupdate: new version failed health check repeatedly — rolling back to v{old_version}"
+                );
+                if let Err(e) = momos_music_manager::autoupdate::perform_rollback() {
+                    tracing::error!("autoupdate: rollback failed: {e}");
+                }
+            }
+            RecoveryAction::CleanupStale => {
+                tracing::debug!("autoupdate: cleaned up stale update state");
+            }
+        }
+    });
+
+    // 2. Startup update check (opt-out via --no-autoupdate, env or config).
+    if !no_autoupdate && au_enabled {
+        tokio::spawn(async move {
+            // Let the server finish booting before hitting the network.
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            let config = ServiceCredentials::load();
+            match momos_music_manager::autoupdate::UpdateSettings::from_config(&config) {
+                Ok(settings) => {
+                    let fetcher = momos_music_manager::autoupdate::HttpFetcher::new();
+                    match momos_music_manager::autoupdate::UpdateStatus::check(&settings, &fetcher)
+                        .await
+                    {
+                        Ok(momos_music_manager::autoupdate::UpdateStatus::UpdateAvailable(info)) => {
+                            tracing::info!(
+                                "autoupdate: v{} available (current v{}) — run `momos-music-manager update apply` to install",
+                                info.version,
+                                settings.current_version
+                            );
+                        }
+                        Ok(momos_music_manager::autoupdate::UpdateStatus::UpToDate) => {
+                            tracing::debug!("autoupdate: up to date (v{})", settings.current_version);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("autoupdate: check failed: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("autoupdate: settings unavailable: {e}");
+                }
+            }
         });
     }
 
