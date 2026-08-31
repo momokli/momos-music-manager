@@ -165,6 +165,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install minisign (pinned release binary)
+        run: |
+          curl -fsSL -o /tmp/minisign.tar.gz https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          tar xzf /tmp/minisign.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/minisign-linux/x86_64/minisign /usr/local/bin/minisign
+          minisign -V | head -1
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -175,6 +181,7 @@ jobs:
       - name: Publish to latest-main (rolling) or tag release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           set -euo pipefail
           cd dist
@@ -225,9 +232,26 @@ jobs:
           echo "--- SHA256SUMS ---"
           cat SHA256SUMS
 
+          # Sign the manifest (M6 autoupdater). Order relative to future
+          # M3/M4 code-signing: sign binary → zip/dmg → sha256 → sign manifest.
+          # The autoupdater refuses unsigned manifests, so this MUST run
+          # before upload. The secret key is the base64 of the minisign.key
+          # file (generate: minisign -G -p scripts/minisign.pub -s … -W).
+          # Public key: scripts/minisign.pub (matches the key embedded in the
+          # binary at src/autoupdate/keys.rs).
+          if [[ -n "${MINISIGN_SECRET_KEY:-}" ]]; then
+            echo "${MINISIGN_SECRET_KEY}" | base64 -d > /tmp/mmm-minisign.key
+            minisign -S -s /tmp/mmm-minisign.key -m SHA256SUMS
+            echo "--- Self-verify against committed public key ---"
+            minisign -V -p "${GITHUB_WORKSPACE}/scripts/minisign.pub" -m SHA256SUMS
+            rm -f /tmp/mmm-minisign.key
+          else
+            echo "::warning::MINISIGN_SECRET_KEY not set — SHA256SUMS stays UNSIGNED; the autoupdater will refuse it. Set the secret to enable signed auto-updates."
+          fi
+
           # Upload every platform artifact (schema names + stable names +
-          # per-file checksums + aggregate).
-          gh release upload "${RELEASE}" momos-music-manager-* SHA256SUMS --clobber
+          # per-file checksums + aggregate + manifest signature).
+          gh release upload "${RELEASE}" momos-music-manager-* SHA256SUMS SHA256SUMS.minisig --clobber
           if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
             gh release upload "${RELEASE}" Momo-s-Music-Manager-latest.dmg Momo-s-Music-Manager-latest.dmg.sha256 --clobber
           fi
