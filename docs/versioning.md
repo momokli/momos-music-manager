@@ -133,3 +133,54 @@ Rebuild vom Tag erzeugt wieder `1.0.1`, da der alte `build.rs` `MMM_VERSION`
 ignoriert). Der Repair ist daher Kosmetik/Konsistenz (Asset-Namen +
 signiertes Manifest), kein inhaltlicher Fix — das behebt sich erst mit dem
 nächsten Release.
+
+## 6. Update-Status in der UI
+
+Seit v1.1.1 zeigt die **Settings-Seite** (`#settings`, Nav-Sektion
+„System") den Update-Status und steuert die Autoupdater-Einstellungen.
+Backend: Modul `src/api/update.rs`, Persistenz in der SQLite-KV-Tabelle
+`settings` (Migration 024).
+
+### Endpoints
+
+| Endpoint | Zweck |
+|---|---|
+| `GET /api/update/status` | Version, Kanal (dev/release), effektiver Enabled-Wert + Quelle, Artifact, letzter Check (`lastCheckAt`, `lastCheckStatus`, `lastCheckResult`, `lastCheckError`), `pendingUpdate` (aus `update-state.json`), `platformSelfInstall` |
+| `POST /api/update/check` | Führt einen verifizierten Check aus (30-s-HTTP-Timeout), persistiert das Ergebnis und gibt den frischen Status zurück. Netz-/Signaturfehler sind **kein** HTTP-Fehler: `lastCheckStatus: "error"` bei 200 |
+| `POST /api/update/settings` | Body `{"autoUpdateEnabled": bool}` — persistiert den Toggle. **409**, wenn Env/TOML den Wert fixieren; **400** bei ungültigem Body |
+| `POST /api/update/apply` | Manuelles „Update now": Linux/Windows → Swap + `{outcome: "installed", restartNeeded: true}`; macOS → verifizierter DMG-Download + Pfad (`outcome: "downloaded"`, **kein** Self-Install). 409 bei disabled/Kanal-Mismatch, 404 wenn kein Update verfügbar |
+
+### Precedence-Regel (Env > UI > TOML > Default **true**)
+
+1. `MOMOS_AUTOUPDATE_ENABLED` gesetzt **und** parsebar → gewinnt (`env`)
+2. sonst UI-Wert in `settings['autoupdate.enabled']` → gewinnt (`ui`)
+3. sonst `[autoupdate] enabled` aus `config.toml` → gewinnt (`toml`)
+4. sonst Default **true** (`default`)
+
+Die Status-Response enthält `enabledSource`; bei `env`/`toml` rendert die
+UI den Toggle **disabled** mit Hinweis („von Umgebungsvariable gesetzt" /
+„von config.toml gesetzt"). Unparsebare Env-Werte fallen wie bisher durch
+(kein Breaking Change).
+
+### Toggle-Persistenz
+
+Der Toggle wird in SQLite persistiert (`settings`-KV, Key
+`autoupdate.enabled`, Werte `"true"`/`"false"`) und überlebt Neustarts.
+Der Start-Check in `serve()` liest den **effektiven** Wert aus der DB
+(nicht mehr nur `config.autoupdate_enabled`) und persistiert sein Ergebnis
+(`autoupdate.last_check_*`) — `--no-autoupdate` hat weiterhin höchste
+Priorität.
+
+### macOS v1-Limitation
+
+„Update now" auf macOS lädt nur den verifizierten DMG nach `~/Downloads`
+und zeigt eine Installations-Anleitung — DMG-Mount, `.app`-Ersetzung und
+Neustart sind **Phase C** (Auto-Apply + Self-Restart, geplant als eigenes
+Feature nach v1.1.1). `platformSelfInstall: false` kennzeichnet das in der
+Status-Response.
+
+### Kanal-Mismatch
+
+Dev- und Release-Builds wechseln nie automatisch die Kanäle: Bei Mismatch
+(dev ↔ release) zeigt die UI einen Erklärtext, der Apply-Button erscheint
+nicht (`POST /api/update/apply` → 409).

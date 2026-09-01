@@ -33,6 +33,10 @@ const NAV_SECTIONS = [
       { id: "traktor-import", label: "Traktor Import", icon: "fa-compact-disc" },
     ],
   },
+  {
+    label: "System",
+    items: [{ id: "settings", label: "Settings", icon: "fa-gear" }],
+  },
 ];
 
 const TOOLS_ITEMS = [
