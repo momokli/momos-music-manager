@@ -204,6 +204,9 @@ pub struct ServiceCredentials {
     pub autoupdate_enabled: bool,
     pub autoupdate_base_url: String,
     pub autoupdate_health_grace_secs: u64,
+    /// Whether `[autoupdate] enabled` was set explicitly in config.toml —
+    /// needed for `enabledSource` detection (the TOML struct is private).
+    pub(crate) autoupdate_has_toml: bool,
 }
 
 impl ServiceCredentials {
@@ -499,6 +502,11 @@ impl ServiceCredentials {
                         .and_then(|a| a.health_grace_secs)
                 })
                 .unwrap_or(crate::autoupdate::DEFAULT_HEALTH_GRACE_SECS),
+            autoupdate_has_toml: toml_config
+                .autoupdate
+                .as_ref()
+                .and_then(|a| a.enabled)
+                .is_some(),
         };
 
         info!(
@@ -617,6 +625,7 @@ impl ServiceCredentials {
             autoupdate_health_grace_secs: env_var_optional("MOMOS_AUTOUPDATE_HEALTH_GRACE_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(crate::autoupdate::DEFAULT_HEALTH_GRACE_SECS),
+            autoupdate_has_toml: false,
         }
     }
 
@@ -706,6 +715,25 @@ impl ServiceCredentials {
         self.youtube_api_key.is_some()
     }
 
+    /// Where the configured `autoupdate_enabled` value comes from, ignoring
+    /// the UI/DB layer: `"env"` (parseable `MOMOS_AUTOUPDATE_ENABLED`),
+    /// `"toml"` (`[autoupdate] enabled` in config.toml) or `"default"`
+    /// (built-in true). Mirrors the resolution in [`Self::load`] — an
+    /// unparseable env value falls through to TOML/default.
+    pub fn autoupdate_enabled_source(&self) -> &'static str {
+        if std::env::var("MOMOS_AUTOUPDATE_ENABLED")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .is_some()
+        {
+            return "env";
+        }
+        if self.autoupdate_has_toml {
+            return "toml";
+        }
+        "default"
+    }
+
     pub fn spotify_client_id(&self) -> anyhow::Result<&str> {
         self.spotify_client_id.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -769,6 +797,7 @@ impl ServiceCredentials {
             autoupdate_enabled: false,
             autoupdate_base_url: crate::autoupdate::DEFAULT_BASE_URL.to_string(),
             autoupdate_health_grace_secs: 5,
+            autoupdate_has_toml: false,
         }
     }
 }

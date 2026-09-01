@@ -452,7 +452,6 @@ async fn serve(
 
     // Autoupdater (M6) settings — captured before `config` moves into AppState.
     let au_grace_secs = config.autoupdate_health_grace_secs;
-    let au_enabled = config.autoupdate_enabled;
 
     let state = Arc::new(AppState {
         db,
@@ -741,37 +740,87 @@ async fn serve(
         }
     });
 
-    // 2. Startup update check (opt-out via --no-autoupdate, env or config).
-    if !no_autoupdate && au_enabled {
+    // 2. Startup update check (opt-out via --no-autoupdate — highest
+    //    priority). The *effective* enabled value (env > UI > TOML > default)
+    //    is read inside the task (config clone + DB clone); the outcome is
+    //    persisted so the Settings page shows the last check.
+    if !no_autoupdate {
+        let au_db = state.db.clone();
+        let au_config = state.config.clone();
         tokio::spawn(async move {
             // Let the server finish booting before hitting the network.
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            let config = ServiceCredentials::load();
-            match momos_music_manager::autoupdate::UpdateSettings::from_config(&config) {
-                Ok(settings) => {
-                    let fetcher = momos_music_manager::autoupdate::HttpFetcher::new();
-                    match momos_music_manager::autoupdate::UpdateStatus::check(&settings, &fetcher)
-                        .await
-                    {
-                        Ok(momos_music_manager::autoupdate::UpdateStatus::UpdateAvailable(info)) => {
+            use momos_music_manager::api::update::{
+                effective_autoupdate_enabled, perform_check, persist_disabled_check,
+            };
+
+            let (enabled, source) =
+                match effective_autoupdate_enabled(&au_config, &au_db).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            "autoupdate: startup check skipped — settings read failed: {e}"
+                        );
+                        return;
+                    }
+                };
+
+            if !enabled {
+                // Honest UI state instead of a stale/absent last check.
+                if let Err(e) = persist_disabled_check(&au_db).await {
+                    tracing::warn!("autoupdate: failed to persist disabled check state: {e}");
+                }
+                tracing::info!(
+                    "autoupdate: startup check skipped (enabled={enabled}, source={source})"
+                );
+                return;
+            }
+
+            let fetcher = momos_music_manager::autoupdate::HttpFetcher::new();
+            match perform_check(&au_db, &au_config, &fetcher).await {
+                Ok(json) => {
+                    let state = json
+                        .get("lastCheckResult")
+                        .and_then(|r| r.get("state"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("");
+                    match state {
+                        "updateAvailable" => {
+                            let avail = json
+                                .get("lastCheckResult")
+                                .and_then(|r| r.get("availableVersion"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?");
                             tracing::info!(
-                                "autoupdate: v{} available (current v{}) — run `momos-music-manager update apply` to install",
-                                info.version,
-                                settings.current_version
+                                "autoupdate: v{avail} available (current v{}) — apply in the Settings page or run `momos-music-manager update apply`",
+                                env!("MMM_VERSION")
                             );
                         }
-                        Ok(momos_music_manager::autoupdate::UpdateStatus::UpToDate) => {
-                            tracing::debug!("autoupdate: up to date (v{})", settings.current_version);
+                        "upToDate" => {
+                            tracing::debug!(
+                                "autoupdate: up to date (v{})",
+                                env!("MMM_VERSION")
+                            );
                         }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!("autoupdate: check failed: {e}");
+                        "channelMismatch" => {
+                            tracing::info!(
+                                "autoupdate: check ok — channel mismatch (dev vs release), no auto-update"
+                            );
                         }
+                        "disabled" => {
+                            tracing::info!("autoupdate: startup check — updates disabled");
+                        }
+                        "error" => {
+                            let err = json
+                                .get("lastCheckError")
+                                .and_then(|e| e.as_str())
+                                .unwrap_or("unknown error");
+                            tracing::warn!("autoupdate: check failed: {err}");
+                        }
+                        other => tracing::debug!("autoupdate: startup check state={other}"),
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("autoupdate: settings unavailable: {e}");
-                }
+                Err(e) => tracing::warn!("autoupdate: check failed: {e}"),
             }
         });
     }

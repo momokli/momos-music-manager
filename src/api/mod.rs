@@ -22,6 +22,7 @@ pub mod tags;
 pub mod tracks;
 pub mod traktor;
 pub mod types;
+pub mod update;
 pub mod websocket;
 
 /// Build the merged API router from all domain sub-routers.
@@ -43,4 +44,5 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(tracks::router())
         .merge(dynamic_bundles::router())
         .merge(files::router())
+        .merge(update::router())
 }
