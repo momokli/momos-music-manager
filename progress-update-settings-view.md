@@ -11,11 +11,20 @@
 |---|---|---|---|
 | 1. Plan | feature-dev-planner | done | Spec → User Stories (7 Stories, 024-Schema, Precedence-Regel, Testplan) |
 | 2. Setup | feature-dev-setup | done | Branch `feat/update-settings-view` von main @ 03ed42e; Build-Baseline grün (cargo build 225 s, lib: 29 Warnungen, v. a. dead_code, keine Errors; cargo test --no-run kompiliert, 96 s); letzte Migration: 023; Toolchain: Rust 1.98.0 via rustup installiert (System-cargo 1.65 konnte edition 2024 nicht parsen) |
-| 3. Dev | feature-dev-developer | pending | Backend + Frontend + Tests |
-| 4. Verify | feature-dev-verifier | pending | Quality Gate |
-| 5. Test | feature-dev-tester | pending | Integration/E2E |
-| 6. PR | feature-dev-developer | pending | Push + PR |
+| 3. Dev | feature-dev-developer | done | US-1…US-7 implementiert (Details s. u.; Orchestrator-Crash 17:18 → WIP war unkompiliert, US-4/US-5-Handler fehlten und wurden nachimplementiert) |
+| 4. Verify | feature-dev-verifier | done | Build/Test grün (Zahlen s. u.); Spec-Konformität geprüft (alle 7 Stories abgedeckt); 2 pre-existing metaflac-Testfehler dokumentiert (Sandbox ohne metaflac-Binary, nicht feature-bedingt) |
+| 5. Test | feature-dev-tester | done | Playwright 9/9 grün (update-settings.spec.js); Gesamtsuite 41 passed / 1 flaky (file-detail-Seed-Timing, retry grün) |
+| 6. PR | feature-dev-developer | done | Push + PR (GitHub, gh CLI) |
 | 7. Review | feature-dev-reviewer | pending | Final Review |
+
+### Verifizierte Fakten (2026-09-01, nach Crash-Recovery)
+
+- **cargo build**: grün, keine Errors (32 lib-Warnungen, v. a. pre-existing dead_code). Fix nötig war ein Compile-Fehler im WIP (`state` nach `build_router` verschoben → `state.clone()`).
+- **cargo test**: **523 passed / 2 failed** — die 2 Failures sind pre-existing und umgebungsbedingt: `db::files`-Tests brauchen das externe `metaflac`-Binary (Sandbox ohne root kann es nicht installieren; `src/db/files.rs` unverändert ggü. main). Alle 32 `api::update`-Tests grün.
+- **cargo fmt**: rustfmt 1.98 installiert; `src/api/update.rs` fmt-clean (`rustfmt --edition 2024 --check`). Repo-Baseline ist NICHT fmt-clean (auch main nicht) → fmt-Churn bewusst auf neue Datei beschränkt.
+- **Playwright**: Chromium-Headless-Shell 151 installiert + System-Libs (glib/nss/X11, ~30 .debs nach `/tmp/pw-deps`) + Fonts (Liberation/DejaVu nach `~/.local/share/fonts` — ohne Fonts rendert Headless-Chrome Text mit Höhe 0). `npx playwright test tests/update-settings.spec.js`: **9/9 grün**. Gesamtsuite: **41 passed / 1 flaky** (file-detail Seed-Timing).
+- **E2E-Hinweis**: `LD_LIBRARY_PATH=/tmp/pw-deps/root/usr/lib/x86_64-linux-gnu:/tmp/pw-deps/root/lib/x86_64-linux-gnu` nötig, solange die .deb-Extraktion nicht in ein Image eingebacken ist.
+- **Startup-Check im E2E**: Der 10-s-Start-Check in `serve()` läuft im Playwright-Server gegen github.com und persistiert lastCheck (hier: HTTP-404 auf releases/latest → `lastCheckStatus: error` — Netz-Routing der Sandbox). Tests sind dagegen robust (kein „never"-Assert).
 
 ### PR 1 — Plan (Phase A+B, Code-Analyse-Basis: main @ 03ed42e)
 
