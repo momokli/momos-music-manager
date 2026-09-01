@@ -94,6 +94,10 @@ impl HttpFetcher {
                     env!("MMM_VERSION"),
                     " (autoupdater)"
                 ))
+                // Global request timeout (reqwest's default is no timeout) —
+                // the API handlers and the CLI must never hang on a dead
+                // upstream.
+                .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("reqwest client builds"),
         }
@@ -543,7 +547,7 @@ pub(crate) mod tests {
 
     const BASE: &str = "https://example.invalid/latest-main";
 
-    fn test_settings(os_arch: &str, ext: &str, current: &str) -> UpdateSettings {
+    pub(crate) fn test_settings(os_arch: &str, ext: &str, current: &str) -> UpdateSettings {
         UpdateSettings {
             base_url: BASE.to_string(),
             enabled: true,
@@ -562,7 +566,7 @@ pub(crate) mod tests {
     /// Insert a signed manifest (+ optional artifact) into the mock fetcher.
     /// The artifact is served under its **versioned** name (the updater no
     /// longer downloads via the stable `-latest-` name).
-    fn signed_fixture(
+    pub(crate) fn signed_fixture(
         files: &mut HashMap<String, Vec<u8>>,
         manifest: &str,
         version: &str,
