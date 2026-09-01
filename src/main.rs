@@ -690,7 +690,7 @@ async fn serve(
     }
 
     // Build the application with routes.
-    let app = momos_music_manager::build_router(state);
+    let app = momos_music_manager::build_router(state.clone());
 
     let address = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&address).await?;
