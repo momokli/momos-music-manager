@@ -14,7 +14,7 @@
 | 3. Dev | feature-dev-developer | done | US-1…US-7 implementiert (Details s. u.; Orchestrator-Crash 17:18 → WIP war unkompiliert, US-4/US-5-Handler fehlten und wurden nachimplementiert) |
 | 4. Verify | feature-dev-verifier | done | Build/Test grün (Zahlen s. u.); Spec-Konformität geprüft (alle 7 Stories abgedeckt); 2 pre-existing metaflac-Testfehler dokumentiert (Sandbox ohne metaflac-Binary, nicht feature-bedingt) |
 | 5. Test | feature-dev-tester | done | Playwright 9/9 grün (update-settings.spec.js); Gesamtsuite 41 passed / 1 flaky (file-detail-Seed-Timing, retry grün) |
-| 6. PR | feature-dev-developer | done | Push + PR (GitHub, gh CLI) |
+| 6. PR | feature-dev-developer | done | Push + PR — **https://github.com/momokli/momos-music-manager/pull/18** (5 Commits über main, base main) |
 | 7. Review | feature-dev-reviewer | pending | Final Review |
 
 ### Verifizierte Fakten (2026-09-01, nach Crash-Recovery)
