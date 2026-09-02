@@ -1,5 +1,6 @@
 //! Telemetry: push consistent DB snapshots + metadata to a central collector over HTTPS.
 
+pub mod client_id;
 pub mod events;
 pub mod metrics;
 pub mod receiver;

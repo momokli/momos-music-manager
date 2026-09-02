@@ -30,6 +30,12 @@
 //! api_key      = "your_youtube_api_key"
 //! playlist_id  = "your_youtube_playlist_id"
 //!
+//! [telemetry]
+//! enabled = true                  # master flag for snapshot push AND event telemetry
+//! # Where event batches are POSTed. Defaults to `<base_url>/api/telemetry`
+//! # when unset (snapshot `base_url` configured).
+//! events_endpoint = "https://telemetry.music.klimk.es/api/telemetry"
+//!
 //! [telemetry_receiver]
 //! bind = "127.0.0.1:8330"
 //! base_dir = "~/.local/share/momos-music-manager/analytics"
@@ -128,6 +134,8 @@ struct TelemetryToml {
     token: Option<String>,
     instance: Option<String>,
     interval_secs: Option<u64>,
+    /// Event-batch endpoint; defaults to `<base_url>/api/telemetry` when unset.
+    events_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -197,6 +205,9 @@ pub struct ServiceCredentials {
     pub telemetry_token: Option<String>,
     pub telemetry_instance: String,
     pub telemetry_interval_secs: u64,
+    /// HTTPS endpoint for event batches (`POST /api/telemetry`). Resolved
+    /// Env > TOML > derived default `<base_url>/api/telemetry` > None.
+    pub telemetry_events_endpoint: Option<String>,
 
     // Telemetry receiver (collector)
     pub telemetry_receiver_bind: String,
@@ -271,6 +282,26 @@ impl ServiceCredentials {
         );
         info!(
             "Spotify config: client-id={sid_src}, client-secret={ssec_src}, redirect-uri={sredir_src}"
+        );
+
+        // Telemetry resolution: env > toml > defaults. `events_endpoint`
+        // falls back to `<base_url>/api/telemetry` when the base URL is set.
+        let telemetry_base_url = env_or_toml_opt(
+            "MOMOS_TELEMETRY_BASE_URL",
+            toml_config
+                .telemetry
+                .as_ref()
+                .and_then(|t| t.base_url.clone()),
+        );
+        let telemetry_events_endpoint = resolve_events_endpoint(
+            env_or_toml_opt(
+                "MOMOS_TELEMETRY_EVENTS_ENDPOINT",
+                toml_config
+                    .telemetry
+                    .as_ref()
+                    .and_then(|t| t.events_endpoint.clone()),
+            ),
+            telemetry_base_url.as_deref(),
         );
 
         let credentials = Self {
@@ -428,13 +459,7 @@ impl ServiceCredentials {
                 .or_else(|| toml_config.telemetry.as_ref().and_then(|t| t.enabled))
                 .unwrap_or(false),
 
-            telemetry_base_url: env_or_toml_opt(
-                "MOMOS_TELEMETRY_BASE_URL",
-                toml_config
-                    .telemetry
-                    .as_ref()
-                    .and_then(|t| t.base_url.clone()),
-            ),
+            telemetry_base_url: telemetry_base_url.clone(),
             telemetry_token: env_or_toml_opt(
                 "MOMOS_TELEMETRY_TOKEN",
                 toml_config.telemetry.as_ref().and_then(|t| t.token.clone()),
@@ -453,6 +478,7 @@ impl ServiceCredentials {
                 .and_then(|v| v.parse::<u64>().ok())
                 .or_else(|| toml_config.telemetry.as_ref().and_then(|t| t.interval_secs))
                 .unwrap_or(0),
+            telemetry_events_endpoint: telemetry_events_endpoint,
 
             // Telemetry receiver (collector)
             telemetry_receiver_bind: env_or_toml(
@@ -545,9 +571,10 @@ impl ServiceCredentials {
         );
 
         info!(
-            "Telemetry config: enabled={}, base_url={:?}, instance={}, interval={}s (receiver_bind={})",
+            "Telemetry config: enabled={}, base_url={:?}, events_endpoint={:?}, instance={}, interval={}s (receiver_bind={})",
             credentials.telemetry_enabled,
             credentials.telemetry_base_url,
+            credentials.telemetry_events_endpoint,
             credentials.telemetry_instance,
             credentials.telemetry_interval_secs,
             credentials.telemetry_receiver_bind,
@@ -623,6 +650,10 @@ impl ServiceCredentials {
             telemetry_interval_secs: env_var_optional("MOMOS_TELEMETRY_INTERVAL_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            telemetry_events_endpoint: resolve_events_endpoint(
+                env_var_optional("MOMOS_TELEMETRY_EVENTS_ENDPOINT"),
+                env_var_optional("MOMOS_TELEMETRY_BASE_URL").as_deref(),
+            ),
             telemetry_receiver_bind: env_var_optional("MOMOS_TELEMETRY_RECEIVER_BIND")
                 .unwrap_or_else(|| "127.0.0.1:8330".to_string()),
             telemetry_receiver_base_dir: env_var_optional("MOMOS_TELEMETRY_RECEIVER_BASE_DIR")
@@ -839,6 +870,7 @@ impl ServiceCredentials {
             telemetry_token: None,
             telemetry_instance: "macbook".to_string(),
             telemetry_interval_secs: 0,
+            telemetry_events_endpoint: None,
             telemetry_receiver_bind: "127.0.0.1:8330".to_string(),
             telemetry_receiver_base_dir: "/tmp/momos-analytics".to_string(),
             telemetry_receiver_token: None,
@@ -880,6 +912,14 @@ fn env_or_toml(name: &str, toml_value: Option<String>) -> Option<String> {
         Ok(_) => toml_value, // empty string → treat as "not set"
         Err(_) => toml_value,
     }
+}
+
+/// Resolve the event-batch endpoint: explicit value wins; otherwise derive
+/// `<base_url>/api/telemetry` from the configured snapshot base URL; else None.
+fn resolve_events_endpoint(explicit: Option<String>, base_url: Option<&str>) -> Option<String> {
+    explicit.or_else(|| {
+        base_url.map(|b| format!("{}/api/telemetry", b.trim_end_matches('/')))
+    })
 }
 
 /// Same as `env_or_toml` but returns `Option<String>`.
@@ -1257,6 +1297,37 @@ mod tests {
         let result = env_or_toml("TEST_BOOL_TRUE_2", Some("false".to_string()));
         unsafe { std::env::remove_var("TEST_BOOL_TRUE_2") };
         assert_eq!(result, Some("true".to_string()));
+    }
+
+    #[test]
+    fn defaults_for_test_events_endpoint_none() {
+        let creds = ServiceCredentials::defaults_for_test();
+        assert!(creds.telemetry_events_endpoint.is_none());
+        assert!(!creds.telemetry_enabled);
+    }
+
+    #[test]
+    fn resolve_events_endpoint_explicit_wins() {
+        let r = resolve_events_endpoint(
+            Some("https://explicit.example/api/telemetry".to_string()),
+            Some("https://telemetry.example"),
+        );
+        assert_eq!(r.unwrap(), "https://explicit.example/api/telemetry");
+    }
+
+    #[test]
+    fn resolve_events_endpoint_derives_from_base_url() {
+        let r = resolve_events_endpoint(None, Some("https://telemetry.example"));
+        assert_eq!(r.unwrap(), "https://telemetry.example/api/telemetry");
+
+        // trailing slash must not produce a double slash
+        let r = resolve_events_endpoint(None, Some("https://telemetry.example/"));
+        assert_eq!(r.unwrap(), "https://telemetry.example/api/telemetry");
+    }
+
+    #[test]
+    fn resolve_events_endpoint_none_without_base_url() {
+        assert_eq!(resolve_events_endpoint(None, None), None);
     }
 
     #[test]
