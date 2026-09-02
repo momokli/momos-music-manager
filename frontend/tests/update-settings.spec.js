@@ -27,6 +27,8 @@ function statusStub(overrides = {}) {
     pendingUpdate: null,
     pendingUpdateError: null,
     platformSelfInstall: true,
+    autoApplyIntervalSecs: 14400,
+    autoApplyIntervalSource: "default",
     ...overrides,
   };
 }
@@ -325,6 +327,170 @@ test.describe("Settings page — update controls", () => {
       "serves a stable release",
     );
     await expect(page.locator("#update-apply-now-btn")).not.toBeVisible();
+
+    expect(errors).toEqual([]);
+  });
+});
+
+test.describe("Settings page — auto-apply interval (Phase C)", () => {
+  test("interval select shows the effective value and auto-restart hint", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await stubStatus(page, { enabled: true });
+    await page.goto("/#settings");
+    await page.waitForSelector("#autoupdate-interval-select", {
+      state: "attached",
+      timeout: 8000,
+    });
+
+    const select = page.locator("#autoupdate-interval-select");
+    await expect(select).toBeVisible();
+    await expect(select).not.toBeDisabled();
+    await expect(select).toHaveValue("14400");
+    // Default preset labelled + auto-restart semantics visible.
+    await expect(page.locator("#settings-updates-content")).toContainText(
+      "Every 4 hours (default)",
+    );
+    await expect(page.locator("#settings-updates-content")).toContainText(
+      "server restarts itself",
+    );
+
+    expect(errors).toEqual([]);
+  });
+
+  test("interval select shows custom value when pinned by env", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await stubStatus(page, {
+      autoApplyIntervalSecs: 7200,
+      autoApplyIntervalSource: "env",
+    });
+    await page.goto("/#settings");
+    await page.waitForSelector("#autoupdate-interval-select", {
+      state: "attached",
+      timeout: 8000,
+    });
+
+    const select = page.locator("#autoupdate-interval-select");
+    await expect(select).toBeDisabled();
+    await expect(select).toHaveValue("7200");
+    await expect(page.locator("#settings-updates-content")).toContainText(
+      "MOMOS_AUTOUPDATE_INTERVAL_SECS",
+    );
+
+    expect(errors).toEqual([]);
+  });
+
+  test("interval select disabled with override hint when intervalSource is toml", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await stubStatus(page, { autoApplyIntervalSource: "toml" });
+    await page.goto("/#settings");
+    await page.waitForSelector("#autoupdate-interval-select", {
+      state: "attached",
+      timeout: 8000,
+    });
+
+    await expect(page.locator("#autoupdate-interval-select")).toBeDisabled();
+    await expect(page.locator("#settings-updates-content")).toContainText(
+      "interval_secs",
+    );
+    await expect(page.locator("#settings-updates-content")).toContainText("config.toml");
+
+    expect(errors).toEqual([]);
+  });
+
+  test("interval persists via the real settings API across reload", async ({ page }) => {
+    test.setTimeout(60_000);
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    const settingsCalls = [];
+    await page.route("**/api/update/settings", (route) => {
+      settingsCalls.push(route.request().postDataJSON());
+      return route.continue();
+    });
+    const SLOW_WAIT = 30_000;
+
+    await page.goto("/#settings");
+    await page.waitForSelector("#autoupdate-interval-select", {
+      state: "attached",
+      timeout: SLOW_WAIT,
+    });
+
+    // Normalize to the default first (a previous run may have persisted a
+    // custom interval in test-playwright.db).
+    const select = page.locator("#autoupdate-interval-select");
+    const current = await select.inputValue();
+    if (current !== "14400") {
+      await select.selectOption("14400");
+      await expect.poll(() => settingsCalls.length).toBeGreaterThan(0);
+    }
+
+    // Switch to "every hour" — real POST, verify the request body.
+    await select.selectOption("3600");
+    await expect.poll(() => settingsCalls.length).toBeGreaterThan(0);
+    expect(settingsCalls[settingsCalls.length - 1]).toEqual({
+      autoApplyIntervalSecs: 3600,
+    });
+    await expect(select).toHaveValue("3600");
+
+    // Reload: the interval must stay (persisted via the real settings API
+    // and reflected by GET /api/update/status).
+    await page.reload();
+    await page.waitForSelector("#autoupdate-interval-select", {
+      state: "attached",
+      timeout: SLOW_WAIT,
+    });
+    await expect(page.locator("#autoupdate-interval-select")).toHaveValue("3600");
+    await expect(page.locator("#settings-updates-content")).toContainText("Every hour");
+
+    // Restore the default so later runs start clean.
+    await page.locator("#autoupdate-interval-select").selectOption("14400");
+    await expect.poll(() => settingsCalls.length).toBeGreaterThan(0);
+
+    expect(errors).toEqual([]);
+  });
+
+  test("interval change to off disables the periodic loop label", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await stubStatus(page, { enabled: true });
+    await page.route("**/api/update/settings", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            autoApplyIntervalSecs: 0,
+            autoApplyIntervalSource: "ui",
+          },
+        }),
+      }),
+    );
+
+    await page.goto("/#settings");
+    await page.waitForSelector("#autoupdate-interval-select", {
+      state: "attached",
+      timeout: 8000,
+    });
+    const select = page.locator("#autoupdate-interval-select");
+    await select.selectOption("0");
+
+    await expect(select).toHaveValue("0");
+    await expect(page.locator("#settings-updates-content")).toContainText(
+      "Off (manual updates only)",
+    );
+    await expect(page.locator("#settings-updates-content")).toContainText(
+      "applied manually",
+    );
+    await expect(page.locator("#settings-updates-content")).toContainText(
+      "automatic applying is off",
+    );
 
     expect(errors).toEqual([]);
   });

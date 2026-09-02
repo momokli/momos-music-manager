@@ -104,7 +104,7 @@ Workflow: `.github/workflows/build-all.yml` — läuft bei Push auf `main`
 | **Linux ARM64 nativ bauen** | 🟡 Cross reicht | klein | Alternativ-Runner `ubuntu-24.04-arm` existiert (hosted) — aktuell Cross gewählt, da schneller/konsistenter Cache |
 | **Linux glibc-Baseline** | 🟡 Ubuntu 22.04 (glibc 2.35) | klein | statische musl-Builds wären noch portabler (offen, nicht priorisiert) |
 | **Landing Page** (`site/`) | ✅ alle 6 Artefakte + SHA256 | klein | erledigt (PR #13): Download-Buttons für macOS/Windows/Linux + Verifikation; stabile Artefakt-Namen im CI. Versionierte Releases: [RELEASE-ROADMAP.md](RELEASE-ROADMAP.md) M2 |
-| **Autoupdater (M6 v1)** | ✅ Linux/Windows: Check + signierter Download + atomarer Austausch + Rollback; macOS: verifizierter Download | mittel | erledigt (PR #14): Ed25519-signiertes `SHA256SUMS` (minisign) im Publish-Job; Prüf-Reihenfolge sign→zip/dmg→sha256→Manifest; Opt-out (`--no-autoupdate`/Env/Config); `.bak` + Health-Grace + Auto-Rollback. Offen: macOS-Swap im `.app`-Bundle (M4), Delta-Updates, Multi-Channel |
+| **Autoupdater (M6 v1 + Phase C)** | ✅ Linux/Windows: Check + signierter Download + atomarer Austausch + Rollback; ✅ macOS: DMG-Self-Install (Mount → `.app`-Ersetzung → Unmount); ✅ Auto-Apply-Scheduler + Self-Restart | mittel | erledigt (PR #14 + Phase C): Ed25519-signiertes `SHA256SUMS` (minisign) im Publish-Job; Opt-out (`--no-autoupdate`/Env/Config); `.bak` + Health-Grace + Auto-Rollback + Crash-Loop-Breaker. Offen: Delta-Updates, macOS-Notarization (M4, siehe Zeile oben) |
 
 ## Verifikations-Stand
 

@@ -4,16 +4,29 @@
 //! verification chain (Ed25519/minisign manifest signature → per-artifact
 //! SHA256 → atomic swap with backup + health-checked commit + rollback).
 //!
-//! See `docs/RELEASE-ROADMAP.md` (M6) for the full milestone definition.
+//! Phase C adds the automatic path on top: periodic auto-apply with a
+//! configurable interval (`update_auto`), self-restart after an installed
+//! update (`restart`) and the macOS DMG self-install (`dmg` + `macos`).
+//!
+//! See `docs/versioning.md` §6/§7 and `docs/RELEASE-ROADMAP.md` (M6) for
+//! the full milestone definition.
 
+pub mod dmg;
 pub mod keys;
+pub mod macos;
 pub mod manifest;
 pub mod minisign;
 pub mod platform;
+pub mod restart;
 pub mod swap;
+pub mod update_auto;
 pub mod verify;
 
 pub use swap::RecoveryAction;
+pub use update_auto::{
+    AutoApplyOutcome, AutoApplyState, DEFAULT_AUTO_APPLY_INTERVAL_SECS,
+    MAX_AUTO_APPLY_CONSECUTIVE_FAILURES,
+};
 pub use verify::{
     ApplyOutcome, DEFAULT_BASE_URL, DEFAULT_HEALTH_GRACE_SECS, DEFAULT_RELEASE_BASE_URL,
     HttpFetcher, UpdateChannel, UpdateError, UpdateInfo, UpdateSettings, UpdateStatus,

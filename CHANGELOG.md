@@ -112,6 +112,33 @@ All notable changes to Momo's Music Manager.
 - **`docs/PLATFORM-SUPPORT.md`**: Platform matrix for all 6 targets (build,
   toolchain, packaging, CI, signing/security per platform) with priorities and
   honest "open" items.
+- **Auto-Apply + Self-Restart + macOS DMG-Self-Install (Phase C)**: Der
+  Autoupdater installiert Updates jetzt auch vollautomatisch. Neuer
+  periodischer Scheduler (`serve`): check → apply → Self-Restart im
+  konfigurierbaren Intervall. Interval-Precedence **Env > UI > TOML > Default
+  4 h** (`MOMOS_AUTOUPDATE_INTERVAL_SECS`, Settings-Dropdown
+  `autoupdate.interval_secs` in der KV-Tabelle, `[autoupdate] interval_secs`;
+  `0` = periodische Schleife aus, Startup-Check läuft weiter; Default
+  14400 s = 4 h). Einstellbar in der Settings-Seite (neuer Select, gesperrt
+  + Hinweis bei Env/TOML-Pinning wie Toggle/Kanal). Self-Restart-Guards:
+  Swap-Marker (laufendes Update) blockiert Folge-Apply; Crash-Loop-Breaker
+  (persistierter Auto-Apply-State, aktiviert beim Startup-Auto-Rollback)
+  verhindert Endlos-Restart-Loops derselben Version; unter systemd
+  (`INVOCATION_ID`) übernimmt der Service-Manager den Neustart
+  (`Restart=always`), sonst startet ein detachter Relauncher das neue Binary
+  nach 2 s neu (macOS `.app`: `open` des ersetzten Bundles, nur wenn das
+  laufende Bundle im Installations-Verzeichnis liegt). **macOS DMG-Handling**:  
+  verifizierter DMG wird gemountet (`hdiutil attach`), das `.app`-Bundle
+  atomar ersetzt (`ditto` → Staging → Swap, alte Version als
+  `<App>.app.updater-bak` für manuelle Wiederherstellung, Restore bei
+  Fehlern), wieder unmountet, DMG aufgeräumt; Installations-Ziel
+  konfigurierbar (`MOMOS_AUTOUPDATE_APP_DIR` / `[autoupdate] app_dir`,
+  Default `/Applications`). Schlägt der Self-Install fehl, bleibt der
+  verifizierte Download in `~/Downloads` (v1-Fallback). `ApplyOutcome::
+  Installed`-Pfad/Status-JSON unverändert → Telemetry-PR #20 (`app.updated`
+  bei Versionswechsel) bleibt kompatibel. Neue Module: `update_auto.rs`,
+  `restart.rs`, `dmg.rs`, `macos.rs`; Doku: README, `.env.example`,
+  `docs/versioning.md` §6/§7, PLATFORM-SUPPORT.
 
 ### Changed
 

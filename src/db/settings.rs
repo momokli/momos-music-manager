@@ -2,8 +2,9 @@
 //!
 //! The table is created by migration 024 and is deliberately generic: any
 //! feature can store small string values here. The autoupdater uses the
-//! `autoupdate.` key namespace (toggle persistence + last-check cache); the
-//! future auto-apply interval (Phase C) reads the same keys.
+//! `autoupdate.` key namespace (toggle persistence + last-check cache +
+//! auto-apply interval + auto-apply crash-loop breaker, see
+//! `autoupdate::update_auto`).
 //!
 //! Precedence for the *effective* autoupdate value is handled in
 //! [`crate::api::update::effective_autoupdate_enabled`].
@@ -22,6 +23,14 @@ pub const KEY_AUTOUPDATE_LAST_CHECK_STATUS: &str = "autoupdate.last_check_status
 pub const KEY_AUTOUPDATE_LAST_CHECK_RESULT: &str = "autoupdate.last_check_result";
 /// Human-readable error of the last failed check (empty when absent).
 pub const KEY_AUTOUPDATE_LAST_CHECK_ERROR: &str = "autoupdate.last_check_error";
+/// Auto-apply interval in seconds (as INTEGER string) chosen in the UI —
+/// precedence env > UI > TOML > default (see
+/// `autoupdate::update_auto::effective_auto_apply_interval`). `0` disables
+/// the periodic auto-apply loop (startup check still runs).
+pub const KEY_AUTOUPDATE_INTERVAL_SECS: &str = "autoupdate.interval_secs";
+/// JSON of the last auto-apply attempt (crash-loop breaker, see
+/// `autoupdate::update_auto::AutoApplyState`).
+pub const KEY_AUTOUPDATE_AUTO_APPLY_STATE: &str = "autoupdate.auto_apply_state";
 
 /// Read a setting; `Ok(None)` when the key does not exist.
 pub async fn get_setting(

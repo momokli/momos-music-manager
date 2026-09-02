@@ -111,10 +111,12 @@ enabled = true
 | `HOST`                  | Server bind address                                 |
 | `PORT`                  | Server port                                         |
 | `RUST_LOG`              | Log level (debug, info, warn, error)                |
-| `MOMOS_AUTOUPDATE_ENABLED` | Enable the startup update check (`true`/`false`, default `true`) |
+| `MOMOS_AUTOUPDATE_ENABLED` | Enable the startup update check + the periodic auto-apply loop (`true`/`false`, default `true`) |
 | `MOMOS_AUTOUPDATE_CHANNEL` | Update channel (`release`/`rolling`; default = channel of the running build — dev → `rolling`, release → `release`; see [docs/versioning.md](docs/versioning.md)) |
 | `MOMOS_AUTOUPDATE_BASE_URL` | Autoupdate source base URL override (default follows the selected channel: `rolling` → `latest-main`, `release` → `releases/latest`; see [docs/versioning.md](docs/versioning.md)) |
 | `MOMOS_AUTOUPDATE_HEALTH_GRACE_SECS` | Seconds the new binary must stay healthy before an update is committed (default `60`) |
+| `MOMOS_AUTOUPDATE_INTERVAL_SECS` | Seconds between two automatic check+apply cycles (`0` = off — startup check only; default `14400` = 4 h; UI setting has precedence over this only when unset here, see [docs/versioning.md](docs/versioning.md) §7) |
+| `MOMOS_AUTOUPDATE_APP_DIR` | macOS only: directory whose `Momo's Music Manager.app` the DMG self-install replaces (default `/Applications`) |
 
 ---
 
@@ -298,12 +300,30 @@ Opt-out: `--no-autoupdate` on `serve`, or `MOMOS_AUTOUPDATE_ENABLED=false`
 config.toml (Settings page otherwise). The update check also runs
 automatically on `serve` startup (10 s after boot) and logs the result.
 
-> **macOS**: the updater downloads and verifies the universal DMG, but does not
-> swap binaries inside the `.app` bundle yet (requires M4/notarization work) —
-> it prints the verified download path for manual installation.
+**Automatic updates (auto-apply + self-restart)**: with auto-update enabled
+(default), the server checks for and **installs** updates every
+`MOMOS_AUTOUPDATE_INTERVAL_SECS` (default 4 h; `0` = periodic loop off,
+startup check still runs) and restarts itself afterwards. Configure the
+interval in the Settings page or via env/`[autoupdate] interval_secs`
+(precedence Env > UI > TOML > default; see [docs/versioning.md](docs/versioning.md)
+§7). Restart behaviour: under systemd the service manager restarts the unit
+(`Restart=always`); otherwise a detached relauncher starts the new binary.
+Repeatedly failing versions are blacklisted by a crash-loop breaker — an
+update that never becomes healthy is rolled back once and then skipped until
+a newer version is published. Manual "Update now" stays available anytime.
+
+> **macOS**: the updater downloads, verifies and **self-installs** the
+> universal DMG: it mounts the image, atomically replaces
+> `Momo's Music Manager.app` in `/Applications` (configurable via
+> `MOMOS_AUTOUPDATE_APP_DIR` / `[autoupdate] app_dir`) and unmounts again;
+> the previous version stays as `Momo's Music Manager.app.updater-bak` for
+> manual recovery. The server restarts itself after the install (the app
+> bundle is relaunched via LaunchServices). If the self-install fails, the
+> verified DMG is kept in `~/Downloads` for manual installation.
 >
 > **Windows**: replacing a *running* executable is not allowed — stop the
-> server before `update apply` (the error message tells you).
+> server before `update apply` (the error message tells you). Automatic
+> updates therefore require the service manager to perform the restart.
 >
 > **Signing key**: the manifest is signed in CI with the `MINISIGN_SECRET_KEY`
 > secret (base64 of the `minisign.key` file, see

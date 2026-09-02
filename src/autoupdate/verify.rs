@@ -238,6 +238,11 @@ pub struct UpdateSettings {
     pub pubkey: MinisignPublicKey,
     /// Directory for the swap + marker (defaults to the current exe dir).
     pub install_dir: Option<PathBuf>,
+    /// macOS only: directory where the DMG self-install replaces the
+    /// `.app` bundle (default `/Applications`, see
+    /// [`crate::autoupdate::macos::default_app_dir`]). Configurable via
+    /// `MOMOS_AUTOUPDATE_APP_DIR` / `[autoupdate] app_dir`.
+    pub app_install_dir: Option<PathBuf>,
 }
 
 impl UpdateSettings {
@@ -279,6 +284,7 @@ impl UpdateSettings {
             pubkey: MinisignPublicKey::from_blob(keys::PUBLIC_KEY_B64)
                 .expect("embedded public key is valid"),
             install_dir: None,
+            app_install_dir: config.autoupdate_app_dir.clone(),
         })
     }
 }
@@ -397,9 +403,13 @@ pub async fn apply<F: Fetcher>(
     }
 
     if settings.artifact.ext == "dmg" {
-        // macOS: DMGs cannot be atomically swapped from a running binary in v1
-        // (the executable lives inside an .app bundle). Download + verify and
-        // let the user install — documented limitation.
+        // macOS (Phase C): verified DMG → self-install. The DMG is written
+        // to the Downloads folder first (kept on failure so the user can
+        // install manually — and always visible where the old behaviour put
+        // it), then mounted and the `.app` bundle atomically replaces the
+        // installed one in the app install directory (default
+        // `/Applications`, see `dmg::install_dmg`). Any install failure
+        // degrades gracefully to the v1 "verified download" outcome.
         let dir = std::env::var("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("."))
@@ -410,6 +420,51 @@ pub async fn apply<F: Fetcher>(
             info.version
         ));
         std::fs::write(&target, &bytes)?;
+
+        if cfg!(target_os = "macos") {
+            let app_dir = settings
+                .app_install_dir
+                .clone()
+                .unwrap_or_else(super::macos::default_app_dir);
+            match super::dmg::install_dmg(&target, &app_dir) {
+                Ok(installed) => {
+                    tracing::info!(
+                        "autoupdate: DMG installed — {} replaced with v{} (restart to activate)",
+                        installed.display(),
+                        info.version
+                    );
+                    // Cleanup: the verified DMG is no longer needed.
+                    if let Err(e) = std::fs::remove_file(&target) {
+                        tracing::debug!(
+                            "autoupdate: could not remove downloaded DMG {}: {e}",
+                            target.display()
+                        );
+                    }
+                    // Telemetry: version switch happened (from → to) — same
+                    // event as the binary-swap path below. Non-blocking,
+                    // no-op while telemetry is disabled.
+                    crate::telemetry::emit::emit_event(
+                        crate::telemetry::events::EventType::AppUpdated,
+                        serde_json::json!({
+                            "from": settings.current_version,
+                            "to": info.version,
+                        }),
+                    );
+                    return Ok(ApplyOutcome::Installed {
+                        new_version: info.version,
+                        old_version: settings.current_version.clone(),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "autoupdate: DMG self-install failed ({e}) — verified download kept at {} for manual install",
+                        target.display()
+                    );
+                }
+            }
+        } else {
+            tracing::debug!("autoupdate: dmg artifact on a non-macOS host — verified download only");
+        }
         return Ok(ApplyOutcome::DownloadedOnly {
             path: target,
             version: info.version,
@@ -655,6 +710,7 @@ pub(crate) mod tests {
             },
             pubkey: test_pubkey(),
             install_dir: None,
+            app_install_dir: None,
         }
     }
 
@@ -871,6 +927,44 @@ pub(crate) mod tests {
             other => panic!("expected UpdateAvailable, got {other:?}"),
         }
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn apply_dmg_on_non_macos_falls_back_to_verified_download() {
+        // Phase C macOS self-install is runtime-gated: on a non-macOS host
+        // (CI) the verified DMG must land in ~/Downloads with the v1
+        // DownloadedOnly outcome — and on macOS a *broken* DMG (hdiutil
+        // cannot mount this byte blob) degrades to the same fallback.
+        let dmg_bytes = b"fake-dmg-content".to_vec();
+        let sha = hex_digest(&dmg_bytes);
+        let manifest = format!(
+            "{sha}  momos-music-manager-2.0.0-macos-universal.dmg\n{sha}  momos-music-manager-latest-macos-universal.dmg\n"
+        );
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &manifest, "2.0.0", None);
+        files.insert(
+            format!("{BASE}/momos-music-manager-2.0.0-macos-universal.dmg"),
+            dmg_bytes.clone(),
+        );
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("macos-universal", "dmg", "1.1.0");
+
+        let outcome = apply(&settings, &fetcher).await.unwrap();
+        match outcome {
+            ApplyOutcome::DownloadedOnly { path, version } => {
+                assert_eq!(version, "2.0.0");
+                let downloads = std::env::var("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("Downloads");
+                assert_eq!(
+                    path,
+                    downloads.join("momos-music-manager-2.0.0-macos-universal.dmg")
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), dmg_bytes);
+            }
+            other => panic!("expected DownloadedOnly fallback, got {other:?}"),
+        }
     }
 
     #[tokio::test]
