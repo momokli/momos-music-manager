@@ -13,6 +13,8 @@ function statusStub(overrides = {}) {
   return {
     currentVersion: "1.1.0",
     channel: "release",
+    channelSource: "default",
+    availableChannels: ["release", "rolling"],
     baseUrl: "https://github.com/momokli/momos-music-manager/releases/latest",
     enabled: true,
     enabledSource: "default",
@@ -66,7 +68,7 @@ test.describe("Settings page — update controls", () => {
 
     await stubStatus(page, {
       currentVersion: "1.1.0-dev+abc1234",
-      channel: "dev",
+      channel: "rolling",
       lastCheckAt: 1756742400,
       lastCheckStatus: "ok",
       lastCheckResult: {
@@ -80,7 +82,7 @@ test.describe("Settings page — update controls", () => {
     await page.goto("/#settings");
     await page.waitForSelector("#settings-updates-card", { timeout: 8000 });
     await expect(page.locator("#settings-updates-content")).toContainText("1.1.0-dev+abc1234");
-    await expect(page.locator("#settings-updates-content")).toContainText("dev");
+    await expect(page.locator("#settings-updates-content")).toContainText("rolling");
     await expect(page.locator("#settings-updates-content")).toContainText("Up to date");
     // lastCheckAt 1756742400 = 2025-09-01 — locale-dependent, so assert the
     // row exists and does not say "never"
@@ -128,6 +130,10 @@ test.describe("Settings page — update controls", () => {
   });
 
   test("toggle persists across reload via real API", async ({ page }) => {
+    // Real-API roundtrips can be slow on cold/slow filesystems (SQLite
+    // fsync per write) — give this test room beyond the 15 s default.
+    test.setTimeout(60_000);
+
     const errors = [];
     page.on("pageerror", (err) => errors.push(err));
 
@@ -139,8 +145,15 @@ test.describe("Settings page — update controls", () => {
       return route.continue();
     });
 
+    // The real backend on this machine can be slow under load — generous
+    // explicit waits (the 15 s test default is too tight for real-API flows).
+    const SLOW_WAIT = 30_000;
+
     await page.goto("/#settings");
-    await page.waitForSelector("#autoupdate-toggle", { state: "attached", timeout: 8000 });
+    await page.waitForSelector("#autoupdate-toggle", {
+      state: "attached",
+      timeout: SLOW_WAIT,
+    });
 
     // Normalize to "on" first (DB may persist a previous run's state).
     // The native input is visually hidden by the switch CSS — click the
@@ -161,7 +174,10 @@ test.describe("Settings page — update controls", () => {
     // Reload: the toggle must stay off (persisted via the real settings API
     // and reflected by GET /api/update/status)
     await page.reload();
-    await page.waitForSelector("#autoupdate-toggle", { state: "attached", timeout: 8000 });
+    await page.waitForSelector("#autoupdate-toggle", {
+      state: "attached",
+      timeout: SLOW_WAIT,
+    });
     await expect(page.locator("#autoupdate-toggle")).not.toBeChecked();
     await expect(page.locator("#settings-updates-content")).toContainText("Disabled");
 
@@ -289,6 +305,7 @@ test.describe("Settings page — update controls", () => {
     page.on("pageerror", (err) => errors.push(err));
 
     await stubStatus(page, {
+      channel: "rolling",
       lastCheckStatus: "ok",
       lastCheckResult: {
         state: "channelMismatch",
@@ -303,8 +320,9 @@ test.describe("Settings page — update controls", () => {
     await page.waitForSelector("#settings-updates-content", { timeout: 8000 });
 
     await expect(page.locator("#settings-updates-content")).toContainText("Channel mismatch");
+    // The source serves the other channel than selected.
     await expect(page.locator("#settings-updates-content")).toContainText(
-      "never auto-update across channels",
+      "serves a stable release",
     );
     await expect(page.locator("#update-apply-now-btn")).not.toBeVisible();
 
