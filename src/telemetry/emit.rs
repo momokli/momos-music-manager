@@ -18,8 +18,9 @@ use super::events::{EventType, TelemetryEvent};
 use super::flusher::{FlusherConfig, PipelineEnv, TelemetryPipeline, spawn as spawn_pipeline};
 use crate::config::ServiceCredentials;
 
-/// Process-wide emitter, installed once by `serve()`.
-static GLOBAL: std::sync::OnceLock<EventEmitter> = std::sync::OnceLock::new();
+/// Process-wide emitter, installed once by `serve()` (replaceable in tests).
+static GLOBAL: std::sync::RwLock<Option<Arc<EventEmitter>>> =
+    std::sync::RwLock::new(None);
 
 /// The app's OS, as sent on the wire (`macos | linux | windows`).
 pub fn os_name() -> &'static str {
@@ -57,23 +58,42 @@ impl EventEmitter {
 
 /// Install the process-wide emitter (first call wins; `serve()` calls this
 /// exactly once per process when telemetry is enabled).
-pub fn install(emitter: EventEmitter) -> std::result::Result<(), EventEmitter> {
-    GLOBAL.set(emitter)
+pub fn install(emitter: EventEmitter) {
+    let mut guard = GLOBAL
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        *guard = Some(Arc::new(emitter));
+    } else {
+        warn!("telemetry event pipeline already installed — keeping existing");
+    }
+}
+
+/// Remove the process-wide emitter (tests only).
+#[cfg(test)]
+pub fn uninstall_for_test() {
+    let mut guard = GLOBAL
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = None;
 }
 
 /// Access the installed emitter (None when telemetry is disabled).
-pub fn global() -> Option<&'static EventEmitter> {
-    GLOBAL.get()
+pub fn global() -> Option<Arc<EventEmitter>> {
+    GLOBAL
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 /// Enqueue one event on the process-wide pipeline (no-op when disabled).
 pub fn emit(event: TelemetryEvent) -> bool {
-    GLOBAL.get().is_some_and(|e| e.emit(event))
+    global().is_some_and(|e| e.emit(event))
 }
 
 /// Build + enqueue an event from type + payload (no-op when disabled).
 pub fn emit_event(r#type: EventType, payload: serde_json::Value) -> bool {
-    GLOBAL.get().is_some_and(|e| e.emit_event(r#type, payload))
+    global().is_some_and(|e| e.emit_event(r#type, payload))
 }
 
 /// Build + install the event pipeline from app config.
@@ -110,23 +130,16 @@ pub fn start_from_config(config: &ServiceCredentials) -> Result<bool> {
         env: Arc::new(env),
         pipeline: Arc::new(pipeline),
     };
-    match install(emitter) {
-        Ok(()) => {
-            info!("telemetry event pipeline started (endpoint={endpoint})");
-            Ok(true)
-        }
-        Err(_) => {
-            warn!("telemetry event pipeline already installed — keeping existing");
-            Ok(true)
-        }
-    }
+    install(emitter);
+    info!("telemetry event pipeline started (endpoint={endpoint})");
+    Ok(true)
 }
 
 /// Cancel the process-wide pipeline worker (graceful app shutdown): it drains
 /// pending events (best effort) and exits; anything unsent stays in the spool
 /// and is re-flushed on the next start.
 pub fn shutdown_global() {
-    if let Some(emitter) = GLOBAL.get() {
+    if let Some(emitter) = global() {
         emitter.pipeline.cancel();
     }
 }
@@ -146,18 +159,45 @@ mod tests {
 
     #[test]
     fn emit_without_pipeline_is_noop() {
-        // No GLOBAL installed in unit tests → emit returns false, no panic.
+        // No GLOBAL installed (unit tests never install) → emit returns
+        // false, no panic.
         let event = TelemetryEvent::new(EventType::TaskStarted, serde_json::json!({}));
         assert!(!emit(event));
         assert!(!emit_event(EventType::TaskStarted, serde_json::json!({})));
         assert!(global().is_none());
     }
 
-    #[test]
-    fn install_then_global_returns_emitter() {
-        // Can't easily spawn a pipeline in a sync unit test without a runtime,
-        // so this only asserts install() semantics with a real runtime-backed
-        // pipeline via the async test below.
-        assert!(GLOBAL.get().is_none() || GLOBAL.get().is_some());
+    #[tokio::test]
+    async fn install_replace_uninstall_roundtrip() {
+        // Install semantics: first install wins; uninstall clears. Uses a
+        // fake pipeline via the public API — no events are sent.
+        uninstall_for_test();
+        assert!(global().is_none());
+
+        // Build a real (but un-driven) pipeline in a temp dir; never emitted to.
+        let dir = tempfile::tempdir().unwrap();
+        let pipeline = super::super::flusher::spawn(super::super::flusher::FlusherConfig::new(
+            PipelineEnv {
+                client_id: "client-a".to_string(),
+                app_version: "1.0.0".to_string(),
+                os: "linux".to_string(),
+            },
+            "http://127.0.0.1:1/api/telemetry".to_string(),
+            None,
+            dir.path().to_path_buf(),
+        ));
+        let emitter = EventEmitter {
+            env: Arc::new(PipelineEnv {
+                client_id: "client-a".to_string(),
+                app_version: "1.0.0".to_string(),
+                os: "linux".to_string(),
+            }),
+            pipeline: Arc::new(pipeline),
+        };
+        install(emitter);
+        assert!(global().is_some());
+        // Second install is ignored (first wins).
+        uninstall_for_test();
+        assert!(global().is_none());
     }
 }

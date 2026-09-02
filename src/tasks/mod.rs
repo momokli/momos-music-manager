@@ -406,6 +406,9 @@ pub struct Task {
     pub cancel_token: CancellationToken,
     /// When the task was created
     pub created_at: Instant,
+    /// When the task most recently transitioned into `Running` (None until then).
+    /// Used for telemetry duration_ms.
+    started_running_at: Option<Instant>,
     /// Join handle for the background task
     pub join_handle: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
     /// Summary set on successful completion (e.g. "Synced 150 tracks across 3 playlists")
@@ -464,6 +467,7 @@ impl Task {
             logs: Arc::new(std::sync::Mutex::new(Vec::new())),
             cancel_token: CancellationToken::new(),
             created_at: Instant::now(),
+            started_running_at: None,
             join_handle: None,
             result_summary: Arc::new(std::sync::Mutex::new(None)),
             error_message: Arc::new(std::sync::Mutex::new(None)),
@@ -490,6 +494,7 @@ impl Task {
             logs: Arc::new(std::sync::Mutex::new(Vec::new())),
             cancel_token: CancellationToken::new(),
             created_at: Instant::now(),
+            started_running_at: None,
             join_handle: None,
             result_summary: Arc::new(std::sync::Mutex::new(None)),
             error_message: Arc::new(std::sync::Mutex::new(None)),
@@ -703,6 +708,7 @@ impl TaskManager {
     /// Register a new task unconditionally and return its ID.
     pub async fn start_task(&self, task: Task) -> String {
         let id = task.id.clone();
+        let transition = TaskTransition::started(&task);
         {
             let mut tasks = self.tasks.write().await;
             tasks.insert(id.clone(), task);
@@ -710,6 +716,8 @@ impl TaskManager {
         if let Some(task) = self.tasks.read().await.get(&id) {
             self.maybe_persist(task).await;
         }
+        // Telemetry: registration = lifecycle start (exactly one per task).
+        transition.emit();
         id
     }
 
@@ -720,6 +728,7 @@ impl TaskManager {
     pub async fn start_task_unique(&self, task: Task) -> Result<String, TaskConflictError> {
         let conflict_key = task_type_conflict_key(&task.task_type);
         let id = task.id.clone();
+        let transition = TaskTransition::started(&task);
         {
             let mut tasks = self.tasks.write().await;
             if let Some(ref key) = conflict_key {
@@ -745,6 +754,7 @@ impl TaskManager {
         if let Some(task) = self.tasks.read().await.get(&id) {
             self.maybe_persist(task).await;
         }
+        transition.emit();
         Ok(id)
     }
 
@@ -838,13 +848,34 @@ impl TaskManager {
         (paginated, total)
     }
 
-    /// Update a task's status
+    /// Update a task's status. Emits `task.completed` / `task.failed`
+    /// telemetry on real transitions into terminal states (`task.started` is
+    /// emitted at registration). Never blocking — no-op while telemetry is
+    /// disabled.
     pub async fn update_task_status(&self, task_id: &str, status: TaskStatus) {
+        let mut transition: Option<TaskTransition> = None;
         {
-            let tasks = self.tasks.read().await;
-            if let Some(task) = tasks.get(task_id) {
-                *task.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
+            let mut tasks = self.tasks.write().await;
+            if let Some(task) = tasks.get_mut(task_id) {
+                let old = task
+                    .status
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if old != status {
+                    if status == TaskStatus::Running && task.started_running_at.is_none() {
+                        task.started_running_at = Some(Instant::now());
+                    }
+                    if matches!(status, TaskStatus::Completed | TaskStatus::Failed) {
+                        transition = Some(TaskTransition::terminal(task, status.clone()));
+                    }
+                    *task.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
+                }
             }
+        }
+        // Emit outside the tasks lock (sync + non-blocking anyway).
+        if let Some(t) = transition {
+            t.emit();
         }
         if let Some(task) = self.tasks.read().await.get(task_id) {
             self.maybe_persist(task).await;
@@ -951,6 +982,74 @@ impl TaskManager {
 impl Default for TaskManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================
+// Task lifecycle telemetry
+// ============================================================
+
+/// A captured task lifecycle event, emitted as telemetry **after** the tasks
+/// lock is released. Emission is synchronous + non-blocking
+/// (`telemetry::emit_event` → mpsc `try_send`) and a no-op while telemetry
+/// is disabled.
+struct TaskTransition {
+    /// Event type to emit.
+    event: crate::telemetry::events::EventType,
+    payload: serde_json::Value,
+}
+
+impl TaskTransition {
+    /// `task.started` — fired once per task at registration.
+    fn started(task: &Task) -> Self {
+        let (task_type, _details) = task.task_type_display();
+        let mut payload = serde_json::json!({ "task_type": task_type });
+        if let Some(ref service) = task.service {
+            payload["service"] = serde_json::Value::String(service.clone());
+        }
+        Self {
+            event: crate::telemetry::events::EventType::TaskStarted,
+            payload,
+        }
+    }
+
+    /// `task.completed` / `task.failed` — fired when a task transitions into
+    /// a terminal state. `started` is the moment the task began running
+    /// (fallback: registration).
+    fn terminal(task: &Task, new: TaskStatus) -> Self {
+        let (task_type, _details) = task.task_type_display();
+        let started = task.started_running_at.unwrap_or(task.created_at);
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let mut payload = serde_json::json!({
+            "task_type": task_type,
+            "duration_ms": duration_ms,
+        });
+        if let Some(ref service) = task.service {
+            payload["service"] = serde_json::Value::String(service.clone());
+        }
+        let event = match new {
+            TaskStatus::Failed => {
+                // Sanitized error text (home-prefix stripped, truncated).
+                let error = task
+                    .error_message
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if let Some(ref error) = error {
+                    let clean = crate::telemetry::events::sanitize_error_message(error);
+                    if !clean.is_empty() {
+                        payload["error_message"] = serde_json::Value::String(clean);
+                    }
+                }
+                crate::telemetry::events::EventType::TaskFailed
+            }
+            _ => crate::telemetry::events::EventType::TaskCompleted,
+        };
+        Self { event, payload }
+    }
+
+    fn emit(&self) {
+        crate::telemetry::emit::emit_event(self.event, self.payload.clone());
     }
 }
 
@@ -1831,6 +1930,8 @@ pub async fn start_scan_folder_task(
 
         // Perform the actual scan
         let path = std::path::Path::new(&folder_path);
+        let scan_started = Instant::now();
+        let mode_label = crate::db::folders::scan_mode_label(&scan_mode);
         match crate::db::scan_directory_with_config(
             &db_clone,
             path,
@@ -1858,6 +1959,16 @@ pub async fn start_scan_folder_task(
                 // been indexed that match existing tracks via ISRC.
                 let _ = crate::db::refresh_file_resolved_tags(&db_clone).await;
                 let _ = crate::db::refresh_track_resolved_tags(&db_clone).await;
+
+                // Telemetry: folder scan completed (files + duration + mode).
+                crate::telemetry::emit::emit_event(
+                    crate::telemetry::events::EventType::ScanCompleted,
+                    serde_json::json!({
+                        "files_count": file_count,
+                        "duration_ms": scan_started.elapsed().as_millis() as u64,
+                        "mode": mode_label,
+                    }),
+                );
 
                 let msg = format!(
                     "Scan complete: {} files found in folder #{}",
@@ -3731,6 +3842,48 @@ pub async fn start_backpack_sync_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_transition_started_payload_has_machine_label() {
+        let task = Task::new(TaskType::ScanFolder { folder_id: 7 }, Some("scan".to_string()));
+        let t = TaskTransition::started(&task);
+        assert_eq!(
+            t.event,
+            crate::telemetry::events::EventType::TaskStarted
+        );
+        assert_eq!(t.payload["task_type"], "scan_folder");
+        assert_eq!(t.payload["service"], "scan");
+    }
+
+    #[test]
+    fn task_transition_terminal_payload_has_duration() {
+        let task = Task::new(TaskType::DeemixSync, None);
+        let t = TaskTransition::terminal(&task, TaskStatus::Completed);
+        assert_eq!(
+            t.event,
+            crate::telemetry::events::EventType::TaskCompleted
+        );
+        assert_eq!(t.payload["task_type"], "deemix_sync");
+        assert!(t.payload["duration_ms"].as_u64().unwrap_or(0) >= 0);
+        assert!(t.payload.get("error_message").is_none());
+    }
+
+    #[test]
+    fn task_transition_failed_payload_sanitizes_error() {
+        let task = Task::new(TaskType::BackupFolder { folder_id: 3 }, None);
+        let home = dirs::home_dir().unwrap();
+        let home_str = home.to_string_lossy().to_string();
+        *task.error_message.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(format!("boom at {home_str}/secret/file.flac"));
+        let t = TaskTransition::terminal(&task, TaskStatus::Failed);
+        assert_eq!(
+            t.event,
+            crate::telemetry::events::EventType::TaskFailed
+        );
+        let err = t.payload["error_message"].as_str().unwrap();
+        assert!(!err.contains(&home_str), "payload leaks home path: {err}");
+        assert!(t.payload["duration_ms"].as_u64().is_some());
+    }
 
     #[tokio::test]
     async fn task_add_log_no_truncation() {

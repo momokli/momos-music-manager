@@ -91,6 +91,12 @@ impl DownloadGuarantor {
                             self.task_manager.add_log(&task_id,
                                 format!("Queue sync FAILED: {:#}", e)
                             ).await;
+                            crate::telemetry::emit::emit_event(
+                                crate::telemetry::events::EventType::ErrorReported,
+                                crate::telemetry::events::error_payload(&format!(
+                                    "deemix queue sync failed: {e:#}"
+                                )),
+                            );
                         }
                     }
 
@@ -192,6 +198,17 @@ impl DownloadGuarantor {
         for (_uuid, item) in &queue {
             let spotify_url = format!("https://open.spotify.com/playlist/{}", item.id);
 
+            // Remember the previous stored state so we can emit lifecycle
+            // events only on real transitions (completed/failed).
+            let prev_status: Option<String> = sqlx::query_scalar(
+                "SELECT status FROM deemix_downloads WHERE spotify_playlist_url = ?",
+            )
+            .bind(&spotify_url)
+            .fetch_optional(&self.db)
+            .await
+            .ok()
+            .flatten();
+
             // Serialize errors to JSON for storage
             let error_json = if item.errors.is_empty() {
                 None
@@ -223,6 +240,15 @@ impl DownloadGuarantor {
             if status_lower == "inqueue" {
                 stuck_detected.push(item.title.clone());
             }
+
+            // Telemetry: deemix lifecycle transitions (source=deemix).
+            emit_deemix_transition(
+                prev_status.as_deref(),
+                &item.status,
+                item.downloaded,
+                item.size,
+                !item.errors.is_empty(),
+            );
         }
 
         info!(
@@ -434,12 +460,25 @@ impl DownloadGuarantor {
                         Ok(()) => {
                             report.requeued_playlists += 1;
                             info!("Re-queued zombie playlist: {}", url);
+                            crate::telemetry::emit::emit_event(
+                                crate::telemetry::events::EventType::DownloadStarted,
+                                serde_json::json!({
+                                    "source": "deemix",
+                                    "kind": "playlist",
+                                }),
+                            );
                         }
                         Err(e) => {
                             warn!("Failed to re-queue {}: {:#}", url, e);
                             self.task_manager
                                 .add_log(task_id, format!("Re-queue FAILED for {}: {:#}", url, e))
                                 .await;
+                            crate::telemetry::emit::emit_event(
+                                crate::telemetry::events::EventType::DownloadFailed,
+                                crate::telemetry::events::error_payload(&format!(
+                                    "deemix re-queue failed: {e:#}"
+                                )),
+                            );
                         }
                     }
                 }
@@ -559,12 +598,17 @@ impl DownloadGuarantor {
     ///
     /// Runs `spotdl download <url> --output <flacs_dir> --bitrate 320k --format mp3`.
     /// Times out after 120 seconds. Gracefully handles spotDL not being installed.
+    /// Emits `download.started/completed/failed` telemetry (source=spotdl).
     async fn spotdl_download_track(
         &self,
         spotify_track_url: &str,
         artist: &str,
         title: &str,
     ) -> Result<()> {
+        crate::telemetry::emit::emit_event(
+            crate::telemetry::events::EventType::DownloadStarted,
+            serde_json::json!({ "source": "spotdl", "kind": "track" }),
+        );
         // Sanitize: spotDL handles URLs directly, but we construct the command carefully
         let output = tokio::process::Command::new("spotdl")
             .arg("download")
@@ -583,20 +627,40 @@ impl DownloadGuarantor {
         match tokio::time::timeout(Duration::from_secs(120), output).await {
             Ok(Ok(o)) => {
                 if o.status.success() {
+                    crate::telemetry::emit::emit_event(
+                        crate::telemetry::events::EventType::DownloadCompleted,
+                        serde_json::json!({ "source": "spotdl", "kind": "track" }),
+                    );
                     Ok(())
                 } else {
                     let stderr = String::from_utf8_lossy(&o.stderr);
-                    anyhow::bail!("spotDL exited with {}: {}", o.status, stderr.trim());
+                    let msg = format!("spotDL exited with {}: {}", o.status, stderr.trim());
+                    crate::telemetry::emit::emit_event(
+                        crate::telemetry::events::EventType::DownloadFailed,
+                        crate::telemetry::events::error_payload(&msg),
+                    );
+                    anyhow::bail!(msg);
                 }
             }
             Ok(Err(e)) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    anyhow::bail!("spotDL not installed — run: pip install spotdl");
-                }
-                anyhow::bail!("spotDL command failed: {}", e);
+                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                    "spotDL not installed — run: pip install spotdl".to_string()
+                } else {
+                    format!("spotDL command failed: {e}")
+                };
+                crate::telemetry::emit::emit_event(
+                    crate::telemetry::events::EventType::DownloadFailed,
+                    crate::telemetry::events::error_payload(&msg),
+                );
+                anyhow::bail!(msg);
             }
             Err(_elapsed) => {
-                anyhow::bail!("spotDL timed out after 120s for '{} - {}'", artist, title);
+                let msg = format!("spotDL timed out after 120s for '{artist} - {title}'");
+                crate::telemetry::emit::emit_event(
+                    crate::telemetry::events::EventType::DownloadFailed,
+                    crate::telemetry::events::error_payload(&msg),
+                );
+                anyhow::bail!(msg);
             }
         }
     }
@@ -636,6 +700,63 @@ impl DownloadGuarantor {
         }
 
         Ok(None)
+    }
+}
+
+// ── Helper: deemix lifecycle bucket (free fn, telemetry) ─────────────
+
+/// Terminal-state bucket of a deemix queue item, used for lifecycle-
+/// transition detection (emit only when the observed state changed).
+fn deemix_state_bucket(status: &str, downloaded: i64, size: i64, has_errors: bool) -> &'static str {
+    let lower = status.to_lowercase();
+    if has_errors || lower.contains("error") || lower.contains("fail") {
+        "failed"
+    } else if (size > 0 && downloaded >= size)
+        || lower.contains("complete")
+        || lower.contains("finish")
+    {
+        "completed"
+    } else {
+        "active"
+    }
+}
+
+/// Emit `download.completed` / `download.failed` (source=deemix) when a
+/// queue item transitions into a terminal state. Only transitions we can
+/// observe (a previous stored status exists) are emitted — no retroactive
+/// events for items that were already finished before momos tracked them.
+fn emit_deemix_transition(
+    prev_status: Option<&str>,
+    status: &str,
+    downloaded: i64,
+    size: i64,
+    has_errors: bool,
+) {
+    use crate::telemetry::emit::emit_event;
+    use crate::telemetry::events::{EventType, error_payload};
+
+    let Some(prev) = prev_status else {
+        return; // first observation — nothing to compare against
+    };
+    let prev_bucket = deemix_state_bucket(prev, downloaded, size, false);
+    let new_bucket = deemix_state_bucket(status, downloaded, size, has_errors);
+    if prev_bucket == new_bucket {
+        return;
+    }
+    match new_bucket {
+        "completed" => {
+            emit_event(
+                EventType::DownloadCompleted,
+                serde_json::json!({ "source": "deemix", "kind": "playlist" }),
+            );
+        }
+        "failed" => {
+            emit_event(
+                EventType::DownloadFailed,
+                error_payload("deemix download failed (see deemix_downloads.errors)"),
+            );
+        }
+        _ => {}
     }
 }
 
@@ -718,6 +839,24 @@ struct RemediationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deemix_bucket_classifies_terminal_states() {
+        // Failed wins over size-based completion.
+        assert_eq!(deemix_state_bucket("completed", 10, 10, true), "failed");
+        assert_eq!(deemix_state_bucket("error", 1, 10, false), "failed");
+        assert_eq!(deemix_state_bucket("downloading", 1, 10, true), "failed");
+
+        // Completed by size and/or status wording.
+        assert_eq!(deemix_state_bucket("downloading", 10, 10, false), "completed");
+        assert_eq!(deemix_state_bucket("completed", 10, 10, false), "completed");
+        assert_eq!(deemix_state_bucket("finished", 10, 10, false), "completed");
+
+        // Everything else is active.
+        assert_eq!(deemix_state_bucket("queued", 0, 10, false), "active");
+        assert_eq!(deemix_state_bucket("inQueue", 0, 10, false), "active");
+        assert_eq!(deemix_state_bucket("downloading", 3, 10, false), "active");
+    }
 
     #[test]
     fn test_normalize_for_fuzzy_exact_match() {
