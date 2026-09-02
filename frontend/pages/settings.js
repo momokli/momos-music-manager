@@ -313,7 +313,8 @@ function wireEvents(container) {
         } else {
           msg = `<span class="text-muted">${escapeHtml(outcome)}</span>`;
         }
-        state.status = resp.data;
+        // Keep the full status shape; loadStatus() below refreshes it — the
+        // apply response only carries the outcome fields.
         renderStatus(container);
         renderInline(msg);
         await loadStatus(container);

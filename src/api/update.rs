@@ -572,13 +572,15 @@ async fn settings_handler(
         Err(ToggleError::Overridden(source)) => (
             StatusCode::CONFLICT,
             Json(ErrorResponse {
-                error: format!(
-                    "autoupdate.enabled wird über {} gesetzt — im UI nicht änderbar",
-                    match source {
-                        "env" => "die Umgebungsvariable MOMOS_AUTOUPDATE_ENABLED",
-                        _ => "config.toml",
-                    }
-                ),
+                error: match source {
+                    "env" => "autoupdate.enabled is pinned by the environment variable \
+                               MOMOS_AUTOUPDATE_ENABLED — change it there to edit this \
+                               toggle"
+                        .into(),
+                    _ => "autoupdate.enabled is pinned by [autoupdate] enabled in \
+                           config.toml — edit the file to change this toggle"
+                        .into(),
+                },
             }),
         )
             .into_response(),
