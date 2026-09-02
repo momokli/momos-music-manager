@@ -40,6 +40,9 @@
 //! bind = "127.0.0.1:8330"
 //! base_dir = "~/.local/share/momos-music-manager/analytics"
 //! token = "secret-collector-token"
+//! # Event telemetry.db (default: <base_dir>/telemetry.db) + retention.
+//! # db_path = "~/.local/share/momos-music-manager/analytics/telemetry.db"
+//! # retention_days = 30
 //!
 //! [autoupdate]
 //! enabled = true
@@ -143,6 +146,10 @@ struct TelemetryReceiverToml {
     bind: Option<String>,
     base_dir: Option<String>,
     token: Option<String>,
+    /// Where the event telemetry.db lives (default: <base_dir>/telemetry.db).
+    db_path: Option<String>,
+    /// How many days events are kept before pruning (default 30).
+    retention_days: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -213,6 +220,10 @@ pub struct ServiceCredentials {
     pub telemetry_receiver_bind: String,
     pub telemetry_receiver_base_dir: String,
     pub telemetry_receiver_token: Option<String>,
+    /// Event telemetry.db path (default: `<base_dir>/telemetry.db`).
+    pub telemetry_receiver_db_path: String,
+    /// Event retention in days (default 30).
+    pub telemetry_receiver_retention_days: i64,
 
     // Autoupdater (M6)
     pub autoupdate_enabled: bool,
@@ -303,6 +314,25 @@ impl ServiceCredentials {
             ),
             telemetry_base_url.as_deref(),
         );
+
+        // Telemetry receiver: resolve base_dir first so the default db_path
+        // derives from the *effective* base_dir (env/toml aware).
+        let telemetry_receiver_base_dir = env_or_toml(
+            "MOMOS_TELEMETRY_RECEIVER_BASE_DIR",
+            toml_config
+                .telemetry_receiver
+                .as_ref()
+                .and_then(|r| r.base_dir.clone()),
+        )
+        .unwrap_or_else(default_telemetry_base_dir);
+        let telemetry_receiver_db_path = env_or_toml(
+            "MOMOS_TELEMETRY_RECEIVER_DB_PATH",
+            toml_config
+                .telemetry_receiver
+                .as_ref()
+                .and_then(|r| r.db_path.clone()),
+        )
+        .unwrap_or_else(|| format!("{}/telemetry.db", telemetry_receiver_base_dir.trim_end_matches('/')));
 
         let credentials = Self {
             spotify_client_id: spotify_id,
@@ -490,15 +520,7 @@ impl ServiceCredentials {
             )
             .unwrap_or_else(|| "127.0.0.1:8330".to_string()),
 
-            telemetry_receiver_base_dir: env_or_toml(
-                "MOMOS_TELEMETRY_RECEIVER_BASE_DIR",
-                toml_config
-                    .telemetry_receiver
-                    .as_ref()
-                    .and_then(|r| r.base_dir.clone()),
-            )
-            .unwrap_or_else(default_telemetry_base_dir),
-
+            telemetry_receiver_base_dir: telemetry_receiver_base_dir,
             telemetry_receiver_token: env_or_toml_opt(
                 "MOMOS_TELEMETRY_RECEIVER_TOKEN",
                 toml_config
@@ -506,6 +528,19 @@ impl ServiceCredentials {
                     .as_ref()
                     .and_then(|r| r.token.clone()),
             ),
+
+            telemetry_receiver_db_path: telemetry_receiver_db_path,
+
+            telemetry_receiver_retention_days: std::env::var("MOMOS_TELEMETRY_RECEIVER_RETENTION_DAYS")
+                .ok()
+                .and_then(|v| v.parse::<i64>().ok())
+                .or_else(|| {
+                    toml_config
+                        .telemetry_receiver
+                        .as_ref()
+                        .and_then(|r| r.retention_days)
+                })
+                .unwrap_or(30),
 
             // Autoupdater (M6): env var > config.toml > built-in default.
             // The default base URL is channel-dependent (dev → latest-main,
@@ -659,6 +694,11 @@ impl ServiceCredentials {
             telemetry_receiver_base_dir: env_var_optional("MOMOS_TELEMETRY_RECEIVER_BASE_DIR")
                 .unwrap_or_else(default_telemetry_base_dir),
             telemetry_receiver_token: env_var_optional("MOMOS_TELEMETRY_RECEIVER_TOKEN"),
+            telemetry_receiver_db_path: env_var_optional("MOMOS_TELEMETRY_RECEIVER_DB_PATH")
+                .unwrap_or_else(|| format!("{}/telemetry.db", default_telemetry_base_dir().trim_end_matches('/'))),
+            telemetry_receiver_retention_days: env_var_optional("MOMOS_TELEMETRY_RECEIVER_RETENTION_DAYS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
 
             autoupdate_enabled: env_var_optional("MOMOS_AUTOUPDATE_ENABLED")
                 .and_then(|v| v.parse().ok())
@@ -874,6 +914,8 @@ impl ServiceCredentials {
             telemetry_receiver_bind: "127.0.0.1:8330".to_string(),
             telemetry_receiver_base_dir: "/tmp/momos-analytics".to_string(),
             telemetry_receiver_token: None,
+            telemetry_receiver_db_path: "/tmp/momos-analytics/telemetry.db".to_string(),
+            telemetry_receiver_retention_days: 30,
             autoupdate_enabled: false,
             autoupdate_base_url: crate::autoupdate::DEFAULT_BASE_URL.to_string(),
             autoupdate_health_grace_secs: 5,
