@@ -30,10 +30,25 @@
 //! api_key      = "your_youtube_api_key"
 //! playlist_id  = "your_youtube_playlist_id"
 //!
+//! [telemetry]
+//! enabled = true                  # master flag for snapshot push AND event telemetry
+//! # Full-DB snapshot push (periodic whole-DB send) — OFF by default.
+//! # Sends the COMPLETE DB (VACUUM INTO snapshot + meta) to `base_url`
+//! # every N seconds. 0 = off (periodic; one-shot via `telemetry push` CLI
+//! # still works). Legacy `interval_secs` (analytics era) stays effective
+//! # when this key is absent/0 — this explicit key wins when set.
+//! full_db_interval_secs = 0
+//! # Where event batches are POSTed. Defaults to `<base_url>/api/telemetry`
+//! # when unset (snapshot `base_url` configured).
+//! events_endpoint = "https://telemetry.music.klimk.es/api/telemetry"
+//!
 //! [telemetry_receiver]
 //! bind = "127.0.0.1:8330"
 //! base_dir = "~/.local/share/momos-music-manager/analytics"
 //! token = "secret-collector-token"
+//! # Event telemetry.db (default: <base_dir>/telemetry.db) + retention.
+//! # db_path = "~/.local/share/momos-music-manager/analytics/telemetry.db"
+//! # retention_days = 30
 //!
 //! [autoupdate]
 //! enabled = true
@@ -127,7 +142,14 @@ struct TelemetryToml {
     base_url: Option<String>,
     token: Option<String>,
     instance: Option<String>,
+    /// Legacy full-DB push interval (analytics era; still honored).
     interval_secs: Option<u64>,
+    /// Explicit full-DB snapshot push interval (0/absent = off, default).
+    /// Sends the complete DB (VACUUM INTO) + meta to `base_url` every N
+    /// seconds. Wins over legacy `interval_secs` when > 0.
+    full_db_interval_secs: Option<u64>,
+    /// Event-batch endpoint; defaults to `<base_url>/api/telemetry` when unset.
+    events_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +157,10 @@ struct TelemetryReceiverToml {
     bind: Option<String>,
     base_dir: Option<String>,
     token: Option<String>,
+    /// Where the event telemetry.db lives (default: <base_dir>/telemetry.db).
+    db_path: Option<String>,
+    /// How many days events are kept before pruning (default 30).
+    retention_days: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -196,12 +222,27 @@ pub struct ServiceCredentials {
     pub telemetry_base_url: Option<String>,
     pub telemetry_token: Option<String>,
     pub telemetry_instance: String,
+    /// Legacy periodic full-DB push interval (analytics era; 0 = off).
+    /// Kept as backward-compatible alias — see `telemetry_full_db_interval_secs`.
     pub telemetry_interval_secs: u64,
+    /// Explicit full-DB snapshot push interval in seconds (default 0 = OFF).
+    /// When > 0 (and `telemetry_enabled`) the app periodically sends the
+    /// COMPLETE DB (VACUUM INTO snapshot + meta) to `telemetry_base_url`.
+    /// Env: `MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS`; TOML:
+    /// `[telemetry] full_db_interval_secs`. Wins over legacy `interval_secs`.
+    pub telemetry_full_db_interval_secs: u64,
+    /// HTTPS endpoint for event batches (`POST /api/telemetry`). Resolved
+    /// Env > TOML > derived default `<base_url>/api/telemetry` > None.
+    pub telemetry_events_endpoint: Option<String>,
 
     // Telemetry receiver (collector)
     pub telemetry_receiver_bind: String,
     pub telemetry_receiver_base_dir: String,
     pub telemetry_receiver_token: Option<String>,
+    /// Event telemetry.db path (default: `<base_dir>/telemetry.db`).
+    pub telemetry_receiver_db_path: String,
+    /// Event retention in days (default 30).
+    pub telemetry_receiver_retention_days: i64,
 
     // Autoupdater (M6)
     pub autoupdate_enabled: bool,
@@ -272,6 +313,45 @@ impl ServiceCredentials {
         info!(
             "Spotify config: client-id={sid_src}, client-secret={ssec_src}, redirect-uri={sredir_src}"
         );
+
+        // Telemetry resolution: env > toml > defaults. `events_endpoint`
+        // falls back to `<base_url>/api/telemetry` when the base URL is set.
+        let telemetry_base_url = env_or_toml_opt(
+            "MOMOS_TELEMETRY_BASE_URL",
+            toml_config
+                .telemetry
+                .as_ref()
+                .and_then(|t| t.base_url.clone()),
+        );
+        let telemetry_events_endpoint = resolve_events_endpoint(
+            env_or_toml_opt(
+                "MOMOS_TELEMETRY_EVENTS_ENDPOINT",
+                toml_config
+                    .telemetry
+                    .as_ref()
+                    .and_then(|t| t.events_endpoint.clone()),
+            ),
+            telemetry_base_url.as_deref(),
+        );
+
+        // Telemetry receiver: resolve base_dir first so the default db_path
+        // derives from the *effective* base_dir (env/toml aware).
+        let telemetry_receiver_base_dir = env_or_toml(
+            "MOMOS_TELEMETRY_RECEIVER_BASE_DIR",
+            toml_config
+                .telemetry_receiver
+                .as_ref()
+                .and_then(|r| r.base_dir.clone()),
+        )
+        .unwrap_or_else(default_telemetry_base_dir);
+        let telemetry_receiver_db_path = env_or_toml(
+            "MOMOS_TELEMETRY_RECEIVER_DB_PATH",
+            toml_config
+                .telemetry_receiver
+                .as_ref()
+                .and_then(|r| r.db_path.clone()),
+        )
+        .unwrap_or_else(|| format!("{}/telemetry.db", telemetry_receiver_base_dir.trim_end_matches('/')));
 
         let credentials = Self {
             spotify_client_id: spotify_id,
@@ -428,13 +508,7 @@ impl ServiceCredentials {
                 .or_else(|| toml_config.telemetry.as_ref().and_then(|t| t.enabled))
                 .unwrap_or(false),
 
-            telemetry_base_url: env_or_toml_opt(
-                "MOMOS_TELEMETRY_BASE_URL",
-                toml_config
-                    .telemetry
-                    .as_ref()
-                    .and_then(|t| t.base_url.clone()),
-            ),
+            telemetry_base_url: telemetry_base_url.clone(),
             telemetry_token: env_or_toml_opt(
                 "MOMOS_TELEMETRY_TOKEN",
                 toml_config.telemetry.as_ref().and_then(|t| t.token.clone()),
@@ -453,6 +527,17 @@ impl ServiceCredentials {
                 .and_then(|v| v.parse::<u64>().ok())
                 .or_else(|| toml_config.telemetry.as_ref().and_then(|t| t.interval_secs))
                 .unwrap_or(0),
+            telemetry_full_db_interval_secs: std::env::var("MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .or_else(|| {
+                    toml_config
+                        .telemetry
+                        .as_ref()
+                        .and_then(|t| t.full_db_interval_secs)
+                })
+                .unwrap_or(0),
+            telemetry_events_endpoint: telemetry_events_endpoint,
 
             // Telemetry receiver (collector)
             telemetry_receiver_bind: env_or_toml(
@@ -464,15 +549,7 @@ impl ServiceCredentials {
             )
             .unwrap_or_else(|| "127.0.0.1:8330".to_string()),
 
-            telemetry_receiver_base_dir: env_or_toml(
-                "MOMOS_TELEMETRY_RECEIVER_BASE_DIR",
-                toml_config
-                    .telemetry_receiver
-                    .as_ref()
-                    .and_then(|r| r.base_dir.clone()),
-            )
-            .unwrap_or_else(default_telemetry_base_dir),
-
+            telemetry_receiver_base_dir: telemetry_receiver_base_dir,
             telemetry_receiver_token: env_or_toml_opt(
                 "MOMOS_TELEMETRY_RECEIVER_TOKEN",
                 toml_config
@@ -480,6 +557,19 @@ impl ServiceCredentials {
                     .as_ref()
                     .and_then(|r| r.token.clone()),
             ),
+
+            telemetry_receiver_db_path: telemetry_receiver_db_path,
+
+            telemetry_receiver_retention_days: std::env::var("MOMOS_TELEMETRY_RECEIVER_RETENTION_DAYS")
+                .ok()
+                .and_then(|v| v.parse::<i64>().ok())
+                .or_else(|| {
+                    toml_config
+                        .telemetry_receiver
+                        .as_ref()
+                        .and_then(|r| r.retention_days)
+                })
+                .unwrap_or(30),
 
             // Autoupdater (M6): env var > config.toml > built-in default.
             // The default base URL is channel-dependent (dev → latest-main,
@@ -545,10 +635,13 @@ impl ServiceCredentials {
         );
 
         info!(
-            "Telemetry config: enabled={}, base_url={:?}, instance={}, interval={}s (receiver_bind={})",
+            "Telemetry config: enabled={}, base_url={:?}, events_endpoint={:?}, instance={}, \
+             full_db_interval={}s, legacy_interval={}s (receiver_bind={})",
             credentials.telemetry_enabled,
             credentials.telemetry_base_url,
+            credentials.telemetry_events_endpoint,
             credentials.telemetry_instance,
+            credentials.telemetry_full_db_interval_secs,
             credentials.telemetry_interval_secs,
             credentials.telemetry_receiver_bind,
         );
@@ -623,11 +716,23 @@ impl ServiceCredentials {
             telemetry_interval_secs: env_var_optional("MOMOS_TELEMETRY_INTERVAL_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            telemetry_full_db_interval_secs: env_var_optional("MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            telemetry_events_endpoint: resolve_events_endpoint(
+                env_var_optional("MOMOS_TELEMETRY_EVENTS_ENDPOINT"),
+                env_var_optional("MOMOS_TELEMETRY_BASE_URL").as_deref(),
+            ),
             telemetry_receiver_bind: env_var_optional("MOMOS_TELEMETRY_RECEIVER_BIND")
                 .unwrap_or_else(|| "127.0.0.1:8330".to_string()),
             telemetry_receiver_base_dir: env_var_optional("MOMOS_TELEMETRY_RECEIVER_BASE_DIR")
                 .unwrap_or_else(default_telemetry_base_dir),
             telemetry_receiver_token: env_var_optional("MOMOS_TELEMETRY_RECEIVER_TOKEN"),
+            telemetry_receiver_db_path: env_var_optional("MOMOS_TELEMETRY_RECEIVER_DB_PATH")
+                .unwrap_or_else(|| format!("{}/telemetry.db", default_telemetry_base_dir().trim_end_matches('/'))),
+            telemetry_receiver_retention_days: env_var_optional("MOMOS_TELEMETRY_RECEIVER_RETENTION_DAYS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
 
             autoupdate_enabled: env_var_optional("MOMOS_AUTOUPDATE_ENABLED")
                 .and_then(|v| v.parse().ok())
@@ -839,9 +944,13 @@ impl ServiceCredentials {
             telemetry_token: None,
             telemetry_instance: "macbook".to_string(),
             telemetry_interval_secs: 0,
+            telemetry_full_db_interval_secs: 0,
+            telemetry_events_endpoint: None,
             telemetry_receiver_bind: "127.0.0.1:8330".to_string(),
             telemetry_receiver_base_dir: "/tmp/momos-analytics".to_string(),
             telemetry_receiver_token: None,
+            telemetry_receiver_db_path: "/tmp/momos-analytics/telemetry.db".to_string(),
+            telemetry_receiver_retention_days: 30,
             autoupdate_enabled: false,
             autoupdate_base_url: crate::autoupdate::DEFAULT_BASE_URL.to_string(),
             autoupdate_health_grace_secs: 5,
@@ -880,6 +989,14 @@ fn env_or_toml(name: &str, toml_value: Option<String>) -> Option<String> {
         Ok(_) => toml_value, // empty string → treat as "not set"
         Err(_) => toml_value,
     }
+}
+
+/// Resolve the event-batch endpoint: explicit value wins; otherwise derive
+/// `<base_url>/api/telemetry` from the configured snapshot base URL; else None.
+fn resolve_events_endpoint(explicit: Option<String>, base_url: Option<&str>) -> Option<String> {
+    explicit.or_else(|| {
+        base_url.map(|b| format!("{}/api/telemetry", b.trim_end_matches('/')))
+    })
 }
 
 /// Same as `env_or_toml` but returns `Option<String>`.
@@ -936,6 +1053,9 @@ mod tests {
         assert!(creds.youtube_api_key.is_none());
         assert!(creds.youtube_playlist_id.is_none());
         assert!(creds.server_public_url.is_none());
+        // Full-DB snapshot option defaults OFF (0) for tests.
+        assert_eq!(creds.telemetry_full_db_interval_secs, 0);
+        assert_eq!(creds.telemetry_interval_secs, 0);
     }
 
     // ── Configured checks ───────────────────────────────────────────
@@ -1003,6 +1123,27 @@ mod tests {
             ..ServiceCredentials::defaults_for_test()
         };
         assert!(!creds.is_youtube_configured());
+    }
+
+    // ── Telemetry TOML parsing (full-DB option) ───────────────────────
+
+    #[test]
+    fn test_telemetry_toml_full_db_interval_parses() {
+        let src = "[telemetry]\nenabled = true\nbase_url = \"https://telemetry.example.com\"\nfull_db_interval_secs = 86400\n";
+        let cfg: TomlConfig = toml::from_str(src).unwrap();
+        let tel = cfg.telemetry.expect("telemetry section should parse");
+        assert_eq!(tel.full_db_interval_secs, Some(86400));
+        assert_eq!(tel.interval_secs, None);
+    }
+
+    #[test]
+    fn test_telemetry_toml_full_db_interval_defaults_absent() {
+        // Legacy analytics-era key must still parse; new key absent → None.
+        let src = "[telemetry]\nenabled = true\ninterval_secs = 3600\n";
+        let cfg: TomlConfig = toml::from_str(src).unwrap();
+        let tel = cfg.telemetry.unwrap();
+        assert_eq!(tel.interval_secs, Some(3600));
+        assert_eq!(tel.full_db_interval_secs, None);
     }
 
     // ── Helper functions ─────────────────────────────────────────────
@@ -1257,6 +1398,37 @@ mod tests {
         let result = env_or_toml("TEST_BOOL_TRUE_2", Some("false".to_string()));
         unsafe { std::env::remove_var("TEST_BOOL_TRUE_2") };
         assert_eq!(result, Some("true".to_string()));
+    }
+
+    #[test]
+    fn defaults_for_test_events_endpoint_none() {
+        let creds = ServiceCredentials::defaults_for_test();
+        assert!(creds.telemetry_events_endpoint.is_none());
+        assert!(!creds.telemetry_enabled);
+    }
+
+    #[test]
+    fn resolve_events_endpoint_explicit_wins() {
+        let r = resolve_events_endpoint(
+            Some("https://explicit.example/api/telemetry".to_string()),
+            Some("https://telemetry.example"),
+        );
+        assert_eq!(r.unwrap(), "https://explicit.example/api/telemetry");
+    }
+
+    #[test]
+    fn resolve_events_endpoint_derives_from_base_url() {
+        let r = resolve_events_endpoint(None, Some("https://telemetry.example"));
+        assert_eq!(r.unwrap(), "https://telemetry.example/api/telemetry");
+
+        // trailing slash must not produce a double slash
+        let r = resolve_events_endpoint(None, Some("https://telemetry.example/"));
+        assert_eq!(r.unwrap(), "https://telemetry.example/api/telemetry");
+    }
+
+    #[test]
+    fn resolve_events_endpoint_none_without_base_url() {
+        assert_eq!(resolve_events_endpoint(None, None), None);
     }
 
     #[test]

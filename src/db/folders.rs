@@ -277,6 +277,15 @@ pub async fn delete_folder(pool: &Pool<Sqlite>, id: i64) -> Result<()> {
 
 /// Scan a folder by ID, discovering new and updated files.
 /// Returns the number of files found during scanning.
+/// Machine label for a scan mode (`full` / `incremental`) — used in
+/// telemetry payloads.
+pub fn scan_mode_label(mode: &ScanMode) -> &'static str {
+    match mode {
+        ScanMode::Full => "full",
+        ScanMode::Incremental { .. } => "incremental",
+    }
+}
+
 pub async fn scan_folder(
     pool: &Pool<Sqlite>,
     folder_id: i64,
@@ -285,13 +294,15 @@ pub async fn scan_folder(
     // Get folder path
     let folder = get_folder_by_id(pool, folder_id)
         .await?
-        .ok_or_else(|| anyhow!("Folder not found with id: {}", folder_id))?;
+        .ok_or_else(|| anyhow!("Folder not found with id: {folder_id}"))?;
 
     let path = std::path::Path::new(&folder.folder_path);
 
     // Capture scan start time BEFORE scanning, so we can clean up stale local entries
     // (files that existed before this scan but weren't encountered).
     let scan_start = chrono::Utc::now().timestamp();
+    let scan_started = std::time::Instant::now();
+    let mode_label = scan_mode_label(&scan_mode);
 
     // Determine effective scan mode based on folder's last_scanned
     let effective_mode = match &scan_mode {
@@ -350,6 +361,16 @@ pub async fn scan_folder(
     // tracks via ISRC (called directly by the Maintainer, not through the task system).
     let _ = refresh_file_resolved_tags(pool).await;
     let _ = refresh_track_resolved_tags(pool).await;
+
+    // Telemetry: folder scan completed (files + duration + mode).
+    crate::telemetry::emit::emit_event(
+        crate::telemetry::events::EventType::ScanCompleted,
+        serde_json::json!({
+            "files_count": file_count,
+            "duration_ms": scan_started.elapsed().as_millis() as u64,
+            "mode": mode_label,
+        }),
+    );
 
     Ok(file_count)
 }

@@ -440,6 +440,16 @@ pub async fn apply<F: Fetcher>(
     swap::write_marker(&install_dir, &marker)?;
     swap::swap_binary(&install_dir, &binary_name, &binary_bytes)?;
 
+    // Telemetry: version switch happened (from → to). Non-blocking, no-op
+    // while telemetry is disabled.
+    crate::telemetry::emit::emit_event(
+        crate::telemetry::events::EventType::AppUpdated,
+        serde_json::json!({
+            "from": settings.current_version,
+            "to": info.version,
+        }),
+    );
+
     Ok(ApplyOutcome::Installed {
         new_version: info.version,
         old_version: settings.current_version.clone(),

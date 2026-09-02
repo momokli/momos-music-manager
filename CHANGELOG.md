@@ -8,6 +8,38 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **Full-DB-Snapshot-Option (periodischer kompletter DB-Push)**: explizite,
+  dokumentierte Option, die die KOMPLETTE DB (konsistenter `VACUUM INTO`-
+  Snapshot + redacted Meta: Logs/Tasks/Metriken) periodisch an den Collector
+  sendet — neue Config-Key `[telemetry] full_db_interval_secs`
+  (`MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS`), Default `0` = AUS. Gating:
+  `telemetry.enabled=true` + Intervall > 0 (wie bisher); es wird die
+  bestehende Snapshot-Infrastruktur wiederverwendet (`PUT
+  /api/telemetry/{instance}/db/{ts}` mit Bearer-Auth, kein Neubau).
+  Legacy-Key `interval_secs` (Analytics-Ära) bleibt als Alias voll
+  wirksam — explizite Option gewinnt, kein Verhaltenswechsel für
+  Bestands-Configs. Getriggert bleibt der One-Shot-Push über die CLI
+  (`telemetry push`). Logging nennt jetzt die Quelle des Intervalls.
+- **Event-Telemetrie (v1)**: strukturierte Core-Events (Tasks, Scans,
+  Downloads, App-Updates, Fehler) als HTTPS-Batches an einen Collector —
+  ergänzend zum bestehenden Snapshot-Push. Client: stabile persistierte
+  Client-ID, Ringbuffer (10k), crash-sicherer JSONL-Spool im Data-Dir,
+  Async-Flusher mit Batch-Limit (≤200 Events / ~1 MB), Exponential-Backoff
+  + Jitter (Cap 1h), 4xx-Drop nach 3 Versuchen, Shutdown-Drain; Events
+  überleben Neustarts (Spool→Buffer-Reload, Dedup über `event_id`).
+  Server: eigene `telemetry.db` (eigene Migrationskette
+  `migrations/telemetry/`, Hauptkette unverändert), `POST /api/telemetry`
+  mit Bearer-Auth, Validierung, Idempotenz-Dedup, Clients-Upsert,
+  Retention-Prune (`retention_days`, Default 30) und 6 SQL-Views
+  (`v_tasks_per_hour`, `v_error_rate`, `v_downloads_by_source`,
+  `v_scan_duration_trend`, `v_client_versions`, `v_clients_last_seen`).
+  Config: `telemetry.events_endpoint`
+  (`MOMOS_TELEMETRY_EVENTS_ENDPOINT`), `telemetry_receiver.db_path`
+  (`MOMOS_TELEMETRY_RECEIVER_DB_PATH`), `telemetry_receiver.retention_days`
+  (`MOMOS_TELEMETRY_RECEIVER_RETENTION_DAYS`); alles aus per Default
+  (`telemetry.enabled=false`) — kein Verhaltenswechsel. Payload-Hygiene:
+  keine Secrets, Pfade werden gestrippt/gekürzt. Konzept-Doc:
+  `plans/proposed/telemetry-events.md`. Keine UI-Actions, keine Heartbeats.
 - **Nachhaltiges Versioning-Konzept**: Release-Builds beziehen ihre Version
   aus dem Git-Tag (`v1.2.0` → `1.2.0`), Dev-Builds aus der Cargo.toml-Basis
   + Commit-SHA (`1.1.0-dev+<sha8>`, rolling `main`). Mechanik: `build.rs`
