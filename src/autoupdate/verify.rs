@@ -32,6 +32,76 @@ pub const DEFAULT_BASE_URL: &str =
 pub const DEFAULT_RELEASE_BASE_URL: &str =
     "https://github.com/momokli/momos-music-manager/releases/latest";
 
+/// Wire name of the rolling update channel (dev builds of `main`).
+pub const UPDATE_CHANNEL_ROLLING: &str = "rolling";
+/// Wire name of the stable update channel (semver releases).
+pub const UPDATE_CHANNEL_RELEASE: &str = "release";
+
+/// Update channel a build tracks: `release` (stable semver releases) or
+/// `rolling` (dev builds of `main`, published on `latest-main`).
+///
+/// A build's *embedded* channel is a property of its version (pre-release
+/// `-dev+<sha>` → dev build), but the *selected* update channel is a user
+/// setting (`autoupdate.channel`, env > UI > TOML > default = embedded
+/// channel). `check`/`apply` run against the selected channel — an explicit
+/// switch across channels is intentional and therefore allowed; the
+/// [`UpdateError::ChannelMismatch`] guard only fires when the update source
+/// serves the *other* channel than selected (inconsistent override).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateChannel {
+    /// Rolling dev channel — `latest-main` (dev builds of `main`).
+    Rolling,
+    /// Stable channel — newest semver release (`releases/latest`).
+    Release,
+}
+
+impl UpdateChannel {
+    /// All selectable channels, stable first (dropdown/status order).
+    pub const ALL: [UpdateChannel; 2] = [UpdateChannel::Release, UpdateChannel::Rolling];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UpdateChannel::Rolling => UPDATE_CHANNEL_ROLLING,
+            UpdateChannel::Release => UPDATE_CHANNEL_RELEASE,
+        }
+    }
+
+    /// Parse a wire/config value (`"rolling"` | `"release"`).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            UPDATE_CHANNEL_ROLLING => Some(UpdateChannel::Rolling),
+            UPDATE_CHANNEL_RELEASE => Some(UpdateChannel::Release),
+            _ => None,
+        }
+    }
+
+    /// Channel default the build tracks: dev builds (`-dev+<sha>`) → rolling,
+    /// release builds → release.
+    pub fn for_version(version: &str) -> Self {
+        match semver::Version::parse(version) {
+            Ok(v) if !v.pre.is_empty() => UpdateChannel::Rolling,
+            _ => UpdateChannel::Release,
+        }
+    }
+
+    /// Default base URL for this channel (overridable via
+    /// `MOMOS_AUTOUPDATE_BASE_URL` / `[autoupdate] base_url`).
+    pub fn default_base_url(&self) -> &'static str {
+        match self {
+            UpdateChannel::Rolling => DEFAULT_BASE_URL,
+            UpdateChannel::Release => DEFAULT_RELEASE_BASE_URL,
+        }
+    }
+
+    /// Whether a published version belongs to this channel.
+    pub fn matches_version(&self, version: &Version) -> bool {
+        match self {
+            UpdateChannel::Rolling => !version.pre.is_empty(),
+            UpdateChannel::Release => version.pre.is_empty(),
+        }
+    }
+}
+
 /// How long the new binary must stay healthy before an update is committed.
 pub const DEFAULT_HEALTH_GRACE_SECS: u64 = 60;
 
@@ -66,8 +136,10 @@ pub enum UpdateError {
     Io(#[from] std::io::Error),
     #[error("could not determine current version")]
     CurrentVersion,
-    #[error("channel mismatch: current {current_version} and available {available_version} are on different channels (dev vs release)")]
+    #[error("channel mismatch: update channel is `{channel}`, but the update source serves a build of the other channel (v{available_version}) — current build: v{current_version}")]
     ChannelMismatch {
+        /// Selected update channel (`rolling` | `release`).
+        channel: &'static str,
         current_version: String,
         available_version: String,
     },
@@ -154,6 +226,9 @@ impl PlatformArtifact {
 #[derive(Debug, Clone)]
 pub struct UpdateSettings {
     pub base_url: String,
+    /// Channel `check`/`apply` run against (env > UI > TOML > default =
+    /// channel of the running build).
+    pub channel: UpdateChannel,
     pub enabled: bool,
     pub health_grace_secs: u64,
     pub current_version: String,
@@ -168,31 +243,29 @@ pub struct UpdateSettings {
 impl UpdateSettings {
     pub fn from_config(
         config: &crate::config::ServiceCredentials,
+        channel: UpdateChannel,
     ) -> Result<Self, UpdateError> {
         // Parse the current version once and fail fast: without a parseable
         // version the channel cannot be decided and comparisons would be wrong.
         let current_version = env!("MMM_VERSION").to_string();
-        let current =
-            Version::parse(&current_version).map_err(|_| UpdateError::CurrentVersion)?;
+        Version::parse(&current_version).map_err(|_| UpdateError::CurrentVersion)?;
 
-        // Channel-dependent default base URL: dev builds track the rolling
-        // `latest-main` pre-release, release builds track the newest semver
-        // release (`releases/latest`). An explicit override
-        // (MOMOS_AUTOUPDATE_BASE_URL / [autoupdate] base_url) wins — any
-        // value different from the built-in dev default is respected.
-        let default_base_url = if current.pre.is_empty() {
-            DEFAULT_RELEASE_BASE_URL
-        } else {
-            DEFAULT_BASE_URL
-        };
+        // The channel decides the default base URL: rolling tracks the
+        // `latest-main` pre-release, release tracks the newest semver release
+        // (`releases/latest`). An explicit override
+        // (MOMOS_AUTOUPDATE_BASE_URL / [autoupdate] base_url) still wins — any
+        // value different from the built-in rolling default is respected; if
+        // the override then serves the *other* channel, the mismatch guard
+        // (in `fetch_update_info`) reports the inconsistency.
         let base_url = if config.autoupdate_base_url == DEFAULT_BASE_URL {
-            default_base_url.to_string()
+            channel.default_base_url().to_string()
         } else {
             config.autoupdate_base_url.clone()
         };
 
         Ok(Self {
             base_url,
+            channel,
             enabled: config.autoupdate_enabled,
             health_grace_secs: config.autoupdate_health_grace_secs,
             current_version,
@@ -217,9 +290,13 @@ pub enum UpdateStatus {
     UpToDate,
     /// New version available (manifest signed + verified).
     UpdateAvailable(UpdateInfo),
-    /// The published version is on a different channel (dev vs release) —
-    /// never auto-update across channels.
+    /// The update source serves a build of the *other* channel than the
+    /// selected one (inconsistent source/channel combination — e.g. a base
+    /// URL override pointing at the wrong feed). An explicit user switch is
+    /// not a mismatch: `check`/`apply` then simply run against the selected
+    /// channel's feed.
     ChannelMismatch {
+        channel: &'static str,
         current_version: String,
         available_version: String,
     },
@@ -281,9 +358,11 @@ pub async fn check<F: Fetcher>(
         Ok(Some(info)) => Ok(UpdateStatus::UpdateAvailable(info)),
         Ok(None) => Ok(UpdateStatus::UpToDate),
         Err(UpdateError::ChannelMismatch {
+            channel,
             current_version,
             available_version,
         }) => Ok(UpdateStatus::ChannelMismatch {
+            channel,
             current_version,
             available_version,
         }),
@@ -392,13 +471,15 @@ async fn fetch_update_info<F: Fetcher>(
     let current = Version::parse(&settings.current_version)
         .map_err(|_| UpdateError::CurrentVersion)?;
 
-    // 3. Channel guards: a dev build (`-dev+<sha>`) must never auto-update to
-    //    a stable release and vice versa (rolling dev channel vs semver
-    //    release channel).
-    let current_is_dev = !current.pre.is_empty();
-    let available_is_dev = !latest.pre.is_empty();
-    if current_is_dev != available_is_dev {
+    // 3. Channel guard: the *selected* channel decides what may be installed.
+    //    Rolling tracks dev builds, release tracks stable releases. Serving
+    //    the other channel than selected is inconsistent (typically a base
+    //    URL override pointing at the wrong feed) → ChannelMismatch. An
+    //    explicit user switch is *not* a mismatch: after the switch the
+    //    settings point at the selected channel's feed and the guard passes.
+    if !settings.channel.matches_version(&latest) {
         return Err(UpdateError::ChannelMismatch {
+            channel: settings.channel.as_str(),
             current_version: settings.current_version.clone(),
             available_version: latest.to_string(),
         });
@@ -408,7 +489,7 @@ async fn fetch_update_info<F: Fetcher>(
     //    `1.1.0-dev+shaB` are precedence-equal (semver ignores build
     //    metadata), so a different SHA is detected via string comparison.
     let same_precedence_new_sha = latest == current
-        && current_is_dev
+        && settings.channel == UpdateChannel::Rolling
         && latest.to_string() != settings.current_version;
     if !(latest > current || same_precedence_new_sha) {
         return Ok(None);
@@ -550,6 +631,10 @@ pub(crate) mod tests {
     pub(crate) fn test_settings(os_arch: &str, ext: &str, current: &str) -> UpdateSettings {
         UpdateSettings {
             base_url: BASE.to_string(),
+            // Default channel of a build = its embedded channel (dev →
+            // rolling, release → release); tests override `channel` to model
+            // an explicit user switch.
+            channel: UpdateChannel::for_version(current),
             enabled: true,
             health_grace_secs: 5,
             current_version: current.to_string(),
@@ -857,18 +942,23 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn dev_build_rejects_release_manifest() {
+        // Rolling channel (default for a dev build) whose source serves a
+        // stable release → inconsistent → ChannelMismatch.
         let mut files = HashMap::new();
         signed_fixture(&mut files, &sample_manifest("abc", "1.1.0"), "1.1.0", None);
         let fetcher = MockFetcher::new(files);
         let settings = test_settings("linux-x64", "tar.gz", "1.1.0-dev+abc1234");
+        assert_eq!(settings.channel, UpdateChannel::Rolling);
         assert!(matches!(
             check(&settings, &fetcher).await.unwrap(),
-            UpdateStatus::ChannelMismatch { .. }
+            UpdateStatus::ChannelMismatch { channel: "rolling", .. }
         ));
     }
 
     #[tokio::test]
     async fn release_build_rejects_dev_manifest() {
+        // Release channel (default for a release build) whose source serves
+        // a dev build → inconsistent → ChannelMismatch.
         let mut files = HashMap::new();
         signed_fixture(
             &mut files,
@@ -878,10 +968,137 @@ pub(crate) mod tests {
         );
         let fetcher = MockFetcher::new(files);
         let settings = test_settings("linux-x64", "tar.gz", "1.1.0");
+        assert_eq!(settings.channel, UpdateChannel::Release);
         assert!(matches!(
             check(&settings, &fetcher).await.unwrap(),
-            UpdateStatus::ChannelMismatch { .. }
+            UpdateStatus::ChannelMismatch { channel: "release", .. }
         ));
+    }
+
+    // ── Explicit channel switch (channel-select feature) ─────────────
+    //
+    // A user-switched channel is *not* a mismatch: check/apply run against
+    // the selected channel's feed, even when that feed publishes builds of
+    // the other type than the running one.
+
+    #[tokio::test]
+    async fn explicit_switch_dev_build_to_release_channel_finds_stable_update() {
+        // Running dev build, user selected the release channel: the stable
+        // feed is consistent with the *selected* channel → update available.
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &sample_manifest("abc", "1.1.0"), "1.1.0", None);
+        let fetcher = MockFetcher::new(files);
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.1.0-dev+abc1234");
+        settings.channel = UpdateChannel::Release;
+        match check(&settings, &fetcher).await.unwrap() {
+            UpdateStatus::UpdateAvailable(info) => {
+                assert_eq!(info.version, "1.1.0");
+                assert_eq!(
+                    info.artifact_name,
+                    "momos-music-manager-1.1.0-linux-x64.tar.gz"
+                );
+            }
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_switch_release_build_to_rolling_channel_finds_dev_update() {
+        // Running release build, user selected the rolling channel: the dev
+        // feed is consistent with the selected channel → update available.
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest("abc", "1.2.0-dev+def5678"),
+            "1.2.0-dev+def5678",
+            None,
+        );
+        let fetcher = MockFetcher::new(files);
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.1.0");
+        settings.channel = UpdateChannel::Rolling;
+        match check(&settings, &fetcher).await.unwrap() {
+            UpdateStatus::UpdateAvailable(info) => {
+                assert_eq!(info.version, "1.2.0-dev+def5678");
+                assert_eq!(
+                    info.artifact_name,
+                    "momos-music-manager-1.2.0-dev+def5678-linux-x64.tar.gz"
+                );
+            }
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_switch_apply_installs_other_channel_binary() {
+        // Dev build, release channel selected: apply swaps in the stable
+        // binary — the cross-channel switch is honored end to end.
+        let archive = tar_gz_with_binary(b"stable-bin");
+        let sha = hex_digest(&archive);
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest(&sha, "1.1.0"),
+            "1.1.0",
+            Some(archive),
+        );
+        let fetcher = MockFetcher::new(files);
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin_path = dir.path().join("momos-music-manager");
+        std::fs::write(&bin_path, b"dev-bin").unwrap();
+
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.1.0-dev+abc1234");
+        settings.channel = UpdateChannel::Release;
+        settings.install_dir = Some(dir.path().to_path_buf());
+
+        let outcome = apply(&settings, &fetcher).await.unwrap();
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Installed {
+                new_version: "1.1.0".to_string(),
+                old_version: "1.1.0-dev+abc1234".to_string()
+            }
+        );
+        assert_eq!(std::fs::read(&bin_path).unwrap(), b"stable-bin");
+        assert!(dir.path().join("update-state.json").exists());
+    }
+
+    #[test]
+    fn update_channel_parse_and_names() {
+        assert_eq!(UpdateChannel::parse("rolling"), Some(UpdateChannel::Rolling));
+        assert_eq!(UpdateChannel::parse("release"), Some(UpdateChannel::Release));
+        assert_eq!(UpdateChannel::parse("banana"), None);
+        assert_eq!(UpdateChannel::parse("Rolling"), None);
+        assert_eq!(UpdateChannel::Rolling.as_str(), "rolling");
+        assert_eq!(UpdateChannel::Release.as_str(), "release");
+        assert_eq!(UpdateChannel::ALL.len(), 2);
+        assert!(UpdateChannel::ALL.contains(&UpdateChannel::Rolling));
+        assert!(UpdateChannel::ALL.contains(&UpdateChannel::Release));
+    }
+
+    #[test]
+    fn update_channel_default_follows_version() {
+        assert_eq!(
+            UpdateChannel::for_version("1.1.0-dev+abc1234"),
+            UpdateChannel::Rolling
+        );
+        assert_eq!(UpdateChannel::for_version("1.1.0"), UpdateChannel::Release);
+        assert_eq!(UpdateChannel::for_version("0.9.0-beta.1"), UpdateChannel::Rolling);
+        assert_eq!(UpdateChannel::for_version("garbage"), UpdateChannel::Release);
+    }
+
+    #[test]
+    fn update_channel_default_base_urls() {
+        assert_eq!(UpdateChannel::Rolling.default_base_url(), DEFAULT_BASE_URL);
+        assert_eq!(
+            UpdateChannel::Release.default_base_url(),
+            DEFAULT_RELEASE_BASE_URL
+        );
+        assert!(UpdateChannel::Rolling.matches_version(&Version::parse("1.1.0-dev+x").unwrap()));
+        assert!(!UpdateChannel::Rolling.matches_version(&Version::parse("1.1.0").unwrap()));
+        assert!(UpdateChannel::Release.matches_version(&Version::parse("1.1.0").unwrap()));
+        assert!(!UpdateChannel::Release
+            .matches_version(&Version::parse("1.1.0-dev+x").unwrap()));
     }
 
     #[tokio::test]

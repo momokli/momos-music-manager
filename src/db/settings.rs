@@ -12,6 +12,8 @@ use sqlx::{Pool, Sqlite};
 
 /// `settings`-KV keys used by the autoupdater (namespace `autoupdate.`).
 pub const KEY_AUTOUPDATE_ENABLED: &str = "autoupdate.enabled";
+/// Update channel (`"rolling"` | `"release"`) chosen in the UI.
+pub const KEY_AUTOUPDATE_CHANNEL: &str = "autoupdate.channel";
 /// Unix seconds (as INTEGER string) of the last completed check.
 pub const KEY_AUTOUPDATE_LAST_CHECK_AT: &str = "autoupdate.last_check_at";
 /// `"ok"` or `"error"` — outcome of the last check.
@@ -42,6 +44,15 @@ pub async fn set_setting(pool: &Pool<Sqlite>, key: &str, value: &str) -> Result<
     .bind(value)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Delete a setting (no-op when the key does not exist).
+pub async fn delete_setting(pool: &Pool<Sqlite>, key: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM settings WHERE key = ?")
+        .bind(key)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -154,5 +165,28 @@ mod tests {
         assert!(parse_bool_value("yes").is_err());
         assert!(parse_bool_value("").is_err());
         assert!(parse_bool_value("True").is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_removes_only_the_requested_key() {
+        let pool = test_pool().await;
+        set_setting(&pool, "autoupdate.enabled", "true").await.unwrap();
+        set_setting(&pool, "autoupdate.channel", "rolling").await.unwrap();
+        delete_setting(&pool, "autoupdate.channel").await.unwrap();
+        assert_eq!(
+            get_setting(&pool, "autoupdate.channel").await.unwrap(),
+            None
+        );
+        // The other key stays untouched.
+        assert_eq!(
+            get_setting(&pool, "autoupdate.enabled").await.unwrap(),
+            Some("true".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_missing_key_is_a_noop() {
+        let pool = test_pool().await;
+        delete_setting(&pool, "does.not.exist").await.unwrap();
     }
 }

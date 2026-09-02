@@ -1,14 +1,20 @@
-//! Update controls — the Phase A+B web surface for the M6 autoupdater.
+//! Update controls — the Phase A+B web surface for the M6 autoupdater,
+//! extended with the channel select (Phase C-1).
 //!
 //! Endpoints:
 //! - `GET  /api/update/status`   — version/channel/enabled + last check + pending marker
-//! - `POST /api/update/check`    — run a (verified) update check and persist the result
-//! - `POST /api/update/settings` — persist the auto-update toggle (UI layer)
+//! - `POST /api/update/check`    — run a (verified) check against the *selected* channel
+//! - `POST /api/update/settings` — persist the auto-update toggle and/or the update channel
 //! - `POST /api/update/apply`    — manual "update now" (swap on Linux/Windows,
 //!                                 verified download + instructions on macOS)
 //!
-//! Precedence rule for the effective enabled value:
-//! **Env > UI (DB setting) > TOML > Default `true`**.
+//! Precedence rules (both **Env > UI (DB setting) > TOML > Default**):
+//! - enabled default `true`;
+//! - channel default = embedded channel of the running build (dev build →
+//!   `rolling`, release build → `release`).
+//! `check`/`apply` run against the effective (selected) channel; an explicit
+//! cross-channel switch is not an error — the mismatch guard only fires when
+//! the update source serves the *other* channel than selected.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -26,7 +32,8 @@ use sqlx::{Pool, Sqlite};
 use crate::AppState;
 use crate::api::types::{ApiResponse, ErrorResponse, internal_error};
 use crate::autoupdate::{
-    ApplyOutcome, HttpFetcher, UpdateError, UpdateSettings, UpdateStatus, swap, verify::Fetcher,
+    ApplyOutcome, HttpFetcher, UpdateChannel, UpdateError, UpdateSettings, UpdateStatus, swap,
+    verify::Fetcher, UPDATE_CHANNEL_RELEASE, UPDATE_CHANNEL_ROLLING,
 };
 use crate::config::ServiceCredentials;
 use crate::db::settings::{self, KEY_AUTOUPDATE_ENABLED};
@@ -64,7 +71,9 @@ pub struct PendingUpdateInfo {
 
 // ── Pure logic (unit-tested; handlers stay thin) ──────────────────────────
 
-/// `"dev"` when the version carries a pre-release tag, else `"release"`.
+/// `"dev"` when the version carries a pre-release tag, else `"release"` —
+/// classifies the *embedded* build channel (not the selectable update
+/// channel, see [`effective_autoupdate_channel`]).
 pub fn channel_for_version(version: &str) -> &'static str {
     match semver::Version::parse(version) {
         Ok(v) if !v.pre.is_empty() => "dev",
@@ -72,6 +81,59 @@ pub fn channel_for_version(version: &str) -> &'static str {
     }
 }
 
+/// Effective update channel per the precedence rule
+/// **Env > UI (DB) > TOML > Default = embedded channel of the running
+/// build** (dev build → `rolling`, release build → `release`).
+///
+/// - `MOMOS_AUTOUPDATE_CHANNEL` set *and* parseable (`"rolling"`/`"release"`)
+///   wins (`"env"`);
+/// - otherwise a persisted UI value `settings['autoupdate.channel']`
+///   (`"ui"`);
+/// - otherwise the config value — TOML `[autoupdate] channel` or the
+///   embedded default (`"toml"`/`"default"`). Unparseable env values fall
+///   through, mirroring the enabled-value rule.
+pub async fn effective_autoupdate_channel(
+    config: &ServiceCredentials,
+    db: &Pool<Sqlite>,
+) -> Result<(UpdateChannel, &'static str), sqlx::Error> {
+    effective_autoupdate_channel_with_env(
+        config,
+        db,
+        std::env::var("MOMOS_AUTOUPDATE_CHANNEL").ok(),
+    )
+    .await
+}
+
+/// Testable core of [`effective_autoupdate_channel`] — the env value is
+/// injected so the precedence matrix can be unit-tested without mutating the
+/// process-global environment.
+pub(crate) async fn effective_autoupdate_channel_with_env(
+    config: &ServiceCredentials,
+    db: &Pool<Sqlite>,
+    env_value: Option<String>,
+) -> Result<(UpdateChannel, &'static str), sqlx::Error> {
+    if let Some(v) = env_value.and_then(|v| UpdateChannel::parse(&v)) {
+        return Ok((v, "env"));
+    }
+    if let Some(raw) = settings::get_setting(db, settings::KEY_AUTOUPDATE_CHANNEL).await? {
+        let channel = UpdateChannel::parse(&raw).ok_or_else(|| {
+            sqlx::Error::Decode(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "invalid stored channel setting `{raw}` (expected \"rolling\" or \"release\")"
+                ),
+            )))
+        })?;
+        return Ok((channel, "ui"));
+    }
+    if config.autoupdate_channel_source() == "toml" {
+        return Ok((config.configured_autoupdate_channel(), "toml"));
+    }
+    Ok((
+        config.configured_autoupdate_channel(),
+        "default",
+    ))
+}
 /// Effective auto-update enablement per the precedence rule
 /// **Env > UI (DB) > TOML > Default `true`**.
 ///
@@ -151,6 +213,7 @@ pub(crate) fn check_result(status: &UpdateStatus, settings: &UpdateSettings) -> 
         UpdateStatus::ChannelMismatch {
             current_version,
             available_version,
+            ..
         } => LastCheckResult {
             state: "channelMismatch".into(),
             available_version: Some(available_version.clone()),
@@ -243,15 +306,19 @@ pub(crate) async fn run_check_and_persist<F: Fetcher>(
     build_status_json(config, db).await
 }
 
-/// Build settings for a check from the config and apply the *effective*
-/// enabled value (env > UI > TOML > default) — `config.autoupdate_enabled`
-/// alone is not enough once the UI toggle exists.
+/// Build settings for a check/apply from the config and apply the *effective*
+/// values: enabled (env > UI > TOML > default true) **and** channel
+/// (env > UI > TOML > default = embedded channel of the running build) —
+/// `config.autoupdate_enabled`/the built-in base URL alone are not enough
+/// once the UI toggle and channel select exist. `check`/`apply` therefore
+/// run against the base URL of the *selected* channel.
 async fn settings_for_check(
     config: &ServiceCredentials,
     db: &Pool<Sqlite>,
 ) -> Result<UpdateSettings, sqlx::Error> {
     let (enabled, _source) = effective_autoupdate_enabled(config, db).await?;
-    let mut settings = UpdateSettings::from_config(config).map_err(|e| {
+    let (channel, _source) = effective_autoupdate_channel(config, db).await?;
+    let mut settings = UpdateSettings::from_config(config, channel).map_err(|e| {
         sqlx::Error::Configuration(Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("cannot build update settings: {e}"),
@@ -278,22 +345,31 @@ pub async fn build_status_json(
     config: &ServiceCredentials,
     db: &Pool<Sqlite>,
 ) -> Result<serde_json::Value, sqlx::Error> {
-    build_status_json_with_env(config, db, std::env::var("MOMOS_AUTOUPDATE_ENABLED").ok()).await
+    build_status_json_with_env(
+        config,
+        db,
+        std::env::var("MOMOS_AUTOUPDATE_ENABLED").ok(),
+        std::env::var("MOMOS_AUTOUPDATE_CHANNEL").ok(),
+    )
+    .await
 }
 
 /// Testable core of [`build_status_json`] — see
-/// [`effective_autoupdate_enabled_with_env`].
+/// [`effective_autoupdate_enabled_with_env`] / [`effective_autoupdate_channel_with_env`].
 pub(crate) async fn build_status_json_with_env(
     config: &ServiceCredentials,
     db: &Pool<Sqlite>,
-    env_value: Option<String>,
+    enabled_env_value: Option<String>,
+    channel_env_value: Option<String>,
 ) -> Result<serde_json::Value, sqlx::Error> {
     let (enabled, enabled_source) =
-        effective_autoupdate_enabled_with_env(config, db, env_value).await?;
+        effective_autoupdate_enabled_with_env(config, db, enabled_env_value).await?;
+    let (channel, channel_source) =
+        effective_autoupdate_channel_with_env(config, db, channel_env_value).await?;
 
     // Best-effort settings: an unsupported platform must not break the status
     // view — base URL then comes straight from the config.
-    let settings = UpdateSettings::from_config(config).ok();
+    let settings = UpdateSettings::from_config(config, channel).ok();
     let base_url = settings
         .as_ref()
         .map(|s| s.base_url.clone())
@@ -325,9 +401,15 @@ pub(crate) async fn build_status_json_with_env(
         .unwrap_or(false)
         || pending_update.is_some();
 
+    let available_channels: Vec<&'static str> =
+        UpdateChannel::ALL.iter().map(|c| c.as_str()).collect();
+
     Ok(serde_json::json!({
         "currentVersion": env!("MMM_VERSION"),
-        "channel": channel_for_version(env!("MMM_VERSION")),
+        // Effective (selected) update channel — `rolling` | `release`.
+        "channel": channel.as_str(),
+        "channelSource": channel_source,
+        "availableChannels": available_channels,
         "baseUrl": base_url,
         "enabled": enabled,
         "enabledSource": enabled_source,
@@ -343,13 +425,15 @@ pub(crate) async fn build_status_json_with_env(
     }))
 }
 
-// ── US-4: toggle persistence ───────────────────────────────────────────────
+// ── US-4: toggle + channel persistence ─────────────────────────────────────
 
-/// Body of `POST /api/update/settings`.
+/// Body of `POST /api/update/settings` — at least one field must be present.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSettingsRequest {
-    pub auto_update_enabled: bool,
+    pub auto_update_enabled: Option<bool>,
+    /// Update channel: `"rolling"` | `"release"`.
+    pub channel: Option<String>,
 }
 
 /// Outcome of a toggle write.
@@ -402,6 +486,67 @@ pub(crate) async fn settings_toggle(
     .await
 }
 
+/// Delete the persisted last-check cache (`autoupdate.last_check_*`) — used
+/// after a channel switch: a check result from the previous channel must not
+/// be presented as the state of the new one.
+pub(crate) async fn clear_last_check_cache(db: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
+    for key in [
+        settings::KEY_AUTOUPDATE_LAST_CHECK_AT,
+        settings::KEY_AUTOUPDATE_LAST_CHECK_STATUS,
+        settings::KEY_AUTOUPDATE_LAST_CHECK_RESULT,
+        settings::KEY_AUTOUPDATE_LAST_CHECK_ERROR,
+    ] {
+        settings::delete_setting(db, key).await?;
+    }
+    Ok(())
+}
+
+/// Persist the UI channel — unless env or TOML pins the value (409). A
+/// successful switch clears the last-check cache (see
+/// [`clear_last_check_cache`]). The env value is injected so the override
+/// matrix is unit-testable.
+pub(crate) async fn settings_channel_with_env(
+    config: &ServiceCredentials,
+    db: &Pool<Sqlite>,
+    channel: UpdateChannel,
+    env_value: Option<String>,
+) -> Result<serde_json::Value, ToggleError> {
+    let (_, source) = effective_autoupdate_channel_with_env(config, db, env_value.clone())
+        .await
+        .map_err(ToggleError::Db)?;
+    if source == "env" || source == "toml" {
+        return Err(ToggleError::Overridden(source));
+    }
+    settings::set_setting(db, settings::KEY_AUTOUPDATE_CHANNEL, channel.as_str())
+        .await
+        .map_err(ToggleError::Db)?;
+    if let Err(e) = clear_last_check_cache(db).await {
+        tracing::warn!("autoupdate: clearing last-check cache after channel switch failed: {e}");
+    }
+    let (channel, source) = effective_autoupdate_channel_with_env(config, db, env_value)
+        .await
+        .map_err(ToggleError::Db)?;
+    Ok(serde_json::json!({
+        "channel": channel.as_str(),
+        "channelSource": source,
+    }))
+}
+
+/// [`settings_channel_with_env`] with the process env.
+pub(crate) async fn settings_channel(
+    config: &ServiceCredentials,
+    db: &Pool<Sqlite>,
+    channel: UpdateChannel,
+) -> Result<serde_json::Value, ToggleError> {
+    settings_channel_with_env(
+        config,
+        db,
+        channel,
+        std::env::var("MOMOS_AUTOUPDATE_CHANNEL").ok(),
+    )
+    .await
+}
+
 // ── US-5: manual "update now" ─────────────────────────────────────────────
 
 /// Outcome of an apply attempt — status code + wire error message.
@@ -442,18 +587,23 @@ pub(crate) fn apply_error_json(err: &UpdateError) -> (StatusCode, String) {
         ),
         UpdateError::NoUpdate => (StatusCode::NOT_FOUND, "no update available".into()),
         UpdateError::ChannelMismatch {
-            current_version,
+            channel,
             available_version,
+            current_version,
         } => {
-            let text = if current_version.contains("-dev+") {
-                format!(
-                    "channel mismatch: current dev build v{current_version} — latest published is a stable release v{available_version}. Dev builds never auto-update to stable releases — please install the release manually."
-                )
+            let tracks = if *channel == UPDATE_CHANNEL_ROLLING {
+                "rolling dev builds of main (latest-main)"
             } else {
-                format!(
-                    "channel mismatch: current release build v{current_version} — latest published is a dev build v{available_version}. Release builds only auto-install semver releases; dev builds are tracked on the rolling latest-main channel."
-                )
+                "stable semver releases (releases/latest)"
             };
+            let published = if available_version.contains("-dev+") {
+                "a dev build"
+            } else {
+                "a stable release"
+            };
+            let text = format!(
+                "channel mismatch: update channel is '{channel}', but the update source serves {published} v{available_version} instead of {tracks} (current build: v{current_version}). Pick the matching channel in the Settings page or fix the update source (base_url)."
+            );
             (StatusCode::CONFLICT, text)
         }
         other => (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
@@ -506,8 +656,9 @@ pub(crate) async fn update_apply_with_settings<F: Fetcher>(
                     let _ = persist_last_check(db, "ok", &result, None).await;
                 }
                 UpdateError::ChannelMismatch {
-                    current_version,
                     available_version,
+                    current_version,
+                    ..
                 } => {
                     let result = LastCheckResult {
                         state: "channelMismatch".into(),
@@ -554,6 +705,10 @@ async fn check_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 /// POST /api/update/settings — persist the auto-update toggle. 409 when the
 /// effective value is pinned by env or TOML (nothing is written); 400 on a
 /// missing/invalid body.
+/// POST /api/update/settings — persist the auto-update toggle and/or the
+/// update channel (`{"autoUpdateEnabled": bool, "channel": "rolling"|"release"}`;
+/// at least one field required). 409 when a field is pinned by env or TOML
+/// (nothing is written); 400 on a missing/invalid body or channel value.
 async fn settings_handler(
     State(state): State<Arc<AppState>>,
     body: Option<Json<UpdateSettingsRequest>>,
@@ -562,30 +717,130 @@ async fn settings_handler(
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "invalid body — expected { \"autoUpdateEnabled\": true|false }".into(),
+                error: "invalid body — expected { \"autoUpdateEnabled\": true|false, \"channel\": \"rolling\"|\"release\" }".into(),
             }),
         )
             .into_response();
     };
-    match settings_toggle(&state.config, &state.db, req.auto_update_enabled).await {
-        Ok(data) => Json(ApiResponse { data }).into_response(),
-        Err(ToggleError::Overridden(source)) => (
-            StatusCode::CONFLICT,
+    if req.auto_update_enabled.is_none() && req.channel.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: match source {
-                    "env" => "autoupdate.enabled is pinned by the environment variable \
-                               MOMOS_AUTOUPDATE_ENABLED — change it there to edit this \
-                               toggle"
-                        .into(),
-                    _ => "autoupdate.enabled is pinned by [autoupdate] enabled in \
-                           config.toml — edit the file to change this toggle"
-                        .into(),
-                },
+                error: "invalid body — provide at least one of \"autoUpdateEnabled\" or \"channel\"".into(),
             }),
         )
-            .into_response(),
-        Err(ToggleError::Db(e)) => internal_error(e).into_response(),
+            .into_response();
     }
+    let wanted_channel = match req.channel.as_deref() {
+        Some(value) => match UpdateChannel::parse(value) {
+            Some(channel) => Some(channel),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "invalid channel \"{value}\" — expected \"{UPDATE_CHANNEL_ROLLING}\" or \"{UPDATE_CHANNEL_RELEASE}\""
+                        ),
+                    }),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+
+    // Pin pre-checks first so a request that would partially fail writes
+    // nothing (a field pinned by env/TOML must not be persisted).
+    if req.auto_update_enabled.is_some() {
+        let (_, source) = match effective_autoupdate_enabled(&state.config, &state.db).await {
+            Ok(v) => v,
+            Err(e) => return internal_error(e).into_response(),
+        };
+        if source == "env" || source == "toml" {
+            return pinned_conflict("autoupdate.enabled", source, "MOMOS_AUTOUPDATE_ENABLED", "[autoupdate] enabled", "toggle").into_response();
+        }
+    }
+    if wanted_channel.is_some() {
+        let (_, source) = match effective_autoupdate_channel(&state.config, &state.db).await {
+            Ok(v) => v,
+            Err(e) => return internal_error(e).into_response(),
+        };
+        if source == "env" || source == "toml" {
+            return pinned_conflict("autoupdate.channel", source, "MOMOS_AUTOUPDATE_CHANNEL", "[autoupdate] channel", "dropdown").into_response();
+        }
+    }
+
+    // Persist whatever was requested — pre-checks above guarantee no 409.
+    let mut data = serde_json::json!({});
+    if let Some(value) = req.auto_update_enabled {
+        match settings_toggle(&state.config, &state.db, value).await {
+            Ok(toggle_data) => data = toggle_data,
+            // Race only; pre-check already passed.
+            Err(ToggleError::Overridden(source)) => {
+                return pinned_conflict("autoupdate.enabled", source, "MOMOS_AUTOUPDATE_ENABLED", "[autoupdate] enabled", "toggle").into_response();
+            }
+            Err(ToggleError::Db(e)) => return internal_error(e).into_response(),
+        }
+    }
+    if let Some(channel) = wanted_channel {
+        match settings_channel(&state.config, &state.db, channel).await {
+            Ok(channel_data) => {
+                for (k, v) in channel_data.as_object().expect("channel response is an object") {
+                    data[k] = v.clone();
+                }
+            }
+            Err(ToggleError::Overridden(source)) => {
+                return pinned_conflict("autoupdate.channel", source, "MOMOS_AUTOUPDATE_CHANNEL", "[autoupdate] channel", "dropdown").into_response();
+            }
+            Err(ToggleError::Db(e)) => return internal_error(e).into_response(),
+        }
+    }
+
+    // Merged response: always report both effective values + sources so the
+    // UI can update its state from a single response.
+    if req.auto_update_enabled.is_none() {
+        let (enabled, enabled_source) =
+            match effective_autoupdate_enabled(&state.config, &state.db).await {
+                Ok(v) => v,
+                Err(e) => return internal_error(e).into_response(),
+            };
+        data["autoUpdateEnabled"] = enabled.into();
+        data["enabled"] = enabled.into();
+        data["enabledSource"] = enabled_source.into();
+    }
+    if wanted_channel.is_none() {
+        let (channel, channel_source) =
+            match effective_autoupdate_channel(&state.config, &state.db).await {
+                Ok(v) => v,
+                Err(e) => return internal_error(e).into_response(),
+            };
+        data["channel"] = channel.as_str().into();
+        data["channelSource"] = channel_source.into();
+    }
+    Json(ApiResponse { data }).into_response()
+}
+
+/// 409 body for a setting pinned by env/TOML.
+fn pinned_conflict(
+    setting: &str,
+    source: &str,
+    env_name: &str,
+    toml_name: &str,
+    control: &str,
+) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::CONFLICT,
+        Json(ErrorResponse {
+            error: match source {
+                "env" => format!(
+                    "{setting} is pinned by the environment variable {env_name} — change it there to edit this {control}"
+                ),
+                _ => format!(
+                    "{setting} is pinned by {toml_name} in config.toml — edit the file to change this {control}"
+                ),
+            },
+        }),
+    )
 }
 
 /// POST /api/update/apply — manual "update now": check + verified download
@@ -776,6 +1031,418 @@ mod tests {
         assert_eq!(channel_for_version("not-a-version"), "release");
     }
 
+    // ── Channel precedence matrix: env × ui × toml × default ──────────
+
+    /// Config with a `[autoupdate] channel` toml value (enabled defaults).
+    fn channel_config(toml_channel: Option<&str>) -> ServiceCredentials {
+        let mut c = config_with(true, false);
+        c.autoupdate_channel_toml = toml_channel.map(str::to_string);
+        c
+    }
+
+    /// Default channel of the running build in tests (Cargo version without
+    /// pre-release → release).
+    fn embedded_default_channel() -> UpdateChannel {
+        UpdateChannel::for_version(env!("MMM_VERSION"))
+    }
+
+    #[tokio::test]
+    async fn channel_default_follows_embedded_build_channel() {
+        let pool = test_pool().await;
+        let config = channel_config(None);
+        assert_eq!(
+            effective_autoupdate_channel_with_env(&config, &pool, None)
+                .await
+                .unwrap(),
+            (embedded_default_channel(), "default")
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_toml_wins_over_default() {
+        let pool = test_pool().await;
+        let config = channel_config(Some("rolling"));
+        assert_eq!(
+            effective_autoupdate_channel_with_env(&config, &pool, None)
+                .await
+                .unwrap(),
+            (UpdateChannel::Rolling, "toml")
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_ui_wins_over_toml() {
+        let pool = test_pool().await;
+        settings::set_setting(&pool, settings::KEY_AUTOUPDATE_CHANNEL, "release")
+            .await
+            .unwrap();
+        let config = channel_config(Some("rolling"));
+        assert_eq!(
+            effective_autoupdate_channel_with_env(&config, &pool, None)
+                .await
+                .unwrap(),
+            (UpdateChannel::Release, "ui")
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_env_wins_over_everything() {
+        let pool = test_pool().await;
+        settings::set_setting(&pool, settings::KEY_AUTOUPDATE_CHANNEL, "release")
+            .await
+            .unwrap();
+        let config = channel_config(Some("release"));
+        assert_eq!(
+            effective_autoupdate_channel_with_env(&config, &pool, Some("rolling".into()))
+                .await
+                .unwrap(),
+            (UpdateChannel::Rolling, "env")
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_unparseable_env_falls_through_to_ui() {
+        let pool = test_pool().await;
+        settings::set_setting(&pool, settings::KEY_AUTOUPDATE_CHANNEL, "rolling")
+            .await
+            .unwrap();
+        let config = channel_config(None);
+        assert_eq!(
+            effective_autoupdate_channel_with_env(&config, &pool, Some("banana".into()))
+                .await
+                .unwrap(),
+            (UpdateChannel::Rolling, "ui")
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_unparseable_env_falls_through_to_toml() {
+        let pool = test_pool().await;
+        let config = channel_config(Some("rolling"));
+        assert_eq!(
+            effective_autoupdate_channel_with_env(&config, &pool, Some("banana".into()))
+                .await
+                .unwrap(),
+            (UpdateChannel::Rolling, "toml")
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_unparseable_env_falls_through_to_default() {
+        let pool = test_pool().await;
+        let config = channel_config(None);
+        assert_eq!(
+            effective_autoupdate_channel_with_env(&config, &pool, Some("banana".into()))
+                .await
+                .unwrap(),
+            (embedded_default_channel(), "default")
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_invalid_db_value_is_an_error() {
+        let pool = test_pool().await;
+        settings::set_setting(&pool, settings::KEY_AUTOUPDATE_CHANNEL, "banana")
+            .await
+            .unwrap();
+        let config = channel_config(None);
+        assert!(effective_autoupdate_channel_with_env(&config, &pool, None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn status_json_reflects_persisted_channel_and_source() {
+        let pool = test_pool().await;
+        settings::set_setting(&pool, settings::KEY_AUTOUPDATE_CHANNEL, "rolling")
+            .await
+            .unwrap();
+        let config = channel_config(None);
+        let json = build_status_json_with_env(&config, &pool, None, None)
+            .await
+            .unwrap();
+        assert_eq!(json["channel"], "rolling");
+        assert_eq!(json["channelSource"], "ui");
+        assert_eq!(json["availableChannels"], serde_json::json!(["release", "rolling"]));
+        // Base URL follows the selected channel (config carries only the
+        // untouched built-in default).
+        assert_eq!(
+            json["baseUrl"],
+            crate::autoupdate::DEFAULT_BASE_URL
+        );
+    }
+
+    #[tokio::test]
+    async fn status_json_base_url_follows_selected_release_channel() {
+        let pool = test_pool().await;
+        settings::set_setting(&pool, settings::KEY_AUTOUPDATE_CHANNEL, "release")
+            .await
+            .unwrap();
+        let config = channel_config(None);
+        let json = build_status_json_with_env(&config, &pool, None, None)
+            .await
+            .unwrap();
+        assert_eq!(json["channel"], "release");
+        assert_eq!(json["baseUrl"], crate::autoupdate::DEFAULT_RELEASE_BASE_URL);
+    }
+
+    #[tokio::test]
+    async fn status_json_env_channel_and_source() {
+        let pool = test_pool().await;
+        settings::set_setting(&pool, settings::KEY_AUTOUPDATE_CHANNEL, "release")
+            .await
+            .unwrap();
+        let config = channel_config(None);
+        let json = build_status_json_with_env(&config, &pool, None, Some("rolling".into()))
+            .await
+            .unwrap();
+        assert_eq!(json["channel"], "rolling");
+        assert_eq!(json["channelSource"], "env");
+        assert_eq!(json["baseUrl"], crate::autoupdate::DEFAULT_BASE_URL);
+    }
+
+    // ── Channel persistence (settings_channel_*) ──────────────────────
+
+    #[tokio::test]
+    async fn channel_write_persists_and_clears_stale_check_cache() {
+        let pool = test_pool().await;
+        let config = channel_config(None);
+        // Simulate a stale check from the previous channel.
+        let stale = LastCheckResult {
+            state: "channelMismatch".into(),
+            available_version: Some("2.0.0".into()),
+            current_version: Some("1.1.0".into()),
+            artifact_name: None,
+        };
+        persist_last_check(&pool, "ok", &stale, None).await.unwrap();
+
+        let json = settings_channel_with_env(&config, &pool, UpdateChannel::Rolling, None)
+            .await
+            .unwrap();
+        assert_eq!(json["channel"], "rolling");
+        assert_eq!(json["channelSource"], "ui");
+        assert_eq!(
+            settings::get_setting(&pool, settings::KEY_AUTOUPDATE_CHANNEL)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("rolling")
+        );
+        // Stale last-check state of the previous channel is cleared.
+        assert!(settings::get_setting(&pool, settings::KEY_AUTOUPDATE_LAST_CHECK_STATUS)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(settings::get_setting(&pool, settings::KEY_AUTOUPDATE_LAST_CHECK_RESULT)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn channel_write_rejected_when_env_overrides_and_nothing_written() {
+        let pool = test_pool().await;
+        let config = channel_config(None);
+
+        let err = settings_channel_with_env(&config, &pool, UpdateChannel::Rolling, Some("release".into()))
+            .await
+            .unwrap_err();
+        match err {
+            ToggleError::Overridden("env") => {}
+            other => panic!("expected env override, got {other:?}"),
+        }
+        assert_eq!(
+            settings::get_setting(&pool, settings::KEY_AUTOUPDATE_CHANNEL)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_write_rejected_when_toml_overrides_and_nothing_written() {
+        let pool = test_pool().await;
+        let config = channel_config(Some("rolling"));
+
+        let err = settings_channel_with_env(&config, &pool, UpdateChannel::Release, None)
+            .await
+            .unwrap_err();
+        match err {
+            ToggleError::Overridden("toml") => {}
+            other => panic!("expected toml override, got {other:?}"),
+        }
+        assert_eq!(
+            settings::get_setting(&pool, settings::KEY_AUTOUPDATE_CHANNEL)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_write_allowed_with_unparseable_env() {
+        let pool = test_pool().await;
+        let config = channel_config(None);
+        let json =
+            settings_channel_with_env(&config, &pool, UpdateChannel::Rolling, Some("x".into()))
+                .await
+                .unwrap();
+        assert_eq!(json["channel"], "rolling");
+        assert_eq!(json["channelSource"], "ui");
+    }
+
+    // ── check/apply against the *selected* channel ────────────────────
+
+    #[tokio::test]
+    async fn settings_for_check_uses_ui_selected_channel_and_its_base_url() {
+        // The UI selected `rolling` (the running build is a release build,
+        // embedded default would be release): settings_for_check must build
+        // rolling settings whose base URL is the rolling feed. (The full
+        // verified fetch cannot run with MockFetcher fixtures here — those
+        // are signed with the test key while perform_check uses the embedded
+        // release key; the chain itself is covered by the injected-settings
+        // tests below and in verify.rs.)
+        let pool = test_pool().await;
+        settings::set_setting(&pool, settings::KEY_AUTOUPDATE_CHANNEL, "rolling")
+            .await
+            .unwrap();
+        let config = config_with(true, false);
+
+        let settings = settings_for_check(&config, &pool).await.unwrap();
+        assert_eq!(settings.channel, UpdateChannel::Rolling);
+        assert_eq!(settings.base_url, crate::autoupdate::DEFAULT_BASE_URL);
+        assert!(settings.enabled);
+    }
+
+    #[tokio::test]
+    async fn settings_for_check_default_channel_is_embedded_build_channel() {
+        // No UI/env/toml value → the release build (embedded default) tracks
+        // the release feed.
+        let pool = test_pool().await;
+        let config = config_with(true, false);
+
+        let settings = settings_for_check(&config, &pool).await.unwrap();
+        assert_eq!(settings.channel, UpdateChannel::Release);
+        assert_eq!(settings.base_url, crate::autoupdate::DEFAULT_RELEASE_BASE_URL);
+    }
+
+    #[tokio::test]
+    async fn settings_for_check_respects_config_toml_channel() {
+        let pool = test_pool().await;
+        let config = channel_config(Some("rolling"));
+
+        let settings = settings_for_check(&config, &pool).await.unwrap();
+        assert_eq!(settings.channel, UpdateChannel::Rolling);
+        assert_eq!(settings.base_url, crate::autoupdate::DEFAULT_BASE_URL);
+    }
+
+    #[tokio::test]
+    async fn settings_for_check_explicit_base_url_override_wins_over_channel() {
+        // An explicit base URL override (≠ the built-in rolling default) is
+        // kept even when the channel would point elsewhere — the mismatch
+        // guard then reports an inconsistent source instead of silently
+        // checking the wrong feed.
+        let pool = test_pool().await;
+        settings::set_setting(&pool, settings::KEY_AUTOUPDATE_CHANNEL, "rolling")
+            .await
+            .unwrap();
+        let mut config = config_with(true, false);
+        config.autoupdate_base_url = "https://mirror.example.invalid/custom".into();
+
+        let settings = settings_for_check(&config, &pool).await.unwrap();
+        assert_eq!(settings.channel, UpdateChannel::Rolling);
+        assert_eq!(settings.base_url, "https://mirror.example.invalid/custom");
+    }
+
+    #[tokio::test]
+    async fn check_persists_channel_mismatch_when_source_serves_other_channel() {
+        // Rolling channel (selected in the UI) whose source serves a stable
+        // release → inconsistent source → check persists channelMismatch
+        // (not an error), the status view keeps reporting the channel.
+        use crate::autoupdate::verify::tests::{MockFetcher, signed_fixture, test_settings};
+        use std::collections::HashMap;
+
+        let pool = test_pool().await;
+        settings::set_setting(&pool, settings::KEY_AUTOUPDATE_CHANNEL, "rolling")
+            .await
+            .unwrap();
+        let config = config_with(true, false);
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.1.0");
+        settings.channel = UpdateChannel::Rolling;
+
+        let sha = "ab".repeat(32);
+        let manifest = format!(
+            "{sha}  momos-music-manager-2.0.0-linux-x64.tar.gz\n{sha}  momos-music-manager-latest-linux-x64.tar.gz\n"
+        );
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &manifest, "2.0.0", None);
+        let fetcher = MockFetcher::new(files);
+
+        let json = run_check_and_persist(&pool, &config, &settings, &fetcher)
+            .await
+            .unwrap();
+        assert_eq!(json["channel"], "rolling");
+        assert_eq!(json["channelSource"], "ui");
+        assert_eq!(json["lastCheckStatus"], "ok");
+        assert_eq!(json["lastCheckResult"]["state"], "channelMismatch");
+        assert_eq!(json["lastCheckResult"]["availableVersion"], "2.0.0");
+    }
+
+    #[tokio::test]
+    async fn update_apply_cross_channel_after_ui_switch() {
+        // UI switched a release build to `rolling`: apply must install the
+        // dev binary from the rolling feed (explicit cross-channel switch).
+        use crate::autoupdate::verify::tests::{MockFetcher, signed_fixture, test_settings};
+        use std::collections::HashMap;
+
+        let pool = test_pool().await;
+        let config = config_with(true, false);
+
+        let archive = {
+            use flate2::write::GzEncoder;
+            use flate2::Compression;
+            use std::io::Write;
+            let mut builder = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_gnu();
+            header.set_size(7);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "momos-music-manager", b"dev-bin" as &[u8])
+                .unwrap();
+            builder.finish().unwrap();
+            let tar_bytes = builder.into_inner().unwrap();
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&tar_bytes).unwrap();
+            encoder.finish().unwrap()
+        };
+        let sha = crate::autoupdate::verify::hex_digest(&archive);
+        let manifest = format!(
+            "{sha}  momos-music-manager-2.0.0-dev+abc-linux-x64.tar.gz\n{sha}  momos-music-manager-latest-linux-x64.tar.gz\n"
+        );
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &manifest, "2.0.0-dev+abc", Some(archive));
+        let fetcher = MockFetcher::new(files);
+
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.1.0");
+        settings.channel = UpdateChannel::Rolling; // explicit switch
+        let dir = tempfile::tempdir().unwrap();
+        let bin_path = dir.path().join("momos-music-manager");
+        std::fs::write(&bin_path, b"old").unwrap();
+        settings.install_dir = Some(dir.path().to_path_buf());
+
+        let json = update_apply_with_settings(&settings, &config, &pool, &fetcher)
+            .await
+            .unwrap();
+        assert_eq!(json["outcome"], "installed");
+        assert_eq!(json["newVersion"], "2.0.0-dev+abc");
+        assert_eq!(json["oldVersion"], "1.1.0");
+        assert_eq!(std::fs::read(&bin_path).unwrap(), b"dev-bin");
+        // Honest refresh of the last-check state (on the new channel).
+        let status = build_status_json(&config, &pool).await.unwrap();
+        assert_eq!(status["lastCheckResult"]["state"], "updateAvailable");
+    }
+
     // ── Marker handling ────────────────────────────────────────────────
 
     #[test]
@@ -823,11 +1490,17 @@ mod tests {
     async fn status_json_fresh_db_defaults() {
         let pool = test_pool().await;
         let config = config_with(true, false);
-        let json = build_status_json_with_env(&config, &pool, None)
+        let json = build_status_json_with_env(&config, &pool, None, None)
             .await
             .unwrap();
         assert_eq!(json["currentVersion"], env!("MMM_VERSION"));
-        assert_eq!(json["channel"], channel_for_version(env!("MMM_VERSION")));
+        // Channel defaults to the embedded channel of the running build and
+        // both selectable channels are advertised.
+        let expected_channel =
+            crate::autoupdate::UpdateChannel::for_version(env!("MMM_VERSION"));
+        assert_eq!(json["channel"], expected_channel.as_str());
+        assert_eq!(json["channelSource"], "default");
+        assert_eq!(json["availableChannels"], serde_json::json!(["release", "rolling"]));
         assert_eq!(json["enabled"], true);
         assert_eq!(json["enabledSource"], "default");
         assert!(json["lastCheckAt"].is_null());
@@ -861,7 +1534,7 @@ mod tests {
             .await
             .unwrap();
 
-        let json = build_status_json_with_env(&config, &pool, None)
+        let json = build_status_json_with_env(&config, &pool, None, None)
             .await
             .unwrap();
         assert_eq!(json["lastCheckStatus"], "ok");
@@ -885,7 +1558,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let json = build_status_json_with_env(&config, &pool, None)
+        let json = build_status_json_with_env(&config, &pool, None, None)
             .await
             .unwrap();
         assert_eq!(json["lastCheckStatus"], "error");
@@ -1011,7 +1684,7 @@ mod tests {
     async fn persist_disabled_check_writes_ok_state() {
         let pool = test_pool().await;
         persist_disabled_check(&pool).await.unwrap();
-        let json = build_status_json_with_env(&config_with(true, false), &pool, None)
+        let json = build_status_json_with_env(&config_with(true, false), &pool, None, None)
             .await
             .unwrap();
         assert_eq!(json["lastCheckStatus"], "ok");
@@ -1026,6 +1699,7 @@ mod tests {
         use crate::autoupdate::minisign::MinisignPublicKey;
         let settings = UpdateSettings {
             base_url: "https://example.invalid/latest-main".into(),
+            channel: UpdateChannel::Release,
             enabled: true,
             health_grace_secs: 5,
             current_version: "1.0.1".into(),
@@ -1055,6 +1729,7 @@ mod tests {
 
         let r = check_result(
             &UpdateStatus::ChannelMismatch {
+                channel: "release",
                 current_version: "1.0.1".into(),
                 available_version: "2.0.0".into(),
             },
@@ -1108,7 +1783,7 @@ mod tests {
             Some(true)
         );
         // The status view must now source the effective value from the DB.
-        let json = build_status_json_with_env(&config, &pool, None)
+        let json = build_status_json_with_env(&config, &pool, None, None)
             .await
             .unwrap();
         assert_eq!(json["enabled"], true);
@@ -1215,12 +1890,23 @@ mod tests {
         assert_eq!(msg, "no update available");
 
         let (status, msg) = apply_error_json(&UpdateError::ChannelMismatch {
+            channel: "rolling",
             current_version: "1.1.0-dev+abc1234".into(),
             available_version: "2.0.0".into(),
         });
         assert_eq!(status, StatusCode::CONFLICT);
         assert!(msg.contains("channel mismatch"));
-        assert!(msg.contains("dev"));
+        assert!(msg.contains("rolling"));
+        assert!(msg.contains("stable release"));
+
+        let (status, msg) = apply_error_json(&UpdateError::ChannelMismatch {
+            channel: "release",
+            current_version: "1.1.0".into(),
+            available_version: "2.0.0-dev+abc1234".into(),
+        });
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(msg.contains("release"));
+        assert!(msg.contains("dev build"));
 
         let (status, _) = apply_error_json(&UpdateError::ChecksumMismatch);
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
