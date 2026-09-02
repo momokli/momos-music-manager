@@ -61,8 +61,9 @@ candle-nn = "0.8"
 hf-hub = { version = "0.4", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
 tokenizers = "0.21"
 
-# macOS-only (menu bar tray icon). Cfg-gated so the project builds on Linux
-# (used for CI integration tests, Playwright screenshots, and the landing page).
+# macOS-only (menu bar tray icon, dock/notifications). Cfg-gated so the project
+# builds on Linux (used for CI integration tests, Playwright screenshots, and the
+# landing page).
 [target.'cfg(target_os = "macos")'.dependencies]
 tray-icon = "0.24.2"
 objc2 = "0.6"

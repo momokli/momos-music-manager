@@ -80,6 +80,7 @@ const HASH_SCHEMA = {
   fileTypes: { type: "array", default: [] },
   backedUp: { type: "boolean", default: null },
   safeToDelete: { type: "boolean", default: null },
+  stems: { type: "boolean", default: null },
   isLocal: { type: "boolean", default: null },
   ratingMin: { type: "number", default: 0 },
   playCountMin: { type: "number", default: 0 },
@@ -106,6 +107,7 @@ const HASH_DEFAULTS = {
   fileTypes: [],
   backedUp: null,
   safeToDelete: null,
+  stems: null,
   isLocal: null,
   ratingMin: 0,
   playCountMin: 0,
@@ -591,6 +593,14 @@ function renderToolbar(state) {
                 <button class="filter-btn${state.safeToDelete === true ? " active" : ""}" data-safe-filter="yes"><i class="fas fa-trash-alt"></i> Yes</button>
               </div>
             </div>
+            <div class="filter-row" data-filter="stem">
+              <span class="filter-row-label toggleable" data-filter="stem">STEMS</span>
+              <div class="filter-group">
+                <button class="filter-btn${!state.stems ? " active" : ""}" data-stem-filter="all">All</button>
+                <button class="filter-btn${state.stems === true ? " active" : ""}" data-stem-filter="yes" title="Non-stem files whose track has no stem.m4a yet"><i class="fas fa-wave-square"></i> Missing</button>
+                <button class="filter-btn${state.stems === false ? " active" : ""}" data-stem-filter="no" title="Stem files plus files that already have a stem.m4a"><i class="fas fa-check"></i> Has</button>
+              </div>
+            </div>
           </div>
         </div>
         <div class="filter-row" style="margin-top:var(--space-2)">
@@ -757,6 +767,7 @@ function buildParams(state) {
   }
   if (state.backedUp !== null) params.set("backedUp", String(state.backedUp));
   if (state.safeToDelete !== null) params.set("safeToDelete", String(state.safeToDelete));
+  if (state.stems !== null) params.set("stems", String(state.stems));
   if (state.isLocal !== null) params.set("isLocal", String(state.isLocal));
   if (state.sort) params.set("sort", state.sort);
   if (state.order === "desc") params.set("order", "desc");
@@ -791,6 +802,7 @@ function buildFilterParams(state) {
   if (state.playCountMin > 0) f.playCountMin = state.playCountMin;
   if (state.backedUp !== null) f.backedUp = state.backedUp;
   if (state.safeToDelete !== null) f.safeToDelete = state.safeToDelete;
+  if (state.stems !== null) f.stems = state.stems;
   if (state.isLocal !== null) f.isLocal = state.isLocal;
   return f;
 }
@@ -1485,6 +1497,25 @@ function wireToolbarEvents(container, signal, state) {
     );
   });
 
+  // ── STEMS filter ──
+  filterPanel?.querySelectorAll("[data-stem-filter]").forEach((btn) => {
+    btn.addEventListener(
+      "click",
+      () => {
+        const val = btn.dataset.stemFilter;
+        state.stems = val === "all" ? null : val === "yes";
+        state.page = 0;
+        filterPanel
+          .querySelectorAll("[data-stem-filter]")
+          .forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  });
+
   // ── Generic toggle for data-filter labels ──
   filterPanel?.querySelectorAll("[data-filter]").forEach((label) => {
     function updateFilterUI() {
@@ -1925,6 +1956,7 @@ export async function init(container, signal, hashParams) {
     backedUp: parsed.backedUp,
     isLocal: parsed.isLocal,
     safeToDelete: parsed.safeToDelete,
+    stems: parsed.stems,
     // Filter section enable/disable flags
     bpmEnabled: true,
     keyEnabled: true,
@@ -1938,6 +1970,7 @@ export async function init(container, signal, hashParams) {
     backupEnabled: true,
     safeEnabled: true,
     localEnabled: true,
+    stemEnabled: true,
     layoutMode: false,
     selectedFileIds: new Set(),
     selectAllMode: false,

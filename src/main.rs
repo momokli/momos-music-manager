@@ -354,14 +354,19 @@ fn main() -> Result<()> {
 }
 
 /// Create a database pool from the configured URL (default: `app.db`).
+/// Uses the same robust options as `db::connection::connect_db`:
+/// create-if-missing, WAL journal, and a 30s busy timeout so concurrent
+/// background tasks can't trigger spurious "database is locked" errors.
 async fn create_db_pool() -> Result<Pool<Sqlite>> {
-    let config = ServiceCredentials::load();
-    let url = &config.database_url;
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
+    use std::str::FromStr;
 
-    // sqlx does not create the SQLite file by default (create_if_missing=false).
-    // Make fresh installs work everywhere (Linux server mode, packaged binaries):
-    // create the parent directory and the empty DB file before connecting.
-    if let Some(rest) = url.strip_prefix("sqlite:") {
+    let config = ServiceCredentials::load();
+
+    // sqlx's create_if_missing creates the DB file but not its parent
+    // directory — make fresh installs work everywhere (Linux server mode,
+    // packaged binaries) by creating that up front.
+    if let Some(rest) = config.database_url.strip_prefix("sqlite:") {
         let path = rest.split('?').next().unwrap_or(rest);
         if !path.is_empty() && path != ":memory:" {
             let path = std::path::Path::new(path);
@@ -370,13 +375,15 @@ async fn create_db_pool() -> Result<Pool<Sqlite>> {
                     tokio::fs::create_dir_all(parent).await?;
                 }
             }
-            if !path.exists() {
-                tokio::fs::File::create(path).await?;
-            }
         }
     }
 
-    let pool = SqlitePool::connect(url).await?;
+    let options = SqliteConnectOptions::from_str(&config.database_url)?
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_secs(30))
+        .synchronous(SqliteSynchronous::Normal);
+    let pool = SqlitePool::connect_with(options).await?;
     momos_music_manager::db::init_db(&pool).await?;
     Ok(pool)
 }

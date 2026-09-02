@@ -118,6 +118,12 @@ All notable changes to Momo's Music Manager.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **STEMS Filter** (`#files`): New "STEMS" filter row shows all non-stem files whose track has no `stem.m4a` yet (same ISRC). Combines with all existing filters (backup, on-disk, type, tags, …) and with the new inverse "Has" state. Server-side via `stems` query param on `GET /api/files` + `/api/files/count` and in the select-all filter body. Linux dev builds unblocked by moving macOS-only deps (`tray-icon`, `objc2*`) behind `cfg(target_os = "macos")`.
+
 ## [0.9.0] — 2026-07-02
 
 ### Added
