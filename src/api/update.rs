@@ -702,9 +702,6 @@ async fn check_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     }
 }
 
-/// POST /api/update/settings — persist the auto-update toggle. 409 when the
-/// effective value is pinned by env or TOML (nothing is written); 400 on a
-/// missing/invalid body.
 /// POST /api/update/settings — persist the auto-update toggle and/or the
 /// update channel (`{"autoUpdateEnabled": bool, "channel": "rolling"|"release"}`;
 /// at least one field required). 409 when a field is pinned by env or TOML

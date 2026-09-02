@@ -67,8 +67,8 @@ Download-Logik der Landing Page).
 
 | Kanal | Basis-URL (Default) |
 |---|---|
-| Dev-Build | `…/releases/download/latest-main` (`DEFAULT_BASE_URL`) |
-| Release-Build | `https://github.com/momokli/momos-music-manager/releases/latest` (`DEFAULT_RELEASE_BASE_URL`; GitHub leitet auf das neueste Non-Prerelease-Release um) |
+| `rolling` (Default von Dev-Builds) | `…/releases/download/latest-main` (`DEFAULT_BASE_URL`) |
+| `release` (Default von Release-Builds) | `https://github.com/momokli/momos-music-manager/releases/latest` (`DEFAULT_RELEASE_BASE_URL`; GitHub leitet auf das neueste Non-Prerelease-Release um) |
 
 `MOMOS_AUTOUPDATE_BASE_URL` / `[autoupdate] base_url` überschreibt den
 Kanal-Default.
@@ -92,6 +92,10 @@ Verhalten:
   build-metadata). Der stabile `-latest-`-Name bleibt nur für die
   Download-Buttons der Landing Page relevant (CI-seitig).
 - `update status` zeigt u. a. den Kanal (Basis-URL).
+- **CLI vs. Server:** Die CLI (`update check|apply|status`) löst den Kanal
+  nur aus Env/TOML/eingebettetem Default auf (kein DB-Zugriff) — ein in der
+  Settings-UI gewählter Kanal gilt für Server-Endpoints und den Start-Check,
+  nicht für die CLI (Folge-PR: CLI liest die DB).
 
 ## 4. Release-Runbook
 
