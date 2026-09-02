@@ -1,15 +1,19 @@
 /**
  * settings.js — Settings page.
  *
- * Update controls (Phase A+B of the update-settings feature):
+ * Update controls (Phase A+B of the update-settings feature + channel
+ * select):
  * - version / channel / update status display (GET /api/update/status)
  * - "Check now" (POST /api/update/check)
  * - auto-update toggle with persistence (POST /api/update/settings)
+ * - update-channel dropdown (`release` | `rolling`) with confirm modal
  * - manual "Update now" (POST /api/update/apply)
  *
- * The toggle is disabled when the effective value is pinned by config.toml
- * or an environment variable (enabledSource "toml"/"env") — the precedence
- * rule is Env > UI > TOML > default true.
+ * Toggle and channel dropdown are disabled when their effective value is
+ * pinned by config.toml or an environment variable (source "toml"/"env") —
+ * the precedence rule is Env > UI > TOML > default (enabled: true; channel:
+ * embedded channel of the running build). check/apply run against the
+ * selected channel; an explicit cross-channel switch is confirmed via modal.
  */
 
 import { fetchJSON } from "../shared/api.js";
@@ -93,8 +97,28 @@ function formatLastCheck(status) {
 }
 
 function channelBadge(status) {
-  const color = status.channel === "dev" ? "var(--yellow)" : "var(--green)";
+  const isRolling = status.channel === "rolling";
+  const color = isRolling ? "var(--yellow)" : "var(--green)";
   return `<span class="badge" style="background:rgba(100,116,139,0.15);color:${color}">${escapeHtml(status.channel)}</span>`;
+}
+
+function channelOptionLabel(channel) {
+  return channel === "rolling"
+    ? "Rolling (dev builds of main)"
+    : "Release (stable)";
+}
+
+function channelOptionsHtml(status) {
+  const list =
+    Array.isArray(status.availableChannels) && status.availableChannels.length
+      ? status.availableChannels
+      : ["release", "rolling"];
+  return list
+    .map(
+      (c) =>
+        `<option value="${c}"${c === status.channel ? " selected" : ""}>${channelOptionLabel(c)}</option>`,
+    )
+    .join("");
 }
 
 function renderStatus(container) {
@@ -115,17 +139,30 @@ function renderStatus(container) {
       : 'Set in <code>config.toml</code> (<code>[autoupdate] enabled</code>) — edit the file to change this toggle.'
     : "";
 
-  // Channel mismatch explanation
+  // Channel state (same precedence rule as the toggle)
+  const channelPinned = s.channelSource === "env" || s.channelSource === "toml";
+  const channelSourceHint = channelPinned
+    ? s.channelSource === "env"
+      ? 'Pinned by the environment variable <code>MOMOS_AUTOUPDATE_CHANNEL</code> — change it there to edit the channel.'
+      : 'Set in <code>config.toml</code> (<code>[autoupdate] channel</code>) — edit the file to change the channel.'
+    : "";
+
+  // Channel mismatch explanation — the update source serves the *other*
+  // channel than selected (inconsistent base URL / feed).
   let mismatchHtml = "";
   if (channelMismatch && result) {
     const cur = result.currentVersion || s.currentVersion;
     const avail = result.availableVersion || "?";
-    const dev = String(cur).includes("-dev+");
+    const published = String(avail).includes("-dev+") ? "a dev build" : "a stable release";
+    const tracks =
+      s.channel === "rolling"
+        ? "rolling dev builds of main"
+        : "stable semver releases";
     mismatchHtml = `
       <div class="help-text" style="margin-top:0.5rem;color:#fb923c">
         <i class="fas fa-arrow-right-arrow-left"></i>
-        Channel mismatch: this build is <strong>${escapeHtml(cur)}</strong> (${dev ? "dev" : "release"}), the latest published is <strong>${escapeHtml(avail)}</strong> (${dev ? "release" : "dev"}).
-        Dev and release builds never auto-update across channels — install the matching build manually.
+        Channel mismatch: update channel is <strong>${escapeHtml(s.channel)}</strong> (tracks ${tracks}), but the update source serves ${published} <strong>${escapeHtml(avail)}</strong> (current build: <code>${escapeHtml(cur)}</code>).
+        Pick the matching channel in the dropdown above or fix the update source (<code>base_url</code>).
       </div>`;
   }
 
@@ -171,15 +208,26 @@ function renderStatus(container) {
     <div class="settings-update-row">
       <div class="settings-update-label">Auto-update</div>
       <div class="settings-update-value">
-        <label class="switch">
-          <input type="checkbox" id="autoupdate-toggle" ${s.enabled ? "checked" : ""} ${toggleDisabled ? "disabled" : ""}>
-          <span class="slider"></span>
-        </label>
-        <span class="text-muted" style="margin-left:0.5rem">
-          ${s.enabled ? "Enabled" : "Disabled"}
-          ${s.enabledSource === "ui" ? "(set in UI)" : ""}
-        </span>
+        <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+          <span style="display:flex;gap:0.5rem;align-items:center">
+            <label class="switch">
+              <input type="checkbox" id="autoupdate-toggle" ${s.enabled ? "checked" : ""} ${toggleDisabled ? "disabled" : ""}>
+              <span class="slider"></span>
+            </label>
+            <span class="text-muted">
+              ${s.enabled ? "Enabled" : "Disabled"}
+              ${s.enabledSource === "ui" ? "(set in UI)" : ""}
+            </span>
+          </span>
+          <span style="display:flex;gap:0.4rem;align-items:center">
+            <label for="update-channel-select" class="text-muted" style="font-size:0.8rem">Channel</label>
+            <select id="update-channel-select" ${channelPinned ? "disabled" : ""} title="Which builds Check now / Update now track">
+              ${channelOptionsHtml(s)}
+            </select>
+          </span>
+        </div>
         ${toggleDisabled ? `<div class="help-text" style="margin-top:0.25rem">${sourceHint}</div>` : ""}
+        ${channelPinned ? `<div class="help-text" style="margin-top:0.25rem">${channelSourceHint}</div>` : ""}
       </div>
     </div>
     <div class="settings-update-actions" style="margin-top:1rem;display:flex;gap:0.75rem;align-items:center">
@@ -350,6 +398,57 @@ function wireEvents(container) {
       toggle.checked = !wanted; // revert
       showToast(`Failed to update setting: ${err.message}`, "error");
       await loadStatus(container);
+    }
+  });
+
+  container.addEventListener("change", async (e) => {
+    const channelSelect = e.target.closest("#update-channel-select");
+    if (!channelSelect) return;
+
+    const previous = state.status?.channel;
+    const wanted = channelSelect.value;
+    if (!wanted || !previous || wanted === previous) return;
+
+    // Cross-channel switch: the next check/apply runs against the other
+    // channel and Update now may install a binary of the other build type.
+    const tracks =
+      wanted === "rolling"
+        ? "<strong>rolling</strong> tracks dev builds of <code>main</code> (published on latest-main)"
+        : "<strong>release</strong> tracks stable semver releases (releases/latest)";
+    const confirmed = await showConfirmModal(
+      "Switch update channel",
+      `Change the update channel from <strong>${escapeHtml(previous)}</strong> to <strong>${escapeHtml(wanted)}</strong>?<br><br>` +
+        `This decides which builds <strong>Check now</strong> and <strong>Update now</strong> use — ${tracks}. ` +
+        `The next <strong>Update now</strong> may therefore install a binary of the other channel type (e.g. a release build on a dev install); after the restart the app runs on that channel's builds.`,
+      "Switch channel",
+    );
+    if (!confirmed) {
+      channelSelect.value = previous; // revert
+      return;
+    }
+
+    try {
+      const resp = await fetchJSON("/api/update/settings", {
+        method: "POST",
+        body: JSON.stringify({ channel: wanted }),
+        signal: _signal,
+      });
+      const newChannel = resp.data.channel || wanted;
+      state.status.channel = newChannel;
+      state.status.channelSource = resp.data.channelSource || "ui";
+      // The server cleared the stale last-check cache of the old channel —
+      // reload the status so the card shows the honest "never checked" state.
+      await loadStatus(container);
+      renderStatus(container);
+      showToast(`Update channel set to ${newChannel}`, "success");
+      renderInline(
+        `<span style="color:var(--green)">Channel switched to <strong>${escapeHtml(newChannel)}</strong> — run Check now to see updates on this channel.</span>`,
+      );
+    } catch (err) {
+      if (err.name === "AbortError") return;
+      channelSelect.value = previous; // revert
+      renderStatus(container);
+      showToast(`Failed to switch channel: ${err.message}`, "error");
     }
   });
 }

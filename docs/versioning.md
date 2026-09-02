@@ -2,7 +2,7 @@
 
 Dieses Dokument beschreibt das nachhaltige Versioning-Konzept: wie die
 Version eines Builds bestimmt wird, welche Kanäle der Autoupdater kennt und
-wie ein Release ausgerollt wird. Stand: 2026-08-31.
+wie ein Release ausgerollt wird. Stand: 2026-09-02.
 
 ## 1. Version eines Builds
 
@@ -59,21 +59,30 @@ Legacy-Namen (`Momo.s-Music-Manager-*`). Stabile Namen, `SHA256SUMS` und
 ## 3. Autoupdater-Kanäle
 
 Der Kanal eines Builds ist eine Eigenschaft seiner **Version**: Version mit
-pre-release (`-dev+`) → Dev-Build; ohne → Release-Build.
+pre-release (`-dev+`) → Dev-Build; ohne → Release-Build. Seit der
+Kanal-Wahl (Settings-Seite) ist der **verfolgte** Kanal ein Setting
+(`autoupdate.channel`, Default = Kanal des laufenden Builds) — der
+**eingebettete** Kanal der Version bestimmt nur noch diesen Default (und die
+Download-Logik der Landing Page).
 
 | Kanal | Basis-URL (Default) |
 |---|---|
-| Dev-Build | `…/releases/download/latest-main` (`DEFAULT_BASE_URL`) |
-| Release-Build | `https://github.com/momokli/momos-music-manager/releases/latest` (`DEFAULT_RELEASE_BASE_URL`; GitHub leitet auf das neueste Non-Prerelease-Release um) |
+| `rolling` (Default von Dev-Builds) | `…/releases/download/latest-main` (`DEFAULT_BASE_URL`) |
+| `release` (Default von Release-Builds) | `https://github.com/momokli/momos-music-manager/releases/latest` (`DEFAULT_RELEASE_BASE_URL`; GitHub leitet auf das neueste Non-Prerelease-Release um) |
 
 `MOMOS_AUTOUPDATE_BASE_URL` / `[autoupdate] base_url` überschreibt den
 Kanal-Default.
 
 Verhalten:
 
-- **Kanal-Guards:** Ein Dev-Build aktualisiert **nie** automatisch auf eine
-  Stable-Release-Version und umgekehrt (dev ↔ release → `ChannelMismatch`,
-  in `update check` und `update apply` mit Handlungs-Hinweis ausgegeben).
+- **Kanal-Guards:** `check`/`apply` laufen gegen den **gewählten** Kanal
+  (env > UI > TOML > Default = eingebetteter Kanal). Ein expliziter
+  Kanalwechsel ist **kein** Fehler mehr: Wer als Dev-Build den
+  Release-Kanal wählt, bekommt dort geprüfte Stable-Updates (und umgekehrt).
+  Der Guard (`ChannelMismatch`) greift nur noch für **inkonsistente** Fälle:
+  Wenn die Update-Quelle den *anderen* Kanal ausliefert als gewählt — etwa
+  durch einen `base_url`-Override auf den falschen Feed. In `update check`
+  und `update apply` mit Handlungs-Hinweis ausgegeben.
 - **Rolling-Vergleich (Dev):** `latest > current` → Update verfügbar;
   precedence-gleich **und** andere Versionszeichenkette (neuer SHA) → Update
   verfügbar; sonst up to date. Release: nur `latest > current`.
@@ -83,6 +92,10 @@ Verhalten:
   build-metadata). Der stabile `-latest-`-Name bleibt nur für die
   Download-Buttons der Landing Page relevant (CI-seitig).
 - `update status` zeigt u. a. den Kanal (Basis-URL).
+- **CLI vs. Server:** Die CLI (`update check|apply|status`) löst den Kanal
+  nur aus Env/TOML/eingebettetem Default auf (kein DB-Zugriff) — ein in der
+  Settings-UI gewählter Kanal gilt für Server-Endpoints und den Start-Check,
+  nicht für die CLI (Folge-PR: CLI liest die DB).
 
 ## 4. Release-Runbook
 
@@ -137,39 +150,72 @@ nächsten Release.
 ## 6. Update-Status in der UI
 
 Seit v1.1.1 zeigt die **Settings-Seite** (`#settings`, Nav-Sektion
-„System") den Update-Status und steuert die Autoupdater-Einstellungen.
-Backend: Modul `src/api/update.rs`, Persistenz in der SQLite-KV-Tabelle
-`settings` (Migration 024).
+„System") den Update-Status, steuert die Autoupdater-Einstellungen und
+wählt den **Update-Kanal** (`release` | `rolling`). Backend: Modul
+`src/api/update.rs`, Persistenz in der SQLite-KV-Tabelle `settings`
+(Migration 024).
 
 ### Endpoints
 
 | Endpoint | Zweck |
 |---|---|
-| `GET /api/update/status` | Version, Kanal (dev/release), effektiver Enabled-Wert + Quelle, Artifact, letzter Check (`lastCheckAt`, `lastCheckStatus`, `lastCheckResult`, `lastCheckError`), `pendingUpdate` (aus `update-state.json`), `platformSelfInstall` |
-| `POST /api/update/check` | Führt einen verifizierten Check aus (30-s-HTTP-Timeout), persistiert das Ergebnis und gibt den frischen Status zurück. Netz-/Signaturfehler sind **kein** HTTP-Fehler: `lastCheckStatus: "error"` bei 200 |
-| `POST /api/update/settings` | Body `{"autoUpdateEnabled": bool}` — persistiert den Toggle. **409**, wenn Env/TOML den Wert fixieren; **400** bei ungültigem Body |
-| `POST /api/update/apply` | Manuelles „Update now": Linux/Windows → Swap + `{outcome: "installed", restartNeeded: true}`; macOS → verifizierter DMG-Download + Pfad (`outcome: "downloaded"`, **kein** Self-Install). 409 bei disabled/Kanal-Mismatch, 404 wenn kein Update verfügbar |
+| `GET /api/update/status` | Version, **effektiver Kanal** (`channel`: `rolling`/`release`, Quelle in `channelSource`, verfügbare Kanäle in `availableChannels`), effektiver Enabled-Wert + Quelle, Basis-URL des gewählten Kanals, Artifact, letzter Check (`lastCheckAt`, `lastCheckStatus`, `lastCheckResult`, `lastCheckError`), `pendingUpdate` (aus `update-state.json`), `platformSelfInstall` |
+| `POST /api/update/check` | Führt einen verifizierten Check gegen den **gewählten Kanal** aus (30-s-HTTP-Timeout), persistiert das Ergebnis und gibt den frischen Status zurück. Netz-/Signaturfehler sind **kein** HTTP-Fehler: `lastCheckStatus: "error"` bei 200 |
+| `POST /api/update/settings` | Body `{"autoUpdateEnabled": bool}` und/oder `{"channel": "rolling"|"release"}` (mind. ein Feld) — persistiert Toggle und/oder Kanal. **409**, wenn Env/TOML den Wert fixieren (es wird nichts geschrieben); **400** bei ungültigem Body oder Kanalwert. Ein Kanalwechsel löscht den Cache des letzten Checks (`autoupdate.last_check_*`) — ein Ergebnis vom alten Kanal gilt nicht für den neuen |
+| `POST /api/update/apply` | Manuelles „Update now" gegen den **gewählten Kanal**: Linux/Windows → Swap + `{outcome: "installed", restartNeeded: true}`; macOS → verifizierter DMG-Download + Pfad (`outcome: "downloaded"`, **kein** Self-Install). 409 bei disabled/inkonsistenter Quelle (Kanal-Mismatch), 404 wenn kein Update verfügbar |
 
-### Precedence-Regel (Env > UI > TOML > Default **true**)
+### Precedence-Regel (Env > UI > TOML > Default)
+
+Für **Enabled** (Default **true**):
 
 1. `MOMOS_AUTOUPDATE_ENABLED` gesetzt **und** parsebar → gewinnt (`env`)
 2. sonst UI-Wert in `settings['autoupdate.enabled']` → gewinnt (`ui`)
 3. sonst `[autoupdate] enabled` aus `config.toml` → gewinnt (`toml`)
 4. sonst Default **true** (`default`)
 
-Die Status-Response enthält `enabledSource`; bei `env`/`toml` rendert die
-UI den Toggle **disabled** mit Hinweis („von Umgebungsvariable gesetzt" /
-„von config.toml gesetzt"). Unparsebare Env-Werte fallen wie bisher durch
-(kein Breaking Change).
+Für **Channel** (Default = Kanal des laufenden Builds: Dev-Build →
+`rolling`, Release-Build → `release`):
 
-### Toggle-Persistenz
+1. `MOMOS_AUTOUPDATE_CHANNEL` gesetzt **und** parsebar
+   (`"rolling"`/`"release"`) → gewinnt (`env`)
+2. sonst UI-Wert in `settings['autoupdate.channel']` → gewinnt (`ui`)
+3. sonst `[autoupdate] channel` aus `config.toml` → gewinnt (`toml`)
+4. sonst Default (eingebetteter Kanal) (`default`)
 
-Der Toggle wird in SQLite persistiert (`settings`-KV, Key
-`autoupdate.enabled`, Werte `"true"`/`"false"`) und überlebt Neustarts.
-Der Start-Check in `serve()` liest den **effektiven** Wert aus der DB
-(nicht mehr nur `config.autoupdate_enabled`) und persistiert sein Ergebnis
+Die Status-Response enthält `enabledSource`/`channelSource`; bei `env`/`toml`
+rendert die UI Toggle bzw. Dropdown **disabled** mit Hinweis („von
+Umgebungsvariable gesetzt" / „von config.toml gesetzt"). Unparsebare
+Env-Werte fallen wie bisher durch (kein Breaking Change).
+
+### Basis-URL je Kanal
+
+Der gewählte Kanal entscheidet über die Default-Quelle:
+`rolling` → `latest-main` (Dev-Builds von `main`), `release` →
+`releases/latest` (neuestes Stable-Release). Ein expliziter Override
+(`MOMOS_AUTOUPDATE_BASE_URL` / `[autoupdate] base_url`) hat weiterhin
+Vorrang — liefert er dann den *anderen* Kanal aus, meldet der
+Kanal-Guard den Widerspruch (`ChannelMismatch`), statt still den falschen
+Feed zu prüfen.
+
+### Toggle- & Kanal-Persistenz
+
+Toggle und Kanal werden in SQLite persistiert (`settings`-KV, Keys
+`autoupdate.enabled` (`"true"`/`"false"`) und `autoupdate.channel`
+(`"rolling"`/`"release"`)) und überleben Neustarts. Der Start-Check in
+`serve()` liest die **effektiven** Werte aus der DB (nicht mehr nur
+`config.autoupdate_enabled`) und persistiert sein Ergebnis
 (`autoupdate.last_check_*`) — `--no-autoupdate` hat weiterhin höchste
 Priorität.
+
+### Kanalwechsel (Cross-Channel-Switch)
+
+Die UI bietet ein Kanal-Dropdown neben dem Auto-Update-Toggle; ein Wechsel
+läuft über ein **Confirm-Modal**, das erklärt, dass der nächste Check/Apply
+gegen den anderen Kanal läuft und „Update now" das Binary des anderen
+Kanaltyps installieren kann (z. B. Release-Binary auf einer Dev-Installation
+— nach dem Neustart läuft die App als Release-Build auf dem neuen Kanal).
+Der Wechsel ist **kein** ChannelMismatch-Fehler mehr — Guards gelten nur
+für inkonsistente Quellen (siehe oben).
 
 ### macOS v1-Limitation
 
@@ -181,6 +227,10 @@ Status-Response.
 
 ### Kanal-Mismatch
 
-Dev- und Release-Builds wechseln nie automatisch die Kanäle: Bei Mismatch
-(dev ↔ release) zeigt die UI einen Erklärtext, der Apply-Button erscheint
-nicht (`POST /api/update/apply` → 409).
+Ein Kanal-Mismatch bedeutet seit der Kanal-Wahl: Die Update-Quelle liefert
+den **anderen** Kanal aus als gewählt — z. B. weil `base_url` explizit auf
+einen Feed zeigt, der Dev-Builds serviert, während der Release-Kanal
+gewählt ist. Die UI zeigt einen Erklärtext (gewählter Kanal vs. gelieferte
+Build-Art), der Apply-Button erscheint nicht (`POST /api/update/apply` →
+409). Ein **expliziter Kanalwechsel über das Dropdown ist kein Fehler** —
+Check/Apply laufen dann einfach gegen den anderen Kanal (siehe oben).

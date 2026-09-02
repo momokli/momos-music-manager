@@ -112,7 +112,8 @@ enabled = true
 | `PORT`                  | Server port                                         |
 | `RUST_LOG`              | Log level (debug, info, warn, error)                |
 | `MOMOS_AUTOUPDATE_ENABLED` | Enable the startup update check (`true`/`false`, default `true`) |
-| `MOMOS_AUTOUPDATE_BASE_URL` | Autoupdate channel base URL (default is channel-dependent: dev builds → `latest-main`, release builds → `releases/latest`; see [docs/versioning.md](docs/versioning.md)) |
+| `MOMOS_AUTOUPDATE_CHANNEL` | Update channel (`release`/`rolling`; default = channel of the running build — dev → `rolling`, release → `release`; see [docs/versioning.md](docs/versioning.md)) |
+| `MOMOS_AUTOUPDATE_BASE_URL` | Autoupdate source base URL override (default follows the selected channel: `rolling` → `latest-main`, `release` → `releases/latest`; see [docs/versioning.md](docs/versioning.md)) |
 | `MOMOS_AUTOUPDATE_HEALTH_GRACE_SECS` | Seconds the new binary must stay healthy before an update is committed (default `60`) |
 
 ---
@@ -236,14 +237,22 @@ open http://localhost:3000
 
 ### Auto-Updates (M6)
 
-The app can update itself. Two channels exist, and a build never auto-updates
-across them (channel guards):
+The app can update itself. Two update channels exist, selectable in the
+Settings page (`release` | `rolling`; default = channel of the running
+build):
 
-- **Dev builds** (`<version>-dev+<sha8>`, rolling `main`) check the
-  `latest-main` pre-release — every push to `main` is offered as an update
-  (detected via the commit SHA in the version).
-- **Release builds** (plain semver, tagged `v*`) check the newest release via
+- **Rolling** (`rolling`) — dev builds of `main` (`<version>-dev+<sha8>`)
+  from the `latest-main` pre-release; every push to `main` is offered as an
+  update (detected via the commit SHA in the version).
+- **Release** (`release`) — stable semver releases (tagged `v*`) via
   `releases/latest`.
+
+An explicit channel switch (dropdown with confirm modal) is **not** an
+error: `check`/`apply` run against the selected channel, and `Update now`
+may install the other channel type's binary. The channel guard
+(`ChannelMismatch`) only fires when the update source serves the *other*
+channel than selected (e.g. a `base_url` override pointing at the wrong
+feed).
 
 Updates are **never installed silently**: the startup check only reports, and
 the actual install is explicit (`momos-music-manager update apply`).
@@ -256,8 +265,8 @@ Verification chain (nothing is installed unless every step passes):
    `scripts/minisign.pub`).
 3. Resolve the platform artifact by its **versioned** name
    (`momos-music-manager-<version>-<os-arch>.<ext>`) and compare versions
-   (semver) against the running build; a channel mismatch (dev ↔ release) is
-   refused.
+   (semver) against the running build; if the source serves the *other*
+   channel than selected, the update is refused (`ChannelMismatch`).
 4. On `update apply`: download the artifact, verify its **SHA256** against the
    signed manifest, extract the binary — and only then swap.
 
@@ -284,8 +293,10 @@ momos-music-manager update status
 ```
 
 Opt-out: `--no-autoupdate` on `serve`, or `MOMOS_AUTOUPDATE_ENABLED=false`
-(env / `[autoupdate] enabled = false` in config.toml). The update check also
-runs automatically on `serve` startup (10 s after boot) and logs the result.
+(env / `[autoupdate] enabled = false` in config.toml). Channel override:
+`MOMOS_AUTOUPDATE_CHANNEL=release|rolling` or `[autoupdate] channel` in
+config.toml (Settings page otherwise). The update check also runs
+automatically on `serve` startup (10 s after boot) and logs the result.
 
 > **macOS**: the updater downloads and verifies the universal DMG, but does not
 > swap binaries inside the `.app` bundle yet (requires M4/notarization work) —

@@ -37,6 +37,23 @@ All notable changes to Momo's Music Manager.
   Autoupdater lehnt Updates ab (safe default). macOS v1: verifizierter
   Download (kein Swap im `.app`-Bundle); Windows: Swap bei gestopptem Server.
   Doku: README, PLATFORM-SUPPORT, RELEASE-ROADMAP (M6), ADR-059.
+- **Update-Kanal-Wahl (`release` | `rolling`)**: Die Settings-Seite
+  (`#settings`) bekommt ein Kanal-Dropdown neben dem Auto-Update-Toggle
+  (Confirm-Modal beim Wechsel; Persistenz wie `autoupdate.enabled` über
+  die SQLite-KV aus Migration 024). Default = Kanal des laufenden Builds
+  (Dev-Build → `rolling`, Release-Build → `release`), Precedence Env
+  (`MOMOS_AUTOUPDATE_CHANNEL`) > UI (`settings['autoupdate.channel']`) >
+  TOML (`[autoupdate] channel`) > Default. `GET /api/update/status`
+  liefert `channel`, `channelSource` und `availableChannels`;
+  `POST /api/update/settings` nimmt zusätzlich `{"channel": …}` an;
+  `check`/`apply` laufen gegen den gewählten Kanal (Basis-URL folgt dem
+  Kanal; ein `base_url`-Override behält Vorrang). **Cross-Channel-
+  Semantik**: Ein expliziter Kanalwechsel ist kein Fehler mehr —
+  `ChannelMismatch` greift nur noch, wenn die Update-Quelle den *anderen*
+  Kanal ausliefert als gewählt (inkonsistenter Override); die UI erklärt
+  den Mismatch entsprechend. Ein Kanalwechsel löscht den gecachten letzten
+  Check (Ergebnisse vom alten Kanal gelten nicht für den neuen). Doku:
+  `docs/versioning.md` §3/§6, `.env.example`, `deploy/config.toml`.
 - **Landing-Page-Downloads für alle Plattformen**: `site/` bietet jetzt
   Download-Buttons für macOS (Universal-DMG), Windows (x64 + arm64) und Linux
   (x64 + arm64) aus dem rolling `latest-main`-Release, jeweils mit

@@ -259,7 +259,10 @@ fn main() -> Result<()> {
                 ApplyOutcome, HttpFetcher, UpdateError, UpdateSettings, UpdateStatus,
             };
             let config = ServiceCredentials::load();
-            let settings = UpdateSettings::from_config(&config)?;
+            // The CLI has no UI/DB layer: channel = env > TOML > embedded
+            // default of the running build (the Settings page adds the UI
+            // layer on top of that).
+            let settings = UpdateSettings::from_config(&config, config.configured_autoupdate_channel())?;
             let fetcher = HttpFetcher::new();
             let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
             match command {
@@ -282,16 +285,22 @@ fn main() -> Result<()> {
                         println!("Autoupdate is not supported on this platform yet.");
                     }
                     UpdateStatus::ChannelMismatch {
+                        channel,
                         current_version,
                         available_version,
                     } => {
-                        if current_version.contains("-dev+") {
-                            println!("Channel mismatch: current dev build v{current_version} — latest published is a stable release v{available_version}.");
-                            println!("Dev builds never auto-update to stable releases — please install the release manually.");
+                        let published = if available_version.contains("-dev+") {
+                            "a dev build"
                         } else {
-                            println!("Channel mismatch: current release build v{current_version} — latest published is a dev build v{available_version}.");
-                            println!("Release builds only auto-install semver releases; dev builds are tracked on the rolling latest-main channel.");
-                        }
+                            "a stable release"
+                        };
+                        let tracks = if channel == "rolling" {
+                            "rolling dev builds of main (latest-main)"
+                        } else {
+                            "stable semver releases (releases/latest)"
+                        };
+                        println!("Channel mismatch: update channel is '{channel}' (current build v{current_version}), but the update source serves {published} v{available_version}.");
+                        println!("Channel '{channel}' tracks {tracks} — pick the matching channel (Settings page / MOMOS_AUTOUPDATE_CHANNEL / [autoupdate] channel) or fix the update source (base_url).");
                     }
                 },
                 UpdateCommand::Apply => match rt.block_on(UpdateStatus::apply(
@@ -311,15 +320,22 @@ fn main() -> Result<()> {
                         println!("macOS auto-install (inside the .app bundle) is not supported yet — open the DMG and drag the app to Applications.");
                     }
                     Err(UpdateError::ChannelMismatch {
+                        channel,
                         current_version,
                         available_version,
                     }) => {
-                        println!("Update not installed: channel mismatch (current v{current_version} vs available v{available_version}).");
-                        if current_version.contains("-dev+") {
-                            println!("Dev builds never auto-update to stable releases — please install the release manually.");
+                        let published = if available_version.contains("-dev+") {
+                            "a dev build"
                         } else {
-                            println!("Release builds only auto-install semver releases; dev builds are tracked on the rolling latest-main channel.");
-                        }
+                            "a stable release"
+                        };
+                        let tracks = if channel == "rolling" {
+                            "rolling dev builds of main (latest-main)"
+                        } else {
+                            "stable semver releases (releases/latest)"
+                        };
+                        println!("Update not installed: channel mismatch — update channel is '{channel}' (current build v{current_version}), the update source serves {published} v{available_version}.");
+                        println!("Channel '{channel}' tracks {tracks} — pick the matching channel or fix the update source (base_url).");
                     }
                     Err(e) => return Err(e.into()),
                 },
@@ -331,7 +347,7 @@ fn main() -> Result<()> {
                     use momos_music_manager::autoupdate::swap;
                     println!("Current version : v{}", settings.current_version);
                     println!("Platform artifact: {} ({})", settings.artifact.os_arch, settings.artifact.ext);
-                    println!("Update channel   : {}", settings.base_url);
+                    println!("Update channel   : {} ({})", settings.channel.as_str(), settings.base_url);
                     println!("Enabled          : {}", settings.enabled);
                     let dir = swap::exe_dir();
                     println!("Install dir      : {}", dir.display());
@@ -804,7 +820,7 @@ async fn serve(
                         }
                         "channelMismatch" => {
                             tracing::info!(
-                                "autoupdate: check ok — channel mismatch (dev vs release), no auto-update"
+                                "autoupdate: check ok — channel mismatch (update source serves the other channel than selected), no auto-update"
                             );
                         }
                         "disabled" => {

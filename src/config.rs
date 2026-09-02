@@ -142,6 +142,9 @@ struct AutoupdateToml {
     enabled: Option<bool>,
     base_url: Option<String>,
     health_grace_secs: Option<u64>,
+    /// Update channel (`"rolling"` | `"release"`) — optional; default is
+    /// the running build's embedded channel.
+    channel: Option<String>,
 }
 
 // ── Runtime representation ─────────────────────────────────────────────────
@@ -207,6 +210,10 @@ pub struct ServiceCredentials {
     /// Whether `[autoupdate] enabled` was set explicitly in config.toml —
     /// needed for `enabledSource` detection (the TOML struct is private).
     pub(crate) autoupdate_has_toml: bool,
+    /// Raw `[autoupdate] channel` value from config.toml (may be unparseable;
+    /// then the running build's embedded channel applies). Needed for
+    /// `channelSource`/value resolution without re-parsing the TOML file.
+    pub(crate) autoupdate_channel_toml: Option<String>,
 }
 
 impl ServiceCredentials {
@@ -507,13 +514,18 @@ impl ServiceCredentials {
                 .as_ref()
                 .and_then(|a| a.enabled)
                 .is_some(),
+            autoupdate_channel_toml: toml_config
+                .autoupdate
+                .as_ref()
+                .and_then(|a| a.channel.clone()),
         };
 
         info!(
-            "Autoupdate config: enabled={}, base_url={}, health_grace_secs={}s",
+            "Autoupdate config: enabled={}, base_url={}, health_grace_secs={}s, channel={}",
             credentials.autoupdate_enabled,
             credentials.autoupdate_base_url,
             credentials.autoupdate_health_grace_secs,
+            credentials.autoupdate_channel_source(),
         );
 
         info!(
@@ -626,6 +638,7 @@ impl ServiceCredentials {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(crate::autoupdate::DEFAULT_HEALTH_GRACE_SECS),
             autoupdate_has_toml: false,
+            autoupdate_channel_toml: None,
         }
     }
 
@@ -734,6 +747,41 @@ impl ServiceCredentials {
         "default"
     }
 
+    /// Where the configured `autoupdate.channel` value comes from, ignoring
+    /// the UI/DB layer: `"env"` (parseable `MOMOS_AUTOUPDATE_CHANNEL`),
+    /// `"toml"` (`[autoupdate] channel` in config.toml) or `"default"`
+    /// (running build's embedded channel). Mirrors
+    /// [`Self::autoupdate_enabled_source`] — an unparseable env value falls
+    /// through to TOML/default.
+    pub fn autoupdate_channel_source(&self) -> &'static str {
+        if configured_channel_env().is_some() {
+            return "env";
+        }
+        if self.autoupdate_channel_toml.is_some() {
+            return "toml";
+        }
+        "default"
+    }
+
+    /// Config-level update channel: parseable env value > `[autoupdate]
+    /// channel` in config.toml > default = embedded channel of the running
+    /// build (dev build → rolling, release build → release). Used by the CLI
+    /// (`update check|apply`) and as the fallback in the API layer once env
+    /// and UI values are absent.
+    pub fn configured_autoupdate_channel(&self) -> crate::autoupdate::UpdateChannel {
+        if let Some(channel) = configured_channel_env() {
+            return channel;
+        }
+        if let Some(channel) = self
+            .autoupdate_channel_toml
+            .as_deref()
+            .and_then(crate::autoupdate::UpdateChannel::parse)
+        {
+            return channel;
+        }
+        crate::autoupdate::UpdateChannel::for_version(env!("MMM_VERSION"))
+    }
+
     pub fn spotify_client_id(&self) -> anyhow::Result<&str> {
         self.spotify_client_id.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -798,6 +846,7 @@ impl ServiceCredentials {
             autoupdate_base_url: crate::autoupdate::DEFAULT_BASE_URL.to_string(),
             autoupdate_health_grace_secs: 5,
             autoupdate_has_toml: false,
+            autoupdate_channel_toml: None,
         }
     }
 }
@@ -809,6 +858,13 @@ impl ServiceCredentials {
 fn env_var(name: &str) -> anyhow::Result<String> {
     std::env::var(name)
         .map_err(|_| anyhow::anyhow!("Missing required environment variable: {}", name))
+}
+
+/// Parseable `MOMOS_AUTOUPDATE_CHANNEL` env value, if any.
+fn configured_channel_env() -> Option<crate::autoupdate::UpdateChannel> {
+    std::env::var("MOMOS_AUTOUPDATE_CHANNEL")
+        .ok()
+        .and_then(|v| crate::autoupdate::UpdateChannel::parse(&v))
 }
 
 /// Read an optional env var.

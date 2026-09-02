@@ -16,7 +16,8 @@ pub mod verify;
 pub use swap::RecoveryAction;
 pub use verify::{
     ApplyOutcome, DEFAULT_BASE_URL, DEFAULT_HEALTH_GRACE_SECS, DEFAULT_RELEASE_BASE_URL,
-    HttpFetcher, UpdateError, UpdateInfo, UpdateSettings, UpdateStatus,
+    HttpFetcher, UpdateChannel, UpdateError, UpdateInfo, UpdateSettings, UpdateStatus,
+    UPDATE_CHANNEL_RELEASE, UPDATE_CHANNEL_ROLLING,
 };
 
 /// Run the startup recovery for a pending update and return what the caller
