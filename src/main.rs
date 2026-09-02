@@ -463,6 +463,7 @@ async fn serve(
     let maint_cancel = poller_cancel.clone();
 
     let telemetry_interval = config.telemetry_interval_secs;
+    let telemetry_full_db_interval = config.telemetry_full_db_interval_secs;
     let telemetry_enabled = config.telemetry_enabled;
     let telemetry_config = config.clone();
 
@@ -685,8 +686,19 @@ async fn serve(
         momos_music_manager::auto_backup::start_auto_backup_poller(auto_db, auto_tm).await;
     });
 
-    // Telemetry loop: periodic DB snapshot + metadata push
-    if telemetry_enabled && telemetry_interval > 0 {
+    // Telemetry loop: periodic full-DB snapshot + metadata push. Defaults
+    // OFF — starts only when telemetry.enabled AND an interval is set. The
+    // explicit `full_db_interval_secs` option
+    // (MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS / `[telemetry]
+    // full_db_interval_secs`) is the documented key; the legacy
+    // `interval_secs` stays effective as alias when the explicit one is
+    // unset/0 (backward compat).
+    let full_db_push_interval =
+        momos_music_manager::telemetry::effective_full_db_interval_secs(
+            telemetry_full_db_interval,
+            telemetry_interval,
+        );
+    if telemetry_enabled && full_db_push_interval > 0 {
         let tel_db = state.db.clone();
         let tel_tm = state.task_manager.clone();
         tokio::spawn(async move {
@@ -694,14 +706,23 @@ async fn serve(
                 tel_db,
                 telemetry_config,
                 tel_tm,
-                telemetry_interval,
+                full_db_push_interval,
             )
             .await;
         });
-        info!("Telemetry loop started (interval: {}s)", telemetry_interval);
+        info!(
+            "Telemetry full-DB loop started (interval: {}s, source: {})",
+            full_db_push_interval,
+            if telemetry_full_db_interval > 0 {
+                "full_db_interval_secs"
+            } else {
+                "interval_secs (legacy alias)"
+            }
+        );
     } else {
         info!(
-            "Telemetry loop disabled (enabled={telemetry_enabled}, interval={telemetry_interval}s)"
+            "Telemetry full-DB loop disabled (enabled={telemetry_enabled}, \
+             full_db_interval={telemetry_full_db_interval}s, legacy_interval={telemetry_interval}s)"
         );
     }
 

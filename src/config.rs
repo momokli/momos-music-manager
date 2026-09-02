@@ -32,6 +32,12 @@
 //!
 //! [telemetry]
 //! enabled = true                  # master flag for snapshot push AND event telemetry
+//! # Full-DB snapshot push (periodic whole-DB send) — OFF by default.
+//! # Sends the COMPLETE DB (VACUUM INTO snapshot + meta) to `base_url`
+//! # every N seconds. 0 = off (periodic; one-shot via `telemetry push` CLI
+//! # still works). Legacy `interval_secs` (analytics era) stays effective
+//! # when this key is absent/0 — this explicit key wins when set.
+//! full_db_interval_secs = 0
 //! # Where event batches are POSTed. Defaults to `<base_url>/api/telemetry`
 //! # when unset (snapshot `base_url` configured).
 //! events_endpoint = "https://telemetry.music.klimk.es/api/telemetry"
@@ -136,7 +142,12 @@ struct TelemetryToml {
     base_url: Option<String>,
     token: Option<String>,
     instance: Option<String>,
+    /// Legacy full-DB push interval (analytics era; still honored).
     interval_secs: Option<u64>,
+    /// Explicit full-DB snapshot push interval (0/absent = off, default).
+    /// Sends the complete DB (VACUUM INTO) + meta to `base_url` every N
+    /// seconds. Wins over legacy `interval_secs` when > 0.
+    full_db_interval_secs: Option<u64>,
     /// Event-batch endpoint; defaults to `<base_url>/api/telemetry` when unset.
     events_endpoint: Option<String>,
 }
@@ -211,7 +222,15 @@ pub struct ServiceCredentials {
     pub telemetry_base_url: Option<String>,
     pub telemetry_token: Option<String>,
     pub telemetry_instance: String,
+    /// Legacy periodic full-DB push interval (analytics era; 0 = off).
+    /// Kept as backward-compatible alias — see `telemetry_full_db_interval_secs`.
     pub telemetry_interval_secs: u64,
+    /// Explicit full-DB snapshot push interval in seconds (default 0 = OFF).
+    /// When > 0 (and `telemetry_enabled`) the app periodically sends the
+    /// COMPLETE DB (VACUUM INTO snapshot + meta) to `telemetry_base_url`.
+    /// Env: `MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS`; TOML:
+    /// `[telemetry] full_db_interval_secs`. Wins over legacy `interval_secs`.
+    pub telemetry_full_db_interval_secs: u64,
     /// HTTPS endpoint for event batches (`POST /api/telemetry`). Resolved
     /// Env > TOML > derived default `<base_url>/api/telemetry` > None.
     pub telemetry_events_endpoint: Option<String>,
@@ -508,6 +527,16 @@ impl ServiceCredentials {
                 .and_then(|v| v.parse::<u64>().ok())
                 .or_else(|| toml_config.telemetry.as_ref().and_then(|t| t.interval_secs))
                 .unwrap_or(0),
+            telemetry_full_db_interval_secs: std::env::var("MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .or_else(|| {
+                    toml_config
+                        .telemetry
+                        .as_ref()
+                        .and_then(|t| t.full_db_interval_secs)
+                })
+                .unwrap_or(0),
             telemetry_events_endpoint: telemetry_events_endpoint,
 
             // Telemetry receiver (collector)
@@ -606,11 +635,13 @@ impl ServiceCredentials {
         );
 
         info!(
-            "Telemetry config: enabled={}, base_url={:?}, events_endpoint={:?}, instance={}, interval={}s (receiver_bind={})",
+            "Telemetry config: enabled={}, base_url={:?}, events_endpoint={:?}, instance={}, \
+             full_db_interval={}s, legacy_interval={}s (receiver_bind={})",
             credentials.telemetry_enabled,
             credentials.telemetry_base_url,
             credentials.telemetry_events_endpoint,
             credentials.telemetry_instance,
+            credentials.telemetry_full_db_interval_secs,
             credentials.telemetry_interval_secs,
             credentials.telemetry_receiver_bind,
         );
@@ -683,6 +714,9 @@ impl ServiceCredentials {
             telemetry_instance: env_var_optional("MOMOS_TELEMETRY_INSTANCE")
                 .unwrap_or_else(|| "macbook".to_string()),
             telemetry_interval_secs: env_var_optional("MOMOS_TELEMETRY_INTERVAL_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            telemetry_full_db_interval_secs: env_var_optional("MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
             telemetry_events_endpoint: resolve_events_endpoint(
@@ -910,6 +944,7 @@ impl ServiceCredentials {
             telemetry_token: None,
             telemetry_instance: "macbook".to_string(),
             telemetry_interval_secs: 0,
+            telemetry_full_db_interval_secs: 0,
             telemetry_events_endpoint: None,
             telemetry_receiver_bind: "127.0.0.1:8330".to_string(),
             telemetry_receiver_base_dir: "/tmp/momos-analytics".to_string(),
@@ -1018,6 +1053,9 @@ mod tests {
         assert!(creds.youtube_api_key.is_none());
         assert!(creds.youtube_playlist_id.is_none());
         assert!(creds.server_public_url.is_none());
+        // Full-DB snapshot option defaults OFF (0) for tests.
+        assert_eq!(creds.telemetry_full_db_interval_secs, 0);
+        assert_eq!(creds.telemetry_interval_secs, 0);
     }
 
     // ── Configured checks ───────────────────────────────────────────
@@ -1085,6 +1123,27 @@ mod tests {
             ..ServiceCredentials::defaults_for_test()
         };
         assert!(!creds.is_youtube_configured());
+    }
+
+    // ── Telemetry TOML parsing (full-DB option) ───────────────────────
+
+    #[test]
+    fn test_telemetry_toml_full_db_interval_parses() {
+        let src = "[telemetry]\nenabled = true\nbase_url = \"https://telemetry.example.com\"\nfull_db_interval_secs = 86400\n";
+        let cfg: TomlConfig = toml::from_str(src).unwrap();
+        let tel = cfg.telemetry.expect("telemetry section should parse");
+        assert_eq!(tel.full_db_interval_secs, Some(86400));
+        assert_eq!(tel.interval_secs, None);
+    }
+
+    #[test]
+    fn test_telemetry_toml_full_db_interval_defaults_absent() {
+        // Legacy analytics-era key must still parse; new key absent → None.
+        let src = "[telemetry]\nenabled = true\ninterval_secs = 3600\n";
+        let cfg: TomlConfig = toml::from_str(src).unwrap();
+        let tel = cfg.telemetry.unwrap();
+        assert_eq!(tel.interval_secs, Some(3600));
+        assert_eq!(tel.full_db_interval_secs, None);
     }
 
     // ── Helper functions ─────────────────────────────────────────────

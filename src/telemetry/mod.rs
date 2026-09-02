@@ -341,7 +341,27 @@ fn hostname() -> String {
     std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string())
 }
 
-/// Start the in-app telemetry loop — pushes a snapshot every `interval_secs`.
+/// Effective periodic full-DB push interval.
+///
+/// The explicit option `full_db_interval_secs`
+/// (`MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS` / `[telemetry]
+/// full_db_interval_secs`, default 0 = OFF) wins when > 0; the legacy
+/// `interval_secs` key (analytics era) stays effective as backward-compatible
+/// alias when the explicit one is unset/0. `0` = periodic loop off
+/// (one-shot trigger via `telemetry push` CLI still works).
+pub fn effective_full_db_interval_secs(
+    full_db_interval_secs: u64,
+    legacy_interval_secs: u64,
+) -> u64 {
+    if full_db_interval_secs > 0 {
+        full_db_interval_secs
+    } else {
+        legacy_interval_secs
+    }
+}
+
+/// Start the in-app telemetry loop — pushes a full DB snapshot (VACUUM INTO)
+/// + metadata every `interval_secs` (see [`effective_full_db_interval_secs`]).
 pub async fn start_telemetry_loop(
     db: Pool<Sqlite>,
     config: ServiceCredentials,
@@ -430,6 +450,25 @@ mod tests {
         let tail = read_tail(&path, 11); // less than full, picks up from a newline
         assert!(tail.ends_with("line4\n"));
         assert!(!tail.contains("line1"));
+    }
+
+    #[test]
+    fn effective_full_db_interval_prefers_explicit_over_legacy() {
+        // Explicit option wins when set.
+        assert_eq!(effective_full_db_interval_secs(86400, 3600), 86400);
+        assert_eq!(effective_full_db_interval_secs(60, 0), 60);
+    }
+
+    #[test]
+    fn effective_full_db_interval_falls_back_to_legacy() {
+        // Legacy `interval_secs` alias stays effective (backward compat).
+        assert_eq!(effective_full_db_interval_secs(0, 3600), 3600);
+    }
+
+    #[test]
+    fn effective_full_db_interval_zero_means_off() {
+        // Default: both unset/0 → periodic loop off.
+        assert_eq!(effective_full_db_interval_secs(0, 0), 0);
     }
 
     #[test]

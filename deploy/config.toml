@@ -46,6 +46,12 @@ port = 3000
 # Snapshot base + token (existing snapshot telemetry, if used).
 # base_url = "https://telemetry.example.com"
 # token = "secret-collector-token"
+# Full-DB snapshot push (periodic whole-DB send) — OFF by default (0).
+# Sends the COMPLETE DB (VACUUM INTO snapshot + meta) to
+# <base_url>/api/telemetry/<instance>/db/<ts> every N seconds when enabled.
+# 0 = off (one-shot via `telemetry push` CLI still works). Legacy
+# interval_secs stays effective when this key is unset/0.
+# full_db_interval_secs = 86400
 # Event-batch endpoint — default: <base_url>/api/telemetry when unset.
 # events_endpoint = "https://telemetry.example.com/api/telemetry"
 

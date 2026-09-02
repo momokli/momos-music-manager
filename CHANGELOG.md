@@ -8,6 +8,18 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **Full-DB-Snapshot-Option (periodischer kompletter DB-Push)**: explizite,
+  dokumentierte Option, die die KOMPLETTE DB (konsistenter `VACUUM INTO`-
+  Snapshot + redacted Meta: Logs/Tasks/Metriken) periodisch an den Collector
+  sendet — neue Config-Key `[telemetry] full_db_interval_secs`
+  (`MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS`), Default `0` = AUS. Gating:
+  `telemetry.enabled=true` + Intervall > 0 (wie bisher); es wird die
+  bestehende Snapshot-Infrastruktur wiederverwendet (`PUT
+  /api/telemetry/{instance}/db/{ts}` mit Bearer-Auth, kein Neubau).
+  Legacy-Key `interval_secs` (Analytics-Ära) bleibt als Alias voll
+  wirksam — explizite Option gewinnt, kein Verhaltenswechsel für
+  Bestands-Configs. Getriggert bleibt der One-Shot-Push über die CLI
+  (`telemetry push`). Logging nennt jetzt die Quelle des Intervalls.
 - **Event-Telemetrie (v1)**: strukturierte Core-Events (Tasks, Scans,
   Downloads, App-Updates, Fehler) als HTTPS-Batches an einen Collector —
   ergänzend zum bestehenden Snapshot-Push. Client: stabile persistierte
