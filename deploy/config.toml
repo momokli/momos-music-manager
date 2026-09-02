@@ -38,3 +38,22 @@ port = 3000
 # staging feeds — the mismatch guard reports a source that serves the other
 # channel than selected.
 # base_url = "https://github.com/momokli/momos-music-manager/releases/download/latest-main"
+
+# Telemetry (event push) — OFF by default; enabling changes nothing for
+# existing installs until events_endpoint + token are configured too.
+# [telemetry]
+# enabled = true
+# Snapshot base + token (existing snapshot telemetry, if used).
+# base_url = "https://telemetry.example.com"
+# token = "secret-collector-token"
+# Event-batch endpoint — default: <base_url>/api/telemetry when unset.
+# events_endpoint = "https://telemetry.example.com/api/telemetry"
+
+# Telemetry receiver (collector side, `telemetry receive`) — event ingest.
+# [telemetry_receiver]
+# bind = "127.0.0.1:8330"
+# base_dir = "~/.local/share/momos-music-manager/analytics"
+# token = "secret-collector-token"
+# Event telemetry.db (default: <base_dir>/telemetry.db) + retention in days.
+# db_path = "~/.local/share/momos-music-manager/analytics/telemetry.db"
+# retention_days = 30
