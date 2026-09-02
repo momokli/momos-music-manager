@@ -25,3 +25,16 @@ traktor_import_enabled = false
 host = "0.0.0.0"
 port = 3000
 # public_url = "http://lan:3000"
+
+[autoupdate]
+# Update channel: "release" (stable semver releases) | "rolling" (dev builds
+# of main). Default = channel of the running build. When set here, the
+# Settings-page dropdown is disabled ("pinned by config.toml").
+# channel = "release"
+# Auto-update toggle (default true). When set here, the Settings-page toggle
+# is disabled.
+# enabled = true
+# Override the channel's default update source. Only needed for mirrors /
+# staging feeds — the mismatch guard reports a source that serves the other
+# channel than selected.
+# base_url = "https://github.com/momokli/momos-music-manager/releases/download/latest-main"
