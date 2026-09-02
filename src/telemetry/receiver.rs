@@ -31,12 +31,30 @@ pub const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3
 
 /// Shared state for the receiver router.
 pub struct ReceiverState {
-    base_dir: PathBuf,
-    token: Option<String>,
+    pub base_dir: PathBuf,
+    pub token: Option<String>,
     /// Event telemetry.db pool (None → event ingest returns 503).
-    db: Option<SqlitePool>,
+    pub db: Option<SqlitePool>,
     /// Retention for ingested events, in days.
-    retention_days: i64,
+    pub retention_days: i64,
+}
+
+impl ReceiverState {
+    /// Build a receiver state. `db` may be None (dev mode without event
+    /// ingest) — `serve()` always opens one via [`init_telemetry_db`].
+    pub fn new(
+        base_dir: PathBuf,
+        token: Option<String>,
+        db: Option<SqlitePool>,
+        retention_days: i64,
+    ) -> Self {
+        Self {
+            base_dir,
+            token,
+            db,
+            retention_days,
+        }
+    }
 }
 
 /// Run the receiver server (blocks until shutdown).
@@ -52,12 +70,12 @@ pub async fn serve(config: ServiceCredentials) -> Result<()> {
     let db_path = PathBuf::from(&config.telemetry_receiver_db_path);
     let pool = init_telemetry_db(&db_path).await?;
 
-    let state = Arc::new(ReceiverState {
+    let state = Arc::new(ReceiverState::new(
         base_dir,
-        token: config.telemetry_receiver_token.clone(),
-        db: Some(pool),
-        retention_days: config.telemetry_receiver_retention_days,
-    });
+        config.telemetry_receiver_token.clone(),
+        Some(pool),
+        config.telemetry_receiver_retention_days,
+    ));
 
     let bind = config.telemetry_receiver_bind.clone();
     let app = build_router(state.clone());

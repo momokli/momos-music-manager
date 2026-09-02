@@ -40,6 +40,14 @@ pub struct EventEmitter {
 }
 
 impl EventEmitter {
+    /// Create an emitter over a running pipeline with the given client env.
+    pub fn new(env: PipelineEnv, pipeline: TelemetryPipeline) -> Self {
+        Self {
+            env: Arc::new(env),
+            pipeline: Arc::new(pipeline),
+        }
+    }
+
     /// Enqueue a fully-built event (envelope is stamped here). Never panics.
     pub fn emit(&self, event: TelemetryEvent) -> bool {
         let stamped = event.with_envelope(&self.env.client_id, &self.env.app_version, &self.env.os);

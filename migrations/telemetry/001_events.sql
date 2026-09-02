@@ -85,33 +85,30 @@ WHERE type LIKE 'download.%'
 GROUP BY client_id, source, event_type, day;
 
 -- Scan duration trend per client per day: avg + p95 of payload.duration_ms
--- (scan.completed events). p95 via sorted window offset.
+-- (scan.completed events). p95 via row_number window (SQLite has no
+-- percentile_disc).
 CREATE VIEW v_scan_duration_trend AS
 SELECT
-    e.client_id,
-    date(e.ts, 'unixepoch') AS day,
+    client_id,
+    day,
     COUNT(*) AS scans,
-    ROUND(AVG(CAST(json_extract(e.payload, '$.duration_ms') AS INTEGER)), 0)
-        AS avg_duration_ms,
-    (
-        SELECT CAST(json_extract(d.payload, '$.duration_ms') AS INTEGER)
-        FROM events d
-        WHERE d.type = 'scan.completed'
-          AND d.client_id = e.client_id
-          AND date(d.ts, 'unixepoch') = date(e.ts, 'unixepoch')
-        ORDER BY CAST(json_extract(d.payload, '$.duration_ms') AS INTEGER) ASC
-        LIMIT 1
-        OFFSET MAX(
-            (SELECT COUNT(*) FROM events c
-              WHERE c.type = 'scan.completed'
-                AND c.client_id = e.client_id
-                AND date(c.ts, 'unixepoch') = date(e.ts, 'unixepoch')) * 95 / 100 - 1,
-            0
-        )
-    ) AS p95_duration_ms
-FROM events e
-WHERE e.type = 'scan.completed'
-GROUP BY e.client_id, date(e.ts, 'unixepoch');
+    CAST(ROUND(AVG(duration_ms), 0) AS INTEGER) AS avg_duration_ms,
+    MAX(CASE WHEN rn = p95_rn THEN duration_ms END) AS p95_duration_ms
+FROM (
+    SELECT
+        client_id,
+        date(ts, 'unixepoch') AS day,
+        CAST(json_extract(payload, '$.duration_ms') AS INTEGER) AS duration_ms,
+        ROW_NUMBER() OVER (
+            PARTITION BY client_id, date(ts, 'unixepoch')
+            ORDER BY CAST(json_extract(payload, '$.duration_ms') AS INTEGER)
+        ) AS rn,
+        MAX(1, CAST((COUNT(*) OVER (PARTITION BY client_id, date(ts, 'unixepoch'))) * 95 AS INTEGER) / 100 + 1)
+            AS p95_rn
+    FROM events
+    WHERE type = 'scan.completed'
+)
+GROUP BY client_id, day;
 
 -- Current app version per client (refreshed on every ingest).
 CREATE VIEW v_client_versions AS
