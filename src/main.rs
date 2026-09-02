@@ -705,6 +705,18 @@ async fn serve(
         );
     }
 
+    // Event telemetry pipeline: ring buffer + JSONL spool + async flusher.
+    // All defaults off — only starts when telemetry.enabled AND an
+    // events_endpoint are configured. Emitters call telemetry::emit_event
+    // (no-op while the pipeline is not running).
+    if telemetry_enabled {
+        match momos_music_manager::telemetry::emit::start_from_config(&state.config) {
+            Ok(true) => info!("Telemetry event pipeline started"),
+            Ok(false) => info!("Telemetry event pipeline not started (no endpoint configured)"),
+            Err(e) => tracing::error!("Telemetry event pipeline start failed: {e}"),
+        }
+    }
+
     // Build the application with routes.
     let app = momos_music_manager::build_router(state.clone());
 

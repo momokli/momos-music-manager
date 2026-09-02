@@ -1,9 +1,13 @@
 //! Telemetry: push consistent DB snapshots + metadata to a central collector over HTTPS.
 
+pub mod buffer;
 pub mod client_id;
+pub mod emit;
 pub mod events;
+pub mod flusher;
 pub mod metrics;
 pub mod receiver;
+pub mod spool;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
