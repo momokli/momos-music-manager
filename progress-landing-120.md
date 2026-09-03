@@ -14,4 +14,4 @@ Workflow-Fix deploy-pages@v4 → @v5.
   - Tag-/Page-Links (v1.2.0, latest-main, releases, RELEASE-ROADMAP) HTTP 200
   - Alle 8 lokal referenzierten Bilder vorhanden (6 Galerie + 2 Logo)
   - HTML-Tag-Balance ok, YAML parst
-- [ ] Stage 6: Commit, Push, PR
+- [x] Stage 6: Commit, Push, PR — https://github.com/momokli/momos-music-manager/pull/22
