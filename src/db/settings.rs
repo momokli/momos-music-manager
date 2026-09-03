@@ -32,6 +32,15 @@ pub const KEY_AUTOUPDATE_INTERVAL_SECS: &str = "autoupdate.interval_secs";
 /// `autoupdate::update_auto::AutoApplyState`).
 pub const KEY_AUTOUPDATE_AUTO_APPLY_STATE: &str = "autoupdate.auto_apply_state";
 
+/// `settings`-KV keys of the telemetry push status (namespace
+/// `telemetry.`): last one-shot push outcome, recorded by the CLI push, the
+/// periodic loop and the Settings "Push now" button.
+pub const KEY_TELEMETRY_LAST_PUSH_AT: &str = "telemetry.last_push_at";
+/// `"ok"` or `"error"` — outcome of the last one-shot telemetry push.
+pub const KEY_TELEMETRY_LAST_PUSH_STATUS: &str = "telemetry.last_push_status";
+/// Human-readable error of the last failed push (absent on success).
+pub const KEY_TELEMETRY_LAST_PUSH_ERROR: &str = "telemetry.last_push_error";
+
 /// Read a setting; `Ok(None)` when the key does not exist.
 pub async fn get_setting(
     pool: &Pool<Sqlite>,

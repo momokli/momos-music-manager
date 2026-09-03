@@ -408,6 +408,28 @@ async fn serve(
     let config = ServiceCredentials::load();
     let db = create_db_pool().await?;
 
+    // CLI access for macOS app installs: ensure the `momos-music-manager`
+    // symlink in a PATH directory (first app start after the user dragged
+    // the bundle into /Applications). The link points at the stable bundle
+    // path, so in-place updates keep it valid; the DMG self-install path
+    // re-ensures it too (autoupdate::verify). Non-fatal: a bare-binary dev
+    // build or a missing writable dir only logs.
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = momos_music_manager::autoupdate::macos::running_app_bundle() {
+        match momos_music_manager::cli_link::ensure_for_bundle(&bundle) {
+            Ok(info) => info!(
+                "CLI link {} → {} ({})",
+                info.link_path.display(),
+                info.target_path.display(),
+                if info.created { "created" } else { "up to date" }
+            ),
+            Err(e) => tracing::warn!(
+                "CLI link not installed (bundle {}): {e}",
+                bundle.display()
+            ),
+        }
+    }
+
     // Ensure task_history table exists (idempotent — safe on every startup)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS task_history (

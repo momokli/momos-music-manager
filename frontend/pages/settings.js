@@ -91,10 +91,19 @@ export async function init(container, signal) {
       <h3><i class="fas fa-rotate"></i> Updates</h3>
       <div id="settings-updates-content">${renderLoading("Loading update status...")}</div>
     </div>
+    <div class="card" id="settings-telemetry-card">
+      <h3><i class="fas fa-tower-broadcast"></i> Telemetry</h3>
+      <div id="settings-telemetry-content">${renderLoading("Loading telemetry settings...")}</div>
+    </div>
+    <div class="card" id="settings-cli-card">
+      <h3><i class="fas fa-terminal"></i> CLI access</h3>
+      <div id="settings-cli-content">${renderLoading("Loading CLI state...")}</div>
+    </div>
   `;
 
-  await loadStatus(container);
+  await Promise.all([loadStatus(container), loadTelemetryStatus(container)]);
   wireEvents(container);
+  wireTelemetryEvents(container);
 }
 
 /* ------------------------------------------------------------------ */
@@ -539,3 +548,423 @@ function wireEvents(container) {
     }
   });
 }
+
+/* ------------------------------------------------------------------ */
+/*  Telemetry settings (client push)                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Telemetry card — Settings-page surface of the telemetry client:
+ * - effective values + sources (Env > TOML > Defaults) for enabled /
+ *   base_url / token / instance / full_db_interval_secs
+ * - save persists into `[telemetry]` of config.toml (fields pinned by an
+ *   env var are disabled; config.toml values are editable)
+ * - "Push now" runs the same one-shot push as the CLI (`telemetry push`)
+ *   and shows success/error + the timestamp of the last successful push
+ * - CLI-access card: state of the `momos-music-manager` symlink
+ *
+ * Background loops (periodic push, event pipeline) pick changes up after
+ * the next restart; the status + Push now always use the current file state.
+ */
+
+let telemetryState = {
+  status: null,
+  saving: false,
+  pushing: false,
+  inlineHtml: null,
+  dirty: {},
+};
+
+const TELEMETRY_FIELDS = [
+  { key: "enabled", envVar: "MOMOS_TELEMETRY_ENABLED", tomlKey: "[telemetry] enabled", control: "toggle" },
+  { key: "baseUrl", envVar: "MOMOS_TELEMETRY_BASE_URL", tomlKey: "[telemetry] base_url", control: "field" },
+  { key: "token", envVar: "MOMOS_TELEMETRY_TOKEN", tomlKey: "[telemetry] token", control: "field" },
+  { key: "instance", envVar: "MOMOS_TELEMETRY_INSTANCE", tomlKey: "[telemetry] instance", control: "field" },
+  { key: "fullDbIntervalSecs", envVar: "MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS", tomlKey: "[telemetry] full_db_interval_secs", control: "field" },
+];
+
+function telemetrySourceOf(status, key) {
+  const map = {
+    enabled: "enabledSource",
+    baseUrl: "baseUrlSource",
+    token: "tokenSource",
+    instance: "instanceSource",
+    fullDbIntervalSecs: "fullDbIntervalSource",
+  };
+  return status[map[key]] || "default";
+}
+
+function telemetryPinHint(key) {
+  const f = TELEMETRY_FIELDS.find((x) => x.key === key);
+  return `Pinned by the environment variable <code>${f.envVar}</code> — change it there to edit this ${f.control}.`;
+}
+
+function telemetryTomlHint(key) {
+  const f = TELEMETRY_FIELDS.find((x) => x.key === key);
+  return `Set in <code>config.toml</code> (<code>${f.tomlKey}</code>) — editable here; the save writes it back.`;
+}
+
+function telemetryBadge(status) {
+  if (status.enabled) {
+    return '<span class="badge" style="background:rgba(34,197,94,0.15);color:var(--green)">Enabled</span>';
+  }
+  return '<span class="badge" style="background:rgba(100,116,139,0.15);color:var(--text-muted)">Disabled (default)</span>';
+}
+
+function telemetryPeriodicText(status) {
+  if (!status.enabled) {
+    return "Periodic full-DB push and event collection are off — the push button below still works after enabling.";
+  }
+  if (status.periodicPushActive) {
+    return `Full-DB snapshot is pushed automatically every ${status.fullDbIntervalSecs} s (event batches are sent continuously). Changes apply after the next restart.`;
+  }
+  return "Enabled — but no periodic full-DB push interval set (0). Events are collected; use \"Push now\" for a snapshot push.";
+}
+
+function formatLastPush(status) {
+  if (!status.lastPushAt) return "never";
+  const d = new Date(status.lastPushAt * 1000);
+  return d.toLocaleString();
+}
+
+function renderTelemetryInline(html) {
+  telemetryState.inlineHtml = html;
+  const el = _container?.querySelector("#settings-telemetry-inline");
+  if (el) el.innerHTML = html;
+}
+
+function renderTelemetry(container) {
+  const el = container.querySelector("#settings-telemetry-content");
+  if (!el) return;
+  const s = telemetryState.status;
+  if (!s) return;
+
+  const pinned = (key) => telemetrySourceOf(s, key) === "env";
+  const sourceText = (key) => {
+    const src = telemetrySourceOf(s, key);
+    if (src === "env") return telemetryPinHint(key);
+    if (src === "toml") return telemetryTomlHint(key);
+    return "Built-in default";
+  };
+  const editable = (key) => !pinned(key);
+
+  const valueAttr = (v) => escapeHtml(v ?? "");
+  const hintFor = (key) =>
+    `<div class="help-text" style="margin-top:0.25rem">${sourceText(key)}</div>`;
+
+  el.innerHTML = `
+    <div class="settings-update-row">
+      <div class="settings-update-label">Status</div>
+      <div class="settings-update-value">
+        ${telemetryBadge(s)}
+        <span class="text-muted" style="font-size:0.8rem">
+          version ${escapeHtml(s.currentVersion)} · event endpoint: <code>${escapeHtml(s.eventsEndpoint || "not configured")}</code>
+        </span>
+        <div class="help-text" style="margin-top:0.25rem">${telemetryPeriodicText(s)}</div>
+      </div>
+    </div>
+    <div class="settings-update-row">
+      <div class="settings-update-label">Telemetry</div>
+      <div class="settings-update-value">
+        <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+          <span style="display:flex;gap:0.5rem;align-items:center">
+            <label class="switch">
+              <input type="checkbox" id="telemetry-enabled-toggle" ${s.enabled ? "checked" : ""} ${editable("enabled") ? "" : "disabled"}>
+              <span class="slider"></span>
+            </label>
+            <span class="text-muted">${s.enabled ? "Enabled" : "Disabled"}${s.enabledSource === "env" ? " (env)" : ""}</span>
+          </span>
+        </div>
+        ${hintFor("enabled")}
+      </div>
+    </div>
+    <div class="settings-update-row">
+      <div class="settings-update-label">Collector base URL</div>
+      <div class="settings-update-value">
+        <input type="text" id="telemetry-base-url" class="input" style="width:min(420px,100%)" placeholder="https://collector.example" value="${valueAttr(s.baseUrl)}" ${editable("baseUrl") ? "" : "disabled"}>
+        ${hintFor("baseUrl")}
+      </div>
+    </div>
+    <div class="settings-update-row">
+      <div class="settings-update-label">Token</div>
+      <div class="settings-update-value">
+        <input type="password" id="telemetry-token" class="input" style="width:min(420px,100%)" placeholder="Bearer token (leave empty to clear)" value="${valueAttr(s.token)}" ${editable("token") ? "" : "disabled"} autocomplete="off">
+        ${hintFor("token")}
+      </div>
+    </div>
+    <div class="settings-update-row">
+      <div class="settings-update-label">Instance name</div>
+      <div class="settings-update-value">
+        <input type="text" id="telemetry-instance" class="input" style="width:min(420px,100%)" placeholder="macbook" value="${valueAttr(s.instance)}" ${editable("instance") ? "" : "disabled"}>
+        ${hintFor("instance")}
+      </div>
+    </div>
+    <div class="settings-update-row">
+      <div class="settings-update-label">Full-DB push interval</div>
+      <div class="settings-update-value">
+        <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+          <input type="number" id="telemetry-interval" class="input" min="0" step="60" style="width:9rem" value="${valueAttr(s.fullDbIntervalSecs)}" ${editable("fullDbIntervalSecs") ? "" : "disabled"}>
+          <span class="text-muted" style="font-size:0.8rem">seconds — 0 = off (periodic)</span>
+        </div>
+        ${hintFor("fullDbIntervalSecs")}
+      </div>
+    </div>
+    <div class="settings-update-row">
+      <div class="settings-update-label">Last push</div>
+      <div class="settings-update-value">
+        ${formatLastPush(s)}
+        ${s.lastPushStatus === "error" ? ' <span class="text-muted">(failed)</span>' : ""}
+        ${s.lastPushStatus === "ok" ? ' <span style="color:var(--green)">✓</span>' : ""}
+        ${s.lastPushError ? `<div class="help-text" style="color:var(--red)">${escapeHtml(s.lastPushError)}</div>` : ""}
+      </div>
+    </div>
+    <div class="settings-update-actions" style="margin-top:1rem;display:flex;gap:0.75rem;align-items:center">
+      <button class="btn btn-primary" id="telemetry-save-btn" disabled>
+        <i class="fas ${telemetryState.saving ? "fa-spinner fa-spin" : "fa-floppy-disk"}"></i>
+        ${telemetryState.saving ? "Saving..." : "Save settings"}
+      </button>
+      <button class="btn" id="telemetry-push-btn" ${s.enabled && !telemetryState.pushing ? "" : "disabled"} title="${s.enabled ? "" : "Enable telemetry first"}">
+        <i class="fas ${telemetryState.pushing ? "fa-spinner fa-spin" : "fa-upload"}"></i>
+        ${telemetryState.pushing ? "Pushing..." : "Push now"}
+      </button>
+      <span id="settings-telemetry-inline" class="text-muted"></span>
+    </div>
+  `;
+
+  if (telemetryState.inlineHtml) {
+    const inline = el.querySelector("#settings-telemetry-inline");
+    if (inline) inline.innerHTML = telemetryState.inlineHtml;
+  }
+  updateTelemetrySaveButton();
+}
+
+function renderCliCard(container) {
+  const el = container.querySelector("#settings-cli-content");
+  if (!el) return;
+  const s = telemetryState.status;
+  if (!s) return;
+  const cli = s.cli;
+
+  if (!cli.supported) {
+    el.innerHTML = `<span class="text-muted">CLI symlinks are not supported on this platform (Windows).</span>`;
+    return;
+  }
+  if (cli.linkPath) {
+    const needsPathExport = cli.linkPath.includes("/.local/bin/");
+    el.innerHTML = `
+      <div class="settings-update-row">
+        <div class="settings-update-label">Command</div>
+        <div class="settings-update-value"><code>momos-music-manager --version</code> · <code>momos-music-manager telemetry push</code> · <code>momos-music-manager update check</code></div>
+      </div>
+      <div class="settings-update-row">
+        <div class="settings-update-label">Symlink</div>
+        <div class="settings-update-value">
+          <code>${escapeHtml(cli.linkPath)}</code>
+          <span class="text-muted" style="font-size:0.8rem">→ <code>${escapeHtml(cli.targetPath)}</code></span>
+        </div>
+      </div>
+      <div class="help-text" style="margin-top:0.5rem">
+        <i class="fas fa-circle-info"></i>
+        The app keeps this symlink up to date (first launch + after every self-update).
+        ${needsPathExport ? `
+        <code>~/.local/bin</code> is not on the default macOS PATH — add it to <code>~/.zprofile</code>:
+        <code style="display:inline-block;margin-top:0.25rem">export PATH="$HOME/.local/bin:$PATH"</code>` : ""}
+      </div>
+    `;
+  } else if (cli.reason) {
+    el.innerHTML = `<span style="color:var(--yellow)"><i class="fas fa-triangle-exclamation"></i> CLI not available: ${escapeHtml(cli.reason)}</span>`;
+  } else {
+    el.innerHTML = `<span class="text-muted"><i class="fas fa-circle-info"></i> Running the bare binary (dev build / Linux) — the CLI is the binary itself, no symlink needed.</span>`;
+  }
+}
+
+function updateTelemetrySaveButton() {
+  const btn = _container?.querySelector("#telemetry-save-btn");
+  if (!btn) return;
+  const hasDirty = Object.values(telemetryState.dirty).some(Boolean);
+  btn.disabled = !hasDirty || telemetryState.saving;
+}
+
+function markDirty(key, dirty) {
+  telemetryState.dirty[key] = dirty;
+  updateTelemetrySaveButton();
+}
+
+async function loadTelemetryStatus(container) {
+  try {
+    const resp = await fetchJSON("/api/telemetry-settings/status", { signal: _signal });
+    telemetryState.status = resp.data;
+    telemetryState.dirty = {};
+    telemetryState.inlineHtml = null;
+    renderTelemetry(container);
+    renderCliCard(container);
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    const el = container.querySelector("#settings-telemetry-content");
+    if (el) {
+      el.innerHTML = renderErrorBlock({ title: "Failed to load telemetry settings", detail: err.message });
+    }
+    const cli = container.querySelector("#settings-cli-content");
+    if (cli) cli.innerHTML = "";
+  }
+}
+
+async function saveTelemetrySettings(container) {
+  const s = telemetryState.status;
+  if (!s) return;
+  const pinned = (key) => telemetrySourceOf(s, key) === "env";
+  const body = {};
+
+  if (telemetryState.dirty.enabled && !pinned("enabled")) {
+    body.enabled = document.querySelector("#telemetry-enabled-toggle")?.checked ?? s.enabled;
+  }
+  const readText = (id) => {
+    const el = document.querySelector(id);
+    return el ? el.value : null;
+  };
+  if (telemetryState.dirty.baseUrl && !pinned("baseUrl")) {
+    body.baseUrl = readText("#telemetry-base-url") ?? s.baseUrl ?? "";
+  }
+  if (telemetryState.dirty.token && !pinned("token")) {
+    body.token = readText("#telemetry-token") ?? s.token ?? "";
+  }
+  if (telemetryState.dirty.instance && !pinned("instance")) {
+    body.instance = readText("#telemetry-instance") ?? s.instance ?? "";
+  }
+  if (telemetryState.dirty.fullDbIntervalSecs && !pinned("fullDbIntervalSecs")) {
+    const raw = readText("#telemetry-interval");
+    const secs = raw === null || raw === "" ? null : Number(raw);
+    if (secs !== null && Number.isInteger(secs) && secs >= 0) {
+      body.fullDbIntervalSecs = secs;
+    } else {
+      showToast("Full-DB interval must be a whole number ≥ 0", "error");
+      return;
+    }
+  }
+  if (Object.keys(body).length === 0) return;
+
+  telemetryState.saving = true;
+  updateTelemetrySaveButton();
+  renderTelemetryInline('<i class="fas fa-spinner fa-spin"></i> Saving to config.toml...');
+  try {
+    await fetchJSON("/api/telemetry-settings/settings", {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal: _signal,
+    });
+    await loadTelemetryStatus(container);
+    showToast("Telemetry settings saved to config.toml", "success");
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    renderTelemetryInline(`<span style="color:var(--red)">${escapeHtml(err.message)}</span>`);
+    showToast(`Failed to save telemetry settings: ${err.message}`, "error");
+  } finally {
+    telemetryState.saving = false;
+    renderTelemetry(container);
+    updateTelemetrySaveButton();
+  }
+}
+
+async function pushTelemetryNow(container) {
+  telemetryState.pushing = true;
+  renderTelemetry(container);
+  renderTelemetryInline('<i class="fas fa-spinner fa-spin"></i> Pushing snapshot + metadata...');
+  try {
+    const resp = await fetchJSON("/api/telemetry-settings/push", {
+      method: "POST",
+      signal: _signal,
+    });
+    await loadTelemetryStatus(container); // refreshes last-push state
+    if (resp.data.ok) {
+      renderTelemetryInline('<span style="color:var(--green)">Push succeeded ✓</span>');
+    } else {
+      renderTelemetryInline(`<span style="color:var(--red)">Push failed: ${escapeHtml(resp.data.message)}</span>`);
+    }
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    renderTelemetry(container);
+    renderTelemetryInline(`<span style="color:var(--red)">${escapeHtml(err.message)}</span>`);
+  } finally {
+    telemetryState.pushing = false;
+    renderTelemetry(container);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Telemetry events                                                   */
+/* ------------------------------------------------------------------ */
+
+function wireTelemetryEvents(container) {
+  // Dirty tracking on the editable controls (Save only sends changed
+  // fields; pinned controls are disabled and never reach this code).
+  const onValueChange = (key, current) => {
+    const s = telemetryState.status;
+    if (!s) return;
+    const raw = current();
+    const base =
+      key === "fullDbIntervalSecs"
+        ? String(s.fullDbIntervalSecs ?? 0)
+        : key === "enabled"
+          ? s.enabled
+          : s[key] ?? "";
+    telemetryState.dirty[key] = raw !== base;
+    updateTelemetrySaveButton();
+  };
+
+  container.addEventListener("change", (e) => {
+    const toggle = e.target.closest("#telemetry-enabled-toggle");
+    if (toggle) {
+      onValueChange("enabled", () => toggle.checked);
+      return;
+    }
+    const baseUrl = e.target.closest("#telemetry-base-url");
+    if (baseUrl) {
+      onValueChange("baseUrl", () => baseUrl.value);
+      return;
+    }
+    const token = e.target.closest("#telemetry-token");
+    if (token) {
+      onValueChange("token", () => token.value);
+      return;
+    }
+    const instance = e.target.closest("#telemetry-instance");
+    if (instance) {
+      onValueChange("instance", () => instance.value);
+      return;
+    }
+    const interval = e.target.closest("#telemetry-interval");
+    if (interval) {
+      onValueChange("fullDbIntervalSecs", () => interval.value);
+      return;
+    }
+  });
+  // Text inputs: track typing immediately (change only fires on blur).
+  container.addEventListener("input", (e) => {
+    for (const [id, key] of [
+      ["#telemetry-base-url", "baseUrl"],
+      ["#telemetry-token", "token"],
+      ["#telemetry-instance", "instance"],
+      ["#telemetry-interval", "fullDbIntervalSecs"],
+    ]) {
+      const field = e.target.closest(id);
+      if (field) {
+        onValueChange(key, () => field.value);
+        return;
+      }
+    }
+  });
+
+  container.addEventListener("click", async (e) => {
+    const saveBtn = e.target.closest("#telemetry-save-btn");
+    if (saveBtn) {
+      await saveTelemetrySettings(container);
+      return;
+    }
+    const pushBtn = e.target.closest("#telemetry-push-btn");
+    if (pushBtn) {
+      await pushTelemetryNow(container);
+      return;
+    }
+  });
+}
+

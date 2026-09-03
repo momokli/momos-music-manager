@@ -159,6 +159,45 @@ Logs: `~/Library/Logs/momos-music-manager/`
 Config: `~/.config/momos-music-manager/config.toml`
 Database: `~/.local/share/momos-music-manager/library.db`
 
+#### CLI access (Terminal)
+
+An `.app` install has no CLI on `PATH` — the binary lives inside the bundle at
+`…/Momo's Music Manager.app/Contents/MacOS/momos-music-manager`. The app
+**automatically keeps a `momos-music-manager` symlink in a PATH directory** so
+the terminal commands work out of the box:
+
+```bash
+momos-music-manager --version
+momos-music-manager telemetry push
+momos-music-manager update check
+momos-music-manager serve --host 0.0.0.0 --port 3000 --no-browser
+```
+
+The symlink is created at the **first app launch** (after dragging the app into
+`/Applications`) and refreshed after every **self-update** (the DMG install path
+re-ensures it). It points at the stable bundle path, so in-place updates never
+break it. Where it goes — the first **writable** directory of:
+
+1. `/usr/local/bin` — on the default macOS/Linux `PATH` (dev machines where it
+   is user-writable get the CLI with zero setup)
+2. `/opt/homebrew/bin` — Apple-Silicon Homebrew prefix (when present)
+3. `~/.local/bin` — per-user XDG dir (created on demand, no admin rights)
+
+> **`~/.local/bin` is not on the default macOS `PATH`.** When the app had to
+> fall back to it, add one line to `~/.zprofile` (the Settings page → *CLI
+> access* card shows the exact command):
+>
+> ```bash
+> export PATH="$HOME/.local/bin:$PATH"
+> ```
+
+No writable candidate at all? The app logs the reason at startup and the
+Settings page shows it — you can always link manually, e.g.:
+
+```bash
+ln -sf "/Applications/Momo's Music Manager.app/Contents/MacOS/momos-music-manager" /usr/local/bin/momos-music-manager
+```
+
 ### Linux (tar.gz)
 
 Grab `momos-music-manager-<version>-linux-x64.tar.gz` (or `-linux-arm64` for

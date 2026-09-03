@@ -19,6 +19,7 @@ pub mod services;
 pub mod spotify_sync;
 pub mod storage;
 pub mod tags;
+pub mod telemetry_settings;
 pub mod tracks;
 pub mod traktor;
 pub mod types;
@@ -45,4 +46,5 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(dynamic_bundles::router())
         .merge(files::router())
         .merge(update::router())
+        .merge(telemetry_settings::router())
 }

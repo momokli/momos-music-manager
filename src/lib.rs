@@ -25,6 +25,7 @@ pub mod audio_extensions;
 pub mod auto_backup;
 pub mod autoupdate;
 pub mod backup;
+pub mod cli_link;
 pub mod comment;
 pub mod config;
 pub mod db;

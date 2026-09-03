@@ -8,6 +8,49 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **Telemetry-Settings-Seite (GUI) + Version 1.3.0**: neuer Bereich
+  „Telemetry“ in den Settings — konfigurierbar ohne Config-Graben:
+  `enabled` (Toggle, Default **OFF**), `base_url`, `token`, `instance` und
+  `full_db_interval_secs`. Gespeichert wird direkt in die bestehende
+  `config.toml` (`[telemetry]`-Sektion, zeilenerhaltend — Kommentare und
+  fremde Sektionen bleiben unangetastet; neue Datei wird bei Bedarf
+  angelegt); Priorität **Env > TOML > Defaults** bleibt vollständig
+  erhalten — env-gebundene Felder sind in der UI gesperrt (409 bei
+  Schreibversuch), TOML-Werte editierbar. Beim Schreiben von
+  `full_db_interval_secs` wird der Legacy-Key `interval_secs` automatisch
+  aus der Sektion entfernt (der explizite Key ist autoritativ, „0 = aus“
+  muss auch aus sein). Dazu ein **„Push now“-Button**: löst denselben
+  One-Shot-Push wie die CLI (`telemetry push` / `push_once`) aus und zeigt
+  Erfolg/Fehler inline plus Zeitpunkt des letzten (erfolgreichen) Push
+  (persistiert in der `settings`-KV, Keys `telemetry.last_push_*`, gesetzt
+  von Button, CLI und periodischem Loop). Neue Endpunkte:
+  `GET/POST /api/telemetry-settings/status|settings`,
+  `POST /api/telemetry-settings/push`. Die Hintergrund-Loops (periodischer
+  Push, Event-Pipeline) lesen ihre Werte beim Start — Änderungen wirken
+  nach dem nächsten Neustart, Status und Push-Button nutzen immer den
+  aktuellen Datei-/Env-Stand.
+- **CLI-Zugriff bei macOS-App-Installation**: Die App wird als `.app`
+  (DMG nach `/Applications`) installiert und hat damit keinen CLI-Zugriff.
+  Beim **ersten App-Start** (und nach jedem erfolgreichen
+  **DMG-Self-Install** des Autoupdaters) legt die App jetzt automatisch
+  einen Symlink `momos-music-manager` in ein PATH-Verzeichnis an — Ziel
+  ist das Binary im Bundle (`…/Momo's Music Manager.app/Contents/MacOS/…`),
+  der stabile Bundle-Pfad überlebt In-Place-Updates. Auswahl: erstes
+  schreibbares Verzeichnis von `/usr/local/bin` (Default-PATH),
+  `/opt/homebrew/bin` (Apple-Silicon-Homebrew) bzw. `~/.local/bin`
+  (per-User-XDG, wird angelegt; nicht auf dem macOS-Default-PATH — Hinweis
+  in der Settings-UI „CLI access“ + README). Danach funktionieren
+  `momos-music-manager --version` und `momos-music-manager telemetry push`
+  aus dem Terminal. Neues Modul `cli_link` (idempotent, repariert
+  veraltete Links, nie destruktiv) + CLI-Status in den Settings
+  (`GET …/status` → `cli`). Kein Symlink für Dev-/Linux-Binary-Builds.
+- **Minor-Bump 1.2.1 → 1.3.0**: `Cargo.toml` + `Cargo.lock` (Basis der
+  Dev-Versionsformel `<Cargo>-dev+<sha8>`; Release-Version kommt beim
+  Tagen aus dem Git-Tag, die Auto-Update-Logik liest die Version
+  ausschließlich als eingebettetes `env!("MMM_VERSION")` — kein weiterer
+  Versionsort nötig, `site/index.html` wird erst beim Release-Tag
+  angehoben).
+
 - **Full-DB-Snapshot-Option (periodischer kompletter DB-Push)**: explizite,
   dokumentierte Option, die die KOMPLETTE DB (konsistenter `VACUUM INTO`-
   Snapshot + redacted Meta: Logs/Tasks/Metriken) periodisch an den Collector
