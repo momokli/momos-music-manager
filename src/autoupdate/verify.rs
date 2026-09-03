@@ -27,10 +27,13 @@ use super::{keys, platform};
 pub const DEFAULT_BASE_URL: &str =
     "https://github.com/momokli/momos-music-manager/releases/download/latest-main";
 
-/// Default channel for release builds: GitHub redirects `releases/latest` to
-/// the newest non-prerelease release (reqwest follows redirects by default).
+/// Default channel for release builds. GitHub only serves release assets
+/// under `releases/latest/download/<asset>` (redirected to the newest
+/// non-prerelease release — reqwest follows redirects by default) or
+/// `releases/download/<tag>/<asset>`; a bare `releases/latest/<asset>` path
+/// is not a valid GitHub URL and 404s (v1.2.0 regression).
 pub const DEFAULT_RELEASE_BASE_URL: &str =
-    "https://github.com/momokli/momos-music-manager/releases/latest";
+    "https://github.com/momokli/momos-music-manager/releases/latest/download";
 
 /// Wire name of the rolling update channel (dev builds of `main`).
 pub const UPDATE_CHANNEL_ROLLING: &str = "rolling";
@@ -51,7 +54,7 @@ pub const UPDATE_CHANNEL_RELEASE: &str = "release";
 pub enum UpdateChannel {
     /// Rolling dev channel — `latest-main` (dev builds of `main`).
     Rolling,
-    /// Stable channel — newest semver release (`releases/latest`).
+    /// Stable channel — newest semver release (`releases/latest/download`).
     Release,
 }
 
@@ -257,7 +260,7 @@ impl UpdateSettings {
 
         // The channel decides the default base URL: rolling tracks the
         // `latest-main` pre-release, release tracks the newest semver release
-        // (`releases/latest`). An explicit override
+        // (`releases/latest/download`). An explicit override
         // (MOMOS_AUTOUPDATE_BASE_URL / [autoupdate] base_url) still wins — any
         // value different from the built-in rolling default is respected; if
         // the override then serves the *other* channel, the mismatch guard
@@ -714,7 +717,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// Insert a signed manifest (+ optional artifact) into the mock fetcher.
+    /// Insert a signed manifest (+ optional artifact) into the mock fetcher
+    /// under the canonical rolling-test base ([`BASE`]).
     /// The artifact is served under its **versioned** name (the updater no
     /// longer downloads via the stable `-latest-` name).
     pub(crate) fn signed_fixture(
@@ -723,8 +727,22 @@ pub(crate) mod tests {
         version: &str,
         artifact_bytes: Option<Vec<u8>>,
     ) {
+        signed_fixture_at(files, BASE, manifest, version, artifact_bytes);
+    }
+
+    /// Insert a signed manifest (+ optional artifact) into the mock fetcher
+    /// under an explicit `base_url` (any feed layout — `latest/download` or
+    /// `download/<tag>`). The artifact is served under its **versioned**
+    /// name, matching the updater's download URL construction.
+    pub(crate) fn signed_fixture_at(
+        files: &mut HashMap<String, Vec<u8>>,
+        base: &str,
+        manifest: &str,
+        version: &str,
+        artifact_bytes: Option<Vec<u8>>,
+    ) {
         files.insert(
-            format!("{BASE}/SHA256SUMS"),
+            format!("{base}/SHA256SUMS"),
             manifest.as_bytes().to_vec(),
         );
         let sig = super::super::minisign::sign_prehashed(
@@ -733,12 +751,12 @@ pub(crate) mod tests {
             "timestamp:1\tfile:SHA256SUMS\thashed",
         );
         files.insert(
-            format!("{BASE}/SHA256SUMS.minisig"),
+            format!("{base}/SHA256SUMS.minisig"),
             sig.as_bytes().to_vec(),
         );
         if let Some(bytes) = artifact_bytes {
             files.insert(
-                format!("{BASE}/momos-music-manager-{version}-linux-x64.tar.gz"),
+                format!("{base}/momos-music-manager-{version}-linux-x64.tar.gz"),
                 bytes,
             );
         }
@@ -1237,5 +1255,81 @@ pub(crate) mod tests {
             apply(&settings, &fetcher).await.unwrap_err(),
             UpdateError::ChannelMismatch { .. }
         ));
+    }
+
+    // ── Release feed URL construction (hotfix: `releases/latest` 404) ──
+    //
+    // v1.2.0 built release-feed URLs as `…/releases/latest/<asset>`, which
+    // GitHub does not serve → HTTP 404 on every check/apply of a release
+    // build. Valid GitHub patterns are `releases/latest/download/<asset>`
+    // (redirected to the newest release) and, for an explicit tag,
+    // `releases/download/<tag>/<asset>`.
+
+    #[test]
+    fn release_default_base_url_uses_latest_download_pattern() {
+        // The base itself must already carry the `download` segment — asset
+        // URLs are built as `{base}/{asset}` in `fetch_update_info`.
+        assert_eq!(
+            DEFAULT_RELEASE_BASE_URL,
+            "https://github.com/momokli/momos-music-manager/releases/latest/download"
+        );
+        assert_eq!(
+            DEFAULT_BASE_URL,
+            "https://github.com/momokli/momos-music-manager/releases/download/latest-main"
+        );
+
+        // Signature, manifest and binary all resolve through the same feed.
+        assert_eq!(
+            format!("{DEFAULT_RELEASE_BASE_URL}/SHA256SUMS.minisig"),
+            "https://github.com/momokli/momos-music-manager/releases/latest/download/SHA256SUMS.minisig"
+        );
+        assert_eq!(
+            format!("{DEFAULT_RELEASE_BASE_URL}/SHA256SUMS"),
+            "https://github.com/momokli/momos-music-manager/releases/latest/download/SHA256SUMS"
+        );
+        assert_eq!(
+            format!("{DEFAULT_RELEASE_BASE_URL}/momos-music-manager-1.2.0-linux-x64.tar.gz"),
+            "https://github.com/momokli/momos-music-manager/releases/latest/download/momos-music-manager-1.2.0-linux-x64.tar.gz"
+        );
+    }
+
+    #[tokio::test]
+    async fn release_feed_check_fetches_sig_and_manifest_from_same_base() {
+        // End to end via `check`: fixtures are only served when the fetcher
+        // is asked for exactly `{base}/SHA256SUMS(.minisig)` — with the old
+        // broken `…/releases/latest/…` base this resolves to 404 (the v1.2.0
+        // bug), with either valid layout it must succeed and produce the
+        // artifact URL on the same base.
+        for base in [
+            // latest feed: every asset goes through the same `latest`
+            // redirect, so sig / manifest / binary come from one release.
+            "https://github.com/momokli/momos-music-manager/releases/latest/download",
+            // explicit tag: canonical `releases/download/<tag>` layout.
+            "https://github.com/momokli/momos-music-manager/releases/download/v1.2.0",
+        ] {
+            let mut files = HashMap::new();
+            signed_fixture_at(
+                &mut files,
+                base,
+                &sample_manifest("abc", "1.2.0"),
+                "1.2.0",
+                None,
+            );
+            let fetcher = MockFetcher::new(files);
+            let mut settings = test_settings("linux-x64", "tar.gz", "1.0.1");
+            settings.channel = UpdateChannel::Release;
+            settings.base_url = base.to_string();
+
+            match check(&settings, &fetcher).await.unwrap() {
+                UpdateStatus::UpdateAvailable(info) => {
+                    assert_eq!(info.version, "1.2.0");
+                    assert_eq!(
+                        info.url,
+                        format!("{base}/momos-music-manager-1.2.0-linux-x64.tar.gz")
+                    );
+                }
+                other => panic!("expected UpdateAvailable, got {other:?}"),
+            }
+        }
     }
 }
