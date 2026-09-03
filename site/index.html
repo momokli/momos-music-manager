@@ -86,6 +86,21 @@
                             <h3>Native macOS app</h3>
                             <p>Menu-bar app with a universal DMG. Starts on login, runs in the background.</p>
                         </div>
+                        <div class="feature-card">
+                            <div class="feature-icon ch">🔀</div>
+                            <h3>Update channels</h3>
+                            <p>Stay on the stable <code>release</code> or follow fresh <code>rolling</code> builds of <code>main</code> — switch in the settings, with a guard against accidental cross-channel changes.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon au">🔐</div>
+                            <h3>Auto-update with auto-apply</h3>
+                            <p>Optional signed auto-updates with a configurable auto-apply interval — Ed25519-verified downloads, atomic swap, automatic rollback if a new build fails to start.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon te">📡</div>
+                            <h3>Event telemetry, opt-in</h3>
+                            <p>Off by default: structured core events (tasks, scans, downloads, updates) leave as HTTPS batches to your own collector. Crash-safe on-device spool, no secrets.</p>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -94,7 +109,7 @@
             <section class="section section-alt" id="screenshots">
                 <div class="container">
                     <h2 class="section-title">Screenshots</h2>
-                    <p class="section-sub">The dashboard and library pages, straight from the running app.</p>
+                    <p class="section-sub">The dashboard, library and settings pages, straight from the running app.</p>
                     <div class="shot-grid">
                         <figure class="shot">
                             <a href="screenshots/dashboard.png" target="_blank"><img src="screenshots/dashboard.png" alt="Dashboard with library stats and service status" loading="lazy" /></a>
@@ -112,6 +127,14 @@
                             <a href="screenshots/tags.png" target="_blank"><img src="screenshots/tags.png" alt="Tag organization table" loading="lazy" /></a>
                             <figcaption>Tags: organization with categories</figcaption>
                         </figure>
+                        <figure class="shot">
+                            <a href="screenshots/settings-channel-overview.png" target="_blank"><img src="screenshots/settings-channel-overview.png" alt="Settings: auto-update with release/rolling channel selection" loading="lazy" /></a>
+                            <figcaption>Settings → Updates: auto-update with channel selection (release | rolling)</figcaption>
+                        </figure>
+                        <figure class="shot">
+                            <a href="screenshots/settings-autoapply-interval.png" target="_blank"><img src="screenshots/settings-autoapply-interval.png" alt="Settings: configurable auto-apply interval for updates" loading="lazy" /></a>
+                            <figcaption>Settings → Updates: auto-apply interval — verified updates install themselves</figcaption>
+                        </figure>
                     </div>
                 </div>
             </section>
@@ -121,7 +144,7 @@
                 <div class="container">
                     <h2 class="section-title">Download</h2>
                     <p class="section-sub">
-                        Rolling build of <code>main</code>, rebuilt on every push.
+                        Release <strong>v1.2.0</strong> (stable) or the rolling build of <code>main</code>, rebuilt on every push.
                     </p>
 
                     <div class="platform-grid">
@@ -133,12 +156,15 @@
                                     <p class="platform-arch">Universal · Apple Silicon + Intel</p>
                                 </div>
                             </div>
-                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/Momo-s-Music-Manager-latest.dmg">
+                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/v1.2.0/momos-music-manager-1.2.0-macos-universal.dmg">
                                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                                Momo-s-Music-Manager-latest.dmg
+                                v1.2.0 (stable)
+                            </a>
+                            <a class="btn btn-ghost btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/Momo-s-Music-Manager-latest.dmg">
+                                Rolling build of main
                             </a>
                             <p class="platform-meta">~30 MB · DMG installer</p>
-                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/Momo-s-Music-Manager-latest.dmg.sha256">SHA256 checksum</a></p>
+                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/v1.2.0/momos-music-manager-1.2.0-macos-universal.dmg.sha256">SHA256 (v1.2.0)</a> · <a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/Momo-s-Music-Manager-latest.dmg.sha256">SHA256 (rolling)</a></p>
                         </div>
 
                         <div class="platform-card">
@@ -149,12 +175,15 @@
                                     <p class="platform-arch">x64</p>
                                 </div>
                             </div>
-                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-windows-x64.zip">
+                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/v1.2.0/momos-music-manager-1.2.0-windows-x64.zip">
                                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                                momos-music-manager-latest-windows-x64.zip
+                                v1.2.0 (stable)
+                            </a>
+                            <a class="btn btn-ghost btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-windows-x64.zip">
+                                Rolling build of main
                             </a>
                             <p class="platform-meta">~15 MB · zip (no installer)</p>
-                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-windows-x64.zip.sha256">SHA256 checksum</a></p>
+                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/v1.2.0/momos-music-manager-1.2.0-windows-x64.zip.sha256">SHA256 (v1.2.0)</a> · <a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-windows-x64.zip.sha256">SHA256 (rolling)</a></p>
                         </div>
 
                         <div class="platform-card">
@@ -165,12 +194,15 @@
                                     <p class="platform-arch">ARM64</p>
                                 </div>
                             </div>
-                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-windows-arm64.zip">
+                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/v1.2.0/momos-music-manager-1.2.0-windows-arm64.zip">
                                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                                momos-music-manager-latest-windows-arm64.zip
+                                v1.2.0 (stable)
+                            </a>
+                            <a class="btn btn-ghost btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-windows-arm64.zip">
+                                Rolling build of main
                             </a>
                             <p class="platform-meta">~14 MB · zip (no installer)</p>
-                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-windows-arm64.zip.sha256">SHA256 checksum</a></p>
+                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/v1.2.0/momos-music-manager-1.2.0-windows-arm64.zip.sha256">SHA256 (v1.2.0)</a> · <a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-windows-arm64.zip.sha256">SHA256 (rolling)</a></p>
                         </div>
 
                         <div class="platform-card">
@@ -181,12 +213,15 @@
                                     <p class="platform-arch">x64</p>
                                 </div>
                             </div>
-                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-x64.tar.gz">
+                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/v1.2.0/momos-music-manager-1.2.0-linux-x64.tar.gz">
                                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                                momos-music-manager-latest-linux-x64.tar.gz
+                                v1.2.0 (stable)
+                            </a>
+                            <a class="btn btn-ghost btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-x64.tar.gz">
+                                Rolling build of main
                             </a>
                             <p class="platform-meta">~16 MB · portable tar.gz</p>
-                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-x64.tar.gz.sha256">SHA256 checksum</a></p>
+                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/v1.2.0/momos-music-manager-1.2.0-linux-x64.tar.gz.sha256">SHA256 (v1.2.0)</a> · <a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-x64.tar.gz.sha256">SHA256 (rolling)</a></p>
                         </div>
 
                         <div class="platform-card">
@@ -197,12 +232,15 @@
                                     <p class="platform-arch">ARM64</p>
                                 </div>
                             </div>
-                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-arm64.tar.gz">
+                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/v1.2.0/momos-music-manager-1.2.0-linux-arm64.tar.gz">
                                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                                momos-music-manager-latest-linux-arm64.tar.gz
+                                v1.2.0 (stable)
+                            </a>
+                            <a class="btn btn-ghost btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-arm64.tar.gz">
+                                Rolling build of main
                             </a>
                             <p class="platform-meta">~16 MB · portable tar.gz</p>
-                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-arm64.tar.gz.sha256">SHA256 checksum</a></p>
+                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/v1.2.0/momos-music-manager-1.2.0-linux-arm64.tar.gz.sha256">SHA256 (v1.2.0)</a> · <a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-arm64.tar.gz.sha256">SHA256 (rolling)</a></p>
                         </div>
                     </div>
 
@@ -241,8 +279,10 @@
                     </div>
 
                     <p class="download-alt download-alt-center">
-                        Prefer the release page?
-                        <a href="https://github.com/momokli/momos-music-manager/releases/tag/latest-main" target="_blank" rel="noopener">github.com/momokli/momos-music-manager/releases/tag/latest-main</a>,
+                        Prefer the GitHub release page?
+                        <a href="https://github.com/momokli/momos-music-manager/releases/tag/v1.2.0" target="_blank" rel="noopener">v1.2.0 (stable)</a>
+                        or
+                        <a href="https://github.com/momokli/momos-music-manager/releases/tag/latest-main" target="_blank" rel="noopener">latest-main (rolling)</a>,
                         or see all <a href="https://github.com/momokli/momos-music-manager/releases" target="_blank" rel="noopener">releases</a>.
                     </p>
                 </div>

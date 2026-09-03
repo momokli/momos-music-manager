@@ -276,6 +276,15 @@ code {
 .feature-icon.mac {
     background: rgba(148, 163, 184, 0.15);
 }
+.feature-icon.ch {
+    background: rgba(56, 189, 248, 0.15);
+}
+.feature-icon.au {
+    background: rgba(244, 63, 94, 0.15);
+}
+.feature-icon.te {
+    background: rgba(236, 72, 153, 0.15);
+}
 
 .feature-card h3 {
     font-size: 1.05rem;
