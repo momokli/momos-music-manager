@@ -68,7 +68,7 @@ Download-Logik der Landing Page).
 | Kanal | Basis-URL (Default) |
 |---|---|
 | `rolling` (Default von Dev-Builds) | `…/releases/download/latest-main` (`DEFAULT_BASE_URL`) |
-| `release` (Default von Release-Builds) | `https://github.com/momokli/momos-music-manager/releases/latest` (`DEFAULT_RELEASE_BASE_URL`; GitHub leitet auf das neueste Non-Prerelease-Release um) |
+| `release` (Default von Release-Builds) | `https://github.com/momokli/momos-music-manager/releases/latest/download` (`DEFAULT_RELEASE_BASE_URL`; GitHub leitet auf das neueste Non-Prerelease-Release um) |
 
 `MOMOS_AUTOUPDATE_BASE_URL` / `[autoupdate] base_url` überschreibt den
 Kanal-Default.
@@ -201,7 +201,7 @@ Env-Werte fallen wie bisher durch (kein Breaking Change).
 
 Der gewählte Kanal entscheidet über die Default-Quelle:
 `rolling` → `latest-main` (Dev-Builds von `main`), `release` →
-`releases/latest` (neuestes Stable-Release). Ein expliziter Override
+`releases/latest/download` (neuestes Stable-Release). Ein expliziter Override
 (`MOMOS_AUTOUPDATE_BASE_URL` / `[autoupdate] base_url`) hat weiterhin
 Vorrang — liefert er dann den *anderen* Kanal aus, meldet der
 Kanal-Guard den Widerspruch (`ChannelMismatch`), statt still den falschen

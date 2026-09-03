@@ -147,6 +147,15 @@ All notable changes to Momo's Music Manager.
   rspotify) — enables clean Linux cross-compilation to ARM64 and removes the
   OpenSSL system dependency on Linux.
 
+### Fixed
+
+- **Update-Check-404 bei Release-Builds (Hotfix v1.2.1)**: `DEFAULT_RELEASE_BASE_URL`
+  endete auf `…/releases/latest` ohne `/download`-Segment — GitHub liefert Assets
+  nur unter `releases/latest/download/<asset>` bzw. `releases/download/<tag>/<asset>`
+  aus, daher schlugen Update-Check/Apply von Release-Builds (Minisig-Signatur,
+  SHA256SUMS-Manifest, versioniertes Binary) mit HTTP 404 fehl. Die Basis-URL
+  trägt jetzt das `download`-Segment (Regression aus PR #19, Fix in PR #23).
+
 ---
 
 ## [1.0.1] — 2026-08-29
