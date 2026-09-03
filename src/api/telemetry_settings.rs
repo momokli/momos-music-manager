@@ -219,8 +219,10 @@ pub(crate) fn apply_settings_patch(
     Ok(status)
 }
 
-/// One-shot push outcome — always HTTP 200 so the Settings button can show
-/// success/error inline (fetchJSON treats non-2xx as thrown errors).
+/// One-shot push outcome — success/error come back as HTTP 200 so the
+/// Settings button can show them inline (fetchJSON treats non-2xx as
+/// thrown errors). A push while telemetry is disabled is refused with 409
+/// (nothing is recorded — no push attempt happened).
 async fn push_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Fresh config: the background loops may still run on the boot
     // snapshot, but the manual push must honor the *current* file/env state
@@ -228,7 +230,14 @@ async fn push_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = ServiceCredentials::load();
 
     let outcome = if !config.telemetry_enabled {
-        Err("Telemetry is disabled — enable it in the settings above to push".to_string())
+        // Not a push attempt — no status record, just honest feedback.
+        let message = "Telemetry is disabled — enable it in the settings above to push"
+            .to_string();
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse { error: message }),
+        )
+            .into_response();
     } else {
         match crate::telemetry::push_once(&state.db, &config).await {
             Ok(()) => Ok(()),
