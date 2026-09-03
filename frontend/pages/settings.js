@@ -2,18 +2,22 @@
  * settings.js — Settings page.
  *
  * Update controls (Phase A+B of the update-settings feature + channel
- * select):
+ * select + Phase C auto-apply interval):
  * - version / channel / update status display (GET /api/update/status)
  * - "Check now" (POST /api/update/check)
  * - auto-update toggle with persistence (POST /api/update/settings)
+ * - auto-apply interval select (POST /api/update/settings) — when
+ *   auto-update is on, updates are installed automatically every interval
+ *   and the server restarts itself (self-restart)
  * - update-channel dropdown (`release` | `rolling`) with confirm modal
  * - manual "Update now" (POST /api/update/apply)
  *
- * Toggle and channel dropdown are disabled when their effective value is
- * pinned by config.toml or an environment variable (source "toml"/"env") —
- * the precedence rule is Env > UI > TOML > default (enabled: true; channel:
- * embedded channel of the running build). check/apply run against the
- * selected channel; an explicit cross-channel switch is confirmed via modal.
+ * Toggle, channel dropdown and interval select are disabled when their
+ * effective value is pinned by config.toml or an environment variable
+ * (source "toml"/"env") — the precedence rule is Env > UI > TOML > default
+ * (enabled: true; channel: embedded channel of the running build; interval:
+ * 4 h). check/apply run against the selected channel; an explicit
+ * cross-channel switch is confirmed via modal.
  */
 
 import { fetchJSON } from "../shared/api.js";
@@ -35,6 +39,38 @@ let state = {
   applying: false,
   inlineHtml: null,
 };
+
+/** Auto-apply interval presets (seconds → label). 0 = periodic loop off. */
+const INTERVAL_PRESETS = [
+  { secs: 0, label: "Off (manual updates only)" },
+  { secs: 3600, label: "Every hour" },
+  { secs: 14400, label: "Every 4 hours" },
+  { secs: 43200, label: "Every 12 hours" },
+  { secs: 86400, label: "Every day" },
+];
+
+function intervalLabel(secs) {
+  const preset = INTERVAL_PRESETS.find((p) => p.secs === secs);
+  if (preset) return preset.label;
+  if (secs === 0) return "Off (manual updates only)";
+  return `Every ${secs} seconds`;
+}
+
+function intervalOptionsHtml(status) {
+  const effective = Number.isFinite(status.autoApplyIntervalSecs)
+    ? status.autoApplyIntervalSecs
+    : 14400;
+  const known = INTERVAL_PRESETS.some((p) => p.secs === effective);
+  return [
+    ...(known
+      ? []
+      : [`<option value="${effective}" selected>${escapeHtml(intervalLabel(effective))} (custom)</option>`]),
+    ...INTERVAL_PRESETS.map(
+      (p) =>
+        `<option value="${p.secs}"${p.secs === effective ? " selected" : ""}>${p.label}${p.secs === 14400 ? " (default)" : ""}</option>`,
+    ),
+  ].join("");
+}
 
 let _container = null;
 let _signal = null;
@@ -147,6 +183,14 @@ function renderStatus(container) {
       : 'Set in <code>config.toml</code> (<code>[autoupdate] channel</code>) — edit the file to change the channel.'
     : "";
 
+  // Auto-apply interval state (same precedence rule as the toggle)
+  const intervalPinned = s.autoApplyIntervalSource === "env" || s.autoApplyIntervalSource === "toml";
+  const intervalSourceHint = intervalPinned
+    ? s.autoApplyIntervalSource === "env"
+      ? 'Pinned by the environment variable <code>MOMOS_AUTOUPDATE_INTERVAL_SECS</code> — change it there to edit the interval.'
+      : 'Set in <code>config.toml</code> (<code>[autoupdate] interval_secs</code>) — edit the file to change the interval.'
+    : "";
+
   // Channel mismatch explanation — the update source serves the *other*
   // channel than selected (inconsistent base URL / feed).
   let mismatchHtml = "";
@@ -225,9 +269,19 @@ function renderStatus(container) {
               ${channelOptionsHtml(s)}
             </select>
           </span>
+          <span style="display:flex;gap:0.4rem;align-items:center">
+            <label for="autoupdate-interval-select" class="text-muted" style="font-size:0.8rem">Auto-apply every</label>
+            <select id="autoupdate-interval-select" ${intervalPinned ? "disabled" : ""} title="How often updates are checked and applied automatically (0 = off — updates are only checked at startup and applied manually)">
+              ${intervalOptionsHtml(s)}
+            </select>
+          </span>
         </div>
+        ${s.enabled ? `<div class="help-text" style="margin-top:0.25rem"><i class="fas fa-rotate"></i> ${intervalLabel(s.autoApplyIntervalSecs ?? 14400).startsWith("Off")
+          ? 'Updates are checked at startup only and applied manually ("Update now") — automatic applying is off.'
+          : `When enabled, available updates are installed automatically ${intervalLabel(s.autoApplyIntervalSecs ?? 14400).toLowerCase()} and the server restarts itself afterwards. Manual "Update now" stays available anytime.`}</div>` : ""}
         ${toggleDisabled ? `<div class="help-text" style="margin-top:0.25rem">${sourceHint}</div>` : ""}
         ${channelPinned ? `<div class="help-text" style="margin-top:0.25rem">${channelSourceHint}</div>` : ""}
+        ${intervalPinned ? `<div class="help-text" style="margin-top:0.25rem">${intervalSourceHint}</div>` : ""}
       </div>
     </div>
     <div class="settings-update-actions" style="margin-top:1rem;display:flex;gap:0.75rem;align-items:center">
@@ -327,7 +381,7 @@ function wireEvents(container) {
     if (applyBtn) {
       const confirmed = await showConfirmModal(
         "Update now",
-        `Install <strong>v${escapeHtml(state.status.lastCheckResult?.availableVersion || "?")}</strong> now? The server will be replaced (Linux/Windows) or the verified download will be saved to Downloads (macOS).`,
+        `Install <strong>v${escapeHtml(state.status.lastCheckResult?.availableVersion || "?")}</strong> now? The current version is replaced (Linux/Windows: atomic binary swap; macOS: the app bundle is replaced in the install directory) and the server must be restarted afterwards.`,
         "Update now",
         "primary",
       );
@@ -398,6 +452,39 @@ function wireEvents(container) {
       toggle.checked = !wanted; // revert
       showToast(`Failed to update setting: ${err.message}`, "error");
       await loadStatus(container);
+    }
+  });
+
+  container.addEventListener("change", async (e) => {
+    const intervalSelect = e.target.closest("#autoupdate-interval-select");
+    if (!intervalSelect) return;
+
+    const wanted = Number(intervalSelect.value);
+    if (!Number.isInteger(wanted) || wanted < 0) return;
+    const previous = state.status?.autoApplyIntervalSecs ?? 14400;
+    if (wanted === previous) return;
+
+    try {
+      const resp = await fetchJSON("/api/update/settings", {
+        method: "POST",
+        body: JSON.stringify({ autoApplyIntervalSecs: wanted }),
+        signal: _signal,
+      });
+      state.status.autoApplyIntervalSecs =
+        resp.data.autoApplyIntervalSecs ?? wanted;
+      state.status.autoApplyIntervalSource =
+        resp.data.autoApplyIntervalSource || "ui";
+      renderStatus(container);
+      const msg =
+        wanted === 0
+          ? "Automatic updates turned off — updates are checked at startup only"
+          : `Updates will be applied automatically ${intervalLabel(wanted).toLowerCase()}`;
+      showToast(msg, "success");
+    } catch (err) {
+      if (err.name === "AbortError") return;
+      intervalSelect.value = String(previous); // revert
+      renderStatus(container);
+      showToast(`Failed to change auto-apply interval: ${err.message}`, "error");
     }
   });
 

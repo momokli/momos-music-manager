@@ -57,6 +57,12 @@
 //! # Only set this to override the channel default.
 //! base_url = "https://github.com/momokli/momos-music-manager/releases/download/latest-main"
 //! health_grace_secs = 60
+//! # Seconds between two automatic check+apply cycles (default 14400 = 4 h;
+//! # 0 disables the periodic auto-apply loop — the startup check still runs).
+//! interval_secs = 14400
+//! # macOS only: app install directory for the DMG self-install
+//! # (default /Applications).
+//! app_dir = "/Applications"
 //! ```
 //!
 //! # Backward compatibility
@@ -171,6 +177,12 @@ struct AutoupdateToml {
     /// Update channel (`"rolling"` | `"release"`) — optional; default is
     /// the running build's embedded channel.
     channel: Option<String>,
+    /// Seconds between two automatic check+apply cycles (`0` disables the
+    /// periodic loop; the startup check still runs). Default 4 h.
+    interval_secs: Option<u64>,
+    /// macOS only: directory whose `Momo's Music Manager.app` the DMG
+    /// self-install replaces (default `/Applications`).
+    app_dir: Option<String>,
 }
 
 // ── Runtime representation ─────────────────────────────────────────────────
@@ -248,6 +260,16 @@ pub struct ServiceCredentials {
     pub autoupdate_enabled: bool,
     pub autoupdate_base_url: String,
     pub autoupdate_health_grace_secs: u64,
+    /// Effective auto-apply interval (env > TOML > default 4 h). The UI/DB
+    /// layer sits on top — see `autoupdate::update_auto`.
+    pub autoupdate_interval_secs: u64,
+    /// Raw `[autoupdate] interval_secs` value from config.toml — needed for
+    /// `intervalSource` resolution (the TOML struct is private).
+    pub(crate) autoupdate_interval_toml: Option<u64>,
+    /// macOS app install directory for the DMG self-install
+    /// (`MOMOS_AUTOUPDATE_APP_DIR` / `[autoupdate] app_dir`); `None` →
+    /// default `/Applications`.
+    pub autoupdate_app_dir: Option<std::path::PathBuf>,
     /// Whether `[autoupdate] enabled` was set explicitly in config.toml —
     /// needed for `enabledSource` detection (the TOML struct is private).
     pub(crate) autoupdate_has_toml: bool,
@@ -599,6 +621,35 @@ impl ServiceCredentials {
                         .and_then(|a| a.health_grace_secs)
                 })
                 .unwrap_or(crate::autoupdate::DEFAULT_HEALTH_GRACE_SECS),
+            // Auto-apply interval (Phase C): env > toml > default 4 h. The
+            // UI layer sits on top (DB setting) — see
+            // `autoupdate::update_auto::effective_auto_apply_interval`.
+            autoupdate_interval_secs: std::env::var("MOMOS_AUTOUPDATE_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .or_else(|| {
+                    toml_config
+                        .autoupdate
+                        .as_ref()
+                        .and_then(|a| a.interval_secs)
+                })
+                .unwrap_or(crate::autoupdate::DEFAULT_AUTO_APPLY_INTERVAL_SECS),
+            autoupdate_interval_toml: toml_config
+                .autoupdate
+                .as_ref()
+                .and_then(|a| a.interval_secs),
+            // macOS app install directory for the DMG self-install (Phase C):
+            // env > toml > default `/Applications` (resolved in
+            // `autoupdate::macos::default_app_dir`).
+            autoupdate_app_dir: env_var_optional("MOMOS_AUTOUPDATE_APP_DIR")
+                .map(PathBuf::from)
+                .or_else(|| {
+                    toml_config
+                        .autoupdate
+                        .as_ref()
+                        .and_then(|a| a.app_dir.clone())
+                        .map(PathBuf::from)
+                }),
             autoupdate_has_toml: toml_config
                 .autoupdate
                 .as_ref()
@@ -611,11 +662,13 @@ impl ServiceCredentials {
         };
 
         info!(
-            "Autoupdate config: enabled={}, base_url={}, health_grace_secs={}s, channel={}",
+            "Autoupdate config: enabled={}, base_url={}, health_grace_secs={}s, channel={}, auto_apply_interval={}s, app_dir={:?}",
             credentials.autoupdate_enabled,
             credentials.autoupdate_base_url,
             credentials.autoupdate_health_grace_secs,
             credentials.autoupdate_channel_source(),
+            credentials.autoupdate_interval_secs,
+            credentials.autoupdate_app_dir,
         );
 
         info!(
@@ -742,6 +795,11 @@ impl ServiceCredentials {
             autoupdate_health_grace_secs: env_var_optional("MOMOS_AUTOUPDATE_HEALTH_GRACE_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(crate::autoupdate::DEFAULT_HEALTH_GRACE_SECS),
+            autoupdate_interval_secs: env_var_optional("MOMOS_AUTOUPDATE_INTERVAL_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(crate::autoupdate::DEFAULT_AUTO_APPLY_INTERVAL_SECS),
+            autoupdate_interval_toml: None,
+            autoupdate_app_dir: env_var_optional("MOMOS_AUTOUPDATE_APP_DIR").map(PathBuf::from),
             autoupdate_has_toml: false,
             autoupdate_channel_toml: None,
         }
@@ -868,6 +926,26 @@ impl ServiceCredentials {
         "default"
     }
 
+    /// Where the configured auto-apply interval comes from, ignoring the
+    /// UI/DB layer: `"env"` (parseable `MOMOS_AUTOUPDATE_INTERVAL_SECS`),
+    /// `"toml"` (`[autoupdate] interval_secs`) or `"default"`
+    /// ([`crate::autoupdate::DEFAULT_AUTO_APPLY_INTERVAL_SECS`]). Mirrors
+    /// [`Self::autoupdate_enabled_source`] — an unparseable env value falls
+    /// through to TOML/default.
+    pub fn autoupdate_interval_source(&self) -> &'static str {
+        if std::env::var("MOMOS_AUTOUPDATE_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .is_some()
+        {
+            return "env";
+        }
+        if self.autoupdate_interval_toml.is_some() {
+            return "toml";
+        }
+        "default"
+    }
+
     /// Config-level update channel: parseable env value > `[autoupdate]
     /// channel` in config.toml > default = embedded channel of the running
     /// build (dev build → rolling, release build → release). Used by the CLI
@@ -954,6 +1032,9 @@ impl ServiceCredentials {
             autoupdate_enabled: false,
             autoupdate_base_url: crate::autoupdate::DEFAULT_BASE_URL.to_string(),
             autoupdate_health_grace_secs: 5,
+            autoupdate_interval_secs: crate::autoupdate::DEFAULT_AUTO_APPLY_INTERVAL_SECS,
+            autoupdate_interval_toml: None,
+            autoupdate_app_dir: None,
             autoupdate_has_toml: false,
             autoupdate_channel_toml: None,
         }

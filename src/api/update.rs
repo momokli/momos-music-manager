@@ -1,20 +1,26 @@
 //! Update controls — the Phase A+B web surface for the M6 autoupdater,
-//! extended with the channel select (Phase C-1).
+//! extended with the channel select (Phase C-1) and the periodic auto-apply
+//! interval (Phase C: auto-apply + self-restart + macOS DMG self-install).
 //!
 //! Endpoints:
-//! - `GET  /api/update/status`   — version/channel/enabled + last check + pending marker
+//! - `GET  /api/update/status`   — version/channel/enabled + auto-apply interval + last check + pending marker
 //! - `POST /api/update/check`    — run a (verified) check against the *selected* channel
-//! - `POST /api/update/settings` — persist the auto-update toggle and/or the update channel
-//! - `POST /api/update/apply`    — manual "update now" (swap on Linux/Windows,
-//!                                 verified download + instructions on macOS)
+//! - `POST /api/update/settings` — persist the auto-update toggle, the update channel and/or the auto-apply interval
+//! - `POST /api/update/apply`    — manual "update now" (atomic swap on Linux/Windows,
+//!                                 DMG self-install on macOS)
 //!
 //! Precedence rules (both **Env > UI (DB setting) > TOML > Default**):
 //! - enabled default `true`;
 //! - channel default = embedded channel of the running build (dev build →
-//!   `rolling`, release build → `release`).
+//!   `rolling`, release build → `release`);
+//! - auto-apply interval default 4 h (`0` disables the periodic loop).
 //! `check`/`apply` run against the effective (selected) channel; an explicit
 //! cross-channel switch is not an error — the mismatch guard only fires when
 //! the update source serves the *other* channel than selected.
+//!
+//! `run_auto_apply_cycle` (called by the scheduler loop in `serve()`) adds
+//! the automatic path: check → apply → self-restart with the crash-loop
+//! breaker from `autoupdate::update_auto`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -37,6 +43,7 @@ use crate::autoupdate::{
 };
 use crate::config::ServiceCredentials;
 use crate::db::settings::{self, KEY_AUTOUPDATE_ENABLED};
+use crate::autoupdate::update_auto::{self, AutoApplyOutcome};
 
 // ── Response types (camelCase on the wire) ────────────────────────────────
 
@@ -350,6 +357,7 @@ pub async fn build_status_json(
         db,
         std::env::var("MOMOS_AUTOUPDATE_ENABLED").ok(),
         std::env::var("MOMOS_AUTOUPDATE_CHANNEL").ok(),
+        std::env::var("MOMOS_AUTOUPDATE_INTERVAL_SECS").ok(),
     )
     .await
 }
@@ -361,6 +369,7 @@ pub(crate) async fn build_status_json_with_env(
     db: &Pool<Sqlite>,
     enabled_env_value: Option<String>,
     channel_env_value: Option<String>,
+    interval_env_value: Option<String>,
 ) -> Result<serde_json::Value, sqlx::Error> {
     let (enabled, enabled_source) =
         effective_autoupdate_enabled_with_env(config, db, enabled_env_value).await?;
@@ -378,7 +387,16 @@ pub(crate) async fn build_status_json_with_env(
         os_arch: s.artifact.os_arch.clone(),
         ext: s.artifact.ext.clone(),
     });
-    let platform_self_install = artifact.as_ref().map(|a| a.ext != "dmg").unwrap_or(false);
+    // Phase C: macOS self-installs its DMG now (mount → replace app bundle),
+    // so the DMG artifact is *not* a reason to report "manual install only".
+    let platform_self_install = artifact
+        .as_ref()
+        .map(|a| a.ext != "dmg" || cfg!(target_os = "macos"))
+        .unwrap_or(false);
+
+    let (auto_apply_interval_secs, auto_apply_interval_source) =
+        update_auto::effective_auto_apply_interval_with_env(config, db, interval_env_value)
+            .await?;
 
     let last_check_at = settings::get_setting(db, settings::KEY_AUTOUPDATE_LAST_CHECK_AT)
         .await?
@@ -422,6 +440,9 @@ pub(crate) async fn build_status_json_with_env(
         "pendingUpdate": pending_update,
         "pendingUpdateError": pending_update_error,
         "platformSelfInstall": platform_self_install,
+        // Phase C: periodic auto-apply (0 = off; env > UI > TOML > default).
+        "autoApplyIntervalSecs": auto_apply_interval_secs,
+        "autoApplyIntervalSource": auto_apply_interval_source,
     }))
 }
 
@@ -434,6 +455,8 @@ pub struct UpdateSettingsRequest {
     pub auto_update_enabled: Option<bool>,
     /// Update channel: `"rolling"` | `"release"`.
     pub channel: Option<String>,
+    /// Auto-apply interval in seconds (0 = periodic loop off).
+    pub auto_apply_interval_secs: Option<u64>,
 }
 
 /// Outcome of a toggle write.
@@ -543,6 +566,50 @@ pub(crate) async fn settings_channel(
         db,
         channel,
         std::env::var("MOMOS_AUTOUPDATE_CHANNEL").ok(),
+    )
+    .await
+}
+
+/// Persist the UI auto-apply interval — unless env or TOML pins the value
+/// (409, nothing written). The env value is injected so the override matrix
+/// is unit-testable.
+pub(crate) async fn settings_interval_with_env(
+    config: &ServiceCredentials,
+    db: &Pool<Sqlite>,
+    interval_secs: u64,
+    env_value: Option<String>,
+) -> Result<serde_json::Value, ToggleError> {
+    let (_, source) =
+        update_auto::effective_auto_apply_interval_with_env(config, db, env_value.clone())
+            .await
+            .map_err(ToggleError::Db)?;
+    if source == "env" || source == "toml" {
+        return Err(ToggleError::Overridden(source));
+    }
+    settings::set_setting(db, settings::KEY_AUTOUPDATE_INTERVAL_SECS, &interval_secs.to_string())
+        .await
+        .map_err(ToggleError::Db)?;
+    let (interval, source) =
+        update_auto::effective_auto_apply_interval_with_env(config, db, env_value)
+            .await
+            .map_err(ToggleError::Db)?;
+    Ok(serde_json::json!({
+        "autoApplyIntervalSecs": interval,
+        "autoApplyIntervalSource": source,
+    }))
+}
+
+/// [`settings_interval_with_env`] with the process env.
+pub(crate) async fn settings_interval(
+    config: &ServiceCredentials,
+    db: &Pool<Sqlite>,
+    interval_secs: u64,
+) -> Result<serde_json::Value, ToggleError> {
+    settings_interval_with_env(
+        config,
+        db,
+        interval_secs,
+        std::env::var("MOMOS_AUTOUPDATE_INTERVAL_SECS").ok(),
     )
     .await
 }
@@ -680,6 +747,144 @@ pub(crate) async fn update_apply_with_settings<F: Fetcher>(
     }
 }
 
+// ── Phase C: automatic check+apply cycle (scheduler) ─────────────────────
+
+/// One full automatic check+apply cycle, driven by the scheduler loop in
+/// `serve()` at the effective auto-apply interval.
+///
+/// Order: (1) enabled? (2) in-flight swap marker? (3) verified check, (4)
+/// apply when a newer version is published — unless the breaker/
+/// waiting-for-activation state forbids this exact version — and record the
+/// attempt for the crash-loop breaker. Never restarts the process itself —
+/// the caller does that on [`AutoApplyOutcome::Installed`].
+pub async fn run_auto_apply_cycle<F: Fetcher>(
+    db: &Pool<Sqlite>,
+    config: &ServiceCredentials,
+    fetcher: &F,
+) -> Result<AutoApplyOutcome, sqlx::Error> {
+    // 1. Effective enabled (env > UI > TOML > default true).
+    let (enabled, _source) = effective_autoupdate_enabled(config, db).await?;
+    if !enabled {
+        return Ok(AutoApplyOutcome::Disabled);
+    }
+
+    // 2. An uncommitted swap marker means a previous update is still in
+    //    flight (new binary started, health grace running, or unhealthy
+    //    starts pending rollback) — never stack another apply on top.
+    match swap::read_marker(&swap::exe_dir()) {
+        Ok(Some(marker)) if !marker.committed => {
+            tracing::info!(
+                "autoupdate: auto-apply skipped — update v{} → v{} still in flight (health check/rollback pending)",
+                marker.old_version, marker.new_version
+            );
+            return Ok(AutoApplyOutcome::InFlight {
+                new_version: marker.new_version,
+            });
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("autoupdate: marker read failed (auto-apply continues): {e}");
+        }
+    }
+
+    // 3. Effective settings + verified check against the selected channel.
+    let settings = settings_for_check(config, db).await?;
+    let status = match UpdateStatus::check(&settings, fetcher).await {
+        Ok(status) => status,
+        Err(e) => {
+            tracing::warn!("autoupdate: auto-apply check failed: {e}");
+            persist_last_check(db, "error", &error_result(), Some(&e.to_string())).await?;
+            return Ok(AutoApplyOutcome::Failed {
+                message: e.to_string(),
+            });
+        }
+    };
+    // Keep the status view honest (same shape as a manual check).
+    persist_last_check(db, "ok", &check_result(&status, &settings), None).await?;
+
+    let state = update_auto::read_auto_apply_state(db).await?;
+    match status {
+        UpdateStatus::Disabled => Ok(AutoApplyOutcome::Disabled),
+        UpdateStatus::UnsupportedPlatform => Ok(AutoApplyOutcome::Failed {
+            message: "platform not supported by the updater".into(),
+        }),
+        UpdateStatus::ChannelMismatch { channel, .. } => {
+            tracing::info!("autoupdate: auto-apply skipped — channel mismatch ({channel})");
+            Ok(AutoApplyOutcome::ChannelMismatch { channel })
+        }
+        UpdateStatus::UpToDate => {
+            tracing::debug!("autoupdate: auto-apply cycle — up to date");
+            Ok(AutoApplyOutcome::UpToDate)
+        }
+        UpdateStatus::UpdateAvailable(info) => {
+            match update_auto::skip_reason(state.as_ref(), &info.version) {
+                update_auto::SkipReason::BreakerEngaged => {
+                    tracing::warn!(
+                        "autoupdate: v{} available, but auto-apply of this version failed to become healthy repeatedly — skipping (publish a new version or run `update apply` manually)",
+                        info.version
+                    );
+                    Ok(AutoApplyOutcome::UpdateAvailableSkipped {
+                        version: info.version,
+                    })
+                }
+                update_auto::SkipReason::WaitingForActivation => {
+                    tracing::info!(
+                        "autoupdate: v{} already installed — waiting for its restart to activate",
+                        info.version
+                    );
+                    Ok(AutoApplyOutcome::UpdateAvailableSkipped {
+                        version: info.version,
+                    })
+                }
+                update_auto::SkipReason::None => {
+                    apply_auto_update(&settings, db, fetcher).await
+                }
+            }
+        }
+    }
+}
+
+/// Shared apply step of the auto cycle: download + verify + install, record
+/// the attempt for the crash-loop breaker, persist honest failure states.
+async fn apply_auto_update<F: Fetcher>(
+    settings: &UpdateSettings,
+    db: &Pool<Sqlite>,
+    fetcher: &F,
+) -> Result<AutoApplyOutcome, sqlx::Error> {
+    match UpdateStatus::apply(settings, fetcher).await {
+        Ok(ApplyOutcome::Installed {
+            new_version,
+            old_version,
+        }) => {
+            // Record the attempt *before* the restart so the next cycle (in
+            // the restarted process) and the startup events can resolve it.
+            update_auto::write_auto_apply_state(db, &update_auto::state_for_attempt(&new_version))
+                .await?;
+            tracing::info!(
+                "autoupdate: auto-apply installed v{old_version} → v{new_version} — restarting"
+            );
+            Ok(AutoApplyOutcome::Installed {
+                new_version,
+                old_version,
+            })
+        }
+        Ok(ApplyOutcome::DownloadedOnly { path, version }) => {
+            tracing::warn!(
+                "autoupdate: auto-apply only downloaded v{version} (DMG self-install failed) — manual install required: {}",
+                path.display()
+            );
+            Ok(AutoApplyOutcome::DownloadedOnly { version, path })
+        }
+        Err(err) => {
+            tracing::warn!("autoupdate: auto-apply failed: {err}");
+            let _ = persist_last_check(db, "error", &error_result(), Some(&err.to_string())).await;
+            Ok(AutoApplyOutcome::Failed {
+                message: err.to_string(),
+            })
+        }
+    }
+}
+
 // ── Handlers ───────────────────────────────────────────────────────────────
 
 /// GET /api/update/status
@@ -714,16 +919,16 @@ async fn settings_handler(
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "invalid body — expected { \"autoUpdateEnabled\": true|false, \"channel\": \"rolling\"|\"release\" }".into(),
+                error: "invalid body — expected { \"autoUpdateEnabled\": true|false, \"channel\": \"rolling\"|\"release\", \"autoApplyIntervalSecs\": <seconds> }".into(),
             }),
         )
             .into_response();
     };
-    if req.auto_update_enabled.is_none() && req.channel.is_none() {
+    if req.auto_update_enabled.is_none() && req.channel.is_none() && req.auto_apply_interval_secs.is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "invalid body — provide at least one of \"autoUpdateEnabled\" or \"channel\"".into(),
+                error: "invalid body — provide at least one of \"autoUpdateEnabled\", \"channel\" or \"autoApplyIntervalSecs\"".into(),
             }),
         )
             .into_response();
@@ -766,6 +971,16 @@ async fn settings_handler(
             return pinned_conflict("autoupdate.channel", source, "MOMOS_AUTOUPDATE_CHANNEL", "[autoupdate] channel", "dropdown").into_response();
         }
     }
+    if req.auto_apply_interval_secs.is_some() {
+        let (_, source) =
+            match update_auto::effective_auto_apply_interval(&state.config, &state.db).await {
+                Ok(v) => v,
+                Err(e) => return internal_error(e).into_response(),
+            };
+        if source == "env" || source == "toml" {
+            return pinned_conflict("autoupdate.interval", source, "MOMOS_AUTOUPDATE_INTERVAL_SECS", "[autoupdate] interval_secs", "dropdown").into_response();
+        }
+    }
 
     // Persist whatever was requested — pre-checks above guarantee no 409.
     let mut data = serde_json::json!({});
@@ -792,9 +1007,23 @@ async fn settings_handler(
             Err(ToggleError::Db(e)) => return internal_error(e).into_response(),
         }
     }
+    if let Some(interval_secs) = req.auto_apply_interval_secs {
+        match settings_interval(&state.config, &state.db, interval_secs).await {
+            Ok(interval_data) => {
+                for (k, v) in interval_data.as_object().expect("interval response is an object") {
+                    data[k] = v.clone();
+                }
+            }
+            Err(ToggleError::Overridden(source)) => {
+                return pinned_conflict("autoupdate.interval", source, "MOMOS_AUTOUPDATE_INTERVAL_SECS", "[autoupdate] interval_secs", "dropdown").into_response();
+            }
+            Err(ToggleError::Db(e)) => return internal_error(e).into_response(),
+        }
+    }
 
-    // Merged response: always report both effective values + sources so the
-    // UI can update its state from a single response.
+    // Merged response: always report the effective values + sources of the
+    // fields NOT written in this request so the UI can update its state
+    // from a single response.
     if req.auto_update_enabled.is_none() {
         let (enabled, enabled_source) =
             match effective_autoupdate_enabled(&state.config, &state.db).await {
@@ -813,6 +1042,15 @@ async fn settings_handler(
             };
         data["channel"] = channel.as_str().into();
         data["channelSource"] = channel_source.into();
+    }
+    if req.auto_apply_interval_secs.is_none() {
+        let (interval, interval_source) =
+            match update_auto::effective_auto_apply_interval(&state.config, &state.db).await {
+                Ok(v) => v,
+                Err(e) => return internal_error(e).into_response(),
+            };
+        data["autoApplyIntervalSecs"] = interval.into();
+        data["autoApplyIntervalSource"] = interval_source.into();
     }
     Json(ApiResponse { data }).into_response()
 }
@@ -841,9 +1079,10 @@ fn pinned_conflict(
 }
 
 /// POST /api/update/apply — manual "update now": check + verified download
-/// + atomic swap (Linux/Windows) or verified DMG download + instructions
-/// (macOS). 409 when disabled or on channel mismatch, 404 when no update is
-/// available, 500 for other failures.
+/// + atomic swap (Linux/Windows) or DMG self-install (macOS; falls back to
+/// a verified download + instructions when the install fails). 409 when
+/// disabled or on channel mismatch, 404 when no update is available, 500
+/// for other failures.
 async fn apply_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let fetcher = HttpFetcher::new();
     match update_apply(&state.config, &state.db, &fetcher).await {
@@ -1155,7 +1394,7 @@ mod tests {
             .await
             .unwrap();
         let config = channel_config(None);
-        let json = build_status_json_with_env(&config, &pool, None, None)
+        let json = build_status_json_with_env(&config, &pool, None, None, None)
             .await
             .unwrap();
         assert_eq!(json["channel"], "rolling");
@@ -1176,7 +1415,7 @@ mod tests {
             .await
             .unwrap();
         let config = channel_config(None);
-        let json = build_status_json_with_env(&config, &pool, None, None)
+        let json = build_status_json_with_env(&config, &pool, None, None, None)
             .await
             .unwrap();
         assert_eq!(json["channel"], "release");
@@ -1190,7 +1429,7 @@ mod tests {
             .await
             .unwrap();
         let config = channel_config(None);
-        let json = build_status_json_with_env(&config, &pool, None, Some("rolling".into()))
+        let json = build_status_json_with_env(&config, &pool, None, Some("rolling".into()), None)
             .await
             .unwrap();
         assert_eq!(json["channel"], "rolling");
@@ -1487,7 +1726,7 @@ mod tests {
     async fn status_json_fresh_db_defaults() {
         let pool = test_pool().await;
         let config = config_with(true, false);
-        let json = build_status_json_with_env(&config, &pool, None, None)
+        let json = build_status_json_with_env(&config, &pool, None, None, None)
             .await
             .unwrap();
         assert_eq!(json["currentVersion"], env!("MMM_VERSION"));
@@ -1500,6 +1739,9 @@ mod tests {
         assert_eq!(json["availableChannels"], serde_json::json!(["release", "rolling"]));
         assert_eq!(json["enabled"], true);
         assert_eq!(json["enabledSource"], "default");
+        // Auto-apply interval defaults (Phase C): 4 h, source default.
+        assert_eq!(json["autoApplyIntervalSecs"], 14400);
+        assert_eq!(json["autoApplyIntervalSource"], "default");
         assert!(json["lastCheckAt"].is_null());
         assert!(json["lastCheckStatus"].is_null());
         assert!(json["lastCheckResult"].is_null());
@@ -1531,7 +1773,7 @@ mod tests {
             .await
             .unwrap();
 
-        let json = build_status_json_with_env(&config, &pool, None, None)
+        let json = build_status_json_with_env(&config, &pool, None, None, None)
             .await
             .unwrap();
         assert_eq!(json["lastCheckStatus"], "ok");
@@ -1555,7 +1797,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let json = build_status_json_with_env(&config, &pool, None, None)
+        let json = build_status_json_with_env(&config, &pool, None, None, None)
             .await
             .unwrap();
         assert_eq!(json["lastCheckStatus"], "error");
@@ -1681,7 +1923,7 @@ mod tests {
     async fn persist_disabled_check_writes_ok_state() {
         let pool = test_pool().await;
         persist_disabled_check(&pool).await.unwrap();
-        let json = build_status_json_with_env(&config_with(true, false), &pool, None, None)
+        let json = build_status_json_with_env(&config_with(true, false), &pool, None, None, None)
             .await
             .unwrap();
         assert_eq!(json["lastCheckStatus"], "ok");
@@ -1708,6 +1950,7 @@ mod tests {
             pubkey: MinisignPublicKey::from_blob(crate::autoupdate::keys::PUBLIC_KEY_B64)
                 .expect("embedded key parses"),
             install_dir: None,
+            app_install_dir: None,
         };
         let info = crate::autoupdate::UpdateInfo {
             version: "2.0.0".into(),
@@ -1780,7 +2023,7 @@ mod tests {
             Some(true)
         );
         // The status view must now source the effective value from the DB.
-        let json = build_status_json_with_env(&config, &pool, None, None)
+        let json = build_status_json_with_env(&config, &pool, None, None, None)
             .await
             .unwrap();
         assert_eq!(json["enabled"], true);
@@ -2001,5 +2244,203 @@ mod tests {
         assert_eq!(json["lastCheckStatus"], "ok");
         assert_eq!(json["lastCheckResult"]["state"], "channelMismatch");
         assert_eq!(json["lastCheckResult"]["availableVersion"], "2.0.0-dev+abc");
+    }
+
+    // ── Phase C: auto-apply interval settings + auto cycle ────────────
+
+    /// Config whose interval is pinned via `[autoupdate] interval_secs`.
+    fn interval_config(toml_interval: Option<u64>, has_toml_enabled: bool) -> ServiceCredentials {
+        let mut c = config_with(true, has_toml_enabled);
+        c.autoupdate_interval_toml = toml_interval;
+        if toml_interval.is_some() {
+            c.autoupdate_interval_secs = toml_interval.unwrap();
+        }
+        c
+    }
+
+    #[tokio::test]
+    async fn interval_write_persists_ui_value_and_responds_ui_source() {
+        let pool = test_pool().await;
+        let config = config_with(true, false);
+        let data = settings_interval_with_env(&config, &pool, 3600, None)
+            .await
+            .unwrap();
+        assert_eq!(data["autoApplyIntervalSecs"], 3600);
+        assert_eq!(data["autoApplyIntervalSource"], "ui");
+        let raw = settings::get_setting(&pool, settings::KEY_AUTOUPDATE_INTERVAL_SECS)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw, "3600");
+    }
+
+    #[tokio::test]
+    async fn interval_write_rejected_when_env_overrides_and_nothing_written() {
+        let pool = test_pool().await;
+        let config = interval_config(None, false);
+        assert!(matches!(
+            settings_interval_with_env(&config, &pool, 3600, Some("86400".into()))
+                .await
+                .unwrap_err(),
+            ToggleError::Overridden("env")
+        ));
+        assert!(settings::get_setting(&pool, settings::KEY_AUTOUPDATE_INTERVAL_SECS)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn interval_write_rejected_when_toml_overrides_and_nothing_written() {
+        let pool = test_pool().await;
+        let config = interval_config(Some(43200), true);
+        assert!(matches!(
+            settings_interval_with_env(&config, &pool, 3600, None)
+                .await
+                .unwrap_err(),
+            ToggleError::Overridden("toml")
+        ));
+        assert!(settings::get_setting(&pool, settings::KEY_AUTOUPDATE_INTERVAL_SECS)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn interval_write_allowed_with_unparseable_env() {
+        let pool = test_pool().await;
+        let config = config_with(true, false);
+        let data = settings_interval_with_env(&config, &pool, 3600, Some("soon".into()))
+            .await
+            .unwrap();
+        assert_eq!(data["autoApplyIntervalSource"], "ui");
+    }
+
+    #[tokio::test]
+    async fn status_json_reports_auto_apply_interval_precedence() {
+        let pool = test_pool().await;
+        // UI value wins over the config default.
+        settings::set_setting(&pool, settings::KEY_AUTOUPDATE_INTERVAL_SECS, "7200")
+            .await
+            .unwrap();
+        let config = config_with(true, false);
+        let json = build_status_json_with_env(&config, &pool, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(json["autoApplyIntervalSecs"], 7200);
+        assert_eq!(json["autoApplyIntervalSource"], "ui");
+
+        // Injected env wins over everything.
+        let json = build_status_json_with_env(&config, &pool, None, None, Some("3600".into()))
+            .await
+            .unwrap();
+        assert_eq!(json["autoApplyIntervalSecs"], 3600);
+        assert_eq!(json["autoApplyIntervalSource"], "env");
+    }
+
+    #[tokio::test]
+    async fn auto_cycle_disabled_when_ui_toggle_off() {
+        use crate::autoupdate::verify::tests::MockFetcher;
+        use std::collections::HashMap;
+
+        let pool = test_pool().await;
+        settings::set_bool(&pool, KEY_AUTOUPDATE_ENABLED, false)
+            .await
+            .unwrap();
+        let config = config_with(true, false);
+        let fetcher = MockFetcher::new(HashMap::new());
+        assert_eq!(
+            run_auto_apply_cycle(&pool, &config, &fetcher).await.unwrap(),
+            AutoApplyOutcome::Disabled
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_cycle_failed_check_returns_failed_and_persists_error() {
+        use crate::autoupdate::verify::tests::MockFetcher;
+        use std::collections::HashMap;
+
+        // Enabled via the UI layer; settings_for_check hits the configured
+        // base URL — an empty fetcher 404s the manifest. (settings_for_check
+        // uses the embedded release pubkey, so key-signed fixtures cannot be
+        // used here; the 404 error path is key-independent.)
+        let pool = test_pool().await;
+        settings::set_bool(&pool, KEY_AUTOUPDATE_ENABLED, true)
+            .await
+            .unwrap();
+        let config = config_with(true, false);
+        let fetcher = MockFetcher::new(HashMap::new());
+
+        let outcome = run_auto_apply_cycle(&pool, &config, &fetcher).await.unwrap();
+        match outcome {
+            AutoApplyOutcome::Failed { message } => assert!(message.contains("404"), "{message}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        // Last-check state persisted as error (honest status view).
+        let status = settings::get_setting(&pool, settings::KEY_AUTOUPDATE_LAST_CHECK_STATUS)
+            .await
+            .unwrap();
+        assert_eq!(status.as_deref(), Some("error"));
+    }
+
+    #[tokio::test]
+    async fn auto_apply_records_attempt_before_restart() {
+        use crate::autoupdate::verify::tests::{MockFetcher, signed_fixture, test_settings};
+        use std::collections::HashMap;
+
+        let pool = test_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let bin_path = dir.path().join("momos-music-manager");
+        std::fs::write(&bin_path, b"oldbin").unwrap();
+
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.0.1");
+        settings.install_dir = Some(dir.path().to_path_buf());
+
+        let archive = tar_gz_with_binary_for_tests(b"newbin");
+        let sha = crate::autoupdate::verify::hex_digest(&archive);
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &format!(
+                "{sha}  momos-music-manager-2.0.0-linux-x64.tar.gz\n{sha}  momos-music-manager-latest-linux-x64.tar.gz\n"
+            ),
+            "2.0.0",
+            Some(archive),
+        );
+        let fetcher = MockFetcher::new(files);
+
+        let outcome = apply_auto_update(&settings, &pool, &fetcher).await.unwrap();
+        assert_eq!(
+            outcome,
+            AutoApplyOutcome::Installed {
+                new_version: "2.0.0".into(),
+                old_version: "1.0.1".into(),
+            }
+        );
+        // Binary swapped into the temp dir and the breaker state records the
+        // attempt (failures = 0) for the post-restart resolution.
+        assert_eq!(std::fs::read(&bin_path).unwrap(), b"newbin");
+        let state = crate::autoupdate::update_auto::read_auto_apply_state(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.attempted_version, "2.0.0");
+        assert_eq!(state.failures, 0);
+    }
+
+    fn tar_gz_with_binary_for_tests(content: &[u8]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "momos-music-manager", content)
+            .unwrap();
+        builder.finish().unwrap();
+        let tar_bytes = builder.into_inner().unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &tar_bytes).unwrap();
+        encoder.finish().unwrap()
     }
 }

@@ -317,7 +317,7 @@ fn main() -> Result<()> {
                     Ok(ApplyOutcome::DownloadedOnly { path, version }) => {
                         println!("Verified download for v{version} saved to:");
                         println!("  {}", path.display());
-                        println!("macOS auto-install (inside the .app bundle) is not supported yet — open the DMG and drag the app to Applications.");
+                        println!("The macOS DMG self-install failed — install manually: open the DMG and drag the app to Applications, then restart the app.");
                     }
                     Err(UpdateError::ChannelMismatch {
                         channel,
@@ -765,8 +765,11 @@ async fn serve(
     //    resolves.
     let au_grace = au_grace_secs;
     let au_port = actual_addr.port();
+    let au_db = state.db.clone();
     tokio::spawn(async move {
-        use momos_music_manager::autoupdate::{RecoveryAction, commit_after_grace};
+        use momos_music_manager::autoupdate::{
+            RecoveryAction, commit_after_grace, update_auto,
+        };
         match momos_music_manager::autoupdate::startup_recovery() {
             RecoveryAction::None => {}
             RecoveryAction::CommitAfterGrace { new_version } => {
@@ -774,11 +777,27 @@ async fn serve(
                     "autoupdate: new version v{new_version} started — health check in {au_grace}s"
                 );
                 commit_after_grace(au_grace, Some(au_port)).await;
+                // Health check passed → the auto-apply attempt stuck.
+                if let Err(e) = update_auto::clear_auto_apply_state(&au_db).await {
+                    tracing::debug!("autoupdate: clearing auto-apply state failed: {e}");
+                }
             }
             RecoveryAction::AutoRollback { old_version } => {
                 tracing::warn!(
                     "autoupdate: new version failed health check repeatedly — rolling back to v{old_version}"
                 );
+                // The rolled-back version failed to become healthy — engage
+                // the crash-loop breaker so the scheduler does not re-apply
+                // the same version forever (Phase C guard).
+                if let Ok(Some(marker)) = momos_music_manager::autoupdate::swap::read_marker(
+                    &momos_music_manager::autoupdate::swap::exe_dir(),
+                ) {
+                    if let Err(e) =
+                        update_auto::note_rollback(&au_db, &marker.new_version).await
+                    {
+                        tracing::debug!("autoupdate: engaging breaker failed: {e}");
+                    }
+                }
                 if let Err(e) = momos_music_manager::autoupdate::perform_rollback() {
                     tracing::error!("autoupdate: rollback failed: {e}");
                 }
@@ -870,6 +889,96 @@ async fn serve(
                     }
                 }
                 Err(e) => tracing::warn!("autoupdate: check failed: {e}"),
+            }
+        });
+    }
+
+    // 3. Phase C: periodic auto-apply loop — every `interval_secs`
+    //    (env > UI > TOML > default 4 h; 0 = off) it checks for an update
+    //    on the selected channel, applies it and restarts the process
+    //    (self-restart; systemd units are restarted by the service manager).
+    //    The interval is re-read every cycle so config/UI changes apply
+    //    without a restart. Same opt-out as the startup check.
+    if !no_autoupdate {
+        let au_db = state.db.clone();
+        let au_config = state.config.clone();
+        tokio::spawn(async move {
+            use momos_music_manager::api::update::run_auto_apply_cycle;
+            use momos_music_manager::autoupdate::{AutoApplyOutcome, restart, update_auto};
+            loop {
+                let (interval, source) =
+                    match update_auto::effective_auto_apply_interval(&au_config, &au_db).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(
+                                "autoupdate: interval resolution failed — auto-apply loop stops: {e}"
+                            );
+                            break;
+                        }
+                    };
+                if interval == 0 {
+                    tracing::info!(
+                        "autoupdate: periodic auto-apply disabled (interval=0, source={source}) — startup check still runs"
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+                let fetcher = momos_music_manager::autoupdate::HttpFetcher::new();
+                match run_auto_apply_cycle(&au_db, &au_config, &fetcher).await {
+                    Ok(AutoApplyOutcome::Installed {
+                        new_version,
+                        old_version,
+                    }) => {
+                        tracing::info!(
+                            "autoupdate: auto-apply installed v{old_version} → v{new_version} — restarting"
+                        );
+                        let plan =
+                            restart::plan_auto_restart(au_config.autoupdate_app_dir.as_deref());
+                        match &plan {
+                            restart::RestartPlan::ManagedBySystemd => {
+                                tracing::info!(
+                                    "autoupdate: systemd manages this service — exiting; the unit restarts the new version (Restart=always)"
+                                );
+                            }
+                            restart::RestartPlan::Skip { reason } => {
+                                tracing::warn!(
+                                    "autoupdate: auto-restart skipped: {reason} — the new version activates on the next manual start"
+                                );
+                            }
+                            other => {
+                                if let Err(e) = restart::execute_plan(other) {
+                                    tracing::error!(
+                                        "autoupdate: spawning the relauncher failed: {e} — restart the server to activate v{new_version}"
+                                    );
+                                }
+                            }
+                        }
+                        if plan.requires_process_exit() {
+                            // Let the tracing appender flush, then exit: the
+                            // detached relauncher (or systemd) starts the new
+                            // version once the HTTP port is free.
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            std::process::exit(0);
+                        }
+                    }
+                    Ok(AutoApplyOutcome::DownloadedOnly { version, path }) => {
+                        tracing::warn!(
+                            "autoupdate: auto-apply downloaded v{version} only (self-install failed) — manual install: {}",
+                            path.display()
+                        );
+                    }
+                    Ok(AutoApplyOutcome::UpdateAvailableSkipped { version }) => {
+                        tracing::debug!(
+                            "autoupdate: v{version} available but skipped (breaker or waiting for activation)"
+                        );
+                    }
+                    Ok(outcome) => {
+                        tracing::debug!("autoupdate: auto-apply cycle outcome: {outcome:?}");
+                    }
+                    Err(e) => {
+                        tracing::warn!("autoupdate: auto-apply cycle failed: {e}");
+                    }
+                }
             }
         });
     }

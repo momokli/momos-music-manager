@@ -159,10 +159,10 @@ wählt den **Update-Kanal** (`release` | `rolling`). Backend: Modul
 
 | Endpoint | Zweck |
 |---|---|
-| `GET /api/update/status` | Version, **effektiver Kanal** (`channel`: `rolling`/`release`, Quelle in `channelSource`, verfügbare Kanäle in `availableChannels`), effektiver Enabled-Wert + Quelle, Basis-URL des gewählten Kanals, Artifact, letzter Check (`lastCheckAt`, `lastCheckStatus`, `lastCheckResult`, `lastCheckError`), `pendingUpdate` (aus `update-state.json`), `platformSelfInstall` |
+| `GET /api/update/status` | Version, **effektiver Kanal** (`channel`: `rolling`/`release`, Quelle in `channelSource`, verfügbare Kanäle in `availableChannels`), effektiver Enabled-Wert + Quelle, **effektives Auto-Apply-Intervall** (`autoApplyIntervalSecs`, Quelle in `autoApplyIntervalSource`), Basis-URL des gewählten Kanals, Artifact, letzter Check (`lastCheckAt`, `lastCheckStatus`, `lastCheckResult`, `lastCheckError`), `pendingUpdate` (aus `update-state.json`), `platformSelfInstall` |
 | `POST /api/update/check` | Führt einen verifizierten Check gegen den **gewählten Kanal** aus (30-s-HTTP-Timeout), persistiert das Ergebnis und gibt den frischen Status zurück. Netz-/Signaturfehler sind **kein** HTTP-Fehler: `lastCheckStatus: "error"` bei 200 |
-| `POST /api/update/settings` | Body `{"autoUpdateEnabled": bool}` und/oder `{"channel": "rolling"|"release"}` (mind. ein Feld) — persistiert Toggle und/oder Kanal. **409**, wenn Env/TOML den Wert fixieren (es wird nichts geschrieben); **400** bei ungültigem Body oder Kanalwert. Ein Kanalwechsel löscht den Cache des letzten Checks (`autoupdate.last_check_*`) — ein Ergebnis vom alten Kanal gilt nicht für den neuen |
-| `POST /api/update/apply` | Manuelles „Update now" gegen den **gewählten Kanal**: Linux/Windows → Swap + `{outcome: "installed", restartNeeded: true}`; macOS → verifizierter DMG-Download + Pfad (`outcome: "downloaded"`, **kein** Self-Install). 409 bei disabled/inkonsistenter Quelle (Kanal-Mismatch), 404 wenn kein Update verfügbar |
+| `POST /api/update/settings` | Body `{"autoUpdateEnabled": bool}` und/oder `{"channel": "rolling"|"release"}` und/oder `{"autoApplyIntervalSecs": <Sekunden>}` (mind. ein Feld) — persistiert Toggle, Kanal und/oder Intervall. **409**, wenn Env/TOML den Wert fixieren (es wird nichts geschrieben); **400** bei ungültigem Body oder Kanalwert. Ein Kanalwechsel löscht den Cache des letzten Checks (`autoupdate.last_check_*`) — ein Ergebnis vom alten Kanal gilt nicht für den neuen |
+| `POST /api/update/apply` | Manuelles „Update now" gegen den **gewählten Kanal**: Linux/Windows → Swap; macOS → **DMG-Self-Install** (Mount → `.app`-Ersetzung → Unmount, siehe §7). Erfolg → `{outcome: "installed", restartNeeded: true}`; schlägt der Self-Install fehl → Fallback `{outcome: "downloaded", path: …}` (verifizierter DMG in `~/Downloads`). 409 bei disabled/inkonsistenter Quelle (Kanal-Mismatch), 404 wenn kein Update verfügbar |
 
 ### Precedence-Regel (Env > UI > TOML > Default)
 
@@ -182,8 +182,18 @@ Für **Channel** (Default = Kanal des laufenden Builds: Dev-Build →
 3. sonst `[autoupdate] channel` aus `config.toml` → gewinnt (`toml`)
 4. sonst Default (eingebetteter Kanal) (`default`)
 
-Die Status-Response enthält `enabledSource`/`channelSource`; bei `env`/`toml`
-rendert die UI Toggle bzw. Dropdown **disabled** mit Hinweis („von
+Für **Auto-Apply-Intervall** (Default **14400 s = 4 h**, `0` = periodische
+Schleife aus):
+
+1. `MOMOS_AUTOUPDATE_INTERVAL_SECS` gesetzt **und** parsebar (Ganzzahl) →
+   gewinnt (`env`)
+2. sonst UI-Wert in `settings['autoupdate.interval_secs']` → gewinnt (`ui`)
+3. sonst `[autoupdate] interval_secs` aus `config.toml` → gewinnt (`toml`)
+4. sonst Default 4 h (`default`)
+
+Die Status-Response enthält `enabledSource`/`channelSource`/
+`autoApplyIntervalSource`; bei `env`/`toml` rendert die UI Toggle bzw.
+Dropdown bzw. Intervall-Select **disabled** mit Hinweis („von
 Umgebungsvariable gesetzt" / „von config.toml gesetzt"). Unparsebare
 Env-Werte fallen wie bisher durch (kein Breaking Change).
 
@@ -197,15 +207,16 @@ Vorrang — liefert er dann den *anderen* Kanal aus, meldet der
 Kanal-Guard den Widerspruch (`ChannelMismatch`), statt still den falschen
 Feed zu prüfen.
 
-### Toggle- & Kanal-Persistenz
+### Toggle-, Kanal- & Intervall-Persistenz
 
-Toggle und Kanal werden in SQLite persistiert (`settings`-KV, Keys
-`autoupdate.enabled` (`"true"`/`"false"`) und `autoupdate.channel`
-(`"rolling"`/`"release"`)) und überleben Neustarts. Der Start-Check in
-`serve()` liest die **effektiven** Werte aus der DB (nicht mehr nur
-`config.autoupdate_enabled`) und persistiert sein Ergebnis
-(`autoupdate.last_check_*`) — `--no-autoupdate` hat weiterhin höchste
-Priorität.
+Toggle, Kanal und Auto-Apply-Intervall werden in SQLite persistiert
+(`settings`-KV, Keys `autoupdate.enabled` (`"true"`/`"false"`),
+`autoupdate.channel` (`"rolling"`/`"release"`) und
+`autoupdate.interval_secs` (Sekunden als INTEGER-String)) und überleben
+Neustarts. Der Start-Check in `serve()` liest die **effektiven** Werte aus
+der DB (nicht mehr nur `config.autoupdate_enabled`) und persistiert sein
+Ergebnis (`autoupdate.last_check_*`) — `--no-autoupdate` hat weiterhin
+höchste Priorität.
 
 ### Kanalwechsel (Cross-Channel-Switch)
 
@@ -217,13 +228,19 @@ Kanaltyps installieren kann (z. B. Release-Binary auf einer Dev-Installation
 Der Wechsel ist **kein** ChannelMismatch-Fehler mehr — Guards gelten nur
 für inkonsistente Quellen (siehe oben).
 
-### macOS v1-Limitation
+### macOS: DMG-Self-Install (Phase C)
 
-„Update now" auf macOS lädt nur den verifizierten DMG nach `~/Downloads`
-und zeigt eine Installations-Anleitung — DMG-Mount, `.app`-Ersetzung und
-Neustart sind **Phase C** (Auto-Apply + Self-Restart, geplant als eigenes
-Feature nach v1.1.1). `platformSelfInstall: false` kennzeichnet das in der
-Status-Response.
+„Update now" auf macOS installiert den verifizierten DMG jetzt selbst
+(Phase C, ersetzt die v1-Limitation): `hdiutil attach` (read-only) →
+`.app`-Bundle im Image suchen → `ditto` in ein Staging-Verzeichnis neben
+`/Applications` (bzw. `MOMOS_AUTOUPDATE_APP_DIR`/`[autoupdate] app_dir`)
+→ atomarer Tausch (bisherige Version wird zu
+`Momo's Music Manager.app.updater-bak`, bei Fehlern wird sie
+zurückgespielt) → `hdiutil detach`. Die alte Version bleibt als
+`.updater-bak` für die manuelle Wiederherstellung stehen und wird beim
+nächsten erfolgreichen Self-Install entfernt. `platformSelfInstall` ist auf
+macOS damit `true`; schlägt die Installation fehl, fällt `apply` auf den
+verifizierten Download nach `~/Downloads` zurück (`outcome: "downloaded"`).
 
 ### Kanal-Mismatch
 
@@ -234,3 +251,59 @@ gewählt ist. Die UI zeigt einen Erklärtext (gewählter Kanal vs. gelieferte
 Build-Art), der Apply-Button erscheint nicht (`POST /api/update/apply` →
 409). Ein **expliziter Kanalwechsel über das Dropdown ist kein Fehler** —
 Check/Apply laufen dann einfach gegen den anderen Kanal (siehe oben).
+
+## 7. Auto-Apply (Phase C) — Scheduler & Self-Restart
+
+Seit Phase C installiert der Autoupdater Updates **vollautomatisch**: Der
+`serve()`-Scheduler läuft im konfigurierbaren Intervall (§6, Default 4 h,
+`0` = aus) und führt pro Zyklus `check → apply → Self-Restart` aus. Die
+Settings-Seite zeigt das effektive Intervall als Dropdown (Presets
+Off/1 h/4 h/12 h/24 h, gesperrt bei Env/TOML-Pinning) und erklärt, dass
+„Auto-Update an" automatisch anwendet und neu startet.
+
+**Ablauf eines Zyklus** (`api::update::run_auto_apply_cycle`,
+`autoupdate::update_auto`):
+
+1. effektiver Enabled-Wert (`env > UI > TOML > default true`) — aus, wenn
+   disabled;
+2. in-flight-Guard: liegt ein unbestätigter Swap-Marker (`update-state.json`)
+   vor, wird **nicht** erneut angewendet (kein Stapeln auf laufende
+   Health-Grace/Rollback);
+3. verifizierter Check gegen den gewählten Kanal (Ergebnis wird wie beim
+   manuellen Check persistiert);
+4. bei verfügbarer Version: Apply (`Installed` → der Versuch wird als
+   `settings['autoupdate.auto_apply_state']` (JSON: `attempted_version`,
+   `failures`, Zeitstempel) **vor** dem Neustart aufgezeichnet; macOS-DMG
+   wird dabei selbst installiert, §6). `DownloadedOnly` (Self-Install-Fallback)
+   und Fehler werden geloggt und im nächsten Zyklus erneut versucht.
+
+**Self-Restart** (`autoupdate::restart`): Nach `Installed` beendet sich der
+Prozess; die neue Version startet — je nach Kontext:
+
+- **systemd** (`INVOCATION_ID` gesetzt): kein eigener Relauncher — der
+  Service-Manager startet den Prozess neu (`Restart=always` im
+  ausgelieferten Unit);
+- **Linux/Windows/macOS-Dev-Binary**: detachter Relauncher (neue
+  Prozessgruppe, kein stdio) wartet 2 s (Port/Datenbank-Handles des alten
+  Prozesses werden frei) und führt das Binary am bisherigen Pfad erneut aus
+  (dort liegt jetzt die neue Version);
+- **macOS `.app`**: das ersetzte Bundle wird per LaunchServices (`open`)
+  neu gestartet — nur wenn das laufende Bundle im Installations-Verzeichnis
+  liegt (sonst Hinweis, kein Auto-Start einer falschen Kopie).
+
+Nach dem Neustart greift die bestehende Health-Grace (`swap.rs`): Die neue
+Version muss die Grace-Periode überleben, dann wird committet
+(`auto_apply_state` wird geleert = Erfolg). Überlebt sie nicht, greift nach
+`MAX_UNHEALTHY_STARTS` der Auto-Rollback — und beim Rollback-Event wird der
+**Crash-Loop-Breaker** aktiviert: Derselbe Versionsstand wird nicht erneut
+automatisch angewendet (frühestens, wenn eine *neuere* Version erscheint;
+manuelles `update apply` geht immer). Zusammen mit dem in-flight-Guard gibt
+es damit **keinen Endlos-Restart-Loop** bei fehlgeschlagenen Updates.
+
+**Abgrenzung**: Der manuelle Pfad (Settings „Update now", CLI `update
+apply`) bleibt unverändert und startet nie automatisch neu
+(`restartNeeded: true` in der Response; Admin/Supervisor startet neu).
+Telemetrie-PR #20 hängt an `ApplyOutcome::Installed` in `verify::apply` —
+der Versionswechsel-Pfad und das Outcome-Schema sind unverändert, der
+`app.updated`-Hook bleibt kompatibel und feuert inzwischen in **beiden**
+Install-Zweigen (Binary-Swap und DMG-Self-Install; #20 ist gemergt).
