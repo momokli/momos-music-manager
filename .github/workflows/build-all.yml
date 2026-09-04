@@ -169,6 +169,49 @@ jobs:
             target/momos-music-manager-*-macos-universal.dmg.sha256
           if-no-files-found: error
 
+  # PR-only dry run of the publish path: proves the merged main run would
+  # not fail inside "Publish release assets". Runs the SAME shared logic as
+  # the publish job (scripts/publish-assets.sh) against the artifacts of all
+  # five build jobs, but never creates a release, signs or uploads — PRs have
+  # no secrets, and the gate must be side-effect free.
+  #
+  # Catches e.g. the linux-arm64 fallback-version bug (packaged with the
+  # plain Cargo version instead of <cargo>-dev+<sha8>): validate fails with
+  # a precise diff because the arm64 artifact name does not match the schema.
+  publish-gate:
+    name: Publish gate (PR dry-run)
+    needs: [linux-x64, linux-arm64, windows-x64, windows-arm64, macos-universal]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # resolve-version.sh needs `cargo metadata` (dev version basis).
+      - name: Install Rust (for resolve-version.sh)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Validate artifact names + checksums vs publish schema
+        run: bash scripts/publish-assets.sh validate dist
+      # Scratch copy of the pristine artifact set (hardlinks, same fs) so the
+      # tag staging path is exercised against versioned files only.
+      - name: Dry-run tag staging (SHA256SUMS + upload manifest)
+        run: |
+          rm -rf dist-tag
+          cp -al dist dist-tag
+          bash scripts/publish-assets.sh stage-tag dist-tag
+      - name: Dry-run main staging (stable names + SHA256SUMS + upload manifest)
+        run: bash scripts/publish-assets.sh stage-main dist
+      - name: Show staged artifact set + upload manifests
+        run: |
+          ls -lh dist/
+          echo "--- upload manifest (main mode, $(wc -l < dist/.upload-manifest) files) ---"
+          cat dist/.upload-manifest
+          echo "--- upload manifest (tag mode, $(wc -l < dist-tag/.upload-manifest) files) ---"
+          cat dist-tag/.upload-manifest
+
   publish:
     name: Publish release assets
     needs: [linux-x64, linux-arm64, windows-x64, windows-arm64, macos-universal]
@@ -199,11 +242,12 @@ jobs:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           set -euo pipefail
-          # Single source of truth for the version (tag = truth for releases,
-          # <cargo>-dev+<sha8> for main) — see scripts/resolve-version.sh.
-          VERSION="$(bash scripts/resolve-version.sh)"
-          echo "Version: ${VERSION}"
-          cd dist
+          # The PR publish-gate job runs the identical shared logic
+          # (scripts/publish-assets.sh) against the same artifact set, so the
+          # publish path can not silently diverge from what the gate tested.
+          # validate: strict artifact-set + checksum check (would have caught
+          # the linux-arm64 fallback-version failure before the cp below).
+          bash scripts/publish-assets.sh validate dist
 
           if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
             RELEASE="latest-main"
@@ -214,40 +258,22 @@ jobs:
                 --title "Latest main build (rolling)" \
                 --notes "Automatischer Build des aktuellen main-Standes für alle Plattformen. Ad-hoc-signiert, nicht notarized."
             fi
-
-            # Stable names for the landing page download buttons. The versioned
-            # assets change with every release; the site links to these names,
-            # so they must stay constant across main builds.
-            cp "momos-music-manager-${VERSION}-macos-universal.dmg" "Momo-s-Music-Manager-latest.dmg"
-            cp "momos-music-manager-${VERSION}-windows-x64.zip" "momos-music-manager-latest-windows-x64.zip"
-            cp "momos-music-manager-${VERSION}-windows-arm64.zip" "momos-music-manager-latest-windows-arm64.zip"
-            cp "momos-music-manager-${VERSION}-linux-x64.tar.gz" "momos-music-manager-latest-linux-x64.tar.gz"
-            cp "momos-music-manager-${VERSION}-linux-arm64.tar.gz" "momos-music-manager-latest-linux-arm64.tar.gz"
-
-            # Matching checksums for the stable names (content-identical to the
-            # versioned artifacts, but the file name inside the .sha256 matters
-            # for `sha256sum -c`).
-            sha256sum "Momo-s-Music-Manager-latest.dmg" > "Momo-s-Music-Manager-latest.dmg.sha256"
-            sha256sum momos-music-manager-latest-windows-x64.zip > momos-music-manager-latest-windows-x64.zip.sha256
-            sha256sum momos-music-manager-latest-windows-arm64.zip > momos-music-manager-latest-windows-arm64.zip.sha256
-            sha256sum momos-music-manager-latest-linux-x64.tar.gz > momos-music-manager-latest-linux-x64.tar.gz.sha256
-            sha256sum momos-music-manager-latest-linux-arm64.tar.gz > momos-music-manager-latest-linux-arm64.tar.gz.sha256
+            # Stable names for the landing page download buttons + aggregate
+            # SHA256SUMS + upload manifest (single source of truth, shared
+            # with the PR gate).
+            bash scripts/publish-assets.sh stage-main dist
           else
             RELEASE="${GITHUB_REF#refs/tags/}"
             if ! gh release view "${RELEASE}" >/dev/null 2>&1; then
               gh release create "${RELEASE}" --generate-notes --title "${RELEASE}"
             fi
+            bash scripts/publish-assets.sh stage-tag dist
           fi
 
-          # Aggregate checksum file: versioned + stable entries on main,
-          # versioned-only on tag releases.
-          SHA_FILES=( momos-music-manager-*.sha256 )
-          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
-            SHA_FILES+=( Momo-s-Music-Manager-latest.dmg.sha256 )
-          fi
-          cat "${SHA_FILES[@]}" > SHA256SUMS
-          echo "--- SHA256SUMS ---"
-          cat SHA256SUMS
+          cd dist
+          # Upload file list written by the shared script — no second,
+          # hand-maintained list that could drift from the gate.
+          mapfile -t UPLOAD_FILES < .upload-manifest
 
           # Sign the manifest (M6 autoupdater). Order relative to future
           # M3/M4 code-signing: sign binary → zip/dmg → sha256 → sign manifest.
@@ -276,38 +302,13 @@ jobs:
           # per-file checksums + aggregate + manifest signature).
           #
           # The file names are deterministic (fixed by the build/package jobs
-          # and the stable-name copies above), so list them explicitly instead
-          # of using shell globs: an unmatched glob is passed through literally
-          # and `gh release upload` then fails with "no matches found" — this
-          # is exactly what happened when SHA256SUMS.minisig did not exist.
-          UPLOAD_FILES=(
-            "momos-music-manager-${VERSION}-macos-universal.dmg"
-            "momos-music-manager-${VERSION}-macos-universal.dmg.sha256"
-            "momos-music-manager-${VERSION}-windows-x64.zip"
-            "momos-music-manager-${VERSION}-windows-x64.zip.sha256"
-            "momos-music-manager-${VERSION}-windows-arm64.zip"
-            "momos-music-manager-${VERSION}-windows-arm64.zip.sha256"
-            "momos-music-manager-${VERSION}-linux-x64.tar.gz"
-            "momos-music-manager-${VERSION}-linux-x64.tar.gz.sha256"
-            "momos-music-manager-${VERSION}-linux-arm64.tar.gz"
-            "momos-music-manager-${VERSION}-linux-arm64.tar.gz.sha256"
-            SHA256SUMS
-            SHA256SUMS.minisig
-          )
-          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
-            UPLOAD_FILES+=(
-              "Momo-s-Music-Manager-latest.dmg"
-              "Momo-s-Music-Manager-latest.dmg.sha256"
-              "momos-music-manager-latest-windows-x64.zip"
-              "momos-music-manager-latest-windows-x64.zip.sha256"
-              "momos-music-manager-latest-windows-arm64.zip"
-              "momos-music-manager-latest-windows-arm64.zip.sha256"
-              "momos-music-manager-latest-linux-x64.tar.gz"
-              "momos-music-manager-latest-linux-x64.tar.gz.sha256"
-              "momos-music-manager-latest-linux-arm64.tar.gz"
-              "momos-music-manager-latest-linux-arm64.tar.gz.sha256"
-            )
-          fi
+          # and the stable-name copies above), so the manifest is explicit
+          # instead of a shell glob: an unmatched glob is passed through
+          # literally and `gh release upload` then fails with "no matches
+          # found" — this is exactly what happened when SHA256SUMS.minisig
+          # did not exist. Re-check every entry here because SHA256SUMS.minisig
+          # is only created by the signing step above (after stage wrote the
+          # manifest).
           for f in "${UPLOAD_FILES[@]}"; do
             if [[ ! -f "${f}" ]]; then
               echo "::error::Missing file for upload: ${f}"
