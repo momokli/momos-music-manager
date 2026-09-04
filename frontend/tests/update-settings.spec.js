@@ -58,7 +58,7 @@ test.describe("Settings page — update controls", () => {
     // Real status endpoint renders version + toggle (the switch label is
     // visible; the native input is visually hidden by the switch CSS)
     await page.waitForSelector("#settings-updates-content code", { timeout: 8000 });
-    await expect(page.locator(".switch")).toBeVisible();
+    await expect(page.locator("#settings-updates-content .switch")).toBeVisible();
     await expect(page.locator("#autoupdate-toggle")).toBeAttached();
 
     expect(errors).toEqual([]);
@@ -162,13 +162,13 @@ test.describe("Settings page — update controls", () => {
     // label (the visible slider) to toggle it.
     const toggle = page.locator("#autoupdate-toggle");
     if (!(await toggle.isChecked())) {
-      await page.locator(".switch").click();
+      await page.locator("#settings-updates-content .switch").click();
       await expect.poll(() => settingsCalls.length).toBeGreaterThan(0);
     }
     await expect(toggle).toBeChecked();
 
     // Turn off — real POST, then verify the request body
-    await page.locator(".switch").click();
+    await page.locator("#settings-updates-content .switch").click();
     await expect.poll(() => settingsCalls.length).toBeGreaterThan(0);
     expect(settingsCalls[settingsCalls.length - 1]).toEqual({ autoUpdateEnabled: false });
     await expect(page.locator("#settings-updates-content")).toContainText("Disabled");

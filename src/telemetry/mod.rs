@@ -19,6 +19,7 @@ use sqlx::{FromRow, Pool, Sqlite, SqlitePool};
 use tracing::{info, warn};
 
 use crate::config::ServiceCredentials;
+use crate::db::settings::{self, KEY_TELEMETRY_LAST_PUSH_AT};
 use crate::tasks::{Task, TaskManager, TaskStatus, TaskType};
 
 /// Telemetry CLI subcommands.
@@ -36,7 +37,16 @@ pub async fn run(cmd: TelemetryCommand) -> Result<()> {
         TelemetryCommand::Push => {
             let config = ServiceCredentials::load();
             let db = SqlitePool::connect(&config.database_url).await?;
-            push_once(&db, &config).await
+            let result = push_once(&db, &config).await;
+            // Best-effort status record (Settings page + `push --status`
+            // style consumers); a raw CLI connect may lack the migrated
+            // `settings` table — the helper skips that case silently.
+            let outcome = match &result {
+                Ok(()) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            };
+            record_push_result(&db, outcome).await;
+            result
         }
         TelemetryCommand::Receive => {
             let config = ServiceCredentials::load();
@@ -163,6 +173,70 @@ pub async fn push_once(db: &Pool<Sqlite>, config: &ServiceCredentials) -> Result
 
     info!("Telemetry push ok: instance={instance} ts={ts} size={size} bytes");
     Ok(())
+}
+
+/// Persist the outcome of a one-shot push into the `settings` KV so the
+/// Settings page can show the status + timestamp of the last (successful)
+/// push. Best effort by design — a failure to record never fails the push
+/// itself. A `settings` table may not exist when the CLI connected without
+/// running migrations (raw `SqlitePool::connect`); that case is detected
+/// and skipped.
+pub async fn record_push_result(db: &Pool<Sqlite>, outcome: Result<(), String>) {
+    let (status, error) = match outcome {
+        Ok(()) => ("ok", None),
+        Err(msg) => ("error", Some(msg)),
+    };
+
+    // Cheap guard: the CLI push path connects without migrations.
+    let has_settings_table: bool = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings'",
+    )
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+    if !has_settings_table {
+        tracing::debug!(
+            "telemetry: settings table not present (raw CLI connect?) — skipping push status record"
+        );
+        return;
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    if let Err(e) = settings::set_setting(db, KEY_TELEMETRY_LAST_PUSH_AT, &now.to_string()).await
+    {
+        tracing::warn!("telemetry: push status record failed: {e}");
+    }
+    if let Err(e) = settings::set_setting(
+        db,
+        settings::KEY_TELEMETRY_LAST_PUSH_STATUS,
+        status,
+    )
+    .await
+    {
+        tracing::warn!("telemetry: push status record failed: {e}");
+    }
+    match &error {
+        Some(msg) => {
+            if let Err(e) = settings::set_setting(
+                db,
+                settings::KEY_TELEMETRY_LAST_PUSH_ERROR,
+                msg,
+            )
+            .await
+            {
+                tracing::warn!("telemetry: push status record failed: {e}");
+            }
+        }
+        None => {
+            if let Err(e) =
+                settings::delete_setting(db, settings::KEY_TELEMETRY_LAST_PUSH_ERROR).await
+            {
+                tracing::warn!("telemetry: push status record failed: {e}");
+            }
+        }
+    }
 }
 
 async fn push_db(
@@ -384,6 +458,7 @@ pub async fn start_telemetry_loop(
 
         match push_once(&db, &config).await {
             Ok(()) => {
+                record_push_result(&db, Ok(())).await;
                 task_manager
                     .add_log(&task_id, "Telemetry push completed".to_string())
                     .await;
@@ -394,6 +469,7 @@ pub async fn start_telemetry_loop(
             Err(e) => {
                 let msg = format!("Telemetry push failed: {e}");
                 warn!("{msg}");
+                record_push_result(&db, Err(msg.clone())).await;
                 task_manager.add_log(&task_id, msg).await;
                 task_manager
                     .update_task_status(&task_id, TaskStatus::Failed)

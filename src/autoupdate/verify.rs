@@ -436,6 +436,16 @@ pub async fn apply<F: Fetcher>(
                         installed.display(),
                         info.version
                     );
+                    // CLI access: refresh the `momos-music-manager` symlink
+                    // in a PATH dir so the freshly installed bundle stays
+                    // reachable from the terminal (see cli_link). Best
+                    // effort — never fails the apply.
+                    if let Err(e) = crate::cli_link::ensure_for_bundle(&installed) {
+                        tracing::warn!(
+                            "autoupdate: CLI link refresh after DMG install failed ({}): {e}",
+                            installed.display()
+                        );
+                    }
                     // Cleanup: the verified DMG is no longer needed.
                     if let Err(e) = std::fs::remove_file(&target) {
                         tracing::debug!(

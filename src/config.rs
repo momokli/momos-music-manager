@@ -72,7 +72,7 @@
 //! This lets you keep secrets in `.env` (gitignored) during local development
 //! while the TOML file is the canonical source for production / daily use.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use tracing::{info, warn};
@@ -156,6 +156,19 @@ struct TelemetryToml {
     full_db_interval_secs: Option<u64>,
     /// Event-batch endpoint; defaults to `<base_url>/api/telemetry` when unset.
     events_endpoint: Option<String>,
+}
+
+impl TelemetryToml {
+    /// Whether any of the UI-managed keys is set in `[telemetry]`.
+    fn is_empty(&self) -> bool {
+        self.enabled.is_none()
+            && self.base_url.is_none()
+            && self.token.is_none()
+            && self.instance.is_none()
+            && self.interval_secs.is_none()
+            && self.full_db_interval_secs.is_none()
+            && self.events_endpoint.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -247,6 +260,13 @@ pub struct ServiceCredentials {
     /// Env > TOML > derived default `<base_url>/api/telemetry` > None.
     pub telemetry_events_endpoint: Option<String>,
 
+    /// Raw `[telemetry]` section of the loaded config.toml (if any) — the
+    /// mirror the Settings UI uses to report where a value comes from
+    /// (env vs toml vs default) and to persist UI edits into the file
+    /// (see [`update_telemetry_toml`]). Never populated for env-only
+    /// loads ([`ServiceCredentials::from_env`]).
+    pub(crate) telemetry_toml: Option<TelemetryToml>,
+
     // Telemetry receiver (collector)
     pub telemetry_receiver_bind: String,
     pub telemetry_receiver_base_dir: String,
@@ -293,6 +313,9 @@ impl ServiceCredentials {
     /// non-empty value.
     pub fn load() -> Self {
         let toml_config = Self::load_toml();
+        // Raw `[telemetry]` mirror for the Settings UI (source reporting +
+        // persistence target) — cloned before the field borrows below.
+        let telemetry_toml = toml_config.telemetry.clone();
 
         let has_toml_spotify = toml_config.spotify.is_some();
 
@@ -560,6 +583,7 @@ impl ServiceCredentials {
                 })
                 .unwrap_or(0),
             telemetry_events_endpoint: telemetry_events_endpoint,
+            telemetry_toml,
 
             // Telemetry receiver (collector)
             telemetry_receiver_bind: env_or_toml(
@@ -776,6 +800,8 @@ impl ServiceCredentials {
                 env_var_optional("MOMOS_TELEMETRY_EVENTS_ENDPOINT"),
                 env_var_optional("MOMOS_TELEMETRY_BASE_URL").as_deref(),
             ),
+            // Env-only load (tests/CI): no config.toml mirror.
+            telemetry_toml: None,
             telemetry_receiver_bind: env_var_optional("MOMOS_TELEMETRY_RECEIVER_BIND")
                 .unwrap_or_else(|| "127.0.0.1:8330".to_string()),
             telemetry_receiver_base_dir: env_var_optional("MOMOS_TELEMETRY_RECEIVER_BASE_DIR")
@@ -877,6 +903,25 @@ impl ServiceCredentials {
         TomlConfig::default()
     }
 
+    /// Path of the config.toml that [`Self::load`] would read: the first
+    /// *existing* candidate (XDG-style `~/.config/…` wins over the
+    /// OS-native dir), else the preferred write location (first candidate).
+    ///
+    /// This is also the file the Settings UI persists into
+    /// ([`update_telemetry_toml`]) — writing to the file the next `load()`
+    /// actually reads keeps Env > TOML > Defaults intact.
+    pub fn primary_config_toml_path() -> PathBuf {
+        Self::config_paths()
+            .into_iter()
+            .find(|p| p.exists())
+            .unwrap_or_else(|| {
+                Self::config_paths()
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default()
+            })
+    }
+
     // ── Service status checks (unchanged) ────────────────────────────────
 
     pub fn is_spotify_configured(&self) -> bool {
@@ -965,6 +1010,148 @@ impl ServiceCredentials {
         crate::autoupdate::UpdateChannel::for_version(env!("MMM_VERSION"))
     }
 
+    // ── Telemetry Settings sources (env > TOML > default) ─────────────
+    //
+    // These mirror the resolution in [`Self::load`] and feed the Settings
+    // UI: a value whose source is `"env"` is pinned by an environment
+    // variable (the UI disables the control); `"toml"` values are
+    // editable — the UI persists into the `[telemetry]` section of
+    // config.toml (see [`update_telemetry_toml`]); `"default"` values
+    // come from the built-in defaults (enabled=false, instance="macbook",
+    // interval 0).
+
+    /// Where the effective `telemetry_enabled` comes from: `"env"`
+    /// (parseable `MOMOS_TELEMETRY_ENABLED`), `"toml"` (`[telemetry]
+    /// enabled` in config.toml) or `"default"` (false). An unparseable env
+    /// value falls through, mirroring the resolution in [`Self::load`].
+    pub fn telemetry_enabled_source(&self) -> &'static str {
+        if std::env::var("MOMOS_TELEMETRY_ENABLED")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .is_some()
+        {
+            return "env";
+        }
+        if self
+            .telemetry_toml
+            .as_ref()
+            .and_then(|t| t.enabled)
+            .is_some()
+        {
+            return "toml";
+        }
+        "default"
+    }
+
+    /// Where the effective `telemetry.base_url` comes from: `"env"` when
+    /// `MOMOS_TELEMETRY_BASE_URL` is set (an empty value counts as set — it
+    /// clears the TOML value, mirroring [`env_or_toml_opt`]), `"toml"` when
+    /// `[telemetry] base_url` exists in config.toml, else `"default"`.
+    pub fn telemetry_base_url_source(&self) -> &'static str {
+        if std::env::var("MOMOS_TELEMETRY_BASE_URL").is_ok() {
+            return "env";
+        }
+        if self
+            .telemetry_toml
+            .as_ref()
+            .and_then(|t| t.base_url.as_ref())
+            .is_some()
+        {
+            return "toml";
+        }
+        "default"
+    }
+
+    /// Where the effective `telemetry.token` comes from (analogous to
+    /// [`Self::telemetry_base_url_source`]; env var `MOMOS_TELEMETRY_TOKEN`).
+    pub fn telemetry_token_source(&self) -> &'static str {
+        if std::env::var("MOMOS_TELEMETRY_TOKEN").is_ok() {
+            return "env";
+        }
+        if self
+            .telemetry_toml
+            .as_ref()
+            .and_then(|t| t.token.as_ref())
+            .is_some()
+        {
+            return "toml";
+        }
+        "default"
+    }
+
+    /// Where the effective `telemetry.instance` comes from: `"env"` when
+    /// `MOMOS_TELEMETRY_INSTANCE` is set to a non-empty value (an empty env
+    /// value falls through, mirroring [`env_or_toml`]), `"toml"` when
+    /// `[telemetry] instance` exists, else `"default"` ("macbook").
+    pub fn telemetry_instance_source(&self) -> &'static str {
+        if std::env::var("MOMOS_TELEMETRY_INSTANCE")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+        {
+            return "env";
+        }
+        if self
+            .telemetry_toml
+            .as_ref()
+            .and_then(|t| t.instance.as_ref())
+            .is_some()
+        {
+            return "toml";
+        }
+        "default"
+    }
+
+    /// Where the effective full-DB push interval comes from: `"env"` when
+    /// `MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS` *or* the legacy
+    /// `MOMOS_TELEMETRY_INTERVAL_SECS` is parseable, `"toml"` when
+    /// `[telemetry] full_db_interval_secs` *or* the legacy `interval_secs`
+    /// exists in config.toml, else `"default"` (0 = off).
+    pub fn telemetry_interval_source(&self) -> &'static str {
+        for name in [
+            "MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS",
+            "MOMOS_TELEMETRY_INTERVAL_SECS",
+        ] {
+            if std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .is_some()
+            {
+                return "env";
+            }
+        }
+        let toml = self.telemetry_toml.as_ref();
+        if toml
+            .and_then(|t| t.full_db_interval_secs)
+            .is_some()
+            || toml.and_then(|t| t.interval_secs).is_some()
+        {
+            return "toml";
+        }
+        "default"
+    }
+
+    /// Effective periodic full-DB push interval in seconds (0 = off) — the
+    /// same value the telemetry loop uses (explicit key wins, legacy
+    /// `interval_secs` stays effective as alias when the explicit one is
+    /// unset/0; see [`crate::telemetry::effective_full_db_interval_secs`]).
+    pub fn telemetry_effective_full_db_interval(&self) -> u64 {
+        if self.telemetry_full_db_interval_secs > 0 {
+            self.telemetry_full_db_interval_secs
+        } else {
+            self.telemetry_interval_secs
+        }
+    }
+
+    /// Whether any `[telemetry]` value is present in the loaded config.toml
+    /// (used by tests and by the API to explain pinning).
+    pub(crate) fn telemetry_toml_present(&self) -> bool {
+        self.telemetry_toml
+            .as_ref()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false)
+    }
+
     pub fn spotify_client_id(&self) -> anyhow::Result<&str> {
         self.spotify_client_id.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -1024,6 +1211,7 @@ impl ServiceCredentials {
             telemetry_interval_secs: 0,
             telemetry_full_db_interval_secs: 0,
             telemetry_events_endpoint: None,
+            telemetry_toml: None,
             telemetry_receiver_bind: "127.0.0.1:8330".to_string(),
             telemetry_receiver_base_dir: "/tmp/momos-analytics".to_string(),
             telemetry_receiver_token: None,
@@ -1089,6 +1277,245 @@ fn env_or_toml_opt(name: &str, toml_value: Option<String>) -> Option<String> {
     }
 }
 
+// ── config.toml persistence (Settings UI → `[telemetry]`) ─────────────────
+//
+// The Settings page writes the `[telemetry]` section of config.toml so the
+// user never has to edit the file by hand. Precedence stays untouched:
+// Env > TOML > Defaults (an env-pinned field is simply not editable in the
+// UI). The writer below does *line surgery* instead of a full TOML
+// round-trip: comments, unknown sections and values the UI does not manage
+// (e.g. `[telemetry] events_endpoint` or the `[autoupdate]` section)
+// survive byte-for-byte.
+
+/// Keys of the `[telemetry]` section the Settings UI manages.
+const TELEMETRY_TOML_SECTION: &str = "telemetry";
+/// Managed `[telemetry]` keys (in the order they are written for new files).
+const TELEMETRY_TOML_KEYS: &[&str] = &[
+    "enabled",
+    "base_url",
+    "token",
+    "instance",
+    "full_db_interval_secs",
+];
+/// Legacy alias key that the UI silently retires when it writes
+/// `full_db_interval_secs` (the explicit key is authoritative; keeping both
+/// would make a UI "0 = off" save ineffective when a legacy value exists).
+const TELEMETRY_TOML_LEGACY_INTERVAL_KEY: &str = "interval_secs";
+
+/// Failure of a config.toml settings write.
+#[derive(Debug, thiserror::Error)]
+#[allow(missing_docs)]
+pub enum TelemetryTomlError {
+    #[error("cannot write config.toml: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("config.toml at {0} is not valid TOML — refusing to modify it: {1}")]
+    InvalidToml(PathBuf, String),
+}
+
+/// New values for the `[telemetry]` section, written from the Settings UI.
+///
+/// `None` leaves the key untouched. String fields: `Some("")` deletes the
+/// key (the effective value becomes the default / env override);
+/// `Some(non-empty)` sets it.
+#[derive(Debug, Clone, Default)]
+#[allow(missing_docs)]
+pub struct TelemetryTomlPatch {
+    pub enabled: Option<bool>,
+    pub base_url: Option<String>,
+    pub token: Option<String>,
+    pub instance: Option<String>,
+    pub full_db_interval_secs: Option<u64>,
+}
+
+/// Patch the `[telemetry]` section of the config.toml that
+/// [`ServiceCredentials::load`] reads (first existing candidate path, else
+/// the preferred XDG location `~/.config/momos-music-manager/config.toml`).
+///
+/// Returns the path that was written. Creating the file when it does not
+/// exist yet (including its parent directory).
+pub fn update_telemetry_toml(
+    patch: &TelemetryTomlPatch,
+) -> Result<PathBuf, TelemetryTomlError> {
+    let path = ServiceCredentials::primary_config_toml_path();
+    update_telemetry_toml_at(&path, patch)?;
+    Ok(path)
+}
+
+/// [`update_telemetry_toml`] at an explicit path (testable without touching
+/// the real home directory).
+pub fn update_telemetry_toml_at(
+    path: &Path,
+    patch: &TelemetryTomlPatch,
+) -> Result<(), TelemetryTomlError> {
+    // Read the current content (empty when the file does not exist yet).
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+
+    // Never rewrite a file we cannot fully understand: validate the current
+    // content parses as TOML (an empty file is a valid empty table).
+    if !content.trim().is_empty() {
+        if let Err(e) = content.parse::<toml::Value>() {
+            return Err(TelemetryTomlError::InvalidToml(
+                path.to_path_buf(),
+                e.to_string(),
+            ));
+        }
+    }
+
+    let mut lines: Vec<String> = content.split('\n').map(str::to_string).collect();
+    // Split marker: the file content ends with a newline iff the last
+    // element is empty (split keeps the trailing empty element).
+    let ends_with_newline = lines.last().map(|l| l.is_empty()).unwrap_or(true);
+
+    // Locate the `[telemetry]` section (header line = trimmed `[name]`).
+    fn is_section_header(line: &str) -> bool {
+        let t = line.trim();
+        t.starts_with('[') && t.ends_with(']') && !t.starts_with("[[")
+    }
+    let section_header = format!("[{TELEMETRY_TOML_SECTION}]");
+    let mut telemetry_idx: Option<usize> = None;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim() == section_header {
+            telemetry_idx = Some(i);
+            break;
+        }
+    }
+
+    let mut section_end = match telemetry_idx {
+        Some(idx) => {
+            // End = next section header after [telemetry], else EOF.
+            let mut end = lines.len();
+            for (i, line) in lines.iter().enumerate().skip(idx + 1) {
+                if is_section_header(line) {
+                    end = i;
+                    break;
+                }
+            }
+            end
+        }
+        None => {
+            // No [telemetry] yet — append it at the end (after a
+            // separating blank line when the file has content).
+            if !lines.is_empty()
+                && !ends_with_newline
+                && lines.iter().any(|l| !l.trim().is_empty())
+            {
+                lines.push(String::new());
+            }
+            lines.push(section_header);
+            telemetry_idx = Some(lines.len() - 1);
+            lines.len() // empty section, keys are inserted below
+        }
+    };
+
+    // Token of a key line: text before the first `=` (trimmed). Comments
+    // and non-key lines return None.
+    fn line_key(line: &str) -> Option<&str> {
+        let t = line.trim();
+        if t.starts_with('#') {
+            return None; // comment
+        }
+        t.split('=').next().map(str::trim).filter(|k| !k.is_empty())
+    }
+
+    // Find the line index of `key` inside the [telemetry] section.
+    fn find_key(lines: &[String], start: usize, end: usize, key: &str) -> Option<usize> {
+        lines[start..end]
+            .iter()
+            .position(|l| line_key(l) == Some(key))
+            .map(|p| p + start)
+    }
+
+    // Value rendering: TOML-literal strings (proper quoting/escaping),
+    // plain scalars otherwise.
+    fn value_line(key: &str, value: &toml::Value) -> String {
+        format!("{key} = {value}")
+    }
+
+    // Replace or insert one key inside the [telemetry] section. Missing
+    // keys are appended at the section end (before the next header);
+    // `section_end` tracks the insertion point.
+    let start = telemetry_idx.expect("telemetry section index set") + 1;
+    let mut set_key = |lines: &mut Vec<String>,
+                       section_end: &mut usize,
+                       key: &str,
+                       value: &toml::Value| {
+        match find_key(lines, start, *section_end, key) {
+            Some(i) => lines[i] = value_line(key, value),
+            None => {
+                lines.insert(*section_end, value_line(key, value));
+                *section_end += 1;
+            }
+        }
+    };
+    let mut remove_key = |lines: &mut Vec<String>, section_end: &mut usize, key: &str| {
+        if let Some(i) = find_key(lines, start, *section_end, key) {
+            lines.remove(i);
+            *section_end -= 1;
+        }
+    };
+
+    // 1. Enabled toggle.
+    if let Some(v) = patch.enabled {
+        set_key(&mut lines, &mut section_end, "enabled", &toml::Value::Boolean(v));
+    }
+    // 2. String fields — Some("") clears the key.
+    for (key, value) in [
+        ("base_url", patch.base_url.as_ref()),
+        ("token", patch.token.as_ref()),
+        ("instance", patch.instance.as_ref()),
+    ] {
+        match value {
+            None => {}
+            Some(v) if v.is_empty() => remove_key(&mut lines, &mut section_end, key),
+            Some(v) => {
+                set_key(
+                    &mut lines,
+                    &mut section_end,
+                    key,
+                    &toml::Value::String(v.clone()),
+                );
+            }
+        }
+    }
+    // 3. Full-DB interval — writing it retires the legacy alias so the UI
+    //    value stays authoritative (0 = off must mean off).
+    if let Some(secs) = patch.full_db_interval_secs {
+        remove_key(&mut lines, &mut section_end, TELEMETRY_TOML_LEGACY_INTERVAL_KEY);
+        set_key(
+            &mut lines,
+            &mut section_end,
+            "full_db_interval_secs",
+            &toml::Value::Integer(secs as i64),
+        );
+    }
+
+    let mut new_content = lines.join("\n");
+    if !ends_with_newline && !new_content.is_empty() {
+        new_content.push('\n');
+    }
+
+    // Validate the result before writing: it must stay valid TOML.
+    if let Err(e) = new_content.parse::<toml::Value>() {
+        return Err(TelemetryTomlError::InvalidToml(
+            path.to_path_buf(),
+            e.to_string(),
+        ));
+    }
+
+    // Atomic write (temp + rename) so a crash never leaves a torn file.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, &new_content)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// Return the env var (as a port number) if set, otherwise fall back to the TOML value.
 fn env_or_toml_port(name: &str, toml_value: Option<u16>) -> Option<u16> {
     match std::env::var(name) {
@@ -1110,8 +1537,15 @@ fn default_telemetry_base_dir() -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Serializes every test that reads/mutates `MOMOS_TELEMETRY_*` env
+    /// vars (the source helpers read the process env live). Acquired by the
+    /// telemetry source-helper tests here and by the Settings-API env-pin
+    /// matrix (`api::telemetry_settings::tests`) — parallel tests inside
+    /// one binary would otherwise race on the process-global environment.
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     // ── ServiceCredentials defaults ────────────────────────────────
 
@@ -1527,5 +1961,270 @@ mod tests {
         let result = env_or_toml("TEST_BOOL_FALSE_2", Some("true".to_string()));
         unsafe { std::env::remove_var("TEST_BOOL_FALSE_2") };
         assert_eq!(result, Some("false".to_string()));
+    }
+
+    // ── Telemetry source helpers (env > toml > default) ──────────────
+    //
+    // The env branches are exercised via the Settings-API pin matrix
+    // (api::telemetry_settings tests, single test fn because env mutation
+    // must not overlap). These tests cover the toml/default branches with
+    // a clean process env (CI never sets MOMOS_TELEMETRY_*).
+
+    fn creds_with_toml(telemetry: Option<TelemetryToml>) -> ServiceCredentials {
+        let mut creds = ServiceCredentials::defaults_for_test();
+        // Mirror what `load()` resolves from the TOML section into the
+        // runtime fields (env is not involved in these tests).
+        if let Some(t) = &telemetry {
+            creds.telemetry_enabled = t.enabled.unwrap_or(false);
+            creds.telemetry_base_url = t.base_url.clone();
+            creds.telemetry_token = t.token.clone();
+            creds.telemetry_instance = t
+                .instance
+                .clone()
+                .unwrap_or_else(|| "macbook".to_string());
+            creds.telemetry_interval_secs = t.interval_secs.unwrap_or(0);
+            creds.telemetry_full_db_interval_secs = t.full_db_interval_secs.unwrap_or(0);
+            creds.telemetry_events_endpoint = match (&t.events_endpoint, &t.base_url) {
+                (Some(e), _) => Some(e.clone()),
+                (None, Some(u)) => Some(format!("{}/api/telemetry", u.trim_end_matches('/'))),
+                (None, None) => None,
+            };
+        }
+        creds.telemetry_toml = telemetry;
+        creds
+    }
+
+    #[test]
+    fn telemetry_sources_default_without_env_or_toml() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let creds = creds_with_toml(None);
+        assert_eq!(creds.telemetry_enabled_source(), "default");
+        assert_eq!(creds.telemetry_base_url_source(), "default");
+        assert_eq!(creds.telemetry_token_source(), "default");
+        assert_eq!(creds.telemetry_instance_source(), "default");
+        assert_eq!(creds.telemetry_interval_source(), "default");
+        assert_eq!(creds.telemetry_effective_full_db_interval(), 0);
+        assert!(!creds.telemetry_toml_present());
+    }
+
+    #[test]
+    fn telemetry_sources_toml_mirror() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let toml = TelemetryToml {
+            enabled: Some(false),
+            base_url: Some("https://collector.example".into()),
+            token: Some("tok".into()),
+            instance: Some("studio".into()),
+            interval_secs: None,
+            full_db_interval_secs: Some(3600),
+            events_endpoint: None,
+        };
+        let creds = creds_with_toml(Some(toml));
+        assert_eq!(creds.telemetry_enabled_source(), "toml");
+        assert_eq!(creds.telemetry_base_url_source(), "toml");
+        assert_eq!(creds.telemetry_token_source(), "toml");
+        assert_eq!(creds.telemetry_instance_source(), "toml");
+        assert_eq!(creds.telemetry_interval_source(), "toml");
+        assert_eq!(creds.telemetry_effective_full_db_interval(), 3600);
+        assert!(creds.telemetry_toml_present());
+    }
+
+    #[test]
+    fn telemetry_sources_legacy_interval_alias() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Legacy `interval_secs` (no explicit key) keeps working and is
+        // reported as toml source.
+        let toml = TelemetryToml {
+            enabled: Some(true),
+            base_url: None,
+            token: None,
+            instance: None,
+            interval_secs: Some(7200),
+            full_db_interval_secs: None,
+            events_endpoint: None,
+        };
+        let creds = creds_with_toml(Some(toml));
+        assert_eq!(creds.telemetry_interval_source(), "toml");
+        assert_eq!(creds.telemetry_effective_full_db_interval(), 7200);
+    }
+
+    #[test]
+    fn telemetry_effective_prefers_explicit_over_legacy() {
+        let creds = {
+            let mut c = ServiceCredentials::defaults_for_test();
+            c.telemetry_full_db_interval_secs = 60;
+            c.telemetry_interval_secs = 7200;
+            c
+        };
+        assert_eq!(creds.telemetry_effective_full_db_interval(), 60);
+    }
+
+    // ── [telemetry] config.toml writer ─────────────────────────────────
+
+    const SAMPLE_TOML: &str = r#"# Momo's Music Manager config
+# secrets stay here
+
+[spotify]
+client_id = "abc"
+client_secret = "def"  # keep me
+
+[telemetry]
+# master flag for snapshot push AND event telemetry
+enabled = true
+base_url = "https://telemetry.example"
+# interval below is the legacy alias
+interval_secs = 3600
+events_endpoint = "https://telemetry.example/api/telemetry"
+
+[autoupdate]
+enabled = true
+"#;
+
+    #[test]
+    fn update_telemetry_toml_preserves_comments_and_other_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, SAMPLE_TOML).unwrap();
+
+        let patch = TelemetryTomlPatch {
+            enabled: Some(false),
+            base_url: Some("https://new.example".into()),
+            token: Some("tok-123".into()),
+            instance: Some("studio".into()),
+            full_db_interval_secs: Some(0),
+        };
+        update_telemetry_toml_at(&path, &patch).unwrap();
+
+        let out = std::fs::read_to_string(&path).unwrap();
+        // Unrelated content survives byte-for-byte.
+        assert!(out.contains("client_secret = \"def\"  # keep me"));
+        assert!(out.contains("[autoupdate]\nenabled = true"));
+        assert!(out.contains("# master flag for snapshot push AND event telemetry"));
+        // events_endpoint (not managed by the UI) survives.
+        assert!(out.contains("events_endpoint = \"https://telemetry.example/api/telemetry\""));
+        // Legacy alias retired when the explicit key is written (the line
+        // must be gone as a key — `full_db_interval_secs` stays).
+        assert!(!out.lines().any(|l| {
+            let t = l.trim();
+            !t.starts_with('#') && t.split('=').next().map(str::trim) == Some("interval_secs")
+        }), "legacy key must be gone: {out}");
+        assert!(out.contains("full_db_interval_secs = 0"));
+
+        // Values updated (0 = off must land as a real key).
+        assert!(out.contains("enabled = false"));
+        assert!(out.contains("base_url = \"https://new.example\""));
+        assert!(out.contains("token = \"tok-123\""));
+        assert!(out.contains("instance = \"studio\""));
+        assert!(out.contains("full_db_interval_secs = 0"));
+
+        // Result must parse + resolve like a fresh load would.
+        let value: toml::Value = out.parse().expect("result must be valid TOML");
+        let tel = &value["telemetry"];
+        assert_eq!(tel["enabled"].as_bool(), Some(false));
+        assert_eq!(tel["full_db_interval_secs"].as_integer(), Some(0));
+        assert_eq!(value["spotify"]["client_id"].as_str(), Some("abc"));
+    }
+
+    #[test]
+    fn update_telemetry_toml_appends_section_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[spotify]\nclient_id = \"abc\"\n",
+        )
+        .unwrap();
+
+        let patch = TelemetryTomlPatch {
+            enabled: Some(true),
+            base_url: Some("https://t.example".into()),
+            ..Default::default()
+        };
+        update_telemetry_toml_at(&path, &patch).unwrap();
+
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(out.contains("[spotify]"));
+        assert!(out.contains("[telemetry]"));
+        let value: toml::Value = out.parse().expect("valid TOML");
+        assert_eq!(value["telemetry"]["enabled"].as_bool(), Some(true));
+        assert_eq!(value["telemetry"]["base_url"].as_str(), Some("https://t.example"));
+    }
+
+    #[test]
+    fn update_telemetry_toml_creates_file_with_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("deep").join("config.toml");
+        assert!(!path.exists());
+
+        let patch = TelemetryTomlPatch {
+            enabled: Some(true),
+            instance: Some("studio".into()),
+            ..Default::default()
+        };
+        update_telemetry_toml_at(&path, &patch).unwrap();
+        assert!(path.exists());
+        let out = std::fs::read_to_string(&path).unwrap();
+        let value: toml::Value = out.parse().expect("valid TOML");
+        assert_eq!(value["telemetry"]["enabled"].as_bool(), Some(true));
+        assert_eq!(value["telemetry"]["instance"].as_str(), Some("studio"));
+        assert_eq!(value["telemetry"].get("base_url"), None);
+    }
+
+    #[test]
+    fn update_telemetry_toml_clears_string_keys_with_empty_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[telemetry]\nbase_url = \"https://old.example\"\ntoken = \"t\"\ninstance = \"studio\"\n",
+        )
+        .unwrap();
+
+        let patch = TelemetryTomlPatch {
+            base_url: Some(String::new()),
+            token: Some(String::new()),
+            ..Default::default()
+        };
+        update_telemetry_toml_at(&path, &patch).unwrap();
+
+        let out = std::fs::read_to_string(&path).unwrap();
+        let value: toml::Value = out.parse().expect("valid TOML");
+        let tel = &value["telemetry"];
+        assert_eq!(tel.get("base_url"), None);
+        assert_eq!(tel.get("token"), None);
+        assert_eq!(tel["instance"].as_str(), Some("studio"), "untouched key survives");
+    }
+
+    #[test]
+    fn update_telemetry_toml_rejects_invalid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "this is = = not toml [[[").unwrap();
+
+        let patch = TelemetryTomlPatch {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let err = update_telemetry_toml_at(&path, &patch).unwrap_err();
+        assert!(matches!(err, TelemetryTomlError::InvalidToml(..)));
+        // File untouched.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "this is = = not toml [[["
+        );
+    }
+
+    #[test]
+    fn update_telemetry_toml_escapes_string_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let patch = TelemetryTomlPatch {
+            instance: Some("studio \"quoted\" ✓".into()),
+            ..Default::default()
+        };
+        update_telemetry_toml_at(&path, &patch).unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        let value: toml::Value = out.parse().expect("valid TOML");
+        assert_eq!(value["telemetry"]["instance"].as_str(), Some("studio \"quoted\" ✓"));
     }
 }
