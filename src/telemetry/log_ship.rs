@@ -107,7 +107,10 @@ pub fn layer() -> (LogShipLayer, LogShipHandle) {
 }
 
 impl LogShipLayer {
-    /// Whether shipping is currently active (test helper + status logs).
+    /// Whether shipping is currently active — unit-test helper only
+    /// (production status is logged in `serve()` from the config; there is
+    /// no non-test caller).
+    #[cfg(test)]
     fn is_active(&self) -> bool {
         self.shared
             .state
@@ -118,6 +121,9 @@ impl LogShipLayer {
 }
 
 impl LogShipHandle {
+    /// Whether shipping is currently active — unit-test helper only, see
+    /// `LogShipLayer::is_active` (same state, same caveats).
+    #[cfg(test)]
     pub fn is_active(&self) -> bool {
         self.shared
             .state
