@@ -79,7 +79,8 @@ impl std::fmt::Display for TelemetrySettingsError {
 }
 
 /// Body of `POST /api/telemetry-settings/settings` — at least one field
-/// must be present. `baseUrl`/`token`/`instance` as `""` clear the key.
+/// must be present. `baseUrl`/`token`/`instance`/`logMinLevel` as `""`
+/// clear the key.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TelemetrySettingsRequest {
@@ -88,6 +89,10 @@ pub struct TelemetrySettingsRequest {
     pub token: Option<String>,
     pub instance: Option<String>,
     pub full_db_interval_secs: Option<u64>,
+    pub ui_events_enabled: Option<bool>,
+    pub log_shipping_enabled: Option<bool>,
+    pub log_min_level: Option<String>,
+    pub log_max_events_per_sec: Option<u64>,
 }
 
 /// Status JSON — effective values (Env > TOML > Defaults) + where each
@@ -107,6 +112,15 @@ pub(crate) fn telemetry_status_json(config: &ServiceCredentials) -> serde_json::
         "instanceSource": config.telemetry_instance_source(),
         "fullDbIntervalSecs": config.telemetry_effective_full_db_interval(),
         "fullDbIntervalSource": config.telemetry_interval_source(),
+        // Full-package flags (plan E3): ui events + log shipping.
+        "uiEventsEnabled": config.telemetry_ui_events_enabled,
+        "uiEventsSource": config.telemetry_ui_events_source(),
+        "logShippingEnabled": config.telemetry_log_shipping_enabled,
+        "logShippingSource": config.telemetry_log_shipping_source(),
+        "logMinLevel": config.telemetry_log_min_level,
+        "logMinLevelSource": config.telemetry_log_min_level_source(),
+        "logMaxEventsPerSec": config.telemetry_log_max_events_per_sec,
+        "logMaxEventsPerSecSource": config.telemetry_log_max_events_per_sec_source(),
         // Derived, read-only.
         "eventsEndpoint": config.telemetry_events_endpoint,
         "periodicPushActive": config.telemetry_enabled
@@ -183,6 +197,29 @@ pub(crate) fn check_env_pins(
             "telemetry.full_db_interval_secs",
             "MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS / MOMOS_TELEMETRY_INTERVAL_SECS",
             patch.full_db_interval_secs.is_some() && current.telemetry_interval_source() == "env",
+        ),
+        (
+            "telemetry.ui_events_enabled",
+            "MOMOS_TELEMETRY_UI_EVENTS_ENABLED",
+            patch.ui_events_enabled.is_some()
+                && current.telemetry_ui_events_source() == "env",
+        ),
+        (
+            "telemetry.log_shipping_enabled",
+            "MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED",
+            patch.log_shipping_enabled.is_some()
+                && current.telemetry_log_shipping_source() == "env",
+        ),
+        (
+            "telemetry.log_min_level",
+            "MOMOS_TELEMETRY_LOG_MIN_LEVEL",
+            patch.log_min_level.is_some() && current.telemetry_log_min_level_source() == "env",
+        ),
+        (
+            "telemetry.log_max_events_per_sec",
+            "MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC",
+            patch.log_max_events_per_sec.is_some()
+                && current.telemetry_log_max_events_per_sec_source() == "env",
         ),
     ] {
         if pinned {
@@ -281,7 +318,7 @@ async fn settings_handler(
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "invalid body — expected { \"enabled\": true|false, \"baseUrl\": \"…\", \"token\": \"…\", \"instance\": \"…\", \"fullDbIntervalSecs\": <seconds> }".into(),
+                error: "invalid body — expected { \"enabled\": true|false, \"baseUrl\": \"…\", \"token\": \"…\", \"instance\": \"…\", \"fullDbIntervalSecs\": <seconds>, \"uiEventsEnabled\": true|false, \"logShippingEnabled\": true|false, \"logMinLevel\": \"error|warn|info|debug|trace\", \"logMaxEventsPerSec\": <1..10000> }".into(),
             }),
         )
             .into_response();
@@ -291,11 +328,15 @@ async fn settings_handler(
         && req.token.is_none()
         && req.instance.is_none()
         && req.full_db_interval_secs.is_none()
+        && req.ui_events_enabled.is_none()
+        && req.log_shipping_enabled.is_none()
+        && req.log_min_level.is_none()
+        && req.log_max_events_per_sec.is_none()
     {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "invalid body — provide at least one of \"enabled\", \"baseUrl\", \"token\", \"instance\" or \"fullDbIntervalSecs\"".into(),
+                error: "invalid body — provide at least one of \"enabled\", \"baseUrl\", \"token\", \"instance\", \"fullDbIntervalSecs\", \"uiEventsEnabled\", \"logShippingEnabled\", \"logMinLevel\" or \"logMaxEventsPerSec\"".into(),
             }),
         )
             .into_response();
@@ -307,6 +348,10 @@ async fn settings_handler(
         token: req.token,
         instance: req.instance,
         full_db_interval_secs: req.full_db_interval_secs,
+        ui_events_enabled: req.ui_events_enabled,
+        log_shipping_enabled: req.log_shipping_enabled,
+        log_min_level: req.log_min_level,
+        log_max_events_per_sec: req.log_max_events_per_sec,
     };
     // Fresh current state (env + file as of now) for the pin checks.
     let current = ServiceCredentials::load();
@@ -356,6 +401,15 @@ mod tests {
         assert_eq!(json["instanceSource"], "default");
         assert_eq!(json["fullDbIntervalSecs"], 0);
         assert_eq!(json["fullDbIntervalSource"], "default");
+        // Full-package flags: all off / warn / 50 by default.
+        assert_eq!(json["uiEventsEnabled"], false);
+        assert_eq!(json["uiEventsSource"], "default");
+        assert_eq!(json["logShippingEnabled"], false);
+        assert_eq!(json["logShippingSource"], "default");
+        assert_eq!(json["logMinLevel"], "warn");
+        assert_eq!(json["logMinLevelSource"], "default");
+        assert_eq!(json["logMaxEventsPerSec"], 50);
+        assert_eq!(json["logMaxEventsPerSecSource"], "default");
         assert_eq!(json["periodicPushActive"], false);
         assert_eq!(json["eventsEndpoint"], serde_json::Value::Null);
         assert!(json["cli"].is_object());
@@ -441,5 +495,49 @@ mod tests {
             ))
         ));
         unsafe { std::env::remove_var("MOMOS_TELEMETRY_INTERVAL_SECS") };
+
+        // ── Pin checks: full-package flags follow the same env rules ──
+        let fp_patch = TelemetryTomlPatch {
+            ui_events_enabled: Some(true),
+            log_shipping_enabled: Some(true),
+            log_min_level: Some("info".into()),
+            log_max_events_per_sec: Some(10),
+            ..Default::default()
+        };
+        assert!(check_env_pins(&c, &fp_patch).is_ok());
+
+        unsafe { std::env::set_var("MOMOS_TELEMETRY_UI_EVENTS_ENABLED", "true") };
+        assert!(matches!(
+            check_env_pins(&c, &fp_patch),
+            Err(TelemetrySettingsError::Overridden(
+                "MOMOS_TELEMETRY_UI_EVENTS_ENABLED"
+            ))
+        ));
+        unsafe { std::env::remove_var("MOMOS_TELEMETRY_UI_EVENTS_ENABLED") };
+
+        unsafe { std::env::set_var("MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED", "true") };
+        assert!(matches!(
+            check_env_pins(&c, &fp_patch),
+            Err(TelemetrySettingsError::Overridden(
+                "MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED"
+            ))
+        ));
+        unsafe { std::env::remove_var("MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED") };
+
+        unsafe { std::env::set_var("MOMOS_TELEMETRY_LOG_MIN_LEVEL", "debug") };
+        assert!(matches!(
+            check_env_pins(&c, &fp_patch),
+            Err(TelemetrySettingsError::Overridden("MOMOS_TELEMETRY_LOG_MIN_LEVEL"))
+        ));
+        unsafe { std::env::remove_var("MOMOS_TELEMETRY_LOG_MIN_LEVEL") };
+
+        unsafe { std::env::set_var("MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC", "10") };
+        assert!(matches!(
+            check_env_pins(&c, &fp_patch),
+            Err(TelemetrySettingsError::Overridden(
+                "MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC"
+            ))
+        ));
+        unsafe { std::env::remove_var("MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC") };
     }
 }

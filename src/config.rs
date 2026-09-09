@@ -1569,6 +1569,10 @@ const TELEMETRY_TOML_KEYS: &[&str] = &[
     "token",
     "instance",
     "full_db_interval_secs",
+    "ui_events_enabled",
+    "log_shipping_enabled",
+    "log_min_level",
+    "log_max_events_per_sec",
 ];
 /// Legacy alias key that the UI silently retires when it writes
 /// `full_db_interval_secs` (the explicit key is authoritative; keeping both
@@ -1598,6 +1602,14 @@ pub struct TelemetryTomlPatch {
     pub token: Option<String>,
     pub instance: Option<String>,
     pub full_db_interval_secs: Option<u64>,
+    /// Full-package: `[telemetry] ui_events_enabled` (view/action tracking).
+    pub ui_events_enabled: Option<bool>,
+    /// Full-package: `[telemetry] log_shipping_enabled`.
+    pub log_shipping_enabled: Option<bool>,
+    /// Full-package: `[telemetry] log_min_level` (`Some("")` clears).
+    pub log_min_level: Option<String>,
+    /// Full-package: `[telemetry] log_max_events_per_sec`.
+    pub log_max_events_per_sec: Option<u64>,
 }
 
 /// Patch the `[telemetry]` section of the config.toml that
@@ -1763,6 +1775,33 @@ pub fn update_telemetry_toml_at(
             &mut section_end,
             "full_db_interval_secs",
             &toml::Value::Integer(secs as i64),
+        );
+    }
+    // 4. Full-package flags (plan E3): ui events + log shipping toggles,
+    //    the log level filter (empty string clears → default "warn") and
+    //    the mandatory per-second cap.
+    if let Some(v) = patch.ui_events_enabled {
+        set_key(&mut lines, &mut section_end, "ui_events_enabled", &toml::Value::Boolean(v));
+    }
+    if let Some(v) = patch.log_shipping_enabled {
+        set_key(&mut lines, &mut section_end, "log_shipping_enabled", &toml::Value::Boolean(v));
+    }
+    match patch.log_min_level.as_ref() {
+        None => {}
+        Some(v) if v.is_empty() => remove_key(&mut lines, &mut section_end, "log_min_level"),
+        Some(v) => set_key(
+            &mut lines,
+            &mut section_end,
+            "log_min_level",
+            &toml::Value::String(v.clone()),
+        ),
+    }
+    if let Some(v) = patch.log_max_events_per_sec {
+        set_key(
+            &mut lines,
+            &mut section_end,
+            "log_max_events_per_sec",
+            &toml::Value::Integer(v as i64),
         );
     }
 
@@ -2464,6 +2503,7 @@ enabled = true
             token: Some("tok-123".into()),
             instance: Some("studio".into()),
             full_db_interval_secs: Some(0),
+            ..Default::default()
         };
         update_telemetry_toml_at(&path, &patch).unwrap();
 
@@ -2584,6 +2624,40 @@ enabled = true
             std::fs::read_to_string(&path).unwrap(),
             "this is = = not toml [[["
         );
+    }
+
+    #[test]
+    fn update_telemetry_toml_writes_full_package_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[telemetry]\nenabled = true\n").unwrap();
+
+        let patch = TelemetryTomlPatch {
+            ui_events_enabled: Some(true),
+            log_shipping_enabled: Some(true),
+            log_min_level: Some("info".into()),
+            log_max_events_per_sec: Some(10),
+            ..Default::default()
+        };
+        update_telemetry_toml_at(&path, &patch).unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        let value: toml::Value = out.parse().expect("valid TOML");
+        let tel = &value["telemetry"];
+        assert_eq!(tel["enabled"].as_bool(), Some(true), "untouched key survives");
+        assert_eq!(tel["ui_events_enabled"].as_bool(), Some(true));
+        assert_eq!(tel["log_shipping_enabled"].as_bool(), Some(true));
+        assert_eq!(tel["log_min_level"].as_str(), Some("info"));
+        assert_eq!(tel["log_max_events_per_sec"].as_integer(), Some(10));
+
+        // Clearing log_min_level with "" removes the key (default warn).
+        let patch = TelemetryTomlPatch {
+            log_min_level: Some(String::new()),
+            ..Default::default()
+        };
+        update_telemetry_toml_at(&path, &patch).unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        let value: toml::Value = out.parse().expect("valid TOML");
+        assert_eq!(value["telemetry"].get("log_min_level"), None);
     }
 
     #[test]
