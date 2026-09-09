@@ -1,5 +1,11 @@
 //! Event-based telemetry: structured core events (tasks, scans, downloads,
-//! errors, app updates) sent in batches to the collector.
+//! errors, app updates) + UI/user-interaction events + shipped log entries
+//! sent in batches to the collector.
+//!
+//! The `ui.*` and `log.entry` types are part of the "telemetry full
+//! package" feature — see `plans/proposed/telemetry-full-package.md`
+//! (decisions E1–E5) for the naming rationale and the receiver-side
+//! migration `migrations/telemetry/002_ui_log_views.sql`.
 //!
 //! This module is the **wire format** shared between client and receiver:
 //! - [`TelemetryEvent`] — one event (dedup key `event_id`, type allowlist,
@@ -25,11 +31,17 @@ pub const MAX_BATCH_BYTES: usize = 1_048_576;
 pub const MAX_PAYLOAD_BYTES: usize = 4096;
 /// Max length of a sanitized `error_message`.
 pub const MAX_ERROR_MESSAGE_CHARS: usize = 500;
+/// Max length of a shipped log message (after home-strip + truncation).
+pub const MAX_LOG_MESSAGE_CHARS: usize = 1000;
 
 /// Allowlisted event types (dotted notation on the wire).
 ///
-/// Deliberately no UI actions and no heartbeats — see
-/// `plans/proposed/telemetry-events.md` (Out of Scope).
+/// Domains: `task.*`/`scan.*`/`download.*`/`app.*`/`error.*` are the core
+/// lifecycle events; `ui.*` covers user interaction (views opened + the
+/// six user-triggered actions of the full-package feature); `log.entry`
+/// transports filtered + sanitized log lines. No heartbeats — see
+/// `plans/proposed/telemetry-events.md` and
+/// `plans/proposed/telemetry-full-package.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventType {
     #[serde(rename = "task.started")]
@@ -50,6 +62,22 @@ pub enum EventType {
     AppUpdated,
     #[serde(rename = "error.reported")]
     ErrorReported,
+    #[serde(rename = "ui.view.opened")]
+    UiViewOpened,
+    #[serde(rename = "ui.action.scan_folder")]
+    UiActionScanFolder,
+    #[serde(rename = "ui.action.run_backup")]
+    UiActionRunBackup,
+    #[serde(rename = "ui.action.restore_dump")]
+    UiActionRestoreDump,
+    #[serde(rename = "ui.action.traktor_import")]
+    UiActionTraktorImport,
+    #[serde(rename = "ui.action.recompute_embeddings")]
+    UiActionRecomputeEmbeddings,
+    #[serde(rename = "ui.action.deemix_enqueue")]
+    UiActionDeemixEnqueue,
+    #[serde(rename = "log.entry")]
+    LogEntry,
 }
 
 impl EventType {
@@ -65,7 +93,29 @@ impl EventType {
             EventType::DownloadFailed => "download.failed",
             EventType::AppUpdated => "app.updated",
             EventType::ErrorReported => "error.reported",
+            EventType::UiViewOpened => "ui.view.opened",
+            EventType::UiActionScanFolder => "ui.action.scan_folder",
+            EventType::UiActionRunBackup => "ui.action.run_backup",
+            EventType::UiActionRestoreDump => "ui.action.restore_dump",
+            EventType::UiActionTraktorImport => "ui.action.traktor_import",
+            EventType::UiActionRecomputeEmbeddings => "ui.action.recompute_embeddings",
+            EventType::UiActionDeemixEnqueue => "ui.action.deemix_enqueue",
+            EventType::LogEntry => "log.entry",
         }
+    }
+
+    /// True for the `ui.*` family (views + user-triggered actions).
+    pub fn is_ui(&self) -> bool {
+        matches!(
+            self,
+            EventType::UiViewOpened
+                | EventType::UiActionScanFolder
+                | EventType::UiActionRunBackup
+                | EventType::UiActionRestoreDump
+                | EventType::UiActionTraktorImport
+                | EventType::UiActionRecomputeEmbeddings
+                | EventType::UiActionDeemixEnqueue
+        )
     }
 }
 
@@ -218,8 +268,8 @@ fn payload_is_valid(payload: &serde_json::Value) -> bool {
 // ── Payload hygiene ───────────────────────────────────────────────────────
 
 /// Strip the home-dir prefix (e.g. `/Users/momo` → `~`) and truncate to
-/// [`MAX_ERROR_MESSAGE_CHARS`] chars. Never send absolute paths / PII.
-pub fn sanitize_error_message(msg: &str) -> String {
+/// `max_chars` chars. Never send absolute paths / PII.
+fn sanitize_message(msg: &str, max_chars: usize) -> String {
     let mut s = msg.to_string();
     if let Some(home) = dirs::home_dir() {
         let home_str = home.to_string_lossy().to_string();
@@ -227,15 +277,68 @@ pub fn sanitize_error_message(msg: &str) -> String {
             s = s.replace(&home_str, "~");
         }
     }
-    if s.chars().count() > MAX_ERROR_MESSAGE_CHARS {
-        s = s.chars().take(MAX_ERROR_MESSAGE_CHARS).collect();
+    if s.chars().count() > max_chars {
+        s = s.chars().take(max_chars).collect();
     }
     s
+}
+
+/// Strip the home-dir prefix (e.g. `/Users/momo` → `~`) and truncate to
+/// [`MAX_ERROR_MESSAGE_CHARS`] chars. Never send absolute paths / PII.
+pub fn sanitize_error_message(msg: &str) -> String {
+    sanitize_message(msg, MAX_ERROR_MESSAGE_CHARS)
 }
 
 /// Build an `error.reported`-style payload from a raw error message.
 pub fn error_payload(message: &str) -> serde_json::Value {
     serde_json::json!({ "error_message": sanitize_error_message(message) })
+}
+
+// ── UI / log payload helpers (full-package feature) ───────────────────────
+
+/// Validate a view id (SPA page id, e.g. `dashboard`, `tag-categories`):
+/// lowercase alphanumeric + hyphen, 1–64 chars — safe to store/group in DB
+/// keys, no traversal or query noise.
+pub fn valid_view_id(view: &str) -> bool {
+    !view.is_empty()
+        && view.len() <= 64
+        && view
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Build a `ui.view.opened` payload. `None` for invalid view ids — the
+/// emitter then skips the event entirely (never send garbage on the wire).
+pub fn view_payload(view: &str) -> Option<serde_json::Value> {
+    if !valid_view_id(view) {
+        return None;
+    }
+    Some(serde_json::json!({ "view": view }))
+}
+
+/// Build a `ui.action.*` payload from the handler outcome. Only sync
+/// errors go into `error_message` (sanitized like `error_payload`);
+/// lifecycle errors keep flowing through `task.failed`/`error.reported`.
+pub fn action_payload(ok: bool, error_message: Option<&str>) -> serde_json::Value {
+    match error_message {
+        Some(msg) => serde_json::json!({
+            "ok": ok,
+            "error_message": sanitize_error_message(msg),
+        }),
+        None => serde_json::json!({ "ok": ok }),
+    }
+}
+
+/// Build a `log.entry` payload: `level` (error/warn/info/debug/trace as
+/// traced by the app), the originating `target` (module path) and the
+/// `message` — home-prefix-stripped + truncated to
+/// [`MAX_LOG_MESSAGE_CHARS`].
+pub fn log_entry_payload(level: &str, target: &str, message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "level": level,
+        "target": target,
+        "message": sanitize_message(message, MAX_LOG_MESSAGE_CHARS),
+    })
 }
 
 #[cfg(test)]
@@ -258,6 +361,78 @@ mod tests {
         assert_eq!(EventType::DownloadFailed.as_str(), "download.failed");
         assert_eq!(EventType::AppUpdated.as_str(), "app.updated");
         assert_eq!(EventType::ErrorReported.as_str(), "error.reported");
+        assert_eq!(EventType::UiViewOpened.as_str(), "ui.view.opened");
+        assert_eq!(EventType::UiActionScanFolder.as_str(), "ui.action.scan_folder");
+        assert_eq!(EventType::UiActionRunBackup.as_str(), "ui.action.run_backup");
+        assert_eq!(EventType::UiActionRestoreDump.as_str(), "ui.action.restore_dump");
+        assert_eq!(EventType::UiActionTraktorImport.as_str(), "ui.action.traktor_import");
+        assert_eq!(
+            EventType::UiActionRecomputeEmbeddings.as_str(),
+            "ui.action.recompute_embeddings"
+        );
+        assert_eq!(
+            EventType::UiActionDeemixEnqueue.as_str(),
+            "ui.action.deemix_enqueue"
+        );
+        assert_eq!(EventType::LogEntry.as_str(), "log.entry");
+    }
+
+    #[test]
+    fn ui_family_flag() {
+        assert!(EventType::UiViewOpened.is_ui());
+        assert!(EventType::UiActionScanFolder.is_ui());
+        assert!(EventType::UiActionRunBackup.is_ui());
+        assert!(EventType::UiActionRestoreDump.is_ui());
+        assert!(EventType::UiActionTraktorImport.is_ui());
+        assert!(EventType::UiActionRecomputeEmbeddings.is_ui());
+        assert!(EventType::UiActionDeemixEnqueue.is_ui());
+        // Core + log types are not ui.*
+        assert!(!EventType::LogEntry.is_ui());
+        assert!(!EventType::TaskStarted.is_ui());
+        assert!(!EventType::ScanCompleted.is_ui());
+    }
+
+    #[test]
+    fn ui_and_log_types_roundtrip_serialization() {
+        for (r#type, payload) in [
+            (EventType::UiViewOpened, serde_json::json!({"view": "dashboard"})),
+            (EventType::UiActionScanFolder, serde_json::json!({"ok": true})),
+            (EventType::UiActionRunBackup, serde_json::json!({"ok": false, "error_message": "no path"})),
+            (EventType::UiActionRestoreDump, serde_json::json!({"ok": true})),
+            (EventType::UiActionTraktorImport, serde_json::json!({"ok": true})),
+            (EventType::UiActionRecomputeEmbeddings, serde_json::json!({"ok": true})),
+            (EventType::UiActionDeemixEnqueue, serde_json::json!({"ok": false})),
+            (EventType::LogEntry, serde_json::json!({"level": "warn", "target": "mmm::db", "message": "disk full"})),
+        ] {
+            let event = TelemetryEvent::new(r#type, payload).with_envelope("client-1", "1.3.0-test", "linux");
+            let json = serde_json::to_string(&event).unwrap();
+            let back: TelemetryEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.r#type, r#type);
+            assert!(back.is_valid());
+            assert!(json.contains(&format!("\"type\":\"{}\"", r#type.as_str())));
+        }
+    }
+
+    #[test]
+    fn unknown_event_type_is_still_rejected() {
+        // Existing unknown core-ish type.
+        let json = r#"{"event_id":"00000000-0000-4000-8000-000000000000","client_id":"c","app_version":"1","os":"macos","ts":"2026-09-01T00:00:00Z","type":"ui.clicked","payload":{}}"#;
+        assert!(serde_json::from_str::<TelemetryEvent>(json).is_err());
+        // New-style unknowns are rejected too (no open `ui.action` string).
+        let json = r#"{"event_id":"00000000-0000-4000-8000-000000000000","client_id":"c","app_version":"1","os":"macos","ts":"2026-09-01T00:00:00Z","type":"ui.action.delete_everything","payload":{}}"#;
+        assert!(serde_json::from_str::<TelemetryEvent>(json).is_err());
+        let json = r#"{"event_id":"00000000-0000-4000-8000-000000000000","client_id":"c","app_version":"1","os":"macos","ts":"2026-09-01T00:00:00Z","type":"log.error","payload":{}}"#;
+        assert!(serde_json::from_str::<TelemetryEvent>(json).is_err());
+    }
+
+    #[test]
+    fn is_valid_accepts_new_full_events() {
+        let e = TelemetryEvent::new(EventType::LogEntry, log_entry_payload("warn", "mmm::db", "hi"))
+            .with_envelope("client-1", "1.3.0-test", "linux");
+        assert!(e.is_valid());
+        let e = TelemetryEvent::new(EventType::UiViewOpened, serde_json::json!({"view": "files"}))
+            .with_envelope("client-1", "1.3.0-test", "linux");
+        assert!(e.is_valid());
     }
 
     #[test]
@@ -275,6 +450,95 @@ mod tests {
     fn unknown_event_type_is_rejected() {
         let json = r#"{"event_id":"00000000-0000-4000-8000-000000000000","client_id":"c","app_version":"1","os":"macos","ts":"2026-09-01T00:00:00Z","type":"ui.clicked","payload":{}}"#;
         assert!(serde_json::from_str::<TelemetryEvent>(json).is_err());
+    }
+
+    #[test]
+    fn view_payload_accepts_valid_ids() {
+        for view in ["dashboard", "tag-categories", "dynamic-bundles", "file-detail", "a1"] {
+            let p = view_payload(view).unwrap();
+            assert_eq!(p["view"], view);
+        }
+    }
+
+    #[test]
+    fn view_payload_rejects_invalid_ids() {
+        for view in ["", "Files", "files?x=1", "../files", "files space", "über", "a".repeat(65).as_str()] {
+            assert!(view_payload(view).is_none(), "{view:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn valid_view_id_rules() {
+        assert!(valid_view_id("dashboard"));
+        assert!(valid_view_id("tag-categories"));
+        assert!(valid_view_id("0abc"));
+        assert!(!valid_view_id(""));
+        assert!(!valid_view_id("Dashboard"));
+        assert!(!valid_view_id("a/b"));
+        assert!(!valid_view_id("has_space"));
+        assert!(!valid_view_id("has_underscore"));
+        assert!(!valid_view_id(&"x".repeat(65)));
+    }
+
+    #[test]
+    fn action_payload_ok_and_error() {
+        let p = action_payload(true, None);
+        assert_eq!(p["ok"], true);
+        assert!(p.get("error_message").is_none());
+
+        let home = dirs::home_dir().unwrap();
+        let home_str = home.to_string_lossy().to_string();
+        let p = action_payload(false, Some(&format!("boom at {home_str}/x")));
+        assert_eq!(p["ok"], false);
+        let msg = p["error_message"].as_str().unwrap();
+        assert!(!msg.contains(&home_str));
+        assert!(msg.contains("~/x"));
+    }
+
+    #[test]
+    fn action_payload_truncates_error_message() {
+        let long = "e".repeat(MAX_ERROR_MESSAGE_CHARS * 2);
+        let p = action_payload(false, Some(&long));
+        assert_eq!(
+            p["error_message"].as_str().unwrap().chars().count(),
+            MAX_ERROR_MESSAGE_CHARS
+        );
+    }
+
+    #[test]
+    fn log_entry_payload_shape_and_strip() {
+        let home = dirs::home_dir().unwrap();
+        let home_str = home.to_string_lossy().to_string();
+        let p = log_entry_payload("warn", "momos_music_manager::db", &format!("failed at {home_str}/Music/x.flac"));
+        assert_eq!(p["level"], "warn");
+        assert_eq!(p["target"], "momos_music_manager::db");
+        let msg = p["message"].as_str().unwrap();
+        assert!(!msg.contains(&home_str));
+        assert!(msg.contains("~/Music/x.flac"));
+    }
+
+    #[test]
+    fn log_entry_payload_truncates_message() {
+        let long = "m".repeat(MAX_LOG_MESSAGE_CHARS * 2);
+        let p = log_entry_payload("info", "t", &long);
+        assert_eq!(
+            p["message"].as_str().unwrap().chars().count(),
+            MAX_LOG_MESSAGE_CHARS
+        );
+    }
+
+    #[test]
+    fn log_entry_payload_keeps_short_messages() {
+        let p = log_entry_payload("error", "t", "disk full");
+        assert_eq!(p["message"], "disk full");
+    }
+
+    #[test]
+    fn log_entry_payload_caps_are_independent_of_error_messages() {
+        // error_message cap (500) must not leak into log entries (1000).
+        let mid = "m".repeat(700);
+        let p = log_entry_payload("warn", "t", &mid);
+        assert_eq!(p["message"].as_str().unwrap().chars().count(), 700);
     }
 
     #[test]
