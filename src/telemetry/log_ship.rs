@@ -12,7 +12,8 @@
 //!   is excluded — the recursion guard (flusher/layer logs never re-enter
 //!   the ship path; pipeline problems stay observable in file/STDOUT).
 //! - The layer **never blocks**: it builds the payload (home-strip +
-//!   [`MAX_LOG_MESSAGE_CHARS`] truncation via [`events::log_entry_payload`])
+//!   [`super::events::MAX_LOG_MESSAGE_CHARS`] truncation via
+//!   [`events::log_entry_payload`])
 //!   and `try_send`s into a bounded channel (2k). A full channel drops the
 //!   event and counts it (warned at most once per 1000 drops).
 //! - An async worker drains the channel through a token bucket
@@ -35,7 +36,7 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
 
 use super::emit;
-use super::events::{EventType, MAX_LOG_MESSAGE_CHARS, log_entry_payload};
+use super::events::{EventType, log_entry_payload};
 
 /// Bounded channel capacity between the layer and the worker (2k — spikes
 /// are stopped at the source; the pipeline ring buffer is the second stage).
@@ -306,7 +307,7 @@ impl Visit for MessageVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::events::MAX_ERROR_MESSAGE_CHARS;
+    use crate::telemetry::events::{MAX_ERROR_MESSAGE_CHARS, MAX_LOG_MESSAGE_CHARS};
 
     /// Send `event` through a registry containing only the given layer and
     /// return the layer (to read its state afterwards). Events are recorded
