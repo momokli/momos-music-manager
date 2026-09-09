@@ -15,8 +15,10 @@ in einer eigenen `telemetry.db` (SQLite, sqlx) ablegt — mit Bearer-Auth,
 Idempotenz-Dedup über `event_id` und Retention. SQL-Views liefern die Auswertung
 (Tasks/Stunde, Fehlerrate, Downloads je Quelle, Scan-Dauer-Trend, Versionen,
 zuletzt gesehen). Kein Dashboard in diesem PR; Views + Konzept-Doc sind die
-Auswertungsfläche. Strikte Grenzen: **keine UI-Actions, keine Heartbeats, keine
-Secrets/Dateinamen-PII in Payloads**.
+Auswertungsfläche. Strikte Grenzen: **keine Heartbeats, keine
+Secrets/Dateinamen-PII in Payloads** (UI-Actions/Views + Log-Shipping sind mit
+`plans/proposed/telemetry-full-package.md` dazugekommen — s. Abschnitt
+„Out of Scope“).
 
 ### Topologie
 
@@ -73,7 +75,9 @@ Batch-Envelope:
 **Event-Typen (Initial):** `task.started`, `task.completed`, `task.failed`,
 `scan.completed` (Dauer, Files, Quelle), `download.started`, `download.completed`,
 `download.failed` (Quelle deemix|spotdl), `app.updated` (from→to, Autoupdater),
-`error.reported` (Fehler-Hook an Catch-Punkten). Keine Heartbeats, keine UI-Actions.
+`error.reported` (Fehler-Hook an Catch-Punkten). Keine Heartbeats.
+(UI-/Log-Typen erweitert durch das Full-Package-Feature: `ui.view.opened`,
+sechs `ui.action.*`-Typen, `log.entry` — `plans/proposed/telemetry-full-package.md`.)
 
 ### SQL-Schema (Server `telemetry.db`, Vorschlag)
 
@@ -198,7 +202,11 @@ Server → Client-Backoff.
 ### Out of Scope (erste Iteration)
 
 - Dashboard/UI (Views + Doc sind die Auswertungsfläche; openclaw/`sqlite3` lesen direkt)
-- Heartbeats, UI-Actions, Play-/Tag-Statistik (bewusst ausgeschlossen)
+- Heartbeats, Play-/Tag-Statistik (bewusst ausgeschlossen)
+  (UI-Actions/Views + Log-Shipping sind mit dem Full-Package-Feature
+  dazugekommen — `plans/proposed/telemetry-full-package.md`; alte
+  Receiver-Binaries droppen die neuen Typen nach 3× 4xx → Rollout:
+  Receiver zuerst/zeitgleich deployen)
 - Rate-Limiting / Quota pro Client (Follow-up; Dedup + Auth decken Missbrauch grob ab)
 - Event-Telemetrie für den Python-`download-service` (eigene Pipeline, Follow-up)
 - Migration der Alt-`instance`-Konzepte (Snapshot-Push bleibt separat)
@@ -236,6 +244,13 @@ Server → Client-Backoff.
    und umgekehrt. `_sqlx_migrations` ist pro DB; Risiko: Verwechslung bei künftigen
    Migrationsarbeiten → Namensraum klar dokumentieren.
 
-**Entscheidungen, die Stage 3 bestätigen muss:** exakte Event-Typ-Allowlist, exakte
-Payload-Felder je Typ, Batch-Limits, Spool-Dateiname/-Format, Backoff-Parameter,
-`retention_days`-Default, Views-Definitionen (finaler SQL-Text in der Migration).
+**Entscheidungen, die Stage 3 bestätigt hat:** exakte Event-Typ-Allowlist
+(bestehende 9 Core-Typen unverändert; additiv `ui.view.opened`, die sechs
+`ui.action.*`-Typen `scan_folder`/`run_backup`/`restore_dump`/
+`traktor_import`/`recompute_embeddings`/`deemix_enqueue` — serverseitig —
+und `log.entry` — tracing-Layer mit Level-/Target-Filter, Kürzung 1000
+Chars, Token-Bucket), exakte Payload-Felder je Typ (`view`,
+`ok`/`error_message`, `level`/`target`/`message`), Batch-Limits,
+Spool-Dateiname/-Format, Backoff-Parameter, `retention_days`-Default 30,
+Views-Definitionen (inkl. `002_ui_log_views.sql`, nur Views). Details:
+`plans/proposed/telemetry-full-package.md`.

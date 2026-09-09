@@ -8,6 +8,35 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **Telemetry Full Package — UI- & Log-Telemetrie**: erweitert die
+  Event-Telemetrie um drei Familien — `ui.view.opened` (View-Tracking,
+  von der SPA bei jeder Navigation gefeuert), die sechs `ui.action.*`-
+  Typen (`scan_folder`, `run_backup`, `restore_dump`, `traktor_import`,
+  `recompute_embeddings`, `deemix_enqueue`; serverseitig in den
+  ausschließlich user-getriggerten Handlern, `ok`/sanitisierte
+  `error_message` je Response-Entscheidung) und `log.entry`
+  (Log-Shipping über einen eigenen tracing-Layer: Level- und
+  Target-Filter nur für `momos_music_manager`, Rekursionsschutz für das
+  Telemetry-Modul, Home-Pfad-Strip + 1000-Zeichen-Kürzung, bounded Kanal
+  (2k, Drop-on-full ohne Blockieren), Token-Bucket `log_max_events_per_sec`
+  → bestehende emit-Pipeline). Alles **default aus**: neue `[telemetry]`-
+  Keys `ui_events_enabled` + `log_shipping_enabled` (beide `false`),
+  `log_min_level` (`"warn"`, error/warn/info/debug/trace) und
+  `log_max_events_per_sec` (`50`, Pflicht-Cap 1–10000, ungültig → Default
+  + Warn) mit `MOMOS_TELEMETRY_UI_EVENTS_ENABLED`/
+  `MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED`/`MOMOS_TELEMETRY_LOG_MIN_LEVEL`/
+  `MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC`; Env > TOML > Default wie
+  gehabt. Neuer interner Endpoint `POST /api/ui-events` (mappt nur `ui.*`
+  auf die Allowlist, antwortet **immer 204** — Flag aus, unbekannter Typ,
+  ungültiger Payload oder keine Pipeline erzeugen nie 4xx). Settings-UI:
+  zwei neue Toggles, Log-Level-Select und Max-Events/s-Feld in der
+  Telemetry-Card (persistiert in `config.toml`, Env-Pinning/409 wie die
+  bestehenden Felder). Receiver: neue Migration
+  `migrations/telemetry/002_ui_log_views.sql` mit **nur Views**
+  (`v_ui_views`, `v_ui_actions`, `v_log_volume`; 001 bleibt unangetastet —
+  Checksumme); Rollout-Hinweis: Receiver-Binary vor Aktivierung neu
+  deployen (alter v1.2.1-Receiver droppt unbekannte Typen nach 3× 4xx).
+
 - **Telemetry-Settings-Seite (GUI) + Version 1.3.0**: neuer Bereich
   „Telemetry“ in den Settings — konfigurierbar ohne Config-Graben:
   `enabled` (Toggle, Default **OFF**), `base_url`, `token`, `instance` und
