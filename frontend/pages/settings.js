@@ -581,7 +581,13 @@ const TELEMETRY_FIELDS = [
   { key: "token", envVar: "MOMOS_TELEMETRY_TOKEN", tomlKey: "[telemetry] token", control: "field" },
   { key: "instance", envVar: "MOMOS_TELEMETRY_INSTANCE", tomlKey: "[telemetry] instance", control: "field" },
   { key: "fullDbIntervalSecs", envVar: "MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS", tomlKey: "[telemetry] full_db_interval_secs", control: "field" },
+  { key: "uiEventsEnabled", envVar: "MOMOS_TELEMETRY_UI_EVENTS_ENABLED", tomlKey: "[telemetry] ui_events_enabled", control: "toggle" },
+  { key: "logShippingEnabled", envVar: "MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED", tomlKey: "[telemetry] log_shipping_enabled", control: "toggle" },
+  { key: "logMinLevel", envVar: "MOMOS_TELEMETRY_LOG_MIN_LEVEL", tomlKey: "[telemetry] log_min_level", control: "select" },
+  { key: "logMaxEventsPerSec", envVar: "MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC", tomlKey: "[telemetry] log_max_events_per_sec", control: "field" },
 ];
+
+const LOG_LEVELS = ["error", "warn", "info", "debug", "trace"];
 
 function telemetrySourceOf(status, key) {
   const map = {
@@ -590,6 +596,10 @@ function telemetrySourceOf(status, key) {
     token: "tokenSource",
     instance: "instanceSource",
     fullDbIntervalSecs: "fullDbIntervalSource",
+    uiEventsEnabled: "uiEventsSource",
+    logShippingEnabled: "logShippingSource",
+    logMinLevel: "logMinLevelSource",
+    logMaxEventsPerSec: "logMaxEventsPerSecSource",
   };
   return status[map[key]] || "default";
 }
@@ -707,6 +717,58 @@ function renderTelemetry(container) {
           <span class="text-muted" style="font-size:0.8rem">seconds — 0 = off (periodic)</span>
         </div>
         ${hintFor("fullDbIntervalSecs")}
+      </div>
+    </div>
+    <div class="settings-update-row">
+      <div class="settings-update-label">UI events</div>
+      <div class="settings-update-value">
+        <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+          <span style="display:flex;gap:0.5rem;align-items:center">
+            <label class="switch">
+              <input type="checkbox" id="telemetry-ui-events-toggle" ${s.uiEventsEnabled ? "checked" : ""} ${editable("uiEventsEnabled") ? "" : "disabled"}>
+              <span class="slider"></span>
+            </label>
+            <span class="text-muted">${s.uiEventsEnabled ? "On" : "Off"}${s.uiEventsSource === "env" ? " (env)" : ""}</span>
+          </span>
+        </div>
+        <div class="help-text" style="margin-top:0.25rem">Track view opens (<code>ui.view.opened</code>) and the six user-triggered actions (<code>ui.action.*</code>). ${hintFor("uiEventsEnabled")}</div>
+      </div>
+    </div>
+    <div class="settings-update-row">
+      <div class="settings-update-label">Log shipping</div>
+      <div class="settings-update-value">
+        <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+          <span style="display:flex;gap:0.5rem;align-items:center">
+            <label class="switch">
+              <input type="checkbox" id="telemetry-log-shipping-toggle" ${s.logShippingEnabled ? "checked" : ""} ${editable("logShippingEnabled") ? "" : "disabled"}>
+              <span class="slider"></span>
+            </label>
+            <span class="text-muted">${s.logShippingEnabled ? "On" : "Off"}${s.logShippingSource === "env" ? " (env)" : ""}</span>
+          </span>
+        </div>
+        <div class="help-text" style="margin-top:0.25rem">Ship filtered app logs as <code>log.entry</code> events (level + rate limited below). ${hintFor("logShippingEnabled")}</div>
+      </div>
+    </div>
+    <div class="settings-update-row">
+      <div class="settings-update-label">Log level</div>
+      <div class="settings-update-value">
+        <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+          <select id="telemetry-log-level" class="input" style="width:10rem" ${editable("logMinLevel") ? "" : "disabled"}>
+            ${LOG_LEVELS.map((l) => `<option value="${l}" ${String(s.logMinLevel ?? "warn") === l ? "selected" : ""}>${l}</option>`).join("")}
+          </select>
+          <span class="text-muted" style="font-size:0.8rem">only this level and above is shipped</span>
+        </div>
+        ${hintFor("logMinLevel")}
+      </div>
+    </div>
+    <div class="settings-update-row">
+      <div class="settings-update-label">Max log events/s</div>
+      <div class="settings-update-value">
+        <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+          <input type="number" id="telemetry-log-max-rate" class="input" min="1" max="10000" step="1" style="width:9rem" value="${valueAttr(s.logMaxEventsPerSec ?? 50)}" ${editable("logMaxEventsPerSec") ? "" : "disabled"}>
+          <span class="text-muted" style="font-size:0.8rem">spike cap (1–10000, mandatory)</span>
+        </div>
+        ${hintFor("logMaxEventsPerSec")}
       </div>
     </div>
     <div class="settings-update-row">
@@ -841,6 +903,31 @@ async function saveTelemetrySettings(container) {
       return;
     }
   }
+  if (telemetryState.dirty.uiEventsEnabled && !pinned("uiEventsEnabled")) {
+    body.uiEventsEnabled = document.querySelector("#telemetry-ui-events-toggle")?.checked ?? s.uiEventsEnabled;
+  }
+  if (telemetryState.dirty.logShippingEnabled && !pinned("logShippingEnabled")) {
+    body.logShippingEnabled = document.querySelector("#telemetry-log-shipping-toggle")?.checked ?? s.logShippingEnabled;
+  }
+  if (telemetryState.dirty.logMinLevel && !pinned("logMinLevel")) {
+    const level = readText("#telemetry-log-level");
+    if (LOG_LEVELS.includes(level)) {
+      body.logMinLevel = level;
+    } else {
+      showToast("Log level must be one of error/warn/info/debug/trace", "error");
+      return;
+    }
+  }
+  if (telemetryState.dirty.logMaxEventsPerSec && !pinned("logMaxEventsPerSec")) {
+    const raw = readText("#telemetry-log-max-rate");
+    const rate = raw === null || raw === "" ? null : Number(raw);
+    if (rate !== null && Number.isInteger(rate) && rate >= 1 && rate <= 10000) {
+      body.logMaxEventsPerSec = rate;
+    } else {
+      showToast("Max log events/s must be a whole number between 1 and 10000", "error");
+      return;
+    }
+  }
   if (Object.keys(body).length === 0) return;
 
   telemetryState.saving = true;
@@ -906,7 +993,15 @@ function wireTelemetryEvents(container) {
         ? String(s.fullDbIntervalSecs ?? 0)
         : key === "enabled"
           ? s.enabled
-          : s[key] ?? "";
+          : key === "uiEventsEnabled"
+            ? s.uiEventsEnabled
+            : key === "logShippingEnabled"
+              ? s.logShippingEnabled
+              : key === "logMinLevel"
+                ? s.logMinLevel ?? "warn"
+                : key === "logMaxEventsPerSec"
+                  ? String(s.logMaxEventsPerSec ?? 50)
+                  : s[key] ?? "";
     telemetryState.dirty[key] = raw !== base;
     updateTelemetrySaveButton();
   };
@@ -915,6 +1010,21 @@ function wireTelemetryEvents(container) {
     const toggle = e.target.closest("#telemetry-enabled-toggle");
     if (toggle) {
       onValueChange("enabled", () => toggle.checked);
+      return;
+    }
+    const uiToggle = e.target.closest("#telemetry-ui-events-toggle");
+    if (uiToggle) {
+      onValueChange("uiEventsEnabled", () => uiToggle.checked);
+      return;
+    }
+    const logToggle = e.target.closest("#telemetry-log-shipping-toggle");
+    if (logToggle) {
+      onValueChange("logShippingEnabled", () => logToggle.checked);
+      return;
+    }
+    const level = e.target.closest("#telemetry-log-level");
+    if (level) {
+      onValueChange("logMinLevel", () => level.value);
       return;
     }
     const baseUrl = e.target.closest("#telemetry-base-url");
@@ -945,6 +1055,7 @@ function wireTelemetryEvents(container) {
       ["#telemetry-token", "token"],
       ["#telemetry-instance", "instance"],
       ["#telemetry-interval", "fullDbIntervalSecs"],
+      ["#telemetry-log-max-rate", "logMaxEventsPerSec"],
     ]) {
       const field = e.target.closest(id);
       if (field) {

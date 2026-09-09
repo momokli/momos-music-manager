@@ -27,6 +27,14 @@ function statusStub(overrides = {}) {
     fullDbIntervalSecs: 0,
     fullDbIntervalSource: "default",
     eventsEndpoint: null,
+    uiEventsEnabled: false,
+    uiEventsSource: "default",
+    logShippingEnabled: false,
+    logShippingSource: "default",
+    logMinLevel: "warn",
+    logMinLevelSource: "default",
+    logMaxEventsPerSec: 50,
+    logMaxEventsPerSecSource: "default",
     periodicPushActive: false,
     lastPushAt: null,
     lastPushStatus: null,
@@ -176,7 +184,9 @@ test.describe("Settings page — telemetry + CLI", () => {
     });
 
     // Toggle on via the visible switch label, then save.
-    await page.locator("#settings-telemetry-content .switch").click();
+    await page
+      .locator(".switch:has(#telemetry-enabled-toggle)")
+      .click();
     await expect(page.locator("#telemetry-enabled-toggle")).toBeChecked();
     await expect(page.locator("#telemetry-save-btn")).toBeEnabled();
     await page.locator("#telemetry-save-btn").click();
@@ -256,6 +266,95 @@ test.describe("Settings page — telemetry + CLI", () => {
       "MOMOS_TELEMETRY_ENABLED",
     );
     // Nothing editable → save stays disabled.
+    await expect(page.locator("#telemetry-save-btn")).toBeDisabled();
+    expect(errors).toEqual([]);
+  });
+
+  test("full-package controls render with defaults and save the new keys", async ({
+    page,
+  }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    let savePayload = null;
+    await page.route("**/api/telemetry-settings/status", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: statusStub() }),
+      }),
+    );
+    await page.route("**/api/telemetry-settings/settings", (route) => {
+      savePayload = route.request().postDataJSON();
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: statusStub() }),
+      });
+    });
+
+    await openSettings(page);
+    await page.waitForSelector("#telemetry-ui-events-toggle", {
+      state: "attached",
+      timeout: 8000,
+    });
+
+    // Defaults: both toggles off, warn selected, 50 events/s.
+    await expect(page.locator("#telemetry-ui-events-toggle")).not.toBeChecked();
+    await expect(page.locator("#telemetry-log-shipping-toggle")).not.toBeChecked();
+    await expect(page.locator("#telemetry-log-level")).toHaveValue("warn");
+    await expect(page.locator("#telemetry-log-max-rate")).toHaveValue("50");
+
+    // Flip UI events on, lower the level, raise the cap → save sends exactly
+    // the changed full-package keys.
+    await page.locator("#telemetry-ui-events-toggle + .slider").click();
+    await page.locator("#telemetry-log-level").selectOption("info");
+    await page.locator("#telemetry-log-max-rate").fill("100");
+    await expect(page.locator("#telemetry-save-btn")).toBeEnabled();
+    await page.locator("#telemetry-save-btn").click();
+    await expect.poll(() => savePayload).toEqual({
+      uiEventsEnabled: true,
+      logMinLevel: "info",
+      logMaxEventsPerSec: 100,
+    });
+    expect(errors).toEqual([]);
+  });
+
+  test("full-package controls can be env-pinned like the rest", async ({
+    page,
+  }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await page.route("**/api/telemetry-settings/status", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: statusStub({
+            uiEventsEnabled: true,
+            uiEventsSource: "env",
+            logMinLevel: "debug",
+            logMinLevelSource: "env",
+          }),
+        }),
+      }),
+    );
+    await openSettings(page);
+    await page.waitForSelector("#telemetry-ui-events-toggle", {
+      state: "attached",
+      timeout: 8000,
+    });
+
+    await expect(page.locator("#telemetry-ui-events-toggle")).toBeDisabled();
+    await expect(page.locator("#telemetry-log-level")).toBeDisabled();
+    await expect(page.locator("#settings-telemetry-content")).toContainText(
+      "MOMOS_TELEMETRY_UI_EVENTS_ENABLED",
+    );
+    await expect(page.locator("#settings-telemetry-content")).toContainText(
+      "MOMOS_TELEMETRY_LOG_MIN_LEVEL",
+    );
+    // Nothing dirty → save stays disabled.
     await expect(page.locator("#telemetry-save-btn")).toBeDisabled();
     expect(errors).toEqual([]);
   });
