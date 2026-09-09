@@ -5,6 +5,7 @@ pub mod client_id;
 pub mod emit;
 pub mod events;
 pub mod flusher;
+pub mod log_ship;
 pub mod metrics;
 pub mod receiver;
 pub mod spool;
