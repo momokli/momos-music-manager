@@ -8,6 +8,25 @@ All notable changes to Momo's Music Manager.
 
 ---
 
+## [1.5.0] — 2026-09-11
+
+### Added
+
+- **STEMS-Filter in der Files-View**: neuer `STEMS`-Filter (All/Missing/Has)
+  auf `#files` zeigt Nicht-Stem-Dateien, deren Track (gleiche ISRC) noch kein
+  `stem.m4a` hat; kombinierbar mit allen bestehenden Filtern. Neuer `stems`-
+  Query-Param auf `GET /api/files` + `GET /api/files/count` inkl. Select-All.
+  (#2)
+
+### Documentation
+
+- `CHANGELOG.md`: `[Unreleased]`-Block in getrennte Versionsabschnitte
+  v1.1.0–v1.4.0 aufgeteilt. (#31)
+- UI/UX-Redesign-Proposal: Ist-Zustand, Reibungsanalyse, Mockups und Roadmap
+  dokumentiert. (#28)
+
+---
+
 ## [1.4.0] — 2026-09-10
 
 ### Added
