@@ -6,6 +6,10 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+---
+
+## [1.4.0] — 2026-09-10
+
 ### Added
 
 - **Telemetry Full Package — UI- & Log-Telemetrie**: erweitert die
@@ -37,6 +41,12 @@ All notable changes to Momo's Music Manager.
   Checksumme); Rollout-Hinweis: Receiver-Binary vor Aktivierung neu
   deployen (alter v1.2.1-Receiver droppt unbekannte Typen nach 3× 4xx).
 
+---
+
+## [1.3.0] — 2026-09-04
+
+### Added
+
 - **Telemetry-Settings-Seite (GUI) + Version 1.3.0**: neuer Bereich
   „Telemetry“ in den Settings — konfigurierbar ohne Config-Graben:
   `enabled` (Toggle, Default **OFF**), `base_url`, `token`, `instance` und
@@ -58,6 +68,7 @@ All notable changes to Momo's Music Manager.
   Push, Event-Pipeline) lesen ihre Werte beim Start — Änderungen wirken
   nach dem nächsten Neustart, Status und Push-Button nutzen immer den
   aktuellen Datei-/Env-Stand.
+
 - **CLI-Zugriff bei macOS-App-Installation**: Die App wird als `.app`
   (DMG nach `/Applications`) installiert und hat damit keinen CLI-Zugriff.
   Beim **ersten App-Start** (und nach jedem erfolgreichen
@@ -73,12 +84,32 @@ All notable changes to Momo's Music Manager.
   aus dem Terminal. Neues Modul `cli_link` (idempotent, repariert
   veraltete Links, nie destruktiv) + CLI-Status in den Settings
   (`GET …/status` → `cli`). Kein Symlink für Dev-/Linux-Binary-Builds.
+
 - **Minor-Bump 1.2.1 → 1.3.0**: `Cargo.toml` + `Cargo.lock` (Basis der
   Dev-Versionsformel `<Cargo>-dev+<sha8>`; Release-Version kommt beim
   Tagen aus dem Git-Tag, die Auto-Update-Logik liest die Version
   ausschließlich als eingebettetes `env!("MMM_VERSION")` — kein weiterer
   Versionsort nötig, `site/index.html` wird erst beim Release-Tag
   angehoben).
+
+---
+
+## [1.2.1] — 2026-09-03
+
+### Fixed
+
+- **Update-Check-404 bei Release-Builds (Hotfix v1.2.1)**: `DEFAULT_RELEASE_BASE_URL`
+  endete auf `…/releases/latest` ohne `/download`-Segment — GitHub liefert Assets
+  nur unter `releases/latest/download/<asset>` bzw. `releases/download/<tag>/<asset>`
+  aus, daher schlugen Update-Check/Apply von Release-Builds (Minisig-Signatur,
+  SHA256SUMS-Manifest, versioniertes Binary) mit HTTP 404 fehl. Die Basis-URL
+  trägt jetzt das `download`-Segment (Regression aus PR #19, Fix in PR #23).
+
+---
+
+## [1.2.0] — 2026-09-03
+
+### Added
 
 - **Full-DB-Snapshot-Option (periodischer kompletter DB-Push)**: explizite,
   dokumentierte Option, die die KOMPLETTE DB (konsistenter `VACUUM INTO`-
@@ -92,6 +123,7 @@ All notable changes to Momo's Music Manager.
   wirksam — explizite Option gewinnt, kein Verhaltenswechsel für
   Bestands-Configs. Getriggert bleibt der One-Shot-Push über die CLI
   (`telemetry push`). Logging nennt jetzt die Quelle des Intervalls.
+
 - **Event-Telemetrie (v1)**: strukturierte Core-Events (Tasks, Scans,
   Downloads, App-Updates, Fehler) als HTTPS-Batches an einen Collector —
   ergänzend zum bestehenden Snapshot-Push. Client: stabile persistierte
@@ -112,6 +144,7 @@ All notable changes to Momo's Music Manager.
   (`telemetry.enabled=false`) — kein Verhaltenswechsel. Payload-Hygiene:
   keine Secrets, Pfade werden gestrippt/gekürzt. Konzept-Doc:
   `plans/proposed/telemetry-events.md`. Keine UI-Actions, keine Heartbeats.
+
 - **Nachhaltiges Versioning-Konzept**: Release-Builds beziehen ihre Version
   aus dem Git-Tag (`v1.2.0` → `1.2.0`), Dev-Builds aus der Cargo.toml-Basis
   + Commit-SHA (`1.1.0-dev+<sha8>`, rolling `main`). Mechanik: `build.rs`
@@ -127,20 +160,7 @@ All notable changes to Momo's Music Manager.
   (Schema, Kanäle, Release-Runbook, Alt-Tag-Repair),
   `repair-release.yml` für die v1.1.0-Nachbesserung (Assets
   `1.0.1` → `1.1.0`, Neu-Signatur des Manifests).
-- **Autoupdater (M6 v1)**: self-update gegen das rolling `latest-main`-Release
-  mit strikter Verifikationskette — Ed25519-Signatur (minisign-Format) über
-  das `SHA256SUMS`-Manifest (Pubkey im Binary eingebettet, Spiegel in
-  `scripts/minisign.pub`), SHA256 je Artefakt, dann atomarer Austausch mit
-  `.bak` + `update-state.json`-Marker, Health-Grace nach Neustart (mit
-  Selbst-Probe von `/api/health`), Auto-Rollback bei wiederholten Fehlstarts,
-  manuelles `update rollback`. Neue CLI: `update check | apply | rollback |
-  status`. Opt-out: `serve --no-autoupdate`, `MOMOS_AUTOUPDATE_ENABLED=false`,
-  `[autoupdate] enabled = false`. CI (Publish-Job) signiert das Manifest mit
-  dem Secret `MINISIGN_SECRET_KEY` (base64 der `minisign.key`) und lädt
-  `SHA256SUMS.minisig` hoch; ohne Secret bleibt es unsigned und der
-  Autoupdater lehnt Updates ab (safe default). macOS v1: verifizierter
-  Download (kein Swap im `.app`-Bundle); Windows: Swap bei gestopptem Server.
-  Doku: README, PLATFORM-SUPPORT, RELEASE-ROADMAP (M6), ADR-059.
+
 - **Update-Kanal-Wahl (`release` | `rolling`)**: Die Settings-Seite
   (`#settings`) bekommt ein Kanal-Dropdown neben dem Auto-Update-Toggle
   (Confirm-Modal beim Wechsel; Persistenz wie `autoupdate.enabled` über
@@ -158,32 +178,7 @@ All notable changes to Momo's Music Manager.
   den Mismatch entsprechend. Ein Kanalwechsel löscht den gecachten letzten
   Check (Ergebnisse vom alten Kanal gelten nicht für den neuen). Doku:
   `docs/versioning.md` §3/§6, `.env.example`, `deploy/config.toml`.
-- **Landing-Page-Downloads für alle Plattformen**: `site/` bietet jetzt
-  Download-Buttons für macOS (Universal-DMG), Windows (x64 + arm64) und Linux
-  (x64 + arm64) aus dem rolling `latest-main`-Release, jeweils mit
-  SHA256-Checksummen-Link und Verifikations-Anleitung. CI publiziert dafür
-  stabile Artefakt-Namen (`momos-music-manager-latest-<os>-<arch>.<ext>`,
-  `Momo-s-Music-Manager-latest.dmg.sha256`) und erweitert das aggregierte
-  `SHA256SUMS` um diese Einträge.
-- **docs/RELEASE-ROADMAP.md**: iterative Roadmap für die Verteilungs-Strategie
-  (M1 Downloads alle Plattformen ✅, M2 versionierte Releases, M3 Windows
-  Code-Signing, M4 macOS Notarization, M5 Linux AppImage/Flatpak, M6 optional
-  Autoupdater) — jeder Milestone einzeln abarbeitbar mit Definition of Done.
-- **Linux support**: Self-contained release builds (SQLite bundled via sqlx,
-  TLS via rustls — no system sqlite/openssl dev packages needed). New
-  `scripts/package-linux.sh` produces a portable `tar.gz` + `SHA256SUMS`,
-  ships a systemd unit for headless server mode. README documents Linux
-  build/run/systemd.
-- **Windows support**: `scripts/package-windows.ps1` produces a `zip` + sha256
-  for x64 and ARM64 (hosted `windows-11-arm` runner).
-- **Cross-platform CI**: `.github/workflows/build-all.yml` builds Linux x64,
-  Linux ARM64 (cross), Windows x64, Windows ARM64 and macOS universal on every
-  `main` push (rolling `latest-main` release) and on `v*` tags — artifacts
-  named `momos-music-manager-<version>-<os>-<arch>.<ext>` with per-file
-  `.sha256` and aggregated `SHA256SUMS`.
-- **`docs/PLATFORM-SUPPORT.md`**: Platform matrix for all 6 targets (build,
-  toolchain, packaging, CI, signing/security per platform) with priorities and
-  honest "open" items.
+
 - **Auto-Apply + Self-Restart + macOS DMG-Self-Install (Phase C)**: Der
   Autoupdater installiert Updates jetzt auch vollautomatisch. Neuer
   periodischer Scheduler (`serve`): check → apply → Self-Restart im
@@ -212,21 +207,66 @@ All notable changes to Momo's Music Manager.
   `restart.rs`, `dmg.rs`, `macos.rs`; Doku: README, `.env.example`,
   `docs/versioning.md` §6/§7, PLATFORM-SUPPORT.
 
+---
+
+## [1.1.0] — 2026-08-31
+
+### Added
+
+- **Autoupdater (M6 v1)**: self-update gegen das rolling `latest-main`-Release
+  mit strikter Verifikationskette — Ed25519-Signatur (minisign-Format) über
+  das `SHA256SUMS`-Manifest (Pubkey im Binary eingebettet, Spiegel in
+  `scripts/minisign.pub`), SHA256 je Artefakt, dann atomarer Austausch mit
+  `.bak` + `update-state.json`-Marker, Health-Grace nach Neustart (mit
+  Selbst-Probe von `/api/health`), Auto-Rollback bei wiederholten Fehlstarts,
+  manuelles `update rollback`. Neue CLI: `update check | apply | rollback |
+  status`. Opt-out: `serve --no-autoupdate`, `MOMOS_AUTOUPDATE_ENABLED=false`,
+  `[autoupdate] enabled = false`. CI (Publish-Job) signiert das Manifest mit
+  dem Secret `MINISIGN_SECRET_KEY` (base64 der `minisign.key`) und lädt
+  `SHA256SUMS.minisig` hoch; ohne Secret bleibt es unsigned und der
+  Autoupdater lehnt Updates ab (safe default). macOS v1: verifizierter
+  Download (kein Swap im `.app`-Bundle); Windows: Swap bei gestopptem Server.
+  Doku: README, PLATFORM-SUPPORT, RELEASE-ROADMAP (M6), ADR-059.
+
+- **Landing-Page-Downloads für alle Plattformen**: `site/` bietet jetzt
+  Download-Buttons für macOS (Universal-DMG), Windows (x64 + arm64) und Linux
+  (x64 + arm64) aus dem rolling `latest-main`-Release, jeweils mit
+  SHA256-Checksummen-Link und Verifikations-Anleitung. CI publiziert dafür
+  stabile Artefakt-Namen (`momos-music-manager-latest-<os>-<arch>.<ext>`,
+  `Momo-s-Music-Manager-latest.dmg.sha256`) und erweitert das aggregierte
+  `SHA256SUMS` um diese Einträge.
+
+- **docs/RELEASE-ROADMAP.md**: iterative Roadmap für die Verteilungs-Strategie
+  (M1 Downloads alle Plattformen ✅, M2 versionierte Releases, M3 Windows
+  Code-Signing, M4 macOS Notarization, M5 Linux AppImage/Flatpak, M6 optional
+  Autoupdater) — jeder Milestone einzeln abarbeitbar mit Definition of Done.
+
+- **Linux support**: Self-contained release builds (SQLite bundled via sqlx,
+  TLS via rustls — no system sqlite/openssl dev packages needed). New
+  `scripts/package-linux.sh` produces a portable `tar.gz` + `SHA256SUMS`,
+  ships a systemd unit for headless server mode. README documents Linux
+  build/run/systemd.
+
+- **Windows support**: `scripts/package-windows.ps1` produces a `zip` + sha256
+  for x64 and ARM64 (hosted `windows-11-arm` runner).
+
+- **Cross-platform CI**: `.github/workflows/build-all.yml` builds Linux x64,
+  Linux ARM64 (cross), Windows x64, Windows ARM64 and macOS universal on every
+  `main` push (rolling `latest-main` release) and on `v*` tags — artifacts
+  named `momos-music-manager-<version>-<os>-<arch>.<ext>` with per-file
+  `.sha256` and aggregated `SHA256SUMS`.
+
+- **`docs/PLATFORM-SUPPORT.md`**: Platform matrix for all 6 targets (build,
+  toolchain, packaging, CI, signing/security per platform) with priorities and
+  honest "open" items.
+
 ### Changed
 
 - `docs/PLATFORM-SUPPORT.md`: Landing-Page-Status auf erledigt aktualisiert.
+
 - TLS stack switched from native-tls/OpenSSL to **rustls** (reqwest, hf-hub,
   rspotify) — enables clean Linux cross-compilation to ARM64 and removes the
   OpenSSL system dependency on Linux.
-
-### Fixed
-
-- **Update-Check-404 bei Release-Builds (Hotfix v1.2.1)**: `DEFAULT_RELEASE_BASE_URL`
-  endete auf `…/releases/latest` ohne `/download`-Segment — GitHub liefert Assets
-  nur unter `releases/latest/download/<asset>` bzw. `releases/download/<tag>/<asset>`
-  aus, daher schlugen Update-Check/Apply von Release-Builds (Minisig-Signatur,
-  SHA256SUMS-Manifest, versioniertes Binary) mit HTTP 404 fehl. Die Basis-URL
-  trägt jetzt das `download`-Segment (Regression aus PR #19, Fix in PR #23).
 
 ---
 
