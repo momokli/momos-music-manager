@@ -10,6 +10,7 @@
  */
 
 import { renderNav, setActiveNav } from "./shared/nav.js";
+import { reportViewOpened } from "./shared/ui-events.js";
 
 const PAGE_MAP = {
   "": "dashboard",
@@ -101,6 +102,10 @@ async function navigate(pageId) {
     if (typeof mod.init === "function") {
       container.innerHTML = ""; // Clear loading
       mod.init(container, currentAbortController.signal, getHashParams());
+      // UI telemetry: one view-opened event per successful navigation
+      // (including the initial one). Fire-and-forget — the server answers
+      // 204 and only records when ui-events tracking is enabled.
+      reportViewOpened(pageId);
     } else {
       container.innerHTML = `<div class="error-block">
         <div class="error-icon"><i class="fas fa-exclamation-triangle"></i></div>

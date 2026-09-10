@@ -41,6 +41,12 @@
 //! # Where event batches are POSTed. Defaults to `<base_url>/api/telemetry`
 //! # when unset (snapshot `base_url` configured).
 //! events_endpoint = "https://telemetry.music.klimk.es/api/telemetry"
+//! # Full-package flags (all default OFF — opt-in; see
+//! # plans/proposed/telemetry-full-package.md):
+//! ui_events_enabled = false          # track ui.view.opened + ui.action.*
+//! log_shipping_enabled = false        # ship filtered log lines as log.entry
+//! log_min_level = "warn"              # error|warn|info|debug|trace filter
+//! log_max_events_per_sec = 50         # spike cap (1..=10000, required)
 //!
 //! [telemetry_receiver]
 //! bind = "127.0.0.1:8330"
@@ -76,6 +82,84 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use tracing::{info, warn};
+
+// ── Full-package constants (defaults + validation bounds) ────────────────────
+
+/// Valid `log_min_level` values (tracing levels, ascending).
+const LOG_MIN_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
+/// Default `log_min_level` — even when shipping is enabled, only warn/error
+/// go out unless the user explicitly lowers the bar.
+pub const DEFAULT_LOG_MIN_LEVEL: &str = "warn";
+/// Default `log_max_events_per_sec` spike cap.
+pub const DEFAULT_LOG_MAX_EVENTS_PER_SEC: u64 = 50;
+/// Upper bound for `log_max_events_per_sec` (hard volume protection).
+pub const MAX_LOG_MAX_EVENTS_PER_SEC: u64 = 10_000;
+
+/// Canonicalize a `log_min_level` value; `None` for anything outside
+/// `error|warn|info|debug|trace`. Pure + public (used by log_ship tests).
+pub fn canonical_log_min_level(raw: &str) -> Option<&'static str> {
+    let lower = raw.trim().to_ascii_lowercase();
+    LOG_MIN_LEVELS.iter().copied().find(|l| *l == lower)
+}
+
+/// Validate a `log_max_events_per_sec` value (1..=10000 — a cap is
+/// mandatory, 0/unbounded is not allowed). Pure + public.
+pub fn valid_log_max_events_per_sec(raw: u64) -> Option<u64> {
+    if (1..=MAX_LOG_MAX_EVENTS_PER_SEC).contains(&raw) {
+        Some(raw)
+    } else {
+        None
+    }
+}
+
+/// Resolve the effective `log_min_level`: env > toml > default `"warn"`.
+/// An invalid value (any source) is ignored with a warning and falls
+/// through to the next source (unset semantics, mirroring `load()`).
+fn resolve_log_min_level(env_raw: Option<String>, toml_raw: Option<String>) -> String {
+    if let Some(raw) = env_raw {
+        if let Some(level) = canonical_log_min_level(&raw) {
+            return level.to_string();
+        }
+        warn!(
+            "invalid MOMOS_TELEMETRY_LOG_MIN_LEVEL={raw:?} — ignoring \
+             (valid: error|warn|info|debug|trace)"
+        );
+    }
+    if let Some(raw) = toml_raw {
+        if let Some(level) = canonical_log_min_level(&raw) {
+            return level.to_string();
+        }
+        warn!("invalid [telemetry] log_min_level={raw:?} — ignoring");
+    }
+    DEFAULT_LOG_MIN_LEVEL.to_string()
+}
+
+/// Resolve the effective `log_max_events_per_sec`: env > toml > default
+/// 50. Invalid values (unparseable/0/>10000) are ignored with a warning.
+fn resolve_log_max_events_per_sec(
+    env_raw: Option<String>,
+    toml_raw: Option<u64>,
+) -> u64 {
+    if let Some(raw) = env_raw {
+        match raw.parse::<u64>().ok().and_then(valid_log_max_events_per_sec) {
+            Some(v) => return v,
+            None => warn!(
+                "invalid MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC={raw:?} — ignoring \
+                 (valid: 1..={MAX_LOG_MAX_EVENTS_PER_SEC})"
+            ),
+        }
+    }
+    if let Some(raw) = toml_raw {
+        if let Some(v) = valid_log_max_events_per_sec(raw) {
+            return v;
+        }
+        warn!(
+            "invalid [telemetry] log_max_events_per_sec={raw} — ignoring \
+             (valid: 1..={MAX_LOG_MAX_EVENTS_PER_SEC})"
+        );
+    }
+    DEFAULT_LOG_MAX_EVENTS_PER_SEC
+}
 
 // ── TOML config file structure ─────────────────────────────────────────────
 
@@ -156,6 +240,14 @@ struct TelemetryToml {
     full_db_interval_secs: Option<u64>,
     /// Event-batch endpoint; defaults to `<base_url>/api/telemetry` when unset.
     events_endpoint: Option<String>,
+    /// Full-package: track UI view opens + user-triggered actions (default off).
+    ui_events_enabled: Option<bool>,
+    /// Full-package: ship filtered log lines as `log.entry` (default off).
+    log_shipping_enabled: Option<bool>,
+    /// Full-package: log level filter for shipping (default `"warn"`).
+    log_min_level: Option<String>,
+    /// Full-package: log spike cap in events/sec (default 50, 1..=10000).
+    log_max_events_per_sec: Option<u64>,
 }
 
 impl TelemetryToml {
@@ -168,6 +260,10 @@ impl TelemetryToml {
             && self.interval_secs.is_none()
             && self.full_db_interval_secs.is_none()
             && self.events_endpoint.is_none()
+            && self.ui_events_enabled.is_none()
+            && self.log_shipping_enabled.is_none()
+            && self.log_min_level.is_none()
+            && self.log_max_events_per_sec.is_none()
     }
 }
 
@@ -259,6 +355,22 @@ pub struct ServiceCredentials {
     /// HTTPS endpoint for event batches (`POST /api/telemetry`). Resolved
     /// Env > TOML > derived default `<base_url>/api/telemetry` > None.
     pub telemetry_events_endpoint: Option<String>,
+    /// Full-package: track UI view opens (`ui.view.opened`) + the six
+    /// user-triggered actions (`ui.action.*`). Default OFF.
+    /// Env `MOMOS_TELEMETRY_UI_EVENTS_ENABLED` / `[telemetry] ui_events_enabled`.
+    pub telemetry_ui_events_enabled: bool,
+    /// Full-package: ship filtered log lines as `log.entry` events.
+    /// Default OFF. Env `MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED` /
+    /// `[telemetry] log_shipping_enabled`.
+    pub telemetry_log_shipping_enabled: bool,
+    /// Full-package: level filter for log shipping (`error|warn|info|debug|
+    /// trace`, default `"warn"`). Env `MOMOS_TELEMETRY_LOG_MIN_LEVEL` /
+    /// `[telemetry] log_min_level`; invalid values fall back to `"warn"`.
+    pub telemetry_log_min_level: String,
+    /// Full-package: log spike cap (events/sec, default 50, mandatory).
+    /// Env `MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC` /
+    /// `[telemetry] log_max_events_per_sec`; invalid (0/>10000) → 50.
+    pub telemetry_log_max_events_per_sec: u64,
 
     /// Raw `[telemetry]` section of the loaded config.toml (if any) — the
     /// mirror the Settings UI uses to report where a value comes from
@@ -377,6 +489,44 @@ impl ServiceCredentials {
                     .and_then(|t| t.events_endpoint.clone()),
             ),
             telemetry_base_url.as_deref(),
+        );
+
+        // Full-package flags (plan E3): env > toml > default, everything
+        // default off. Invalid level/cap values are ignored with a warning.
+        let telemetry_ui_events_enabled = std::env::var("MOMOS_TELEMETRY_UI_EVENTS_ENABLED")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .or_else(|| {
+                toml_config
+                    .telemetry
+                    .as_ref()
+                    .and_then(|t| t.ui_events_enabled)
+            })
+            .unwrap_or(false);
+        let telemetry_log_shipping_enabled =
+            std::env::var("MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED")
+                .ok()
+                .and_then(|v| v.parse::<bool>().ok())
+                .or_else(|| {
+                    toml_config
+                        .telemetry
+                        .as_ref()
+                        .and_then(|t| t.log_shipping_enabled)
+                })
+                .unwrap_or(false);
+        let telemetry_log_min_level = resolve_log_min_level(
+            std::env::var("MOMOS_TELEMETRY_LOG_MIN_LEVEL").ok(),
+            toml_config
+                .telemetry
+                .as_ref()
+                .and_then(|t| t.log_min_level.clone()),
+        );
+        let telemetry_log_max_events_per_sec = resolve_log_max_events_per_sec(
+            std::env::var("MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC").ok(),
+            toml_config
+                .telemetry
+                .as_ref()
+                .and_then(|t| t.log_max_events_per_sec),
         );
 
         // Telemetry receiver: resolve base_dir first so the default db_path
@@ -583,6 +733,10 @@ impl ServiceCredentials {
                 })
                 .unwrap_or(0),
             telemetry_events_endpoint: telemetry_events_endpoint,
+            telemetry_ui_events_enabled,
+            telemetry_log_shipping_enabled,
+            telemetry_log_min_level,
+            telemetry_log_max_events_per_sec,
             telemetry_toml,
 
             // Telemetry receiver (collector)
@@ -713,13 +867,19 @@ impl ServiceCredentials {
 
         info!(
             "Telemetry config: enabled={}, base_url={:?}, events_endpoint={:?}, instance={}, \
-             full_db_interval={}s, legacy_interval={}s (receiver_bind={})",
+             full_db_interval={}s, legacy_interval={}s, ui_events_enabled={}, \
+             log_shipping_enabled={}, log_min_level={}, log_max_events_per_sec={} \
+             (receiver_bind={})",
             credentials.telemetry_enabled,
             credentials.telemetry_base_url,
             credentials.telemetry_events_endpoint,
             credentials.telemetry_instance,
             credentials.telemetry_full_db_interval_secs,
             credentials.telemetry_interval_secs,
+            credentials.telemetry_ui_events_enabled,
+            credentials.telemetry_log_shipping_enabled,
+            credentials.telemetry_log_min_level,
+            credentials.telemetry_log_max_events_per_sec,
             credentials.telemetry_receiver_bind,
         );
 
@@ -799,6 +959,22 @@ impl ServiceCredentials {
             telemetry_events_endpoint: resolve_events_endpoint(
                 env_var_optional("MOMOS_TELEMETRY_EVENTS_ENDPOINT"),
                 env_var_optional("MOMOS_TELEMETRY_BASE_URL").as_deref(),
+            ),
+            telemetry_ui_events_enabled: env_var_optional("MOMOS_TELEMETRY_UI_EVENTS_ENABLED")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
+            telemetry_log_shipping_enabled: env_var_optional(
+                "MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED",
+            )
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(false),
+            telemetry_log_min_level: resolve_log_min_level(
+                std::env::var("MOMOS_TELEMETRY_LOG_MIN_LEVEL").ok(),
+                None,
+            ),
+            telemetry_log_max_events_per_sec: resolve_log_max_events_per_sec(
+                std::env::var("MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC").ok(),
+                None,
             ),
             // Env-only load (tests/CI): no config.toml mirror.
             telemetry_toml: None,
@@ -1131,6 +1307,99 @@ impl ServiceCredentials {
         "default"
     }
 
+    /// Where the effective `telemetry_ui_events_enabled` comes from:
+    /// `"env"` (parseable `MOMOS_TELEMETRY_UI_EVENTS_ENABLED`), `"toml"`
+    /// (`[telemetry] ui_events_enabled`) or `"default"` (false).
+    pub fn telemetry_ui_events_source(&self) -> &'static str {
+        if std::env::var("MOMOS_TELEMETRY_UI_EVENTS_ENABLED")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .is_some()
+        {
+            return "env";
+        }
+        if self
+            .telemetry_toml
+            .as_ref()
+            .and_then(|t| t.ui_events_enabled)
+            .is_some()
+        {
+            return "toml";
+        }
+        "default"
+    }
+
+    /// Where the effective `telemetry_log_shipping_enabled` comes from
+    /// (analogous to [`Self::telemetry_ui_events_source`]; env var
+    /// `MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED`).
+    pub fn telemetry_log_shipping_source(&self) -> &'static str {
+        if std::env::var("MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .is_some()
+        {
+            return "env";
+        }
+        if self
+            .telemetry_toml
+            .as_ref()
+            .and_then(|t| t.log_shipping_enabled)
+            .is_some()
+        {
+            return "toml";
+        }
+        "default"
+    }
+
+    /// Where the effective `telemetry_log_min_level` comes from: `"env"`
+    /// (valid `MOMOS_TELEMETRY_LOG_MIN_LEVEL`), `"toml"` (`[telemetry]
+    /// log_min_level`) or `"default"` ("warn"). An invalid value counts
+    /// as unset, mirroring the resolution in [`Self::load`].
+    pub fn telemetry_log_min_level_source(&self) -> &'static str {
+        if std::env::var("MOMOS_TELEMETRY_LOG_MIN_LEVEL")
+            .ok()
+            .as_deref()
+            .and_then(canonical_log_min_level)
+            .is_some()
+        {
+            return "env";
+        }
+        if self
+            .telemetry_toml
+            .as_ref()
+            .and_then(|t| t.log_min_level.as_deref())
+            .and_then(canonical_log_min_level)
+            .is_some()
+        {
+            return "toml";
+        }
+        "default"
+    }
+
+    /// Where the effective `telemetry_log_max_events_per_sec` comes from
+    /// (analogous to [`Self::telemetry_log_min_level_source`]; env var
+    /// `MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC`).
+    pub fn telemetry_log_max_events_per_sec_source(&self) -> &'static str {
+        if std::env::var("MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .and_then(valid_log_max_events_per_sec)
+            .is_some()
+        {
+            return "env";
+        }
+        if self
+            .telemetry_toml
+            .as_ref()
+            .and_then(|t| t.log_max_events_per_sec)
+            .and_then(valid_log_max_events_per_sec)
+            .is_some()
+        {
+            return "toml";
+        }
+        "default"
+    }
+
     /// Effective periodic full-DB push interval in seconds (0 = off) — the
     /// same value the telemetry loop uses (explicit key wins, legacy
     /// `interval_secs` stays effective as alias when the explicit one is
@@ -1211,6 +1480,10 @@ impl ServiceCredentials {
             telemetry_interval_secs: 0,
             telemetry_full_db_interval_secs: 0,
             telemetry_events_endpoint: None,
+            telemetry_ui_events_enabled: false,
+            telemetry_log_shipping_enabled: false,
+            telemetry_log_min_level: DEFAULT_LOG_MIN_LEVEL.to_string(),
+            telemetry_log_max_events_per_sec: DEFAULT_LOG_MAX_EVENTS_PER_SEC,
             telemetry_toml: None,
             telemetry_receiver_bind: "127.0.0.1:8330".to_string(),
             telemetry_receiver_base_dir: "/tmp/momos-analytics".to_string(),
@@ -1296,6 +1569,10 @@ const TELEMETRY_TOML_KEYS: &[&str] = &[
     "token",
     "instance",
     "full_db_interval_secs",
+    "ui_events_enabled",
+    "log_shipping_enabled",
+    "log_min_level",
+    "log_max_events_per_sec",
 ];
 /// Legacy alias key that the UI silently retires when it writes
 /// `full_db_interval_secs` (the explicit key is authoritative; keeping both
@@ -1325,6 +1602,14 @@ pub struct TelemetryTomlPatch {
     pub token: Option<String>,
     pub instance: Option<String>,
     pub full_db_interval_secs: Option<u64>,
+    /// Full-package: `[telemetry] ui_events_enabled` (view/action tracking).
+    pub ui_events_enabled: Option<bool>,
+    /// Full-package: `[telemetry] log_shipping_enabled`.
+    pub log_shipping_enabled: Option<bool>,
+    /// Full-package: `[telemetry] log_min_level` (`Some("")` clears).
+    pub log_min_level: Option<String>,
+    /// Full-package: `[telemetry] log_max_events_per_sec`.
+    pub log_max_events_per_sec: Option<u64>,
 }
 
 /// Patch the `[telemetry]` section of the config.toml that
@@ -1490,6 +1775,33 @@ pub fn update_telemetry_toml_at(
             &mut section_end,
             "full_db_interval_secs",
             &toml::Value::Integer(secs as i64),
+        );
+    }
+    // 4. Full-package flags (plan E3): ui events + log shipping toggles,
+    //    the log level filter (empty string clears → default "warn") and
+    //    the mandatory per-second cap.
+    if let Some(v) = patch.ui_events_enabled {
+        set_key(&mut lines, &mut section_end, "ui_events_enabled", &toml::Value::Boolean(v));
+    }
+    if let Some(v) = patch.log_shipping_enabled {
+        set_key(&mut lines, &mut section_end, "log_shipping_enabled", &toml::Value::Boolean(v));
+    }
+    match patch.log_min_level.as_ref() {
+        None => {}
+        Some(v) if v.is_empty() => remove_key(&mut lines, &mut section_end, "log_min_level"),
+        Some(v) => set_key(
+            &mut lines,
+            &mut section_end,
+            "log_min_level",
+            &toml::Value::String(v.clone()),
+        ),
+    }
+    if let Some(v) = patch.log_max_events_per_sec {
+        set_key(
+            &mut lines,
+            &mut section_end,
+            "log_max_events_per_sec",
+            &toml::Value::Integer(v as i64),
         );
     }
 
@@ -1989,6 +2301,18 @@ pub(crate) mod tests {
                 (None, Some(u)) => Some(format!("{}/api/telemetry", u.trim_end_matches('/'))),
                 (None, None) => None,
             };
+            creds.telemetry_ui_events_enabled = t.ui_events_enabled.unwrap_or(false);
+            creds.telemetry_log_shipping_enabled = t.log_shipping_enabled.unwrap_or(false);
+            creds.telemetry_log_min_level = t
+                .log_min_level
+                .as_deref()
+                .and_then(canonical_log_min_level)
+                .unwrap_or(DEFAULT_LOG_MIN_LEVEL)
+                .to_string();
+            creds.telemetry_log_max_events_per_sec = t
+                .log_max_events_per_sec
+                .and_then(valid_log_max_events_per_sec)
+                .unwrap_or(DEFAULT_LOG_MAX_EVENTS_PER_SEC);
         }
         creds.telemetry_toml = telemetry;
         creds
@@ -2018,6 +2342,10 @@ pub(crate) mod tests {
             interval_secs: None,
             full_db_interval_secs: Some(3600),
             events_endpoint: None,
+            ui_events_enabled: Some(true),
+            log_shipping_enabled: Some(true),
+            log_min_level: Some("info".into()),
+            log_max_events_per_sec: Some(25),
         };
         let creds = creds_with_toml(Some(toml));
         assert_eq!(creds.telemetry_enabled_source(), "toml");
@@ -2026,7 +2354,86 @@ pub(crate) mod tests {
         assert_eq!(creds.telemetry_instance_source(), "toml");
         assert_eq!(creds.telemetry_interval_source(), "toml");
         assert_eq!(creds.telemetry_effective_full_db_interval(), 3600);
+        assert_eq!(creds.telemetry_ui_events_source(), "toml");
+        assert_eq!(creds.telemetry_log_shipping_source(), "toml");
+        assert_eq!(creds.telemetry_log_min_level_source(), "toml");
+        assert_eq!(creds.telemetry_log_max_events_per_sec_source(), "toml");
         assert!(creds.telemetry_toml_present());
+
+        // Effective values come from the toml mirror.
+        assert!(creds.telemetry_ui_events_enabled);
+        assert!(creds.telemetry_log_shipping_enabled);
+        assert_eq!(creds.telemetry_log_min_level, "info");
+        assert_eq!(creds.telemetry_log_max_events_per_sec, 25);
+    }
+
+    #[test]
+    fn full_package_flags_default_all_off() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let creds = creds_with_toml(None);
+        assert_eq!(creds.telemetry_ui_events_source(), "default");
+        assert_eq!(creds.telemetry_log_shipping_source(), "default");
+        assert_eq!(creds.telemetry_log_min_level_source(), "default");
+        assert_eq!(creds.telemetry_log_max_events_per_sec_source(), "default");
+        // Defaults exact per plan E3: everything off, warn + 50 cap.
+        assert!(!creds.telemetry_ui_events_enabled);
+        assert!(!creds.telemetry_log_shipping_enabled);
+        assert_eq!(creds.telemetry_log_min_level, "warn");
+        assert_eq!(creds.telemetry_log_max_events_per_sec, 50);
+    }
+
+    #[test]
+    fn canonical_log_min_level_validates() {
+        assert_eq!(canonical_log_min_level("warn"), Some("warn"));
+        assert_eq!(canonical_log_min_level("INFO"), Some("info"));
+        assert_eq!(canonical_log_min_level("  debug "), Some("debug"));
+        assert_eq!(canonical_log_min_level("error"), Some("error"));
+        assert_eq!(canonical_log_min_level("trace"), Some("trace"));
+        assert_eq!(canonical_log_min_level("nonsense"), None);
+        assert_eq!(canonical_log_min_level(""), None);
+    }
+
+    #[test]
+    fn valid_log_max_events_per_sec_bounds() {
+        assert_eq!(valid_log_max_events_per_sec(1), Some(1));
+        assert_eq!(valid_log_max_events_per_sec(50), Some(50));
+        assert_eq!(valid_log_max_events_per_sec(10_000), Some(10_000));
+        assert_eq!(valid_log_max_events_per_sec(0), None);
+        assert_eq!(valid_log_max_events_per_sec(10_001), None);
+    }
+
+    #[test]
+    fn resolve_log_min_level_precedence_and_fallback() {
+        // env > toml
+        assert_eq!(
+            resolve_log_min_level(Some("debug".into()), Some("error".into())),
+            "debug"
+        );
+        // invalid env → toml
+        assert_eq!(
+            resolve_log_min_level(Some("bogus".into()), Some("error".into())),
+            "error"
+        );
+        // invalid env + no toml → default
+        assert_eq!(resolve_log_min_level(Some("bogus".into()), None), "warn");
+        // invalid toml → default
+        assert_eq!(resolve_log_min_level(None, Some("verbose".into())), "warn");
+        // none → default
+        assert_eq!(resolve_log_min_level(None, None), "warn");
+    }
+
+    #[test]
+    fn resolve_log_max_events_per_sec_precedence_and_fallback() {
+        assert_eq!(resolve_log_max_events_per_sec(Some("10".into()), Some(100)), 10);
+        // 0 is invalid (cap is mandatory) → falls to toml
+        assert_eq!(resolve_log_max_events_per_sec(Some("0".into()), Some(100)), 100);
+        // unparseable + no toml → default
+        assert_eq!(resolve_log_max_events_per_sec(Some("lots".into()), None), 50);
+        // > 10000 → default
+        assert_eq!(resolve_log_max_events_per_sec(Some("99999".into()), None), 50);
+        // invalid toml → default
+        assert_eq!(resolve_log_max_events_per_sec(None, Some(0)), 50);
+        assert_eq!(resolve_log_max_events_per_sec(None, None), 50);
     }
 
     #[test]
@@ -2042,6 +2449,10 @@ pub(crate) mod tests {
             interval_secs: Some(7200),
             full_db_interval_secs: None,
             events_endpoint: None,
+            ui_events_enabled: None,
+            log_shipping_enabled: None,
+            log_min_level: None,
+            log_max_events_per_sec: None,
         };
         let creds = creds_with_toml(Some(toml));
         assert_eq!(creds.telemetry_interval_source(), "toml");
@@ -2092,6 +2503,7 @@ enabled = true
             token: Some("tok-123".into()),
             instance: Some("studio".into()),
             full_db_interval_secs: Some(0),
+            ..Default::default()
         };
         update_telemetry_toml_at(&path, &patch).unwrap();
 
@@ -2212,6 +2624,40 @@ enabled = true
             std::fs::read_to_string(&path).unwrap(),
             "this is = = not toml [[["
         );
+    }
+
+    #[test]
+    fn update_telemetry_toml_writes_full_package_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[telemetry]\nenabled = true\n").unwrap();
+
+        let patch = TelemetryTomlPatch {
+            ui_events_enabled: Some(true),
+            log_shipping_enabled: Some(true),
+            log_min_level: Some("info".into()),
+            log_max_events_per_sec: Some(10),
+            ..Default::default()
+        };
+        update_telemetry_toml_at(&path, &patch).unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        let value: toml::Value = out.parse().expect("valid TOML");
+        let tel = &value["telemetry"];
+        assert_eq!(tel["enabled"].as_bool(), Some(true), "untouched key survives");
+        assert_eq!(tel["ui_events_enabled"].as_bool(), Some(true));
+        assert_eq!(tel["log_shipping_enabled"].as_bool(), Some(true));
+        assert_eq!(tel["log_min_level"].as_str(), Some("info"));
+        assert_eq!(tel["log_max_events_per_sec"].as_integer(), Some(10));
+
+        // Clearing log_min_level with "" removes the key (default warn).
+        let patch = TelemetryTomlPatch {
+            log_min_level: Some(String::new()),
+            ..Default::default()
+        };
+        update_telemetry_toml_at(&path, &patch).unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        let value: toml::Value = out.parse().expect("valid TOML");
+        assert_eq!(value["telemetry"].get("log_min_level"), None);
     }
 
     #[test]

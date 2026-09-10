@@ -411,6 +411,12 @@ async fn deemix_enqueue_handler(
     use axum::http::StatusCode;
 
     if request.url.is_empty() {
+        crate::api::ui_events::emit_action(
+            &state,
+            crate::telemetry::events::EventType::UiActionDeemixEnqueue,
+            false,
+            Some("URL is required"),
+        );
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse {
@@ -440,6 +446,12 @@ async fn deemix_enqueue_handler(
 
     if let Err(e) = insert_result {
         tracing::error!("Failed to insert deemix download: {}", e);
+        crate::api::ui_events::emit_action(
+            &state,
+            crate::telemetry::events::EventType::UiActionDeemixEnqueue,
+            false,
+            Some(&format!("Failed to queue download: {}", e)),
+        );
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiResponse {
@@ -454,6 +466,12 @@ async fn deemix_enqueue_handler(
         && let Err(e) = client.add_to_queue(&request.url).await
     {
         tracing::error!("Failed to forward URL to deemix server: {}", e);
+        crate::api::ui_events::emit_action(
+            &state,
+            crate::telemetry::events::EventType::UiActionDeemixEnqueue,
+            false,
+            Some(&format!("Deemix server rejected the request: {}", e)),
+        );
         return (
             StatusCode::BAD_GATEWAY,
             Json(ApiResponse {
@@ -463,6 +481,12 @@ async fn deemix_enqueue_handler(
             .into_response();
     }
 
+    crate::api::ui_events::emit_action(
+        &state,
+        crate::telemetry::events::EventType::UiActionDeemixEnqueue,
+        true,
+        None,
+    );
     Json(ApiResponse {
         data: "Playlist added to download queue",
     })

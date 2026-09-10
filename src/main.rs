@@ -120,8 +120,16 @@ fn main() -> Result<()> {
         .with_ansi(false)
         .with_writer(non_blocking);
 
+    // Log shipping (telemetry full package): starts INACTIVE; `serve()`
+    // activates it after the event pipeline is running, when
+    // `log_shipping_enabled` is set. The layer sits between the global
+    // EnvFilter and the fmt layers so it only sees filtered events.
+    let (log_ship_layer, log_ship_handle) =
+        momos_music_manager::telemetry::log_ship::layer();
+
     tracing_subscriber::registry()
         .with(env_filter)
+        .with(log_ship_layer)
         .with(stdout_layer)
         .with(file_layer)
         .init();
@@ -159,10 +167,11 @@ fn main() -> Result<()> {
                 let p = port;
                 let pu = public_url.clone();
                 let no_au = no_autoupdate;
+                let ship_handle = log_ship_handle;
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
                     rt.block_on(async {
-                        if let Err(e) = serve(h, p, pu, true, no_au).await {
+                        if let Err(e) = serve(h, p, pu, true, no_au, ship_handle).await {
                             tracing::error!("Server exited with error: {}", e);
                         }
                     });
@@ -178,7 +187,14 @@ fn main() -> Result<()> {
             #[cfg(not(target_os = "macos"))]
             {
                 let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
-                rt.block_on(serve(host, port, public_url, no_browser, no_autoupdate))?;
+                rt.block_on(serve(
+                    host,
+                    port,
+                    public_url,
+                    no_browser,
+                    no_autoupdate,
+                    log_ship_handle,
+                ))?;
                 return Ok(());
             }
         }
@@ -398,12 +414,17 @@ async fn create_db_pool() -> Result<Pool<Sqlite>> {
 }
 
 /// Start the HTTP server with all background tasks.
+///
+/// `log_ship_handle` activates the (initially inactive) log-shipping layer
+/// once the telemetry event pipeline is running (see
+/// [`momos_music_manager::telemetry::log_ship`]).
 async fn serve(
     host: String,
     port: u16,
     public_url: Option<String>,
     no_browser: bool,
     no_autoupdate: bool,
+    log_ship_handle: momos_music_manager::telemetry::log_ship::LogShipHandle,
 ) -> Result<()> {
     let config = ServiceCredentials::load();
     let db = create_db_pool().await?;
@@ -760,6 +781,32 @@ async fn serve(
         }
     }
 
+    // Log shipping (full-package feature): activate the tracing layer ONLY
+    // now that the event pipeline is running — logs emitted before this
+    // point expire silently (documented in log_ship.rs). Default off;
+    // `log_shipping_enabled` gates the whole path.
+    if state.config.telemetry_log_shipping_enabled {
+        if telemetry_enabled {
+            log_ship_handle.activate(momos_music_manager::telemetry::log_ship::LogShipConfig {
+                min_level: momos_music_manager::telemetry::log_ship::parse_level(
+                    &state.config.telemetry_log_min_level,
+                ),
+                max_events_per_sec: state.config.telemetry_log_max_events_per_sec,
+            });
+            info!(
+                "Telemetry log shipping activated (min_level={}, max_events_per_sec={})",
+                state.config.telemetry_log_min_level,
+                state.config.telemetry_log_max_events_per_sec
+            );
+        } else {
+            info!(
+                "Telemetry log shipping configured but telemetry is disabled — log.entry stays off"
+            );
+        }
+    } else {
+        info!("Telemetry log shipping disabled (log_shipping_enabled=false)");
+    }
+
     // Build the application with routes.
     let app = momos_music_manager::build_router(state.clone());
 
@@ -1006,6 +1053,10 @@ async fn serve(
     }
 
     axum::serve(listener, app).await?;
+
+    // Serve ended: deactivate log shipping (buffered logs expire by design;
+    // the process usually exits right after this anyway).
+    log_ship_handle.deactivate();
 
     Ok(())
 }

@@ -265,6 +265,12 @@ async fn restore_handler(
     // Safety guard: require ?confirm=true
     let confirmed = params.get("confirm").map(|s| s == "true").unwrap_or(false);
     if !confirmed {
+        crate::api::ui_events::emit_action(
+            &state,
+            crate::telemetry::events::EventType::UiActionRestoreDump,
+            false,
+            Some("confirm=true query param is required (this operation wipes all existing data)"),
+        );
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -290,6 +296,12 @@ async fn restore_handler(
     let data = match file_bytes {
         Some(d) if !d.is_empty() => d,
         _ => {
+            crate::api::ui_events::emit_action(
+                &state,
+                crate::telemetry::events::EventType::UiActionRestoreDump,
+                false,
+                Some("No file uploaded. Send a multipart form with a 'file' field."),
+            );
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "No file uploaded. Send a multipart form with a 'file' field."})),
@@ -309,6 +321,12 @@ async fn restore_handler(
         Ok(())
     })() {
         tracing::error!("Failed to write uploaded file: {e}");
+        crate::api::ui_events::emit_action(
+            &state,
+            crate::telemetry::events::EventType::UiActionRestoreDump,
+            false,
+            Some(&format!("Failed to write uploaded file: {e}")),
+        );
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("Failed to write uploaded file: {e}")})),
@@ -321,6 +339,12 @@ async fn restore_handler(
         Ok(()) => {
             // Clean up temp file
             let _ = std::fs::remove_file(&temp_path);
+            crate::api::ui_events::emit_action(
+                &state,
+                crate::telemetry::events::EventType::UiActionRestoreDump,
+                true,
+                None,
+            );
             Json(json!({
                 "success": true,
                 "message": "Database restored successfully"
@@ -330,6 +354,12 @@ async fn restore_handler(
         Err(e) => {
             let _ = std::fs::remove_file(&temp_path);
             tracing::error!("Failed to restore dump: {e}");
+            crate::api::ui_events::emit_action(
+                &state,
+                crate::telemetry::events::EventType::UiActionRestoreDump,
+                false,
+                Some(&e.to_string()),
+            );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to restore dump: {e}")})),
@@ -376,6 +406,13 @@ async fn embeddings_status_handler(State(state): State<Arc<AppState>>) -> impl I
 async fn recompute_embeddings_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let task_id =
         crate::tasks::start_recompute_embeddings_task(&state.task_manager, &state.db).await;
+
+    crate::api::ui_events::emit_action(
+        &state,
+        crate::telemetry::events::EventType::UiActionRecomputeEmbeddings,
+        true,
+        None,
+    );
 
     Json(ApiResponse {
         data: serde_json::json!({

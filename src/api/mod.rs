@@ -23,6 +23,7 @@ pub mod telemetry_settings;
 pub mod tracks;
 pub mod traktor;
 pub mod types;
+pub mod ui_events;
 pub mod update;
 pub mod websocket;
 
@@ -47,4 +48,5 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(files::router())
         .merge(update::router())
         .merge(telemetry_settings::router())
+        .merge(ui_events::router())
 }

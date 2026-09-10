@@ -431,6 +431,180 @@ async fn views_aggregate_seeded_events() {
     assert_eq!(v, "1.1.0");
 }
 
+#[tokio::test]
+async fn ui_and_log_views_aggregate_seeded_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("telemetry.db");
+    let pool = init_telemetry_db(&db_path).await.unwrap();
+
+    let now = chrono::Utc::now().timestamp();
+    let hour_ts = now - now.rem_euclid(3600);
+    let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+    // Client A: views (dashboard ×2, folders ×1) + actions (scan ok + scan
+    // failed + run_backup ok) + log entries (warn ×2, error ×1).
+    seed_event(&pool, "a-view-1", "client-a", "ui.view.opened", hour_ts,
+        json!({ "view": "dashboard" }), now).await;
+    seed_event(&pool, "a-view-2", "client-a", "ui.view.opened", hour_ts + 10,
+        json!({ "view": "dashboard" }), now).await;
+    seed_event(&pool, "a-view-3", "client-a", "ui.view.opened", hour_ts + 20,
+        json!({ "view": "folders" }), now).await;
+    seed_event(&pool, "a-act-1", "client-a", "ui.action.scan_folder", hour_ts,
+        json!({ "ok": true }), now).await;
+    seed_event(&pool, "a-act-2", "client-a", "ui.action.scan_folder", hour_ts + 5,
+        json!({ "ok": false, "error_message": "Folder not found with id: 999" }), now).await;
+    seed_event(&pool, "a-act-3", "client-a", "ui.action.run_backup", hour_ts,
+        json!({ "ok": true }), now).await;
+    seed_event(&pool, "a-log-1", "client-a", "log.entry", hour_ts,
+        json!({ "level": "warn", "target": "momos_music_manager::db", "message": "disk full" }), now).await;
+    seed_event(&pool, "a-log-2", "client-a", "log.entry", hour_ts + 1,
+        json!({ "level": "warn", "target": "momos_music_manager::watch", "message": "retry" }), now).await;
+    seed_event(&pool, "a-log-3", "client-a", "log.entry", hour_ts + 2,
+        json!({ "level": "error", "target": "momos_music_manager::db", "message": "boom" }), now).await;
+
+    // Client B: one view open — must not leak into client-a rows.
+    seed_event(&pool, "b-view-1", "client-b", "ui.view.opened", hour_ts,
+        json!({ "view": "settings" }), now).await;
+
+    // v_ui_views: per client/day/view.
+    let rows = sqlx::query(
+        "SELECT view, views FROM v_ui_views WHERE client_id = 'client-a' ORDER BY view",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2, "dashboard + folders for client-a");
+    let v0: String = rows[0].get("view");
+    let n0: i64 = rows[0].get("views");
+    let v1: String = rows[1].get("view");
+    let n1: i64 = rows[1].get("views");
+    assert_eq!((v0.as_str(), n0), ("dashboard", 2));
+    assert_eq!((v1.as_str(), n1), ("folders", 1));
+    let b_views: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM v_ui_views WHERE client_id = 'client-b' AND view = 'settings'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(b_views, 1);
+
+    // v_ui_actions: per client/day/action_type/ok.
+    let rows = sqlx::query(
+        "SELECT action_type, ok, actions FROM v_ui_actions \
+         WHERE client_id = 'client-a' ORDER BY action_type, ok",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 3, "scan_folder ok+failed, run_backup ok");
+    let t0: String = rows[0].get("action_type");
+    let ok0: i64 = rows[0].get("ok");
+    let n: i64 = rows[0].get("actions");
+    assert_eq!((t0.as_str(), ok0, n), ("ui.action.run_backup", 1, 1));
+    let t1: String = rows[1].get("action_type");
+    let ok1: i64 = rows[1].get("ok");
+    assert_eq!((t1.as_str(), ok1), ("ui.action.scan_folder", 0));
+    let t2: String = rows[2].get("action_type");
+    let ok2: i64 = rows[2].get("ok");
+    assert_eq!((t2.as_str(), ok2), ("ui.action.scan_folder", 1));
+
+    // v_log_volume: per client/day/level.
+    let rows = sqlx::query(
+        "SELECT level, entries FROM v_log_volume \
+         WHERE client_id = 'client-a' AND day = ? ORDER BY level",
+    )
+    .bind(&day)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2, "error + warn for client-a");
+    let l0: String = rows[0].get("level");
+    let e0: i64 = rows[0].get("entries");
+    let l1: String = rows[1].get("level");
+    let e1: i64 = rows[1].get("entries");
+    assert_eq!((l0.as_str(), e0), ("error", 1));
+    assert_eq!((l1.as_str(), e1), ("warn", 2));
+}
+
+/// POST /api/telemetry accepts the new full-package types (ui.view.opened,
+/// ui.action.*, log.entry) — the shared events.rs allowlist is the wire
+/// contract, the ingest path stays generic. Also proves dedup + the ingest
+/// side of the three new views (US6).
+#[tokio::test]
+async fn ingest_accepts_ui_and_log_types_into_views() {
+    let receiver_dir = tempfile::tempdir().unwrap();
+    let spool_dir = tempfile::tempdir().unwrap();
+    let (base, pool) = spawn_receiver(&receiver_dir).await;
+
+    let cfg = test_flusher_config(&base, spool_dir.path());
+    let pipeline = spawn_pipeline(cfg);
+
+    let events = vec![
+        stamped_event(
+            "30000000-0000-4000-8000-000000000001",
+            "client-ui",
+            EventType::UiViewOpened,
+            json!({ "view": "dashboard" }),
+        ),
+        stamped_event(
+            "30000000-0000-4000-8000-000000000002",
+            "client-ui",
+            EventType::UiActionScanFolder,
+            json!({ "ok": true }),
+        ),
+        stamped_event(
+            "30000000-0000-4000-8000-000000000003",
+            "client-ui",
+            EventType::LogEntry,
+            json!({ "level": "error", "target": "momos_music_manager::db", "message": "boom" }),
+        ),
+    ];
+    for event in &events {
+        assert!(pipeline.emit(event.clone()), "emit must succeed");
+    }
+    wait_for_count(&pool, "SELECT COUNT(*) FROM events", 3).await;
+
+    // Dedup unchanged: resend → accepted=0, duplicates=3.
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/api/telemetry"))
+        .bearer_auth(TOKEN)
+        .json(&EventBatch::new("client-ui", events))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["accepted"], 0);
+    assert_eq!(body["duplicates"], 3);
+
+    // Ingested into the new views (day of ingestion).
+    let views: i64 = sqlx::query_scalar(
+        "SELECT views FROM v_ui_views WHERE client_id = 'client-ui' AND view = 'dashboard'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(views, 1);
+    let actions: i64 = sqlx::query_scalar(
+        "SELECT actions FROM v_ui_actions WHERE client_id = 'client-ui' \
+         AND action_type = 'ui.action.scan_folder' AND ok = 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(actions, 1);
+    let entries: i64 = sqlx::query_scalar(
+        "SELECT entries FROM v_log_volume WHERE client_id = 'client-ui' AND level = 'error'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(entries, 1);
+
+    pipeline.shutdown().await;
+}
+
 // ── 4. TaskManager lifecycle hooks (exactly-once per lifecycle) ────────────
 
 #[tokio::test]
