@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>M5 · Traktor Import — UI/UX-Mockup</title>
+<link rel="stylesheet" href="assets/mockup.css" />
+<style>
+  .imp-status { display: flex; gap: 20px; flex-wrap: wrap; align-items: center; }
+  .imp-path { flex: 1; min-width: 240px; }
+  .imp-path .val { font-family: var(--mono); font-size: .95rem; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; display: flex; align-items: center; gap: 10px; }
+  .imp-meta { color: var(--text-muted); font-size: .8rem; margin-top: 6px; display: flex; gap: 14px; }
+  .kpi { text-align: center; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px 18px; min-width: 92px; }
+  .kpi .v { font-size: 1.5rem; font-weight: 800; line-height: 1.1; }
+  .kpi .k { font-size: .7rem; color: var(--text-subtle); text-transform: uppercase; letter-spacing: .06em; font-weight: 700; }
+  .delta-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(30,41,59,.55); font-size: .85rem; }
+  .delta-row:last-child { border-bottom: 0; }
+  .delta-row .f { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .delta-row .chg { display: flex; gap: 6px; align-items: center; font-variant-numeric: tabular-nums; }
+  .delta-row .old { color: var(--red); text-decoration: line-through; opacity: .8; }
+  .delta-row .new { color: var(--green); font-weight: 700; }
+  .nm-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; font-size: .84rem; border-bottom: 1px solid rgba(30,41,59,.4); }
+  .nm-row:last-child { border-bottom: 0; }
+  .nm-row .f { flex: 1; font-family: var(--mono); font-size: .78rem; color: var(--text-muted); }
+  .side-stats { display: flex; flex-direction: column; gap: 10px; }
+  .statline { display: flex; justify-content: space-between; font-size: .84rem; padding: 6px 0; border-bottom: 1px dashed rgba(30,41,59,.5); }
+  .statline:last-child { border: 0; }
+  .statline b { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topnav">
+    <div class="brand"><span class="logo">♪</span>momo's music manager<small>UI/UX-Proposal</small></div>
+    <nav class="navlinks">
+      <a class="nav-item" href="#">Overview</a>
+      <a class="nav-item" href="#">Library</a>
+      <a class="nav-item active" href="#">Services</a>
+      <a class="nav-item" href="#">Tools <span class="count orange">Digging</span></a>
+      <a class="nav-item" href="#">System</a>
+    </nav>
+    <div class="global-activity">Letzter Import: vor 3 min · 4/5 gematcht</div>
+    <span class="version">v1.3.0</span>
+  </header>
+
+  <div class="pagehead">
+    <div>
+      <h1>Traktor Import</h1>
+      <div class="sub">BPM · Key · Rating · Playcount aus collection.nml übernehmen</div>
+    </div>
+    <div class="actions">
+      <span class="fix-tag">adressiert R01/R06/R07</span>
+      <button class="btn primary">⬇ Import jetzt ausführen</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Collection <span class="grow"></span><span class="chip green" style="padding:1px 8px">erkannt</span></div>
+    <div class="imp-status">
+      <div class="imp-path">
+        <div class="val">📁 /Users/momo/Music/Traktor/collection.nml</div>
+        <div class="imp-meta"><span>Zuletzt geändert: 07.09.2026, 10:31</span><span>·</span><span>Auto-Detect: an</span></div>
+      </div>
+      <div class="kpi"><div class="v">24.814</div><div class="k">Library-Tracks</div></div>
+      <div class="kpi"><div class="v">4.310</div><div class="k">mit BPM/Key</div></div>
+      <div class="kpi"><div class="v">12</div><div class="k">Abweichungen</div></div>
+    </div>
+  </div>
+
+  <div class="grid" style="grid-template-columns:1.55fr 1fr;gap:16px;margin-top:16px">
+    <div>
+      <div class="card">
+        <div class="card-title">Letzter Import · Ergebnis <span class="chip green" style="padding:1px 8px">Completed</span><span class="grow"></span><span class="hint">07.09.2026, 10:31 · 3 s</span></div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:6px">
+          <span class="chip">5 Entries geparst</span>
+          <span class="chip green">4 gematcht</span>
+          <span class="chip">1 ohne Match</span>
+          <span class="chip blue">4× Playcount · Last Played</span>
+          <span class="chip blue">4× BPM · Key</span>
+          <span class="chip blue">4× Rating</span>
+        </div>
+        <div class="footnote" style="margin-bottom:8px">Vorschlag: Ergebnis bleibt nach dem Import auf dieser Seite sichtbar (heute: nur im Task-Log).</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Übernommene Änderungen <span class="chip blue" style="padding:1px 8px">neu: Consistency-Vorschau</span></div>
+        <div class="delta-row">
+          <div class="f">Artist - Title.flac</div>
+          <div class="chg"><span class="chip" style="padding:0 7px">Playcount</span><span class="old">3</span>→<span class="new">7</span></div>
+          <div class="chg"><span class="chip" style="padding:0 7px">Rating</span><span class="old">3★</span>→<span class="new">4★</span></div>
+        </div>
+        <div class="delta-row">
+          <div class="f">Artist - Title.stem.m4a</div>
+          <div class="chg"><span class="chip" style="padding:0 7px">BPM</span><span class="old">128.0</span>→<span class="new">128.5</span></div>
+          <div class="chg"><span class="chip" style="padding:0 7px">Key</span><span class="old">4m</span>→<span class="new">4m</span></div>
+        </div>
+        <div class="delta-row">
+          <div class="f">Other - Track.flac</div>
+          <div class="chg"><span class="chip" style="padding:0 7px">Playcount</span><span class="old">3</span>→<span class="new">12</span></div>
+          <div class="chg"><span class="chip" style="padding:0 7px">Rating</span><span class="old">2★</span>→<span class="new">5★</span></div>
+        </div>
+        <div class="delta-row">
+          <div class="f">Unlinked - Song.flac</div>
+          <div class="chg"><span class="chip" style="padding:0 7px">BPM</span><span class="old">—</span>→<span class="new">124.0</span></div>
+          <div class="chg"><span class="chip" style="padding:0 7px">Key</span><span class="old">—</span>→<span class="new">8m</span></div>
+        </div>
+        <div class="footnote" style="margin-top:6px">„Kein Wert → Wert“-Fälle befüllen die Library; „Wert → anderer Wert“ sind Korrekturen aus Traktor.</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Ohne Match <span class="chip yellow" style="padding:1px 8px">1</span></div>
+        <div class="nm-row"><span>⛒</span><div class="f">Ghost - NotInDb.flac</div><button class="btn sm ghost">In Library suchen</button></div>
+        <div class="footnote">Datei liegt in Traktor, aber nicht in der Library — ggf. Folder-Scan nötig (→ Roadmap Quick-Win Folders).</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <div class="card-title">Konsistenz-Check <span class="chip" style="padding:1px 8px">Vorschlag</span></div>
+        <div class="side-stats">
+          <div class="statline"><span>BPM-Differenz &gt; 2</span><b class="chip red" style="padding:0 7px">2 Dateien</b></div>
+          <div class="statline"><span>Key-Konflikt (Traktor ≠ Library)</span><b class="chip yellow" style="padding:0 7px">7 Dateien</b></div>
+          <div class="statline"><span>Ohne Rating in Traktor</span><b class="chip blue" style="padding:0 7px">12 Dateien</b></div>
+          <div class="statline"><span>Playcount: Traktor höher</span><b class="chip green" style="padding:0 7px">alle aktuell</b></div>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <button class="btn primary sm">Abweichungen prüfen →</button>
+          <button class="btn sm ghost">Als CSV exportieren</button>
+        </div>
+        <div class="footnote">Zielbild: Traktor-Import wird zum sichtbaren Consistency-Werkzeug statt „Import gedrückt — was ist passiert?“</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Manueller Pfad <span class="grow"></span><span class="chip green" style="padding:1px 8px">Fix: sichtbarer Save</span></div>
+        <div style="display:flex;gap:8px">
+          <input class="input" style="font-family:var(--mono);text-overflow:ellipsis" value="/Users/momo/Music/Traktor/collection.nml" />
+          <button class="btn sm primary">Übernehmen</button>
+        </div>
+        <div class="footnote" style="margin-top:6px">Heute wird der Pfad nur per Enter gespeichert — ohne Hinweis läuft der Import mit dem alten Pfad (→ R06).</div>
+        <div style="margin-top:10px;display:flex;align-items:center;justify-content:space-between">
+          <span class="chip">Auto-Detect aktiv</span>
+          <span class="footnote">Server prüft collection.nml periodisch</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="assets/mockup.js"></script>
+</body>
+</html>

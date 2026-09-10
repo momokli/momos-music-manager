@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>M1 · Dashboard &amp; Shell — UI/UX-Mockup</title>
+<link rel="stylesheet" href="assets/mockup.css" />
+<style>
+  .hero { display: grid; grid-template-columns: 1.25fr 1fr; gap: 16px; align-items: stretch; }
+  @media (max-width: 980px) { .hero { grid-template-columns: 1fr; } }
+  .focus-list { display: flex; flex-direction: column; }
+  .focus-item { display: flex; gap: 14px; padding: 12px 4px; border-bottom: 1px solid rgba(30,41,59,.6); align-items: flex-start; }
+  .focus-item:last-child { border-bottom: 0; }
+  .focus-ico { width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; font-size: 1rem; flex-shrink: 0; }
+  .focus-item b { font-size: 0.92rem; display: block; }
+  .focus-item .d { color: var(--text-muted); font-size: 0.8rem; }
+  .focus-item .go { margin-left: auto; align-self: center; }
+  .focus-item .count-big { font-size: 1.1rem; font-weight: 800; color: var(--accent-2); }
+  .service-row { display: flex; flex-wrap: wrap; gap: 10px; }
+  .svc { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--border); background: var(--surface-2); border-radius: 999px; padding: 6px 13px; font-size: 0.8rem; font-weight: 600; }
+  .svc i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .svc i.ok { background: var(--green); box-shadow: 0 0 8px rgba(52,211,153,.8); }
+  .svc i.off { background: var(--text-subtle); }
+  .svc i.warn { background: var(--yellow); }
+  .svc i.err { background: var(--red); }
+  .svc small { color: var(--text-subtle); font-weight: 500; }
+  .dash-grid { display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px; margin-top: 16px; }
+  @media (max-width: 980px) { .dash-grid { grid-template-columns: 1fr; } }
+  .diff-row { display: flex; gap: 10px; align-items: center; padding: 9px 0; border-bottom: 1px solid rgba(30,41,59,.55); }
+  .diff-row:last-child { border-bottom: 0; }
+  .diff-file { flex: 1; min-width: 0; }
+  .diff-file .t { font-weight: 600; font-size: 0.88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .diff-file .p { font-family: var(--mono); font-size: 0.7rem; color: var(--text-subtle); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mini-actions { display: flex; gap: 6px; }
+  .folder-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(30,41,59,.55); font-size: 0.86rem; }
+  .folder-row:last-child { border-bottom: 0; }
+  .folder-row .n { flex: 1; font-weight: 600; }
+  .folder-row .mono { color: var(--text-subtle); }
+  .quick-scan { display: flex; gap: 8px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topnav">
+    <div class="brand"><span class="logo">♪</span>momo's music manager<small>UI/UX-Proposal</small></div>
+    <nav class="navlinks">
+      <a class="nav-item active" href="#"><span class="dot"></span>Overview</a>
+      <a class="nav-item" href="#">Library <span class="count" style="display:none"></span></a>
+      <a class="nav-item" href="#">Services</a>
+      <a class="nav-item" href="#">Tools <span class="count orange">Digging</span></a>
+      <a class="nav-item" href="#">System</a>
+    </nav>
+    <div class="global-activity"><span class="live"></span> 2 Downloads aktiv · <b>1 Fehler</b> · 3 PMV offen</div>
+    <span class="version">v1.3.0</span>
+  </header>
+
+  <div class="pagehead">
+    <div>
+      <h1>Guten Abend, Momo 👋</h1>
+      <div class="sub">Heute anstehen: 3 Kommentar-Updates · 2 Downloads laufen · 1 Traktor-Abweichung geprüft</div>
+    </div>
+    <div class="actions">
+      <span class="fix-tag">Redesign-Mockup</span>
+      <button class="btn ghost sm">⟳ Refresh</button>
+    </div>
+  </div>
+
+  <section class="cols-4 grid">
+    <div class="stat">
+      <span class="accent-line"></span>
+      <div class="k">Library Coverage</div>
+      <div class="v">57<small>%</small></div>
+      <div class="bars"><i style="height:40%"></i><i style="height:65%"></i><i style="height:50%"></i><i style="height:80%"></i><i style="height:57%"></i></div>
+      <div class="foot">3 Dateien ohne Track-Link · <a href="#" style="color:var(--accent)">ungelinkt ansehen →</a></div>
+    </div>
+    <div class="stat">
+      <span class="accent-line"></span>
+      <div class="k">PMV-Review</div>
+      <div class="v">3</div>
+      <div class="foot"><span class="chip red" style="padding:1px 8px">Needs Update</span> Kommentare warten auf dich</div>
+    </div>
+    <div class="stat">
+      <span class="accent-line"></span>
+      <div class="k">Downloads</div>
+      <div class="v">2</div>
+      <div class="foot"><span class="chip blue" style="padding:1px 8px">12 / 50 Tracks</span> · <a href="#" style="color:var(--accent)">Queue öffnen →</a></div>
+    </div>
+    <div class="stat">
+      <span class="accent-line"></span>
+      <div class="k">Digging-Session</div>
+      <div class="v">3</div>
+      <div class="foot">Tracks in der Ladder · <a href="#" style="color:var(--accent)">weiterarbeiten →</a></div>
+    </div>
+  </section>
+
+  <div class="dash-grid">
+    <div>
+      <div class="card">
+        <div class="card-title">Heute · Fokusliste <span class="grow"></span><span class="hint">eine Aufgabe pro Klick, kein Scannen</span></div>
+        <div class="focus-list">
+          <div class="focus-item">
+            <div class="focus-ico" style="background:var(--red-soft);color:var(--red)">✎</div>
+            <div><b>3 PMV-Kommentare reviewen</b><span class="d">Diff - NeedsUpdate.flac · Comment - NeedsUpdate.flac · +1</span></div>
+            <div class="go"><button class="btn primary sm">Review starten →</button></div>
+          </div>
+          <div class="focus-item">
+            <div class="focus-ico" style="background:var(--blue-soft);color:var(--blue)">⬇</div>
+            <div><b>Download „Drum &amp; Bass Arena“ schlug fehl</b><span class="d">Fehler bei Track 3/60 (404) — Retry oder Details</span></div>
+            <div class="go"><button class="btn sm">Retry</button></div>
+          </div>
+          <div class="focus-item">
+            <div class="focus-ico" style="background:var(--yellow-soft);color:var(--yellow)">⇄</div>
+            <div><b>Traktor-Import prüfen</b><span class="d">Letzter Lauf: 5 Entries, 4 matched, 4 Ratings übernommen</span></div>
+            <div class="go"><a href="#" style="color:var(--accent);font-size:.85rem;font-weight:600">Ergebnis →</a></div>
+          </div>
+          <div class="focus-item">
+            <div class="focus-ico" style="background:var(--pink-soft);color:var(--pink)">☰</div>
+            <div><b>Neue Folder-Struktur?</b><span class="d">Quick-Win: /test/stems als managed Folder ist aktiv — jetzt aufräumen</span></div>
+            <div class="go"><button class="btn sm">Folders öffnen</button></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Services <span class="grow"></span><a href="#" style="font-size:.78rem;color:var(--accent)">alle Dienste</a></div>
+        <div class="service-row">
+          <span class="svc"><i class="warn"></i>Traktor <small>not detected</small></span>
+          <span class="svc"><i class="off"></i>Spotify <small>unconfigured</small></span>
+          <span class="svc"><i class="off"></i>Soundcloud <small>unconfigured</small></span>
+          <span class="svc"><i class="off"></i>YouTube <small>unconfigured</small></span>
+          <span class="svc"><i class="ok"></i>Deemix <small>verbunden</small></span>
+          <span class="svc"><i class="ok"></i>Telemetry <small>Push ok · vor 12 min</small></span>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <div class="card-title">Comment Diffs <span class="chip red" style="padding:1px 8px">3 offen</span><span class="grow"></span><button class="btn sm">Alle anwenden</button></div>
+        <div class="diff-row">
+          <div class="diff-file"><div class="t">Diff - NeedsUpdate.flac</div><div class="p">/test/stems/… · Ziel: [PMV] groovy</div></div>
+          <div class="mini-actions"><button class="btn sm primary">✓</button><button class="btn sm ghost" title="überspringen">→</button></div>
+        </div>
+        <div class="diff-row">
+          <div class="diff-file"><div class="t">Comment - NeedsUpdate.flac</div><div class="p">/test/stems/… · Kommentar leer</div></div>
+          <div class="mini-actions"><button class="btn sm primary">✓</button><button class="btn sm ghost" title="überspringen">→</button></div>
+        </div>
+        <div class="diff-row">
+          <div class="diff-file"><div class="t">Artist - Title.flac</div><div class="p">/test/stems/… · Rating 4★</div></div>
+          <div class="mini-actions"><button class="btn sm primary">✓</button><button class="btn sm ghost" title="überspringen">→</button></div>
+        </div>
+        <div class="footnote">Statt „Write everything“ ein Durchklicken mit Rückgängig — Details in M2.</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Managed Folders <span class="grow"></span><button class="btn sm ghost">+ Ordner</button></div>
+        <div class="folder-row"><span class="n">📁 /test/stems</span><span class="mono">7 Dateien · zuletzt 09.09. 10:24</span></div>
+        <div class="folder-row"><span class="n" style="opacity:.45">📁 + weiterer Ordner hinzufügen</span><span class="mono">dein Musik-Ordner</span></div>
+        <div class="quick-scan">
+          <button class="btn sm">Scan jetzt</button>
+          <span class="footnote" style="margin-top:6px">Folder-Support ist der Quick-Win #1 — mehr in der Roadmap (04).</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Telemetry <span class="grow"></span><span class="chip green" style="padding:1px 8px">aktiv</span></div>
+        <div style="font-size:.85rem;color:var(--text-secondary);margin-bottom:10px">Deine Nutzung hilft, die App zu verbessern — <b>Push ok</b> (12 min her, 143 Events).</div>
+        <button class="btn primary sm">Jetzt pushen</button>
+        <span class="footnote">Einstellungen &amp; Opt-out → M6.</span>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="assets/mockup.js"></script>
+</body>
+</html>
