@@ -177,6 +177,7 @@ struct TomlConfig {
     telemetry: Option<TelemetryToml>,
     telemetry_receiver: Option<TelemetryReceiverToml>,
     autoupdate: Option<AutoupdateToml>,
+    autoupgrade: Option<AutoupgradeToml>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -294,6 +295,13 @@ struct AutoupdateToml {
     app_dir: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct AutoupgradeToml {
+    /// Auto-upgrade shorter track versions to their "Extended Mix" (issue #29).
+    /// Default OFF (opt-in) — automatic replacement is destructive.
+    enabled: Option<bool>,
+}
+
 // ── Runtime representation ─────────────────────────────────────────────────
 
 /// Service credentials used throughout the application.
@@ -409,6 +417,11 @@ pub struct ServiceCredentials {
     /// then the running build's embedded channel applies). Needed for
     /// `channelSource`/value resolution without re-parsing the TOML file.
     pub(crate) autoupdate_channel_toml: Option<String>,
+
+    /// Auto-upgrade shorter track versions to their "Extended Mix" (issue #29).
+    /// Env `MOMOS_AUTOUPGRADE_ENABLED` > `[autoupgrade] enabled` > default
+    /// `false` (opt-in — automatic replacement is destructive).
+    pub autoupgrade_enabled: bool,
 }
 
 impl ServiceCredentials {
@@ -837,7 +850,25 @@ impl ServiceCredentials {
                 .autoupdate
                 .as_ref()
                 .and_then(|a| a.channel.clone()),
+
+            // Auto-upgrade shorter versions to "Extended Mix" (issue #29):
+            // env > [autoupgrade] enabled > default OFF (opt-in).
+            autoupgrade_enabled: std::env::var("MOMOS_AUTOUPGRADE_ENABLED")
+                .ok()
+                .and_then(|v| v.parse::<bool>().ok())
+                .or_else(|| {
+                    toml_config
+                        .autoupgrade
+                        .as_ref()
+                        .and_then(|a| a.enabled)
+                })
+                .unwrap_or(false),
         };
+
+        info!(
+            "Autoupgrade config: enabled={}",
+            credentials.autoupgrade_enabled,
+        );
 
         info!(
             "Autoupdate config: enabled={}, base_url={}, health_grace_secs={}s, channel={}, auto_apply_interval={}s, app_dir={:?}",
@@ -1004,6 +1035,9 @@ impl ServiceCredentials {
             autoupdate_app_dir: env_var_optional("MOMOS_AUTOUPDATE_APP_DIR").map(PathBuf::from),
             autoupdate_has_toml: false,
             autoupdate_channel_toml: None,
+            autoupgrade_enabled: env_var_optional("MOMOS_AUTOUPGRADE_ENABLED")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
         }
     }
 
@@ -1498,6 +1532,7 @@ impl ServiceCredentials {
             autoupdate_app_dir: None,
             autoupdate_has_toml: false,
             autoupdate_channel_toml: None,
+            autoupgrade_enabled: false,
         }
     }
 }
