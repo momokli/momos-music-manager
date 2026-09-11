@@ -748,13 +748,14 @@ pub async fn get_files_by_source(pool: &Pool<Sqlite>, source_file_id: i64) -> Re
 // Prune
 // ============================================================================
 
-/// Get all files that can be safely pruned (backed up, not in any backpack
-/// tag, and currently on local disk).
+/// Get all files that can be safely pruned (backed up, not in the Backpack
+/// set, and currently on local disk).
 ///
-/// A file is safe to delete if: backed up + local + not in backpack.
+/// A file is safe to delete if: backed up + local + not in the Backpack.
 /// No other gates — the user trusts backup.
 ///
-/// Two-step approach (file_resolved_tags is already materialized and fast):
+/// Two-step approach (the Backpack set is resolved via the single concept in
+/// `crate::backpack` — union of subscribed playlists + backpack tags):
 /// 1. Get all backed-up+local file IDs (fast, uses indexes)
 /// 2. Get all file IDs with backpack tags via file_resolved_tags
 /// 3. Subtract in Rust, then fetch details for remaining candidates
@@ -776,14 +777,9 @@ pub async fn get_prune_candidates(pool: &Pool<Sqlite>) -> Result<Vec<PruneCandid
         return Ok(vec![]);
     }
 
-    // Step 2: file IDs with any backpack tag (simple EXISTS query)
-    let backpack: Vec<i64> = sqlx::query_scalar(
-        "SELECT DISTINCT frt.file_id FROM file_resolved_tags frt
-         JOIN tags t ON t.id = frt.tag_id
-         WHERE t.backpack = 1",
-    )
-    .fetch_all(pool)
-    .await?;
+    // Step 2: file IDs in the Backpack set (union of subscribed playlists +
+    // backpack tags) — these are prune-protected.
+    let backpack: Vec<i64> = crate::backpack::get_backpack_file_ids(pool).await?;
 
     // Build HashSet for fast lookup
     let backpack_set: HashSet<i64> = backpack.iter().copied().collect();
@@ -1237,6 +1233,106 @@ mod tests {
         .await
         .unwrap();
 
+        // ── Tables needed by the Backpack set resolution (crate::backpack) ──
+        // `get_prune_candidates` protects files in the Backpack set, which is the
+        // union of subscribed playlists (a) and backpack tags (b). These are the
+        // minimal tables/views that resolution reads.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS service_tracks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                service TEXT NOT NULL,
+                service_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                artist TEXT NOT NULL,
+                isrc TEXT,
+                UNIQUE(service, service_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS service_playlists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                service TEXT NOT NULL,
+                playlist_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                UNIQUE(service, playlist_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS service_playlist_tracks (
+                playlist_id INTEGER NOT NULL,
+                track_id INTEGER NOT NULL,
+                position INTEGER,
+                added_at INTEGER DEFAULT 0,
+                deleted_at INTEGER,
+                PRIMARY KEY (playlist_id, track_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS playlist_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                service TEXT NOT NULL,
+                playlist_id TEXT NOT NULL,
+                service_playlist_id INTEGER,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(service, playlist_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tag_categories (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                prefix TEXT NOT NULL,
+                is_default INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE VIEW IF NOT EXISTS v_track_tags AS
+             SELECT DISTINCT spt.track_id,
+                    t.id AS tag_id, t.name AS tag_name,
+                    tc.id AS category_id, tc.name AS category_name,
+                    tc.prefix, tc.is_default
+             FROM service_playlist_tracks spt
+             JOIN service_playlists sp ON sp.id = spt.playlist_id
+             JOIN tags t ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))
+             JOIN tag_categories tc ON tc.id = t.category_id",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE VIEW IF NOT EXISTS v_file_track_link AS
+             SELECT f.id AS file_id, st.id AS track_id
+             FROM files f
+             JOIN service_tracks st ON (
+                 st.isrc = f.isrc
+                 OR (st.service = 'spotify' AND st.service_id = f.spotify_id)
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
         pool
     }
 
@@ -1493,16 +1589,34 @@ mod tests {
             .await
             .unwrap();
 
-        // Give it a backpack tag
+        // Backpack membership via a backpack tag → playlist name match → track →
+        // file. The file's ISRC matches the service track's ISRC, so it resolves
+        // through v_file_track_link into the Backpack set.
+        sqlx::query("INSERT INTO tag_categories (id, name, prefix, is_default) VALUES (1, 'Setlist', 'S', 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO tags (id, name, category_id, backpack) VALUES (1, 'keep', 1, 1)")
             .execute(&pool)
             .await
             .unwrap();
         sqlx::query(
-            "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix)
-             VALUES (?, 1, 'keep', 1, 'Setlist', 'S')",
+            "INSERT INTO service_tracks (id, service, service_id, title, artist, isrc)
+             VALUES (1, 'spotify', 'spotify:track:keep', 'Keep', 'A', 'ISRC-1')",
         )
-        .bind(fid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO service_playlists (id, service, playlist_id, name)
+             VALUES (1, 'spotify', 'pl-keep', 'keep')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO service_playlist_tracks (playlist_id, track_id, position) VALUES (1, 1, 0)",
+        )
         .execute(&pool)
         .await
         .unwrap();

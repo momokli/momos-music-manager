@@ -6,6 +6,17 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+### Added
+
+- **Backpack-Konzept (Verschmelzung)**: die markierten Spotify-Playlists
+  (Subscriptions) und die `tags.backpack`-Flags laufen in **einen** `Backpack`
+  zusammen (deduplizierte Vereinigung). Die Menge wird in **genau eine**
+  Spotify-Playlist `Backpack` materialisiert und **nur diese eine** URL an
+  deemix submittet — statt N Einzel-Submits. Auto-Download
+  (`stem.m4a` > `flac` > `mp3`) und Prune-Schutz wirken auf die gesamte Menge.
+  Migration `025_backpack_concept.sql` konsolidiert `deemix_downloads` auf
+  eine Transport-Row (kein Datenverlust). (#32)
+
 ---
 
 ## [1.5.0] — 2026-09-11
