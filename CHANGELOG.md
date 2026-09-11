@@ -6,6 +6,19 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-09-11
+
+### Added
+
+- **M2 — Release-spezifische Seiten/Assets pro Tag (#8, PR #38)**: Der Tag-Build
+  (`build-all.yml`) stellt den automatisch generierten Release-Notes jetzt eine
+  „Downloads + SHA256SUMS"-Sektion voran — Plattform-Matrix (macOS universal,
+  Windows x64/ARM64, Linux x64/ARM64) mit aggregierten Checksummen und
+  Verifikationsanleitung. Das neue, netzwerkfreie Skript `scripts/release-notes.sh`
+  erzeugt die Sektion aus `dist/SHA256SUMS` und wird auch vom PR-Publish-Gate als
+  Dry-Run ausgeführt. Die Landing-Page verlinkt die stabile Version nun über
+  `releases/latest` (nie stale) plus expliziten Changelog-Link.
+
 ## [1.9.0] — 2026-09-11
 
 ### Added
