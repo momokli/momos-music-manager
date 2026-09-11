@@ -279,6 +279,122 @@ pub struct DeemixCombinedQueueItem {
     pub progress: i64,          // from deemix queue (0-100)
 }
 
+/// Audio quality tier, ordered best → worst (`Stem` > `Flac` > `Mp3` > `Wav` >
+/// `Other`). This matches the Backpack auto-download priority from
+/// [`crate::db::default_format_priorities`] (WAV sources are never preferred).
+///
+/// `Ord` derives in declaration order, so `Iterator::min()` yields the *best*
+/// available quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum AudioQuality {
+    /// Multi-track stem file (`.stem.m4a` / `.stem`).
+    Stem,
+    /// Lossless FLAC.
+    Flac,
+    /// Lossy MP3.
+    Mp3,
+    /// Uncompressed WAV — a real source, but never the preferred target quality.
+    Wav,
+    /// Any other / unrecognised format.
+    Other,
+}
+
+impl AudioQuality {
+    /// Detect the quality tier from a file extension (leading dot optional).
+    pub fn from_extension(ext: &str) -> Self {
+        let e = ext.trim_start_matches('.').to_lowercase();
+        match e.as_str() {
+            "stem.m4a" | "stem" => AudioQuality::Stem,
+            "flac" => AudioQuality::Flac,
+            "mp3" => AudioQuality::Mp3,
+            "wav" => AudioQuality::Wav,
+            _ => AudioQuality::Other,
+        }
+    }
+
+    /// Detect the quality tier from a full file name (suffix match).
+    pub fn from_filename(name: &str) -> Self {
+        let lower = name.to_lowercase();
+        if lower.ends_with(".stem.m4a") || lower.ends_with(".stem") {
+            AudioQuality::Stem
+        } else if lower.ends_with(".flac") {
+            AudioQuality::Flac
+        } else if lower.ends_with(".mp3") {
+            AudioQuality::Mp3
+        } else if lower.ends_with(".wav") {
+            AudioQuality::Wav
+        } else {
+            AudioQuality::Other
+        }
+    }
+
+    /// Best (highest-priority) quality among the given extensions.
+    pub fn best_from_extensions<'a>(exts: impl Iterator<Item = &'a str>) -> Option<Self> {
+        exts.map(AudioQuality::from_extension).min()
+    }
+}
+
+/// Progress snapshot for a single queued download (Status-/Fortschritts-Polling).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct DeemixDownloadProgress {
+    /// deemix queue UUID.
+    pub uuid: String,
+    /// Raw deemix status (`inQueue`, `downloading`, `completed`, `failed`, `withErrors`).
+    pub status: String,
+    /// Download progress percentage (0–100).
+    pub progress: i64,
+    /// Number of tracks downloaded so far.
+    pub downloaded: i64,
+    /// Total number of tracks.
+    pub total: i64,
+    /// Whether the item reached a terminal state (`completed` or `withErrors`).
+    pub finished: bool,
+    /// Whether the item has any recorded errors.
+    pub has_errors: bool,
+}
+
+/// Result of verifying a completed deemix download (Download-Verifikation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct DownloadVerification {
+    /// deemix reported the item as `completed`.
+    pub completed: bool,
+    /// Number of files deemix reported as downloaded.
+    pub file_count: usize,
+    /// Best available quality among the reported files (`stem` > `flac` > `mp3`).
+    pub best_quality: Option<AudioQuality>,
+    /// Whether the download satisfies the target: completed + at least one file.
+    pub verified: bool,
+}
+
+impl DeemixQueueItem {
+    /// Verify a queue item's download result (B.1.4).
+    ///
+    /// The audio quality is derived from each reported file's `filename`
+    /// (e.g. `Track.stem.m4a`, `Track.flac`, `Track.mp3`). `album_urls` are album
+    /// artwork and are intentionally ignored for quality detection.
+    pub fn verify_download(&self) -> DownloadVerification {
+        let completed = self.status.eq_ignore_ascii_case("completed");
+        let file_count = self.files.len();
+        let best_quality = self
+            .files
+            .iter()
+            .filter(|f| !f.filename.is_empty())
+            .map(|f| AudioQuality::from_filename(&f.filename))
+            .min();
+        let verified = completed && file_count > 0;
+        DownloadVerification {
+            completed,
+            file_count,
+            best_quality,
+            verified,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +518,156 @@ mod tests {
         assert!(item.errors.is_empty());
         assert!(item.files.is_empty());
         assert_eq!(item.status, "");
+    }
+
+    #[test]
+    fn test_audio_quality_ordering_best_first() {
+        // Derived Ord orders Stem < Flac < Mp3 < Wav < Other, so min() = best.
+        assert!(AudioQuality::Stem < AudioQuality::Flac);
+        assert!(AudioQuality::Flac < AudioQuality::Mp3);
+        assert!(AudioQuality::Mp3 < AudioQuality::Wav);
+        assert!(AudioQuality::Wav < AudioQuality::Other);
+    }
+
+    #[test]
+    fn test_audio_quality_from_extension() {
+        assert_eq!(AudioQuality::from_extension("stem.m4a"), AudioQuality::Stem);
+        assert_eq!(AudioQuality::from_extension("flac"), AudioQuality::Flac);
+        assert_eq!(AudioQuality::from_extension("mp3"), AudioQuality::Mp3);
+        assert_eq!(AudioQuality::from_extension("wav"), AudioQuality::Wav);
+        assert_eq!(AudioQuality::from_extension("ogg"), AudioQuality::Other);
+        // leading dot tolerated
+        assert_eq!(AudioQuality::from_extension(".flac"), AudioQuality::Flac);
+        // case-insensitive
+        assert_eq!(AudioQuality::from_extension("FLAC"), AudioQuality::Flac);
+    }
+
+    #[test]
+    fn test_audio_quality_from_filename() {
+        assert_eq!(
+            AudioQuality::from_filename("Track.stem.m4a"),
+            AudioQuality::Stem
+        );
+        assert_eq!(AudioQuality::from_filename("Track.flac"), AudioQuality::Flac);
+        assert_eq!(AudioQuality::from_filename("Track.mp3"), AudioQuality::Mp3);
+        assert_eq!(AudioQuality::from_filename("Track.wav"), AudioQuality::Wav);
+        assert_eq!(AudioQuality::from_filename("Track.ogg"), AudioQuality::Other);
+        // case-insensitive
+        assert_eq!(AudioQuality::from_filename("TRACK.FLAC"), AudioQuality::Flac);
+    }
+
+    #[test]
+    fn test_best_from_extensions_picks_stem_over_flac_mp3() {
+        let best = AudioQuality::best_from_extensions(["mp3", "flac", "stem.m4a"].into_iter());
+        assert_eq!(best, Some(AudioQuality::Stem));
+    }
+
+    #[test]
+    fn test_best_from_extensions_empty() {
+        let best = AudioQuality::best_from_extensions(std::iter::empty());
+        assert_eq!(best, None);
+    }
+
+    fn file(name: &str) -> DeemixDownloadedFile {
+        DeemixDownloadedFile {
+            album_urls: None,
+            album_path: None,
+            album_filename: None,
+            filename: name.to_string(),
+            data: None,
+            path: format!("/music/{name}"),
+        }
+    }
+
+    #[test]
+    fn test_verify_download_completed_flac() {
+        let mut item = DeemixQueueItem {
+            item_type: "spotify".into(),
+            id: "abc".into(),
+            bitrate: 0,
+            uuid: "u".into(),
+            title: "T".into(),
+            artist: "A".into(),
+            cover: None,
+            explicit: false,
+            size: 1,
+            downloaded: 1,
+            failed: 0,
+            progress: 100,
+            errors: vec![],
+            files: vec![file("Track.flac")],
+            collection_type: "playlist".into(),
+            status: "completed".into(),
+            extras_path: None,
+        };
+        let v = item.verify_download();
+        assert!(v.completed);
+        assert_eq!(v.file_count, 1);
+        assert_eq!(v.best_quality, Some(AudioQuality::Flac));
+        assert!(v.verified);
+
+        // same shape but still downloading → not verified
+        item.status = "downloading".into();
+        let v2 = item.verify_download();
+        assert!(!v2.completed);
+        assert!(!v2.verified);
+    }
+
+    #[test]
+    fn test_verify_download_best_quality_is_stem() {
+        let item = DeemixQueueItem {
+            item_type: "spotify".into(),
+            id: "abc".into(),
+            bitrate: 0,
+            uuid: "u".into(),
+            title: "T".into(),
+            artist: "A".into(),
+            cover: None,
+            explicit: false,
+            size: 3,
+            downloaded: 3,
+            failed: 0,
+            progress: 100,
+            errors: vec![],
+            files: vec![
+                file("Track.mp3"),
+                file("Track.flac"),
+                file("Track.stem.m4a"),
+            ],
+            collection_type: "playlist".into(),
+            status: "completed".into(),
+            extras_path: None,
+        };
+        let v = item.verify_download();
+        assert!(v.verified);
+        assert_eq!(v.best_quality, Some(AudioQuality::Stem));
+    }
+
+    #[test]
+    fn test_verify_download_ignores_album_artwork_and_empty_files() {
+        let item = DeemixQueueItem {
+            item_type: "spotify".into(),
+            id: "abc".into(),
+            bitrate: 0,
+            uuid: "u".into(),
+            title: "T".into(),
+            artist: "A".into(),
+            cover: None,
+            explicit: false,
+            size: 0,
+            downloaded: 0,
+            failed: 0,
+            progress: 0,
+            errors: vec![],
+            files: vec![],
+            collection_type: "playlist".into(),
+            status: "completed".into(),
+            extras_path: None,
+        };
+        let v = item.verify_download();
+        assert!(v.completed);
+        assert_eq!(v.file_count, 0);
+        assert_eq!(v.best_quality, None);
+        assert!(!v.verified);
     }
 }
