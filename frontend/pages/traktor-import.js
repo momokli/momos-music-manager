@@ -36,6 +36,7 @@ let state = {
   taskMessage: "",
   taskLogs: [],
   taskPercent: null,
+  taskResultData: null,
   pollHandle: null,
 };
 
@@ -132,6 +133,7 @@ async function pollTask() {
     state.taskMessage = data.message || data.progress?.message || "";
     state.taskLogs = data.logs || [];
     state.taskPercent = data.progress?.percent ?? null;
+    if (data.result_data) state.taskResultData = data.result_data;
 
     const btn = containerEl?.querySelector("#traktor-import-btn");
     const st = state.taskStatus;
@@ -197,6 +199,42 @@ function modeChip(mode, label) {
   const active = state.pathMode === mode;
   return `<button class="btn btn-sm ${active ? "btn-primary" : "btn-ghost"}"
     data-action="set-path-mode" data-mode="${mode}">${label}</button>`;
+}
+
+/**
+ * Render summary chips + "without match" list from a Traktor ImportStats result.
+ * @param {object|null} resultData — structured `result_data` from the task
+ */
+function renderImportResult(resultData) {
+  if (!resultData) return "";
+  const totalEntries = resultData.totalEntries ?? 0;
+  const matched = resultData.matched ?? 0;
+  const unmatched = Array.isArray(resultData.unmatched) ? resultData.unmatched : [];
+  const withoutMatch = Math.max(0, totalEntries - matched);
+
+  const chips = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:0.75rem;">
+      <span class="status-badge" style="background:rgba(99,102,241,0.1);color:var(--accent);"><i class="fas fa-file-import"></i> ${totalEntries} parsed</span>
+      <span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green);"><i class="fas fa-check"></i> ${matched} matched</span>
+      <span class="status-badge" style="background:rgba(245,158,11,0.1);color:var(--yellow);"><i class="fas fa-question"></i> ${withoutMatch} without match</span>
+    </div>`;
+
+  let unmatchedHtml = "";
+  if (unmatched.length) {
+    const items = unmatched
+      .map(
+        (f) =>
+          `<li style="padding:2px 0;"><code class="font-mono" style="font-size:0.8rem;">${escapeHtml(f)}</code></li>`,
+      )
+      .join("");
+    unmatchedHtml = `
+      <div style="margin-top:0.75rem;">
+        <h4 style="margin:0 0 0.25rem;font-size:0.85rem;color:var(--text-muted);">Without match</h4>
+        <ul style="margin:0;padding-left:1.25rem;color:var(--text-muted);max-height:160px;overflow-y:auto;">${items}</ul>
+      </div>`;
+  }
+
+  return chips + unmatchedHtml;
 }
 
 function pathSection() {
@@ -274,6 +312,7 @@ function renderPage() {
           <span class="status-badge status-${taskStatus}">${taskStatus === "completed" ? "\u2713 Completed" : "\u2717 Failed"}</span>
         </div>
         ${state.taskMessage ? `<p style="margin-top: 0.5rem;">${escapeHtml(state.taskMessage)}</p>` : ""}
+        ${taskStatus === "completed" ? renderImportResult(state.taskResultData) : ""}
         ${state.taskLogs.length ? `<pre class="task-logs" style="margin-top: 0.5rem; font-size: 0.75rem; max-height: 200px; overflow-y: auto;">${state.taskLogs.map(escapeHtml).join("\n")}</pre>` : ""}
       </div>
     </div>`
@@ -357,6 +396,7 @@ export function init(container, signal) {
   state.taskMessage = "";
   state.taskLogs = [];
   state.taskPercent = null;
+  state.taskResultData = null;
   stopTaskPolling();
 
   container.innerHTML = renderLoading("Loading Traktor Import\u2026");

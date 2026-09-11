@@ -66,6 +66,8 @@ pub struct ImportStats {
     pub with_key: usize,
     /// Matched entries providing rating data
     pub with_rating: usize,
+    /// File names of entries that did not match any file in the database
+    pub unmatched: Vec<String>,
 }
 
 // ============================================================
@@ -334,6 +336,7 @@ pub async fn import_traktor_metadata(
 
     if rows.is_empty() {
         info!("No files in database — nothing to match");
+        stats.unmatched = entries.iter().map(|e| e.file.clone()).collect();
         return Ok(stats);
     }
 
@@ -360,6 +363,7 @@ pub async fn import_traktor_metadata(
     let mut with_rating = 0usize;
     let mut matched = 0usize;
     let mut no_play_count = 0usize;
+    let mut unmatched: Vec<String> = vec![];
 
     // Collect updates to avoid holding a tx open during iteration
     // (play_count, last_played, bpm, musical_key, rating, file_id)
@@ -412,6 +416,8 @@ pub async fn import_traktor_metadata(
                 rating_converted,
                 *file_id,
             ));
+        } else {
+            unmatched.push(entry.file.clone());
         }
     }
 
@@ -422,6 +428,7 @@ pub async fn import_traktor_metadata(
     stats.with_bpm = with_bpm;
     stats.with_key = with_key;
     stats.with_rating = with_rating;
+    stats.unmatched = unmatched;
 
     // Execute batch updates
     if !updates.is_empty() {
