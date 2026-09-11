@@ -6,6 +6,30 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-09-11
+
+### Added
+
+- **deemix-Stack vollständig im Eigentum von MMM (#32/Abschnitt B, PR #37)**: Der
+  `DeemixClient` deckt den kompletten deemix-Lifecycle ab — ARL-Auth + automatische
+  Re-Auth (sowohl HTTP 401 als auch `{"result":false,"errid":"NotLoggedIn"}`, jetzt
+  auch im neuen Delete-Pfad), vollständige Queue-Steuerung via neuem
+  `remove_from_queue(uuid)` (`POST /api/removeFromQueue`) ergänzend zu
+  `add_to_queue`/`retry_download`, Status-/Fortschritts-Polling via
+  `get_download_progress(spotify_url)` (`DeemixDownloadProgress`: status, progress,
+  downloaded/total, finished, has_errors) sowie Download-Verifikation via
+  `verify_download` + `AudioQuality` (Priorität `stem` > `flac` > `mp3`). Rein additiv
+  (`src/deemix/{client,models}.rs`), keine Änderung an bestehenden API-Routen oder am
+  DB-Schema. Gemockte-HTTP-Integrationstests; der Live-e2e-Test bleibt ein
+  `#[ignore]`-Test gegen die eigene deemix-Instanz (ARL ausschließlich per Env, nie im
+  Repo/CI).
+
+### Fixed
+
+- **Site-Download-Links**: Asset-Dateinamen in `site/index.html` zeigten auf den
+  alten Build-Stand (`momos-music-manager-1.7.0-*`) statt auf den Release-Tag; die
+  Links verweisen jetzt auf die zum Tag passenden Asset-Namen.
+
 ## [1.8.0] — 2026-09-11
 
 ### Added
