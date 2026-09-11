@@ -113,7 +113,7 @@ zusätzlich auf die neueste **stabile** Version hin.
       **Offen:** benötigt einen vom Maintainer gepushten Tag (kein
       Agent-Tag-Push).
 
-**Umsetzungsstand (dieser PR):**
+**Umsetzungsstand (PR #38):**
 
 - Aufräum-Regel für `latest-main` (Vorschlag 1): bereits im Publish-Job
   vorhanden und korrekt (idempotent, nur im Nicht-Dry-Run-Pfad) — unverändert.
