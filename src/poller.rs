@@ -125,7 +125,6 @@ pub async fn start_subscription_poller(
                 if let Err(e) = poll_subscribed_playlist(
                     &db,
                     &spotify_client,
-                    &deemix_client,
                     subscription,
                     &task_manager,
                 )
@@ -149,6 +148,31 @@ pub async fn start_subscription_poller(
 
                 // Small delay between subscriptions to avoid rate limit bursts
                 tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+
+            // Single Backpack transport: materialise the union (subscribed
+            // playlists + backpack tags) into ONE Spotify playlist and submit
+            // only that ONE URL to deemix. Replaces the old N per-playlist
+            // auto-download submits.
+            if due_count > 0 {
+                match crate::backpack::materialize_backpack_playlist(
+                    &db,
+                    &spotify_client,
+                    deemix_client.as_ref(),
+                )
+                .await
+                {
+                    Ok(outcome) if outcome.updated => {
+                        info!(
+                            "Subscription poller: Backpack materialised ({} track(s), deemix_submitted={})",
+                            outcome.track_count, outcome.deemix_submitted,
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!("Subscription poller: Backpack sync failed: {:#}", e);
+                    }
+                }
             }
 
             info!(
@@ -180,7 +204,6 @@ pub async fn start_subscription_poller(
 async fn poll_subscribed_playlist(
     db: &Pool<Sqlite>,
     spotify_client: &SpotifyClient,
-    deemix_client: &Option<DeemixClient>,
     subscription: &db::PlaylistSubscription,
     task_manager: &TaskManager,
 ) -> Result<()> {
@@ -536,95 +559,6 @@ async fn poll_subscribed_playlist(
             .await;
         "no new tracks"
     };
-
-    // -- Auto-download via deemix on first poll, new tracks, or missing entry ---
-    let deemix_url = format!(
-        "https://open.spotify.com/playlist/{}",
-        subscription.playlist_id
-    );
-    let has_deemix_entry = crate::db::has_deemix_download_entry(db, &deemix_url)
-        .await
-        .unwrap_or(false);
-    // Also check if the entry is a zombie (exists but 0 downloads —
-    // e.g. auto-download was attempted but the ARL was expired).
-    let has_zero_downloads = if has_deemix_entry {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT track_count_downloaded FROM deemix_downloads WHERE spotify_playlist_url = ?",
-        )
-        .bind(&deemix_url)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or(-1)
-            == 0
-    } else {
-        false
-    };
-
-    if subscription.last_polled_at.is_none()
-        || new_tracks_found
-        || !has_deemix_entry
-        || has_zero_downloads
-    {
-        task_manager
-            .add_log(&task_id, "Deemix: attempting auto-download...".into())
-            .await;
-        match deemix_client {
-            Some(client) => {
-                let url = deemix_url;
-                match client.ensure_queued(&url).await {
-                    Ok(()) => {
-                        task_manager
-                            .add_log(&task_id, "Deemix: queued successfully".into())
-                            .await;
-                        // Insert/update local deemix_downloads table so the
-                        // Playlists page shows the correct status immediately
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64;
-                        let _ = sqlx::query(
-                            "INSERT INTO deemix_downloads (spotify_playlist_url, status, created_at, updated_at)
-                             VALUES (?, 'queued', ?, ?)
-                             ON CONFLICT(spotify_playlist_url) DO UPDATE SET
-                                 status = 'queued',
-                                 error_message = NULL,
-                                 updated_at = excluded.updated_at"
-                        )
-                        .bind(&url)
-                        .bind(now)
-                        .bind(now)
-                        .execute(db)
-                        .await;
-
-                        info!(
-                            "Subscription poller: auto-download triggered for '{}'",
-                            playlist_name,
-                        );
-                    }
-                    Err(e) => {
-                        task_manager
-                            .add_log(&task_id, format!("Deemix: FAILED — {}", e))
-                            .await;
-                        warn!(
-                            "Subscription poller: failed to trigger deemix download for '{}': {:#}",
-                            playlist_name, e,
-                        );
-                    }
-                }
-            }
-            None => {
-                task_manager
-                    .add_log(&task_id, "Deemix: SKIPPED (not connected)".into())
-                    .await;
-                debug!(
-                    "Subscription poller: deemix not configured, skipping auto-download for '{}'",
-                    playlist_name,
-                );
-            }
-        }
-    }
 
     // -- Update the playlist's remote track counts -----------------------
     // After streaming all tracks, update the remote_track_count so the

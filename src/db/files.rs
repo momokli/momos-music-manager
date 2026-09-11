@@ -1871,16 +1871,9 @@ pub async fn get_backpack_pull_candidates(
     // Load format priorities (could be user-configured)
     let priorities = load_format_priorities(pool).await;
 
-    // Step 1: Get all file IDs that are in backpack tags (via file_resolved_tags)
-    // A file is in a backpack tag if any of its resolved tags has backpack = 1.
-    let backpack_file_ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT DISTINCT frt.file_id
-         FROM file_resolved_tags frt
-         JOIN tags t ON t.id = frt.tag_id
-         WHERE t.backpack = 1",
-    )
-    .fetch_all(pool)
-    .await?;
+    // Step 1: Get all file IDs in the Backpack set (union of subscribed
+    // playlists + backpack tags), via the single Backpack concept.
+    let backpack_file_ids: Vec<i64> = crate::backpack::get_backpack_file_ids(pool).await?;
 
     if backpack_file_ids.is_empty() {
         return Ok(Vec::new());
@@ -2040,30 +2033,14 @@ pub async fn get_backpack_size_stats(pool: &Pool<Sqlite>) -> Result<BackpackSize
     // Load format priorities (could be user-configured)
     let priorities = load_format_priorities(pool).await;
 
-    // Step 1: Count backpack tags
+    // Step 1: Count backpack tags (reported as `tag_count` for UI compatibility).
     let tag_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE backpack = 1")
         .fetch_one(pool)
         .await?;
 
-    if tag_count == 0 {
-        return Ok(BackpackSizeStats {
-            tag_count: 0,
-            track_count: 0,
-            local_bytes: 0,
-            target_bytes: 0,
-            needs_pull_bytes: 0,
-        });
-    }
-
-    // Step 2: Get all file IDs that are in backpack tags (via file_resolved_tags)
-    let backpack_file_ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT DISTINCT frt.file_id
-         FROM file_resolved_tags frt
-         JOIN tags t ON t.id = frt.tag_id
-         WHERE t.backpack = 1",
-    )
-    .fetch_all(pool)
-    .await?;
+    // Step 2: Get all file IDs in the Backpack set (union of subscribed
+    // playlists + backpack tags), via the single Backpack concept.
+    let backpack_file_ids: Vec<i64> = crate::backpack::get_backpack_file_ids(pool).await?;
 
     if backpack_file_ids.is_empty() {
         return Ok(BackpackSizeStats {

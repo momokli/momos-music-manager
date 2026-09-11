@@ -32,6 +32,14 @@ pub const KEY_AUTOUPDATE_INTERVAL_SECS: &str = "autoupdate.interval_secs";
 /// `autoupdate::update_auto::AutoApplyState`).
 pub const KEY_AUTOUPDATE_AUTO_APPLY_STATE: &str = "autoupdate.auto_apply_state";
 
+/// `settings`-KV keys of the Backpack transport (namespace `backpack.`).
+/// `playlist_id`/`playlist_url` persist the single materialised Spotify
+/// playlist; `signature` is the hash of the current Backpack track set used to
+/// skip redundant Spotify/deemix API calls when nothing changed.
+pub const KEY_BACKPACK_PLAYLIST_ID: &str = "backpack.playlist_id";
+pub const KEY_BACKPACK_PLAYLIST_URL: &str = "backpack.playlist_url";
+pub const KEY_BACKPACK_SIGNATURE: &str = "backpack.signature";
+
 /// `settings`-KV keys of the telemetry push status (namespace
 /// `telemetry.`): last one-shot push outcome, recorded by the CLI push, the
 /// periodic loop and the Settings "Push now" button.
