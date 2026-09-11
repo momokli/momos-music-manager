@@ -3794,6 +3794,19 @@ tr.row-mismatch td {
     font-family: var(--font-mono);
 }
 
+/* Placeholder semantics: "not set" (—) vs "unknown" (?) */
+.cell-placeholder {
+    opacity: 0.55;
+    white-space: nowrap;
+}
+.cell-placeholder-unset {
+    /* em-dash placeholder for a value that is genuinely not set */
+}
+.cell-placeholder-unknown {
+    font-style: italic;
+    opacity: 0.7;
+}
+
 /* Playlist context badge in toolbar (e.g. tracks page when scoped) */
 .playlist-context-badge {
     display: inline-flex;

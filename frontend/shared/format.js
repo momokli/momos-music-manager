@@ -33,3 +33,19 @@ export function formatNumber(n) {
   if (n == null) return "0";
   return n.toLocaleString();
 }
+
+/**
+ * Placeholder for a value that is genuinely not set (e.g. never played).
+ * Distinct from `placeholderUnknown` so the UI no longer uses a universal "—".
+ */
+export function placeholderUnset(label = "Not set") {
+  return `<span class="cell-placeholder cell-placeholder-unset" title="${label}">—</span>`;
+}
+
+/**
+ * Placeholder for a value that is unknown / could not be determined
+ * (e.g. duration unavailable). Rendered as "?" to differ from "not set".
+ */
+export function placeholderUnknown(label = "Unknown") {
+  return `<span class="cell-placeholder cell-placeholder-unknown" title="${label}">?</span>`;
+}
