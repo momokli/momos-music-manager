@@ -6,6 +6,17 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-09-11
+
+### Added
+
+- **Traktor-Import-Summary (#27/Phase 0, PR #39)**: Nach einem Traktor-Import
+  zeigt die Import-Seite jetzt eine strukturierte Summary statt roher Log-Zeilen
+  — Chips (`parsed` / `matched` / `without match`) plus Liste der Dateinamen ohne
+  DB-Match. Gespeist aus dem neuen optionalen `Task.result_data` (nicht mehr aus
+  dem Freitext-Log geparst); keine Schema-Migration, keine Breaking Changes am
+  API-Vertrag.
+
 ## [1.10.0] — 2026-09-11
 
 ### Added
