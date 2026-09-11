@@ -10,6 +10,7 @@ pub mod deemix_api;
 pub mod digging;
 pub mod dynamic_bundles;
 pub mod explorer;
+pub mod extended_mix;
 pub mod file_track_corrections;
 pub mod files;
 pub mod folders;
@@ -35,6 +36,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(daily::router())
         .merge(traktor::router())
         .merge(explorer::router())
+        .merge(extended_mix::router())
         .merge(digging::router())
         .merge(services::router())
         .merge(spotify_sync::router())
