@@ -6,6 +6,8 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-09-11
+
 ### Added
 
 - **Backpack-Konzept (Verschmelzung)**: die markierten Spotify-Playlists
