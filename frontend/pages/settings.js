@@ -99,6 +99,13 @@ export async function init(container, signal) {
       <h3><i class="fas fa-terminal"></i> CLI access</h3>
       <div id="settings-cli-content">${renderLoading("Loading CLI state...")}</div>
     </div>
+    <div class="card" id="settings-folders-card">
+      <h3><i class="fas fa-folder-tree"></i> Folders</h3>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);">
+        <span class="text-muted" style="font-size:0.85rem;">Managed folders live in the Library. Add a music folder to start scanning.</span>
+        <a href="#folders?new=1" class="btn btn-primary btn-sm" style="white-space:nowrap;"><i class="fa-solid fa-plus"></i> Add Folder</a>
+      </div>
+    </div>
   `;
 
   await Promise.all([loadStatus(container), loadTelemetryStatus(container)]);
