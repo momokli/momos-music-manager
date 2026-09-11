@@ -6,6 +6,21 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-09-11
+
+### Added
+
+- **Extended-Mix Auto-Upgrade, Stufe 1 (#29/#36)**: neues, quellen-agnostisches
+  Modul `src/extended_mix.rs` erkennt Versions-Varianten (Extended Mix, Ext Mix,
+  Radio Edit, Original/Club Mix, Instrumental) und gruppiert Releases über
+  `base_title`. Upgrade-Entscheidung ohne Loop/Downgrade (`find_extended_mix`,
+  `upgrade_target_for_release`) sowie library-weite Kandidatensuche
+  (`find_upgrade_candidates`). Neuer read-only Endpoint
+  `GET /api/extended-mix/candidates`; `is_extended_mix` auf Digging-Ergebnissen.
+  Opt-in-Toggle `autoupgrade` (Env `MOMOS_AUTOUPGRADE_ENABLED` > `[autoupgrade]
+  enabled` > Default aus). Der eigentliche Download-/Ersetzungsschritt folgt als
+  separater PR (benötigt ARL/Single-Track-Download).
+
 ## [1.7.0] — 2026-09-11
 
 ### Changed
