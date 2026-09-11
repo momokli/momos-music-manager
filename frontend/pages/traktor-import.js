@@ -10,7 +10,7 @@
  */
 
 import { fetchJSON } from "../shared/api.js";
-import { renderLoading } from "../shared/components.js";
+import { renderLoading, showToast } from "../shared/components.js";
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -176,7 +176,10 @@ function saveCustomPath() {
   state.customPath = input.value.trim();
   saveSetting(LS_CUSTOM_PATH, state.customPath);
   fetchStatus()
-    .then(() => updateUI())
+    .then(() => {
+      updateUI();
+      showToast("Path applied", "success");
+    })
     .catch(() => {});
 }
 
@@ -207,11 +210,19 @@ function pathSection() {
 
   if (isManual) {
     html += '<div class="form-row" style="margin-top: 0.5rem;">';
+    html += `<div style="display:flex;gap:8px;align-items:flex-start;flex:1;">`;
     html += `<input type="text" class="input-text" id="traktor-path-input"
       value="${escapeHtml(state.customPath)}"
       placeholder="/path/to/collection.nml"
-      data-action="save-custom-path" />`;
-    html += "</div>";
+      data-action="save-custom-path" style="flex:1;" />`;
+    html += `<button class="btn btn-primary btn-sm" id="traktor-path-apply" title="Apply this path">
+      <i class="fas fa-check"></i> Apply
+    </button>`;
+    html += `</div>`;
+    html += '</div>';
+    html += `<div class="form-row" style="margin-top:-0.25rem;">
+      <span class="form-hint text-muted" style="font-size:0.75rem;"><i class="fas fa-info-circle"></i> Path is applied when you click <strong>Apply</strong> — Enter is still a shortcut.</span>
+    </div>`;
   }
 
   html += '<div class="form-row" style="margin-top: 0.75rem;">';
@@ -313,6 +324,12 @@ function wireEvents() {
     pathInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") saveCustomPath();
     });
+  }
+
+  // Visible "Apply" button — same action as Enter
+  const applyBtn = containerEl.querySelector("#traktor-path-apply");
+  if (applyBtn) {
+    applyBtn.addEventListener("click", () => saveCustomPath());
   }
 }
 

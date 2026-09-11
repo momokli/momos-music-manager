@@ -21,6 +21,7 @@ const NAV_SECTIONS = [
       { id: "playlists", label: "Playlists", icon: "fa-list" },
       { id: "tags", label: "Tags", icon: "fa-tag" },
       { id: "tag-categories", label: "Tag Categories", icon: "fa-layer-group" },
+      { id: "folders", label: "Folders", icon: "fa-folder" },
     ],
   },
   {
@@ -28,7 +29,6 @@ const NAV_SECTIONS = [
     items: [
       { id: "services", label: "Services", icon: "fa-cloud" },
       { id: "tasks", label: "Tasks", icon: "fa-list-check" },
-      { id: "folders", label: "Folders", icon: "fa-folder" },
       { id: "deemix-queue", label: "Deemix Queue", icon: "fa-download" },
       { id: "traktor-import", label: "Traktor Import", icon: "fa-compact-disc" },
     ],

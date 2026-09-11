@@ -16,7 +16,7 @@ import {
   showModal,
 } from "../shared/components.js";
 import { renderActionsPanel, updateSelectionCount } from "../shared/actions-panel.js";
-import { formatBPM, formatDuration } from "../shared/format.js";
+import { formatBPM, formatDuration, placeholderUnset, placeholderUnknown } from "../shared/format.js";
 import { fetchJSON } from "../shared/api.js";
 import { renderSearchInput, wireSearchFilter } from "../shared/search-filter.js";
 import { renderCommentWriter, wireCommentWriter } from "../shared/comment-writer.js";
@@ -159,7 +159,7 @@ const FILES_COLUMNS = [
     label: "Last Played",
     sortable: true,
     sortKey: "last_played",
-    defaultWidth: 80,
+    defaultWidth: 120,
   },
   { id: "backedUp", label: "Backup", sortable: false, defaultWidth: 70 },
   { id: "isLocal", label: "Local", sortable: false, defaultWidth: 60 },
@@ -192,12 +192,12 @@ const FILES_CELL_RENDERERS = {
   duration: (f) =>
     f.duration > 0
       ? `<span class="font-mono text-sm">${formatDuration(f.duration)}</span>`
-      : '<span class="text-muted">—</span>',
+      : placeholderUnknown("Unknown"),
   album: (f) => (f.album ? escapeHtml(f.album) : '<span class="text-muted">—</span>'),
   created: (f) =>
     f.createdAt ? formatTimestamp(f.createdAt) : '<span class="text-muted">—</span>',
   lastPlayed: (f) =>
-    f.lastPlayed ? formatTimestamp(f.lastPlayed) : '<span class="text-muted">—</span>',
+    f.lastPlayed ? formatTimestamp(f.lastPlayed) : placeholderUnset("Never played"),
   backedUp: (r) => {
     return r.backedUp
       ? '<span class="status-badge connected" title="Backed up"><i class="fas fa-cloud"></i></span>'
@@ -227,7 +227,7 @@ const FILES_CELL_RENDERERS = {
 function formatTimestamp(ts) {
   if (!ts) return '<span class="text-muted">—</span>';
   const d = new Date(ts * 1000);
-  return `<span class="font-mono text-xs" title="${d.toISOString()}">${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>`;
+  return `<span class="font-mono text-xs" style="white-space:nowrap;" title="${d.toISOString()}">${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>`;
 }
 
 function computeDiff(oldComment, targetComment) {

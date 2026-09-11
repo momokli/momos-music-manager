@@ -19,7 +19,7 @@ import {
   renderErrorBlock,
   showToast,
 } from "../shared/components.js";
-import { formatDuration } from "../shared/format.js";
+import { formatDuration, placeholderUnset } from "../shared/format.js";
 import { renderSearchInput, wireSearchFilter } from "../shared/search-filter.js";
 import {
   getPageSize,
@@ -77,7 +77,7 @@ const TRACKS_COLUMNS = [
   { id: "key", label: "Key", sortable: false, defaultWidth: 60 },
   { id: "rating", label: "★", sortable: false, defaultWidth: 60 },
   { id: "plays", label: "Plays", sortable: false, defaultWidth: 60 },
-  { id: "lastPlayed", label: "Last Played", sortable: false, defaultWidth: 80 },
+  { id: "lastPlayed", label: "Last Played", sortable: false, defaultWidth: 110 },
   {
     id: "imported",
     label: "Imported",
@@ -165,7 +165,7 @@ const HASH_SCHEMA = {
 function formatTimestamp(ts) {
   if (!ts) return '<span class="text-muted">—</span>';
   const d = new Date(ts * 1000);
-  return `<span class="font-mono text-xs">${d.toLocaleDateString()}</span>`;
+  return `<span class="font-mono text-xs" style="white-space:nowrap;">${d.toLocaleDateString()}</span>`;
 }
 
 /**
@@ -182,7 +182,9 @@ const TRACKS_CELL_RENDERERS = {
   playlists: (t) => renderPlaylistBadges(t),
   localFiles: (t) => renderFormatBadges(t),
   duration: (t) =>
-    `<span class="font-mono">${escapeHtml(formatDuration(t.duration))}</span>`,
+    t.duration
+      ? `<span class="font-mono">${escapeHtml(formatDuration(t.duration))}</span>`
+      : placeholderUnknown("Unknown"),
   bpm: (t) =>
     t.bpmDisplay
       ? `<span class="font-mono">${escapeHtml(t.bpmDisplay)}</span>`
@@ -200,7 +202,7 @@ const TRACKS_CELL_RENDERERS = {
       ? `<span class="font-mono text-sm">${t.playCount}</span>`
       : '<span class="text-muted">—</span>',
   lastPlayed: (t) =>
-    t.lastPlayed ? formatTimestamp(t.lastPlayed) : '<span class="text-muted">—</span>',
+    t.lastPlayed ? formatTimestamp(t.lastPlayed) : placeholderUnset("Never played"),
   isrc: (t) =>
     t.isrc
       ? `<span class="font-mono text-sm">${escapeHtml(t.isrc)}</span>`
