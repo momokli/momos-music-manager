@@ -7,7 +7,8 @@ use sqlx::{Pool, Row, Sqlite};
 use tracing::info;
 
 use crate::deemix::models::{
-    DeemixActionResult, DeemixLoginResponse, DeemixQueueItem, DeemixQueueResponse,
+    DeemixActionResult, DeemixDownloadProgress, DeemixLoginResponse, DeemixQueueItem,
+    DeemixQueueResponse, DownloadVerification,
 };
 
 /// HTTP client for the deemix-pyweb web API.
@@ -186,6 +187,23 @@ impl DeemixClient {
         Ok(())
     }
 
+    /// Remove an entry from the deemix download queue (full queue control).
+    ///
+    /// POST `/api/removeFromQueue` with `{"uuid": "..."}`. Like `addToQueue` and
+    /// `retryDownload`, the deemix API returns HTTP 200 with a `result` field
+    /// that must be checked for errors.
+    pub async fn remove_from_queue(&self, uuid: &str) -> Result<()> {
+        let body = serde_json::json!({"uuid": uuid});
+        let resp = self
+            .authed_request_with_body(Method::POST, "/api/removeFromQueue", Some(&body))
+            .await?;
+
+        self.ensure_action_success(resp, "removeFromQueue", Some(uuid))
+            .await?;
+        info!("Removed download from deemix queue: {}", uuid);
+        Ok(())
+    }
+
     /// Status values that mean deemix is still actively working on a download.
     /// When found, we skip retry to avoid interrupting the download.
     ///
@@ -228,7 +246,67 @@ impl DeemixClient {
         self.add_to_queue(spotify_url).await
     }
 
+    /// Poll the progress of a single queued download by its Spotify playlist URL
+    /// (Status-/Fortschritts-Polling, B.1.3).
+    ///
+    /// Returns `None` when the URL is not currently in the deemix queue.
+    pub async fn get_download_progress(
+        &self,
+        spotify_url: &str,
+    ) -> Result<Option<DeemixDownloadProgress>> {
+        let Some((uuid, item)) = self.find_queue_item(spotify_url).await? else {
+            return Ok(None);
+        };
+
+        let status_lc = item.status.to_lowercase();
+        Ok(Some(DeemixDownloadProgress {
+            uuid,
+            status: item.status,
+            progress: item.progress,
+            downloaded: item.downloaded,
+            total: item.size,
+            finished: status_lc == "completed" || status_lc == "witherrors",
+            has_errors: !item.errors.is_empty(),
+        }))
+    }
+
+    /// Verify a download's result for a given Spotify playlist URL
+    /// (Download-Verifikation, B.1.4).
+    ///
+    /// Returns `None` when the URL is not currently in the deemix queue.
+    /// The verification is derived from deemix's reported queue item — it
+    /// confirms the item reached `completed` and reports the best available
+    /// quality (`stem` > `flac` > `mp3`). Local on-disk presence of the files
+    /// is enforced by [`crate::db::get_backpack_pull_candidates`].
+    pub async fn verify_download(
+        &self,
+        spotify_url: &str,
+    ) -> Result<Option<DownloadVerification>> {
+        let Some((_uuid, item)) = self.find_queue_item(spotify_url).await? else {
+            return Ok(None);
+        };
+        Ok(Some(item.verify_download()))
+    }
+
     // ── Internal helpers ──────────────────────────────────────────────
+
+    /// Find a queue item (uuid + item) by its Spotify playlist URL.
+    ///
+    /// deemix stores the bare playlist id on the item; we reconstruct the
+    /// canonical `open.spotify.com` URL the same way `ensure_queued` does.
+    async fn find_queue_item(
+        &self,
+        spotify_url: &str,
+    ) -> Result<Option<(String, DeemixQueueItem)>> {
+        let queue = self.get_queue().await?;
+        for (uuid, item) in queue {
+            let item_url = format!("https://open.spotify.com/playlist/{}", item.id);
+            if item_url == spotify_url {
+                return Ok(Some((uuid, item)));
+            }
+        }
+        Ok(None)
+    }
 
     /// Make an authenticated API call with auto-re-auth on HTTP 401.
     ///
@@ -343,6 +421,9 @@ impl DeemixClient {
                     .map(|id| serde_json::json!({"url": id}))
                     .unwrap_or(serde_json::json!({})),
                 "retryDownload" => identifier
+                    .map(|id| serde_json::json!({"uuid": id}))
+                    .unwrap_or(serde_json::json!({})),
+                "removeFromQueue" => identifier
                     .map(|id| serde_json::json!({"uuid": id}))
                     .unwrap_or(serde_json::json!({})),
                 _ => serde_json::json!({}),
