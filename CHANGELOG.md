@@ -6,6 +6,17 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-09-11
+
+### Changed
+
+- **UI Phase-0 Quick Wins (#27/#35)**: `Folders` von der Services- in die
+  Library-Navigation verschoben + `#folders?new=1`-Direkteinstieg (Dashboard-
+  Empty-State, Settings-Karte); sichtbarer **Apply**-Button für den Traktor-
+  Manual-Path; Deemix-Queue zeigt Fehlermeldungen als eigene Inline-Zeile mit
+  **Retry**-Button; Platzhalter-Semantik getrennt („—“ = nicht gesetzt,
+  „?“ = unbekannt) via `shared/format.js`; Last-Played-Spaltenbreiten angepasst.
+
 ## [1.6.0] — 2026-09-11
 
 ### Added
