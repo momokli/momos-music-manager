@@ -415,6 +415,8 @@ pub struct Task {
     pub result_summary: Arc<std::sync::Mutex<Option<String>>>,
     /// Error message set on failure
     pub error_message: Arc<std::sync::Mutex<Option<String>>>,
+    /// Structured result data (e.g. Traktor ImportStats) for frontend rendering
+    pub result_data: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
 }
 
 /// Derive a conflict key from a TaskType.
@@ -471,6 +473,7 @@ impl Task {
             join_handle: None,
             result_summary: Arc::new(std::sync::Mutex::new(None)),
             error_message: Arc::new(std::sync::Mutex::new(None)),
+            result_data: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -498,6 +501,7 @@ impl Task {
             join_handle: None,
             result_summary: Arc::new(std::sync::Mutex::new(None)),
             error_message: Arc::new(std::sync::Mutex::new(None)),
+            result_data: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -596,6 +600,11 @@ impl Task {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
+            result_data: self
+                .result_data
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         }
     }
 
@@ -655,6 +664,9 @@ pub struct TaskProgress {
     /// Error message set on failure
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    /// Structured result data (e.g. Traktor ImportStats) for frontend rendering
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_data: Option<serde_json::Value>,
 }
 
 // ============================================================
@@ -900,6 +912,15 @@ impl TaskManager {
         let tasks = self.tasks.read().await;
         if let Some(task) = tasks.get(task_id) {
             *task.progress_text.lock().unwrap_or_else(|e| e.into_inner()) = text;
+        }
+    }
+
+    /// Set structured result data on a task (e.g. Traktor ImportStats).
+    /// In-memory only — not persisted to task_history.
+    pub async fn set_result_data(&self, task_id: &str, data: serde_json::Value) {
+        let tasks = self.tasks.read().await;
+        if let Some(task) = tasks.get(task_id) {
+            *task.result_data.lock().unwrap_or_else(|e| e.into_inner()) = Some(data);
         }
     }
 
@@ -2097,6 +2118,22 @@ pub async fn start_traktor_import_task(
                     nml_path.display()
                 );
                 info!("{}", msg);
+                // Expose structured stats (summary chips + unmatched list) to the UI.
+                tm.set_result_data(
+                    &worker_task_id,
+                    serde_json::json!({
+                        "totalEntries": stats.total_entries,
+                        "matched": stats.matched,
+                        "noPlayCount": stats.no_play_count,
+                        "withPlayCount": stats.with_play_count,
+                        "withLastPlayed": stats.with_last_played,
+                        "withBpm": stats.with_bpm,
+                        "withKey": stats.with_key,
+                        "withRating": stats.with_rating,
+                        "unmatched": stats.unmatched,
+                    }),
+                )
+                .await;
                 tm.add_log(&worker_task_id, msg.clone()).await;
                 tm.update_progress_text(&worker_task_id, msg.clone()).await;
                 tm.update_progress(&worker_task_id, |p| {
