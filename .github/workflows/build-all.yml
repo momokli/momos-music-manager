@@ -202,6 +202,11 @@ jobs:
           rm -rf dist-tag
           cp -al dist dist-tag
           bash scripts/publish-assets.sh stage-tag dist-tag
+      - name: Dry-run tag release notes
+        run: |
+          VERSION="$(bash scripts/resolve-version.sh)"
+          bash scripts/release-notes.sh "${VERSION}" dist-tag | tee dist-tag/.release-notes.md
+          test -s dist-tag/.release-notes.md
       - name: Dry-run main staging (stable names + SHA256SUMS + upload manifest)
         run: bash scripts/publish-assets.sh stage-main dist
       - name: Show staged artifact set + upload manifests
@@ -264,10 +269,17 @@ jobs:
             bash scripts/publish-assets.sh stage-main dist
           else
             RELEASE="${GITHUB_REF#refs/tags/}"
-            if ! gh release view "${RELEASE}" >/dev/null 2>&1; then
-              gh release create "${RELEASE}" --generate-notes --title "${RELEASE}"
-            fi
+            # Stage the versioned artifacts + aggregate SHA256SUMS first so the
+            # release notes can embed the checksums (M2 DoD: platform matrix +
+            # SHA256 in the tag release notes).
             bash scripts/publish-assets.sh stage-tag dist
+            VERSION="$(bash scripts/resolve-version.sh)"
+            bash scripts/release-notes.sh "${VERSION}" dist > dist/.release-notes.md
+            if ! gh release view "${RELEASE}" >/dev/null 2>&1; then
+              # --notes-file is prepended to the auto-generated changelog
+              # (GitHub's generate_release_notes API prepends `body`).
+              gh release create "${RELEASE}" --generate-notes --title "${RELEASE}" --notes-file dist/.release-notes.md
+            fi
           fi
 
           cd dist

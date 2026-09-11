@@ -101,11 +101,27 @@ zusätzlich auf die neueste **stabile** Version hin.
 
 **Definition of Done (M2):**
 
-- [ ] Ein `v*`-Tag erzeugt ein Release mit allen 6 Artefakten + `SHA256SUMS`.
-- [ ] `latest-main` enthält nach dem nächsten Build nur noch die **aktuelle**
-      Version (Aufräum-Job oder dokumentierte Regel, verifiziert im CI).
-- [ ] Landing-Page verlinkt die neueste stabile Version (mit Changelog-Link).
+- [x] Ein `v*`-Tag erzeugt ein Release mit allen 6 Artefakten + `SHA256SUMS`.
+      (`build-all.yml` Tag-Pfad: `stage-tag` + Upload; verifiziert am
+      `v1.8.0`-Release, 12 Assets.)
+- [x] `latest-main` enthält nach dem nächsten Build nur noch die **aktuelle**
+      Version (Cleanup-Step im Publish-Job entfernt alte
+      `momos-music-manager-<ver>-*`-Assets, deren Version ≠ aktuell).
+- [x] Landing-Page verlinkt die neueste stabile Version (mit Changelog-Link):
+      `releases/latest` (stabil, versioniert, SHA256SUMS) + CHANGELOG-Link.
 - [ ] Mit einem echten Test-Tag (`v1.1.0` o. ä.) end-to-end verifiziert.
+      **Offen:** benötigt einen vom Maintainer gepushten Tag (kein
+      Agent-Tag-Push).
+
+**Umsetzungsstand (PR #38):**
+
+- Aufräum-Regel für `latest-main` (Vorschlag 1): bereits im Publish-Job
+  vorhanden und korrekt (idempotent, nur im Nicht-Dry-Run-Pfad) — unverändert.
+- Landing-Page (Vorschlag 2): stabiler „Latest stable release"-Link über
+  `releases/latest` (nie stale) + Changelog-Link.
+- Tag-Release-Notes (Vorschlag 3): `--generate-notes` wird jetzt eine
+  „Downloads + SHA256SUMS"-Sektion vorangestellt (Plattform-Matrix + aggregierte
+  Checksummen + Verifikationsanleitung) via neuem `scripts/release-notes.sh`.
 
 **Aufwand:** M — überwiegend CI/Publish-Logik + kleiner Site-Input.
 **Abhängigkeiten:** keine (baut auf M1 auf).
