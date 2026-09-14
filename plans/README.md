@@ -1,9 +1,10 @@
 # Active Plans
 
-**52 done** · **0 in progress** · **17 proposed**
+**52 done** · **0 in progress** · **18 proposed**
 
 ## Proposed
 
+- [backpack-playlist-push](proposed/backpack-playlist-push.md) — `feat/backpack-playlist-push` (#43: expliziter Push der EINEN Backpack-Playlist, Mirror statt Append, Trigger + UI)
 - [tracks-filter-overhaul](proposed/tracks-filter-overhaul.md) — `feat/tracks-filter-overhaul`
 - [multi-provider-playlists](proposed/multi-provider-playlists.md) — `feat/multi-provider-playlists`
 - [soundcloud-integration](proposed/soundcloud-integration.md) — `feat/soundcloud-integration`
