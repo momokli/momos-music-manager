@@ -12,6 +12,7 @@
 //!    against the manifest entry
 //! 5. only then swap the binary (see [`crate::autoupdate::swap`])
 
+use std::cmp::Ordering;
 use std::path::PathBuf;
 
 use semver::Version;
@@ -563,13 +564,49 @@ async fn fetch_update_info<F: Fetcher>(
         });
     }
 
-    // 4. Version comparison. On the rolling dev channel `1.1.0-dev+shaA` and
-    //    `1.1.0-dev+shaB` are precedence-equal (semver ignores build
-    //    metadata), so a different SHA is detected via string comparison.
-    let same_precedence_new_sha = latest == current
-        && settings.channel == UpdateChannel::Rolling
-        && latest.to_string() != settings.current_version;
-    if !(latest > current || same_precedence_new_sha) {
+    // 4. Version comparison.
+    //
+    //    Two traps make the naive `latest > current` wrong:
+    //
+    //    a) Rolling dev builds: `1.1.0-dev+shaA` and `1.1.0-dev+shaB` are
+    //       precedence-equal — semver ignores build metadata in
+    //       `cmp_precedence`, but `Version`'s *derived* `Ord` does compare
+    //       it (lexicographically). `latest > current` is therefore NOT
+    //       "newer build", it is "sha sorts higher": a freshly pushed
+    //       commit whose sha sorts lower than the running one was reported
+    //       as up to date. On rolling, any different version string is a
+    //       new build of `main` and must be offered.
+    //    b) Cross-channel switches (release build tracking rolling or vice
+    //       versa) compare across the pre-release boundary: a stable
+    //       `1.11.0` outranks every `1.11.0-dev+*`, so switching a release
+    //       install to rolling reported "up to date" against a *different*
+    //       build. When the running build does not belong to the selected
+    //       channel, a published build of the same base version is an
+    //       update even though its precedence is lower.
+    let cross_channel = !settings.channel.matches_version(&current);
+    let update_available = match (latest.major, latest.minor, latest.patch)
+        .cmp(&(current.major, current.minor, current.patch))
+    {
+        // An older base version is never an update (no silent downgrade).
+        Ordering::Less => false,
+        // A newer base version is always an update.
+        Ordering::Greater => true,
+        // Same base version: it depends on the channel and on whether the
+        // running build belongs to the selected channel at all.
+        Ordering::Equal => {
+            if cross_channel || settings.channel == UpdateChannel::Rolling {
+                // Rolling tracks main (every published dev build differs by
+                // sha) and a cross-channel switch changes the build type —
+                // any *different* version string is a new build to install.
+                latest.to_string() != settings.current_version
+            } else {
+                // Release channel: plain semver precedence (`1.11.0` >
+                // `1.11.0-rc.1`).
+                latest > current
+            }
+        }
+    };
+    if !update_available {
         return Ok(None);
     }
 
@@ -1051,6 +1088,108 @@ pub(crate) mod tests {
                     "momos-music-manager-1.1.0-dev+def5678-linux-x64.tar.gz"
                 );
             }
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+    }
+
+    // ── Rolling comparison must not depend on sha ordering ───────────
+
+    #[tokio::test]
+    async fn rolling_offers_new_dev_build_whose_sha_sorts_lower() {
+        // Regression: `latest > current` on semver's *derived* `Ord` compares
+        // build metadata lexicographically, so a newer commit whose sha sorts
+        // lower (`0f5dde5a` < `f0000000`) was reported as up to date.
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest("abc", "1.11.0-dev+0f5dde5a"),
+            "1.11.0-dev+0f5dde5a",
+            None,
+        );
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("linux-x64", "tar.gz", "1.11.0-dev+f0000000");
+        assert_eq!(settings.channel, UpdateChannel::Rolling);
+        match check(&settings, &fetcher).await.unwrap() {
+            UpdateStatus::UpdateAvailable(info) => {
+                assert_eq!(info.version, "1.11.0-dev+0f5dde5a");
+                assert_eq!(
+                    info.artifact_name,
+                    "momos-music-manager-1.11.0-dev+0f5dde5a-linux-x64.tar.gz"
+                );
+            }
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn release_build_on_rolling_channel_offers_same_base_dev_build() {
+        // Regression: a release build switched to the rolling channel never
+        // updated — `1.11.0-dev+<sha>` is *lower* than `1.11.0` in semver
+        // precedence, so `latest > current` was false while the running
+        // build is not even a build of the selected channel.
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest("abc", "1.11.0-dev+0f5dde5a"),
+            "1.11.0-dev+0f5dde5a",
+            None,
+        );
+        let fetcher = MockFetcher::new(files);
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.11.0");
+        settings.channel = UpdateChannel::Rolling;
+        match check(&settings, &fetcher).await.unwrap() {
+            UpdateStatus::UpdateAvailable(info) => {
+                assert_eq!(info.version, "1.11.0-dev+0f5dde5a");
+            }
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn release_build_on_rolling_channel_ignores_older_base_dev_build() {
+        // Cross-channel must never be a silent downgrade: a dev build on an
+        // *older* base version is not offered to a release build.
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest("abc", "1.10.0-dev+0f5dde5a"),
+            "1.10.0-dev+0f5dde5a",
+            None,
+        );
+        let fetcher = MockFetcher::new(files);
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.11.0");
+        settings.channel = UpdateChannel::Rolling;
+        assert_eq!(check(&settings, &fetcher).await.unwrap(), UpdateStatus::UpToDate);
+    }
+
+    #[tokio::test]
+    async fn dev_build_on_rolling_channel_ignores_older_base_dev_build() {
+        // Rolling tracks main, but a *different base version* still has to be
+        // newer: a build of an older base must not be offered as an update.
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest("abc", "1.10.0-dev+0f5dde5a"),
+            "1.10.0-dev+0f5dde5a",
+            None,
+        );
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("linux-x64", "tar.gz", "1.11.0-dev+f0000000");
+        assert_eq!(check(&settings, &fetcher).await.unwrap(), UpdateStatus::UpToDate);
+    }
+
+    #[tokio::test]
+    async fn dev_build_on_release_channel_offers_stable_release() {
+        // The mirror image of the release→rolling switch: a dev build on the
+        // release channel gets the stable release of the same base version
+        // (`1.11.0` > `1.11.0-dev+*` holds here, so this is the plain path).
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &sample_manifest("abc", "1.11.0"), "1.11.0", None);
+        let fetcher = MockFetcher::new(files);
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.11.0-dev+0f5dde5a");
+        settings.channel = UpdateChannel::Release;
+        match check(&settings, &fetcher).await.unwrap() {
+            UpdateStatus::UpdateAvailable(info) => assert_eq!(info.version, "1.11.0"),
             other => panic!("expected UpdateAvailable, got {other:?}"),
         }
     }

@@ -1,6 +1,6 @@
 # Active Plans
 
-**53 done** · **0 in progress** · **16 proposed**
+**54 done** · **0 in progress** · **16 proposed**
 
 ## Proposed
 
@@ -23,6 +23,8 @@
 - [fix-deemix-auto-download-retry](proposed/fix-deemix-auto-download-retry.md) — `fix/deemix-auto-download-retry`
 
 ## Done
+
+- [rolling-channel-update-offer](done/rolling-channel-update-offer.md) — `fix/rolling-channel-update-offer`
 
 - [backpack-playlist-push](done/backpack-playlist-push.md) — `feat/backpack-playlist-push`
 
