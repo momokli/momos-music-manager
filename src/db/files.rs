@@ -1834,6 +1834,34 @@ pub fn format_preference(file_type: &str) -> u8 {
     format_preference_with(file_type, &default_format_priorities())
 }
 
+/// Load `File` rows for the given ids, ordered by `file_type` — the order the
+/// backpack grouping steps relied on when they selected the rows with
+/// `ORDER BY file_type`.
+///
+/// Ids are chunked so the bind count stays well inside SQLite's limit even for
+/// very large libraries.
+pub async fn get_files_by_ids_ordered(pool: &Pool<Sqlite>, ids: &[i64]) -> Result<Vec<File>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    const CHUNK: usize = 500;
+    let mut files: Vec<File> = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(CHUNK) {
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT DISTINCT f.* FROM files f WHERE f.id IN ({placeholders}) ORDER BY f.file_type"
+        );
+        let mut q = sqlx::query_as::<_, File>(&sql);
+        for id in chunk {
+            q = q.bind(id);
+        }
+        files.extend(q.fetch_all(pool).await?);
+    }
+    files.sort_by(|a, b| a.file_type.cmp(&b.file_type));
+    Ok(files)
+}
+
 /// Load format priorities from service_config (stored on the 'deemix' row's
 /// metadata_json as a JSON string array). Falls back to default priorities.
 pub async fn load_format_priorities(pool: &Pool<Sqlite>) -> Vec<String> {
@@ -1885,35 +1913,15 @@ pub async fn get_backpack_pull_candidates(
         priorities
     );
 
-    // Step 2: For each backpack file, find all variants sharing the same track_id
-    // via v_file_track_link. Files not linked to any track get individual groups.
-    let placeholders: Vec<String> = backpack_file_ids.iter().map(|_| "?".to_string()).collect();
-    let sql = format!(
-        "SELECT DISTINCT f.* FROM files f
-         JOIN v_file_track_link v ON v.file_id = f.id
-         WHERE v.track_id IN (
-             SELECT DISTINCT v2.track_id FROM v_file_track_link v2
-             WHERE v2.file_id IN ({})
-         )
-         UNION
-         SELECT DISTINCT f.* FROM files f
-         WHERE f.id IN ({})
-           AND f.id NOT IN (SELECT file_id FROM v_file_track_link)
-         ORDER BY file_type",
-        placeholders.join(","),
-        placeholders.join(",")
-    );
-
-    let mut query = sqlx::query_as::<_, File>(&sql);
-    for id in &backpack_file_ids {
-        query = query.bind(id);
-    }
-    // Second set of bindings for the UNION branch (same IDs)
-    for id in &backpack_file_ids {
-        query = query.bind(id);
-    }
-
-    let all_files: Vec<File> = query.fetch_all(pool).await?;
+    // Step 2: Find all track-mates of backpack files. Files not linked to any
+    // track form their own group.
+    //
+    // Resolved by key (see `get_backpack_family_file_ids`) rather than through
+    // the view's `track_id IN (...)` form, which makes SQLite materialise the
+    // whole view — ~100 s on a production-scale library.
+    let family_file_ids: Vec<i64> =
+        crate::backpack::get_backpack_family_file_ids(pool, &backpack_file_ids).await?;
+    let all_files = get_files_by_ids_ordered(pool, &family_file_ids).await?;
 
     // Step 3: Build file_id → track_id mapping from v_file_track_link
     let track_id_placeholders: Vec<String> = all_files.iter().map(|_| "?".to_string()).collect();
@@ -2064,32 +2072,14 @@ pub async fn get_backpack_size_stats(pool: &Pool<Sqlite>) -> Result<BackpackSize
     }
     let track_count: i64 = track_count_query.fetch_one(pool).await?;
 
-    // Step 4: Fetch all files linked to the same tracks as backpack files
-    let sql = format!(
-        "SELECT DISTINCT f.* FROM files f
-         JOIN v_file_track_link v ON v.file_id = f.id
-         WHERE v.track_id IN (
-             SELECT DISTINCT v2.track_id FROM v_file_track_link v2
-             WHERE v2.file_id IN ({})
-         )
-         UNION
-         SELECT DISTINCT f.* FROM files f
-         WHERE f.id IN ({})
-           AND f.id NOT IN (SELECT file_id FROM v_file_track_link)
-         ORDER BY file_type",
-        placeholders.join(","),
-        placeholders.join(",")
-    );
-
-    let mut query = sqlx::query_as::<_, File>(&sql);
-    for id in &backpack_file_ids {
-        query = query.bind(id);
-    }
-    for id in &backpack_file_ids {
-        query = query.bind(id);
-    }
-
-    let all_files: Vec<File> = query.fetch_all(pool).await?;
+    // Step 4: Fetch all files linked to the same tracks as backpack files.
+    //
+    // Resolved by key (see `get_backpack_family_file_ids`) rather than through
+    // the view's `track_id IN (...)` form, which makes SQLite materialise the
+    // whole view — ~100 s on a production-scale library.
+    let family_file_ids: Vec<i64> =
+        crate::backpack::get_backpack_family_file_ids(pool, &backpack_file_ids).await?;
+    let all_files = get_files_by_ids_ordered(pool, &family_file_ids).await?;
 
     // Step 5: Build file_id → track_id mapping from v_file_track_link
     let track_placeholders: Vec<String> = all_files.iter().map(|_| "?".to_string()).collect();
@@ -2242,33 +2232,15 @@ pub async fn cleanup_redundant_backpack_files(pool: &Pool<Sqlite>) -> Result<(us
         return Ok((0, 0));
     }
 
-    // Step 2: Find all track-mates of backpack files via v_file_track_link (same query as get_backpack_pull_candidates)
-    let placeholders: Vec<String> = backpack_file_ids.iter().map(|_| "?".to_string()).collect();
-    let sql = format!(
-        "SELECT DISTINCT f.* FROM files f
-         JOIN v_file_track_link v ON v.file_id = f.id
-         WHERE v.track_id IN (
-             SELECT DISTINCT v2.track_id FROM v_file_track_link v2
-             WHERE v2.file_id IN ({})
-         )
-         UNION
-         SELECT DISTINCT f.* FROM files f
-         WHERE f.id IN ({})
-           AND f.id NOT IN (SELECT file_id FROM v_file_track_link)
-         ORDER BY file_type",
-        placeholders.join(","),
-        placeholders.join(",")
-    );
-
-    let mut query = sqlx::query_as::<_, File>(&sql);
-    for id in &backpack_file_ids {
-        query = query.bind(id);
-    }
-    for id in &backpack_file_ids {
-        query = query.bind(id);
-    }
-
-    let all_files: Vec<File> = query.fetch_all(pool).await?;
+    // Step 2: Find all track-mates of backpack files. Files not linked to any
+    // track form their own group.
+    //
+    // Resolved by key (see `get_backpack_family_file_ids`) rather than through
+    // the view's `track_id IN (...)` form, which makes SQLite materialise the
+    // whole view — ~100 s on a production-scale library.
+    let family_file_ids: Vec<i64> =
+        crate::backpack::get_backpack_family_file_ids(pool, &backpack_file_ids).await?;
+    let all_files = get_files_by_ids_ordered(pool, &family_file_ids).await?;
 
     // Step 3: Build file_id → track_id mapping from v_file_track_link, then group by track_id
     let track_id_placeholders: Vec<String> = all_files.iter().map(|_| "?".to_string()).collect();

@@ -1321,12 +1321,37 @@ mod tests {
         .unwrap();
 
         sqlx::query(
+            "CREATE TABLE IF NOT EXISTS file_track_corrections (
+                file_id INTEGER NOT NULL,
+                track_id INTEGER NOT NULL,
+                link_type TEXT NOT NULL,
+                reason TEXT,
+                created_at INTEGER DEFAULT (unixepoch()),
+                UNIQUE(file_id, track_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
             "CREATE VIEW IF NOT EXISTS v_file_track_link AS
+             SELECT file_id, track_id FROM file_track_corrections WHERE link_type = 'include'
+             UNION
              SELECT f.id AS file_id, st.id AS track_id
              FROM files f
              JOIN service_tracks st ON (
                  st.isrc = f.isrc
                  OR (st.service = 'spotify' AND st.service_id = f.spotify_id)
+                 OR (st.service = 'soundcloud' AND st.service_id = f.soundcloud_id)
+                 OR (st.service = 'youtube' AND st.service_id = f.youtube_id)
+                 OR (st.service = 'local' AND st.service_id = CAST(f.id AS TEXT))
+             )
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM file_track_corrections ftc
+                 WHERE ftc.file_id = f.id
+                   AND ftc.track_id = st.id
+                   AND ftc.link_type = 'exclude'
              )",
         )
         .execute(&pool)
