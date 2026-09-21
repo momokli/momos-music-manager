@@ -532,6 +532,7 @@ Open Traktor → run "Consistency Check" over all tracks → Comments visible �
 | `#digging`         | `pages/digging.js`         | Digging curator — chain-based sessions   |
 | `#data`            | `pages/data.js`            | Import/Export database                   |
 | `#tag-curation`    | `pages/tag-curation.js`    | Tag parent curation workflow             |
+| `#backpack`        | `pages/backpack.js`        | Backpack tags + Spotify transport playlist |
 
 ---
 
@@ -552,6 +553,7 @@ Open Traktor → run "Consistency Check" over all tracks → Comments visible �
 | Parents     | `GET/PUT /api/tags/{id}/parents`                                                 |
 | Corrections | `GET/PUT /api/files/{id}/track-corrections`, `/api/tracks/{id}/file-corrections` |
 | Digging     | `GET/POST /api/digging/...`                                                      |
+| Backpack    | `GET /api/backpack`, `POST /api/backpack/push`                                    |
 | Health      | `GET /api/health`                                                                |
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.

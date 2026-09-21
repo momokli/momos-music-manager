@@ -742,6 +742,10 @@ async fn track_backpack_handler(
         .await;
     }
 
+    // Membership changed → mark the Backpack transport dirty so the
+    // coordinator rebuilds the Spotify playlist (debounced).
+    let _ = crate::backpack::mark_backpack_dirty(&state.db).await;
+
     Json(ApiResponse {
         data: serde_json::json!({ "inBackpack": !in_backpack }),
     })
