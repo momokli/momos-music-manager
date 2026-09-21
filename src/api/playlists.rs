@@ -732,10 +732,14 @@ async fn subscribe_handler(
     )
     .await
     {
-        Ok(id) => Json(ApiResponse {
-            data: serde_json::json!({"id": id, "service": body.service, "playlistId": body.playlist_id}),
-        })
-        .into_response(),
+        Ok(id) => {
+            // Subscribing changes Backpack membership — mark dirty.
+            let _ = crate::backpack::mark_backpack_dirty(&state.db).await;
+            Json(ApiResponse {
+                data: serde_json::json!({"id": id, "service": body.service, "playlistId": body.playlist_id}),
+            })
+            .into_response()
+        }
         Err(e) => internal_error(format!("Failed to subscribe: {}", e)).into_response(),
     }
 }
@@ -746,10 +750,14 @@ async fn unsubscribe_handler(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     match unsubscribe_from_playlist(&state.db, id).await {
-        Ok(()) => Json(ApiResponse {
-            data: serde_json::json!({"unsubscribed": true}),
-        })
-        .into_response(),
+        Ok(()) => {
+            // Unsubscribing changes Backpack membership — mark dirty.
+            let _ = crate::backpack::mark_backpack_dirty(&state.db).await;
+            Json(ApiResponse {
+                data: serde_json::json!({"unsubscribed": true}),
+            })
+            .into_response()
+        }
         Err(e) => internal_error(format!("Failed to unsubscribe: {}", e)).into_response(),
     }
 }

@@ -31,7 +31,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::ServiceCredentials;
 use crate::db;
-use crate::deemix::DeemixClient;
 use crate::spotify::client::SpotifyClient;
 use crate::spotify::models::TrackInfo;
 use crate::spotify::retry::{extract_retry_after_secs, format_duration};
@@ -110,12 +109,6 @@ pub async fn start_subscription_poller(
                 }
             };
 
-            // -- Create Deemix client once per cycle -----------------------------
-            // A single client reuses the reqwest cookie jar across all subscriptions,
-            // so the deemix-pyweb session (connect.sid) survives the whole cycle
-            // instead of triggering a NotLoggedIn → re-auth on every subscription.
-            let deemix_client = DeemixClient::from_db(db.clone()).await;
-
             // -- Poll each due subscription ------------------------------------
             for subscription in &subscriptions {
                 if cancel_token.is_cancelled() {
@@ -155,24 +148,10 @@ pub async fn start_subscription_poller(
             // only that ONE URL to deemix. Replaces the old N per-playlist
             // auto-download submits.
             if due_count > 0 {
-                match crate::backpack::materialize_backpack_playlist(
-                    &db,
-                    &spotify_client,
-                    deemix_client.as_ref(),
-                )
-                .await
-                {
-                    Ok(outcome) if outcome.updated => {
-                        info!(
-                            "Subscription poller: Backpack materialised ({} track(s), deemix_submitted={})",
-                            outcome.track_count, outcome.deemix_submitted,
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        warn!("Subscription poller: Backpack sync failed: {:#}", e);
-                    }
-                }
+                // Membership may have changed remotely — mark dirty and let the
+                // Backpack coordinator materialise (debounced) instead of doing
+                // it inline on this poll tick.
+                let _ = crate::backpack::mark_backpack_dirty(&db).await;
             }
 
             info!(

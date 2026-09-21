@@ -39,6 +39,16 @@ pub const KEY_AUTOUPDATE_AUTO_APPLY_STATE: &str = "autoupdate.auto_apply_state";
 pub const KEY_BACKPACK_PLAYLIST_ID: &str = "backpack.playlist_id";
 pub const KEY_BACKPACK_PLAYLIST_URL: &str = "backpack.playlist_url";
 pub const KEY_BACKPACK_SIGNATURE: &str = "backpack.signature";
+/// Unix seconds of the last Backpack membership mutation (dirty marker).
+/// Present ⇒ the Spotify playlist may be out of date. Cleared after a
+/// successful push.
+pub const KEY_BACKPACK_DIRTY_AT: &str = "backpack.dirty_at";
+/// Unix seconds of the last successful Backpack push.
+pub const KEY_BACKPACK_LAST_PUSH_AT: &str = "backpack.last_push_at";
+/// `"ok"` or `"error"` — outcome of the last Backpack push.
+pub const KEY_BACKPACK_LAST_PUSH_STATUS: &str = "backpack.last_push_status";
+/// Human-readable error of the last failed push (absent on success).
+pub const KEY_BACKPACK_LAST_PUSH_ERROR: &str = "backpack.last_push_error";
 
 /// `settings`-KV keys of the telemetry push status (namespace
 /// `telemetry.`): last one-shot push outcome, recorded by the CLI push, the

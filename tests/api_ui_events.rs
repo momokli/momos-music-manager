@@ -40,6 +40,9 @@ fn app_state_with_ui_flag(pool: Pool<Sqlite>, ui_events_enabled: bool) -> Arc<Ap
         embeddings: tokio::sync::Mutex::new(None),
         category_means: tokio::sync::Mutex::new(None),
         public_url: None,
+        backpack_coordinator: Arc::new(
+            momos_music_manager::backpack::BackpackSyncCoordinator::new(),
+        ),
     })
 }
 

@@ -317,6 +317,9 @@ async fn run_poll_cycle(
                                 sp.name, track_count
                             );
                         }
+                        // A changed (subscribed) playlist may alter Backpack
+                        // membership — mark the transport dirty.
+                        let _ = backpack_dirty(db, &sp.id).await;
                     }
                     Err(e) => {
                         error!(
@@ -350,6 +353,8 @@ async fn run_poll_cycle(
                         db_id, e
                     );
                 }
+                // A deleted playlist drops all its tracks from the Backpack.
+                let _ = backpack_dirty(db, &pid).await;
                 deleted_count += 1;
             }
         }
@@ -391,6 +396,21 @@ async fn run_poll_cycle(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Mark the Backpack transport dirty if `playlist_id` is (or was) part of the
+/// Backpack — i.e. if it is actively subscribed. Non-fatal by design.
+async fn backpack_dirty(db: &Pool<Sqlite>, playlist_id: &str) {
+    let subscribed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM playlist_subscriptions WHERE playlist_id = ? AND is_active = 1",
+    )
+    .bind(playlist_id)
+    .fetch_one(db)
+    .await
+    .unwrap_or(0);
+    if subscribed > 0 {
+        let _ = crate::backpack::mark_backpack_dirty(db).await;
+    }
+}
 
 struct SimplifiedPlaylistData {
     id: String,

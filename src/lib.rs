@@ -61,6 +61,8 @@ pub struct AppState {
     pub embeddings: Mutex<Option<crate::embeddings::EmbeddingModel>>,
     pub category_means: tokio::sync::Mutex<Option<CategoryMeans>>,
     pub public_url: Option<String>,
+    /// Backpack materialisation coordinator (dirty-marker debounce + manual push).
+    pub backpack_coordinator: Arc<crate::backpack::BackpackSyncCoordinator>,
 }
 
 // ── Embedded Frontend Assets ───────────────────────────────────────────────

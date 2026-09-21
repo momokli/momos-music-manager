@@ -6,6 +6,22 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+### Added
+
+- **Backpack: expliziter Spotify-Playlist-Push (#43, ADR-060)**: Die eine
+  `Backpack`-Playlist wird jetzt **gespiegelt** statt angehängt
+  (`replace_playlist_items`) — entfernte Tracks verschwinden aus Spotify, keine
+  deemix-Residual-Downloads mehr. Neu: `GET /api/backpack` (Set-Größe,
+  Playlist-URL, dirty/Last-Push-Status) und `POST /api/backpack/push`
+  (`force` / `dryRun` / `submitToDeemix` → `MaterializeOutcome`). Mutationen
+  (Track-Toggle, Tag-Flag, Subscribe/Unsubscribe, Global-Poller) setzen einen
+  Dirty-Marker, den ein `BackpackSyncCoordinator` nach 30 s Debounce
+  materialisiert (plus 10-min-Reconciliation als Safety-Net); der Poller baut
+  nicht mehr inline. Nach jedem Replace wird die Remote-Playlist zurückgelesen
+  und verglichen — nur bei Gleichheit wird die Signatur fortgeschrieben, bei
+  404/403 wird die Playlist neu angelegt. Backpack-Seite: Status-Karte +
+  Button „Push to Spotify". Keine Migration nötig.
+
 ## [1.11.0] — 2026-09-11
 
 ### Added

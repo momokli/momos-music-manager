@@ -9,8 +9,8 @@ use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth, Token,
     clients::{BaseClient, OAuthClient},
     model::{
-        Market, PlaylistId, SimplifiedPlaylist, TrackId, UserId, playlist::FullPlaylist,
-        track::FullTrack,
+        Market, PlayableId, PlayableItem, PlaylistId, SimplifiedPlaylist, TrackId, UserId,
+        playlist::FullPlaylist, track::FullTrack,
     },
 };
 use sqlx::Pool;
@@ -377,6 +377,100 @@ impl SpotifyClient {
             }
         }
         Ok(())
+    }
+
+    /// Replace *all* tracks of a Spotify playlist (mirror semantics).
+    ///
+    /// Unlike [`Self::add_tracks_to_playlist`] this does not append: the
+    /// resulting playlist contains exactly `track_uris`, in that order.
+    /// Spotify accepts at most 100 URIs per call, so the list is chunked; the
+    /// first chunk replaces, the remaining ones are appended (still yielding
+    /// exactly the intended set for the whole call).
+    ///
+    /// `track_uris` must be `spotify:track:XXX` URIs.
+    pub async fn replace_playlist_items(
+        &self,
+        playlist_id: &str,
+        track_uris: &[String],
+    ) -> Result<()> {
+        self.refresh_token_if_needed().await?;
+        let pid = PlaylistId::from_id(playlist_id)
+            .map_err(|e| anyhow::anyhow!("Invalid playlist ID: {}", e))?;
+
+        // Group into batches of at most 100 playable items (invalid URIs are
+        // dropped so they never silently shrink the requested set — the caller
+        // verifies the remote result afterwards).
+        let batches: Vec<Vec<PlayableId>> = track_uris
+            .chunks(100)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .filter_map(|uri| {
+                        TrackId::from_uri(uri)
+                            .ok()
+                            .map(PlayableId::Track)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        let mut batches = batches.into_iter();
+        match batches.next() {
+            // Replace with the first batch (this also clears the playlist when
+            // the batch is empty).
+            Some(first) => {
+                self.spotify
+                    .playlist_replace_items(pid.clone(), first)
+                    .await
+                    .context("Failed to replace playlist items")?;
+            }
+            None => {
+                // Empty set: explicitly clear the playlist.
+                self.spotify
+                    .playlist_replace_items(pid.clone(), std::iter::empty::<PlayableId>())
+                    .await
+                    .context("Failed to clear playlist items")?;
+                return Ok(());
+            }
+        }
+
+        for batch in batches {
+            if !batch.is_empty() {
+                self.spotify
+                    .playlist_add_items(pid.clone(), batch, None)
+                    .await
+                    .context("Failed to add tracks to playlist")?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read all track URIs currently in a Spotify playlist (paginated).
+    ///
+    /// Local files and non-track items (episodes) are skipped: they cannot be
+    /// produced by the Backpack transport and would otherwise make the remote
+    /// verification fail spuriously.
+    pub async fn get_playlist_track_uris(&self, playlist_id: &str) -> Result<Vec<String>> {
+        self.refresh_token_if_needed().await?;
+        let pid = PlaylistId::from_id(playlist_id)
+            .map_err(|e| anyhow::anyhow!("Invalid playlist ID: {}", e))?;
+
+        let mut uris = Vec::new();
+        let mut stream = self
+            .spotify
+            .playlist_items(pid, None, Some(Market::FromToken));
+        while let Some(item) = stream.next().await {
+            let item = item.map_err(|e| anyhow::Error::from(e)).context("Spotify API error")?;
+            if item.is_local {
+                continue;
+            }
+            if let Some(PlayableItem::Track(track)) = item.track
+                && let Some(id) = track.id
+            {
+                uris.push(format!("spotify:track:{id}"));
+            }
+        }
+        Ok(uris)
     }
 
     /// Save current tokens to database

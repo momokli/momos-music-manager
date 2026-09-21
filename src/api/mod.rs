@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::AppState;
 
+pub mod backpack;
 pub mod daily;
 pub mod deemix_api;
 pub mod digging;
@@ -51,4 +52,5 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(update::router())
         .merge(telemetry_settings::router())
         .merge(ui_events::router())
+        .merge(backpack::router())
 }
