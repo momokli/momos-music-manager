@@ -6,6 +6,26 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rolling-Kanal bot neue Dev-Builds nicht an (#44)**: Der Rolling-Vergleich
+  nutzte `latest > current` auf SemVer-`Version`, dessen abgeleitetes `Ord`
+  die Build-Metadata (den SHA) lexikographisch mitvergleicht — ein frisch
+  gepushter Commit, dessen SHA niedriger sortiert als der laufende, galt als
+  „Up to date" (`1.11.0-dev+0f5dde5a` < `1.11.0-dev+f0000000`). Rolling
+  vergleicht jetzt die Versionszeichenkette (jeder andere Build von `main`
+  ist ein Update), eine ältere **Basisversion** bleibt ausgeschlossen.
+  Zusätzlich verglich ein Kanalwechsel über die Pre-Release-Grenze: ein
+  Release-Build (`1.11.0`) auf dem Rolling-Kanal bekam `1.11.0-dev+<sha>`
+  nie angeboten, weil stabile Versionen *über* ihren Pre-Releases stehen.
+  Cross-Channel gilt jetzt „gleiche/neuere Basisversion + andere
+  Zeichenkette → Update", ohne Silent-Downgrade. Tests:
+  `rolling_offers_new_dev_build_whose_sha_sorts_lower`,
+  `release_build_on_rolling_channel_offers_same_base_dev_build`,
+  `release_build_on_rolling_channel_ignores_older_base_dev_build`,
+  `dev_build_on_rolling_channel_ignores_older_base_dev_build`,
+  `dev_build_on_release_channel_offers_stable_release`.
+
 ### Added
 
 - **Backpack: expliziter Spotify-Playlist-Push (#43, ADR-060)**: Die eine

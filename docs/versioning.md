@@ -83,9 +83,18 @@ Verhalten:
   Wenn die Update-Quelle den *anderen* Kanal ausliefert als gewählt — etwa
   durch einen `base_url`-Override auf den falschen Feed. In `update check`
   und `update apply` mit Handlungs-Hinweis ausgegeben.
-- **Rolling-Vergleich (Dev):** `latest > current` → Update verfügbar;
-  precedence-gleich **und** andere Versionszeichenkette (neuer SHA) → Update
-  verfügbar; sonst up to date. Release: nur `latest > current`.
+- **Rolling-Vergleich (Dev):** Rolling trackt `main` — jede **andere
+  Versionszeichenkette** ist ein neuer Build (der SHA wird lexikographisch
+  verglichen, eine höhere SHA-Sortierung ist *kein* Merkmal eines neueren
+  Builds); gleiche Zeichenkette → up to date. Eine **ältere Basisversion**
+  (z. B. `1.10.0-dev+x` vs. `1.11.0-dev+y`) ist nie ein Update. Release-Kanal:
+  reine SemVer-Precedence (`latest > current`).
+- **Kanalwechsel-Vergleich (cross-channel):** Läuft der Build nicht im
+  gewählten Kanal (Release-Build auf `rolling` oder umgekehrt), vergleichen
+  die Versionen über die Pre-Release-Grenze — eine stabile `1.11.0` steht
+  *über* jedem `1.11.0-dev+*`. Deshalb gilt dort: gleiche oder neuere
+  Basisversion **und** andere Versionszeichenkette → Update verfügbar
+  (kein Silent-Downgrade auf eine ältere Basis).
 - **Artefakt-Auflösung:** über den **versionierten** Namen
   (`momos-music-manager-<version>-<os-arch>.<ext>`), abgeleitet aus der
   geparsten Manifest-Version (`Version::to_string()` erhält die
