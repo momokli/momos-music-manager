@@ -6,9 +6,11 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-09-21
+
 ### Fixed
 
-- **Rolling-Kanal bot neue Dev-Builds nicht an (#44)**: Der Rolling-Vergleich
+- **Rolling-Kanal bot neue Dev-Builds nicht an (#47, PR #46)**: Der Rolling-Vergleich
   nutzte `latest > current` auf SemVer-`Version`, dessen abgeleitetes `Ord`
   die Build-Metadata (den SHA) lexikographisch mitvergleicht — ein frisch
   gepushter Commit, dessen SHA niedriger sortiert als der laufende, galt als
