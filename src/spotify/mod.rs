@@ -4,6 +4,7 @@
 //! Spotify playlists and tracks to the local database.
 
 pub mod client;
+pub mod cooldown;
 pub mod models;
 pub mod replay;
 pub mod retry;

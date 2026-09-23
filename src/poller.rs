@@ -32,6 +32,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::ServiceCredentials;
 use crate::db;
 use crate::spotify::client::SpotifyClient;
+use crate::spotify::cooldown::cooldown as spotify_cooldown;
 use crate::spotify::models::TrackInfo;
 use crate::spotify::retry::{extract_retry_after_secs, format_duration};
 use crate::tasks::{Task, TaskManager, TaskStatus, TaskType};
@@ -77,6 +78,17 @@ pub async fn start_subscription_poller(
         // Use a labelled block so that early exits (via `break 'cycle`)
         // still reach the sleep at the bottom — prevents tight error loops.
         'cycle: {
+            // Honour a process-wide rate-limit cooldown before touching Spotify:
+            // retrying inside Spotify's penalty window is what kept the limit
+            // saturated.
+            if let Some(secs) = spotify_cooldown().remaining_secs() {
+                debug!(
+                    "Subscription poller: Spotify rate-limit cooldown active ({}s remaining), skipping cycle",
+                    secs
+                );
+                break 'cycle;
+            }
+
             // -- Fetch due subscriptions ---------------------------------------
             let subscriptions = match db::get_due_subscriptions(&db).await {
                 Ok(subs) => subs,
@@ -115,13 +127,9 @@ pub async fn start_subscription_poller(
                     break;
                 }
 
-                if let Err(e) = poll_subscribed_playlist(
-                    &db,
-                    &spotify_client,
-                    subscription,
-                    &task_manager,
-                )
-                .await
+                if let Err(e) =
+                    poll_subscribed_playlist(&db, &spotify_client, subscription, &task_manager)
+                        .await
                 {
                     error!(
                         "Subscription poller: error polling subscription {} (playlist_id={}): {:#}",
@@ -211,36 +219,25 @@ async fn poll_subscribed_playlist(
 
     // -- Fetch playlist metadata (with retry) -------------------------------
     let playlist = {
-        let mut attempt = 0;
-        loop {
-            match spotify_client.get_playlist(&subscription.playlist_id).await {
-                Ok(p) => break p,
-                Err(e) => {
-                    if let Some(raw_secs) = extract_retry_after_secs(&e) {
-                        let clamped = raw_secs.min(300);
-                        attempt += 1;
-                        if attempt >= 3 {
-                            task_manager
-                                .update_task_status(&task_id, TaskStatus::Failed)
-                                .await;
-                            return Err(e)
-                                .context("Failed to fetch playlist from Spotify after 3 retries");
-                        }
-                        let sleep_secs = clamped + 1;
-                        warn!(
-                            "Subscription poller: rate limited fetching playlist '{}'. \
-                             Retry-After: {} ({raw_secs}s total, clamped to {clamped}s), attempt {attempt}/3, waiting {sleep_secs}s",
-                            subscription.playlist_id,
-                            format_duration(raw_secs),
-                        );
-                        tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
-                    } else {
-                        task_manager
-                            .update_task_status(&task_id, TaskStatus::Failed)
-                            .await;
-                        return Err(e).context("Failed to fetch playlist from Spotify");
-                    }
+        match spotify_client.get_playlist(&subscription.playlist_id).await {
+            Ok(p) => p,
+            Err(e) => {
+                if let Some(raw_secs) = extract_retry_after_secs(&e) {
+                    // Record the penalty process-wide instead of sleeping inline
+                    // and retrying inside the window — that is exactly what kept
+                    // the limit saturated. The next cycle resumes once it expires.
+                    spotify_cooldown().note_retry_after(raw_secs);
+                    warn!(
+                        "Subscription poller: rate limited fetching playlist '{}'. \
+                         Retry-After: {} — cooling down, no inline retry",
+                        subscription.playlist_id,
+                        format_duration(raw_secs),
+                    );
                 }
+                task_manager
+                    .update_task_status(&task_id, TaskStatus::Failed)
+                    .await;
+                return Err(e).context("Failed to fetch playlist from Spotify");
             }
         }
     };
@@ -364,41 +361,27 @@ async fn poll_subscribed_playlist(
     let mut new_tracks_found = false;
 
     if !skip_track_fetch {
-        let track_stream = {
-            let mut attempt = 0;
-            loop {
-                match spotify_client
-                    .get_playlist_tracks(&subscription.playlist_id)
-                    .await
-                {
-                    Ok(s) => break s,
-                    Err(e) => {
-                        if let Some(raw_secs) = extract_retry_after_secs(&e) {
-                            let clamped = raw_secs.min(300);
-                            attempt += 1;
-                            if attempt >= 3 {
-                                task_manager
-                                    .update_task_status(&task_id, TaskStatus::Failed)
-                                    .await;
-                                return Err(e)
-                                    .context("Failed to get playlist tracks after 3 retries");
-                            }
-                            let sleep_secs = clamped + 1;
-                            warn!(
-                                "Subscription poller: rate limited fetching tracks for playlist '{}'. \
-                                 Retry-After: {} ({raw_secs}s total, clamped to {clamped}s), attempt {attempt}/3, waiting {sleep_secs}s",
-                                subscription.playlist_id,
-                                format_duration(raw_secs),
-                            );
-                            tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
-                        } else {
-                            task_manager
-                                .update_task_status(&task_id, TaskStatus::Failed)
-                                .await;
-                            return Err(e).context("Failed to get playlist tracks");
-                        }
-                    }
+        let track_stream = match spotify_client
+            .get_playlist_tracks(&subscription.playlist_id)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                if let Some(raw_secs) = extract_retry_after_secs(&e) {
+                    // See the metadata fetch above: record the penalty
+                    // process-wide, do not retry inside the window.
+                    spotify_cooldown().note_retry_after(raw_secs);
+                    warn!(
+                        "Subscription poller: rate limited fetching tracks for playlist '{}'. \
+                         Retry-After: {} — cooling down, no inline retry",
+                        subscription.playlist_id,
+                        format_duration(raw_secs),
+                    );
                 }
+                task_manager
+                    .update_task_status(&task_id, TaskStatus::Failed)
+                    .await;
+                return Err(e).context("Failed to get playlist tracks");
             }
         };
 

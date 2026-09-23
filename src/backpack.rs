@@ -34,6 +34,8 @@ use crate::db::settings::{
     KEY_BACKPACK_LAST_PUSH_STATUS, KEY_BACKPACK_PLAYLIST_ID, KEY_BACKPACK_PLAYLIST_URL,
     KEY_BACKPACK_SIGNATURE, delete_setting, get_setting, set_setting,
 };
+use crate::spotify::cooldown::cooldown as spotify_cooldown;
+use crate::spotify::retry::extract_retry_after_secs;
 
 /// Current Unix time in seconds (0 only if the clock is before the epoch).
 fn now_secs() -> i64 {
@@ -379,8 +381,9 @@ where
     let stored_signature = get_setting(pool, KEY_BACKPACK_SIGNATURE).await?;
     let stored_url = get_setting(pool, KEY_BACKPACK_PLAYLIST_URL).await?;
 
-    let unchanged =
-        !opts.force && stored_id.is_some() && stored_signature.as_deref() == Some(signature.as_str());
+    let unchanged = !opts.force
+        && stored_id.is_some()
+        && stored_signature.as_deref() == Some(signature.as_str());
     if unchanged {
         debug!("Backpack unchanged ({signature}), skipping materialisation");
         return Ok(MaterializeOutcome {
@@ -436,8 +439,8 @@ where
         });
     };
 
-    let mut spotify_url = spotify_url
-        .unwrap_or_else(|| format!("https://open.spotify.com/playlist/{playlist_id}"));
+    let mut spotify_url =
+        spotify_url.unwrap_or_else(|| format!("https://open.spotify.com/playlist/{playlist_id}"));
 
     // Mirror the (deduplicated, stably ordered) track set into the playlist.
     let mirrored = match spotify.replace_tracks(&playlist_id, &uris).await {
@@ -445,9 +448,7 @@ where
         Err(e) if is_playlist_gone(&e) => {
             // The playlist was deleted manually or belongs to a different
             // account now — re-create it and retry once. Never wedge.
-            warn!(
-                "Backpack playlist '{playlist_id}' is not authorable ({e:#}); re-creating it"
-            );
+            warn!("Backpack playlist '{playlist_id}' is not authorable ({e:#}); re-creating it");
             delete_setting(pool, KEY_BACKPACK_PLAYLIST_ID).await?;
             delete_setting(pool, KEY_BACKPACK_PLAYLIST_URL).await?;
             let (id, url) = create_backpack_playlist(pool, spotify).await?;
@@ -606,20 +607,85 @@ pub const BACKPACK_DEBOUNCE: Duration = Duration::from_secs(30);
 /// Safety-net reconciliation interval for the Backpack loop.
 pub const BACKPACK_RECONCILE_INTERVAL: Duration = Duration::from_secs(600);
 
+/// First retry delay after a failed Backpack materialisation.
+pub const BACKPACK_RETRY_BASE_SECS: u64 = 60;
+/// Upper bound for the exponential Backpack retry backoff.
+pub const BACKPACK_RETRY_MAX_SECS: u64 = 1800;
+
+/// Exponential backoff (seconds) for the `failures`-th consecutive failed
+/// Backpack materialisation: 60s, 120s, 240s, … capped at
+/// [`BACKPACK_RETRY_MAX_SECS`]. A Spotify `Retry-After` (`retry_after`) always
+/// wins when larger — the server's own deadline must be honoured.
+pub fn backpack_retry_backoff_secs(failures: u32, retry_after: Option<u64>) -> u64 {
+    let shift = failures.saturating_sub(1).min(16);
+    let exponential = BACKPACK_RETRY_BASE_SECS
+        .saturating_mul(1u64 << shift)
+        .min(BACKPACK_RETRY_MAX_SECS);
+    exponential.max(retry_after.unwrap_or(0))
+}
+
 /// Coordinates Backpack materialisation.
 ///
 /// Mutations only set a dirty marker; the [`start_backpack_coordinator`] loop
 /// materialises after a debounce. `request_push()` materialises on the next
 /// tick regardless of the signature (used by the manual push endpoint).
+///
+/// A failed push is **not** retried every tick: [`Self::note_failure`] schedules
+/// the next attempt with exponential backoff, extended to Spotify's
+/// `Retry-After` when one was reported — a rate limit must never be turned into
+/// a request storm.
 pub struct BackpackSyncCoordinator {
     push_requested: std::sync::atomic::AtomicBool,
+    /// Consecutive failed materialisation attempts (reset on success).
+    consecutive_failures: std::sync::atomic::AtomicU32,
+    /// Absolute unix second before which no automatic retry may run.
+    next_attempt_unix: std::sync::atomic::AtomicI64,
 }
 
 impl BackpackSyncCoordinator {
     pub fn new() -> Self {
         Self {
             push_requested: std::sync::atomic::AtomicBool::new(false),
+            consecutive_failures: std::sync::atomic::AtomicU32::new(0),
+            next_attempt_unix: std::sync::atomic::AtomicI64::new(0),
         }
+    }
+
+    /// Seconds until the next backoff-scheduled retry, or `None` when a retry
+    /// is allowed now.
+    pub fn retry_in_secs(&self) -> Option<u64> {
+        let remaining = self
+            .next_attempt_unix
+            .load(std::sync::atomic::Ordering::SeqCst)
+            - now_secs();
+        if remaining > 0 {
+            Some(remaining as u64)
+        } else {
+            None
+        }
+    }
+
+    /// Record a successful materialisation: clears the failure backoff.
+    pub fn note_success(&self) {
+        self.consecutive_failures
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.next_attempt_unix
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Record a failed materialisation and schedule the next retry with
+    /// exponential backoff, extended to at least `retry_after` when Spotify
+    /// reported a rate limit.
+    pub fn note_failure(&self, retry_after: Option<u64>) {
+        let failures = self
+            .consecutive_failures
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let delay = backpack_retry_backoff_secs(failures, retry_after);
+        self.next_attempt_unix.store(
+            now_secs().saturating_add(delay as i64),
+            std::sync::atomic::Ordering::SeqCst,
+        );
     }
 
     /// Request an on-demand (forced) push on the next coordinator tick.
@@ -636,13 +702,57 @@ impl BackpackSyncCoordinator {
     }
 
     fn has_push_request(&self) -> bool {
-        self.push_requested.load(std::sync::atomic::Ordering::SeqCst)
+        self.push_requested
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
 impl Default for BackpackSyncCoordinator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod retry_backoff_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_exponentially_and_caps() {
+        assert_eq!(backpack_retry_backoff_secs(1, None), 60);
+        assert_eq!(backpack_retry_backoff_secs(2, None), 120);
+        assert_eq!(backpack_retry_backoff_secs(3, None), 240);
+        assert_eq!(backpack_retry_backoff_secs(4, None), 480);
+        assert_eq!(
+            backpack_retry_backoff_secs(100, None),
+            BACKPACK_RETRY_MAX_SECS
+        );
+    }
+
+    #[test]
+    fn retry_after_wins_over_exponential_backoff() {
+        assert_eq!(backpack_retry_backoff_secs(1, Some(3063)), 3063);
+        assert_eq!(
+            backpack_retry_backoff_secs(99, Some(1)),
+            BACKPACK_RETRY_MAX_SECS
+        );
+    }
+
+    #[test]
+    fn coordinator_schedules_and_clears_backoff() {
+        let coord = BackpackSyncCoordinator::new();
+        assert!(coord.retry_in_secs().is_none());
+
+        coord.note_failure(Some(120));
+        let remaining = coord.retry_in_secs().expect("backoff after failure");
+        assert!((119..=120).contains(&remaining), "got {remaining}");
+
+        // A second failure keeps a (larger) schedule queued.
+        coord.note_failure(None);
+        assert!(coord.retry_in_secs().is_some());
+
+        coord.note_success();
+        assert!(coord.retry_in_secs().is_none());
     }
 }
 
@@ -677,10 +787,23 @@ pub async fn start_backpack_coordinator(
         let debounce_elapsed = elapsed_since_dirty
             .map(|e| e >= BACKPACK_DEBOUNCE.as_secs() as i64)
             .unwrap_or(false);
-        let reconcile_due = last_reconcile.elapsed().unwrap_or_default()
-            >= BACKPACK_RECONCILE_INTERVAL;
+        let reconcile_due =
+            last_reconcile.elapsed().unwrap_or_default() >= BACKPACK_RECONCILE_INTERVAL;
 
-        if forced || debounce_elapsed || reconcile_due {
+        // Never retry a failed push on every tick: the failure backoff and the
+        // process-wide Spotify cooldown both gate automatic attempts. A manual
+        // push (`forced`) is a single user-initiated call and always gets
+        // through.
+        let retry_in = coordinator.retry_in_secs();
+        let cooling = spotify_cooldown().remaining_secs();
+        let blocked = retry_in.is_some() || cooling.is_some();
+
+        if forced || ((debounce_elapsed || reconcile_due) && !blocked) {
+            if blocked {
+                debug!(
+                    "Backpack coordinator: automatic retry suppressed (backoff {retry_in:?}, cooldown {cooling:?})"
+                );
+            }
             last_reconcile = SystemTime::now();
             match SpotifyClient::from_stored_tokens(db.clone(), &credentials).await {
                 Ok(client) => {
@@ -690,35 +813,42 @@ pub async fn start_backpack_coordinator(
                         submit_to_deemix: forced,
                         dry_run: false,
                     };
-                    match materialize_backpack_playlist_with(
-                        &db,
-                        &client,
-                        deemix.as_ref(),
-                        opts,
-                    )
-                    .await
+                    match materialize_backpack_playlist_with(&db, &client, deemix.as_ref(), opts)
+                        .await
                     {
                         Ok(outcome) if outcome.updated => {
+                            coordinator.note_success();
+                            spotify_cooldown().clear();
                             info!(
                                 "Backpack coordinator: materialised {} track(s) (forced={}, verification_failed={})",
-                                outcome.track_count,
-                                forced,
-                                outcome.verification_failed,
+                                outcome.track_count, forced, outcome.verification_failed,
                             );
                             record_push_status(&db, "ok", None).await;
                         }
                         Ok(_) => {
+                            coordinator.note_success();
                             if forced {
                                 record_push_status(&db, "ok", None).await;
                             }
                         }
                         Err(e) => {
-                            warn!("Backpack coordinator: push failed: {e:#}");
+                            let retry_after = extract_retry_after_secs(&e);
+                            if let Some(secs) = retry_after {
+                                spotify_cooldown().note_retry_after(secs);
+                            }
+                            coordinator.note_failure(retry_after);
+                            let next_in = coordinator.retry_in_secs().unwrap_or(0);
+                            warn!(
+                                "Backpack coordinator: push failed: {e:#} — next automatic retry in {next_in}s"
+                            );
                             record_push_status(&db, "error", Some(&format!("{e:#}"))).await;
                         }
                     }
                 }
                 Err(e) => {
+                    // Not a Spotify API failure (usually missing/expired
+                    // tokens) — back off anyway so this cannot spin every tick.
+                    coordinator.note_failure(None);
                     debug!("Backpack coordinator: Spotify not available, skipping tick: {e:#}");
                 }
             }
@@ -774,12 +904,10 @@ pub async fn record_backpack_submit(pool: &Pool<Sqlite>, url: &str) -> Result<()
     .await
     .context("Failed to upsert Backpack deemix_downloads row")?;
 
-    sqlx::query(
-        "DELETE FROM deemix_downloads WHERE is_backpack = 1 AND spotify_playlist_url != ?",
-    )
-    .bind(url)
-    .execute(pool)
-    .await?;
+    sqlx::query("DELETE FROM deemix_downloads WHERE is_backpack = 1 AND spotify_playlist_url != ?")
+        .bind(url)
+        .execute(pool)
+        .await?;
 
     Ok(())
 }
@@ -800,14 +928,17 @@ impl BackpackSpotifyOps for crate::spotify::client::SpotifyClient {
         description: Option<&str>,
     ) -> Result<(String, String)> {
         crate::spotify::client::SpotifyClient::create_playlist(
-            self, user_id, name, public, description,
+            self,
+            user_id,
+            name,
+            public,
+            description,
         )
         .await
     }
 
     async fn add_tracks_to_playlist(&self, playlist_id: &str, uris: &[String]) -> Result<()> {
-        crate::spotify::client::SpotifyClient::add_tracks_to_playlist(self, playlist_id, uris)
-            .await
+        crate::spotify::client::SpotifyClient::add_tracks_to_playlist(self, playlist_id, uris).await
     }
 
     async fn replace_tracks(&self, playlist_id: &str, uris: &[String]) -> Result<()> {
@@ -1000,10 +1131,12 @@ mod tests {
         .await
         .unwrap();
 
-        sqlx::query("INSERT INTO tag_categories (id, name, prefix, is_default) VALUES (1, 'Mood', 'M', 0)")
-            .execute(pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO tag_categories (id, name, prefix, is_default) VALUES (1, 'Mood', 'M', 0)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
 
         // Tracks 1..5.
         sqlx::query(
@@ -1109,7 +1242,11 @@ mod tests {
         .unwrap();
 
         let ids = get_backpack_track_ids(&pool).await.unwrap();
-        assert_eq!(ids, vec![2], "overlapping sources must dedupe to a single id");
+        assert_eq!(
+            ids,
+            vec![2],
+            "overlapping sources must dedupe to a single id"
+        );
     }
 
     #[tokio::test]
@@ -1338,7 +1475,10 @@ mod tests {
         let actual = get_backpack_family_file_ids(&pool, &backpack_file_ids)
             .await
             .unwrap();
-        assert_eq!(actual, expected, "family expansion must match the view query");
+        assert_eq!(
+            actual, expected,
+            "family expansion must match the view query"
+        );
     }
 
     #[tokio::test]
@@ -1516,15 +1656,17 @@ mod tests {
         assert_eq!(out.track_count, 1);
         assert!(out.deemix_submitted);
         assert_eq!(*spotify.creates.lock().unwrap(), 1);
-        assert_eq!(*deemix.queued.lock().unwrap(), vec![out.spotify_url.clone().unwrap()]);
+        assert_eq!(
+            *deemix.queued.lock().unwrap(),
+            vec![out.spotify_url.clone().unwrap()]
+        );
 
         // Single deemix_downloads row, marked is_backpack.
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM deemix_downloads WHERE is_backpack = 1",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deemix_downloads WHERE is_backpack = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(count, 1);
 
         // Second run with unchanged set must be a no-op (no new create/submit).
@@ -1554,12 +1696,17 @@ mod tests {
         let real = "https://open.spotify.com/playlist/realid".to_string();
         record_backpack_submit(&pool, &real).await.unwrap();
 
-        let rows: Vec<(String, i64)> =
-            sqlx::query_as("SELECT spotify_playlist_url, is_backpack FROM deemix_downloads ORDER BY id")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(rows, vec![(real, 1)], "sentinel must be replaced by the real row");
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT spotify_playlist_url, is_backpack FROM deemix_downloads ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(real, 1)],
+            "sentinel must be replaced by the real row"
+        );
     }
 
     // ── Mirror semantics, verification, guards ──────────────────────────
@@ -1655,7 +1802,12 @@ mod tests {
         assert!(!out.updated);
         assert_eq!(*spotify.creates.lock().unwrap(), 0);
         assert!(spotify.replaces.lock().unwrap().is_empty());
-        assert!(get_setting(&pool, KEY_BACKPACK_SIGNATURE).await.unwrap().is_none());
+        assert!(
+            get_setting(&pool, KEY_BACKPACK_SIGNATURE)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1682,7 +1834,10 @@ mod tests {
 
         assert!(out.verification_failed, "mismatch must be reported");
         assert!(
-            get_setting(&pool, KEY_BACKPACK_SIGNATURE).await.unwrap().is_none(),
+            get_setting(&pool, KEY_BACKPACK_SIGNATURE)
+                .await
+                .unwrap()
+                .is_none(),
             "signature must NOT be set when verification fails"
         );
     }
@@ -1695,11 +1850,18 @@ mod tests {
 
         let spotify = MockSpotify::new();
         // Simulate a stale stored playlist that Spotify no longer accepts.
-        set_setting(&pool, KEY_BACKPACK_PLAYLIST_ID, "dead-id").await.unwrap();
-        set_setting(&pool, KEY_BACKPACK_PLAYLIST_URL, "https://open.spotify.com/playlist/dead-id")
+        set_setting(&pool, KEY_BACKPACK_PLAYLIST_ID, "dead-id")
             .await
             .unwrap();
-        *spotify.fail_replace.lock().unwrap() = Some("Spotify API error: 404 Not Found".to_string());
+        set_setting(
+            &pool,
+            KEY_BACKPACK_PLAYLIST_URL,
+            "https://open.spotify.com/playlist/dead-id",
+        )
+        .await
+        .unwrap();
+        *spotify.fail_replace.lock().unwrap() =
+            Some("Spotify API error: 404 Not Found".to_string());
 
         let out = materialize_backpack_playlist_with::<_, MockDeemix>(
             &pool,
@@ -1723,10 +1885,20 @@ mod tests {
     #[tokio::test]
     async fn coordinator_dirty_marker_roundtrip() {
         let pool = settings_db().await;
-        assert!(get_setting(&pool, KEY_BACKPACK_DIRTY_AT).await.unwrap().is_none());
+        assert!(
+            get_setting(&pool, KEY_BACKPACK_DIRTY_AT)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         mark_backpack_dirty(&pool).await.unwrap();
-        assert!(get_setting(&pool, KEY_BACKPACK_DIRTY_AT).await.unwrap().is_some());
+        assert!(
+            get_setting(&pool, KEY_BACKPACK_DIRTY_AT)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         // The coordinator flags an on-demand push exactly once.
         let coord = BackpackSyncCoordinator::new();
