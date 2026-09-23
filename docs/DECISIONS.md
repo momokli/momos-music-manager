@@ -1229,3 +1229,96 @@ und wird deshalb **vollständig ersetzt**, nie ergänzt:
   versucht erneut, statt einen falschen Zustand als synchron zu markieren.
 - Keine Migration nötig: Settings-Keys (024) und `deemix_downloads.is_backpack`
   (025) existieren bereits.
+
+## ADR-061: Spotify-Rate-Limit — prozessweiter Cooldown + Backoff
+
+**Date**: 2026-09-23
+**Status**: Accepted (implemented, Issue #49)
+
+**Context**: Ein fehlgeschlagener Backpack-Push wurde bei jedem Coordinator-Tick
+(5 s) erneut versucht (2081 Versuche an einem Tag, 0 Erfolge), und sowohl der
+Coordinator als auch Subscription- und Global-Poller verwarfen Spotifys
+`Retry-After` (auf 300 s geklemmt bzw. gar nicht gelesen). Spotifys Limit ist ein
+gleitendes Fenster — Retries *im* Penalty-Fenster halten es gesättigt, die App
+sperrt sich selbst aus (beobachtet: ein Tag lang 0 von 58 Subscription-Polls
+erfolgreich, obwohl der Token-Refresh durchgehend funktionierte).
+
+**Decision**:
+
+1. **`SpotifyCooldown`** (`src/spotify/cooldown.rs`) ist die einzige Wahrheit für
+   „dürfen wir Spotify gerade ansprechen“: ein prozessweiter Deadline-Wert, der nur
+   verlängert (nie verkürzt), aus `Retry-After` gesetzt und bei Erfolg gelöscht wird
+   und nach Ablauf selbst heilt (Cap 6 h).
+2. **Alle Spotify-Loops konsultieren ihn** vor dem Request (Subscription-Poller,
+   Global-Poller, Backpack-Coordinator).
+3. **Kein Inline-Retry im Penalty-Fenster**: bei 429 wird der Cooldown gesetzt und
+   der Zyklus abgebrochen, statt 3× innerhalb des Fensters zu retryen.
+4. **Backoff statt Tick-Retry**: der Coordinator plant den nächsten automatischen
+   Versuch exponentiell (60 s → 1800 s), angehoben auf `Retry-After`, und setzt ihn
+   nur bei Erfolg zurück. Ein manueller Push (`force`) kommt weiter durch.
+
+**Consequences**:
+
+- Ein einzelner 429 pausiert alle Spotify-Caller — gewollt: nur so kann das
+  gleitende Fenster leerlaufen.
+- `Retry-After` wird nicht mehr geklemmt; pathologische Werte sind auf 6 h begrenzt.
+- ADR-060 („der bestehende 429-Retry greift“) ist damit überholt.
+
+## ADR-062: Backpack-Transport — ID-Fallstricke, marktfreier Read, tolerante Verifikation
+
+**Date**: 2026-09-23
+**Status**: Accepted (implemented)
+
+**Context**: Die Backpack-Playlist konnte nie angelegt werden, obwohl Retry- und
+Verifikationslogik mehrfach nachgebessert wurden. Ursache waren drei unabhängige
+Fehler im Zusammenspiel mit rspotify 0.15 und Spotifys Marktverhalten.
+
+**Decision**:
+
+1. **rspotify-IDs**: `Id::to_string()`/`Display` liefern die *URI*
+   (`spotify:user:<id>`), `Id::id()` die blanke Id. Alle Stellen, die eine Id
+   brauchen (`get_current_user_id`, `create_playlist`-Rückgabe), nutzen `.id()`;
+   Track-URIs werden nie aus `Display` zusammengesetzt. Ein Regressionstest
+   (`spotify::client::tests`) pinnt die Falle.
+2. **Verifikations-Read ohne Market**: `Market::FromToken` liefert für
+   markt-nicht-verfügbare Tracks `null`, wodurch eine korrekte Playlist
+   unvollständig aussah.
+3. **Tolerante Verifikation**: Spotify verwirft markt-nicht-verfügbare Tracks beim
+   Schreiben still, ein exakter Set-Match ist nicht erreichbar. Nur eine *grobe*
+   Abweichung gilt als Fehler (>1 %, min 5 Tracks); ein Read-Fehler ist „unklar“
+   (Signatur wird fortgeschrieben), kein Mismatch.
+4. **Materialisierungen sind serialisiert** (prozessweiter Lock), damit Coordinator
+   und manueller Push sich nicht auf derselben Playlist verheddern.
+
+**Consequences**:
+
+- `backpack.signature` wird nach einem erfolgreichen Write auch bei kleiner
+  Abweichung fortgeschrieben → kein Rebuild-Loop mehr.
+- ADR-060 Punkt 3 („nur bei Gleichheit“) ist damit überholt; ein Mismatch bleibt
+  sichtbar (`verification_failed`, Log mit Diff-Sample).
+- Die 2 dauerhaft nicht spiegelbaren Tracks (Markt/Region) sind dokumentiert
+  akzeptiert.
+
+## ADR-063: „Backpack“ ist der UI-Oberbegriff für Subscribe
+
+**Date**: 2026-09-23
+**Status**: Accepted (implemented, Issue #40)
+
+**Context**: `Subscribe` und `Backpack` sind dasselbe Konzept — PR #34 hat den
+Transport vereinheitlicht (eine aggregierte Playlist, ein deemix-Submit), die UI
+zeigte aber weiterhin Glocke, „Subscribed“ und „Unsubscribe“. Zusätzlich listete die
+Backpack-Seite nur Tag-Quellen und verschwieg die subscribten Playlists, was den
+Eindruck zweier Systeme erzeugte.
+
+**Decision**: UI-Terminologie durchgängig „Backpack“ — Spalte, Filter, Buttons
+(Box-Icon: `fa-box` = drin, `fa-box-open` = nicht drin), Dashboard-Karte, Toasts,
+Tooltips mit der realen Semantik. API-Pfade und interne Bezeichner bleiben
+(`/api/playlists/subscriptions`, `state.subscribed`). Die Backpack-Seite zeigt und
+verwaltet beide Quellen (Playlist- und Tag-Quellen) direkt.
+
+**Consequences**:
+
+- Kein Breaking der REST-Routen oder der DB.
+- „Aus dem Backpack entfernen“ ist jetzt auf der Backpack-Seite möglich; bei einer
+  Playlist bedeutet das Unsubscribe (stoppt das Polling), bei einem Tag nur das
+  Clear des Flags.

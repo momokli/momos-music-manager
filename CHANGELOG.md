@@ -6,6 +6,43 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+### Added
+
+- **Backpack-Seite verwaltet das Backpack**: Playlist-Quellen (subscribte Playlists)
+  und Tag-Quellen werden nebeneinander gelistet und sind dort direkt entfernbar (Tag:
+  `PUT /api/tags/{id}/backpack`, Playlist: `DELETE /api/playlists/subscriptions/{id}`).
+  Die Seite war bisher read-only.
+
+### Changed
+
+- **„Subscribe“ heißt in der UI jetzt „Backpack“ (#40)**: Spalte, Filter, Buttons
+  (Box-Icon), Dashboard-Karte und Toasts. Die Tooltips beschreiben die reale Semantik
+  (eine aggregierte Backpack-Playlist → ein deemix-Submit, prune-safe). API-Pfade und
+  interne Namen bleiben unverändert.
+
+### Fixed
+
+- **Backpack-Playlist wurde nie angelegt**: `get_current_user_id` gab die rspotify-*URI*
+  (`spotify:user:<id>`) statt der blanken Id zurück → `POST
+  /v1/users/spotify:user:<id>/playlists` → **400 Bad Request**. Ebenso lieferte
+  `create_playlist` die Playlist-URI zurück und `get_playlist_track_uris` baute
+  `spotify:track:spotify:track:<id>`.
+- **429-Sturm (#49)**: Coordinator, Subscription- und Global-Poller ignorierten
+  `Retry-After` (auf 300 s geklemmt bzw. gar nicht gelesen) und retryten im
+  Penalty-Fenster; der Coordinator zusätzlich alle 5 s (2081 Versuche/Tag, 0 Erfolge).
+  Jetzt: prozessweiter Cooldown, exponentielles Backoff (60 s → 30 min) und
+  Zyklus-Abbruch beim ersten 429.
+- **Backpack-Verifikation** las mit `Market::FromToken`, wodurch Spotify für
+  markt-nicht-verfügbare Tracks `null` liefert (~90 von 6480) — die Playlist sah
+  „unvollständig“ aus und `backpack.signature` wurde nie gesetzt (Rebuild-Loop). Der
+  Read ist jetzt marktfrei, die Verifikation toleriert kleine Abweichungen (1 %, min 5)
+  und ein Read-Fehler gilt als unklar statt als Mismatch. Zusätzlich sind
+  Materialisierungen serialisiert (Coordinator vs. manueller Push).
+- **`v_track_tags`-Backpack-Query 8,8 s → 0,05 s** (Migration 026: Expression-Indizes
+  auf `LOWER(TRIM(name))`). Das war die Ursache der leeren Backpack-Karte
+  (`/api/backpack`-Timeout) und beschleunigt zugleich `refresh_track_resolved_tags`,
+  die Digging-Queries und die Files-Tag-Filter.
+
 ## [1.12.0] — 2026-09-21
 
 ### Fixed
