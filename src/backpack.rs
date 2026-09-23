@@ -396,6 +396,12 @@ where
         && stored_id.is_some()
         && stored_signature.as_deref() == Some(signature.as_str());
     if unchanged {
+        // Nothing pending: the materialised playlist already matches this set.
+        // Clear the dirty marker here as well — otherwise it stays set forever
+        // (only a real push cleared it), which keeps the coordinator's debounce
+        // gate permanently open and re-resolves the whole Backpack set on every
+        // tick.
+        clear_backpack_dirty(pool).await?;
         debug!("Backpack unchanged ({signature}), skipping materialisation");
         return Ok(MaterializeOutcome {
             track_count: uris.len(),
@@ -1964,6 +1970,54 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "the signature must advance so a few dropped tracks cannot pin a rebuild loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_set_clears_the_dirty_marker() {
+        // A signature-gated run that finds nothing to do must still clear the
+        // dirty marker: leaving it set kept the coordinator's debounce gate open
+        // and re-resolved the whole Backpack set on every tick.
+        let pool = test_db().await;
+        seed(&pool).await;
+        create_settings_tables(&pool).await;
+
+        let spotify = MockSpotify::new();
+        materialize_backpack_playlist_with::<_, MockDeemix>(
+            &pool,
+            &spotify,
+            None,
+            MaterializeOptions {
+                force: true,
+                submit_to_deemix: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // A membership mutation marks the set dirty...
+        mark_backpack_dirty(&pool).await.unwrap();
+        assert!(get_setting(&pool, KEY_BACKPACK_DIRTY_AT).await.unwrap().is_some());
+
+        // ...but the next (signature-gated) run has nothing to do and clears it.
+        let out = materialize_backpack_playlist_with::<_, MockDeemix>(
+            &pool,
+            &spotify,
+            None,
+            MaterializeOptions {
+                force: false,
+                submit_to_deemix: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!out.updated, "an unchanged set must not re-materialise");
+        assert!(
+            get_setting(&pool, KEY_BACKPACK_DIRTY_AT).await.unwrap().is_none(),
+            "the dirty marker must be cleared when there is nothing to do"
         );
     }
 

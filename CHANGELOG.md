@@ -43,6 +43,11 @@ All notable changes to Momo's Music Manager.
   (`/api/backpack`-Timeout) und beschleunigt zugleich `refresh_track_resolved_tags`,
   die Digging-Queries und die Files-Tag-Filter.
 
+- **Dirty-Marker blieb stehen**: Ein signature-gated Lauf ohne Änderung
+  (`unchanged`) räumte `backpack.dirty_at` nicht auf. Dadurch blieb das
+  Debounce-Gate des Coordinators dauerhaft offen und das komplette Set wurde
+  alle 5 s neu aufgelöst (vor Migration 026: jedes Mal ~8,8 s).
+
 ## [1.12.0] — 2026-09-21
 
 ### Fixed
