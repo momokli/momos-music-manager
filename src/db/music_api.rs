@@ -24,7 +24,10 @@ pub struct MusicApiImport {
 }
 
 /// Terminal states — an ISRC here is never re-ordered.
-const TERMINAL_STATES: &str = "'imported','absent','failed'";
+// A row in `music_api_imports` means the ISRC is already handled — ordered,
+// downloaded (`ready`), imported, or terminal. None of those may be ordered
+// again: re-ordering an in-flight ISRC would spam `music-api` every cycle and
+// stall progress at the first batch.
 
 /// Convert the backpack helpers' `anyhow` error into an `sqlx::Error`.
 fn as_sqlx(e: anyhow::Error) -> sqlx::Error {
@@ -169,8 +172,9 @@ async fn isrcs_for_tracks(
 }
 
 /// ISRCs that are already in a terminal state (never ordered again).
-async fn terminal_isrcs(pool: &Pool<Sqlite>) -> Result<HashSet<String>, sqlx::Error> {
-    let sql = format!("SELECT isrc FROM music_api_imports WHERE state IN ({TERMINAL_STATES})");
+/// Every ISRC the ledger already knows about, in any state.
+async fn known_isrcs(pool: &Pool<Sqlite>) -> Result<HashSet<String>, sqlx::Error> {
+    let sql = "SELECT isrc FROM music_api_imports";
     Ok(sqlx::query_scalar::<_, String>(&sql)
         .fetch_all(pool)
         .await?
@@ -178,9 +182,9 @@ async fn terminal_isrcs(pool: &Pool<Sqlite>) -> Result<HashSet<String>, sqlx::Er
         .collect())
 }
 
-/// ISRCs of Backpack tracks that have `isrc` set, no linked file and are not in
-/// a terminal state — the demand to order from `music-api`. Deduplicated,
-/// capped at `limit`.
+/// ISRCs of Backpack tracks that have `isrc` set, no linked file and no row in
+/// the ledger yet — the demand to order from `music-api`. Deduplicated, capped
+/// at `limit`.
 pub async fn demand_isrcs(pool: &Pool<Sqlite>, limit: usize) -> Result<Vec<String>, sqlx::Error> {
     if limit == 0 {
         return Ok(Vec::new());
@@ -190,11 +194,11 @@ pub async fn demand_isrcs(pool: &Pool<Sqlite>, limit: usize) -> Result<Vec<Strin
         return Ok(Vec::new());
     }
     let isrcs = isrcs_for_tracks(pool, &missing).await?;
-    let terminal = terminal_isrcs(pool).await?;
+    let known = known_isrcs(pool).await?;
 
     let mut out = Vec::new();
     for isrc in isrcs {
-        if terminal.contains(&isrc) {
+        if known.contains(&isrc) {
             continue;
         }
         out.push(isrc);
@@ -219,7 +223,7 @@ pub async fn demand_count(pool: &Pool<Sqlite>) -> i64 {
     let sql = format!(
         "SELECT COUNT(DISTINCT isrc) FROM service_tracks
           WHERE isrc IS NOT NULL AND id IN ({placeholders})
-            AND isrc NOT IN (SELECT isrc FROM music_api_imports WHERE state IN ({TERMINAL_STATES}))"
+            AND isrc NOT IN (SELECT isrc FROM music_api_imports)"
     );
     let mut query = sqlx::query_scalar::<_, i64>(&sql);
     for id in &missing {
@@ -526,6 +530,27 @@ mod tests {
         make_backpack_track(&pool, 4, "ISRC-4").await;
         let demand = demand_isrcs(&pool, 1).await.unwrap();
         assert_eq!(demand.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn demand_skips_in_flight_orders() {
+        let pool = test_db().await;
+        make_backpack_track(&pool, 1, "ISRC-A").await;
+        make_backpack_track(&pool, 2, "ISRC-B").await;
+
+        // Ordering must take ISRC-A out of the demand immediately, otherwise the
+        // next cycle re-orders the same batch instead of advancing to ISRC-B.
+        upsert_ordered(&pool, "ISRC-A", "order-1").await.unwrap();
+        let demand = demand_isrcs(&pool, 100).await.unwrap();
+        assert_eq!(demand, vec!["ISRC-B"]);
+        assert_eq!(demand_count(&pool).await, 1);
+
+        // `ready` (delivered, not yet imported) is in flight too.
+        set_state(&pool, "ISRC-B", "ready", Some("flac"), None, None)
+            .await
+            .unwrap();
+        assert!(demand_isrcs(&pool, 100).await.unwrap().is_empty());
+        assert_eq!(demand_count(&pool).await, 0);
     }
 
     #[tokio::test]
