@@ -148,4 +148,52 @@ test.describe("Backpack Spotify playlist", () => {
 
     expect(errors).toEqual([]);
   });
+
+  test("a playlist source can be removed from the backpack page", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await page.route("**/api/playlists/subscriptions", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({
+          json: {
+            data: [
+              {
+                id: 5,
+                service: "spotify",
+                playlistId: "pl-test",
+                playlistName: "Test Set",
+                trackCount: 42,
+                isActive: true,
+              },
+            ],
+          },
+        });
+      } else {
+        await route.continue();
+      }
+    });
+
+    let removedUrl = null;
+    await page.route("**/api/playlists/subscriptions/*", async (route) => {
+      removedUrl = route.request().url();
+      await route.fulfill({ json: { data: { unsubscribed: true } } });
+    });
+
+    await gotoBackpack(page);
+
+    await expect(page.locator(".backpack-playlist-remove").first()).toBeVisible();
+    await expect(
+      page.locator(".backpack-tag-card", { hasText: "Test Set" }),
+    ).toBeVisible();
+
+    await page.locator(".backpack-playlist-remove").first().click();
+
+    await expect(page.locator(".toast-notification")).toContainText("Backpack", {
+      timeout: 6000,
+    });
+    expect(removedUrl).toContain("/api/playlists/subscriptions/5");
+
+    expect(errors).toEqual([]);
+  });
 });
