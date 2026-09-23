@@ -85,6 +85,31 @@ async fn all_migrations_run_cleanly() {
         );
     }
 
+    // Verify the name-match expression indexes exist (migration 026). Without
+    // them the tag↔playlist joins fall back to a ~32M-row nested loop and the
+    // Backpack endpoints time out.
+    let indexes: Vec<String> =
+        sqlx::query("SELECT name FROM sqlite_master WHERE type='index' ORDER BY name")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+
+    for idx in [
+        "idx_tags_name_norm",
+        "idx_service_playlists_name_norm",
+        "idx_frt_tag_name_norm",
+    ] {
+        assert!(
+            indexes.contains(&idx.to_string()),
+            "Expected index '{}' not found after migrations. Existing indexes: {:?}",
+            idx,
+            indexes
+        );
+    }
+
     // Verify seed data from migration 001 exists
     let category_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM tag_categories WHERE is_default = 1")
