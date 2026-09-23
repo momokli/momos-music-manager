@@ -48,6 +48,17 @@ All notable changes to Momo's Music Manager.
   Debounce-Gate des Coordinators dauerhaft offen und das komplette Set wurde
   alle 5 s neu aufgelöst (vor Migration 026: jedes Mal ~8,8 s).
 
+- **Backpack-Badge sagte dauerhaft „out of sync“**: `dirty` heißt „eine
+  Membership-Mutation ist vorgemerkt“, nicht „die Playlist ist falsch“ — und der
+  Poller setzte es zusätzlich in jeder Runde mit fälligen Subscriptions (also fast
+  immer). `GET /api/backpack` liefert jetzt `inSync` (Vergleich der gespeicherten
+  Signatur mit dem aktuellen Set) und die UI stützt das Badge darauf; der Poller
+  markiert dirty nur noch, wenn wirklich Tracks dazukamen oder die Playlist
+  umbenannt wurde (der Name steuert das Tag↔Playlist-Matching).
+- **Silenter Coordinator-Fehler**: schlug `from_stored_tokens` fehl, backte der
+  Coordinator nur auf `debug` ab (im Default-Log unsichtbar) — der Backpack-
+  Transport war damit unbemerkt still. Jetzt `warn` inklusive nächstem Versuch.
+
 ## [1.12.0] — 2026-09-21
 
 ### Fixed

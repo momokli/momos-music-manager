@@ -16,8 +16,9 @@ use std::sync::Arc;
 use crate::AppState;
 use crate::api::types::{ApiResponse, internal_error};
 use crate::backpack::{
-    BackpackSpotifyOps, MaterializeOptions, backpack_status, has_pending_push,
-    materialize_backpack_playlist_with, record_push_status,
+    BackpackSpotifyOps, MaterializeOptions, backpack_signature, backpack_status,
+    has_pending_push, materialize_backpack_playlist_with, record_push_status,
+    resolve_backpack_track_uris,
 };
 use crate::spotify::client::SpotifyClient;
 
@@ -26,12 +27,26 @@ async fn backpack_status_handler(State(state): State<Arc<AppState>>) -> impl Int
     match backpack_status(&state.db).await {
         Ok(status) => {
             let push_pending = has_pending_push(&state.backpack_coordinator);
+
+            // `dirty` only means "a membership mutation is pending", which is not
+            // the same as "the playlist is wrong". `inSync` compares the stored
+            // signature with the current set, so the UI can show the truth
+            // without changing what `dirty` means to the coordinator.
+            let in_sync = match resolve_backpack_track_uris(&state.db).await {
+                Ok(uris) => {
+                    let current = backpack_signature(&uris);
+                    status.signature.as_deref() == Some(current.as_str())
+                }
+                Err(_) => false,
+            };
+
             Json(ApiResponse {
                 data: serde_json::json!({
                     "trackCount": status.track_count,
                     "fileCount": status.file_count,
                     "playlistUrl": status.playlist_url,
                     "signature": status.signature,
+                    "inSync": in_sync,
                     "dirty": status.dirty,
                     "dirtyAt": status.dirty_at,
                     "lastPushAt": status.last_push_at,

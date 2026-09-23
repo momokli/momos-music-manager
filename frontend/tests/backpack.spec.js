@@ -16,6 +16,7 @@ const STATUS_OK = {
     fileCount: 9,
     playlistUrl: "https://open.spotify.com/playlist/bp-id-1",
     signature: "abc123",
+    inSync: true,
     dirty: false,
     dirtyAt: null,
     lastPushAt: 1700000000,
@@ -55,8 +56,32 @@ test.describe("Backpack Spotify playlist", () => {
     await expect(
       page.locator('.backpack-playlist-link a[href*="spotify.com"]'),
     ).toBeVisible();
+    await expect(
+      page.locator('.backpack-playlist-link a[href*="spotify.com"]'),
+    ).toBeVisible();
     await expect(page.locator("#backpack-push")).toBeVisible();
+    await expect(page.locator(".backpack-badge-ok")).toContainText("in sync");
 
+    expect(errors).toEqual([]);
+  });
+
+  test("a set that no longer matches the playlist shows out of sync", async ({
+    page,
+  }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await page.route("**/api/backpack", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({ json: { data: { ...STATUS_OK.data, inSync: false } } });
+      } else {
+        await route.continue();
+      }
+    });
+
+    await gotoBackpack(page);
+
+    await expect(page.locator(".backpack-badge-dirty")).toContainText("out of sync");
     expect(errors).toEqual([]);
   });
 

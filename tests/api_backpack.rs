@@ -40,6 +40,8 @@ async fn backpack_status_reports_set_size() {
     assert_eq!(data["dirty"], Value::Bool(false));
     assert_eq!(data["pushPending"], Value::Bool(false));
     assert!(data["playlistUrl"].is_null());
+    // No playlist/signature yet → not in sync (the badge's source of truth).
+    assert_eq!(data["inSync"], Value::Bool(false));
 }
 
 #[tokio::test]

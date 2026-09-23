@@ -122,6 +122,11 @@ pub async fn start_subscription_poller(
             };
 
             // -- Poll each due subscription ------------------------------------
+            // Only a poll that actually changed membership needs to wake the
+            // Backpack coordinator: marking it dirty on every cycle left the UI
+            // permanently "out of sync" and re-resolved the whole set on every
+            // debounce.
+            let mut membership_changed = false;
             for subscription in &subscriptions {
                 if cancel_token.is_cancelled() {
                     break;
@@ -139,15 +144,17 @@ pub async fn start_subscription_poller(
                     break 'cycle;
                 }
 
-                if let Err(e) =
-                    poll_subscribed_playlist(&db, &spotify_client, subscription, &task_manager)
-                        .await
+                match poll_subscribed_playlist(&db, &spotify_client, subscription, &task_manager)
+                    .await
                 {
-                    error!(
-                        "Subscription poller: error polling subscription {} (playlist_id={}): {:#}",
-                        subscription.id, subscription.playlist_id, e,
-                    );
-                    // Continue to the next subscription despite the error.
+                    Ok(changed) => membership_changed |= changed,
+                    Err(e) => {
+                        error!(
+                            "Subscription poller: error polling subscription {} (playlist_id={}): {:#}",
+                            subscription.id, subscription.playlist_id, e,
+                        );
+                        // Continue to the next subscription despite the error.
+                    }
                 }
 
                 // Mark the subscription as polled (even on partial errors so we
@@ -167,10 +174,10 @@ pub async fn start_subscription_poller(
             // playlists + backpack tags) into ONE Spotify playlist and submit
             // only that ONE URL to deemix. Replaces the old N per-playlist
             // auto-download submits.
-            if due_count > 0 {
-                // Membership may have changed remotely — mark dirty and let the
-                // Backpack coordinator materialise (debounced) instead of doing
-                // it inline on this poll tick.
+            if membership_changed {
+                // Membership changed remotely — mark dirty and let the Backpack
+                // coordinator materialise (debounced) instead of doing it inline
+                // on this poll tick.
                 let _ = crate::backpack::mark_backpack_dirty(&db).await;
             }
 
@@ -205,7 +212,7 @@ async fn poll_subscribed_playlist(
     spotify_client: &SpotifyClient,
     subscription: &db::PlaylistSubscription,
     task_manager: &TaskManager,
-) -> Result<()> {
+) -> Result<bool> {
     let playlist_name_for_task = subscription
         .playlist_name
         .clone()
@@ -256,6 +263,10 @@ async fn poll_subscribed_playlist(
 
     let playlist_name = &playlist.name;
     let playlist_description = playlist.description.as_deref();
+
+    // A rename can change Backpack membership — tags are matched to playlists by
+    // name. Compare against the stored name, before the upsert below overwrites it.
+    let name_changed = subscription.playlist_name.as_deref() != Some(playlist.name.as_str());
 
     task_manager
         .add_log(
@@ -567,7 +578,9 @@ async fn poll_subscribed_playlist(
         .update_task_status(&task_id, TaskStatus::Completed)
         .await;
 
-    Ok(())
+    // Membership changed if tracks were added or the playlist was renamed (the
+    // name drives the tag↔playlist match that feeds the Backpack set).
+    Ok(new_tracks_found || name_changed)
 }
 
 /// Store a TrackInfo (track or episode) and link it to a playlist.

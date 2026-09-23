@@ -366,11 +366,14 @@ function renderPlaylistCard(status) {
   const el = document.querySelector("#backpack-playlist-card");
   if (!el) return;
 
-  const dirty = !!status.dirty;
+  // `dirty` only means "a membership mutation is pending"; whether the
+  // materialised playlist still matches the set is `inSync` (a signature
+  // comparison the server does).
   const hasPlaylist = !!status.playlistUrl;
-  const syncBadge = dirty
-    ? '<span class="backpack-badge backpack-badge-dirty">out of sync</span>'
-    : '<span class="backpack-badge backpack-badge-ok">in sync</span>';
+  const inSync = typeof status.inSync === "boolean" ? status.inSync : !status.dirty;
+  const syncBadge = inSync
+    ? '<span class="backpack-badge backpack-badge-ok">in sync</span>'
+    : '<span class="backpack-badge backpack-badge-dirty">out of sync</span>';
 
   el.innerHTML = `
     <div class="backpack-playlist-card">

@@ -897,8 +897,13 @@ pub async fn start_backpack_coordinator(
                 Err(e) => {
                     // Not a Spotify API failure (usually missing/expired
                     // tokens) — back off anyway so this cannot spin every tick.
+                    // Warn, not debug: this silently disabled the whole Backpack
+                    // transport when it first happened.
                     coordinator.note_failure(None);
-                    debug!("Backpack coordinator: Spotify not available, skipping tick: {e:#}");
+                    let next_in = coordinator.retry_in_secs().unwrap_or(0);
+                    warn!(
+                        "Backpack coordinator: Spotify not available — skipping (next attempt in {next_in}s): {e:#}"
+                    );
                 }
             }
         }
