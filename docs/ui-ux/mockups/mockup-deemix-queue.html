@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>M3 · Deemix Queue — UI/UX-Mockup</title>
+<link rel="stylesheet" href="assets/mockup.css" />
+<style>
+  .qgroup { margin-bottom: 14px; }
+  .qgroup-head { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; font-size: 0.76rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); }
+  .qgroup-head .n { margin-left: auto; font-weight: 800; }
+  .qrow { display: flex; gap: 16px; align-items: center; padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md); margin-bottom: 8px; transition: border-color .15s ease; }
+  .qrow:hover { border-color: var(--border-strong); }
+  .qrow .thumb { width: 42px; height: 42px; border-radius: 10px; display: grid; place-items: center; font-size: 1.05rem; flex-shrink: 0; background: var(--surface-3); }
+  .qrow .main { flex: 1; min-width: 0; }
+  .qrow .main .t { font-weight: 650; font-size: 0.92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .qrow .main .p { font-size: 0.75rem; color: var(--text-subtle); }
+  .qrow .meta { text-align: right; font-size: 0.78rem; color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .qrow .meta b { color: var(--text); }
+  .qrow .acts { display: flex; gap: 6px; }
+  .qrow .barwrap { margin-top: 7px; display: flex; gap: 10px; align-items: center; }
+  .qrow .barwrap .progress { flex: 1; }
+  .qrow .barwrap .pct { font-size: 0.74rem; font-weight: 700; color: var(--text-muted); width: 40px; text-align: right; font-variant-numeric: tabular-nums; }
+  .errbox { margin: 0 0 8px 0; padding: 10px 14px; background: var(--red-soft); border: 1px solid rgba(248,113,113,.35); border-radius: 10px; font-size: 0.8rem; color: #fecaca; display: flex; gap: 10px; align-items: center; }
+  .errbox .mono { font-family: var(--mono); }
+  .summary-strip { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; align-items: center; }
+  .pct-num { font-weight: 800; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topnav">
+    <div class="brand"><span class="logo">♪</span>momo's music manager<small>UI/UX-Proposal</small></div>
+    <nav class="navlinks">
+      <a class="nav-item" href="#">Overview</a>
+      <a class="nav-item" href="#">Library</a>
+      <a class="nav-item active" href="#">Services</a>
+      <a class="nav-item" href="#">Tools <span class="count orange">Digging</span></a>
+      <a class="nav-item" href="#">System</a>
+    </nav>
+    <div class="global-activity"><span class="live"></span> 2 Downloads aktiv</div>
+    <span class="version">v1.3.0</span>
+  </header>
+
+  <div class="pagehead">
+    <div>
+      <h1>Deemix Queue</h1>
+      <div class="sub">Playlist-Downloads über den Deemix-Server — Stand jetzt</div>
+    </div>
+    <div class="actions">
+      <span class="fix-tag">adressiert R04</span>
+      <button class="btn primary sm">+ Neue Playlist</button>
+    </div>
+  </div>
+
+  <div class="summary-strip">
+    <span class="chip blue"><span class="pct-num">2</span> aktiv</span>
+    <span class="chip red"><span class="pct-num">1</span> Fehler</span>
+    <span class="chip yellow"><span class="pct-num">2</span> warten</span>
+    <span class="chip green"><span class="pct-num">1</span> fertig heute</span>
+    <span style="flex:1"></span>
+    <button class="btn sm ghost">↻ Alle aktualisieren</button>
+  </div>
+
+  <div class="qgroup">
+    <div class="qgroup-head">Aktiv <span class="chip blue" style="padding:0 7px">2</span><span class="n">Downloading</span></div>
+
+    <div class="qrow">
+      <div class="thumb" style="background:var(--blue-soft);color:var(--blue)">◉</div>
+      <div class="main">
+        <div class="t">Techno Underground</div>
+        <div class="p">spotify:playlist:37i9dQZF1DX9XIFQuFvzCz · 50 Tracks</div>
+        <div class="barwrap"><div class="progress"><i style="width:24%"></i></div><span class="pct">24%</span></div>
+      </div>
+      <div class="meta"><b>12</b> / 50 Tracks<br/>Track 13/50 lädt…</div>
+      <div class="acts"><button class="btn sm ghost" title="pausieren">⏸</button></div>
+    </div>
+
+    <div class="qrow">
+      <div class="thumb" style="background:var(--blue-soft);color:var(--blue)">◉</div>
+      <div class="main">
+        <div class="t">Melodic Techno Sessions</div>
+        <div class="p">spotify:playlist:37i9dQZF1DX0r3x8OtiwEM · 30 Tracks</div>
+        <div class="barwrap"><div class="progress"><i style="width:57%"></i></div><span class="pct">57%</span></div>
+      </div>
+      <div class="meta"><b>17</b> / 30 Tracks<br/>~ 4 min Rest</div>
+      <div class="acts"><button class="btn sm ghost" title="pausieren">⏸</button></div>
+    </div>
+  </div>
+
+  <div class="qgroup">
+    <div class="qgroup-head">Fehlgeschlagen <span class="chip red" style="padding:0 7px">1</span><span class="n">Failed</span></div>
+
+    <div class="errbox">
+      <span>⚠</span>
+      <span class="mono">Deemix error for track 3/60: 404 Not Found</span>
+      <span style="flex:1"></span>
+      <button class="btn sm primary">↻ Retry</button>
+      <button class="btn sm ghost">Details</button>
+    </div>
+    <div class="qrow">
+      <div class="thumb" style="background:var(--red-soft);color:var(--red)">⛒</div>
+      <div class="main">
+        <div class="t">Drum &amp; Bass Arena</div>
+        <div class="p">spotify:playlist:37i9dQZF1DX8KE5A7KZN7w · 60 Tracks · Fehler bei Track 3/60</div>
+      </div>
+      <div class="meta"><b>5</b> / 60 Tracks<br/>vor 2 Std · 1. Retry</div>
+      <div class="acts"><button class="btn sm ghost">↻</button><button class="btn sm danger">🗑</button></div>
+    </div>
+  </div>
+
+  <div class="qgroup">
+    <div class="qgroup-head">Wartend <span class="chip yellow" style="padding:0 7px">2</span><span class="n">Queued</span></div>
+    <div class="qrow">
+      <div class="thumb" style="background:var(--yellow-soft);color:var(--yellow)">◷</div>
+      <div class="main"><div class="t">Summer Dance Essentials</div><div class="p">spotify:playlist:37i9dQZF1DX0XUfTFmNbrM · 40 Tracks</div></div>
+      <div class="meta">startet nach aktiven Downloads</div>
+      <div class="acts"><button class="btn sm danger">🗑</button></div>
+    </div>
+    <div class="qrow">
+      <div class="thumb" style="background:var(--yellow-soft);color:var(--yellow)">◷</div>
+      <div class="main"><div class="t">Deep House Weekly</div><div class="p">spotify:playlist:37i9dQZF1DX6a1D9WZ7hGq · 25 Tracks</div></div>
+      <div class="meta">startet nach aktiven Downloads</div>
+      <div class="acts"><button class="btn sm danger">🗑</button></div>
+    </div>
+  </div>
+
+  <div class="qgroup">
+    <div class="qgroup-head">Fertig heute <span class="chip green" style="padding:0 7px">1</span><span class="n">Completed</span></div>
+    <div class="qrow" style="opacity:.85">
+      <div class="thumb" style="background:var(--green-soft);color:var(--green)">✓</div>
+      <div class="main"><div class="t">Chill Vibes 2025</div><div class="p">spotify:playlist:37i9dQZF1DXcBWIGoYBM5M · 80 Tracks</div></div>
+      <div class="meta"><b>80</b> / 80 · in 12 min</div>
+      <div class="acts"><button class="btn sm ghost">Ordner öffnen</button></div>
+    </div>
+  </div>
+
+  <div class="notice ok" style="margin-top:4px"><span class="ico">✓</span><div><b>Alles erledigt?</b> Leere Queue zeigt künftig einen echten Empty-State mit „Playlist von Spotify einfügen“ statt einer leeren Tabelle.</div></div>
+</div>
+<script src="assets/mockup.js"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+/downloads
+/target
+**/*.env
+**/*.txt
+**/*.mp3
+**/*.m3u8

@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>M2 · Files &amp; PMV-Review — UI/UX-Mockup</title>
+<link rel="stylesheet" href="assets/mockup.css" />
+<style>
+  .review-list { display: flex; flex-direction: column; }
+  .review-item { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); padding: 14px 16px; margin-bottom: 10px; }
+  .review-item.checked { border-color: rgba(99,102,241,.55); box-shadow: 0 0 0 1px rgba(99,102,241,.25); }
+  .ri-head { display: flex; align-items: center; gap: 12px; }
+  .ri-file { flex: 1; min-width: 0; }
+  .ri-file .t { font-weight: 700; font-size: 0.95rem; }
+  .ri-file .p { font-family: var(--mono); font-size: 0.72rem; color: var(--text-subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ri-actions { display: flex; gap: 6px; }
+  .diffbox { margin: 12px 0 4px 29px; font-family: var(--mono); font-size: 0.8rem; border-radius: 10px; overflow: hidden; }
+  .diffbox .ln { display: flex; gap: 12px; padding: 6px 12px; align-items: baseline; }
+  .diffbox .ln .sign { width: 14px; text-align: center; font-weight: 800; flex-shrink: 0; }
+  .diffbox .rem { background: rgba(248,113,113,.09); color: #fca5a5; }
+  .diffbox .add { background: rgba(52,211,153,.09); color: #86efac; }
+  .pretty { margin: 10px 0 0 29px; font-size: 0.8rem; color: var(--text-secondary); display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .pretty code { font-family: var(--mono); color: var(--text-muted); font-size: 0.72rem; background: var(--surface-3); padding: 1px 7px; border-radius: 6px; }
+  .bulkbar {
+    display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-radius: var(--r-md);
+    background: var(--accent-grad); color: #fff; box-shadow: var(--shadow-accent);
+    font-size: 0.87rem; font-weight: 600; position: sticky; top: 60px; z-index: 50;
+  }
+  .bulkbar .spacer { flex: 1; }
+  .bulkbar button { background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.35); color: #fff; }
+  .bulkbar button:hover { background: rgba(255,255,255,.28); }
+  .legend { font-size: 0.8rem; color: var(--text-secondary); line-height: 1.7; }
+  .legend code { font-family: var(--mono); background: var(--surface-3); padding: 1px 7px; border-radius: 6px; font-size: 0.75rem; color: #c7d2fe; }
+  .filters-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+  .searchbox { display: flex; align-items: center; gap: 8px; background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: 999px; padding: 6px 14px; flex: 1; min-width: 220px; }
+  .searchbox input { background: transparent; border: 0; color: var(--text); flex: 1; font-size: 0.85rem; outline: none; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topnav">
+    <div class="brand"><span class="logo">♪</span>momo's music manager<small>UI/UX-Proposal</small></div>
+    <nav class="navlinks">
+      <a class="nav-item" href="#">Overview</a>
+      <a class="nav-item active" href="#">Library</a>
+      <a class="nav-item" href="#">Services</a>
+      <a class="nav-item" href="#">Tools <span class="count orange">Digging</span></a>
+      <a class="nav-item" href="#">System</a>
+    </nav>
+    <div class="global-activity"><span class="live"></span> 3 PMV-Kommentare offen</div>
+    <span class="version">v1.3.0</span>
+  </header>
+
+  <div class="pagehead">
+    <div>
+      <h1>Files</h1>
+      <div class="sub">7 Dateien · 4 lokal · Sortierung: Pfad</div>
+    </div>
+    <div class="actions">
+      <span class="fix-tag">adressiert R02/R03/R09</span>
+      <button class="btn ghost sm">Datei hinzufügen</button>
+    </div>
+  </div>
+
+  <div class="seg" style="margin-bottom:14px">
+    <button class="active">Browse · alle Dateien</button>
+    <button>PMV-Review <span class="chip red" style="padding:0 7px;margin-left:4px;background:rgba(248,113,113,.25);border-color:transparent;color:#fca5a5">3</span></button>
+    <button>Ungelinkt</button>
+  </div>
+
+  <div class="filters-row">
+    <span class="chip on">Kommentar: Needs Update ✕</span>
+    <span class="chip on">Lokal: Ja ✕</span>
+    <span class="chip">BPM 100–140</span>
+    <span class="chip">Key-Gruppe</span>
+    <span class="chip">Rating ≥ 3★</span>
+    <button class="btn sm ghost">Filter zurücksetzen</button>
+    <div class="searchbox"><span style="opacity:.5">⌕</span><input placeholder="Suchen in Library…" value=""/></div>
+  </div>
+
+  <div class="bulkbar">
+    <input type="checkbox" class="check" checked />
+    2 ausgewählt · Kommentare schreiben an: Diff - NeedsUpdate.flac, Artist - Title.flac
+    <span class="spacer"></span>
+    <button class="btn sm">Abbrechen</button>
+    <button class="btn sm">✓ Jetzt anwenden (2)</button>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1.7fr 1fr;gap:16px;margin-top:16px">
+    <div>
+      <div class="card" style="padding:14px">
+        <div class="review-list">
+          <!-- Zeile 1: gewählt + mit Klartext -->
+          <div class="review-item checked">
+            <div class="ri-head">
+              <input type="checkbox" class="check" checked />
+              <div class="ri-file">
+                <div class="t">Diff - NeedsUpdate.flac</div>
+                <div class="p">/test/stems/Diff - NeedsUpdate.flac · FLAC · lokal</div>
+              </div>
+              <span class="chip red">Needs Update</span>
+              <div class="ri-actions">
+                <button class="btn sm primary">✓ Anwenden</button>
+                <button class="btn sm ghost" title="überspringen">Weiter →</button>
+              </div>
+            </div>
+            <div class="diffbox">
+              <div class="ln rem"><span class="sign">−</span><span>(kein Kommentar)</span></div>
+              <div class="ln add"><span class="sign">+</span><span>[_M_] groovy sp:spotify:track:diff1</span></div>
+            </div>
+            <div class="pretty">≈ Klartext: <span class="chip pink" style="padding:0 8px">PMV · groovy</span><span class="chip blue" style="padding:0 8px">↗ Spotify diff1</span><code>Zielformat automatisch erzeugt</code></div>
+          </div>
+
+          <!-- Zeile 2: gewählt, Kommentar ersetzt -->
+          <div class="review-item checked">
+            <div class="ri-head">
+              <input type="checkbox" class="check" checked />
+              <div class="ri-file">
+                <div class="t">Artist - Title.flac</div>
+                <div class="p">/test/stems/Artist - Title.flac · FLAC · lokal · 128 BPM · 4m</div>
+              </div>
+              <span class="chip yellow">ersetzt</span>
+              <div class="ri-actions">
+                <button class="btn sm primary">✓ Anwenden</button>
+                <button class="btn sm ghost">Weiter →</button>
+              </div>
+            </div>
+            <div class="diffbox">
+              <div class="ln rem"><span class="sign">−</span><span>old wrong comment</span></div>
+              <div class="ln add"><span class="sign">+</span><span>[_M_] groovy sp:spotify:track:aaa</span></div>
+            </div>
+            <div class="pretty">≈ Klartext: <span class="chip pink" style="padding:0 8px">PMV · groovy</span><span class="chip blue" style="padding:0 8px">↗ Spotify aaa</span><code>ersetzt 1 alten Kommentar</code></div>
+          </div>
+
+          <!-- Zeile 3: nicht gewählt -->
+          <div class="review-item">
+            <div class="ri-head">
+              <input type="checkbox" class="check" />
+              <div class="ri-file">
+                <div class="t">Comment - NeedsUpdate.flac</div>
+                <div class="p">/test/stems/Comment - NeedsUpdate.flac · FLAC · nicht lokal</div>
+              </div>
+              <span class="chip red">Needs Update</span>
+              <div class="ri-actions">
+                <button class="btn sm primary">✓ Anwenden</button>
+                <button class="btn sm ghost">Weiter →</button>
+              </div>
+            </div>
+            <div class="diffbox">
+              <div class="ln rem"><span class="sign">−</span><span>(kein Kommentar)</span></div>
+              <div class="ln add"><span class="sign">+</span><span>[_M_] groovy sp:spotify:track:diff2</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="footnote" style="margin-top:8px">Review-Modus ersetzt den Code-Diff in der Browse-Tabelle — Browse bleibt schlank. Anwenden = Schreiben in die Datei + Statuswechsel „Up to Date“.</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <div class="card-title">So funktioniert der PMV-Kommentar</div>
+        <div class="legend">
+          Jede Datei bekommt einen Ziel-Kommentar aus <b>Tag-Kategorien</b> und <b>Service-Links</b>.<br/>
+          <code>[_M_]</code> Markierung „von Momo verwaltet“<br/>
+          <code>groovy</code> Begriff aus deiner PMV-Kategorien<br/>
+          <code>sp:spotify:track:…</code> Service-Referenz (Spotify/…)<br/><br/>
+          <b>Weicht der Datei-Kommentar ab</b>, erscheint die Datei im Review mit Diff-Vorschau. Nach dem Anwenden ist sie „Up to Date“.
+        </div>
+        <button class="btn sm ghost" style="margin-top:6px">Kategorien pflegen →</button>
+      </div>
+      <div class="card">
+        <div class="card-title">Nächste Schritte</div>
+        <div style="font-size:.84rem;color:var(--text-secondary)">
+          <b>PR #1 (Tag-Roundtrip-Inbox)</b> liefert genau diesen Review-Flow als echte Inbox — dieses Mockup zeigt, wie er sich in Files anfühlen kann.<br/><br/>
+          Vorschlag: Review als eigene View <code>#comment-inbox</code>, damit Browse und Review getrennte Jobs bleiben.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="assets/mockup.js"></script>
+</body>
+</html>

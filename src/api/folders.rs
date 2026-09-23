@@ -522,9 +522,23 @@ async fn scan_folder_handler(
             .await
             {
                 Ok(id) => id,
-                Err(e) => return internal_error(e).into_response(),
+                Err(e) => {
+                    crate::api::ui_events::emit_action(
+                        &state,
+                        crate::telemetry::events::EventType::UiActionScanFolder,
+                        false,
+                        Some(&e.to_string()),
+                    );
+                    return internal_error(e).into_response();
+                }
             };
 
+            crate::api::ui_events::emit_action(
+                &state,
+                crate::telemetry::events::EventType::UiActionScanFolder,
+                true,
+                None,
+            );
             Json(ApiResponse {
                 data: serde_json::json!({
                     "taskId": task_id,
@@ -534,14 +548,30 @@ async fn scan_folder_handler(
             })
             .into_response()
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Folder not found with id: {}", id),
-            }),
-        )
-            .into_response(),
-        Err(e) => internal_error(e).into_response(),
+        Ok(None) => {
+            crate::api::ui_events::emit_action(
+                &state,
+                crate::telemetry::events::EventType::UiActionScanFolder,
+                false,
+                Some(&format!("Folder not found with id: {}", id)),
+            );
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Folder not found with id: {}", id),
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            crate::api::ui_events::emit_action(
+                &state,
+                crate::telemetry::events::EventType::UiActionScanFolder,
+                false,
+                Some(&e.to_string()),
+            );
+            internal_error(e).into_response()
+        }
     }
 }
 

@@ -1,0 +1,50 @@
+use serde::{Deserialize, Serialize};
+
+use crate::models::response::{PagingCollection, tracks::Track, users::UserSummary};
+
+pub type Playlists = PagingCollection<Playlist>;
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct Playlist {
+    pub title: Option<String>,
+    pub id: Option<i32>,
+    pub urn: Option<String>,
+    pub kind: Option<String>,
+    pub artwork_url: Option<String>,
+    pub created_at: Option<String>,
+    pub description: Option<String>,
+    pub downloadable: Option<bool>,
+    pub duration: Option<i64>,
+    pub ean: Option<String>,
+    pub embeddable_by: Option<String>,
+    pub genre: Option<String>,
+    pub label_id: Option<i32>,
+    pub label_name: Option<String>,
+    pub last_modified: Option<String>,
+    pub license: Option<String>,
+    pub permalink: Option<String>,
+    pub permalink_url: Option<String>,
+    pub playlist_type: Option<String>,
+    pub purchase_title: Option<String>,
+    pub purchase_url: Option<String>,
+    pub release: Option<String>,
+    pub release_day: Option<i32>,
+    pub release_month: Option<i32>,
+    pub release_year: Option<i32>,
+    pub sharing: Option<String>,
+    pub streamable: Option<bool>,
+    pub tag_list: Option<String>,
+    pub track_count: Option<i32>,
+    pub tracks: Option<Vec<Track>>,
+    pub r#type: Option<String>,
+    pub uri: Option<String>,
+    pub user: Option<UserSummary>,
+    pub user_id: Option<i32>,
+    pub user_urn: Option<String>,
+    pub likes_count: Option<i32>,
+    pub label: Option<UserSummary>,
+    pub tracks_uri: Option<String>,
+    pub tags: Option<String>,
+    pub monetization_model: Option<String>,
+    pub policy: Option<String>,
+}

@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>momo's music manager: Library sync &amp; harmonic discovery for DJs</title>
+        <meta
+            name="description"
+            content="momo's music manager: Multi-service library sync and harmonic discovery for DJs. Spotify &amp; SoundCloud sync, harmonic matching, tag organization, and Traktor integration."
+        />
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <header class="site-header">
+            <div class="container header-inner">
+                <a class="brand" href="#top">
+                    <img src="assets/logo-text-only.png" alt="momo's music manager" />
+                </a>
+                <nav class="site-nav">
+                    <a href="#features">Features</a>
+                    <a href="#screenshots">Screenshots</a>
+                    <a href="#download">Download</a>
+                    <a class="nav-gh" href="https://github.com/momokli/momos-music-manager" target="_blank" rel="noopener">GitHub</a>
+                </nav>
+            </div>
+        </header>
+
+        <main id="top">
+            <!-- ─── Hero ─────────────────────────────────────────── -->
+            <section class="hero">
+                <div class="container hero-inner">
+                    <img class="hero-logo" src="assets/logo_cutted_out.png" alt="" />
+                    <h1>momo's music manager</h1>
+                    <p class="tagline">
+                        your playlists are your tags, written to the comment field, wherever you dig or play.
+                    </p>
+                    <div class="hero-actions">
+                        <a class="btn btn-primary btn-lg" href="#download">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            Download
+                        </a>
+                        <a class="btn btn-ghost btn-lg" href="https://github.com/momokli/momos-music-manager/releases/tag/latest-main" target="_blank" rel="noopener">
+                            View latest release
+                        </a>
+                    </div>
+                    <p class="hero-note">
+                        Rolling build of the current <code>main</code> branch · v1.12.0 ·
+                        macOS (universal) · Windows · Linux
+                    </p>
+                </div>
+            </section>
+
+            <!-- ─── Features ─────────────────────────────────────── -->
+            <section class="section" id="features">
+                <div class="container">
+                    <h2 class="section-title">What it does</h2>
+                    <p class="section-sub">One local library for Spotify, SoundCloud and your files, in sync with your DJ software.</p>
+                    <div class="feature-grid">
+                        <div class="feature-card">
+                            <div class="feature-icon sc">🔄</div>
+                            <h3>Library sync</h3>
+                            <p>Sync Spotify and SoundCloud playlists and tracks into one local library. Subscribe to playlists, track changes.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon hm">🎵</div>
+                            <h3>Harmonic matching</h3>
+                            <p>BPM &amp; key detection with Camelot-wheel matching. Build sets that stay in key.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon tag">🏷️</div>
+                            <h3>Tag organization</h3>
+                            <p>Free-form tags with categories and parent relations. Auto-categorization runs a <strong>local</strong> embedding model, no cloud. Tags map to playlists and land in your ID3 comments.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon tr">🎧</div>
+                            <h3>Traktor integration</h3>
+                            <p>Import <code>collection.nml</code> and write BPM/key/comment back. Traktor Smart Lists just work.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon web">🖥️</div>
+                            <h3>Web UI, locally</h3>
+                            <p>A fast, dark single-page app. One binary, one port, <code>localhost:3000</code>.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon mac">🍎</div>
+                            <h3>Native macOS app</h3>
+                            <p>Menu-bar app with a universal DMG. Starts on login, runs in the background.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon ch">🔀</div>
+                            <h3>Update channels</h3>
+                            <p>Stay on the stable <code>release</code> or follow fresh <code>rolling</code> builds of <code>main</code> — switch in the settings, with a guard against accidental cross-channel changes.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon au">🔐</div>
+                            <h3>Auto-update with auto-apply</h3>
+                            <p>Optional signed auto-updates with a configurable auto-apply interval — Ed25519-verified downloads, atomic swap, automatic rollback if a new build fails to start.</p>
+                        </div>
+                        <div class="feature-card">
+                            <div class="feature-icon te">📡</div>
+                            <h3>Event telemetry, opt-in</h3>
+                            <p>Off by default: structured core events (tasks, scans, downloads, updates) leave as HTTPS batches to your own collector. Crash-safe on-device spool, no secrets.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ─── Screenshots ──────────────────────────────────── -->
+            <section class="section section-alt" id="screenshots">
+                <div class="container">
+                    <h2 class="section-title">Screenshots</h2>
+                    <p class="section-sub">The dashboard, library and settings pages, straight from the running app.</p>
+                    <div class="shot-grid">
+                        <figure class="shot">
+                            <a href="screenshots/dashboard.png" target="_blank"><img src="screenshots/dashboard.png" alt="Dashboard with library stats and service status" loading="lazy" /></a>
+                            <figcaption>Dashboard: library stats, service status, folders</figcaption>
+                        </figure>
+                        <figure class="shot">
+                            <a href="screenshots/files.png" target="_blank"><img src="screenshots/files.png" alt="Local files table with BPM, key and comment status" loading="lazy" /></a>
+                            <figcaption>Files: local library with BPM/key and comment status</figcaption>
+                        </figure>
+                        <figure class="shot">
+                            <a href="screenshots/tracks.png" target="_blank"><img src="screenshots/tracks.png" alt="Tracks view with playlist and tag filters" loading="lazy" /></a>
+                            <figcaption>Tracks: service tracks with playlist/tag/PMV filters</figcaption>
+                        </figure>
+                        <figure class="shot">
+                            <a href="screenshots/tags.png" target="_blank"><img src="screenshots/tags.png" alt="Tag organization table" loading="lazy" /></a>
+                            <figcaption>Tags: organization with categories</figcaption>
+                        </figure>
+                        <figure class="shot">
+                            <a href="screenshots/settings-channel-overview.png" target="_blank"><img src="screenshots/settings-channel-overview.png" alt="Settings: auto-update with release/rolling channel selection" loading="lazy" /></a>
+                            <figcaption>Settings → Updates: auto-update with channel selection (release | rolling)</figcaption>
+                        </figure>
+                        <figure class="shot">
+                            <a href="screenshots/settings-autoapply-interval.png" target="_blank"><img src="screenshots/settings-autoapply-interval.png" alt="Settings: configurable auto-apply interval for updates" loading="lazy" /></a>
+                            <figcaption>Settings → Updates: auto-apply interval — verified updates install themselves</figcaption>
+                        </figure>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ─── Download ─────────────────────────────────────── -->
+            <section class="section" id="download">
+                <div class="container">
+                    <h2 class="section-title">Download</h2>
+                    <p class="section-sub">
+                        Release <strong>v1.12.0</strong> (stable) or the rolling build of <code>main</code>, rebuilt on every push.
+                    </p>
+
+                    <div class="platform-grid">
+                        <div class="platform-card">
+                            <div class="platform-head">
+                                <span class="platform-icon">🍎</span>
+                                <div>
+                                    <h3>macOS</h3>
+                                    <p class="platform-arch">Universal · Apple Silicon + Intel</p>
+                                </div>
+                            </div>
+                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/v1.12.0/momos-music-manager-1.12.0-macos-universal.dmg">
+                                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                v1.12.0 (stable)
+                            </a>
+                            <a class="btn btn-ghost btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/Momo-s-Music-Manager-latest.dmg">
+                                Rolling build of main
+                            </a>
+                            <p class="platform-meta">~30 MB · DMG installer</p>
+                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/v1.12.0/momos-music-manager-1.12.0-macos-universal.dmg.sha256">SHA256 (v1.12.0)</a> · <a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/Momo-s-Music-Manager-latest.dmg.sha256">SHA256 (rolling)</a></p>
+                        </div>
+
+                        <div class="platform-card">
+                            <div class="platform-head">
+                                <span class="platform-icon">🪟</span>
+                                <div>
+                                    <h3>Windows</h3>
+                                    <p class="platform-arch">x64</p>
+                                </div>
+                            </div>
+                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/v1.12.0/momos-music-manager-1.12.0-windows-x64.zip">
+                                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                v1.12.0 (stable)
+                            </a>
+                            <a class="btn btn-ghost btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-windows-x64.zip">
+                                Rolling build of main
+                            </a>
+                            <p class="platform-meta">~15 MB · zip (no installer)</p>
+                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/v1.12.0/momos-music-manager-1.12.0-windows-x64.zip.sha256">SHA256 (v1.12.0)</a> · <a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-windows-x64.zip.sha256">SHA256 (rolling)</a></p>
+                        </div>
+
+                        <div class="platform-card">
+                            <div class="platform-head">
+                                <span class="platform-icon">🪟</span>
+                                <div>
+                                    <h3>Windows</h3>
+                                    <p class="platform-arch">ARM64</p>
+                                </div>
+                            </div>
+                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/v1.12.0/momos-music-manager-1.12.0-windows-arm64.zip">
+                                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                v1.12.0 (stable)
+                            </a>
+                            <a class="btn btn-ghost btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-windows-arm64.zip">
+                                Rolling build of main
+                            </a>
+                            <p class="platform-meta">~14 MB · zip (no installer)</p>
+                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/v1.12.0/momos-music-manager-1.12.0-windows-arm64.zip.sha256">SHA256 (v1.12.0)</a> · <a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-windows-arm64.zip.sha256">SHA256 (rolling)</a></p>
+                        </div>
+
+                        <div class="platform-card">
+                            <div class="platform-head">
+                                <span class="platform-icon">🐧</span>
+                                <div>
+                                    <h3>Linux</h3>
+                                    <p class="platform-arch">x64</p>
+                                </div>
+                            </div>
+                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/v1.12.0/momos-music-manager-1.12.0-linux-x64.tar.gz">
+                                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                v1.12.0 (stable)
+                            </a>
+                            <a class="btn btn-ghost btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-x64.tar.gz">
+                                Rolling build of main
+                            </a>
+                            <p class="platform-meta">~16 MB · portable tar.gz</p>
+                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/v1.12.0/momos-music-manager-1.12.0-linux-x64.tar.gz.sha256">SHA256 (v1.12.0)</a> · <a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-x64.tar.gz.sha256">SHA256 (rolling)</a></p>
+                        </div>
+
+                        <div class="platform-card">
+                            <div class="platform-head">
+                                <span class="platform-icon">🐧</span>
+                                <div>
+                                    <h3>Linux</h3>
+                                    <p class="platform-arch">ARM64</p>
+                                </div>
+                            </div>
+                            <a class="btn btn-primary btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/v1.12.0/momos-music-manager-1.12.0-linux-arm64.tar.gz">
+                                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                v1.12.0 (stable)
+                            </a>
+                            <a class="btn btn-ghost btn-dl" href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-arm64.tar.gz">
+                                Rolling build of main
+                            </a>
+                            <p class="platform-meta">~16 MB · portable tar.gz</p>
+                            <p class="platform-sha"><a href="https://github.com/momokli/momos-music-manager/releases/download/v1.12.0/momos-music-manager-1.12.0-linux-arm64.tar.gz.sha256">SHA256 (v1.12.0)</a> · <a href="https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-arm64.tar.gz.sha256">SHA256 (rolling)</a></p>
+                        </div>
+                    </div>
+
+                    <div class="platform-notes">
+                        <div class="note-card note-warn">
+                            <h3>🍎 macOS: first launch</h3>
+                            <p>
+                                Unsigned and not notarized, so Gatekeeper may block it:
+                            </p>
+                            <ol>
+                                <li>Download and open the DMG.</li>
+                                <li>Drag <strong>momo's music manager</strong> into <strong>Applications</strong>.</li>
+                                <li>First start: <strong>right-click</strong> the app → <strong>Open</strong> → <strong>Open</strong>.</li>
+                            </ol>
+                            <p class="note-muted">
+                                Runs in the menu bar, opens your browser at <code>localhost:3000</code>. Notarization planned,
+                                <a href="https://github.com/momokli/momos-music-manager/blob/main/docs/RELEASE-ROADMAP.md#m4--macos-notarization-gatekeeper" target="_blank" rel="noopener">roadmap M4</a>.
+                            </p>
+                        </div>
+                        <div class="note-card note-warn">
+                            <h3>🪟 Windows: SmartScreen</h3>
+                            <p>
+                                Unsigned, so SmartScreen may show
+                                “Windows protected your PC”. Click <strong>More info</strong> →
+                                <strong>Run anyway</strong>. Code signing planned,
+                                <a href="https://github.com/momokli/momos-music-manager/blob/main/docs/RELEASE-ROADMAP.md#m3--windows-code-signing-smartscreen" target="_blank" rel="noopener">roadmap M3</a>.
+                            </p>
+                        </div>
+                        <div class="note-card note-ok">
+                            <h3>🐧 Linux: portable archive</h3>
+                            <p>
+                                Portable <code>tar.gz</code> with a <code>systemd</code> unit for headless mode. AppImage/Flatpak planned,
+                                <a href="https://github.com/momokli/momos-music-manager/blob/main/docs/RELEASE-ROADMAP.md#m5--linux-appimage--flatpak" target="_blank" rel="noopener">roadmap M5</a>.
+                            </p>
+                        </div>
+                    </div>
+
+                    <p class="download-alt download-alt-center">
+                        <a href="https://github.com/momokli/momos-music-manager/releases/latest" target="_blank" rel="noopener">Latest stable release</a>
+                        (versioned, with SHA256SUMS) ·
+                        <a href="https://github.com/momokli/momos-music-manager/releases/tag/latest-main" target="_blank" rel="noopener">latest-main (rolling)</a> ·
+                        see all <a href="https://github.com/momokli/momos-music-manager/releases" target="_blank" rel="noopener">releases</a> ·
+                        <a href="https://github.com/momokli/momos-music-manager/blob/main/CHANGELOG.md" target="_blank" rel="noopener">changelog</a>
+                    </p>
+                </div>
+            </section>
+        </main>
+
+        <footer class="site-footer">
+            <div class="container footer-inner">
+                <div class="footer-brand">
+                    <img src="assets/logo-text-only.png" alt="momo's music manager" />
+                    <span>v1.12.0</span>
+                </div>
+                <nav class="footer-links">
+                    <a href="https://github.com/momokli/momos-music-manager" target="_blank" rel="noopener">Repository</a>
+                    <a href="https://github.com/momokli/momos-music-manager/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
+                    <a href="https://github.com/momokli/momos-music-manager/blob/main/README.md" target="_blank" rel="noopener">README</a>
+                    <a href="https://github.com/momokli/momos-music-manager/releases" target="_blank" rel="noopener">Releases</a>
+                </nav>
+            </div>
+            <div class="container footer-bottom">
+                <p>built with <span aria-hidden="true">♥</span> by <a href="https://github.com/momokli/momos-music-manager" target="_blank" rel="noopener">@momokli</a></p>
+            </div>
+        </footer>
+    </body>
+</html>

@@ -1,7 +1,14 @@
 //! Telemetry: push consistent DB snapshots + metadata to a central collector over HTTPS.
 
+pub mod buffer;
+pub mod client_id;
+pub mod emit;
+pub mod events;
+pub mod flusher;
+pub mod log_ship;
 pub mod metrics;
 pub mod receiver;
+pub mod spool;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,6 +20,7 @@ use sqlx::{FromRow, Pool, Sqlite, SqlitePool};
 use tracing::{info, warn};
 
 use crate::config::ServiceCredentials;
+use crate::db::settings::{self, KEY_TELEMETRY_LAST_PUSH_AT};
 use crate::tasks::{Task, TaskManager, TaskStatus, TaskType};
 
 /// Telemetry CLI subcommands.
@@ -30,7 +38,16 @@ pub async fn run(cmd: TelemetryCommand) -> Result<()> {
         TelemetryCommand::Push => {
             let config = ServiceCredentials::load();
             let db = SqlitePool::connect(&config.database_url).await?;
-            push_once(&db, &config).await
+            let result = push_once(&db, &config).await;
+            // Best-effort status record (Settings page + `push --status`
+            // style consumers); a raw CLI connect may lack the migrated
+            // `settings` table — the helper skips that case silently.
+            let outcome = match &result {
+                Ok(()) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            };
+            record_push_result(&db, outcome).await;
+            result
         }
         TelemetryCommand::Receive => {
             let config = ServiceCredentials::load();
@@ -159,6 +176,70 @@ pub async fn push_once(db: &Pool<Sqlite>, config: &ServiceCredentials) -> Result
     Ok(())
 }
 
+/// Persist the outcome of a one-shot push into the `settings` KV so the
+/// Settings page can show the status + timestamp of the last (successful)
+/// push. Best effort by design — a failure to record never fails the push
+/// itself. A `settings` table may not exist when the CLI connected without
+/// running migrations (raw `SqlitePool::connect`); that case is detected
+/// and skipped.
+pub async fn record_push_result(db: &Pool<Sqlite>, outcome: Result<(), String>) {
+    let (status, error) = match outcome {
+        Ok(()) => ("ok", None),
+        Err(msg) => ("error", Some(msg)),
+    };
+
+    // Cheap guard: the CLI push path connects without migrations.
+    let has_settings_table: bool = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings'",
+    )
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+    if !has_settings_table {
+        tracing::debug!(
+            "telemetry: settings table not present (raw CLI connect?) — skipping push status record"
+        );
+        return;
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    if let Err(e) = settings::set_setting(db, KEY_TELEMETRY_LAST_PUSH_AT, &now.to_string()).await
+    {
+        tracing::warn!("telemetry: push status record failed: {e}");
+    }
+    if let Err(e) = settings::set_setting(
+        db,
+        settings::KEY_TELEMETRY_LAST_PUSH_STATUS,
+        status,
+    )
+    .await
+    {
+        tracing::warn!("telemetry: push status record failed: {e}");
+    }
+    match &error {
+        Some(msg) => {
+            if let Err(e) = settings::set_setting(
+                db,
+                settings::KEY_TELEMETRY_LAST_PUSH_ERROR,
+                msg,
+            )
+            .await
+            {
+                tracing::warn!("telemetry: push status record failed: {e}");
+            }
+        }
+        None => {
+            if let Err(e) =
+                settings::delete_setting(db, settings::KEY_TELEMETRY_LAST_PUSH_ERROR).await
+            {
+                tracing::warn!("telemetry: push status record failed: {e}");
+            }
+        }
+    }
+}
+
 async fn push_db(
     client: &reqwest::Client,
     base_url: &str,
@@ -233,7 +314,7 @@ async fn build_meta_payload(
     Ok(MetaPayload {
         instance: InstanceMeta {
             hostname: hostname(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: env!("MMM_VERSION").to_string(),
             instance: instance.to_string(),
             ts: ts.to_string(),
             db_size_bytes: db_size,
@@ -335,7 +416,27 @@ fn hostname() -> String {
     std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string())
 }
 
-/// Start the in-app telemetry loop — pushes a snapshot every `interval_secs`.
+/// Effective periodic full-DB push interval.
+///
+/// The explicit option `full_db_interval_secs`
+/// (`MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS` / `[telemetry]
+/// full_db_interval_secs`, default 0 = OFF) wins when > 0; the legacy
+/// `interval_secs` key (analytics era) stays effective as backward-compatible
+/// alias when the explicit one is unset/0. `0` = periodic loop off
+/// (one-shot trigger via `telemetry push` CLI still works).
+pub fn effective_full_db_interval_secs(
+    full_db_interval_secs: u64,
+    legacy_interval_secs: u64,
+) -> u64 {
+    if full_db_interval_secs > 0 {
+        full_db_interval_secs
+    } else {
+        legacy_interval_secs
+    }
+}
+
+/// Start the in-app telemetry loop — pushes a full DB snapshot (VACUUM INTO)
+/// + metadata every `interval_secs` (see [`effective_full_db_interval_secs`]).
 pub async fn start_telemetry_loop(
     db: Pool<Sqlite>,
     config: ServiceCredentials,
@@ -358,6 +459,7 @@ pub async fn start_telemetry_loop(
 
         match push_once(&db, &config).await {
             Ok(()) => {
+                record_push_result(&db, Ok(())).await;
                 task_manager
                     .add_log(&task_id, "Telemetry push completed".to_string())
                     .await;
@@ -368,6 +470,7 @@ pub async fn start_telemetry_loop(
             Err(e) => {
                 let msg = format!("Telemetry push failed: {e}");
                 warn!("{msg}");
+                record_push_result(&db, Err(msg.clone())).await;
                 task_manager.add_log(&task_id, msg).await;
                 task_manager
                     .update_task_status(&task_id, TaskStatus::Failed)
@@ -424,6 +527,25 @@ mod tests {
         let tail = read_tail(&path, 11); // less than full, picks up from a newline
         assert!(tail.ends_with("line4\n"));
         assert!(!tail.contains("line1"));
+    }
+
+    #[test]
+    fn effective_full_db_interval_prefers_explicit_over_legacy() {
+        // Explicit option wins when set.
+        assert_eq!(effective_full_db_interval_secs(86400, 3600), 86400);
+        assert_eq!(effective_full_db_interval_secs(60, 0), 60);
+    }
+
+    #[test]
+    fn effective_full_db_interval_falls_back_to_legacy() {
+        // Legacy `interval_secs` alias stays effective (backward compat).
+        assert_eq!(effective_full_db_interval_secs(0, 3600), 3600);
+    }
+
+    #[test]
+    fn effective_full_db_interval_zero_means_off() {
+        // Default: both unset/0 → periodic loop off.
+        assert_eq!(effective_full_db_interval_secs(0, 0), 0);
     }
 
     #[test]

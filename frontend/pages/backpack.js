@@ -7,6 +7,8 @@
  * API:
  *   GET /api/tags?limit=500 → tags with backpack field
  *   POST /api/tags/{id}/backpack → toggle backpack
+ *   GET /api/backpack → transport status (set size, playlist URL, dirty)
+ *   POST /api/backpack/push → build/replace the single Spotify playlist
  *   POST /api/tasks/backpack-sync → trigger sync task (future)
  */
 
@@ -47,6 +49,9 @@ export async function init(container, signal) {
     // Load size stats asynchronously (nice-to-have, won't block page render)
     loadSizeStats();
 
+    // Load + render the Spotify transport playlist status
+    loadPlaylistStatus();
+
     // Poll every 5s for live ETA during active pull
     if (_pollInterval) clearInterval(_pollInterval);
     _pollInterval = setInterval(pollSizeStats, 5000);
@@ -66,6 +71,8 @@ function renderPage(container, tags) {
     </div>
 
     <div id="backpack-size-stats"></div>
+
+    <div id="backpack-playlist-card"></div>
 
     <div class="backpack-summary">
       <div class="backpack-stat">
@@ -225,6 +232,119 @@ function wireEvents(container) {
   const syncBtn = container.querySelector("#backpack-sync-all");
   if (syncBtn) {
     syncBtn.addEventListener("click", () => handleSyncAll(container));
+  }
+
+  const pushBtn = container.querySelector("#backpack-push");
+  if (pushBtn) {
+    pushBtn.addEventListener("click", () => handlePushToSpotify(container));
+  }
+}
+
+// ── Spotify transport playlist ──────────────────────────────────────────────
+
+function formatTimestamp(secs) {
+  if (!secs) return "never";
+  return new Date(secs * 1000).toLocaleString();
+}
+
+async function loadPlaylistStatus() {
+  const el = document.querySelector("#backpack-playlist-card");
+  if (!el) return;
+  try {
+    const resp = await fetchJSON("/api/backpack");
+    renderPlaylistCard(resp?.data || {});
+  } catch (err) {
+    el.innerHTML = `<div class="detail-error"><i class="fa-solid fa-triangle-exclamation"></i> Failed to load playlist status: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderPlaylistCard(status) {
+  const el = document.querySelector("#backpack-playlist-card");
+  if (!el) return;
+
+  const dirty = !!status.dirty;
+  const hasPlaylist = !!status.playlistUrl;
+  const syncBadge = dirty
+    ? '<span class="backpack-badge backpack-badge-dirty">out of sync</span>'
+    : '<span class="backpack-badge backpack-badge-ok">in sync</span>';
+
+  el.innerHTML = `
+    <div class="backpack-playlist-card">
+      <div class="backpack-playlist-head">
+        <h2 class="section-title" style="margin:0">
+          <i class="fa-brands fa-spotify"></i> Spotify Playlist ${syncBadge}
+        </h2>
+        <button class="btn btn-sm btn-primary" id="backpack-push">
+          <i class="fas fa-upload"></i> Push to Spotify
+        </button>
+      </div>
+      <div class="backpack-playlist-meta">
+        <span><strong>${status.trackCount ?? 0}</strong> tracks in Backpack</span>
+        <span><strong>${status.fileCount ?? 0}</strong> local files</span>
+        <span>Last push: ${escapeHtml(formatTimestamp(status.lastPushAt))}</span>
+      </div>
+      ${
+        hasPlaylist
+          ? `<div class="backpack-playlist-link"><a href="${escapeHtml(status.playlistUrl)}" target="_blank" rel="noopener"><i class="fa-solid fa-arrow-up-right-from-square"></i> Open \u201cBackpack\u201d playlist</a></div>`
+          : '<div class="text-muted" style="font-size:0.85rem">No playlist yet \u2014 push to create it.</div>'
+      }
+      ${
+        status.lastPushStatus === "error" && status.lastPushError
+          ? `<div class="backpack-playlist-error"><i class="fa-solid fa-triangle-exclamation"></i> Last push failed: ${escapeHtml(status.lastPushError)}</div>`
+          : ""
+      }
+      <label class="backpack-playlist-option">
+        <input type="checkbox" id="backpack-submit-deemix" checked />
+        also submit to deemix
+      </label>
+    </div>
+  `;
+
+  const pushBtn = el.querySelector("#backpack-push");
+  if (pushBtn) {
+    pushBtn.addEventListener("click", () => handlePushToSpotify());
+  }
+}
+
+async function handlePushToSpotify() {
+  const pushBtn = document.querySelector("#backpack-push");
+  const submitCheckbox = document.querySelector("#backpack-submit-deemix");
+  const submitToDeemix = submitCheckbox ? submitCheckbox.checked : true;
+
+  try {
+    if (pushBtn) {
+      pushBtn.disabled = true;
+      pushBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Pushing...';
+    }
+
+    const resp = await fetchJSON("/api/backpack/push", {
+      method: "POST",
+      body: JSON.stringify({ force: true, submitToDeemix }),
+    });
+    const data = resp?.data || {};
+
+    if (data.verificationFailed) {
+      showToast(
+        "Playlist built, but Spotify did not match the Backpack set \u2014 will retry",
+        "error"
+      );
+    } else if (data.updated) {
+      const n = data.trackCount ?? 0;
+      const suffix = data.deemixSubmitted ? " and submitted to deemix" : "";
+      showToast(`${data.created ? "Created" : "Updated"} playlist with ${n} track(s)${suffix}`, "success");
+    } else {
+      showToast("Playlist already up to date", "info");
+    }
+
+    await loadPlaylistStatus();
+  } catch (err) {
+    showToast(`Push failed: ${err.message}`, "error");
+  } finally {
+    const btn = document.querySelector("#backpack-push");
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-upload"></i> Push to Spotify';
+    }
   }
 }
 

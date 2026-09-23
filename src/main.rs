@@ -18,7 +18,7 @@ mod tray;
 #[derive(Parser)]
 #[command(name = "momos-music-manager")]
 #[command(about = "Momo's Music Manager - Multi-service library sync for DJs")]
-#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(version = env!("MMM_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -36,6 +36,9 @@ enum Commands {
         public_url: Option<String>,
         #[arg(long, default_value_t = false)]
         no_browser: bool,
+        /// Disable the startup update check (overrides MOMOS_AUTOUPDATE_ENABLED)
+        #[arg(long, default_value_t = false)]
+        no_autoupdate: bool,
     },
     /// Scan and import files from directory
     Scan {
@@ -75,6 +78,23 @@ enum Commands {
         #[command(subcommand)]
         command: momos_music_manager::telemetry::TelemetryCommand,
     },
+    /// Self-update (M6): check, apply, rollback
+    Update {
+        #[command(subcommand)]
+        command: UpdateCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum UpdateCommand {
+    /// Check for updates against latest-main (verifies the signed manifest)
+    Check,
+    /// Download + verify + install the latest version (swap with backup)
+    Apply,
+    /// Restore the previous binary from the .bak backup
+    Rollback,
+    /// Show current version, platform artifact and updater state
+    Status,
 }
 
 // ── CLI entry point ────────────────────────────────────────────────────────
@@ -100,8 +120,16 @@ fn main() -> Result<()> {
         .with_ansi(false)
         .with_writer(non_blocking);
 
+    // Log shipping (telemetry full package): starts INACTIVE; `serve()`
+    // activates it after the event pipeline is running, when
+    // `log_shipping_enabled` is set. The layer sits between the global
+    // EnvFilter and the fmt layers so it only sees filtered events.
+    let (log_ship_layer, log_ship_handle) =
+        momos_music_manager::telemetry::log_ship::layer();
+
     tracing_subscriber::registry()
         .with(env_filter)
+        .with(log_ship_layer)
         .with(stdout_layer)
         .with(file_layer)
         .init();
@@ -117,6 +145,7 @@ fn main() -> Result<()> {
         port: None,
         public_url: None,
         no_browser: false,
+        no_autoupdate: false,
     });
 
     match command {
@@ -125,6 +154,7 @@ fn main() -> Result<()> {
             port,
             public_url,
             no_browser,
+            no_autoupdate,
         } => {
             let host = host.unwrap_or_else(|| ServiceCredentials::load().server_host);
             let port = port.unwrap_or_else(|| ServiceCredentials::load().server_port);
@@ -136,10 +166,12 @@ fn main() -> Result<()> {
                 let h = host.clone();
                 let p = port;
                 let pu = public_url.clone();
+                let no_au = no_autoupdate;
+                let ship_handle = log_ship_handle;
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
                     rt.block_on(async {
-                        if let Err(e) = serve(h, p, pu, true).await {
+                        if let Err(e) = serve(h, p, pu, true, no_au, ship_handle).await {
                             tracing::error!("Server exited with error: {}", e);
                         }
                     });
@@ -155,7 +187,14 @@ fn main() -> Result<()> {
             #[cfg(not(target_os = "macos"))]
             {
                 let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
-                rt.block_on(serve(host, port, public_url, no_browser))?;
+                rt.block_on(serve(
+                    host,
+                    port,
+                    public_url,
+                    no_browser,
+                    no_autoupdate,
+                    log_ship_handle,
+                ))?;
                 return Ok(());
             }
         }
@@ -231,29 +270,193 @@ fn main() -> Result<()> {
             let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
             rt.block_on(momos_music_manager::telemetry::run(command))?;
         }
+        Commands::Update { command } => {
+            use momos_music_manager::autoupdate::{
+                ApplyOutcome, HttpFetcher, UpdateError, UpdateSettings, UpdateStatus,
+            };
+            let config = ServiceCredentials::load();
+            // The CLI has no UI/DB layer: channel = env > TOML > embedded
+            // default of the running build (the Settings page adds the UI
+            // layer on top of that).
+            let settings = UpdateSettings::from_config(&config, config.configured_autoupdate_channel())?;
+            let fetcher = HttpFetcher::new();
+            let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+            match command {
+                UpdateCommand::Check => match rt.block_on(UpdateStatus::check(
+                    &settings, &fetcher,
+                ))? {
+                    UpdateStatus::UpToDate => {
+                        println!("Up to date (v{})", settings.current_version);
+                    }
+                    UpdateStatus::UpdateAvailable(info) => {
+                        println!("Update available: v{} (current: v{})", info.version, settings.current_version);
+                        println!("  artifact: {}", info.artifact_name);
+                        println!("  sha256:   {}", info.sha256);
+                        println!("  Run `momos-music-manager update apply` to install.");
+                    }
+                    UpdateStatus::Disabled => {
+                        println!("Autoupdate is disabled (set MOMOS_AUTOUPDATE_ENABLED=true to enable).");
+                    }
+                    UpdateStatus::UnsupportedPlatform => {
+                        println!("Autoupdate is not supported on this platform yet.");
+                    }
+                    UpdateStatus::ChannelMismatch {
+                        channel,
+                        current_version,
+                        available_version,
+                    } => {
+                        let published = if available_version.contains("-dev+") {
+                            "a dev build"
+                        } else {
+                            "a stable release"
+                        };
+                        let tracks = if channel == "rolling" {
+                            "rolling dev builds of main (latest-main)"
+                        } else {
+                            "stable semver releases (releases/latest)"
+                        };
+                        println!("Channel mismatch: update channel is '{channel}' (current build v{current_version}), but the update source serves {published} v{available_version}.");
+                        println!("Channel '{channel}' tracks {tracks} — pick the matching channel (Settings page / MOMOS_AUTOUPDATE_CHANNEL / [autoupdate] channel) or fix the update source (base_url).");
+                    }
+                },
+                UpdateCommand::Apply => match rt.block_on(UpdateStatus::apply(
+                    &settings, &fetcher,
+                )) {
+                    Ok(ApplyOutcome::Installed {
+                        new_version,
+                        old_version,
+                    }) => {
+                        println!("Update installed: v{old_version} → v{new_version}");
+                        println!("Restart the server to activate (systemd: `sudo systemctl restart momos-music-manager`).");
+                        println!("The previous binary is kept as `momos-music-manager.bak` and removed automatically once the new version passes its health check.");
+                    }
+                    Ok(ApplyOutcome::DownloadedOnly { path, version }) => {
+                        println!("Verified download for v{version} saved to:");
+                        println!("  {}", path.display());
+                        println!("The macOS DMG self-install failed — install manually: open the DMG and drag the app to Applications, then restart the app.");
+                    }
+                    Err(UpdateError::ChannelMismatch {
+                        channel,
+                        current_version,
+                        available_version,
+                    }) => {
+                        let published = if available_version.contains("-dev+") {
+                            "a dev build"
+                        } else {
+                            "a stable release"
+                        };
+                        let tracks = if channel == "rolling" {
+                            "rolling dev builds of main (latest-main)"
+                        } else {
+                            "stable semver releases (releases/latest)"
+                        };
+                        println!("Update not installed: channel mismatch — update channel is '{channel}' (current build v{current_version}), the update source serves {published} v{available_version}.");
+                        println!("Channel '{channel}' tracks {tracks} — pick the matching channel or fix the update source (base_url).");
+                    }
+                    Err(e) => return Err(e.into()),
+                },
+                UpdateCommand::Rollback => {
+                    momos_music_manager::autoupdate::perform_rollback()?;
+                    println!("Rolled back to the previous version. Restart the server to activate.");
+                }
+                UpdateCommand::Status => {
+                    use momos_music_manager::autoupdate::swap;
+                    println!("Current version : v{}", settings.current_version);
+                    println!("Platform artifact: {} ({})", settings.artifact.os_arch, settings.artifact.ext);
+                    println!("Update channel   : {} ({})", settings.channel.as_str(), settings.base_url);
+                    println!("Enabled          : {}", settings.enabled);
+                    let dir = swap::exe_dir();
+                    println!("Install dir      : {}", dir.display());
+                    match swap::read_marker(&dir) {
+                        Ok(Some(m)) => println!(
+                            "Pending update  : v{} → v{} (start_count={}, committed={})",
+                            m.old_version, m.new_version, m.start_count, m.committed
+                        ),
+                        Ok(None) => println!("Pending update  : none"),
+                        Err(e) => println!("Pending update  : unreadable ({e})"),
+                    }
+                    let bak = swap::backup_path(&dir, &settings.artifact.binary_name);
+                    println!("Backup binary   : {}", if bak.exists() { "present" } else { "absent" });
+                }
+            }
+        }
     }
 
     Ok(())
 }
 
 /// Create a database pool from the configured URL (default: `app.db`).
+/// Uses the same robust options as `db::connection::connect_db`:
+/// create-if-missing, WAL journal, and a 30s busy timeout so concurrent
+/// background tasks can't trigger spurious "database is locked" errors.
 async fn create_db_pool() -> Result<Pool<Sqlite>> {
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
+    use std::str::FromStr;
+
     let config = ServiceCredentials::load();
-    let url = &config.database_url;
-    let pool = SqlitePool::connect(url).await?;
+
+    // sqlx's create_if_missing creates the DB file but not its parent
+    // directory — make fresh installs work everywhere (Linux server mode,
+    // packaged binaries) by creating that up front.
+    if let Some(rest) = config.database_url.strip_prefix("sqlite:") {
+        let path = rest.split('?').next().unwrap_or(rest);
+        if !path.is_empty() && path != ":memory:" {
+            let path = std::path::Path::new(path);
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+            }
+        }
+    }
+
+    let options = SqliteConnectOptions::from_str(&config.database_url)?
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_secs(30))
+        .synchronous(SqliteSynchronous::Normal);
+    let pool = SqlitePool::connect_with(options).await?;
     momos_music_manager::db::init_db(&pool).await?;
     Ok(pool)
 }
 
 /// Start the HTTP server with all background tasks.
+///
+/// `log_ship_handle` activates the (initially inactive) log-shipping layer
+/// once the telemetry event pipeline is running (see
+/// [`momos_music_manager::telemetry::log_ship`]).
 async fn serve(
     host: String,
     port: u16,
     public_url: Option<String>,
     no_browser: bool,
+    no_autoupdate: bool,
+    log_ship_handle: momos_music_manager::telemetry::log_ship::LogShipHandle,
 ) -> Result<()> {
     let config = ServiceCredentials::load();
     let db = create_db_pool().await?;
+
+    // CLI access for macOS app installs: ensure the `momos-music-manager`
+    // symlink in a PATH directory (first app start after the user dragged
+    // the bundle into /Applications). The link points at the stable bundle
+    // path, so in-place updates keep it valid; the DMG self-install path
+    // re-ensures it too (autoupdate::verify). Non-fatal: a bare-binary dev
+    // build or a missing writable dir only logs.
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = momos_music_manager::autoupdate::macos::running_app_bundle() {
+        match momos_music_manager::cli_link::ensure_for_bundle(&bundle) {
+            Ok(info) => info!(
+                "CLI link {} → {} ({})",
+                info.link_path.display(),
+                info.target_path.display(),
+                if info.created { "created" } else { "up to date" }
+            ),
+            Err(e) => tracing::warn!(
+                "CLI link not installed (bundle {}): {e}",
+                bundle.display()
+            ),
+        }
+    }
 
     // Ensure task_history table exists (idempotent — safe on every startup)
     sqlx::query(
@@ -310,8 +513,16 @@ async fn serve(
     let maint_cancel = poller_cancel.clone();
 
     let telemetry_interval = config.telemetry_interval_secs;
+    let telemetry_full_db_interval = config.telemetry_full_db_interval_secs;
     let telemetry_enabled = config.telemetry_enabled;
     let telemetry_config = config.clone();
+
+    // Autoupdater (M6) settings — captured before `config` moves into AppState.
+    let au_grace_secs = config.autoupdate_health_grace_secs;
+
+    let backpack_coordinator = Arc::new(
+        momos_music_manager::backpack::BackpackSyncCoordinator::new(),
+    );
 
     let state = Arc::new(AppState {
         db,
@@ -320,6 +531,7 @@ async fn serve(
         embeddings: Mutex::new(None),
         category_means: tokio::sync::Mutex::new(None),
         public_url,
+        backpack_coordinator,
     });
 
     // Refresh materialized tag tables so comment computation is correct from startup.
@@ -340,12 +552,13 @@ async fn serve(
 
     // Spawn subscription poller — polls subscribed playlists every 30s
     let poller_tm = state.task_manager.clone();
+    let poller_cancel_token = poller_cancel.clone();
     let poller_handle = tokio::spawn(async move {
         momos_music_manager::poller::start_subscription_poller(
             poller_db,
             poller_config,
             poller_tm,
-            poller_cancel,
+            poller_cancel_token,
             sub_count,
         )
         .await;
@@ -444,6 +657,25 @@ async fn serve(
         }
     });
 
+    // Spawn Backpack coordinator — materialises the single Spotify playlist after
+    // membership mutations (dirty-marker + debounce) and on manual push requests.
+    {
+        let bp_coord_db = state.db.clone();
+        let bp_coord_creds = state.config.clone();
+        let bp_coord = state.backpack_coordinator.clone();
+        let bp_coord_cancel = poller_cancel.clone();
+        tokio::spawn(async move {
+            momos_music_manager::backpack::start_backpack_coordinator(
+                bp_coord_db,
+                bp_coord_creds,
+                bp_coord,
+                bp_coord_cancel,
+            )
+            .await;
+        });
+        tracing::info!("Backpack coordinator started");
+    }
+
     // Auto-backup-consistency on startup: remove stale file_locations.backup entries
     // for files that exist in the DB but are no longer on the NAS.
     let cc_db = state.db.clone();
@@ -529,8 +761,19 @@ async fn serve(
         momos_music_manager::auto_backup::start_auto_backup_poller(auto_db, auto_tm).await;
     });
 
-    // Telemetry loop: periodic DB snapshot + metadata push
-    if telemetry_enabled && telemetry_interval > 0 {
+    // Telemetry loop: periodic full-DB snapshot + metadata push. Defaults
+    // OFF — starts only when telemetry.enabled AND an interval is set. The
+    // explicit `full_db_interval_secs` option
+    // (MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS / `[telemetry]
+    // full_db_interval_secs`) is the documented key; the legacy
+    // `interval_secs` stays effective as alias when the explicit one is
+    // unset/0 (backward compat).
+    let full_db_push_interval =
+        momos_music_manager::telemetry::effective_full_db_interval_secs(
+            telemetry_full_db_interval,
+            telemetry_interval,
+        );
+    if telemetry_enabled && full_db_push_interval > 0 {
         let tel_db = state.db.clone();
         let tel_tm = state.task_manager.clone();
         tokio::spawn(async move {
@@ -538,19 +781,66 @@ async fn serve(
                 tel_db,
                 telemetry_config,
                 tel_tm,
-                telemetry_interval,
+                full_db_push_interval,
             )
             .await;
         });
-        info!("Telemetry loop started (interval: {}s)", telemetry_interval);
+        info!(
+            "Telemetry full-DB loop started (interval: {}s, source: {})",
+            full_db_push_interval,
+            if telemetry_full_db_interval > 0 {
+                "full_db_interval_secs"
+            } else {
+                "interval_secs (legacy alias)"
+            }
+        );
     } else {
         info!(
-            "Telemetry loop disabled (enabled={telemetry_enabled}, interval={telemetry_interval}s)"
+            "Telemetry full-DB loop disabled (enabled={telemetry_enabled}, \
+             full_db_interval={telemetry_full_db_interval}s, legacy_interval={telemetry_interval}s)"
         );
     }
 
+    // Event telemetry pipeline: ring buffer + JSONL spool + async flusher.
+    // All defaults off — only starts when telemetry.enabled AND an
+    // events_endpoint are configured. Emitters call telemetry::emit_event
+    // (no-op while the pipeline is not running).
+    if telemetry_enabled {
+        match momos_music_manager::telemetry::emit::start_from_config(&state.config) {
+            Ok(true) => info!("Telemetry event pipeline started"),
+            Ok(false) => info!("Telemetry event pipeline not started (no endpoint configured)"),
+            Err(e) => tracing::error!("Telemetry event pipeline start failed: {e}"),
+        }
+    }
+
+    // Log shipping (full-package feature): activate the tracing layer ONLY
+    // now that the event pipeline is running — logs emitted before this
+    // point expire silently (documented in log_ship.rs). Default off;
+    // `log_shipping_enabled` gates the whole path.
+    if state.config.telemetry_log_shipping_enabled {
+        if telemetry_enabled {
+            log_ship_handle.activate(momos_music_manager::telemetry::log_ship::LogShipConfig {
+                min_level: momos_music_manager::telemetry::log_ship::parse_level(
+                    &state.config.telemetry_log_min_level,
+                ),
+                max_events_per_sec: state.config.telemetry_log_max_events_per_sec,
+            });
+            info!(
+                "Telemetry log shipping activated (min_level={}, max_events_per_sec={})",
+                state.config.telemetry_log_min_level,
+                state.config.telemetry_log_max_events_per_sec
+            );
+        } else {
+            info!(
+                "Telemetry log shipping configured but telemetry is disabled — log.entry stays off"
+            );
+        }
+    } else {
+        info!("Telemetry log shipping disabled (log_shipping_enabled=false)");
+    }
+
     // Build the application with routes.
-    let app = momos_music_manager::build_router(state);
+    let app = momos_music_manager::build_router(state.clone());
 
     let address = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&address).await?;
@@ -558,7 +848,7 @@ async fn serve(
     info!("Listening on http://{addr}/", addr = actual_addr);
     info!(
         "🚀 Momo's Music Manager v{} started",
-        env!("CARGO_PKG_VERSION")
+        env!("MMM_VERSION")
     );
 
     // Auto-open browser on startup (unless --no-browser)
@@ -570,7 +860,235 @@ async fn serve(
         });
     }
 
+    // ── Autoupdater (M6) ────────────────────────────────────────────────
+    // 1. Complete/undo a pending update (health-checked commit or rollback).
+    //    Runs regardless of the enabled flag so an in-flight update always
+    //    resolves.
+    let au_grace = au_grace_secs;
+    let au_port = actual_addr.port();
+    let au_db = state.db.clone();
+    tokio::spawn(async move {
+        use momos_music_manager::autoupdate::{
+            RecoveryAction, commit_after_grace, update_auto,
+        };
+        match momos_music_manager::autoupdate::startup_recovery() {
+            RecoveryAction::None => {}
+            RecoveryAction::CommitAfterGrace { new_version } => {
+                tracing::info!(
+                    "autoupdate: new version v{new_version} started — health check in {au_grace}s"
+                );
+                commit_after_grace(au_grace, Some(au_port)).await;
+                // Health check passed → the auto-apply attempt stuck.
+                if let Err(e) = update_auto::clear_auto_apply_state(&au_db).await {
+                    tracing::debug!("autoupdate: clearing auto-apply state failed: {e}");
+                }
+            }
+            RecoveryAction::AutoRollback { old_version } => {
+                tracing::warn!(
+                    "autoupdate: new version failed health check repeatedly — rolling back to v{old_version}"
+                );
+                // The rolled-back version failed to become healthy — engage
+                // the crash-loop breaker so the scheduler does not re-apply
+                // the same version forever (Phase C guard).
+                if let Ok(Some(marker)) = momos_music_manager::autoupdate::swap::read_marker(
+                    &momos_music_manager::autoupdate::swap::exe_dir(),
+                ) {
+                    if let Err(e) =
+                        update_auto::note_rollback(&au_db, &marker.new_version).await
+                    {
+                        tracing::debug!("autoupdate: engaging breaker failed: {e}");
+                    }
+                }
+                if let Err(e) = momos_music_manager::autoupdate::perform_rollback() {
+                    tracing::error!("autoupdate: rollback failed: {e}");
+                }
+            }
+            RecoveryAction::CleanupStale => {
+                tracing::debug!("autoupdate: cleaned up stale update state");
+            }
+        }
+    });
+
+    // 2. Startup update check (opt-out via --no-autoupdate — highest
+    //    priority). The *effective* enabled value (env > UI > TOML > default)
+    //    is read inside the task (config clone + DB clone); the outcome is
+    //    persisted so the Settings page shows the last check.
+    if !no_autoupdate {
+        let au_db = state.db.clone();
+        let au_config = state.config.clone();
+        tokio::spawn(async move {
+            // Let the server finish booting before hitting the network.
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            use momos_music_manager::api::update::{
+                effective_autoupdate_enabled, perform_check, persist_disabled_check,
+            };
+
+            let (enabled, source) =
+                match effective_autoupdate_enabled(&au_config, &au_db).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            "autoupdate: startup check skipped — settings read failed: {e}"
+                        );
+                        return;
+                    }
+                };
+
+            if !enabled {
+                // Honest UI state instead of a stale/absent last check.
+                if let Err(e) = persist_disabled_check(&au_db).await {
+                    tracing::warn!("autoupdate: failed to persist disabled check state: {e}");
+                }
+                tracing::info!(
+                    "autoupdate: startup check skipped (enabled={enabled}, source={source})"
+                );
+                return;
+            }
+
+            let fetcher = momos_music_manager::autoupdate::HttpFetcher::new();
+            match perform_check(&au_db, &au_config, &fetcher).await {
+                Ok(json) => {
+                    let state = json
+                        .get("lastCheckResult")
+                        .and_then(|r| r.get("state"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("");
+                    match state {
+                        "updateAvailable" => {
+                            let avail = json
+                                .get("lastCheckResult")
+                                .and_then(|r| r.get("availableVersion"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?");
+                            tracing::info!(
+                                "autoupdate: v{avail} available (current v{}) — apply in the Settings page or run `momos-music-manager update apply`",
+                                env!("MMM_VERSION")
+                            );
+                        }
+                        "upToDate" => {
+                            tracing::debug!(
+                                "autoupdate: up to date (v{})",
+                                env!("MMM_VERSION")
+                            );
+                        }
+                        "channelMismatch" => {
+                            tracing::info!(
+                                "autoupdate: check ok — channel mismatch (update source serves the other channel than selected), no auto-update"
+                            );
+                        }
+                        "disabled" => {
+                            tracing::info!("autoupdate: startup check — updates disabled");
+                        }
+                        "error" => {
+                            let err = json
+                                .get("lastCheckError")
+                                .and_then(|e| e.as_str())
+                                .unwrap_or("unknown error");
+                            tracing::warn!("autoupdate: check failed: {err}");
+                        }
+                        other => tracing::debug!("autoupdate: startup check state={other}"),
+                    }
+                }
+                Err(e) => tracing::warn!("autoupdate: check failed: {e}"),
+            }
+        });
+    }
+
+    // 3. Phase C: periodic auto-apply loop — every `interval_secs`
+    //    (env > UI > TOML > default 4 h; 0 = off) it checks for an update
+    //    on the selected channel, applies it and restarts the process
+    //    (self-restart; systemd units are restarted by the service manager).
+    //    The interval is re-read every cycle so config/UI changes apply
+    //    without a restart. Same opt-out as the startup check.
+    if !no_autoupdate {
+        let au_db = state.db.clone();
+        let au_config = state.config.clone();
+        tokio::spawn(async move {
+            use momos_music_manager::api::update::run_auto_apply_cycle;
+            use momos_music_manager::autoupdate::{AutoApplyOutcome, restart, update_auto};
+            loop {
+                let (interval, source) =
+                    match update_auto::effective_auto_apply_interval(&au_config, &au_db).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(
+                                "autoupdate: interval resolution failed — auto-apply loop stops: {e}"
+                            );
+                            break;
+                        }
+                    };
+                if interval == 0 {
+                    tracing::info!(
+                        "autoupdate: periodic auto-apply disabled (interval=0, source={source}) — startup check still runs"
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+                let fetcher = momos_music_manager::autoupdate::HttpFetcher::new();
+                match run_auto_apply_cycle(&au_db, &au_config, &fetcher).await {
+                    Ok(AutoApplyOutcome::Installed {
+                        new_version,
+                        old_version,
+                    }) => {
+                        tracing::info!(
+                            "autoupdate: auto-apply installed v{old_version} → v{new_version} — restarting"
+                        );
+                        let plan =
+                            restart::plan_auto_restart(au_config.autoupdate_app_dir.as_deref());
+                        match &plan {
+                            restart::RestartPlan::ManagedBySystemd => {
+                                tracing::info!(
+                                    "autoupdate: systemd manages this service — exiting; the unit restarts the new version (Restart=always)"
+                                );
+                            }
+                            restart::RestartPlan::Skip { reason } => {
+                                tracing::warn!(
+                                    "autoupdate: auto-restart skipped: {reason} — the new version activates on the next manual start"
+                                );
+                            }
+                            other => {
+                                if let Err(e) = restart::execute_plan(other) {
+                                    tracing::error!(
+                                        "autoupdate: spawning the relauncher failed: {e} — restart the server to activate v{new_version}"
+                                    );
+                                }
+                            }
+                        }
+                        if plan.requires_process_exit() {
+                            // Let the tracing appender flush, then exit: the
+                            // detached relauncher (or systemd) starts the new
+                            // version once the HTTP port is free.
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            std::process::exit(0);
+                        }
+                    }
+                    Ok(AutoApplyOutcome::DownloadedOnly { version, path }) => {
+                        tracing::warn!(
+                            "autoupdate: auto-apply downloaded v{version} only (self-install failed) — manual install: {}",
+                            path.display()
+                        );
+                    }
+                    Ok(AutoApplyOutcome::UpdateAvailableSkipped { version }) => {
+                        tracing::debug!(
+                            "autoupdate: v{version} available but skipped (breaker or waiting for activation)"
+                        );
+                    }
+                    Ok(outcome) => {
+                        tracing::debug!("autoupdate: auto-apply cycle outcome: {outcome:?}");
+                    }
+                    Err(e) => {
+                        tracing::warn!("autoupdate: auto-apply cycle failed: {e}");
+                    }
+                }
+            }
+        });
+    }
+
     axum::serve(listener, app).await?;
+
+    // Serve ended: deactivate log shipping (buffered logs expire by design;
+    // the process usually exits right after this anyway).
+    log_ship_handle.deactivate();
 
     Ok(())
 }
@@ -873,6 +1391,9 @@ mod tests {
             embeddings: Mutex::new(None),
             category_means: tokio::sync::Mutex::new(None),
             public_url: None,
+            backpack_coordinator: Arc::new(
+                momos_music_manager::backpack::BackpackSyncCoordinator::new(),
+            ),
         });
         let _router = momos_music_manager::build_router(state);
     }

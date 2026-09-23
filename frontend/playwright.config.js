@@ -15,7 +15,11 @@ export default defineConfig({
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
     // macOS provenance attr prevents binary from creating files; touch first.
-    command: "touch test-playwright.db && cargo run -- serve --host 127.0.0.1 --port 3001",
+    // --no-autoupdate: the serve() startup check would write its result into
+    // the same SQLite ~10 s after boot (and hit GitHub); on slow filesystems
+    // that write collides with the real-API specs (SQLite BUSY → HTTP 500).
+    command:
+      "touch test-playwright.db && cargo run -- serve --no-autoupdate --host 127.0.0.1 --port 3001",
     cwd: "..", // run from project root
     url: "http://localhost:3001/api/health",
     reuseExistingServer: false,

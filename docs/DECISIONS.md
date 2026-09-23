@@ -1108,3 +1108,124 @@ _Phase 2 (v0.3.2)_: Extract `extract_retry_after_secs` and `client_error_retry_a
 **Decision**: Add `src/external_tools.rs` with `resolve_tool()`, which resolves a tool name to an absolute path across common install locations (`/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, and their sbin variants), falling back to the bare name. Use it for `metaflac`/`exiftool` in `src/db/files.rs` and `ffmpeg`/`ffprobe` in `src/api/files.rs`.
 
 **Consequences**: Comment writing, metadata extraction, and stem streaming work regardless of how the app was launched. No longer relies on `PATH` for Homebrew tools. System tools (`rsync`, `ssh`) remain on the minimal `PATH` and are unchanged.
+
+---
+
+## ADR-058: Per-Format Comment Writers (lofty for MP3 only)
+
+**Date**: 2026-08-29
+**Status**: Accepted (implemented)
+
+**Context**: `write_comment_to_file` shelled out to `exiftool` for everything except FLAC. The Homebrew exiftool build reports `Writing of MP3 files is not yet supported`, so MP3 comment writes always failed. We considered unifying all comment writes on `lofty` (already used to read tags during scans), which does support writing FLAC/WAV/AIFF/M4A/MP3.
+
+**Decision**: Keep the mixed writer, add `lofty` only for MP3:
+
+- FLAC → `metaflac` (`--remove-tag=COMMENT --set-tag COMMENT=...`) — lossless, touches only the `COMMENT` field.
+- MP3 → `lofty` (ID3v2 `COMM` frame) — the only in-tree option, since exiftool cannot write MP3 and ffmpeg writes a `TXXX:comment` frame that lofty doesn't read as `ItemKey::Comment`.
+- M4A/WAV/AIFF → `exiftool` (unchanged).
+
+MP3 comment _reads_ also go through `lofty` (`read_comment_from_file` branches on `.mp3`). This is required for consistency: lofty writes the ID3v2 `COMM` frame with language `"XXX"` (its MPEG write path ignores the language field), which exiftool renders as `Comment-xxx` rather than `Comment`.
+
+**Consequences**: Do **not** unify on `lofty` for writes — its Vorbis-comment round-trip is not lossless (it remaps `ORGANIZATION` → `LABEL`), which would corrupt FLAC tags. MP3 is an accepted exception because there is no lossless in-tree alternative and testing confirmed other ID3v2 frames are preserved.
+
+---
+
+## ADR-059: Autoupdater (M6) — Ed25519-signiertes Manifest + atomarer Swap
+
+**Date**: 2026-08-31
+**Status**: Accepted (implemented, PR #14)
+
+**Context**: The app is distributed as a headless Rust server (axum + sqlx,
+rustls) with an embedded web frontend — no Tauri/Electron, so no ready-made
+self-update framework. CI publishes a rolling `latest-main` release with stable
+artifact names (`momos-music-manager-latest-<os>-<arch>.<ext>`) and an
+aggregated `SHA256SUMS` (M1, PR #13). M6 (Issue #11) requires the app to check
+for and install updates with signature/checksum verification *before* any swap,
+opt-out, rollback, and docs. The original DoD said verification "nutzt M3/M4"
+(OS code-signing/notarization) — that would block the updater on paid accounts.
+
+**Decision**:
+
+1. **Own Ed25519 key (minisign format) over `SHA256SUMS`** — a project-owned
+   keypair, public key embedded in the binary (`src/autoupdate/keys.rs`,
+   mirrored in `scripts/minisign.pub`), private key only as the CI secret
+   `MINISIGN_SECRET_KEY`. Verification chain: Ed25519 over the manifest →
+   per-artifact SHA256 → atomic swap. This decouples update integrity from
+   M3/M4 (which remain valuable for OS-level trust: SmartScreen/Gatekeeper).
+2. **Both minisign signature layouts are accepted**: legacy `"Ed"` (raw
+   Ed25519, minisign ≤ 0.11) and `"ED"` (prehashed over BLAKE2b-512,
+   minisign 0.12 default). CI pins minisign 0.12.
+3. **Swap safety**: previous binary kept as `momos-music-manager.bak` next to
+   the new binary with an `update-state.json` marker; on next start the new
+   binary must survive a health grace period (default 60 s, configurable;
+   self-probe of `/api/health`), then the update is committed. Repeated
+   unhealthy starts (marker `start_count` > 2) trigger auto-rollback; manual
+   `update rollback` is always available. No silent auto-apply: startup only
+   checks and logs; `update apply` is explicit (user-visible).
+4. **Platform scope v1**: Linux/Windows swap fully; macOS downloads + verifies
+   the DMG but does not swap inside the `.app` bundle (blocked on M4);
+   Windows swap requires the server stopped (running exe is locked).
+5. **Verification is injectable/testable**: `Fetcher` trait, minisign fixtures
+   produced with the real CLI, unit + local end-to-end tests.
+
+**Consequences**:
+
+- Update integrity no longer depends on M3/M4; the updater refuses unsigned
+  manifests (safe default when the secret is not configured).
+- Key rotation = replace embedded pubkey + `scripts/minisign.pub`, update the
+  secret, release once (documented in `src/autoupdate/keys.rs`).
+- Users must restart the server after `update apply`; rollback covers
+  start-crash loops via the start_count/auto-rollback state machine.
+- M3/M4 remain open for SmartScreen/Gatekeeper UX, not for update integrity.
+
+---
+
+## ADR-060: Backpack-Playlist ist abgeleiteter Zustand (Mirror statt Append)
+
+**Date**: 2026-09-21
+**Status**: Accepted (implemented)
+
+**Context**: Die Backpack-Menge (Union aus aktiven Playlist-Subscriptions und
+`tags.backpack = 1`) wird in **eine** Spotify-Playlist `Backpack` materialisiert;
+nur diese eine URL wird an deemix submittet (Backpack-Verschmelzung, PR #34).
+Die ursprüngliche Implementierung war ein Nebeneffekt des Subscription-Pollers
+und benutzte `playlist_add_items` (append). Folge: Wurde ein Track aus dem
+Backpack entfernt, blieb er **für immer** in der Spotify-Playlist → deemix lud
+ihn weiter (Residual-Downloads), die Playlist driftete vom Backpack weg.
+Zusätzlich gab es keinen manuellen Trigger und keine Verifikation — bei
+Teilfehlern wurde die Signatur trotzdem als „synchron" gesetzt.
+
+**Decision**: Die Spotify-Playlist ist **abgeleiteter** (nicht primärer) Zustand
+und wird deshalb **vollständig ersetzt**, nie ergänzt:
+
+1. **Mirror-Semantik** — `SpotifyClient::replace_playlist_items` (Chunks ≤ 100)
+   statt `add_tracks_to_playlist`. Die Remote-Playlist entspricht danach exakt
+   dem Backpack-Set.
+2. **Re-Create-Guard** — ist die gespeicherte `playlist_id` nicht mehr
+   authorbar (404/403: manuell gelöscht, Account gewechselt), wird sie neu
+   angelegt und die Settings-Keys werden aktualisiert. Nie wedgen.
+3. **Verifikation ist Teil der Materialisierung** — nach dem Replace wird die
+   Remote-Playlist zurückgelesen (`get_playlist_track_uris`, paginated; lokale
+   und Episode-Items aussortiert) und als Menge mit der intendierten verglichen.
+   Nur bei Gleichheit wird `backpack.signature` fortgeschrieben.
+4. **Trigger ist explizit** — Mutationen (Track-Toggle, Tag-Flag,
+   Subscribe/Unsubscribe, Global-Poller-Snapshot-Änderung) setzen einen
+   **Dirty-Marker** (`backpack.dirty_at`); der `BackpackSyncCoordinator`
+   materialisiert nach Debounce (30 s) und zusätzlich als Safety-Net alle 10 min.
+   `POST /api/backpack/push` (`force` / `dryRun` / `submitToDeemix`) erzwingt
+   einen sofortigen Push mit sichtbarem Feedback.
+5. **Genau ein deemix-Submit** — es bleibt bei genau einer
+   `deemix_downloads`-Row (`is_backpack = 1`). `submit_to_deemix=false` baut nur
+   die Playlist.
+
+**Consequences**:
+
+- Manuelle Handarbeit in der Spotify-Playlist geht bei jedem Push verloren —
+  akzeptiert, die Playlist ist dokumentiert MMM-authored (`private`,
+  Beschreibung „generated by MMM").
+- Push + Verifikation kosten 2 Spotify-Calls (+1 pro 100 Tracks); Debounce und
+  Signatur-Gate halten das klein, der bestehende 429-Retry greift.
+- Ein Verifikations-Mismatch setzt die Signatur **nicht**; der nächste Lauf
+  versucht erneut, statt einen falschen Zustand als synchron zu markieren.
+- Keine Migration nötig: Settings-Keys (024) und `deemix_downloads.is_backpack`
+  (025) existieren bereits.

@@ -271,7 +271,7 @@ function renderFoldersCard(folders) {
     return renderCard(
       "Managed Folders",
       "fa-solid fa-folder-tree",
-      `<div class="empty-state" style="padding:var(--space-4) 0;"><p>No folders configured. <a href="#folders">Add a folder →</a></p></div>`,
+      `<div class="empty-state" style="padding:var(--space-4) 0;"><p>No folders configured.</p><a href="#folders?new=1" class="btn btn-xs btn-primary"><i class="fa-solid fa-plus"></i> Add Folder</a></div>`,
     );
   }
 
@@ -295,7 +295,7 @@ function renderFoldersCard(folders) {
     "Managed Folders",
     "fa-solid fa-folder-tree",
     `<div style="margin-top:var(--space-1);">${rows}</div>`,
-    `<a href="#folders">Manage folders →</a>`,
+    `<a href="#folders">Manage folders →</a> · <a href="#folders?new=1"><i class="fa-solid fa-plus"></i> Add Folder</a>`,
   );
 }
 

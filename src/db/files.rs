@@ -1033,6 +1033,14 @@ pub async fn update_file_comment(pool: &Pool<Sqlite>, file_id: i64, comment: &st
 pub async fn read_comment_from_file(file_path: &str) -> Result<Option<String>> {
     use std::process::Command;
 
+    // MP3 comments are written via `lofty` (see `write_mp3_comment`), so read
+    // them the same way.  exiftool renders lofty's ID3v2 COMM frame as
+    // "Comment-xxx" (lofty pins the language to "XXX"), so exiftool would not
+    // see the value we wrote.
+    if file_path.to_lowercase().ends_with(".mp3") {
+        return read_mp3_comment_from_file(file_path);
+    }
+
     let output = Command::new(resolve_tool("exiftool"))
         .arg("-json")
         .arg("-Comment")
@@ -1055,14 +1063,32 @@ pub async fn read_comment_from_file(file_path: &str) -> Result<Option<String>> {
     Ok(comment)
 }
 
+/// Read the comment tag of an MP3 file via `lofty` (ID3v2).
+///
+/// This mirrors `write_mp3_comment` so the read/write paths stay consistent:
+/// lofty maps the ID3v2 COMM frame to `ItemKey::Comment`.
+fn read_mp3_comment_from_file(file_path: &str) -> Result<Option<String>> {
+    let tagged_file =
+        read_from_path(file_path).map_err(|e| anyhow!("Failed to read MP3 comment: {}", e))?;
+
+    Ok(tagged_file
+        .primary_tag()
+        .and_then(|tag| tag.get_string(&ItemKey::Comment))
+        .map(String::from))
+}
+
 /// Write comment to file using exiftool.
 ///
 /// FLAC files use `metaflac` because the macOS build of exiftool does
-/// not include FLAC write support.  All other formats use exiftool.
+/// not include FLAC write support.  MP3 files use `lofty` (ID3v2) because
+/// exiftool reports "Writing of MP3 files is not yet supported".  All other
+/// formats use exiftool.
 pub async fn write_comment_to_file(file_path: &str, comment: &str) -> Result<()> {
     use std::process::Command;
 
-    let is_flac = file_path.to_lowercase().ends_with(".flac");
+    let lower = file_path.to_lowercase();
+    let is_flac = lower.ends_with(".flac");
+    let is_mp3 = lower.ends_with(".mp3");
 
     if is_flac {
         // --remove-tag first: metaflac --set-tag APPENDS by default.
@@ -1078,6 +1104,8 @@ pub async fn write_comment_to_file(file_path: &str, comment: &str) -> Result<()>
             let error = String::from_utf8_lossy(&output.stderr);
             return Err(anyhow::anyhow!("Failed to write FLAC comment: {}", error));
         }
+    } else if is_mp3 {
+        write_mp3_comment(file_path, comment)?;
     } else {
         let comment_tag = format!("-Comment={}", comment);
         let output = Command::new(resolve_tool("exiftool"))
@@ -1091,6 +1119,39 @@ pub async fn write_comment_to_file(file_path: &str, comment: &str) -> Result<()>
             return Err(anyhow::anyhow!("Failed to write comment: {}", error));
         }
     }
+
+    Ok(())
+}
+
+/// Write the comment tag of an MP3 file via `lofty` (ID3v2).
+///
+/// exiftool cannot write MP3 files, so we use the same library that reads
+/// ID3v2 tags during scanning.  `insert_text` replaces any existing item with
+/// the same key, so repeated writes are idempotent and never accumulate
+/// duplicate COMM frames.
+///
+/// NOTE: lofty writes ID3v2 COMM frames with language "XXX" (its MPEG write
+/// path ignores the language field).  This is fine because we also READ MP3
+/// comments via lofty (see `read_mp3_comment_from_file`), which maps any COMM
+/// frame back to `ItemKey::Comment` regardless of language.
+fn write_mp3_comment(file_path: &str, comment: &str) -> Result<()> {
+    use lofty::config::WriteOptions;
+
+    let mut tagged_file = read_from_path(file_path)
+        .map_err(|e| anyhow!("Failed to read MP3 for comment write: {}", e))?;
+
+    let tag_type = tagged_file.primary_tag_type();
+    if let Some(tag) = tagged_file.primary_tag_mut() {
+        tag.insert_text(ItemKey::Comment, comment.to_string());
+    } else {
+        let mut tag = lofty::tag::Tag::new(tag_type);
+        tag.insert_text(ItemKey::Comment, comment.to_string());
+        tagged_file.insert_tag(tag);
+    }
+
+    tagged_file
+        .save_to_path(file_path, WriteOptions::default())
+        .map_err(|e| anyhow!("Failed to write MP3 comment: {}", e))?;
 
     Ok(())
 }
@@ -1773,6 +1834,34 @@ pub fn format_preference(file_type: &str) -> u8 {
     format_preference_with(file_type, &default_format_priorities())
 }
 
+/// Load `File` rows for the given ids, ordered by `file_type` — the order the
+/// backpack grouping steps relied on when they selected the rows with
+/// `ORDER BY file_type`.
+///
+/// Ids are chunked so the bind count stays well inside SQLite's limit even for
+/// very large libraries.
+pub async fn get_files_by_ids_ordered(pool: &Pool<Sqlite>, ids: &[i64]) -> Result<Vec<File>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    const CHUNK: usize = 500;
+    let mut files: Vec<File> = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(CHUNK) {
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT DISTINCT f.* FROM files f WHERE f.id IN ({placeholders}) ORDER BY f.file_type"
+        );
+        let mut q = sqlx::query_as::<_, File>(&sql);
+        for id in chunk {
+            q = q.bind(id);
+        }
+        files.extend(q.fetch_all(pool).await?);
+    }
+    files.sort_by(|a, b| a.file_type.cmp(&b.file_type));
+    Ok(files)
+}
+
 /// Load format priorities from service_config (stored on the 'deemix' row's
 /// metadata_json as a JSON string array). Falls back to default priorities.
 pub async fn load_format_priorities(pool: &Pool<Sqlite>) -> Vec<String> {
@@ -1810,16 +1899,9 @@ pub async fn get_backpack_pull_candidates(
     // Load format priorities (could be user-configured)
     let priorities = load_format_priorities(pool).await;
 
-    // Step 1: Get all file IDs that are in backpack tags (via file_resolved_tags)
-    // A file is in a backpack tag if any of its resolved tags has backpack = 1.
-    let backpack_file_ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT DISTINCT frt.file_id
-         FROM file_resolved_tags frt
-         JOIN tags t ON t.id = frt.tag_id
-         WHERE t.backpack = 1",
-    )
-    .fetch_all(pool)
-    .await?;
+    // Step 1: Get all file IDs in the Backpack set (union of subscribed
+    // playlists + backpack tags), via the single Backpack concept.
+    let backpack_file_ids: Vec<i64> = crate::backpack::get_backpack_file_ids(pool).await?;
 
     if backpack_file_ids.is_empty() {
         return Ok(Vec::new());
@@ -1831,35 +1913,15 @@ pub async fn get_backpack_pull_candidates(
         priorities
     );
 
-    // Step 2: For each backpack file, find all variants sharing the same track_id
-    // via v_file_track_link. Files not linked to any track get individual groups.
-    let placeholders: Vec<String> = backpack_file_ids.iter().map(|_| "?".to_string()).collect();
-    let sql = format!(
-        "SELECT DISTINCT f.* FROM files f
-         JOIN v_file_track_link v ON v.file_id = f.id
-         WHERE v.track_id IN (
-             SELECT DISTINCT v2.track_id FROM v_file_track_link v2
-             WHERE v2.file_id IN ({})
-         )
-         UNION
-         SELECT DISTINCT f.* FROM files f
-         WHERE f.id IN ({})
-           AND f.id NOT IN (SELECT file_id FROM v_file_track_link)
-         ORDER BY file_type",
-        placeholders.join(","),
-        placeholders.join(",")
-    );
-
-    let mut query = sqlx::query_as::<_, File>(&sql);
-    for id in &backpack_file_ids {
-        query = query.bind(id);
-    }
-    // Second set of bindings for the UNION branch (same IDs)
-    for id in &backpack_file_ids {
-        query = query.bind(id);
-    }
-
-    let all_files: Vec<File> = query.fetch_all(pool).await?;
+    // Step 2: Find all track-mates of backpack files. Files not linked to any
+    // track form their own group.
+    //
+    // Resolved by key (see `get_backpack_family_file_ids`) rather than through
+    // the view's `track_id IN (...)` form, which makes SQLite materialise the
+    // whole view — ~100 s on a production-scale library.
+    let family_file_ids: Vec<i64> =
+        crate::backpack::get_backpack_family_file_ids(pool, &backpack_file_ids).await?;
+    let all_files = get_files_by_ids_ordered(pool, &family_file_ids).await?;
 
     // Step 3: Build file_id → track_id mapping from v_file_track_link
     let track_id_placeholders: Vec<String> = all_files.iter().map(|_| "?".to_string()).collect();
@@ -1979,30 +2041,14 @@ pub async fn get_backpack_size_stats(pool: &Pool<Sqlite>) -> Result<BackpackSize
     // Load format priorities (could be user-configured)
     let priorities = load_format_priorities(pool).await;
 
-    // Step 1: Count backpack tags
+    // Step 1: Count backpack tags (reported as `tag_count` for UI compatibility).
     let tag_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE backpack = 1")
         .fetch_one(pool)
         .await?;
 
-    if tag_count == 0 {
-        return Ok(BackpackSizeStats {
-            tag_count: 0,
-            track_count: 0,
-            local_bytes: 0,
-            target_bytes: 0,
-            needs_pull_bytes: 0,
-        });
-    }
-
-    // Step 2: Get all file IDs that are in backpack tags (via file_resolved_tags)
-    let backpack_file_ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT DISTINCT frt.file_id
-         FROM file_resolved_tags frt
-         JOIN tags t ON t.id = frt.tag_id
-         WHERE t.backpack = 1",
-    )
-    .fetch_all(pool)
-    .await?;
+    // Step 2: Get all file IDs in the Backpack set (union of subscribed
+    // playlists + backpack tags), via the single Backpack concept.
+    let backpack_file_ids: Vec<i64> = crate::backpack::get_backpack_file_ids(pool).await?;
 
     if backpack_file_ids.is_empty() {
         return Ok(BackpackSizeStats {
@@ -2026,32 +2072,14 @@ pub async fn get_backpack_size_stats(pool: &Pool<Sqlite>) -> Result<BackpackSize
     }
     let track_count: i64 = track_count_query.fetch_one(pool).await?;
 
-    // Step 4: Fetch all files linked to the same tracks as backpack files
-    let sql = format!(
-        "SELECT DISTINCT f.* FROM files f
-         JOIN v_file_track_link v ON v.file_id = f.id
-         WHERE v.track_id IN (
-             SELECT DISTINCT v2.track_id FROM v_file_track_link v2
-             WHERE v2.file_id IN ({})
-         )
-         UNION
-         SELECT DISTINCT f.* FROM files f
-         WHERE f.id IN ({})
-           AND f.id NOT IN (SELECT file_id FROM v_file_track_link)
-         ORDER BY file_type",
-        placeholders.join(","),
-        placeholders.join(",")
-    );
-
-    let mut query = sqlx::query_as::<_, File>(&sql);
-    for id in &backpack_file_ids {
-        query = query.bind(id);
-    }
-    for id in &backpack_file_ids {
-        query = query.bind(id);
-    }
-
-    let all_files: Vec<File> = query.fetch_all(pool).await?;
+    // Step 4: Fetch all files linked to the same tracks as backpack files.
+    //
+    // Resolved by key (see `get_backpack_family_file_ids`) rather than through
+    // the view's `track_id IN (...)` form, which makes SQLite materialise the
+    // whole view — ~100 s on a production-scale library.
+    let family_file_ids: Vec<i64> =
+        crate::backpack::get_backpack_family_file_ids(pool, &backpack_file_ids).await?;
+    let all_files = get_files_by_ids_ordered(pool, &family_file_ids).await?;
 
     // Step 5: Build file_id → track_id mapping from v_file_track_link
     let track_placeholders: Vec<String> = all_files.iter().map(|_| "?".to_string()).collect();
@@ -2204,33 +2232,15 @@ pub async fn cleanup_redundant_backpack_files(pool: &Pool<Sqlite>) -> Result<(us
         return Ok((0, 0));
     }
 
-    // Step 2: Find all track-mates of backpack files via v_file_track_link (same query as get_backpack_pull_candidates)
-    let placeholders: Vec<String> = backpack_file_ids.iter().map(|_| "?".to_string()).collect();
-    let sql = format!(
-        "SELECT DISTINCT f.* FROM files f
-         JOIN v_file_track_link v ON v.file_id = f.id
-         WHERE v.track_id IN (
-             SELECT DISTINCT v2.track_id FROM v_file_track_link v2
-             WHERE v2.file_id IN ({})
-         )
-         UNION
-         SELECT DISTINCT f.* FROM files f
-         WHERE f.id IN ({})
-           AND f.id NOT IN (SELECT file_id FROM v_file_track_link)
-         ORDER BY file_type",
-        placeholders.join(","),
-        placeholders.join(",")
-    );
-
-    let mut query = sqlx::query_as::<_, File>(&sql);
-    for id in &backpack_file_ids {
-        query = query.bind(id);
-    }
-    for id in &backpack_file_ids {
-        query = query.bind(id);
-    }
-
-    let all_files: Vec<File> = query.fetch_all(pool).await?;
+    // Step 2: Find all track-mates of backpack files. Files not linked to any
+    // track form their own group.
+    //
+    // Resolved by key (see `get_backpack_family_file_ids`) rather than through
+    // the view's `track_id IN (...)` form, which makes SQLite materialise the
+    // whole view — ~100 s on a production-scale library.
+    let family_file_ids: Vec<i64> =
+        crate::backpack::get_backpack_family_file_ids(pool, &backpack_file_ids).await?;
+    let all_files = get_files_by_ids_ordered(pool, &family_file_ids).await?;
 
     // Step 3: Build file_id → track_id mapping from v_file_track_link, then group by track_id
     let track_id_placeholders: Vec<String> = all_files.iter().map(|_| "?".to_string()).collect();
@@ -3982,6 +3992,44 @@ mod tests {
         assert_eq!(count, 1, "idempotent: should still have 1 COMMENT tag");
         let val = get_comment_tag(&tmp);
         assert_eq!(val.as_deref(), Some(comment));
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    fn test_mp3_path() -> std::path::PathBuf {
+        fixtures_dir().join("test.mp3")
+    }
+
+    /// Test: write_comment_to_file on MP3 must write the ID3v2 comment via
+    /// `lofty` (exiftool cannot write MP3), replacing any existing comment.
+    #[tokio::test]
+    async fn test_write_comment_to_file_mp3() {
+        let src = test_mp3_path();
+        assert!(src.exists(), "test fixture missing: {:?}", src);
+
+        let tmp = std::env::temp_dir().join("mmm_test_mp3.mp3");
+        std::fs::copy(&src, &tmp).unwrap();
+
+        let new_comment = "[PMV] mp3 test";
+        write_comment_to_file(&tmp.to_string_lossy(), new_comment)
+            .await
+            .expect("write_comment_to_file should succeed for MP3");
+
+        // Verify via the canonical read path (lofty, used by both the scanner
+        // and `read_comment_from_file` for MP3 files).
+        let exif = read_comment_from_file(&tmp.to_string_lossy())
+            .await
+            .expect("read_comment_from_file should succeed");
+        assert_eq!(exif.as_deref(), Some(new_comment));
+
+        // Idempotence: writing again must not create duplicate comment frames.
+        write_comment_to_file(&tmp.to_string_lossy(), new_comment)
+            .await
+            .unwrap();
+        let exif_after = read_comment_from_file(&tmp.to_string_lossy())
+            .await
+            .unwrap();
+        assert_eq!(exif_after.as_deref(), Some(new_comment));
 
         let _ = std::fs::remove_file(&tmp);
     }

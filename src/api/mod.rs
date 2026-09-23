@@ -5,11 +5,13 @@ use std::sync::Arc;
 
 use crate::AppState;
 
+pub mod backpack;
 pub mod daily;
 pub mod deemix_api;
 pub mod digging;
 pub mod dynamic_bundles;
 pub mod explorer;
+pub mod extended_mix;
 pub mod file_track_corrections;
 pub mod files;
 pub mod folders;
@@ -19,9 +21,12 @@ pub mod services;
 pub mod spotify_sync;
 pub mod storage;
 pub mod tags;
+pub mod telemetry_settings;
 pub mod tracks;
 pub mod traktor;
 pub mod types;
+pub mod ui_events;
+pub mod update;
 pub mod websocket;
 
 /// Build the merged API router from all domain sub-routers.
@@ -32,6 +37,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(daily::router())
         .merge(traktor::router())
         .merge(explorer::router())
+        .merge(extended_mix::router())
         .merge(digging::router())
         .merge(services::router())
         .merge(spotify_sync::router())
@@ -43,4 +49,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(tracks::router())
         .merge(dynamic_bundles::router())
         .merge(files::router())
+        .merge(update::router())
+        .merge(telemetry_settings::router())
+        .merge(ui_events::router())
+        .merge(backpack::router())
 }

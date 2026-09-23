@@ -82,6 +82,12 @@ async fn storage_backup_handler(
     let folder = match get_folder_by_id(&state.db, folder_id).await {
         Ok(Some(f)) => f,
         Ok(None) => {
+            crate::api::ui_events::emit_action(
+                &state,
+                crate::telemetry::events::EventType::UiActionRunBackup,
+                false,
+                Some("Folder not found"),
+            );
             return (
                 StatusCode::NOT_FOUND,
                 Json(ApiResponse {
@@ -94,6 +100,12 @@ async fn storage_backup_handler(
     };
 
     if folder.backup_path.is_none() {
+        crate::api::ui_events::emit_action(
+            &state,
+            crate::telemetry::events::EventType::UiActionRunBackup,
+            false,
+            Some("Folder has no backup_path configured"),
+        );
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse {
@@ -107,6 +119,12 @@ async fn storage_backup_handler(
         crate::tasks::start_backup_folder_task(&state.task_manager, &state.db, folder_id).await;
 
     if task_id.is_empty() {
+        crate::api::ui_events::emit_action(
+            &state,
+            crate::telemetry::events::EventType::UiActionRunBackup,
+            true,
+            None,
+        );
         return Json(ApiResponse {
             data: serde_json::json!({
                 "taskId": null,
@@ -116,6 +134,12 @@ async fn storage_backup_handler(
         .into_response();
     }
 
+    crate::api::ui_events::emit_action(
+        &state,
+        crate::telemetry::events::EventType::UiActionRunBackup,
+        true,
+        None,
+    );
     Json(ApiResponse {
         data: serde_json::json!({ "taskId": task_id }),
     })

@@ -22,3 +22,4 @@ resources/icon.iconset/
 # Python
 download-service/__pycache__/
 *.pyc
+scripts/keys/

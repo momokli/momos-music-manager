@@ -1,0 +1,373 @@
+name: Build all platforms
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-all-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-x64:
+    name: Linux x64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          # Keep caches per runner image: ubuntu-22.04 (glibc 2.35) artifacts
+          # must not be reused from ubuntu-latest (glibc 2.39) runs.
+          key: runner-image-22.04
+      - name: Resolve version
+        run: echo "MMM_VERSION=$(bash scripts/resolve-version.sh)" >> "$GITHUB_ENV"
+      - name: Package tar.gz + sha256
+        run: ./scripts/package-linux.sh x86_64-unknown-linux-gnu
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmm-linux-x64
+          path: |
+            target/momos-music-manager-*-linux-x64.tar.gz
+            target/momos-music-manager-*-linux-x64.tar.gz.sha256
+          if-no-files-found: error
+
+  linux-arm64:
+    name: Linux ARM64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install aarch64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          # Keep caches per runner image (see linux-x64 job).
+          key: runner-image-22.04
+      - name: Resolve version
+        run: echo "MMM_VERSION=$(bash scripts/resolve-version.sh)" >> "$GITHUB_ENV"
+      - name: Package tar.gz + sha256 (cross)
+        env:
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          # rust-lld chokes on --fix-cortex-a53-843419 for aarch64 on x86_64 hosts;
+          # use the GNU cross linker for the final link instead.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: ./scripts/package-linux.sh aarch64-unknown-linux-gnu
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmm-linux-arm64
+          path: |
+            target/momos-music-manager-*-linux-arm64.tar.gz
+            target/momos-music-manager-*-linux-arm64.tar.gz.sha256
+          if-no-files-found: error
+
+  windows-x64:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Resolve version
+        shell: bash
+        run: echo "MMM_VERSION=$(bash scripts/resolve-version.sh)" >> "$GITHUB_ENV"
+      - name: Build release
+        run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Package zip + sha256
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -TargetTriple x86_64-pc-windows-msvc
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmm-windows-x64
+          path: |
+            target/momos-music-manager-*-windows-x64.zip
+            target/momos-music-manager-*-windows-x64.zip.sha256
+          if-no-files-found: error
+
+  # GitHub-hosted ARM64 Windows runner (windows-11-arm) — available since 2025.
+  windows-arm64:
+    name: Windows ARM64
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Resolve version
+        shell: bash
+        run: echo "MMM_VERSION=$(bash scripts/resolve-version.sh)" >> "$GITHUB_ENV"
+      - name: Build release
+        run: cargo build --release --target aarch64-pc-windows-msvc
+      - name: Package zip + sha256
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -TargetTriple aarch64-pc-windows-msvc
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmm-windows-arm64
+          path: |
+            target/momos-music-manager-*-windows-arm64.zip
+            target/momos-music-manager-*-windows-arm64.zip.sha256
+          if-no-files-found: error
+
+  macos-universal:
+    name: macOS Universal (Intel + ARM)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Install create-dmg
+        run: brew install create-dmg
+      - name: Resolve version
+        run: echo "MMM_VERSION=$(bash scripts/resolve-version.sh)" >> "$GITHUB_ENV"
+      - name: Package DMG (universal)
+        run: ./scripts/package-macos.sh
+      - name: Rename to schema + sha256
+        run: |
+          BASE="target/Momo's-Music-Manager-v${MMM_VERSION}.dmg"
+          SCHEMA="target/momos-music-manager-${MMM_VERSION}-macos-universal.dmg"
+          cp "$BASE" "$SCHEMA"
+          (cd target && sha256sum "$(basename "$SCHEMA")" > "momos-music-manager-${MMM_VERSION}-macos-universal.dmg.sha256")
+          ls -lh "$SCHEMA"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmm-macos-universal
+          path: |
+            target/momos-music-manager-*-macos-universal.dmg
+            target/momos-music-manager-*-macos-universal.dmg.sha256
+          if-no-files-found: error
+
+  # PR-only dry run of the publish path: proves the merged main run would
+  # not fail inside "Publish release assets". Runs the SAME shared logic as
+  # the publish job (scripts/publish-assets.sh) against the artifacts of all
+  # five build jobs, but never creates a release, signs or uploads — PRs have
+  # no secrets, and the gate must be side-effect free.
+  #
+  # Catches e.g. the linux-arm64 fallback-version bug (packaged with the
+  # plain Cargo version instead of <cargo>-dev+<sha8>): validate fails with
+  # a precise diff because the arm64 artifact name does not match the schema.
+  publish-gate:
+    name: Publish gate (PR dry-run)
+    needs: [linux-x64, linux-arm64, windows-x64, windows-arm64, macos-universal]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # resolve-version.sh needs `cargo metadata` (dev version basis).
+      - name: Install Rust (for resolve-version.sh)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Validate artifact names + checksums vs publish schema
+        run: bash scripts/publish-assets.sh validate dist
+      # Scratch copy of the pristine artifact set (hardlinks, same fs) so the
+      # tag staging path is exercised against versioned files only.
+      - name: Dry-run tag staging (SHA256SUMS + upload manifest)
+        run: |
+          rm -rf dist-tag
+          cp -al dist dist-tag
+          bash scripts/publish-assets.sh stage-tag dist-tag
+      - name: Dry-run tag release notes
+        run: |
+          VERSION="$(bash scripts/resolve-version.sh)"
+          bash scripts/release-notes.sh "${VERSION}" dist-tag | tee dist-tag/.release-notes.md
+          test -s dist-tag/.release-notes.md
+      - name: Dry-run main staging (stable names + SHA256SUMS + upload manifest)
+        run: bash scripts/publish-assets.sh stage-main dist
+      - name: Show staged artifact set + upload manifests
+        run: |
+          ls -lh dist/
+          echo "--- upload manifest (main mode, $(wc -l < dist/.upload-manifest) files) ---"
+          cat dist/.upload-manifest
+          echo "--- upload manifest (tag mode, $(wc -l < dist-tag/.upload-manifest) files) ---"
+          cat dist-tag/.upload-manifest
+
+  publish:
+    name: Publish release assets
+    needs: [linux-x64, linux-arm64, windows-x64, windows-arm64, macos-universal]
+    # workflow_dispatch on main enables test publishes without a push.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # resolve-version.sh needs `cargo metadata` (dev version basis).
+      - name: Install Rust (for resolve-version.sh)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install minisign (pinned release binary)
+        run: |
+          curl -fsSL -o /tmp/minisign.tar.gz https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          tar xzf /tmp/minisign.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/minisign-linux/x86_64/minisign /usr/local/bin/minisign
+          minisign -V | head -1
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Show artifacts
+        run: ls -lh dist/
+      - name: Publish to latest-main (rolling) or tag release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          # The PR publish-gate job runs the identical shared logic
+          # (scripts/publish-assets.sh) against the same artifact set, so the
+          # publish path can not silently diverge from what the gate tested.
+          # validate: strict artifact-set + checksum check (would have caught
+          # the linux-arm64 fallback-version failure before the cp below).
+          bash scripts/publish-assets.sh validate dist
+
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            RELEASE="latest-main"
+            if ! gh release view "${RELEASE}" >/dev/null 2>&1; then
+              gh release create "${RELEASE}" \
+                --prerelease \
+                --target main \
+                --title "Latest main build (rolling)" \
+                --notes "Automatischer Build des aktuellen main-Standes für alle Plattformen. Ad-hoc-signiert, nicht notarized."
+            fi
+            # Stable names for the landing page download buttons + aggregate
+            # SHA256SUMS + upload manifest (single source of truth, shared
+            # with the PR gate).
+            bash scripts/publish-assets.sh stage-main dist
+          else
+            RELEASE="${GITHUB_REF#refs/tags/}"
+            # Stage the versioned artifacts + aggregate SHA256SUMS first so the
+            # release notes can embed the checksums (M2 DoD: platform matrix +
+            # SHA256 in the tag release notes).
+            bash scripts/publish-assets.sh stage-tag dist
+            VERSION="$(bash scripts/resolve-version.sh)"
+            bash scripts/release-notes.sh "${VERSION}" dist > dist/.release-notes.md
+            if ! gh release view "${RELEASE}" >/dev/null 2>&1; then
+              # --notes-file is prepended to the auto-generated changelog
+              # (GitHub's generate_release_notes API prepends `body`).
+              gh release create "${RELEASE}" --generate-notes --title "${RELEASE}" --notes-file dist/.release-notes.md
+            fi
+          fi
+
+          cd dist
+          # Upload file list written by the shared script — no second,
+          # hand-maintained list that could drift from the gate.
+          mapfile -t UPLOAD_FILES < .upload-manifest
+
+          # Sign the manifest (M6 autoupdater). Order relative to future
+          # M3/M4 code-signing: sign binary → zip/dmg → sha256 → sign manifest.
+          # The autoupdater refuses unsigned manifests, so this MUST run
+          # before upload. The secret key is the base64 of the minisign.key
+          # file (generate: minisign -G -p scripts/minisign.pub -s … -W).
+          # Public key: scripts/minisign.pub (matches the key embedded in the
+          # binary at src/autoupdate/keys.rs).
+          #
+          # Hard-fail when the key is missing: publishing an unsigned
+          # `latest-main` would silently break every autoupdating client
+          # (they refuse unsigned manifests), so a red build is the safe
+          # default — no key, no publish.
+          if [[ -z "${MINISIGN_SECRET_KEY:-}" ]]; then
+            echo "::error::MINISIGN_SECRET_KEY not set — refusing to publish unsigned release; the autoupdater would reject it. Set the secret (base64 of the minisign.key) and re-run the workflow."
+            exit 1
+          fi
+
+          echo "${MINISIGN_SECRET_KEY}" | base64 -d > /tmp/mmm-minisign.key
+          minisign -S -s /tmp/mmm-minisign.key -m SHA256SUMS
+          echo "--- Self-verify against committed public key ---"
+          minisign -V -p "${GITHUB_WORKSPACE}/scripts/minisign.pub" -m SHA256SUMS
+          rm -f /tmp/mmm-minisign.key
+
+          # Upload every platform artifact (schema names + stable names +
+          # per-file checksums + aggregate + manifest signature).
+          #
+          # The file names are deterministic (fixed by the build/package jobs
+          # and the stable-name copies above), so the manifest is explicit
+          # instead of a shell glob: an unmatched glob is passed through
+          # literally and `gh release upload` then fails with "no matches
+          # found" — this is exactly what happened when SHA256SUMS.minisig
+          # did not exist. Re-check every entry here because SHA256SUMS.minisig
+          # is only created by the signing step above (after stage wrote the
+          # manifest).
+          for f in "${UPLOAD_FILES[@]}"; do
+            if [[ ! -f "${f}" ]]; then
+              echo "::error::Missing file for upload: ${f}"
+              exit 1
+            fi
+          done
+          gh release upload "${RELEASE}" "${UPLOAD_FILES[@]}" --clobber
+          echo "Uploaded to ${RELEASE}"
+
+      # Rolling `latest-main` accumulates stale versioned assets from previous
+      # builds and legacy `Momo.s-Music-Manager-*` names (3 assets live there
+      # today). Remove everything that does not belong to the current schema:
+      # keep stable `*-latest-*` names, current versioned assets, SHA256SUMS.
+      - name: Cleanup stale assets (latest-main)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="$(bash scripts/resolve-version.sh)"
+          RELEASE="latest-main"
+          : > /tmp/stale.txt
+          while IFS= read -r asset; do
+            case "${asset}" in
+              SHA256SUMS*|Momo-s-Music-Manager-latest*|momos-music-manager-latest-*)
+                continue
+                ;;
+              Momo.s-*)
+                echo "${asset}" >> /tmp/stale.txt
+                ;;
+              momos-music-manager-*)
+                # momos-music-manager-<version>-<os-arch>.<ext> — cut the
+                # os-arch/ext suffix (version may contain `-dev+`).
+                base="${asset#momos-music-manager-}"
+                ver="${base%-*}"
+                ver="${ver%-*}"
+                if [[ "${ver}" != "${VERSION}" ]]; then
+                  echo "${asset}" >> /tmp/stale.txt
+                fi
+                ;;
+            esac
+          done < <(gh release view "${RELEASE}" --json assets -q '.assets[].name')
+          if [[ -s /tmp/stale.txt ]]; then
+            while IFS= read -r asset; do
+              echo "Deleting stale asset: ${asset}"
+              gh release delete-asset "${RELEASE}" "${asset}" --yes
+            done < /tmp/stale.txt
+          else
+            echo "No stale assets."
+          fi

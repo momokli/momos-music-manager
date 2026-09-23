@@ -31,17 +31,33 @@ async fn traktor_import_handler(
     match crate::tasks::start_traktor_import_task(&state.task_manager, &state.db, body.custom_path)
         .await
     {
-        Ok(task_id) => Json(ApiResponse {
-            data: serde_json::json!({ "taskId": task_id }),
-        })
-        .into_response(),
-        Err(e) => (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Ok(task_id) => {
+            crate::api::ui_events::emit_action(
+                &state,
+                crate::telemetry::events::EventType::UiActionTraktorImport,
+                true,
+                None,
+            );
+            Json(ApiResponse {
+                data: serde_json::json!({ "taskId": task_id }),
+            })
+            .into_response()
+        }
+        Err(e) => {
+            crate::api::ui_events::emit_action(
+                &state,
+                crate::telemetry::events::EventType::UiActionTraktorImport,
+                false,
+                Some(&e.to_string()),
+            );
+            (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+                .into_response()
+        }
     }
 }
 

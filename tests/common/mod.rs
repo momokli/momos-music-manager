@@ -91,6 +91,9 @@ pub fn test_app_state(pool: Pool<Sqlite>) -> Arc<AppState> {
         embeddings: tokio::sync::Mutex::new(None),
         category_means: tokio::sync::Mutex::new(None),
         public_url: None,
+        backpack_coordinator: Arc::new(
+            momos_music_manager::backpack::BackpackSyncCoordinator::new(),
+        ),
     })
 }
 

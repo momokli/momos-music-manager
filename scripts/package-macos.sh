@@ -4,7 +4,8 @@ set -euo pipefail
 APP_NAME="Momo's Music Manager"
 BUNDLE_NAME="${APP_NAME}.app"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
-VERSION=$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['packages'][0]['version'])")
+# Effective version: MMM_VERSION (set by CI) wins; local fallback = Cargo.toml.
+VERSION="${MMM_VERSION:-$(cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['packages'][0]['version'])")}"
 
 echo "=== Building ${APP_NAME} v${VERSION} ==="
 

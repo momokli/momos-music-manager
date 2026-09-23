@@ -1,0 +1,1484 @@
+//! Update check + download + verification chain.
+//!
+//! Verification order (strict — nothing is installed unless every step
+//! passes):
+//!
+//! 1. fetch `SHA256SUMS.minisig` + `SHA256SUMS`
+//! 2. verify the Ed25519 (minisign) signature over the manifest with the
+//!    embedded public key
+//! 3. resolve the platform artifact (`momos-music-manager-latest-<os>-<arch>`)
+//!    and the published version from the manifest
+//! 4. on apply: download the artifact over HTTPS and verify its SHA256
+//!    against the manifest entry
+//! 5. only then swap the binary (see [`crate::autoupdate::swap`])
+
+use std::cmp::Ordering;
+use std::path::PathBuf;
+
+use semver::Version;
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+use super::manifest::{Manifest, ManifestError};
+use super::minisign::MinisignPublicKey;
+use super::swap::{self, UpdateMarker};
+use super::{keys, platform};
+
+/// Default release channel checked by the updater (dev builds).
+pub const DEFAULT_BASE_URL: &str =
+    "https://github.com/momokli/momos-music-manager/releases/download/latest-main";
+
+/// Default channel for release builds. GitHub only serves release assets
+/// under `releases/latest/download/<asset>` (redirected to the newest
+/// non-prerelease release — reqwest follows redirects by default) or
+/// `releases/download/<tag>/<asset>`; a bare `releases/latest/<asset>` path
+/// is not a valid GitHub URL and 404s (v1.2.0 regression).
+pub const DEFAULT_RELEASE_BASE_URL: &str =
+    "https://github.com/momokli/momos-music-manager/releases/latest/download";
+
+/// Wire name of the rolling update channel (dev builds of `main`).
+pub const UPDATE_CHANNEL_ROLLING: &str = "rolling";
+/// Wire name of the stable update channel (semver releases).
+pub const UPDATE_CHANNEL_RELEASE: &str = "release";
+
+/// Update channel a build tracks: `release` (stable semver releases) or
+/// `rolling` (dev builds of `main`, published on `latest-main`).
+///
+/// A build's *embedded* channel is a property of its version (pre-release
+/// `-dev+<sha>` → dev build), but the *selected* update channel is a user
+/// setting (`autoupdate.channel`, env > UI > TOML > default = embedded
+/// channel). `check`/`apply` run against the selected channel — an explicit
+/// switch across channels is intentional and therefore allowed; the
+/// [`UpdateError::ChannelMismatch`] guard only fires when the update source
+/// serves the *other* channel than selected (inconsistent override).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateChannel {
+    /// Rolling dev channel — `latest-main` (dev builds of `main`).
+    Rolling,
+    /// Stable channel — newest semver release (`releases/latest/download`).
+    Release,
+}
+
+impl UpdateChannel {
+    /// All selectable channels, stable first (dropdown/status order).
+    pub const ALL: [UpdateChannel; 2] = [UpdateChannel::Release, UpdateChannel::Rolling];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UpdateChannel::Rolling => UPDATE_CHANNEL_ROLLING,
+            UpdateChannel::Release => UPDATE_CHANNEL_RELEASE,
+        }
+    }
+
+    /// Parse a wire/config value (`"rolling"` | `"release"`).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            UPDATE_CHANNEL_ROLLING => Some(UpdateChannel::Rolling),
+            UPDATE_CHANNEL_RELEASE => Some(UpdateChannel::Release),
+            _ => None,
+        }
+    }
+
+    /// Channel default the build tracks: dev builds (`-dev+<sha>`) → rolling,
+    /// release builds → release.
+    pub fn for_version(version: &str) -> Self {
+        match semver::Version::parse(version) {
+            Ok(v) if !v.pre.is_empty() => UpdateChannel::Rolling,
+            _ => UpdateChannel::Release,
+        }
+    }
+
+    /// Default base URL for this channel (overridable via
+    /// `MOMOS_AUTOUPDATE_BASE_URL` / `[autoupdate] base_url`).
+    pub fn default_base_url(&self) -> &'static str {
+        match self {
+            UpdateChannel::Rolling => DEFAULT_BASE_URL,
+            UpdateChannel::Release => DEFAULT_RELEASE_BASE_URL,
+        }
+    }
+
+    /// Whether a published version belongs to this channel.
+    pub fn matches_version(&self, version: &Version) -> bool {
+        match self {
+            UpdateChannel::Rolling => !version.pre.is_empty(),
+            UpdateChannel::Release => version.pre.is_empty(),
+        }
+    }
+}
+
+/// How long the new binary must stay healthy before an update is committed.
+pub const DEFAULT_HEALTH_GRACE_SECS: u64 = 60;
+
+#[derive(Debug, Error)]
+pub enum UpdateError {
+    #[error("update disabled by configuration")]
+    Disabled,
+    #[error("platform not supported by the updater: {0}")]
+    UnsupportedPlatform(String),
+    #[error("network error fetching {url}: {source}")]
+    Fetch {
+        url: String,
+        source: reqwest::Error,
+    },
+    #[error("HTTP {status} fetching {url}")]
+    HttpStatus { url: String, status: u16 },
+    #[error("manifest signature verification failed — refusing to update: {0}")]
+    Signature(#[from] super::minisign::MinisignError),
+    #[error("invalid manifest: {0}")]
+    Manifest(#[from] ManifestError),
+    #[error("no update available")]
+    NoUpdate,
+    #[error("artifact SHA256 mismatch — refusing to install")]
+    ChecksumMismatch,
+    #[error("no binary entry found in archive for `{name}`")]
+    MissingBinary { name: String },
+    #[error("swap failed: {0}")]
+    Swap(#[from] swap::SwapError),
+    #[error("current executable unavailable: {0}")]
+    CurrentExe(std::io::Error),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("could not determine current version")]
+    CurrentVersion,
+    #[error("channel mismatch: update channel is `{channel}`, but the update source serves a build of the other channel (v{available_version}) — current build: v{current_version}")]
+    ChannelMismatch {
+        /// Selected update channel (`rolling` | `release`).
+        channel: &'static str,
+        current_version: String,
+        available_version: String,
+    },
+}
+
+/// Fetch abstraction so the verification chain is testable without network.
+#[async_trait::async_trait]
+pub trait Fetcher: Send + Sync {
+    async fn get_bytes(&self, url: &str) -> Result<Vec<u8>, UpdateError>;
+}
+
+/// Production fetcher backed by reqwest (rustls).
+#[derive(Clone, Default)]
+pub struct HttpFetcher {
+    client: reqwest::Client,
+}
+
+impl HttpFetcher {
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .user_agent(concat!(
+                    "momos-music-manager/",
+                    env!("MMM_VERSION"),
+                    " (autoupdater)"
+                ))
+                // Global request timeout (reqwest's default is no timeout) —
+                // the API handlers and the CLI must never hang on a dead
+                // upstream.
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("reqwest client builds"),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Fetcher for HttpFetcher {
+    async fn get_bytes(&self, url: &str) -> Result<Vec<u8>, UpdateError> {
+        let resp = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|source| UpdateError::Fetch {
+                url: url.to_string(),
+                source,
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(UpdateError::HttpStatus {
+                url: url.to_string(),
+                status: status.as_u16(),
+            });
+        }
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|source| UpdateError::Fetch {
+                url: url.to_string(),
+                source,
+            })
+    }
+}
+
+/// Platform artifact description for the current build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformArtifact {
+    /// `linux-x64`, `linux-arm64`, `windows-x64`, `windows-arm64`, `macos-universal`
+    pub os_arch: String,
+    /// `tar.gz`, `zip` or `dmg`
+    pub ext: String,
+    /// Name of the executable inside the archive / on disk.
+    pub binary_name: String,
+}
+
+impl PlatformArtifact {
+    pub fn stable_artifact_name(&self) -> String {
+        format!("momos-music-manager-latest-{}.{}", self.os_arch, self.ext)
+    }
+}
+
+/// Settings for the updater (built from config in the CLI layer).
+#[derive(Debug, Clone)]
+pub struct UpdateSettings {
+    pub base_url: String,
+    /// Channel `check`/`apply` run against (env > UI > TOML > default =
+    /// channel of the running build).
+    pub channel: UpdateChannel,
+    pub enabled: bool,
+    pub health_grace_secs: u64,
+    pub current_version: String,
+    pub artifact: PlatformArtifact,
+    /// Key used to verify the manifest signature (embedded release key by
+    /// default; injectable for tests / staging).
+    pub pubkey: MinisignPublicKey,
+    /// Directory for the swap + marker (defaults to the current exe dir).
+    pub install_dir: Option<PathBuf>,
+    /// macOS only: directory where the DMG self-install replaces the
+    /// `.app` bundle (default `/Applications`, see
+    /// [`crate::autoupdate::macos::default_app_dir`]). Configurable via
+    /// `MOMOS_AUTOUPDATE_APP_DIR` / `[autoupdate] app_dir`.
+    pub app_install_dir: Option<PathBuf>,
+}
+
+impl UpdateSettings {
+    pub fn from_config(
+        config: &crate::config::ServiceCredentials,
+        channel: UpdateChannel,
+    ) -> Result<Self, UpdateError> {
+        // Parse the current version once and fail fast: without a parseable
+        // version the channel cannot be decided and comparisons would be wrong.
+        let current_version = env!("MMM_VERSION").to_string();
+        Version::parse(&current_version).map_err(|_| UpdateError::CurrentVersion)?;
+
+        // The channel decides the default base URL: rolling tracks the
+        // `latest-main` pre-release, release tracks the newest semver release
+        // (`releases/latest/download`). An explicit override
+        // (MOMOS_AUTOUPDATE_BASE_URL / [autoupdate] base_url) still wins — any
+        // value different from the built-in rolling default is respected; if
+        // the override then serves the *other* channel, the mismatch guard
+        // (in `fetch_update_info`) reports the inconsistency.
+        let base_url = if config.autoupdate_base_url == DEFAULT_BASE_URL {
+            channel.default_base_url().to_string()
+        } else {
+            config.autoupdate_base_url.clone()
+        };
+
+        Ok(Self {
+            base_url,
+            channel,
+            enabled: config.autoupdate_enabled,
+            health_grace_secs: config.autoupdate_health_grace_secs,
+            current_version,
+            artifact: platform::current_artifact().ok_or_else(|| {
+                UpdateError::UnsupportedPlatform(format!(
+                    "{}/{}",
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                ))
+            })?,
+            pubkey: MinisignPublicKey::from_blob(keys::PUBLIC_KEY_B64)
+                .expect("embedded public key is valid"),
+            install_dir: None,
+            app_install_dir: config.autoupdate_app_dir.clone(),
+        })
+    }
+}
+
+/// Result of an update check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateStatus {
+    /// Current version is the latest published one.
+    UpToDate,
+    /// New version available (manifest signed + verified).
+    UpdateAvailable(UpdateInfo),
+    /// The update source serves a build of the *other* channel than the
+    /// selected one (inconsistent source/channel combination — e.g. a base
+    /// URL override pointing at the wrong feed). An explicit user switch is
+    /// not a mismatch: `check`/`apply` then simply run against the selected
+    /// channel's feed.
+    ChannelMismatch {
+        channel: &'static str,
+        current_version: String,
+        available_version: String,
+    },
+    /// Platform is not supported by the updater.
+    UnsupportedPlatform,
+    /// Updates disabled by configuration.
+    Disabled,
+}
+
+impl UpdateStatus {
+    /// Convenience wrapper around [`check`] for CLI use.
+    pub async fn check<F: Fetcher>(
+        settings: &UpdateSettings,
+        fetcher: &F,
+    ) -> Result<UpdateStatus, UpdateError> {
+        check(settings, fetcher).await
+    }
+
+    /// Convenience wrapper around [`apply`] for CLI use.
+    pub async fn apply<F: Fetcher>(
+        settings: &UpdateSettings,
+        fetcher: &F,
+    ) -> Result<ApplyOutcome, UpdateError> {
+        apply(settings, fetcher).await
+    }
+}
+
+/// Verified information about an available update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateInfo {
+    pub version: String,
+    pub artifact_name: String,
+    pub sha256: String,
+    pub url: String,
+}
+
+/// Result of `update apply`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyOutcome {
+    /// Binary swapped; restart the server to activate.
+    Installed {
+        new_version: String,
+        old_version: String,
+    },
+    /// Platform artifact downloaded + verified, but not swapped (macOS DMG).
+    DownloadedOnly { path: PathBuf, version: String },
+}
+
+/// Verify the manifest signature, resolve the platform artifact and compare
+/// versions. Does **not** download the artifact.
+pub async fn check<F: Fetcher>(
+    settings: &UpdateSettings,
+    fetcher: &F,
+) -> Result<UpdateStatus, UpdateError> {
+    if !settings.enabled {
+        return Ok(UpdateStatus::Disabled);
+    }
+    match fetch_update_info(settings, fetcher).await {
+        Ok(Some(info)) => Ok(UpdateStatus::UpdateAvailable(info)),
+        Ok(None) => Ok(UpdateStatus::UpToDate),
+        Err(UpdateError::ChannelMismatch {
+            channel,
+            current_version,
+            available_version,
+        }) => Ok(UpdateStatus::ChannelMismatch {
+            channel,
+            current_version,
+            available_version,
+        }),
+        Err(e) => Err(e),
+    }
+}
+
+/// Full apply: check + download + SHA256 verification + atomic swap.
+pub async fn apply<F: Fetcher>(
+    settings: &UpdateSettings,
+    fetcher: &F,
+) -> Result<ApplyOutcome, UpdateError> {
+    if !settings.enabled {
+        return Err(UpdateError::Disabled);
+    }
+    let Some(info) = fetch_update_info(settings, fetcher).await? else {
+        return Err(UpdateError::NoUpdate);
+    };
+
+    tracing::info!(
+        "autoupdate: downloading {} ({})",
+        info.artifact_name,
+        info.url
+    );
+    let bytes = fetcher.get_bytes(&info.url).await?;
+
+    // SHA256 verification against the signed manifest — before anything is
+    // written to disk.
+    let actual = hex_digest(&bytes);
+    if !actual.eq_ignore_ascii_case(&info.sha256) {
+        return Err(UpdateError::ChecksumMismatch);
+    }
+
+    if settings.artifact.ext == "dmg" {
+        // macOS (Phase C): verified DMG → self-install. The DMG is written
+        // to the Downloads folder first (kept on failure so the user can
+        // install manually — and always visible where the old behaviour put
+        // it), then mounted and the `.app` bundle atomically replaces the
+        // installed one in the app install directory (default
+        // `/Applications`, see `dmg::install_dmg`). Any install failure
+        // degrades gracefully to the v1 "verified download" outcome.
+        let dir = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("Downloads");
+        std::fs::create_dir_all(&dir)?;
+        let target = dir.join(format!(
+            "momos-music-manager-{}-macos-universal.dmg",
+            info.version
+        ));
+        std::fs::write(&target, &bytes)?;
+
+        if cfg!(target_os = "macos") {
+            let app_dir = settings
+                .app_install_dir
+                .clone()
+                .unwrap_or_else(super::macos::default_app_dir);
+            match super::dmg::install_dmg(&target, &app_dir) {
+                Ok(installed) => {
+                    tracing::info!(
+                        "autoupdate: DMG installed — {} replaced with v{} (restart to activate)",
+                        installed.display(),
+                        info.version
+                    );
+                    // CLI access: refresh the `momos-music-manager` symlink
+                    // in a PATH dir so the freshly installed bundle stays
+                    // reachable from the terminal (see cli_link). Best
+                    // effort — never fails the apply.
+                    if let Err(e) = crate::cli_link::ensure_for_bundle(&installed) {
+                        tracing::warn!(
+                            "autoupdate: CLI link refresh after DMG install failed ({}): {e}",
+                            installed.display()
+                        );
+                    }
+                    // Cleanup: the verified DMG is no longer needed.
+                    if let Err(e) = std::fs::remove_file(&target) {
+                        tracing::debug!(
+                            "autoupdate: could not remove downloaded DMG {}: {e}",
+                            target.display()
+                        );
+                    }
+                    // Telemetry: version switch happened (from → to) — same
+                    // event as the binary-swap path below. Non-blocking,
+                    // no-op while telemetry is disabled.
+                    crate::telemetry::emit::emit_event(
+                        crate::telemetry::events::EventType::AppUpdated,
+                        serde_json::json!({
+                            "from": settings.current_version,
+                            "to": info.version,
+                        }),
+                    );
+                    return Ok(ApplyOutcome::Installed {
+                        new_version: info.version,
+                        old_version: settings.current_version.clone(),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "autoupdate: DMG self-install failed ({e}) — verified download kept at {} for manual install",
+                        target.display()
+                    );
+                }
+            }
+        } else {
+            tracing::debug!("autoupdate: dmg artifact on a non-macOS host — verified download only");
+        }
+        return Ok(ApplyOutcome::DownloadedOnly {
+            path: target,
+            version: info.version,
+        });
+    }
+
+    // Extract the binary from the archive (still fully in memory).
+    let binary_bytes = extract_binary(
+        &bytes,
+        &settings.artifact.ext,
+        &settings.artifact.binary_name,
+    )?;
+
+    let install_dir = settings
+        .install_dir
+        .clone()
+        .unwrap_or_else(swap::exe_dir);
+    let binary_name = settings.artifact.binary_name.clone();
+
+    // Marker before the swap so a crash mid-swap is recoverable.
+    let marker = UpdateMarker {
+        old_version: settings.current_version.clone(),
+        new_version: info.version.clone(),
+        created_at_unix: chrono::Utc::now().timestamp(),
+        start_count: 0,
+        committed: false,
+    };
+    swap::write_marker(&install_dir, &marker)?;
+    swap::swap_binary(&install_dir, &binary_name, &binary_bytes)?;
+
+    // Telemetry: version switch happened (from → to). Non-blocking, no-op
+    // while telemetry is disabled.
+    crate::telemetry::emit::emit_event(
+        crate::telemetry::events::EventType::AppUpdated,
+        serde_json::json!({
+            "from": settings.current_version,
+            "to": info.version,
+        }),
+    );
+
+    Ok(ApplyOutcome::Installed {
+        new_version: info.version,
+        old_version: settings.current_version.clone(),
+    })
+}
+
+/// Fetch + verify the manifest and build [`UpdateInfo`] if an update is
+/// published on the same channel. Returns `Ok(None)` when already up to date.
+async fn fetch_update_info<F: Fetcher>(
+    settings: &UpdateSettings,
+    fetcher: &F,
+) -> Result<Option<UpdateInfo>, UpdateError> {
+    let artifact = &settings.artifact;
+
+    let sig_url = format!("{}/SHA256SUMS.minisig", settings.base_url);
+    let manifest_url = format!("{}/SHA256SUMS", settings.base_url);
+
+    let sig_bytes = fetcher.get_bytes(&sig_url).await?;
+    let manifest_bytes = fetcher.get_bytes(&manifest_url).await?;
+
+    // 1. Ed25519 verification of the manifest (before parsing anything).
+    settings.pubkey.verify_bytes(&manifest_bytes, &sig_bytes)?;
+
+    // 2. Resolve the published version from the verified manifest.
+    let manifest_text = String::from_utf8_lossy(&manifest_bytes);
+    let manifest = Manifest::parse(&manifest_text)?;
+    let latest = manifest.version_for(&artifact.os_arch)?;
+
+    let current = Version::parse(&settings.current_version)
+        .map_err(|_| UpdateError::CurrentVersion)?;
+
+    // 3. Channel guard: the *selected* channel decides what may be installed.
+    //    Rolling tracks dev builds, release tracks stable releases. Serving
+    //    the other channel than selected is inconsistent (typically a base
+    //    URL override pointing at the wrong feed) → ChannelMismatch. An
+    //    explicit user switch is *not* a mismatch: after the switch the
+    //    settings point at the selected channel's feed and the guard passes.
+    if !settings.channel.matches_version(&latest) {
+        return Err(UpdateError::ChannelMismatch {
+            channel: settings.channel.as_str(),
+            current_version: settings.current_version.clone(),
+            available_version: latest.to_string(),
+        });
+    }
+
+    // 4. Version comparison.
+    //
+    //    Two traps make the naive `latest > current` wrong:
+    //
+    //    a) Rolling dev builds: `1.1.0-dev+shaA` and `1.1.0-dev+shaB` are
+    //       precedence-equal — semver ignores build metadata in
+    //       `cmp_precedence`, but `Version`'s *derived* `Ord` does compare
+    //       it (lexicographically). `latest > current` is therefore NOT
+    //       "newer build", it is "sha sorts higher": a freshly pushed
+    //       commit whose sha sorts lower than the running one was reported
+    //       as up to date. On rolling, any different version string is a
+    //       new build of `main` and must be offered.
+    //    b) Cross-channel switches (release build tracking rolling or vice
+    //       versa) compare across the pre-release boundary: a stable
+    //       `1.11.0` outranks every `1.11.0-dev+*`, so switching a release
+    //       install to rolling reported "up to date" against a *different*
+    //       build. When the running build does not belong to the selected
+    //       channel, a published build of the same base version is an
+    //       update even though its precedence is lower.
+    let cross_channel = !settings.channel.matches_version(&current);
+    let update_available = match (latest.major, latest.minor, latest.patch)
+        .cmp(&(current.major, current.minor, current.patch))
+    {
+        // An older base version is never an update (no silent downgrade).
+        Ordering::Less => false,
+        // A newer base version is always an update.
+        Ordering::Greater => true,
+        // Same base version: it depends on the channel and on whether the
+        // running build belongs to the selected channel at all.
+        Ordering::Equal => {
+            if cross_channel || settings.channel == UpdateChannel::Rolling {
+                // Rolling tracks main (every published dev build differs by
+                // sha) and a cross-channel switch changes the build type —
+                // any *different* version string is a new build to install.
+                latest.to_string() != settings.current_version
+            } else {
+                // Release channel: plain semver precedence (`1.11.0` >
+                // `1.11.0-rc.1`).
+                latest > current
+            }
+        }
+    };
+    if !update_available {
+        return Ok(None);
+    }
+
+    // 5. Artifact via the *versioned* name (exists on both channels;
+    //    `Version::to_string()` preserves build metadata).
+    let artifact_name = format!(
+        "momos-music-manager-{}-{}.{}",
+        latest, artifact.os_arch, artifact.ext
+    );
+    let sha256 = manifest
+        .artifact_hash(&artifact_name)
+        .ok_or_else(|| ManifestError::ArtifactNotFound {
+            name: artifact_name.clone(),
+        })?
+        .to_string();
+
+    let url = format!("{}/{}", settings.base_url, artifact_name);
+
+    Ok(Some(UpdateInfo {
+        version: latest.to_string(),
+        artifact_name,
+        sha256,
+        url,
+    }))
+}
+
+/// Extract the binary from an in-memory archive.
+pub fn extract_binary(
+    archive: &[u8],
+    ext: &str,
+    binary_name: &str,
+) -> Result<Vec<u8>, UpdateError> {
+    match ext {
+        "tar.gz" | "tgz" => {
+            let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(archive));
+            let mut tar = tar::Archive::new(decoder);
+            for entry in tar.entries()? {
+                let mut entry = entry?;
+                let path = entry.path()?.into_owned();
+                if path
+                    .file_name()
+                    .map(|n| n == binary_name)
+                    .unwrap_or(false)
+                {
+                    let mut buf = Vec::new();
+                    std::io::Read::read_to_end(&mut entry, &mut buf)?;
+                    return Ok(buf);
+                }
+            }
+            Err(UpdateError::MissingBinary {
+                name: binary_name.to_string(),
+            })
+        }
+        "zip" => {
+            let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).map_err(|e| {
+                UpdateError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            })?;
+            for i in 0..zip.len() {
+                let mut file = zip.by_index(i).map_err(|e| {
+                    UpdateError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                })?;
+                let name = file.name().to_string();
+                let base = name.rsplit(['/', '\\']).next().unwrap_or(&name);
+                if base == binary_name {
+                    let mut buf = Vec::new();
+                    std::io::Read::read_to_end(&mut file, &mut buf)?;
+                    return Ok(buf);
+                }
+            }
+            Err(UpdateError::MissingBinary {
+                name: binary_name.to_string(),
+            })
+        }
+        other => Err(UpdateError::MissingBinary {
+            name: format!("unsupported archive type `{other}`"),
+        }),
+    }
+}
+
+pub fn hex_digest(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut s = String::with_capacity(64);
+    for b in digest {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use base64::Engine;
+    use std::collections::HashMap;
+
+    /// In-memory fetcher serving fixture files.
+    pub(crate) struct MockFetcher {
+        pub files: HashMap<String, Vec<u8>>,
+    }
+
+    impl MockFetcher {
+        pub fn new(files: HashMap<String, Vec<u8>>) -> Self {
+            Self { files }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Fetcher for MockFetcher {
+        async fn get_bytes(&self, url: &str) -> Result<Vec<u8>, UpdateError> {
+            self.files
+                .get(url)
+                .cloned()
+                .ok_or_else(|| UpdateError::HttpStatus {
+                    url: url.to_string(),
+                    status: 404,
+                })
+        }
+    }
+
+    /// Test-only signing key (NOT the release key).
+    fn test_signer() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[9u8; 32])
+    }
+
+    fn test_pubkey() -> MinisignPublicKey {
+        let pk = test_signer().verifying_key().to_bytes();
+        let mut blob = Vec::with_capacity(42);
+        blob.extend_from_slice(b"Ed");
+        blob.extend_from_slice(&pk[0..8]);
+        blob.extend_from_slice(&pk);
+        MinisignPublicKey::from_blob(&base64::engine::general_purpose::STANDARD.encode(&blob))
+            .unwrap()
+    }
+
+    const BASE: &str = "https://example.invalid/latest-main";
+
+    pub(crate) fn test_settings(os_arch: &str, ext: &str, current: &str) -> UpdateSettings {
+        UpdateSettings {
+            base_url: BASE.to_string(),
+            // Default channel of a build = its embedded channel (dev →
+            // rolling, release → release); tests override `channel` to model
+            // an explicit user switch.
+            channel: UpdateChannel::for_version(current),
+            enabled: true,
+            health_grace_secs: 5,
+            current_version: current.to_string(),
+            artifact: PlatformArtifact {
+                os_arch: os_arch.to_string(),
+                ext: ext.to_string(),
+                binary_name: "momos-music-manager".to_string(),
+            },
+            pubkey: test_pubkey(),
+            install_dir: None,
+            app_install_dir: None,
+        }
+    }
+
+    /// Insert a signed manifest (+ optional artifact) into the mock fetcher
+    /// under the canonical rolling-test base ([`BASE`]).
+    /// The artifact is served under its **versioned** name (the updater no
+    /// longer downloads via the stable `-latest-` name).
+    pub(crate) fn signed_fixture(
+        files: &mut HashMap<String, Vec<u8>>,
+        manifest: &str,
+        version: &str,
+        artifact_bytes: Option<Vec<u8>>,
+    ) {
+        signed_fixture_at(files, BASE, manifest, version, artifact_bytes);
+    }
+
+    /// Insert a signed manifest (+ optional artifact) into the mock fetcher
+    /// under an explicit `base_url` (any feed layout — `latest/download` or
+    /// `download/<tag>`). The artifact is served under its **versioned**
+    /// name, matching the updater's download URL construction.
+    pub(crate) fn signed_fixture_at(
+        files: &mut HashMap<String, Vec<u8>>,
+        base: &str,
+        manifest: &str,
+        version: &str,
+        artifact_bytes: Option<Vec<u8>>,
+    ) {
+        files.insert(
+            format!("{base}/SHA256SUMS"),
+            manifest.as_bytes().to_vec(),
+        );
+        let sig = super::super::minisign::sign_prehashed(
+            &test_signer(),
+            manifest.as_bytes(),
+            "timestamp:1\tfile:SHA256SUMS\thashed",
+        );
+        files.insert(
+            format!("{base}/SHA256SUMS.minisig"),
+            sig.as_bytes().to_vec(),
+        );
+        if let Some(bytes) = artifact_bytes {
+            files.insert(
+                format!("{base}/momos-music-manager-{version}-linux-x64.tar.gz"),
+                bytes,
+            );
+        }
+    }
+
+    fn sample_manifest(sha: &str, version: &str) -> String {
+        format!(
+            "{sha}  momos-music-manager-{version}-linux-x64.tar.gz\n{sha}  momos-music-manager-latest-linux-x64.tar.gz\n"
+        )
+    }
+
+    fn tar_gz_with_binary(content: &[u8]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "momos-music-manager", content)
+            .unwrap();
+        builder.finish().unwrap();
+        let tar_bytes = builder.into_inner().unwrap();
+        let mut encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &tar_bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn hex_digest_matches_sha256sum() {
+        assert_eq!(
+            hex_digest(b"hello\n"),
+            "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+        );
+    }
+
+    #[test]
+    fn extract_binary_from_tar_gz() {
+        let gz = tar_gz_with_binary(b"bin");
+        let out = extract_binary(&gz, "tar.gz", "momos-music-manager").unwrap();
+        assert_eq!(out, b"bin");
+    }
+
+    #[test]
+    fn extract_binary_from_zip() {
+        let mut writer = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut writer);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("momos-music-manager.exe", options).unwrap();
+            std::io::Write::write_all(&mut zip, b"winbin").unwrap();
+            zip.finish().unwrap();
+        }
+        let bytes = writer.into_inner();
+        let out = extract_binary(&bytes, "zip", "momos-music-manager.exe").unwrap();
+        assert_eq!(out, b"winbin");
+    }
+
+    #[tokio::test]
+    async fn check_rejects_unsigned_or_tampered_manifest() {
+        let mut files = HashMap::new();
+        files.insert(
+            format!("{BASE}/SHA256SUMS"),
+            sample_manifest("abc", "2.0.0").into_bytes(),
+        );
+        files.insert(
+            format!("{BASE}/SHA256SUMS.minisig"),
+            b"garbage".to_vec(),
+        );
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("linux-x64", "tar.gz", "1.0.1");
+        assert!(matches!(
+            check(&settings, &fetcher).await.unwrap_err(),
+            UpdateError::Signature(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_rejects_manifest_signed_by_wrong_key() {
+        let mut files = HashMap::new();
+        let manifest = sample_manifest("abc", "2.0.0");
+        // Signed by the correct test key…
+        signed_fixture(&mut files, &manifest, "2.0.0", None);
+        // …but the settings use the *embedded release* key → must be refused.
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.0.1");
+        settings.pubkey = MinisignPublicKey::from_blob(keys::PUBLIC_KEY_B64).unwrap();
+        let fetcher = MockFetcher::new(files);
+        assert!(matches!(
+            check(&settings, &fetcher).await.unwrap_err(),
+            UpdateError::Signature(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_returns_uptodate_for_equal_version() {
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &sample_manifest("abc", "1.0.1"), "1.0.1", None);
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("linux-x64", "tar.gz", "1.0.1");
+        assert_eq!(check(&settings, &fetcher).await.unwrap(), UpdateStatus::UpToDate);
+    }
+
+    #[tokio::test]
+    async fn check_reports_newer_version() {
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &sample_manifest("abc", "2.0.0"), "2.0.0", None);
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("linux-x64", "tar.gz", "1.0.1");
+        match check(&settings, &fetcher).await.unwrap() {
+            UpdateStatus::UpdateAvailable(info) => {
+                assert_eq!(info.version, "2.0.0");
+                assert_eq!(info.artifact_name, "momos-music-manager-2.0.0-linux-x64.tar.gz");
+            }
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_verifies_checksum_before_swap() {
+        let archive = tar_gz_with_binary(b"newbin");
+        let wrong_sha = "0".repeat(64);
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &sample_manifest(&wrong_sha, "2.0.0"), "2.0.0", Some(archive));
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("linux-x64", "tar.gz", "1.0.1");
+        assert!(matches!(
+            apply(&settings, &fetcher).await.unwrap_err(),
+            UpdateError::ChecksumMismatch
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_against_real_http_server() {
+        // End-to-end through HttpFetcher + a local HTTP server serving the
+        // committed minisign-CLI-signed fixtures.
+        use axum::{Router, routing::get};
+
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/autoupdate"
+        );
+        let manifest = std::fs::read(format!("{dir}/SHA256SUMS")).unwrap();
+        let sig = std::fs::read(format!("{dir}/SHA256SUMS.minisig")).unwrap();
+
+        let app = Router::new()
+            .route(
+                "/SHA256SUMS",
+                get(move || {
+                    let m = manifest.clone();
+                    async move {
+                        axum::response::Response::new(axum::body::Body::from(m))
+                    }
+                }),
+            )
+            .route(
+                "/SHA256SUMS.minisig",
+                get(move || {
+                    let s = sig.clone();
+                    async move {
+                        axum::response::Response::new(axum::body::Body::from(s))
+                    }
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        // Fixtures are signed with the committed TEST key.
+        let test_pub = MinisignPublicKey::from_pubkey_file(
+            &std::fs::read_to_string(format!("{dir}/minisign-test.pub")).unwrap(),
+        )
+        .unwrap();
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.0.1");
+        settings.base_url = format!("http://{addr}");
+        settings.pubkey = test_pub;
+
+        let fetcher = HttpFetcher::new();
+        match check(&settings, &fetcher).await.unwrap() {
+            UpdateStatus::UpdateAvailable(info) => {
+                assert_eq!(info.version, "2.0.0");
+                assert_eq!(info.artifact_name, "momos-music-manager-2.0.0-linux-x64.tar.gz");
+            }
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn apply_dmg_on_non_macos_falls_back_to_verified_download() {
+        // Phase C macOS self-install is runtime-gated: on a non-macOS host
+        // (CI) the verified DMG must land in ~/Downloads with the v1
+        // DownloadedOnly outcome — and on macOS a *broken* DMG (hdiutil
+        // cannot mount this byte blob) degrades to the same fallback.
+        let dmg_bytes = b"fake-dmg-content".to_vec();
+        let sha = hex_digest(&dmg_bytes);
+        let manifest = format!(
+            "{sha}  momos-music-manager-2.0.0-macos-universal.dmg\n{sha}  momos-music-manager-latest-macos-universal.dmg\n"
+        );
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &manifest, "2.0.0", None);
+        files.insert(
+            format!("{BASE}/momos-music-manager-2.0.0-macos-universal.dmg"),
+            dmg_bytes.clone(),
+        );
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("macos-universal", "dmg", "1.1.0");
+
+        let outcome = apply(&settings, &fetcher).await.unwrap();
+        match outcome {
+            ApplyOutcome::DownloadedOnly { path, version } => {
+                assert_eq!(version, "2.0.0");
+                let downloads = std::env::var("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("Downloads");
+                assert_eq!(
+                    path,
+                    downloads.join("momos-music-manager-2.0.0-macos-universal.dmg")
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), dmg_bytes);
+            }
+            other => panic!("expected DownloadedOnly fallback, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_swaps_binary_into_install_dir() {
+        let archive = tar_gz_with_binary(b"newbin");
+        let sha = hex_digest(&archive);
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &sample_manifest(&sha, "2.0.0"), "2.0.0", Some(archive));
+        let fetcher = MockFetcher::new(files);
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin_path = dir.path().join("momos-music-manager");
+        std::fs::write(&bin_path, b"oldbin").unwrap();
+
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.0.1");
+        settings.install_dir = Some(dir.path().to_path_buf());
+
+        let outcome = apply(&settings, &fetcher).await.unwrap();
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Installed {
+                new_version: "2.0.0".to_string(),
+                old_version: "1.0.1".to_string()
+            }
+        );
+        // New binary in place, old one preserved as .bak, marker written.
+        assert_eq!(std::fs::read(&bin_path).unwrap(), b"newbin");
+        assert_eq!(
+            std::fs::read(dir.path().join("momos-music-manager.bak")).unwrap(),
+            b"oldbin"
+        );
+        assert!(dir.path().join("update-state.json").exists());
+    }
+
+    // ── Channel logic (US4) ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dev_build_updates_to_newer_dev_sha() {
+        // Rolling dev channel: `1.1.0-dev+abc1234` vs `1.1.0-dev+def5678` are
+        // precedence-equal (semver ignores build metadata) — a different SHA
+        // must still yield UpdateAvailable.
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest("abc", "1.1.0-dev+def5678"),
+            "1.1.0-dev+def5678",
+            None,
+        );
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("linux-x64", "tar.gz", "1.1.0-dev+abc1234");
+        match check(&settings, &fetcher).await.unwrap() {
+            UpdateStatus::UpdateAvailable(info) => {
+                assert_eq!(info.version, "1.1.0-dev+def5678");
+                assert_eq!(
+                    info.artifact_name,
+                    "momos-music-manager-1.1.0-dev+def5678-linux-x64.tar.gz"
+                );
+            }
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+    }
+
+    // ── Rolling comparison must not depend on sha ordering ───────────
+
+    #[tokio::test]
+    async fn rolling_offers_new_dev_build_whose_sha_sorts_lower() {
+        // Regression: `latest > current` on semver's *derived* `Ord` compares
+        // build metadata lexicographically, so a newer commit whose sha sorts
+        // lower (`0f5dde5a` < `f0000000`) was reported as up to date.
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest("abc", "1.11.0-dev+0f5dde5a"),
+            "1.11.0-dev+0f5dde5a",
+            None,
+        );
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("linux-x64", "tar.gz", "1.11.0-dev+f0000000");
+        assert_eq!(settings.channel, UpdateChannel::Rolling);
+        match check(&settings, &fetcher).await.unwrap() {
+            UpdateStatus::UpdateAvailable(info) => {
+                assert_eq!(info.version, "1.11.0-dev+0f5dde5a");
+                assert_eq!(
+                    info.artifact_name,
+                    "momos-music-manager-1.11.0-dev+0f5dde5a-linux-x64.tar.gz"
+                );
+            }
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn release_build_on_rolling_channel_offers_same_base_dev_build() {
+        // Regression: a release build switched to the rolling channel never
+        // updated — `1.11.0-dev+<sha>` is *lower* than `1.11.0` in semver
+        // precedence, so `latest > current` was false while the running
+        // build is not even a build of the selected channel.
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest("abc", "1.11.0-dev+0f5dde5a"),
+            "1.11.0-dev+0f5dde5a",
+            None,
+        );
+        let fetcher = MockFetcher::new(files);
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.11.0");
+        settings.channel = UpdateChannel::Rolling;
+        match check(&settings, &fetcher).await.unwrap() {
+            UpdateStatus::UpdateAvailable(info) => {
+                assert_eq!(info.version, "1.11.0-dev+0f5dde5a");
+            }
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn release_build_on_rolling_channel_ignores_older_base_dev_build() {
+        // Cross-channel must never be a silent downgrade: a dev build on an
+        // *older* base version is not offered to a release build.
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest("abc", "1.10.0-dev+0f5dde5a"),
+            "1.10.0-dev+0f5dde5a",
+            None,
+        );
+        let fetcher = MockFetcher::new(files);
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.11.0");
+        settings.channel = UpdateChannel::Rolling;
+        assert_eq!(check(&settings, &fetcher).await.unwrap(), UpdateStatus::UpToDate);
+    }
+
+    #[tokio::test]
+    async fn dev_build_on_rolling_channel_ignores_older_base_dev_build() {
+        // Rolling tracks main, but a *different base version* still has to be
+        // newer: a build of an older base must not be offered as an update.
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest("abc", "1.10.0-dev+0f5dde5a"),
+            "1.10.0-dev+0f5dde5a",
+            None,
+        );
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("linux-x64", "tar.gz", "1.11.0-dev+f0000000");
+        assert_eq!(check(&settings, &fetcher).await.unwrap(), UpdateStatus::UpToDate);
+    }
+
+    #[tokio::test]
+    async fn dev_build_on_release_channel_offers_stable_release() {
+        // The mirror image of the release→rolling switch: a dev build on the
+        // release channel gets the stable release of the same base version
+        // (`1.11.0` > `1.11.0-dev+*` holds here, so this is the plain path).
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &sample_manifest("abc", "1.11.0"), "1.11.0", None);
+        let fetcher = MockFetcher::new(files);
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.11.0-dev+0f5dde5a");
+        settings.channel = UpdateChannel::Release;
+        match check(&settings, &fetcher).await.unwrap() {
+            UpdateStatus::UpdateAvailable(info) => assert_eq!(info.version, "1.11.0"),
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dev_build_same_sha_is_uptodate() {
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest("abc", "1.1.0-dev+abc1234"),
+            "1.1.0-dev+abc1234",
+            None,
+        );
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("linux-x64", "tar.gz", "1.1.0-dev+abc1234");
+        assert_eq!(
+            check(&settings, &fetcher).await.unwrap(),
+            UpdateStatus::UpToDate
+        );
+    }
+
+    #[tokio::test]
+    async fn dev_build_rejects_release_manifest() {
+        // Rolling channel (default for a dev build) whose source serves a
+        // stable release → inconsistent → ChannelMismatch.
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &sample_manifest("abc", "1.1.0"), "1.1.0", None);
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("linux-x64", "tar.gz", "1.1.0-dev+abc1234");
+        assert_eq!(settings.channel, UpdateChannel::Rolling);
+        assert!(matches!(
+            check(&settings, &fetcher).await.unwrap(),
+            UpdateStatus::ChannelMismatch { channel: "rolling", .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn release_build_rejects_dev_manifest() {
+        // Release channel (default for a release build) whose source serves
+        // a dev build → inconsistent → ChannelMismatch.
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest("abc", "1.1.0-dev+def5678"),
+            "1.1.0-dev+def5678",
+            None,
+        );
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("linux-x64", "tar.gz", "1.1.0");
+        assert_eq!(settings.channel, UpdateChannel::Release);
+        assert!(matches!(
+            check(&settings, &fetcher).await.unwrap(),
+            UpdateStatus::ChannelMismatch { channel: "release", .. }
+        ));
+    }
+
+    // ── Explicit channel switch (channel-select feature) ─────────────
+    //
+    // A user-switched channel is *not* a mismatch: check/apply run against
+    // the selected channel's feed, even when that feed publishes builds of
+    // the other type than the running one.
+
+    #[tokio::test]
+    async fn explicit_switch_dev_build_to_release_channel_finds_stable_update() {
+        // Running dev build, user selected the release channel: the stable
+        // feed is consistent with the *selected* channel → update available.
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &sample_manifest("abc", "1.1.0"), "1.1.0", None);
+        let fetcher = MockFetcher::new(files);
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.1.0-dev+abc1234");
+        settings.channel = UpdateChannel::Release;
+        match check(&settings, &fetcher).await.unwrap() {
+            UpdateStatus::UpdateAvailable(info) => {
+                assert_eq!(info.version, "1.1.0");
+                assert_eq!(
+                    info.artifact_name,
+                    "momos-music-manager-1.1.0-linux-x64.tar.gz"
+                );
+            }
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_switch_release_build_to_rolling_channel_finds_dev_update() {
+        // Running release build, user selected the rolling channel: the dev
+        // feed is consistent with the selected channel → update available.
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest("abc", "1.2.0-dev+def5678"),
+            "1.2.0-dev+def5678",
+            None,
+        );
+        let fetcher = MockFetcher::new(files);
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.1.0");
+        settings.channel = UpdateChannel::Rolling;
+        match check(&settings, &fetcher).await.unwrap() {
+            UpdateStatus::UpdateAvailable(info) => {
+                assert_eq!(info.version, "1.2.0-dev+def5678");
+                assert_eq!(
+                    info.artifact_name,
+                    "momos-music-manager-1.2.0-dev+def5678-linux-x64.tar.gz"
+                );
+            }
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_switch_apply_installs_other_channel_binary() {
+        // Dev build, release channel selected: apply swaps in the stable
+        // binary — the cross-channel switch is honored end to end.
+        let archive = tar_gz_with_binary(b"stable-bin");
+        let sha = hex_digest(&archive);
+        let mut files = HashMap::new();
+        signed_fixture(
+            &mut files,
+            &sample_manifest(&sha, "1.1.0"),
+            "1.1.0",
+            Some(archive),
+        );
+        let fetcher = MockFetcher::new(files);
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin_path = dir.path().join("momos-music-manager");
+        std::fs::write(&bin_path, b"dev-bin").unwrap();
+
+        let mut settings = test_settings("linux-x64", "tar.gz", "1.1.0-dev+abc1234");
+        settings.channel = UpdateChannel::Release;
+        settings.install_dir = Some(dir.path().to_path_buf());
+
+        let outcome = apply(&settings, &fetcher).await.unwrap();
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Installed {
+                new_version: "1.1.0".to_string(),
+                old_version: "1.1.0-dev+abc1234".to_string()
+            }
+        );
+        assert_eq!(std::fs::read(&bin_path).unwrap(), b"stable-bin");
+        assert!(dir.path().join("update-state.json").exists());
+    }
+
+    #[test]
+    fn update_channel_parse_and_names() {
+        assert_eq!(UpdateChannel::parse("rolling"), Some(UpdateChannel::Rolling));
+        assert_eq!(UpdateChannel::parse("release"), Some(UpdateChannel::Release));
+        assert_eq!(UpdateChannel::parse("banana"), None);
+        assert_eq!(UpdateChannel::parse("Rolling"), None);
+        assert_eq!(UpdateChannel::Rolling.as_str(), "rolling");
+        assert_eq!(UpdateChannel::Release.as_str(), "release");
+        assert_eq!(UpdateChannel::ALL.len(), 2);
+        assert!(UpdateChannel::ALL.contains(&UpdateChannel::Rolling));
+        assert!(UpdateChannel::ALL.contains(&UpdateChannel::Release));
+    }
+
+    #[test]
+    fn update_channel_default_follows_version() {
+        assert_eq!(
+            UpdateChannel::for_version("1.1.0-dev+abc1234"),
+            UpdateChannel::Rolling
+        );
+        assert_eq!(UpdateChannel::for_version("1.1.0"), UpdateChannel::Release);
+        assert_eq!(UpdateChannel::for_version("0.9.0-beta.1"), UpdateChannel::Rolling);
+        assert_eq!(UpdateChannel::for_version("garbage"), UpdateChannel::Release);
+    }
+
+    #[test]
+    fn update_channel_default_base_urls() {
+        assert_eq!(UpdateChannel::Rolling.default_base_url(), DEFAULT_BASE_URL);
+        assert_eq!(
+            UpdateChannel::Release.default_base_url(),
+            DEFAULT_RELEASE_BASE_URL
+        );
+        assert!(UpdateChannel::Rolling.matches_version(&Version::parse("1.1.0-dev+x").unwrap()));
+        assert!(!UpdateChannel::Rolling.matches_version(&Version::parse("1.1.0").unwrap()));
+        assert!(UpdateChannel::Release.matches_version(&Version::parse("1.1.0").unwrap()));
+        assert!(!UpdateChannel::Release
+            .matches_version(&Version::parse("1.1.0-dev+x").unwrap()));
+    }
+
+    #[tokio::test]
+    async fn release_build_updates_to_newer_release_with_versioned_artifact() {
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &sample_manifest("abc", "1.1.0"), "1.1.0", None);
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("linux-x64", "tar.gz", "1.0.1");
+        match check(&settings, &fetcher).await.unwrap() {
+            UpdateStatus::UpdateAvailable(info) => {
+                assert_eq!(info.version, "1.1.0");
+                assert_eq!(
+                    info.artifact_name,
+                    "momos-music-manager-1.1.0-linux-x64.tar.gz"
+                );
+                assert_eq!(
+                    info.url,
+                    format!("{BASE}/momos-music-manager-1.1.0-linux-x64.tar.gz")
+                );
+            }
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_rejects_channel_mismatch() {
+        let mut files = HashMap::new();
+        signed_fixture(&mut files, &sample_manifest("abc", "1.1.0"), "1.1.0", None);
+        let fetcher = MockFetcher::new(files);
+        let settings = test_settings("linux-x64", "tar.gz", "1.1.0-dev+abc1234");
+        assert!(matches!(
+            apply(&settings, &fetcher).await.unwrap_err(),
+            UpdateError::ChannelMismatch { .. }
+        ));
+    }
+
+    // ── Release feed URL construction (hotfix: `releases/latest` 404) ──
+    //
+    // v1.2.0 built release-feed URLs as `…/releases/latest/<asset>`, which
+    // GitHub does not serve → HTTP 404 on every check/apply of a release
+    // build. Valid GitHub patterns are `releases/latest/download/<asset>`
+    // (redirected to the newest release) and, for an explicit tag,
+    // `releases/download/<tag>/<asset>`.
+
+    #[test]
+    fn release_default_base_url_uses_latest_download_pattern() {
+        // The base itself must already carry the `download` segment — asset
+        // URLs are built as `{base}/{asset}` in `fetch_update_info`.
+        assert_eq!(
+            DEFAULT_RELEASE_BASE_URL,
+            "https://github.com/momokli/momos-music-manager/releases/latest/download"
+        );
+        assert_eq!(
+            DEFAULT_BASE_URL,
+            "https://github.com/momokli/momos-music-manager/releases/download/latest-main"
+        );
+
+        // Signature, manifest and binary all resolve through the same feed.
+        assert_eq!(
+            format!("{DEFAULT_RELEASE_BASE_URL}/SHA256SUMS.minisig"),
+            "https://github.com/momokli/momos-music-manager/releases/latest/download/SHA256SUMS.minisig"
+        );
+        assert_eq!(
+            format!("{DEFAULT_RELEASE_BASE_URL}/SHA256SUMS"),
+            "https://github.com/momokli/momos-music-manager/releases/latest/download/SHA256SUMS"
+        );
+        assert_eq!(
+            format!("{DEFAULT_RELEASE_BASE_URL}/momos-music-manager-1.2.0-linux-x64.tar.gz"),
+            "https://github.com/momokli/momos-music-manager/releases/latest/download/momos-music-manager-1.2.0-linux-x64.tar.gz"
+        );
+    }
+
+    #[tokio::test]
+    async fn release_feed_check_fetches_sig_and_manifest_from_same_base() {
+        // End to end via `check`: fixtures are only served when the fetcher
+        // is asked for exactly `{base}/SHA256SUMS(.minisig)` — with the old
+        // broken `…/releases/latest/…` base this resolves to 404 (the v1.2.0
+        // bug), with either valid layout it must succeed and produce the
+        // artifact URL on the same base.
+        for base in [
+            // latest feed: every asset goes through the same `latest`
+            // redirect, so sig / manifest / binary come from one release.
+            "https://github.com/momokli/momos-music-manager/releases/latest/download",
+            // explicit tag: canonical `releases/download/<tag>` layout.
+            "https://github.com/momokli/momos-music-manager/releases/download/v1.2.0",
+        ] {
+            let mut files = HashMap::new();
+            signed_fixture_at(
+                &mut files,
+                base,
+                &sample_manifest("abc", "1.2.0"),
+                "1.2.0",
+                None,
+            );
+            let fetcher = MockFetcher::new(files);
+            let mut settings = test_settings("linux-x64", "tar.gz", "1.0.1");
+            settings.channel = UpdateChannel::Release;
+            settings.base_url = base.to_string();
+
+            match check(&settings, &fetcher).await.unwrap() {
+                UpdateStatus::UpdateAvailable(info) => {
+                    assert_eq!(info.version, "1.2.0");
+                    assert_eq!(
+                        info.url,
+                        format!("{base}/momos-music-manager-1.2.0-linux-x64.tar.gz")
+                    );
+                }
+                other => panic!("expected UpdateAvailable, got {other:?}"),
+            }
+        }
+    }
+}

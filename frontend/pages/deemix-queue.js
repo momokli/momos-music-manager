@@ -120,15 +120,10 @@ const DEEMIX_CELL_RENDERERS = {
     }
     return '<span class="text-muted">—</span>';
   },
-  detail: (item) => {
-    let html = item.uuid
+  detail: (item) =>
+    item.uuid
       ? `<span class="font-mono text-sm" title="${escapeHtml(item.uuid)}">${escapeHtml(item.uuid.slice(0, 24))}…</span>`
-      : '<span class="text-muted">—</span>';
-    if (item.errorMessage) {
-      html += `<div class="text-sm" style="color:var(--red);margin-top:2px" title="${escapeHtml(item.errorMessage)}">${escapeHtml(item.errorMessage.slice(0, 40))}${item.errorMessage.length > 40 ? "…" : ""}</div>`;
-    }
-    return html;
-  },
+      : '<span class="text-muted">—</span>',
   created: (item) => formatTimestamp(item.createdAt),
   updated: (item) => formatTimestamp(item.updatedAt),
   actions: (item) => {
@@ -222,6 +217,22 @@ function renderToolbar(search, state) {
   </div>`;
 }
 
+function renderErrorRow(item, colspan) {
+  const retryBtn =
+    item.status === "failed" && item.id
+      ? `<button class="btn btn-sm btn-red" data-act="retry" data-id="${item.id}" title="Retry this download"><i class="fa-solid fa-rotate"></i> Retry</button>`
+      : "";
+  return `<tr class="deemix-error-row">
+    <td colspan="${colspan}" style="padding:4px 12px;background:rgba(239,68,68,0.06);border-bottom:1px solid var(--border);">
+      <div style="display:flex;align-items:center;gap:8px;color:var(--red);">
+        <i class="fa-solid fa-triangle-exclamation" style="flex-shrink:0;"></i>
+        <span style="flex:1;font-size:0.8rem;word-break:break-word;">${escapeHtml(item.errorMessage)}</span>
+        ${retryBtn}
+      </div>
+    </td>
+  </tr>`;
+}
+
 function renderBody(data, state) {
   const items = data.items || [];
   const totalCount = data._total ?? items.length;
@@ -231,9 +242,13 @@ function renderBody(data, state) {
 
   const rowsHtml = items
     .map((item) => {
-      return `<tr>
+      const visibleCount = colConfig.filter((c) => c.visible).length;
+      const mainRow = `<tr>
       ${renderColumnCells(colConfig, DEEMIX_COLUMNS, DEEMIX_CELL_RENDERERS, item)}
     </tr>`;
+      if (!item.errorMessage) return mainRow;
+      return `${mainRow}
+${renderErrorRow(item, visibleCount)}`;
     })
     .join("");
 

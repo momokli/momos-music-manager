@@ -3794,6 +3794,19 @@ tr.row-mismatch td {
     font-family: var(--font-mono);
 }
 
+/* Placeholder semantics: "not set" (—) vs "unknown" (?) */
+.cell-placeholder {
+    opacity: 0.55;
+    white-space: nowrap;
+}
+.cell-placeholder-unset {
+    /* em-dash placeholder for a value that is genuinely not set */
+}
+.cell-placeholder-unknown {
+    font-style: italic;
+    opacity: 0.7;
+}
+
 /* Playlist context badge in toolbar (e.g. tracks page when scoped) */
 .playlist-context-badge {
     display: inline-flex;
@@ -5598,6 +5611,62 @@ body.dark .storage-warning {
     margin-top: 0.5rem;
 }
 
+/* ─── Backpack Spotify transport playlist ───────────────── */
+.backpack-playlist-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+    margin: 1rem 0;
+}
+.backpack-playlist-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+.backpack-playlist-meta {
+    display: flex;
+    gap: 1.25rem;
+    flex-wrap: wrap;
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin: 0.75rem 0;
+}
+.backpack-playlist-link {
+    font-size: 0.9rem;
+    margin-bottom: 0.5rem;
+}
+.backpack-playlist-error {
+    font-size: 0.85rem;
+    color: var(--red, #e5534b);
+    margin-bottom: 0.5rem;
+}
+.backpack-playlist-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--muted);
+}
+.backpack-badge {
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    vertical-align: middle;
+    margin-left: 0.4rem;
+}
+.backpack-badge-ok {
+    background: rgba(63, 185, 80, 0.15);
+    color: var(--green, #3fb950);
+}
+.backpack-badge-dirty {
+    background: rgba(210, 153, 34, 0.18);
+    color: var(--yellow, #d29922);
+}
+
 /* Pulse animation for active pull indicator */
 .backpack-pulse-dot {
     display: inline-block;
@@ -5923,4 +5992,83 @@ body.dark .storage-warning {
 #backfill-results .text-danger {
     color: var(--red);
     /* kept for specificity if needed */
+}
+
+/* ── Settings page: update toggle ─────────────────────────────────── */
+
+.settings-update-row {
+    display: flex;
+    gap: 1rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--border);
+    align-items: baseline;
+}
+
+.settings-update-row:last-of-type {
+    border-bottom: none;
+}
+
+.settings-update-label {
+    flex: 0 0 130px;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+.settings-update-value {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.settings-update-value .help-text {
+    flex-basis: 100%;
+}
+
+.switch {
+    position: relative;
+    display: inline-block;
+    width: 40px;
+    height: 22px;
+}
+
+.switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.switch .slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background: var(--border, #555);
+    border-radius: 22px;
+    transition: background 0.2s;
+}
+
+.switch .slider::before {
+    content: "";
+    position: absolute;
+    height: 16px;
+    width: 16px;
+    left: 3px;
+    top: 3px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform 0.2s;
+}
+
+.switch input:checked + .slider {
+    background: var(--green, #22c55e);
+}
+
+.switch input:checked + .slider::before {
+    transform: translateX(18px);
+}
+
+.switch input:disabled + .slider {
+    opacity: 0.5;
+    cursor: not-allowed;
 }

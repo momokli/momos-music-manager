@@ -1,6 +1,6 @@
 [package]
 name = "momos-music-manager"
-version = "1.0.1"
+version = "1.12.0"
 edition = "2024"
 description = "Momo's Music Manager - Multi-service library sync and harmonic discovery for DJs"
 
@@ -16,7 +16,7 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = {version = "0.3", features = ["env-filter", "fmt", "registry"]}
 tracing-appender = "0.2"
-rspotify = "0.15.1"
+rspotify = { version = "0.15.1", default-features = false, features = ["client-reqwest", "reqwest-rustls-tls"] }
 axum = { version = "0.8.6", features = ["ws", "multipart"] }
 askama = "0.14"
 
@@ -24,7 +24,7 @@ tower = "0.5.2"
 hyper = "1.7.0"
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 futures = "0.3"
-reqwest = { version = "0.12", features = ["json", "cookies", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "stream", "rustls-tls"] }
 dotenvy = "0.15"
 clap = { version = "4.5.50", features = ["derive"] }
 sha2 = "0.10"
@@ -37,23 +37,39 @@ roxmltree = "0.20"
 lofty = "0.20"
 tokio-tungstenite = "0.21"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
+async-trait = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 toml = "0.8"
 dirs = "6.0"
+rand = "0.8"
 rust-embed = "8"
 unicode-normalization = "0.1"
 webbrowser = "1"
-tray-icon = "0.24.2"
-objc2 = "0.6"
-objc2-foundation = "0.3"
-objc2-app-kit = "0.3"
+
+# Autoupdater (M6): Ed25519 (minisign-format) manifest verification + atomic self-update
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+blake2 = "0.10"
+semver = "1"
+flate2 = "1"
+tar = "0.4"
+# deflate-only (pure Rust, no C deps): PowerShell Compress-Archive zips use deflate.
+zip = { version = "1", default-features = false, features = ["deflate"] }
 
 # ML / Embeddings
 candle-core = "0.8"
 candle-transformers = "0.8"
 candle-nn = "0.8"
-hf-hub = "0.4"
+hf-hub = { version = "0.4", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
 tokenizers = "0.21"
+
+# macOS-only (menu bar tray icon, dock/notifications). Cfg-gated so the project
+# builds on Linux (used for CI integration tests, Playwright screenshots, and the
+# landing page).
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = "0.24.2"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -69,3 +85,9 @@ osx_minimum_system_version = "13.0"
 
 [package.metadata.bundle.settings.macos]
 LSUIElement = true
+
+# soundcloud-rs (vendored): upstream enables reqwest default-tls (native-tls/OpenSSL),
+# which breaks Linux cross-compilation to ARM64 and adds a system OpenSSL dependency.
+# Patch: reqwest with rustls-tls only.
+[patch.crates-io]
+soundcloud-rs = { path = "vendor/soundcloud-rs" }

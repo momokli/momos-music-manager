@@ -4,6 +4,416 @@ All notable changes to Momo's Music Manager.
 
 ---
 
+## [Unreleased]
+
+## [1.12.0] — 2026-09-21
+
+### Fixed
+
+- **Rolling-Kanal bot neue Dev-Builds nicht an (#47, PR #46)**: Der Rolling-Vergleich
+  nutzte `latest > current` auf SemVer-`Version`, dessen abgeleitetes `Ord`
+  die Build-Metadata (den SHA) lexikographisch mitvergleicht — ein frisch
+  gepushter Commit, dessen SHA niedriger sortiert als der laufende, galt als
+  „Up to date" (`1.11.0-dev+0f5dde5a` < `1.11.0-dev+f0000000`). Rolling
+  vergleicht jetzt die Versionszeichenkette (jeder andere Build von `main`
+  ist ein Update), eine ältere **Basisversion** bleibt ausgeschlossen.
+  Zusätzlich verglich ein Kanalwechsel über die Pre-Release-Grenze: ein
+  Release-Build (`1.11.0`) auf dem Rolling-Kanal bekam `1.11.0-dev+<sha>`
+  nie angeboten, weil stabile Versionen *über* ihren Pre-Releases stehen.
+  Cross-Channel gilt jetzt „gleiche/neuere Basisversion + andere
+  Zeichenkette → Update", ohne Silent-Downgrade. Tests:
+  `rolling_offers_new_dev_build_whose_sha_sorts_lower`,
+  `release_build_on_rolling_channel_offers_same_base_dev_build`,
+  `release_build_on_rolling_channel_ignores_older_base_dev_build`,
+  `dev_build_on_rolling_channel_ignores_older_base_dev_build`,
+  `dev_build_on_release_channel_offers_stable_release`.
+
+### Added
+
+- **Backpack: expliziter Spotify-Playlist-Push (#43, ADR-060)**: Die eine
+  `Backpack`-Playlist wird jetzt **gespiegelt** statt angehängt
+  (`replace_playlist_items`) — entfernte Tracks verschwinden aus Spotify, keine
+  deemix-Residual-Downloads mehr. Neu: `GET /api/backpack` (Set-Größe,
+  Playlist-URL, dirty/Last-Push-Status) und `POST /api/backpack/push`
+  (`force` / `dryRun` / `submitToDeemix` → `MaterializeOutcome`). Mutationen
+  (Track-Toggle, Tag-Flag, Subscribe/Unsubscribe, Global-Poller) setzen einen
+  Dirty-Marker, den ein `BackpackSyncCoordinator` nach 30 s Debounce
+  materialisiert (plus 10-min-Reconciliation als Safety-Net); der Poller baut
+  nicht mehr inline. Nach jedem Replace wird die Remote-Playlist zurückgelesen
+  und verglichen — nur bei Gleichheit wird die Signatur fortgeschrieben, bei
+  404/403 wird die Playlist neu angelegt. Backpack-Seite: Status-Karte +
+  Button „Push to Spotify". Keine Migration nötig.
+
+## [1.11.0] — 2026-09-11
+
+### Added
+
+- **Traktor-Import-Summary (#27/Phase 0, PR #39)**: Nach einem Traktor-Import
+  zeigt die Import-Seite jetzt eine strukturierte Summary statt roher Log-Zeilen
+  — Chips (`parsed` / `matched` / `without match`) plus Liste der Dateinamen ohne
+  DB-Match. Gespeist aus dem neuen optionalen `Task.result_data` (nicht mehr aus
+  dem Freitext-Log geparst); keine Schema-Migration, keine Breaking Changes am
+  API-Vertrag.
+
+## [1.10.0] — 2026-09-11
+
+### Added
+
+- **M2 — Release-spezifische Seiten/Assets pro Tag (#8, PR #38)**: Der Tag-Build
+  (`build-all.yml`) stellt den automatisch generierten Release-Notes jetzt eine
+  „Downloads + SHA256SUMS"-Sektion voran — Plattform-Matrix (macOS universal,
+  Windows x64/ARM64, Linux x64/ARM64) mit aggregierten Checksummen und
+  Verifikationsanleitung. Das neue, netzwerkfreie Skript `scripts/release-notes.sh`
+  erzeugt die Sektion aus `dist/SHA256SUMS` und wird auch vom PR-Publish-Gate als
+  Dry-Run ausgeführt. Die Landing-Page verlinkt die stabile Version nun über
+  `releases/latest` (nie stale) plus expliziten Changelog-Link.
+
+## [1.9.0] — 2026-09-11
+
+### Added
+
+- **deemix-Stack vollständig im Eigentum von MMM (#32/Abschnitt B, PR #37)**: Der
+  `DeemixClient` deckt den kompletten deemix-Lifecycle ab — ARL-Auth + automatische
+  Re-Auth (sowohl HTTP 401 als auch `{"result":false,"errid":"NotLoggedIn"}`, jetzt
+  auch im neuen Delete-Pfad), vollständige Queue-Steuerung via neuem
+  `remove_from_queue(uuid)` (`POST /api/removeFromQueue`) ergänzend zu
+  `add_to_queue`/`retry_download`, Status-/Fortschritts-Polling via
+  `get_download_progress(spotify_url)` (`DeemixDownloadProgress`: status, progress,
+  downloaded/total, finished, has_errors) sowie Download-Verifikation via
+  `verify_download` + `AudioQuality` (Priorität `stem` > `flac` > `mp3`). Rein additiv
+  (`src/deemix/{client,models}.rs`), keine Änderung an bestehenden API-Routen oder am
+  DB-Schema. Gemockte-HTTP-Integrationstests; der Live-e2e-Test bleibt ein
+  `#[ignore]`-Test gegen die eigene deemix-Instanz (ARL ausschließlich per Env, nie im
+  Repo/CI).
+
+### Fixed
+
+- **Site-Download-Links**: Asset-Dateinamen in `site/index.html` zeigten auf den
+  alten Build-Stand (`momos-music-manager-1.7.0-*`) statt auf den Release-Tag; die
+  Links verweisen jetzt auf die zum Tag passenden Asset-Namen.
+
+## [1.8.0] — 2026-09-11
+
+### Added
+
+- **Extended-Mix Auto-Upgrade, Stufe 1 (#29/#36)**: neues, quellen-agnostisches
+  Modul `src/extended_mix.rs` erkennt Versions-Varianten (Extended Mix, Ext Mix,
+  Radio Edit, Original/Club Mix, Instrumental) und gruppiert Releases über
+  `base_title`. Upgrade-Entscheidung ohne Loop/Downgrade (`find_extended_mix`,
+  `upgrade_target_for_release`) sowie library-weite Kandidatensuche
+  (`find_upgrade_candidates`). Neuer read-only Endpoint
+  `GET /api/extended-mix/candidates`; `is_extended_mix` auf Digging-Ergebnissen.
+  Opt-in-Toggle `autoupgrade` (Env `MOMOS_AUTOUPGRADE_ENABLED` > `[autoupgrade]
+  enabled` > Default aus). Der eigentliche Download-/Ersetzungsschritt folgt als
+  separater PR (benötigt ARL/Single-Track-Download).
+
+## [1.7.0] — 2026-09-11
+
+### Changed
+
+- **UI Phase-0 Quick Wins (#27/#35)**: `Folders` von der Services- in die
+  Library-Navigation verschoben + `#folders?new=1`-Direkteinstieg (Dashboard-
+  Empty-State, Settings-Karte); sichtbarer **Apply**-Button für den Traktor-
+  Manual-Path; Deemix-Queue zeigt Fehlermeldungen als eigene Inline-Zeile mit
+  **Retry**-Button; Platzhalter-Semantik getrennt („—“ = nicht gesetzt,
+  „?“ = unbekannt) via `shared/format.js`; Last-Played-Spaltenbreiten angepasst.
+
+## [1.6.0] — 2026-09-11
+
+### Added
+
+- **Backpack-Konzept (Verschmelzung)**: die markierten Spotify-Playlists
+  (Subscriptions) und die `tags.backpack`-Flags laufen in **einen** `Backpack`
+  zusammen (deduplizierte Vereinigung). Die Menge wird in **genau eine**
+  Spotify-Playlist `Backpack` materialisiert und **nur diese eine** URL an
+  deemix submittet — statt N Einzel-Submits. Auto-Download
+  (`stem.m4a` > `flac` > `mp3`) und Prune-Schutz wirken auf die gesamte Menge.
+  Migration `025_backpack_concept.sql` konsolidiert `deemix_downloads` auf
+  eine Transport-Row (kein Datenverlust). (#32)
+
+---
+
+## [1.5.0] — 2026-09-11
+
+### Added
+
+- **STEMS-Filter in der Files-View**: neuer `STEMS`-Filter (All/Missing/Has)
+  auf `#files` zeigt Nicht-Stem-Dateien, deren Track (gleiche ISRC) noch kein
+  `stem.m4a` hat; kombinierbar mit allen bestehenden Filtern. Neuer `stems`-
+  Query-Param auf `GET /api/files` + `GET /api/files/count` inkl. Select-All.
+  (#2)
+
+### Documentation
+
+- `CHANGELOG.md`: `[Unreleased]`-Block in getrennte Versionsabschnitte
+  v1.1.0–v1.4.0 aufgeteilt. (#31)
+- UI/UX-Redesign-Proposal: Ist-Zustand, Reibungsanalyse, Mockups und Roadmap
+  dokumentiert. (#28)
+
+---
+
+## [1.4.0] — 2026-09-10
+
+### Added
+
+- **Telemetry Full Package — UI- & Log-Telemetrie**: erweitert die
+  Event-Telemetrie um drei Familien — `ui.view.opened` (View-Tracking,
+  von der SPA bei jeder Navigation gefeuert), die sechs `ui.action.*`-
+  Typen (`scan_folder`, `run_backup`, `restore_dump`, `traktor_import`,
+  `recompute_embeddings`, `deemix_enqueue`; serverseitig in den
+  ausschließlich user-getriggerten Handlern, `ok`/sanitisierte
+  `error_message` je Response-Entscheidung) und `log.entry`
+  (Log-Shipping über einen eigenen tracing-Layer: Level- und
+  Target-Filter nur für `momos_music_manager`, Rekursionsschutz für das
+  Telemetry-Modul, Home-Pfad-Strip + 1000-Zeichen-Kürzung, bounded Kanal
+  (2k, Drop-on-full ohne Blockieren), Token-Bucket `log_max_events_per_sec`
+  → bestehende emit-Pipeline). Alles **default aus**: neue `[telemetry]`-
+  Keys `ui_events_enabled` + `log_shipping_enabled` (beide `false`),
+  `log_min_level` (`"warn"`, error/warn/info/debug/trace) und
+  `log_max_events_per_sec` (`50`, Pflicht-Cap 1–10000, ungültig → Default
+  + Warn) mit `MOMOS_TELEMETRY_UI_EVENTS_ENABLED`/
+  `MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED`/`MOMOS_TELEMETRY_LOG_MIN_LEVEL`/
+  `MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC`; Env > TOML > Default wie
+  gehabt. Neuer interner Endpoint `POST /api/ui-events` (mappt nur `ui.*`
+  auf die Allowlist, antwortet **immer 204** — Flag aus, unbekannter Typ,
+  ungültiger Payload oder keine Pipeline erzeugen nie 4xx). Settings-UI:
+  zwei neue Toggles, Log-Level-Select und Max-Events/s-Feld in der
+  Telemetry-Card (persistiert in `config.toml`, Env-Pinning/409 wie die
+  bestehenden Felder). Receiver: neue Migration
+  `migrations/telemetry/002_ui_log_views.sql` mit **nur Views**
+  (`v_ui_views`, `v_ui_actions`, `v_log_volume`; 001 bleibt unangetastet —
+  Checksumme); Rollout-Hinweis: Receiver-Binary vor Aktivierung neu
+  deployen (alter v1.2.1-Receiver droppt unbekannte Typen nach 3× 4xx).
+
+---
+
+## [1.3.0] — 2026-09-04
+
+### Added
+
+- **Telemetry-Settings-Seite (GUI) + Version 1.3.0**: neuer Bereich
+  „Telemetry“ in den Settings — konfigurierbar ohne Config-Graben:
+  `enabled` (Toggle, Default **OFF**), `base_url`, `token`, `instance` und
+  `full_db_interval_secs`. Gespeichert wird direkt in die bestehende
+  `config.toml` (`[telemetry]`-Sektion, zeilenerhaltend — Kommentare und
+  fremde Sektionen bleiben unangetastet; neue Datei wird bei Bedarf
+  angelegt); Priorität **Env > TOML > Defaults** bleibt vollständig
+  erhalten — env-gebundene Felder sind in der UI gesperrt (409 bei
+  Schreibversuch), TOML-Werte editierbar. Beim Schreiben von
+  `full_db_interval_secs` wird der Legacy-Key `interval_secs` automatisch
+  aus der Sektion entfernt (der explizite Key ist autoritativ, „0 = aus“
+  muss auch aus sein). Dazu ein **„Push now“-Button**: löst denselben
+  One-Shot-Push wie die CLI (`telemetry push` / `push_once`) aus und zeigt
+  Erfolg/Fehler inline plus Zeitpunkt des letzten (erfolgreichen) Push
+  (persistiert in der `settings`-KV, Keys `telemetry.last_push_*`, gesetzt
+  von Button, CLI und periodischem Loop). Neue Endpunkte:
+  `GET/POST /api/telemetry-settings/status|settings`,
+  `POST /api/telemetry-settings/push`. Die Hintergrund-Loops (periodischer
+  Push, Event-Pipeline) lesen ihre Werte beim Start — Änderungen wirken
+  nach dem nächsten Neustart, Status und Push-Button nutzen immer den
+  aktuellen Datei-/Env-Stand.
+
+- **CLI-Zugriff bei macOS-App-Installation**: Die App wird als `.app`
+  (DMG nach `/Applications`) installiert und hat damit keinen CLI-Zugriff.
+  Beim **ersten App-Start** (und nach jedem erfolgreichen
+  **DMG-Self-Install** des Autoupdaters) legt die App jetzt automatisch
+  einen Symlink `momos-music-manager` in ein PATH-Verzeichnis an — Ziel
+  ist das Binary im Bundle (`…/Momo's Music Manager.app/Contents/MacOS/…`),
+  der stabile Bundle-Pfad überlebt In-Place-Updates. Auswahl: erstes
+  schreibbares Verzeichnis von `/usr/local/bin` (Default-PATH),
+  `/opt/homebrew/bin` (Apple-Silicon-Homebrew) bzw. `~/.local/bin`
+  (per-User-XDG, wird angelegt; nicht auf dem macOS-Default-PATH — Hinweis
+  in der Settings-UI „CLI access“ + README). Danach funktionieren
+  `momos-music-manager --version` und `momos-music-manager telemetry push`
+  aus dem Terminal. Neues Modul `cli_link` (idempotent, repariert
+  veraltete Links, nie destruktiv) + CLI-Status in den Settings
+  (`GET …/status` → `cli`). Kein Symlink für Dev-/Linux-Binary-Builds.
+
+- **Minor-Bump 1.2.1 → 1.3.0**: `Cargo.toml` + `Cargo.lock` (Basis der
+  Dev-Versionsformel `<Cargo>-dev+<sha8>`; Release-Version kommt beim
+  Tagen aus dem Git-Tag, die Auto-Update-Logik liest die Version
+  ausschließlich als eingebettetes `env!("MMM_VERSION")` — kein weiterer
+  Versionsort nötig, `site/index.html` wird erst beim Release-Tag
+  angehoben).
+
+---
+
+## [1.2.1] — 2026-09-03
+
+### Fixed
+
+- **Update-Check-404 bei Release-Builds (Hotfix v1.2.1)**: `DEFAULT_RELEASE_BASE_URL`
+  endete auf `…/releases/latest` ohne `/download`-Segment — GitHub liefert Assets
+  nur unter `releases/latest/download/<asset>` bzw. `releases/download/<tag>/<asset>`
+  aus, daher schlugen Update-Check/Apply von Release-Builds (Minisig-Signatur,
+  SHA256SUMS-Manifest, versioniertes Binary) mit HTTP 404 fehl. Die Basis-URL
+  trägt jetzt das `download`-Segment (Regression aus PR #19, Fix in PR #23).
+
+---
+
+## [1.2.0] — 2026-09-03
+
+### Added
+
+- **Full-DB-Snapshot-Option (periodischer kompletter DB-Push)**: explizite,
+  dokumentierte Option, die die KOMPLETTE DB (konsistenter `VACUUM INTO`-
+  Snapshot + redacted Meta: Logs/Tasks/Metriken) periodisch an den Collector
+  sendet — neue Config-Key `[telemetry] full_db_interval_secs`
+  (`MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS`), Default `0` = AUS. Gating:
+  `telemetry.enabled=true` + Intervall > 0 (wie bisher); es wird die
+  bestehende Snapshot-Infrastruktur wiederverwendet (`PUT
+  /api/telemetry/{instance}/db/{ts}` mit Bearer-Auth, kein Neubau).
+  Legacy-Key `interval_secs` (Analytics-Ära) bleibt als Alias voll
+  wirksam — explizite Option gewinnt, kein Verhaltenswechsel für
+  Bestands-Configs. Getriggert bleibt der One-Shot-Push über die CLI
+  (`telemetry push`). Logging nennt jetzt die Quelle des Intervalls.
+
+- **Event-Telemetrie (v1)**: strukturierte Core-Events (Tasks, Scans,
+  Downloads, App-Updates, Fehler) als HTTPS-Batches an einen Collector —
+  ergänzend zum bestehenden Snapshot-Push. Client: stabile persistierte
+  Client-ID, Ringbuffer (10k), crash-sicherer JSONL-Spool im Data-Dir,
+  Async-Flusher mit Batch-Limit (≤200 Events / ~1 MB), Exponential-Backoff
+  + Jitter (Cap 1h), 4xx-Drop nach 3 Versuchen, Shutdown-Drain; Events
+  überleben Neustarts (Spool→Buffer-Reload, Dedup über `event_id`).
+  Server: eigene `telemetry.db` (eigene Migrationskette
+  `migrations/telemetry/`, Hauptkette unverändert), `POST /api/telemetry`
+  mit Bearer-Auth, Validierung, Idempotenz-Dedup, Clients-Upsert,
+  Retention-Prune (`retention_days`, Default 30) und 6 SQL-Views
+  (`v_tasks_per_hour`, `v_error_rate`, `v_downloads_by_source`,
+  `v_scan_duration_trend`, `v_client_versions`, `v_clients_last_seen`).
+  Config: `telemetry.events_endpoint`
+  (`MOMOS_TELEMETRY_EVENTS_ENDPOINT`), `telemetry_receiver.db_path`
+  (`MOMOS_TELEMETRY_RECEIVER_DB_PATH`), `telemetry_receiver.retention_days`
+  (`MOMOS_TELEMETRY_RECEIVER_RETENTION_DAYS`); alles aus per Default
+  (`telemetry.enabled=false`) — kein Verhaltenswechsel. Payload-Hygiene:
+  keine Secrets, Pfade werden gestrippt/gekürzt. Konzept-Doc:
+  `plans/proposed/telemetry-events.md`. Keine UI-Actions, keine Heartbeats.
+
+- **Nachhaltiges Versioning-Konzept**: Release-Builds beziehen ihre Version
+  aus dem Git-Tag (`v1.2.0` → `1.2.0`), Dev-Builds aus der Cargo.toml-Basis
+  + Commit-SHA (`1.1.0-dev+<sha8>`, rolling `main`). Mechanik: `build.rs`
+  injiziert `MMM_VERSION` (Env, Fallback Cargo.toml),
+  `scripts/resolve-version.sh` ist die einzige CI-Versionsquelle,
+  Packaging-Skripte versionieren aus `MMM_VERSION`. CI benennt Assets nach
+  Schema (`momos-music-manager-<version>-<os-arch>.<ext>`, Dev zusätzlich
+  stabile `-latest-`-Namen), publiziert versionierte Dev-Assets inkl.
+  signiertem Manifest und räumt stale/legacy Assets aus `latest-main` auf.
+  Autoupdater-Kanäle: Dev → `latest-main`, Release → `releases/latest`,
+  mit Kanal-Guards (kein automatischer dev↔release-Wechsel) und
+  rolling-Vergleich über den SHA. Doku: `docs/versioning.md`
+  (Schema, Kanäle, Release-Runbook, Alt-Tag-Repair),
+  `repair-release.yml` für die v1.1.0-Nachbesserung (Assets
+  `1.0.1` → `1.1.0`, Neu-Signatur des Manifests).
+
+- **Update-Kanal-Wahl (`release` | `rolling`)**: Die Settings-Seite
+  (`#settings`) bekommt ein Kanal-Dropdown neben dem Auto-Update-Toggle
+  (Confirm-Modal beim Wechsel; Persistenz wie `autoupdate.enabled` über
+  die SQLite-KV aus Migration 024). Default = Kanal des laufenden Builds
+  (Dev-Build → `rolling`, Release-Build → `release`), Precedence Env
+  (`MOMOS_AUTOUPDATE_CHANNEL`) > UI (`settings['autoupdate.channel']`) >
+  TOML (`[autoupdate] channel`) > Default. `GET /api/update/status`
+  liefert `channel`, `channelSource` und `availableChannels`;
+  `POST /api/update/settings` nimmt zusätzlich `{"channel": …}` an;
+  `check`/`apply` laufen gegen den gewählten Kanal (Basis-URL folgt dem
+  Kanal; ein `base_url`-Override behält Vorrang). **Cross-Channel-
+  Semantik**: Ein expliziter Kanalwechsel ist kein Fehler mehr —
+  `ChannelMismatch` greift nur noch, wenn die Update-Quelle den *anderen*
+  Kanal ausliefert als gewählt (inkonsistenter Override); die UI erklärt
+  den Mismatch entsprechend. Ein Kanalwechsel löscht den gecachten letzten
+  Check (Ergebnisse vom alten Kanal gelten nicht für den neuen). Doku:
+  `docs/versioning.md` §3/§6, `.env.example`, `deploy/config.toml`.
+
+- **Auto-Apply + Self-Restart + macOS DMG-Self-Install (Phase C)**: Der
+  Autoupdater installiert Updates jetzt auch vollautomatisch. Neuer
+  periodischer Scheduler (`serve`): check → apply → Self-Restart im
+  konfigurierbaren Intervall. Interval-Precedence **Env > UI > TOML > Default
+  4 h** (`MOMOS_AUTOUPDATE_INTERVAL_SECS`, Settings-Dropdown
+  `autoupdate.interval_secs` in der KV-Tabelle, `[autoupdate] interval_secs`;
+  `0` = periodische Schleife aus, Startup-Check läuft weiter; Default
+  14400 s = 4 h). Einstellbar in der Settings-Seite (neuer Select, gesperrt
+  + Hinweis bei Env/TOML-Pinning wie Toggle/Kanal). Self-Restart-Guards:
+  Swap-Marker (laufendes Update) blockiert Folge-Apply; Crash-Loop-Breaker
+  (persistierter Auto-Apply-State, aktiviert beim Startup-Auto-Rollback)
+  verhindert Endlos-Restart-Loops derselben Version; unter systemd
+  (`INVOCATION_ID`) übernimmt der Service-Manager den Neustart
+  (`Restart=always`), sonst startet ein detachter Relauncher das neue Binary
+  nach 2 s neu (macOS `.app`: `open` des ersetzten Bundles, nur wenn das
+  laufende Bundle im Installations-Verzeichnis liegt). **macOS DMG-Handling**:  
+  verifizierter DMG wird gemountet (`hdiutil attach`), das `.app`-Bundle
+  atomar ersetzt (`ditto` → Staging → Swap, alte Version als
+  `<App>.app.updater-bak` für manuelle Wiederherstellung, Restore bei
+  Fehlern), wieder unmountet, DMG aufgeräumt; Installations-Ziel
+  konfigurierbar (`MOMOS_AUTOUPDATE_APP_DIR` / `[autoupdate] app_dir`,
+  Default `/Applications`). Schlägt der Self-Install fehl, bleibt der
+  verifizierte Download in `~/Downloads` (v1-Fallback). `ApplyOutcome::
+  Installed`-Pfad/Status-JSON unverändert → Telemetry-PR #20 (`app.updated`
+  bei Versionswechsel) bleibt kompatibel. Neue Module: `update_auto.rs`,
+  `restart.rs`, `dmg.rs`, `macos.rs`; Doku: README, `.env.example`,
+  `docs/versioning.md` §6/§7, PLATFORM-SUPPORT.
+
+---
+
+## [1.1.0] — 2026-08-31
+
+### Added
+
+- **Autoupdater (M6 v1)**: self-update gegen das rolling `latest-main`-Release
+  mit strikter Verifikationskette — Ed25519-Signatur (minisign-Format) über
+  das `SHA256SUMS`-Manifest (Pubkey im Binary eingebettet, Spiegel in
+  `scripts/minisign.pub`), SHA256 je Artefakt, dann atomarer Austausch mit
+  `.bak` + `update-state.json`-Marker, Health-Grace nach Neustart (mit
+  Selbst-Probe von `/api/health`), Auto-Rollback bei wiederholten Fehlstarts,
+  manuelles `update rollback`. Neue CLI: `update check | apply | rollback |
+  status`. Opt-out: `serve --no-autoupdate`, `MOMOS_AUTOUPDATE_ENABLED=false`,
+  `[autoupdate] enabled = false`. CI (Publish-Job) signiert das Manifest mit
+  dem Secret `MINISIGN_SECRET_KEY` (base64 der `minisign.key`) und lädt
+  `SHA256SUMS.minisig` hoch; ohne Secret bleibt es unsigned und der
+  Autoupdater lehnt Updates ab (safe default). macOS v1: verifizierter
+  Download (kein Swap im `.app`-Bundle); Windows: Swap bei gestopptem Server.
+  Doku: README, PLATFORM-SUPPORT, RELEASE-ROADMAP (M6), ADR-059.
+
+- **Landing-Page-Downloads für alle Plattformen**: `site/` bietet jetzt
+  Download-Buttons für macOS (Universal-DMG), Windows (x64 + arm64) und Linux
+  (x64 + arm64) aus dem rolling `latest-main`-Release, jeweils mit
+  SHA256-Checksummen-Link und Verifikations-Anleitung. CI publiziert dafür
+  stabile Artefakt-Namen (`momos-music-manager-latest-<os>-<arch>.<ext>`,
+  `Momo-s-Music-Manager-latest.dmg.sha256`) und erweitert das aggregierte
+  `SHA256SUMS` um diese Einträge.
+
+- **docs/RELEASE-ROADMAP.md**: iterative Roadmap für die Verteilungs-Strategie
+  (M1 Downloads alle Plattformen ✅, M2 versionierte Releases, M3 Windows
+  Code-Signing, M4 macOS Notarization, M5 Linux AppImage/Flatpak, M6 optional
+  Autoupdater) — jeder Milestone einzeln abarbeitbar mit Definition of Done.
+
+- **Linux support**: Self-contained release builds (SQLite bundled via sqlx,
+  TLS via rustls — no system sqlite/openssl dev packages needed). New
+  `scripts/package-linux.sh` produces a portable `tar.gz` + `SHA256SUMS`,
+  ships a systemd unit for headless server mode. README documents Linux
+  build/run/systemd.
+
+- **Windows support**: `scripts/package-windows.ps1` produces a `zip` + sha256
+  for x64 and ARM64 (hosted `windows-11-arm` runner).
+
+- **Cross-platform CI**: `.github/workflows/build-all.yml` builds Linux x64,
+  Linux ARM64 (cross), Windows x64, Windows ARM64 and macOS universal on every
+  `main` push (rolling `latest-main` release) and on `v*` tags — artifacts
+  named `momos-music-manager-<version>-<os>-<arch>.<ext>` with per-file
+  `.sha256` and aggregated `SHA256SUMS`.
+
+- **`docs/PLATFORM-SUPPORT.md`**: Platform matrix for all 6 targets (build,
+  toolchain, packaging, CI, signing/security per platform) with priorities and
+  honest "open" items.
+
+### Changed
+
+- `docs/PLATFORM-SUPPORT.md`: Landing-Page-Status auf erledigt aktualisiert.
+
+- TLS stack switched from native-tls/OpenSSL to **rustls** (reqwest, hf-hub,
+  rspotify) — enables clean Linux cross-compilation to ARM64 and removes the
+  OpenSSL system dependency on Linux.
+
+---
+
 ## [1.0.1] — 2026-08-29
 
 ### Added
@@ -48,6 +458,12 @@ All notable changes to Momo's Music Manager.
   `PATH`).
 
 ---
+
+## [Unreleased]
+
+### Added
+
+- **STEMS Filter** (`#files`): New "STEMS" filter row shows all non-stem files whose track has no `stem.m4a` yet (same ISRC). Combines with all existing filters (backup, on-disk, type, tags, …) and with the new inverse "Has" state. Server-side via `stems` query param on `GET /api/files` + `/api/files/count` and in the select-all filter body. Linux dev builds unblocked by moving macOS-only deps (`tray-icon`, `objc2*`) behind `cfg(target_os = "macos")`.
 
 ## [0.9.0] — 2026-07-02
 

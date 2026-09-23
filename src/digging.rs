@@ -1096,6 +1096,8 @@ pub struct SearchFileResult {
     pub last_played: Option<i64>,
     pub energy_level: Option<f64>,
     pub tags: Vec<DiggingTag>,
+    /// Whether this result is itself an "Extended Mix" version.
+    pub is_extended_mix: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1168,6 +1170,8 @@ pub struct DiggingTrackResult {
     pub last_played: Option<i64>,
     /// Number of distinct tag categories this track has
     pub tag_category_count: usize,
+    /// Whether this result is itself an "Extended Mix" version.
+    pub is_extended_mix: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1619,10 +1623,12 @@ pub async fn search_digging_tracks(
             pl_rows.into_iter().map(|(name,)| name).collect()
         };
 
+        let title = row.title;
         results.push(DiggingTrackResult {
             id: row.id,
             service: row.service,
-            title: row.title,
+            is_extended_mix: crate::extended_mix::is_extended_mix(&title),
+            title,
             artist: row.artist,
             isrc: row.isrc,
             duration_ms: row.duration_ms,
@@ -1851,10 +1857,13 @@ pub async fn search_tracks_and_files(
     for f in files {
         let tags = load_file_tags(pool, f.id).await?;
         let energy = compute_track_energy(pool, f.id).await.unwrap_or(None);
+        let title = f.title.unwrap_or_default();
+        let artist = f.artist.unwrap_or_default();
         file_results.push(SearchFileResult {
             id: f.id,
-            title: f.title.unwrap_or_default(),
-            artist: f.artist.unwrap_or_default(),
+            is_extended_mix: crate::extended_mix::is_extended_mix(&title),
+            title,
+            artist,
             bpm: f.bpm,
             musical_key: f.musical_key,
             file_type: f.file_type,

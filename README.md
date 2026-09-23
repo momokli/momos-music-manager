@@ -1,4 +1,4 @@
-# Momo's Music Manager
+# momo's music manager
 
 > Multi-service music library management for DJs — local files + Spotify streaming with harmonic matching, tag organization, and Traktor integration.
 
@@ -14,11 +14,48 @@ cargo run -- serve
 open http://localhost:3000
 ```
 
+---
+
+## Website / Landing Page
+
+The project has a static landing page (features, screenshots, download button)
+deployed to GitHub Pages:
+
+- **URL:** <https://momokli.github.io/momos-music-manager/>
+- **Source:** [`site/`](site/) — plain HTML/CSS, no build step
+- **Deploy:** [`.github/workflows/pages.yml`](.github/workflows/pages.yml) —
+  runs on every push to `main` that touches `site/**`
+
+The landing page now has **download buttons for all supported platforms**
+(macOS universal DMG, Windows x64 + arm64 zip, Linux x64 + arm64 tar.gz),
+each with a SHA256 checksum link and verification instructions, pointing at
+**stable asset names** on the rolling `latest-main` pre-release (the CI
+uploads e.g. `momos-music-manager-latest-linux-x64.tar.gz` under that stable
+name on every main build):
+
+- <https://github.com/momokli/momos-music-manager/releases/tag/latest-main>
+- <https://github.com/momokli/momos-music-manager/releases/download/latest-main/SHA256SUMS>
+
+The `latest-main` release carries **Linux (x64 + arm64) tar.gz and
+Windows (x64 + arm64) zip** artifacts with checksums — see
+[docs/PLATFORM-SUPPORT.md](docs/PLATFORM-SUPPORT.md) for the full matrix and
+[docs/RELEASE-ROADMAP.md](docs/RELEASE-ROADMAP.md) for the iterative next
+steps (versioned releases, code signing, notarization, AppImage).
+
+A custom domain (e.g. `mmm.simonklimke.de`) is intentionally **not** configured
+— the DNS entry is managed by the home `home_domains.txt` script on the
+Fritz!Box and would collide with it. It can be added later via a `CNAME` file
+plus a DNS exception.
+
+---
+
 ### Prerequisites
 
-- Rust 1.80+ (and Cargo)
-- SQLite 3.x
+- Rust 1.85+ (and Cargo) — the project uses the Rust 2024 edition
 - Spotify Developer Account (optional, only for sync features)
+
+SQLite is compiled in (sqlx `bundled`) and TLS uses rustls — **no system
+SQLite/OpenSSL development packages needed** on any platform.
 
 No Python, Node.js, or separate dev server needed. The entire frontend is embedded in the binary via `rust-embed`.
 
@@ -55,6 +92,11 @@ user_id  = "your_soundcloud_user_id"
 [youtube]
 api_key      = "your_youtube_api_key"
 playlist_id  = "your_youtube_playlist_id"
+
+[autoupdate]
+enabled = true
+# base_url = "https://github.com/momokli/momos-music-manager/releases/download/latest-main"
+# health_grace_secs = 60
 ```
 
 ### Environment variables (override config.toml)
@@ -69,6 +111,12 @@ playlist_id  = "your_youtube_playlist_id"
 | `HOST`                  | Server bind address                                 |
 | `PORT`                  | Server port                                         |
 | `RUST_LOG`              | Log level (debug, info, warn, error)                |
+| `MOMOS_AUTOUPDATE_ENABLED` | Enable the startup update check + the periodic auto-apply loop (`true`/`false`, default `true`) |
+| `MOMOS_AUTOUPDATE_CHANNEL` | Update channel (`release`/`rolling`; default = channel of the running build — dev → `rolling`, release → `release`; see [docs/versioning.md](docs/versioning.md)) |
+| `MOMOS_AUTOUPDATE_BASE_URL` | Autoupdate source base URL override (default follows the selected channel: `rolling` → `latest-main`, `release` → `releases/latest`; see [docs/versioning.md](docs/versioning.md)) |
+| `MOMOS_AUTOUPDATE_HEALTH_GRACE_SECS` | Seconds the new binary must stay healthy before an update is committed (default `60`) |
+| `MOMOS_AUTOUPDATE_INTERVAL_SECS` | Seconds between two automatic check+apply cycles (`0` = off — startup check only; default `14400` = 4 h; UI setting has precedence over this only when unset here, see [docs/versioning.md](docs/versioning.md) §7) |
+| `MOMOS_AUTOUPDATE_APP_DIR` | macOS only: directory whose `Momo's Music Manager.app` the DMG self-install replaces (default `/Applications`) |
 
 ---
 
@@ -80,11 +128,29 @@ Download the latest `Momo's-Music-Manager-v*.dmg` from
 [GitHub Releases](https://github.com/momo/momos-music-manager/releases).
 
 1. Open the DMG
-2. Drag **Momo's Music Manager** to the **Applications** folder
+2. Drag **momo's music manager** to the **Applications** folder
 3. Double-click the app — the server starts and your browser opens to the dashboard
 
 > **First launch**: macOS Gatekeeper may block unsigned apps. Right-click the app
 > and select **Open**, then click **Open** in the dialog.
+
+#### Latest main (rolling build)
+
+Every push to `main` triggers a CI build that packages the current state for
+**all platforms** (Linux x64/arm64, Windows x64/arm64, macOS universal) and
+publishes them as a rolling pre-release:
+
+- **Download:** <https://github.com/momokli/momos-music-manager/releases/tag/latest-main>
+- **Naming:** versioned `momos-music-manager-<version>-<os-arch>.<ext>` (dev builds:
+  `<cargo-version>-dev+<sha8>`, the short commit SHA identifies the exact state) plus
+  stable `momos-music-manager-latest-<os-arch>.<ext>` names, each with a `.sha256`
+  file; aggregate `SHA256SUMS` + `SHA256SUMS.minisig`. Full schema, channels and the
+  release process: [docs/versioning.md](docs/versioning.md).
+
+Same caveat as the tagged releases: macOS builds are **ad-hoc signed, not
+notarized**, so Gatekeeper may block them on first launch — right-click the app
+and select **Open**. Windows builds are unsigned (SmartScreen warning possible).
+Artifacts are also attached to the workflow run (`mmm-<os>-<arch>`).
 
 The server runs in the background (no dock icon). Re-opening the app just brings
 back the browser. To stop the server, use Activity Monitor or `pkill momos-music-manager`.
@@ -92,6 +158,111 @@ back the browser. To stop the server, use Activity Monitor or `pkill momos-music
 Logs: `~/Library/Logs/momos-music-manager/`
 Config: `~/.config/momos-music-manager/config.toml`
 Database: `~/.local/share/momos-music-manager/library.db`
+
+#### CLI access (Terminal)
+
+An `.app` install has no CLI on `PATH` — the binary lives inside the bundle at
+`…/Momo's Music Manager.app/Contents/MacOS/momos-music-manager`. The app
+**automatically keeps a `momos-music-manager` symlink in a PATH directory** so
+the terminal commands work out of the box:
+
+```bash
+momos-music-manager --version
+momos-music-manager telemetry push
+momos-music-manager update check
+momos-music-manager serve --host 0.0.0.0 --port 3000 --no-browser
+```
+
+The symlink is created at the **first app launch** (after dragging the app into
+`/Applications`) and refreshed after every **self-update** (the DMG install path
+re-ensures it). It points at the stable bundle path, so in-place updates never
+break it. Where it goes — the first **writable** directory of:
+
+1. `/usr/local/bin` — on the default macOS/Linux `PATH` (dev machines where it
+   is user-writable get the CLI with zero setup)
+2. `/opt/homebrew/bin` — Apple-Silicon Homebrew prefix (when present)
+3. `~/.local/bin` — per-user XDG dir (created on demand, no admin rights)
+
+> **`~/.local/bin` is not on the default macOS `PATH`.** When the app had to
+> fall back to it, add one line to `~/.zprofile` (the Settings page → *CLI
+> access* card shows the exact command):
+>
+> ```bash
+> export PATH="$HOME/.local/bin:$PATH"
+> ```
+
+No writable candidate at all? The app logs the reason at startup and the
+Settings page shows it — you can always link manually, e.g.:
+
+```bash
+ln -sf "/Applications/Momo's Music Manager.app/Contents/MacOS/momos-music-manager" /usr/local/bin/momos-music-manager
+```
+
+### Linux (tar.gz)
+
+Grab `momos-music-manager-<version>-linux-x64.tar.gz` (or `-linux-arm64` for
+ARM — Raspberry Pi, NAS, ARM servers) from
+[GitHub Releases](https://github.com/momokli/momos-music-manager/releases/tag/latest-main),
+verify the checksum, unpack and run — the binary is fully self-contained
+(SQLite and TLS compiled in, no system libs beyond the base OS):
+
+```bash
+curl -LO https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-x64.tar.gz
+curl -LO https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-x64.tar.gz.sha256
+sha256sum -c momos-music-manager-latest-linux-x64.tar.gz.sha256
+tar -xzf momos-music-manager-latest-linux-x64.tar.gz
+```
+
+Run the server (headless — no GUI, no tray on Linux):
+
+```bash
+./momos-music-manager serve --host 0.0.0.0 --port 3000 --no-browser
+# open http://<host>:3000 in any browser
+```
+
+#### Build from source on Linux
+
+```bash
+# Debian/Ubuntu: nothing extra needed (SQLite bundled, TLS via rustls)
+cargo build --release
+target/release/momos-music-manager serve --host 127.0.0.1 --port 3000 --no-browser
+```
+
+Cross-build for ARM64 (needs the cross C compiler):
+
+```bash
+sudo apt-get install gcc-aarch64-linux-gnu
+CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ \
+  cargo build --release --target aarch64-unknown-linux-gnu
+```
+
+#### Systemd (server mode, auto-start)
+
+The package ships a systemd unit (`deploy/momos-music-manager.service`, also in
+the tar.gz under `deploy/`) for running the headless server as a service:
+
+```bash
+sudo install -m 0644 deploy/momos-music-manager.service /etc/systemd/system/
+sudo systemctl edit momos-music-manager   # set User + secrets (SPOTIFY_*, etc.)
+sudo systemctl daemon-reload
+sudo systemctl enable --now momos-music-manager
+sudo systemctl status momos-music-manager
+```
+
+### Windows (zip)
+
+Download `momos-music-manager-<version>-windows-x64.zip` (or `-windows-arm64`)
+from the [latest-main release](https://github.com/momokli/momos-music-manager/releases/tag/latest-main),
+unzip, and run from a terminal:
+
+```powershell
+.\momos-music-manager.exe serve --host 0.0.0.0 --port 3000 --no-browser
+# open http://<host>:3000
+```
+
+> Note: builds are unsigned — SmartScreen may show a warning ("More info → Run
+yet"). For background operation use Task Scheduler or NSSM.
 
 ### From Source
 
@@ -104,6 +275,100 @@ open http://localhost:3000
 ```
 
 ## Deployment
+
+### Auto-Updates (M6)
+
+The app can update itself. Two update channels exist, selectable in the
+Settings page (`release` | `rolling`; default = channel of the running
+build):
+
+- **Rolling** (`rolling`) — dev builds of `main` (`<version>-dev+<sha8>`)
+  from the `latest-main` pre-release; every push to `main` is offered as an
+  update (detected via the commit SHA in the version).
+- **Release** (`release`) — stable semver releases (tagged `v*`) via
+  `releases/latest`.
+
+An explicit channel switch (dropdown with confirm modal) is **not** an
+error: `check`/`apply` run against the selected channel, and `Update now`
+may install the other channel type's binary. The channel guard
+(`ChannelMismatch`) only fires when the update source serves the *other*
+channel than selected (e.g. a `base_url` override pointing at the wrong
+feed).
+
+Updates are **never installed silently**: the startup check only reports, and
+the actual install is explicit (`momos-music-manager update apply`).
+
+Verification chain (nothing is installed unless every step passes):
+
+1. Download `SHA256SUMS` + `SHA256SUMS.minisig` over HTTPS (rustls).
+2. Verify the **Ed25519 signature** (minisign format) of the manifest with the
+   public key embedded in the binary (`src/autoupdate/keys.rs`, mirrored in
+   `scripts/minisign.pub`).
+3. Resolve the platform artifact by its **versioned** name
+   (`momos-music-manager-<version>-<os-arch>.<ext>`) and compare versions
+   (semver) against the running build; if the source serves the *other*
+   channel than selected, the update is refused (`ChannelMismatch`).
+4. On `update apply`: download the artifact, verify its **SHA256** against the
+   signed manifest, extract the binary — and only then swap.
+
+Swap safety (Linux/Windows): the previous binary is kept as
+`momos-music-manager.bak` next to the new one, with an `update-state.json`
+marker. On the next start the new binary must survive a health grace period
+(default 60 s, with a self-probe of `/api/health`); then the update is
+committed (`.bak` removed). If the new binary repeatedly fails to become
+healthy, the updater **auto-rolls back** to the previous version. Manual
+rollback is always available:
+
+```bash
+# check for updates (verifies the signed manifest, no download)
+momos-music-manager update check
+
+# download + verify + install (restart the server afterwards)
+momos-music-manager update apply
+
+# restore the previous binary from .bak
+momos-music-manager update rollback
+
+# current version, channel (base URL), pending update state
+momos-music-manager update status
+```
+
+Opt-out: `--no-autoupdate` on `serve`, or `MOMOS_AUTOUPDATE_ENABLED=false`
+(env / `[autoupdate] enabled = false` in config.toml). Channel override:
+`MOMOS_AUTOUPDATE_CHANNEL=release|rolling` or `[autoupdate] channel` in
+config.toml (Settings page otherwise). The update check also runs
+automatically on `serve` startup (10 s after boot) and logs the result.
+
+**Automatic updates (auto-apply + self-restart)**: with auto-update enabled
+(default), the server checks for and **installs** updates every
+`MOMOS_AUTOUPDATE_INTERVAL_SECS` (default 4 h; `0` = periodic loop off,
+startup check still runs) and restarts itself afterwards. Configure the
+interval in the Settings page or via env/`[autoupdate] interval_secs`
+(precedence Env > UI > TOML > default; see [docs/versioning.md](docs/versioning.md)
+§7). Restart behaviour: under systemd the service manager restarts the unit
+(`Restart=always`); otherwise a detached relauncher starts the new binary.
+Repeatedly failing versions are blacklisted by a crash-loop breaker — an
+update that never becomes healthy is rolled back once and then skipped until
+a newer version is published. Manual "Update now" stays available anytime.
+
+> **macOS**: the updater downloads, verifies and **self-installs** the
+> universal DMG: it mounts the image, atomically replaces
+> `Momo's Music Manager.app` in `/Applications` (configurable via
+> `MOMOS_AUTOUPDATE_APP_DIR` / `[autoupdate] app_dir`) and unmounts again;
+> the previous version stays as `Momo's Music Manager.app.updater-bak` for
+> manual recovery. The server restarts itself after the install (the app
+> bundle is relaunched via LaunchServices). If the self-install fails, the
+> verified DMG is kept in `~/Downloads` for manual installation.
+>
+> **Windows**: replacing a *running* executable is not allowed — stop the
+> server before `update apply` (the error message tells you). Automatic
+> updates therefore require the service manager to perform the restart.
+>
+> **Signing key**: the manifest is signed in CI with the `MINISIGN_SECRET_KEY`
+> secret (base64 of the `minisign.key` file, see
+> [`docs/RELEASE-ROADMAP.md`](docs/RELEASE-ROADMAP.md) M6 for generation &
+> rotation). If the secret is not configured, artifacts stay unsigned and the
+> updater **refuses** them (safe default).
 
 ### Database path
 
@@ -161,7 +426,13 @@ cargo run -- serve --public-url https://mmm.mydomain.de
 
 ```bash
 # Start server
-cargo run -- serve [--host 127.0.0.1] [--port 3000] [--public-url URL]
+cargo run -- serve [--host 127.0.0.1] [--port 3000] [--public-url URL] [--no-autoupdate]
+
+# Self-update (M6)
+cargo run -- update check
+cargo run -- update apply
+cargo run -- update rollback
+cargo run -- update status
 
 # Database management
 cargo run -- db-status
@@ -186,6 +457,9 @@ cargo run -- --version
 ## Development
 
 ```bash
+# Run the test suite (some tests shell out to external tools)
+# Debian/Ubuntu: sudo apt-get install flac exiftool ffmpeg
+cargo test
 # Clean DB (for schema changes)
 rm -f app.db && cargo run -- serve
 
@@ -245,7 +519,7 @@ Open Traktor → run "Consistency Check" over all tracks → Comments visible �
 | Route              | Module                     | Description                              |
 | ------------------ | -------------------------- | ---------------------------------------- |
 | `#dashboard`       | `pages/dashboard.js`       | Stats + Services dashboard               |
-| `#files`           | `pages/files.js`           | Local files with BPM/Key, comment status |
+| `#files`           | `pages/files.js`           | Local files with BPM/Key, comment status, STEMS filter |
 | `#tracks`          | `pages/tracks.js`          | Service tracks, playlist/tag/PMV filter  |
 | `#playlists`       | `pages/playlists.js`       | All service playlists                    |
 | `#tags`            | `pages/tags.js`            | Tags (paginated list)                    |
@@ -258,6 +532,7 @@ Open Traktor → run "Consistency Check" over all tracks → Comments visible �
 | `#digging`         | `pages/digging.js`         | Digging curator — chain-based sessions   |
 | `#data`            | `pages/data.js`            | Import/Export database                   |
 | `#tag-curation`    | `pages/tag-curation.js`    | Tag parent curation workflow             |
+| `#backpack`        | `pages/backpack.js`        | Backpack tags + Spotify transport playlist |
 
 ---
 
@@ -278,6 +553,7 @@ Open Traktor → run "Consistency Check" over all tracks → Comments visible �
 | Parents     | `GET/PUT /api/tags/{id}/parents`                                                 |
 | Corrections | `GET/PUT /api/files/{id}/track-corrections`, `/api/tracks/{id}/file-corrections` |
 | Digging     | `GET/POST /api/digging/...`                                                      |
+| Backpack    | `GET /api/backpack`, `POST /api/backpack/push`                                    |
 | Health      | `GET /api/health`                                                                |
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
@@ -290,6 +566,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — Architectural Decision Records
 - [`docs/COMMENT_SYSTEM.md`](docs/COMMENT_SYSTEM.md) — Comment format specification
 - [`docs/TASK_MANAGER.md`](docs/TASK_MANAGER.md) — Task manager design
+- [`docs/USER_STORY.md`](docs/USER_STORY.md) — Core user story
 
 ---
 
@@ -324,7 +601,7 @@ momos-music-manager/
 │   └── tasks/              # TaskManager + workers
 │       └── mod.rs
 ├── download-service/       # Python download pipeline (deemix + spotDL)
-├── scripts/                # macOS packaging + helper scripts
+├── scripts/                # Packaging: macOS DMG, Linux tar.gz, Windows zip
 ├── frontend/               # SPA (embedded via rust-embed)
 │   ├── index.html          # Shell
 │   ├── app.js              # Hash router

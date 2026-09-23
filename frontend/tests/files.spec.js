@@ -153,4 +153,48 @@ test.describe("Files Page", () => {
       expect(writeCount).toBeGreaterThan(0);
     }
   });
+
+  test("stems filter shows only files without stems", async ({ page }) => {
+    // files_filter scenario: files 1-4 + 30-32.
+    // File 1 (flac US001) has a stem, file 2 IS the stem,
+    // files 3, 4, 30, 31, 32 are flac without stems → expect 5 files.
+    await page.goto("/#files?stems=true");
+    await page.waitForSelector("#files-content table tbody tr", { timeout: 8000 });
+
+    // Total in stats row must be 5
+    const statsText = await page.locator("#files-content .stats-row strong").textContent();
+    expect(parseInt(statsText, 10)).toBe(5);
+
+    // The filter button row is present and "Missing" is active
+    const missingBtn = page.locator('[data-stem-filter="yes"]');
+    await expect(missingBtn).toBeVisible();
+    await expect(missingBtn).toHaveClass(/active/);
+
+    // No stem.m4a rows and no "Title One" (the file that HAS a stem)
+    const formatCells = page.locator("#files-content table tbody tr td:nth-child(5)");
+    const formats = await formatCells.allTextContents();
+    expect(formats.every((f) => !f.includes("stem.m4a"))).toBe(true);
+    const rows = page.locator("#files-content table tbody tr");
+    expect(await rows.count()).toBe(5);
+  });
+
+  test("stems filter combines with backup filter", async ({ page }) => {
+    // All stems-filter files (3, 4, 30, 31, 32) are backed up → still 5.
+    // File 1 has a stem, file 2 is a stem → excluded regardless of backup.
+    await page.goto("/#files?stems=true&backedUp=true");
+    await page.waitForSelector("#files-content table tbody tr", { timeout: 8000 });
+
+    const statsText = await page.locator("#files-content .stats-row strong").textContent();
+    expect(parseInt(statsText, 10)).toBe(5);
+  });
+
+  test("stems filter excludes local-only stems", async ({ page }) => {
+    // stems=true & isLocal=true: stems-filter files are backup-only
+    // (files 3,4,30,31,32 have no local entry) → expect 0 files.
+    await page.goto("/#files?stems=true&isLocal=true");
+    await page.waitForTimeout(800);
+
+    const statsText = await page.locator("#files-content .stats-row strong").textContent();
+    expect(parseInt(statsText, 10)).toBe(0);
+  });
 });

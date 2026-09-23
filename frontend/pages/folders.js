@@ -1221,4 +1221,26 @@ export async function init(container, signal, hashParams) {
 
   // Fetch initial data
   await fetchAndRender();
+
+  // "+ Ordner" jump: `#folders?new=1` opens the Add Folder modal directly.
+  if (hashParams && (hashParams.new === "1" || hashParams.add === "1")) {
+    openAddModalFromHash();
+  }
+}
+
+/**
+ * Open the Add Folder modal and strip the `new`/`add` hash param so the
+ * modal does not re-open on refresh.
+ */
+function openAddModalFromHash() {
+  const raw = window.location.hash || "#folders";
+  const [path, query] = raw.split("?");
+  if (query) {
+    const params = new URLSearchParams(query);
+    params.delete("new");
+    params.delete("add");
+    const qs = params.toString();
+    history.replaceState(null, "", qs ? `${path}?${qs}` : path);
+  }
+  openAddModal();
 }

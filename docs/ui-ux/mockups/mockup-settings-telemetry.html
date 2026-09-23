@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>M6 · Settings &amp; Telemetry — UI/UX-Mockup</title>
+<link rel="stylesheet" href="assets/mockup.css" />
+<style>
+  .set-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 980px) { .set-grid { grid-template-columns: 1fr; } }
+  .formgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 760px) { .formgrid { grid-template-columns: 1fr; } }
+  .fieldrow { display: flex; align-items: center; gap: 14px; padding: 10px 0; border-bottom: 1px solid rgba(30,41,59,.55); font-size: .88rem; }
+  .fieldrow:last-child { border-bottom: 0; }
+  .fieldrow .lab { flex: 1; }
+  .fieldrow .lab b { display: block; font-size: .88rem; }
+  .fieldrow .lab span { color: var(--text-muted); font-size: .76rem; }
+  .tok { font-family: var(--mono); letter-spacing: .12em; }
+  .push-result { display: flex; gap: 8px; align-items: center; margin-top: 12px; font-size: .85rem; }
+  .mini-bars { display: flex; align-items: flex-end; gap: 3px; height: 34px; }
+  .mini-bars i { width: 7px; border-radius: 2px; background: var(--accent-grad); opacity: .8; }
+  .privacy li { margin: 4px 0 4px 18px; font-size: .82rem; color: var(--text-muted); }
+  .privacy b { color: var(--text-secondary); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topnav">
+    <div class="brand"><span class="logo">♪</span>momo's music manager<small>UI/UX-Proposal</small></div>
+    <nav class="navlinks">
+      <a class="nav-item" href="#">Overview</a>
+      <a class="nav-item" href="#">Library</a>
+      <a class="nav-item" href="#">Services</a>
+      <a class="nav-item" href="#">Tools <span class="count orange">Digging</span></a>
+      <a class="nav-item active" href="#">System</a>
+    </nav>
+    <div class="global-activity">Telemetry: Push ok · vor 12 min</div>
+    <span class="version">v1.3.0</span>
+  </header>
+
+  <div class="pagehead">
+    <div>
+      <h1>Settings</h1>
+      <div class="sub">Update · Telemetry · Ordner · CLI</div>
+    </div>
+    <div class="actions"><span class="fix-tag">adressiert R10 + Telemetry-Priorität</span></div>
+  </div>
+
+  <div class="set-grid">
+    <div>
+      <div class="card">
+        <div class="card-title">Telemetry <span class="grow"></span><span class="chip green" style="padding:1px 8px">● aktiv</span></div>
+        <div class="notice ok" style="margin-bottom:14px"><span class="ico">✓</span><div><b>Push erfolgreich</b> — vor 12 min · 143 Events · HTTP 200 in 0,4 s. Nächster automatischer Push in ~48 min.</div></div>
+        <div class="formgrid">
+          <div class="field"><label>Collector-URL</label><input class="input" value="https://telemetry.momos-music.example/collect" /></div>
+          <div class="field"><label>Token</label><input class="input tok" value="••••••••••••4f2a" readonly title="maskiert" /></div>
+          <div class="field"><label>Instanzname</label><input class="input" value="macbook" /></div>
+          <div class="field"><label>Push-Intervall</label>
+            <select class="input"><option>alle 1 Stunde</option><option selected>alle 4 Stunden</option><option>täglich</option><option>manuell</option></select>
+          </div>
+        </div>
+        <div class="push-result">
+          <button class="btn primary">Jetzt pushen</button>
+          <span class="footnote">nach manueller Aktion: sofortige Übertragung + Status</span>
+        </div>
+        <div style="margin-top:16px;display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+          <div class="mini-bars"><i style="height:30%"></i><i style="height:55%"></i><i style="height:40%"></i><i style="height:75%"></i><i style="height:60%"></i><i style="height:85%"></i><i style="height:50%"></i><i style="height:100%"></i><i style="height:70%"></i><i style="height:45%"></i></div>
+          <div style="font-size:.8rem;color:var(--text-muted)">Events der letzten 10 Stunden<br/><b style="color:var(--text)">143 Events</b> heute · Fehlerrate 0,0 %</div>
+        </div>
+        <div class="privacy" style="margin-top:12px">
+          <b style="font-size:.8rem">Was gesendet wird (und warum es wichtig ist):</b>
+          <ul>
+            <li><b>Nutzungszähler</b> (Views, Filter, Importe) — zeigt, welche UI wirklich gebraucht wird</li>
+            <li><b>Fehler &amp; Abbruchgründe</b> (Deemix-Fehler, Task-Fails) — macht Qualität messbar</li>
+            <li><b>Keine Musikdaten, keine Pfade, keine Inhalte</b> — nur anonyme Ereignisse</li>
+          </ul>
+        </div>
+        <div class="fieldrow" style="border-top:1px solid var(--border);margin-top:8px">
+          <div class="lab"><b>Telemetry deaktivieren</b><span>Opt-out jederzeit — dann stoppt auch der Hinweis oben</span></div>
+          <button class="toggle"></button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Update <span class="grow"></span><span class="chip" style="padding:1px 8px">Release-Kanal</span></div>
+        <div class="fieldrow">
+          <div class="lab"><b>Aktuelle Version</b><span>v1.3.0 · zuletzt geprüft: nie (manuell)</span></div>
+          <button class="btn sm">Nach Updates suchen</button>
+        </div>
+        <div class="fieldrow">
+          <div class="lab"><b>Automatische Updates</b><span>Stable-Downloads, alle 4 h geprüft</span></div>
+          <button class="toggle on"></button>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <div class="card-title">Folders <span class="chip green" style="padding:1px 8px">Quick-Win #1</span></div>
+        <div style="font-size:.86rem;color:var(--text-secondary);line-height:1.65">
+          Managed Folders sind der einfachste Hebel für deine Library:
+          <b>/test/stems</b> wird überwacht (Watch + periodischer Scan), neue Dateien landen automatisch in Files.
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <button class="btn primary sm">Ordner verwalten →</button>
+          <button class="btn sm ghost">+ Ordner hinzufügen</button>
+        </div>
+        <div class="footnote" style="margin-top:8px">Zielbild: Folders in der Top-Nav sichtbar (heute unter Services ▸ Folders, 2 Klicks tief).</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">CLI-Zugriff</div>
+        <div style="font-size:.82rem;color:var(--text-muted);font-family:var(--mono)">
+          momos-music-manager serve<br/>momos-music-manager scan --folder …<br/>momos-music-manager import-traktor …
+        </div>
+        <div class="footnote" style="margin-top:8px">Unverändert — nur Doku-Hinweis, dass die App auch headless läuft (Tray-Betrieb).</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Warum Telemetry hier so prominent ist</div>
+        <div style="font-size:.84rem;color:var(--text-secondary);line-height:1.65">
+          Telemetry ist <b>deine Priorität</b> (v1.2.0-Planung, <span class="mono" style="font-size:.78rem">plans/proposed/telemetry-events.md</span>).
+          Diese Karte macht Status, letzten Push und Umfang auf einen Blick sichtbar —
+          statt eines „Disabled (default)“-Formulars wie heute.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="assets/mockup.js"></script>
+</body>
+</html>

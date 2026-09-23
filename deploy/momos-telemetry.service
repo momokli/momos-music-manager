@@ -11,6 +11,9 @@ User=momo
 Environment="RUST_LOG=info"
 Environment="MOMOS_TELEMETRY_RECEIVER_BIND=127.0.0.1:8330"
 Environment="MOMOS_TELEMETRY_RECEIVER_BASE_DIR=/home/momo/momos-analytics"
+# Event telemetry.db (default: <base_dir>/telemetry.db) + retention in days.
+# Environment="MOMOS_TELEMETRY_RECEIVER_DB_PATH=/home/momo/momos-analytics/telemetry.db"
+# Environment="MOMOS_TELEMETRY_RECEIVER_RETENTION_DAYS=30"
 
 # SECRET — set in a drop-in override, never commit the token:
 #   sudo systemctl edit momos-telemetry
