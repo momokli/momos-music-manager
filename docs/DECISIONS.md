@@ -1248,7 +1248,7 @@ erfolgreich, obwohl der Token-Refresh durchgehend funktionierte).
 1. **`SpotifyCooldown`** (`src/spotify/cooldown.rs`) ist die einzige Wahrheit für
    „dürfen wir Spotify gerade ansprechen“: ein prozessweiter Deadline-Wert, der nur
    verlängert (nie verkürzt), aus `Retry-After` gesetzt und bei Erfolg gelöscht wird
-   und nach Ablauf selbst heilt (Cap 6 h).
+   und nach Ablauf selbst heilt (Cap 24 h — Spotify vergibt auch mehrstündige Penalties, beobachtet: `Retry-After: 22h 37m`; ein kürzerer Cap würde zu früh wieder anklopfen).
 2. **Alle Spotify-Loops konsultieren ihn** vor dem Request (Subscription-Poller,
    Global-Poller, Backpack-Coordinator).
 3. **Kein Inline-Retry im Penalty-Fenster**: bei 429 wird der Cooldown gesetzt und

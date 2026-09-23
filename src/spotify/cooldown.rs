@@ -13,8 +13,10 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Upper bound for a single cooldown, so a bogus `Retry-After` cannot wedge the
-/// app forever.
-pub const MAX_COOLDOWN_SECS: u64 = 21_600; // 6 h
+/// app forever. Spotify hands out long penalties for sustained overuse
+/// (observed: `Retry-After: 22h 37m`), so this must cover a full day rather than
+/// undercut the server's own deadline.
+pub const MAX_COOLDOWN_SECS: u64 = 86_400; // 24 h
 
 fn now_unix() -> i64 {
     SystemTime::now()
