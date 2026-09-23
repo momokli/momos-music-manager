@@ -1,6 +1,6 @@
 # Plan: remote object store on .200 — submits instead of rsync backups
 
-**Status**: proposed
+**Status**: in-progress (phase 1 done)
 **Branch**: `feat/remote-object-store`
 **Ready for review**: yes
 **Depends on**: `feat/music-api` (the `.200` service: Axum/SQLite, bearer auth, systemd, Caddy)
@@ -115,14 +115,30 @@ keep it off the LAN.
 - [ ] `cargo build` passes
 - [ ] `cargo test` passes (store client/task tests included)
 - [ ] `cd frontend && npx playwright test` passes
-- [ ] Canonicalisation is deterministic: re-save ⇒ same hash; two files differing
-      only by comment ⇒ same hash
-- [ ] A mismatching digest is rejected; re-upload is a no-op; `/objects/check`
-      answers present/missing for a bulk list
+- [x] Canonicalisation is deterministic: re-save ⇒ same hash; two files differing
+      only by comment ⇒ same hash  **(probed on FLAC/MP3/stem M4A — all YES)**
+- [x] A mismatching digest is rejected; re-upload is a no-op; `/objects/check`
+      answers present/missing for a bulk list  **(verified live)**
 - [ ] MMM writes `file_locations('backup','store:<sha256>')` only for verified objects
 - [ ] A locally deleted file is restorable from the store **with its comment restored**
 - [ ] A remote-only file streams through `file_stream_handler` with Range support
 - [ ] No default flow uses rsync/SSH; `backup:` is gone from config
+
+### Progress
+
+**Phase 1 — done.** The `store` module is live on `.200`:
+
+- `PUT`/`HEAD`/`GET`/`check`/`list` under `/objects`, keyed by the SHA-256 of the
+  bytes sent; the store verifies the digest of what it receives and rejects a
+  mismatch, so a `PUT` cannot claim a wrong key. Sharded `<aa>/<bb>/<hash>` layout
+  on the 7.1 TB volume, single-range `GET`, sqlite metadata, 4 GiB cap, bearer auth.
+- Verified live: a 35 MB FLAC uploads (`201`), `HEAD` reports the length, `GET`
+  round-trips **byte-identical**, `check` answers present/missing, a wrong key is
+  `400`, `Range` returns the file's leading bytes, an unauthenticated `PUT` is `401`.
+- **The canonicalisation question is settled**: `examples/canon_probe.rs` shows
+  clearing the Comment tag with `lofty` is byte-stable across two saves **and**
+  comment-independent on FLAC, MP3 and stem M4A. The raw-payload-hash fallback in
+  the design is therefore *not* needed.
 
 ### Files to touch (indicative)
 
