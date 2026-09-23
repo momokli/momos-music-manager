@@ -1,0 +1,184 @@
+//! HTTP surface: orders, per-ISRC status, and file delivery.
+
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::extract::{Path, Query, State};
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::json;
+use tokio_util::io::ReaderStream;
+
+use crate::models::CreateOrderRequest;
+use crate::{AppState, db};
+
+/// Public liveness probe (no auth).
+pub async fn health() -> impl IntoResponse {
+    Json(json!({ "status": "ok" }))
+}
+
+/// All protected routes. The auth layer is applied by the caller.
+pub fn router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/orders", post(create_order).get(list_orders))
+        .route("/orders/{id}", get(get_order))
+        .route("/isrc/{isrc}", get(get_isrc))
+        .route("/isrc/{isrc}/{format}", get(get_file))
+}
+
+fn error(code: StatusCode, msg: impl Into<String>) -> Response {
+    (code, Json(json!({ "error": msg.into() }))).into_response()
+}
+
+/// `POST /orders` — place an order for a batch of ISRCs.
+async fn create_order(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateOrderRequest>,
+) -> Response {
+    let mut isrcs: Vec<String> = req
+        .items
+        .iter()
+        .map(|i| db::normalize_isrc(&i.isrc))
+        .filter(|s| !s.is_empty())
+        .collect();
+    isrcs.sort();
+    isrcs.dedup();
+
+    if isrcs.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "no ISRCs in order");
+    }
+
+    let order_id = uuid::Uuid::new_v4().to_string();
+    if let Err(e) = db::create_order(&state.pool, &order_id, &isrcs).await {
+        tracing::error!("create_order failed: {e:#}");
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to create order");
+    }
+
+    // Wake the worker so a fresh order starts immediately instead of on the
+    // next tick.
+    state.notify.notify_one();
+
+    Json(json!({ "orderId": order_id, "status": "open", "count": isrcs.len() })).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct ListQuery {
+    status: Option<String>,
+    limit: Option<i64>,
+}
+
+/// `GET /orders` — list orders, optionally filtered by status.
+async fn list_orders(State(state): State<Arc<AppState>>, Query(q): Query<ListQuery>) -> Response {
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    match db::list_orders(&state.pool, q.status.as_deref(), limit).await {
+        Ok(orders) => Json(json!({ "orders": orders })).into_response(),
+        Err(e) => {
+            tracing::error!("list_orders failed: {e:#}");
+            error(StatusCode::INTERNAL_SERVER_ERROR, "failed to list orders")
+        }
+    }
+}
+
+/// `GET /orders/{id}` — order status plus per-ISRC state.
+async fn get_order(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let order = match db::get_order(&state.pool, &id).await {
+        Ok(Some(o)) => o,
+        Ok(None) => return error(StatusCode::NOT_FOUND, "order not found"),
+        Err(e) => {
+            tracing::error!("get_order failed: {e:#}");
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read order");
+        }
+    };
+    let items = match db::order_items(&state.pool, &id).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::error!("order_items failed: {e:#}");
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read order items");
+        }
+    };
+    Json(json!({
+        "orderId": order.id,
+        "status": order.status,
+        "createdAt": order.created_at,
+        "updatedAt": order.updated_at,
+        "items": items,
+    }))
+    .into_response()
+}
+
+/// `GET /isrc/{isrc}` — current state of a single ISRC.
+async fn get_isrc(State(state): State<Arc<AppState>>, Path(isrc): Path<String>) -> Response {
+    let isrc = db::normalize_isrc(&isrc);
+    match db::get_track(&state.pool, &isrc).await {
+        Ok(Some(track)) => Json(json!({
+            "isrc": track.isrc,
+            "state": track.state,
+            "deezerId": track.deezer_id,
+            "title": track.title,
+            "artist": track.artist,
+            "album": track.album,
+            "sourceFormat": track.source_format,
+            "formats": track.formats(),
+            "error": track.error,
+        }))
+        .into_response(),
+        Ok(None) => error(StatusCode::NOT_FOUND, "unknown ISRC"),
+        Err(e) => {
+            tracing::error!("get_isrc failed: {e:#}");
+            error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read track")
+        }
+    }
+}
+
+/// `GET /isrc/{isrc}/{flac|320|128}` — stream the delivered file.
+async fn get_file(
+    State(state): State<Arc<AppState>>,
+    Path((isrc, format)): Path<(String, String)>,
+) -> Response {
+    let isrc = db::normalize_isrc(&isrc);
+    let format = format.to_lowercase();
+    if !matches!(format.as_str(), "flac" | "320" | "128") {
+        return error(StatusCode::BAD_REQUEST, "format must be flac, 320 or 128");
+    }
+
+    let track = match db::get_track(&state.pool, &isrc).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return error(StatusCode::NOT_FOUND, "unknown ISRC"),
+        Err(e) => {
+            tracing::error!("get_file failed: {e:#}");
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read track");
+        }
+    };
+
+    let Some(path) = track.path_for(&format) else {
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("no {format} for this ISRC (state: {})", track.state),
+        );
+    };
+
+    let file = match tokio::fs::File::open(path).await {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::error!("open {path} failed: {e:#}");
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "file missing on disk");
+        }
+    };
+
+    let content_type = if format == "flac" {
+        "audio/flac"
+    } else {
+        "audio/mpeg"
+    };
+
+    let stream = ReaderStream::new(file);
+    let mut resp = Body::from_stream(stream).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static(content_type),
+    );
+    resp
+}
