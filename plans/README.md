@@ -1,6 +1,6 @@
 # Active Plans
 
-**54 done** · **0 in progress** · **16 proposed**
+**54 done** · **0 in progress** · **17 proposed**
 
 ## Proposed
 
@@ -21,6 +21,7 @@
 - [traktor-basename-matching](proposed/traktor-basename-matching.md) — `feat/traktor-basename-matching`
 - [laboratory-analysis-pipeline](proposed/laboratory-analysis-pipeline.md) — `feat/laboratory-analysis`
 - [fix-deemix-auto-download-retry](proposed/fix-deemix-auto-download-retry.md) — `fix/deemix-auto-download-retry`
+- [music-api-order-consumer](proposed/music-api-order-consumer.md) — `feat/music-api-order-consumer`
 
 ## Done
 
