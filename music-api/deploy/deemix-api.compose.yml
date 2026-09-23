@@ -19,7 +19,8 @@ services:
       - "127.0.0.1:6599:6595"
     volumes:
       - /opt/music-api/deemix-config:/config
-      - /opt/music-api/data/incoming:/downloads
+      # The store lives on the big data volume, NOT on the 30G root fs.
+      - /data/public/media/music-api/incoming:/downloads
     environment:
       - DEEMIX_SINGLE_USER=true
       - PUID=1000

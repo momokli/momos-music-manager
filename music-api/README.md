@@ -117,17 +117,27 @@ On the host:
 
 ```bash
 install -d /opt/music-api/{data,deemix-config}
+install -d /data/public/media/music-api/{incoming,flac,320,128}   # the BIG volume
 install -m755 music-api /opt/music-api/music-api
 install -m600 .env.example /opt/music-api/music-api.env   # then edit + chmod
 install -m644 deploy/music-api.service /etc/systemd/system/music-api.service
 systemctl daemon-reload && systemctl enable --now music-api
+```
+
+**Storage**: the file store (`flac/320/128/incoming`) must sit on a large
+volume — a full library is hundreds of GB. `/opt/music-api/data` holds only the
+small ledger DB. `deploy/relocate-data.sh` moves an existing store and rewrites
+the stored paths.
 
 docker compose -f deploy/deemix-api.compose.yml up -d
+
 # once: SSH-tunnel to :6599, log in with the ARL, set Quality = FLAC + Bitrate fallback ON
+
 # (deploy/setup.sh seeds this config and picks a usable ARL from an existing instance)
 
 # .149: add deploy/Caddyfile.snippet to the Caddyfile, export MUSIC_API_TOKEN, reload Caddy
-```
+
+````
 
 **ARL tier matters.** FLAC and 320 need a Deezer Premium/HiFi account; a Free ARL
 makes deemix fall back to what the account may stream (128) — the service still
@@ -140,7 +150,7 @@ The tier is a property of the ARL, not of this service.
 
 ```bash
 cargo test
-```
+````
 
 17 tests: unit tests for ISRC normalisation, order-status derivation, deemix and
 Deezer payload parsing, constant-time token compare and download-file matching;

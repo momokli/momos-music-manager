@@ -17,7 +17,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/music-api/data
+ReadWritePaths=/opt/music-api/data /data/public/media/music-api
 
 [Install]
 WantedBy=multi-user.target

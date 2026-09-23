@@ -7,11 +7,15 @@ set -euo pipefail
 BIN_SRC="${1:-/tmp/music-api}"
 ROOT=/opt/music-api
 DEEMIX_DIR="$ROOT/deemix-config"
+# The ledger DB is small and stays on the root fs; the file store must live on
+# the big data volume (a full library is hundreds of GB).
 DATA="$ROOT/data"
+STORE=/data/public/media/music-api
 
 echo "== 1. directories =="
 sudo install -d -o momo -g momo "$ROOT" "$DEEMIX_DIR"
-install -d -o momo -g momo "$DATA" "$DATA/incoming" "$DATA/flac" "$DATA/320" "$DATA/128"
+install -d -o momo -g momo "$DATA"
+install -d -o momo -g momo "$STORE" "$STORE/incoming" "$STORE/flac" "$STORE/320" "$STORE/128"
 
 echo "== 2. binary =="
 install -m755 "$BIN_SRC" "$ROOT/music-api"
@@ -88,8 +92,9 @@ MUSIC_API_BIND=0.0.0.0:8710
 DEEMIX_URL=http://127.0.0.1:6599
 DEEMIX_ARL=$ARL
 DEEMIX_BITRATE=9
-DEEMIX_DOWNLOAD_DIR=$DATA/incoming
-DATA_DIR=$DATA
+DEEMIX_DOWNLOAD_DIR=$STORE/incoming
+DATA_DIR=$STORE
+DATABASE_URL=sqlite:$ROOT/data/music-api.db
 DEEZER_BASE=https://api.deezer.com
 FFMPEG=ffmpeg
 FFPROBE=ffprobe
