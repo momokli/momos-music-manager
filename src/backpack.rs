@@ -53,6 +53,14 @@ pub const BACKPACK_PLAYLIST_NAME: &str = "Backpack";
 /// with the real URL on first materialisation.
 pub const BACKPACK_SENTINEL_URL: &str = "https://open.spotify.com/playlist/backpack";
 
+/// Serialises Backpack materialisations process-wide.
+///
+/// The coordinator loop and the manual `POST /api/backpack/push` handler can
+/// otherwise race on the same playlist: interleaved `replace` + `add` batches
+/// were observed to leave a mixed/duplicated remote state (and made the
+/// post-write verification read a moving target).
+static MATERIALIZE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 // ── Aggregation ───────────────────────────────────────────────────────────
 
 /// Return the deduplicated, stably-ordered set of `service_tracks.id` that form
@@ -374,6 +382,9 @@ where
     S: BackpackSpotifyOps,
     D: BackpackDeemixOps,
 {
+    // Never interleave two materialisations on the same playlist.
+    let _materialize_guard = MATERIALIZE_LOCK.lock().await;
+
     let uris = resolve_backpack_track_uris(pool).await?;
     let signature = backpack_signature(&uris);
 
@@ -475,21 +486,53 @@ where
     let verification_failed = match spotify.playlist_uris(&playlist_id).await {
         Ok(remote) => {
             let remote_set: BTreeSet<&String> = remote.iter().collect();
-            if remote_set == intended && remote.len() == uris.len() {
+            let present = intended.intersection(&remote_set).count();
+            let missing = intended.len().saturating_sub(present);
+            let unexpected = remote_set.len().saturating_sub(present);
+
+            // Spotify silently drops tracks that are unavailable in the user's
+            // market from the write (measured: 2 of 6480 on a real library), so
+            // an *exact* set match is not achievable and gating the signature
+            // on it pinned the coordinator into a rebuild loop. Only a gross
+            // deviation (a genuinely broken mirror) counts as a failure.
+            let tolerance = (intended.len() / 100).max(5);
+            if missing <= tolerance && unexpected <= tolerance {
+                if missing > 0 || unexpected > 0 {
+                    warn!(
+                        "Backpack verification: {missing} missing / {unexpected} unexpected of {} intended — within tolerance (playlist {playlist_id})",
+                        intended.len(),
+                    );
+                }
                 false
             } else {
+                let only_remote: Vec<&String> = remote_set
+                    .difference(&intended)
+                    .take(4)
+                    .copied()
+                    .collect();
+                let only_intended: Vec<&String> = intended
+                    .difference(&remote_set)
+                    .take(4)
+                    .copied()
+                    .collect();
                 warn!(
-                    "Backpack verification mismatch: intended {} track(s), remote has {} (playlist {})",
-                    uris.len(),
-                    remote.len(),
-                    playlist_id,
+                    "Backpack verification mismatch (playlist {playlist_id}): intended {} | remote {} | missing {missing} unexpected {unexpected} (tolerance {tolerance}) | only_remote: {only_remote:?} | only_intended: {only_intended:?}",
+                    intended.len(),
+                    remote_set.len(),
                 );
                 true
             }
         }
         Err(e) => {
-            warn!("Backpack verification read failed: {e:#}");
-            true
+            // The write itself succeeded; we just could not read the playlist
+            // back (typically rate limited right after the write burst). That
+            // is inconclusive, not a mismatch — advance the signature anyway,
+            // so a transient read failure cannot pin the coordinator into a
+            // rebuild loop on every debounce.
+            warn!(
+                "Backpack verification read failed ({e:#}) — inconclusive, advancing signature"
+            );
+            false
         }
     };
 
@@ -1501,8 +1544,11 @@ mod tests {
         replaces: std::sync::Mutex<Vec<Vec<String>>>,
         /// When set, `replace_tracks`/`playlist_uris` fail with this message.
         fail_replace: std::sync::Mutex<Option<String>>,
-        /// When true, `playlist_uris` reports a state that differs from intend.
-        corrupt_remote: std::sync::Mutex<bool>,
+        /// How many stale URIs `playlist_uris` reports on top of the real remote
+        /// state (simulates a deviating/corrupt playlist).
+        extra_stale: std::sync::Mutex<usize>,
+        /// When set, `playlist_uris` (and only that) fails with this message.
+        fail_playlist_uris: std::sync::Mutex<Option<String>>,
     }
 
     impl MockSpotify {
@@ -1513,7 +1559,8 @@ mod tests {
                 remote: std::sync::Mutex::new(vec![]),
                 replaces: std::sync::Mutex::new(vec![]),
                 fail_replace: std::sync::Mutex::new(None),
-                corrupt_remote: std::sync::Mutex::new(false),
+                extra_stale: std::sync::Mutex::new(0),
+                fail_playlist_uris: std::sync::Mutex::new(None),
             }
         }
     }
@@ -1552,9 +1599,12 @@ mod tests {
             Ok(())
         }
         async fn playlist_uris(&self, _playlist_id: &str) -> Result<Vec<String>> {
+            if let Some(msg) = self.fail_playlist_uris.lock().unwrap().clone() {
+                anyhow::bail!(msg);
+            }
             let mut remote = self.remote.lock().unwrap().clone();
-            if *self.corrupt_remote.lock().unwrap() {
-                remote.push("spotify:track:stale".to_string());
+            for i in 0..*self.extra_stale.lock().unwrap() {
+                remote.push(format!("spotify:track:stale{i}"));
             }
             Ok(remote)
         }
@@ -1817,7 +1867,9 @@ mod tests {
         create_settings_tables(&pool).await;
 
         let spotify = MockSpotify::new();
-        *spotify.corrupt_remote.lock().unwrap() = true;
+        // A gross deviation (12 stale URIs vs a tolerance of 5) must be reported
+        // and must NOT advance the signature.
+        *spotify.extra_stale.lock().unwrap() = 12;
 
         let out = materialize_backpack_playlist_with::<_, MockDeemix>(
             &pool,
@@ -1839,6 +1891,79 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "signature must NOT be set when verification fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn verification_read_failure_is_inconclusive_and_advances_signature() {
+        let pool = test_db().await;
+        seed(&pool).await;
+        create_settings_tables(&pool).await;
+
+        let spotify = MockSpotify::new();
+        *spotify.fail_playlist_uris.lock().unwrap() =
+            Some("Spotify API error: http error: status code 429 Too Many Requests".to_string());
+
+        let out = materialize_backpack_playlist_with::<_, MockDeemix>(
+            &pool,
+            &spotify,
+            None,
+            MaterializeOptions {
+                force: true,
+                submit_to_deemix: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(out.updated);
+        assert!(
+            !out.verification_failed,
+            "a read failure is inconclusive, not a mismatch"
+        );
+        assert!(
+            get_setting(&pool, KEY_BACKPACK_SIGNATURE)
+                .await
+                .unwrap()
+                .is_some(),
+            "the signature must advance so a transient read failure cannot pin a rebuild loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn small_remote_deviation_is_tolerated_and_advances_signature() {
+        // Spotify silently drops tracks that are unavailable in the user's
+        // market from the write (measured: 2 of 6480 on a real library), so a
+        // small deviation must not block the signature — gating on an exact
+        // match is what pinned the coordinator into a rebuild loop.
+        let pool = test_db().await;
+        seed(&pool).await;
+        create_settings_tables(&pool).await;
+
+        let spotify = MockSpotify::new();
+        *spotify.extra_stale.lock().unwrap() = 1;
+
+        let out = materialize_backpack_playlist_with::<_, MockDeemix>(
+            &pool,
+            &spotify,
+            None,
+            MaterializeOptions {
+                force: true,
+                submit_to_deemix: false,
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!out.verification_failed, "a small deviation is tolerated");
+        assert!(
+            get_setting(&pool, KEY_BACKPACK_SIGNATURE)
+                .await
+                .unwrap()
+                .is_some(),
+            "the signature must advance so a few dropped tracks cannot pin a rebuild loop"
         );
     }
 
