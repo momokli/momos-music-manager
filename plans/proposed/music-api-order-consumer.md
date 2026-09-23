@@ -124,10 +124,24 @@ interval_secs = 900
 - [x] `cargo test` passes (new `tests/api_music_api.rs`, `tests/music_api_client.rs`)
 - [x] `migration_integrity` passes with the new migration
 - [x] `cd frontend && npx playwright test` passes
-- [ ] A Backpack track with no local file is ordered, imported and linked
+- [x] A Backpack track with no local file is ordered, imported and linked
       end-to-end against the deployed `music-api` (manual verification)
-- [ ] An `absent` ISRC is recorded and never re-ordered on the next cycle
+- [x] An `absent` ISRC is recorded and never re-ordered on the next cycle
+      (`demand_skips_terminal_and_dedupes_and_limits`, `demand_skips_in_flight_orders`)
 - [x] The old deemix-submit path no longer runs (no `addToQueue` from MMM)
+
+### Verified 2026-09-23 (deployed run)
+
+Against the live `music-api` on the music host: 8 Backpack tracks were ordered,
+downloaded and imported — 7 as FLAC into the FLAC library dir, 1 as MP3-320
+(Deezer had no lossless master) — and every file was picked up by the scanner
+and linked in `files`. 2 ISRCs came back `absent` ("not streamable on deezer")
+and are terminal.
+
+**Known gap**: `absent` ISRCs currently get *no* automatic fallback. The plan
+promised spotDL would cover them, but the old `download_guarantor` spotDL path
+is driven by per-playlist deemix rows and is not wired to the new ledger. Either
+a follow-up plan connects it, or the fallback is dropped deliberately.
 
 ### Open questions (need a decision before implementation)
 
