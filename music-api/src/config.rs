@@ -19,6 +19,10 @@ pub struct Config {
     pub deemix_download_dir: PathBuf,
     /// Our own store: `flac/`, `320/`, `128/` live below this.
     pub data_dir: PathBuf,
+    /// Root of the content-addressed object store.
+    pub store_root: PathBuf,
+    /// Maximum size of a single uploaded object.
+    pub store_max_upload_bytes: u64,
     /// Deezer public API base (no auth required for ISRC lookups).
     pub deezer_base: String,
     /// ffmpeg binary used for the 320/128 transcodes.
@@ -42,6 +46,10 @@ impl Config {
         let data_dir = PathBuf::from(
             std::env::var("DATA_DIR").unwrap_or_else(|_| "/opt/music-api/data".to_string()),
         );
+        let store_root = PathBuf::from(
+            std::env::var("STORE_ROOT")
+                .unwrap_or_else(|_| data_dir.join("objects").display().to_string()),
+        );
 
         Ok(Self {
             token,
@@ -57,6 +65,11 @@ impl Config {
                     .unwrap_or_else(|_| data_dir.join("incoming").display().to_string()),
             ),
             data_dir,
+            store_root,
+            store_max_upload_bytes: env_parse(
+                "STORE_MAX_UPLOAD_BYTES",
+                crate::store::DEFAULT_MAX_UPLOAD_BYTES,
+            ),
             deezer_base: std::env::var("DEEZER_BASE")
                 .unwrap_or_else(|_| "https://api.deezer.com".to_string())
                 .trim_end_matches('/')

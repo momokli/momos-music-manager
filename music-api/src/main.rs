@@ -33,6 +33,12 @@ async fn main() -> anyhow::Result<()> {
     let pool = connect_db(&config).await?;
     db::init(&pool).await?;
 
+    let store = music_api::store::Store::new(
+        config.store_root.clone(),
+        config.store_max_upload_bytes,
+    );
+    music_api::store::init(&pool, &store).await?;
+
     let http = reqwest::Client::builder()
         .cookie_store(true)
         .timeout(Duration::from_secs(60))
@@ -44,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         http,
         notify: Arc::new(Notify::new()),
         deemix_login: Default::default(),
+        store,
     });
 
     let worker_state = state.clone();

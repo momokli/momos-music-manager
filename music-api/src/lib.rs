@@ -11,6 +11,7 @@ pub mod db;
 pub mod deemix;
 pub mod deezer;
 pub mod models;
+pub mod store;
 pub mod transcode;
 pub mod worker;
 
@@ -35,6 +36,8 @@ pub struct AppState {
     pub notify: Arc<Notify>,
     /// Login-attempt backoff for the deemix session.
     pub deemix_login: worker::LoginBackoff,
+    /// Content-addressed object store.
+    pub store: store::Store,
 }
 
 /// Build the fully-stated router: public `/health`, everything else behind the

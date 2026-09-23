@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -27,6 +27,15 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/orders/{id}", get(get_order))
         .route("/isrc/{isrc}", get(get_isrc))
         .route("/isrc/{isrc}/{format}", get(get_file))
+        // Content-addressed object store (Backpack backup / file home).
+        .route("/objects", get(crate::store::list))
+        .route("/objects/check", post(crate::store::check))
+        .route(
+            "/objects/{hash}",
+            put(crate::store::put)
+                .head(crate::store::head)
+                .get(crate::store::get),
+        )
 }
 
 fn error(code: StatusCode, msg: impl Into<String>) -> Response {

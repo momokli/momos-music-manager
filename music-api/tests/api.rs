@@ -35,6 +35,8 @@ async fn harness() -> Harness {
         deemix_bitrate: 9,
         deemix_download_dir: root.join("incoming"),
         data_dir: root.clone(),
+        store_root: root.join("objects"),
+        store_max_upload_bytes: music_api::store::DEFAULT_MAX_UPLOAD_BYTES,
         deezer_base: "http://127.0.0.1:1".to_string(),
         ffmpeg: "ffmpeg".to_string(),
         ffprobe: "ffprobe".to_string(),
@@ -61,6 +63,10 @@ async fn harness() -> Harness {
         http: reqwest::Client::new(),
         notify: Arc::new(tokio::sync::Notify::new()),
         deemix_login: Default::default(),
+        store: music_api::store::Store::new(
+            root.join("objects"),
+            music_api::store::DEFAULT_MAX_UPLOAD_BYTES,
+        ),
     });
 
     Harness {
@@ -307,4 +313,138 @@ async fn serves_ready_files_and_flips_order_to_done() {
     .await;
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["status"], "done");
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(bytes);
+    d.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[tokio::test]
+async fn object_store_round_trips_and_verifies() {
+    let h = harness().await;
+    let body = b"hello object store".to_vec();
+    let hash = sha256_hex(&body);
+
+    // Absent until uploaded.
+    let (status, _) = send(
+        &h.app,
+        authed("HEAD", &format!("/objects/{hash}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Upload.
+    let (status, _) = send(
+        &h.app,
+        authed("PUT", &format!("/objects/{hash}"))
+            .header(header::CONTENT_TYPE, "audio/flac")
+            .header("x-original-path", "/Music/flacs/x.flac")
+            .body(Body::from(body.clone()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // HEAD reports the size.
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            authed("HEAD", &format!("/objects/{hash}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()[header::CONTENT_LENGTH],
+        body.len().to_string().as_str()
+    );
+
+    // GET returns identical bytes.
+    let (status, got) = send(
+        &h.app,
+        authed("GET", &format!("/objects/{hash}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, body);
+
+    // Range request.
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            authed("GET", &format!("/objects/{hash}"))
+                .header(header::RANGE, "bytes=0-4")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    let part = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    assert_eq!(part, b"hello");
+
+    // Re-upload is a no-op.
+    let (status, resp_body) = send(
+        &h.app,
+        authed("PUT", &format!("/objects/{hash}"))
+            .body(Body::from(body.clone()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+    assert_eq!(v["present"], true);
+
+    // Bulk check.
+    let missing = sha256_hex(b"nope");
+    let (status, check_body) = send(
+        &h.app,
+        authed("POST", "/objects/check")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(
+                serde_json::json!({"hashes": [hash, missing]}),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&check_body).unwrap();
+    assert_eq!(v["present"].as_array().unwrap().len(), 1);
+    assert_eq!(v["missing"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn object_store_rejects_a_wrong_digest() {
+    let h = harness().await;
+    let body = b"payload".to_vec();
+    let wrong = sha256_hex(b"different");
+
+    let (status, _) = send(
+        &h.app,
+        authed("PUT", &format!("/objects/{wrong}"))
+            .body(Body::from(body))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Nothing was stored under the claimed key.
+    let (status, _) = send(
+        &h.app,
+        authed("HEAD", &format!("/objects/{wrong}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
