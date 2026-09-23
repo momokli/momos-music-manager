@@ -642,6 +642,10 @@ async fn serve(
     let bp_tm = state.task_manager.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(5)).await;
+        if !momos_music_manager::backpack::backpack_sync_enabled(&bp_db).await {
+            tracing::info!("Startup backpack sync: disabled (backpack.sync_enabled), skipping");
+            return;
+        }
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE backpack = 1")
             .fetch_one(&bp_db)
             .await

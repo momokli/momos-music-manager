@@ -364,4 +364,54 @@ test.describe("Backpack Spotify playlist", () => {
 
     expect(errors).toEqual([]);
   });
+
+  test("sync switch reflects the server state and gates Sync All", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    let enabled = false;
+    await page.route("**/api/backpack", async (route) => {
+      if (route.request().method() !== "GET") return route.continue();
+      await route.fulfill({
+        json: { data: { ...STATUS_OK.data, syncEnabled: enabled } },
+      });
+    });
+
+    // Off → toggle unchecked, Sync All disabled.
+    await gotoBackpack(page);
+    await expect(page.locator("#backpack-sync-enabled")).not.toBeChecked();
+    await expect(page.locator("#backpack-sync-all")).toBeDisabled();
+
+    // On → toggle checked, Sync All enabled.
+    enabled = true;
+    await page.reload();
+    await page.waitForSelector("#backpack-playlist-card", { timeout: 8000 });
+    await expect(page.locator("#backpack-sync-enabled")).toBeChecked();
+    await expect(page.locator("#backpack-sync-all")).toBeEnabled();
+
+    expect(errors).toEqual([]);
+  });
+
+  test("toggling the switch posts the new value", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    let body = null;
+    await page.route("**/api/backpack/sync-enabled", async (route) => {
+      body = route.request().postDataJSON();
+      await route.fulfill({ json: { data: { syncEnabled: false } } });
+    });
+
+    await gotoBackpack(page);
+    // STATUS_OK does not set syncEnabled → default on.
+    await expect(page.locator("#backpack-sync-enabled")).toBeChecked();
+    await page.locator("#backpack-sync-enabled").uncheck();
+
+    await expect(page.locator(".toast-notification")).toContainText("disabled", {
+      timeout: 6000,
+    });
+    expect(body).toEqual({ enabled: false });
+
+    expect(errors).toEqual([]);
+  });
 });

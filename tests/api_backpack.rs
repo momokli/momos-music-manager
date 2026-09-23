@@ -96,3 +96,78 @@ async fn backpack_push_without_spotify_reports_config_error() {
         resp.status()
     );
 }
+
+/// The Backpack file-sync switch defaults to on and is exposed to the UI.
+#[tokio::test]
+async fn backpack_status_reports_sync_switch_default_on() {
+    let (client, base, _pool) = common::spawn_test_app().await;
+
+    let resp = client
+        .get(format!("{base}/api/backpack"))
+        .send()
+        .await
+        .unwrap();
+    let json: Value = resp.json().await.unwrap();
+    assert_eq!(
+        json["data"]["syncEnabled"],
+        Value::Bool(true),
+        "unset must mean enabled"
+    );
+}
+
+/// Turning the switch off must gate the manual sync endpoint, and turning it
+/// back on must restore it.
+#[tokio::test]
+async fn backpack_sync_switch_gates_the_sync_endpoint() {
+    let (client, base, _pool) = common::spawn_test_app().await;
+
+    // Off.
+    let resp = client
+        .post(format!("{base}/api/backpack/sync-enabled"))
+        .json(&serde_json::json!({ "enabled": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: Value = resp.json().await.unwrap();
+    assert_eq!(json["data"]["syncEnabled"], Value::Bool(false));
+
+    let resp = client
+        .get(format!("{base}/api/backpack"))
+        .send()
+        .await
+        .unwrap();
+    let json: Value = resp.json().await.unwrap();
+    assert_eq!(json["data"]["syncEnabled"], Value::Bool(false));
+
+    let resp = client
+        .post(format!("{base}/api/storage/sync-backpack"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        409,
+        "disabled Backpack sync must refuse to start"
+    );
+
+    // Back on.
+    let resp = client
+        .post(format!("{base}/api/backpack/sync-enabled"))
+        .json(&serde_json::json!({ "enabled": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client
+        .post(format!("{base}/api/storage/sync-backpack"))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        resp.status(),
+        409,
+        "re-enabled Backpack sync must be allowed again"
+    );
+}

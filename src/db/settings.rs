@@ -43,6 +43,10 @@ pub const KEY_BACKPACK_SIGNATURE: &str = "backpack.signature";
 /// Present ⇒ the Spotify playlist may be out of date. Cleared after a
 /// successful push.
 pub const KEY_BACKPACK_DIRTY_AT: &str = "backpack.dirty_at";
+
+/// Whether the Backpack *file* sync (pull missing files from the NAS backup +
+/// format cleanup) may run. Unset = enabled, for backward compatibility.
+pub const KEY_BACKPACK_SYNC_ENABLED: &str = "backpack.sync_enabled";
 /// Unix seconds of the last successful Backpack push.
 pub const KEY_BACKPACK_LAST_PUSH_AT: &str = "backpack.last_push_at";
 /// `"ok"` or `"error"` — outcome of the last Backpack push.

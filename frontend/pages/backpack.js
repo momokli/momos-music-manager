@@ -118,6 +118,10 @@ function renderPage(container, tags, playlists) {
     <div class="backpack-section">
       <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem">
         <h2 class="section-title" style="margin:0"><i class="fa-solid fa-tags"></i> Tag Sources</h2>
+        <label class="backpack-playlist-option" title="Pull missing Backpack files from the NAS backup and clean up duplicate formats. Off pauses every automatic pull (startup and tag toggles) as well as the Sync All button.">
+          <input type="checkbox" id="backpack-sync-enabled" checked />
+          file sync
+        </label>
         <button class="btn btn-sm" id="backpack-sync-all"><i class="fas fa-sync"></i> Sync All</button>
       </div>
       ${
@@ -292,6 +296,13 @@ function wireEvents(container) {
     syncBtn.addEventListener("click", () => handleSyncAll(container));
   }
 
+  const syncToggle = container.querySelector("#backpack-sync-enabled");
+  if (syncToggle) {
+    syncToggle.addEventListener("change", () =>
+      handleSyncToggle(container, syncToggle.checked),
+    );
+  }
+
   const pushBtn = container.querySelector("#backpack-push");
   if (pushBtn) {
     pushBtn.addEventListener("click", () => handlePushToSpotify(container));
@@ -362,8 +373,21 @@ async function loadPlaylistStatus() {
     const data = resp?.data || {};
     renderPlaylistCard(data);
     renderMusicApiCard(data.musicApi || {});
+    applySyncSwitch(data);
   } catch (err) {
     el.innerHTML = `<div class="detail-error"><i class="fa-solid fa-triangle-exclamation"></i> Failed to load playlist status: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+/** Reflect the Backpack file-sync switch in the toggle + Sync All button. */
+function applySyncSwitch(data) {
+  const toggle = document.querySelector("#backpack-sync-enabled");
+  const btn = document.querySelector("#backpack-sync-all");
+  const enabled = data?.syncEnabled !== false;
+  if (toggle) toggle.checked = enabled;
+  if (btn) {
+    btn.disabled = !enabled;
+    btn.title = enabled ? "" : "Backpack file sync is off";
   }
 }
 
@@ -560,6 +584,29 @@ async function handleMusicApiPull() {
       btn.disabled = false;
       btn.innerHTML = '<i class="fas fa-cloud-arrow-down"></i> Pull now';
     }
+  }
+}
+
+/** Turn the Backpack file sync on/off and persist it. */
+async function handleSyncToggle(container, enabled) {
+  const toggle = container.querySelector("#backpack-sync-enabled");
+  const btn = container.querySelector("#backpack-sync-all");
+  if (toggle) toggle.disabled = true;
+  try {
+    await fetchJSON("/api/backpack/sync-enabled", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    });
+    showToast(
+      enabled ? "Backpack file sync enabled" : "Backpack file sync disabled",
+      "success",
+    );
+    if (btn) btn.disabled = !enabled;
+  } catch (err) {
+    showToast(`Failed to change backpack sync: ${err.message}`, "error");
+    if (toggle) toggle.checked = !enabled;
+  } finally {
+    if (toggle) toggle.disabled = false;
   }
 }
 

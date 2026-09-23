@@ -8,6 +8,12 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **Schalter für den Backpack-File-Sync**: Der Backpack-Sync (fehlende Files per
+  rsync aus dem Backup ziehen, Formate aufräumen) lief bisher immer beim
+  App-Start und beim Umschalten eines Tags. Neuer Settings-Key
+  `backpack.sync_enabled` (Default an), Toggle auf der Backpack-Seite, und
+  `POST /api/backpack/sync-enabled`. Aus = kein Auto-Pull beim Start, kein Sync
+  beim Tag-Toggle, und `POST /api/storage/sync-backpack` antwortet **409**.
 - **music-api-Consumer**: MMM bestellt fehlende Backpack-ISRCs bei `music-api`,
   importiert die gelieferten Dateien (FLAC, sonst 320/128) in die Library und
   stößt den Scan der Zielordner an. Neue Tabelle `music_api_imports` (Migration

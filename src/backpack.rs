@@ -32,7 +32,7 @@ use tracing::{debug, info, warn};
 use crate::db::settings::{
     KEY_BACKPACK_DIRTY_AT, KEY_BACKPACK_LAST_PUSH_AT, KEY_BACKPACK_LAST_PUSH_ERROR,
     KEY_BACKPACK_LAST_PUSH_STATUS, KEY_BACKPACK_PLAYLIST_ID, KEY_BACKPACK_PLAYLIST_URL,
-    KEY_BACKPACK_SIGNATURE, delete_setting, get_setting, set_setting,
+    KEY_BACKPACK_SIGNATURE, KEY_BACKPACK_SYNC_ENABLED, delete_setting, get_setting, set_setting,
 };
 use crate::spotify::cooldown::cooldown as spotify_cooldown;
 use crate::spotify::retry::extract_retry_after_secs;
@@ -604,6 +604,23 @@ fn is_playlist_gone(e: &anyhow::Error) -> bool {
 }
 
 // ── Dirty marker + coordinator ────────────────────────────────────────────
+
+/// Whether the Backpack *file* sync (pull missing files from the NAS backup +
+/// format cleanup) may run. Unset = enabled, so existing installs are
+/// unaffected until the value is written explicitly.
+pub async fn backpack_sync_enabled(pool: &Pool<Sqlite>) -> bool {
+    match get_setting(pool, KEY_BACKPACK_SYNC_ENABLED).await {
+        Ok(Some(v)) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"),
+        _ => true,
+    }
+}
+
+/// Persist the Backpack file-sync switch.
+pub async fn set_backpack_sync_enabled(pool: &Pool<Sqlite>, enabled: bool) -> Result<()> {
+    set_setting(pool, KEY_BACKPACK_SYNC_ENABLED, if enabled { "1" } else { "0" })
+        .await
+        .context("Failed to persist backpack.sync_enabled")
+}
 
 /// Mark the Backpack as out of sync (called from every membership mutation).
 pub async fn mark_backpack_dirty(pool: &Pool<Sqlite>) -> Result<()> {

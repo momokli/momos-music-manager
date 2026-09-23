@@ -1649,7 +1649,8 @@ async fn tag_backpack_handler(
             // coordinator rebuilds the Spotify playlist (debounced).
             let _ = crate::backpack::mark_backpack_dirty(&state.db).await;
             // When toggling TO backpack, trigger a background sync task
-            if backpack {
+            // (unless the Backpack file sync is switched off).
+            if backpack && crate::backpack::backpack_sync_enabled(&state.db).await {
                 let task_id =
                     crate::tasks::start_backpack_sync_task(&state.task_manager, &state.db).await;
                 if task_id.is_empty() {

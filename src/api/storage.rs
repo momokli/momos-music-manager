@@ -354,6 +354,18 @@ async fn format_priority_put_handler(
 /// Pulls missing files from backup for all backpack tags.
 /// For each track in a backpack tag, ensures the best format exists locally.
 async fn sync_backpack_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // The switch turns the Backpack file sync (NAS pulls + format cleanup) off
+    // entirely, including this manual trigger.
+    if !crate::backpack::backpack_sync_enabled(&state.db).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResponse {
+                data: serde_json::json!({ "error": "Backpack file sync is disabled" }),
+            }),
+        )
+            .into_response();
+    }
+
     let task_id = crate::tasks::start_backpack_sync_task(&state.task_manager, &state.db).await;
     if task_id.is_empty() {
         return Json(ApiResponse {

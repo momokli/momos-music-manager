@@ -58,6 +58,7 @@ async fn backpack_status_handler(State(state): State<Arc<AppState>>) -> impl Int
                     "lastPushStatus": status.last_push_status,
                     "lastPushError": status.last_push_error,
                     "pushPending": push_pending,
+                    "syncEnabled": crate::backpack::backpack_sync_enabled(&state.db).await,
                     "musicApi": {
                         "configured": state.config.music_api.is_configured(),
                         "demand": demand,
@@ -213,9 +214,40 @@ fn respond(result: anyhow::Result<crate::backpack::MaterializeOutcome>) -> axum:
     }
 }
 
+/// Body of `POST /api/backpack/sync-enabled`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncEnabledRequest {
+    pub enabled: bool,
+}
+
+/// POST /api/backpack/sync-enabled — switch the Backpack *file* sync on/off.
+///
+/// Off means: no NAS pulls at startup, no sync when a tag is toggled to
+/// Backpack, and `POST /api/storage/sync-backpack` refuses. The Spotify
+/// playlist transport is a different concern and is not affected.
+async fn backpack_sync_enabled_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SyncEnabledRequest>,
+) -> impl IntoResponse {
+    match crate::backpack::set_backpack_sync_enabled(&state.db, req.enabled).await {
+        Ok(()) => Json(ApiResponse {
+            data: serde_json::json!({ "syncEnabled": req.enabled }),
+        })
+        .into_response(),
+        Err(e) => {
+            internal_error(format!("Failed to set the backpack sync switch: {e:#}")).into_response()
+        }
+    }
+}
+
 pub(super) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/backpack", get(backpack_status_handler))
         .route("/api/backpack/push", post(backpack_push_handler))
         .route("/api/backpack/pull", post(backpack_pull_handler))
+        .route(
+            "/api/backpack/sync-enabled",
+            post(backpack_sync_enabled_handler),
+        )
 }
