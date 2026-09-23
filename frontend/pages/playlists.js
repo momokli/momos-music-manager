@@ -132,7 +132,7 @@ const PLAYLISTS_COLUMNS = [
   { id: "tags", label: "Tags", sortable: false, defaultWidth: 140 },
   { id: "deemix", label: "Deemix", sortable: false, defaultWidth: 100 },
   { id: "sync", label: "Sync", sortable: false, defaultWidth: 80 },
-  { id: "subscribe", label: "Subscribed", sortable: false, defaultWidth: 80 },
+  { id: "subscribe", label: "Backpack", sortable: false, defaultWidth: 80 },
   { id: "view", label: "View", sortable: false, defaultWidth: 60 },
   { id: "actions", label: "Actions", sortable: false, defaultWidth: 120 },
 ];
@@ -166,12 +166,12 @@ function syncCell(v) {
   return `<span style="color:var(--text-muted)" title="${d.toLocaleString()}">${label}</span>`;
 }
 
-/** Show a subscription bell icon (green = subscribed, muted = not subscribed) */
+/** Backpack membership of a playlist: solid box = in, open box = not in. */
 function subCell(sub) {
   if (sub) {
-    return `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)" title="Subscribed — polls every ${sub.pollIntervalSecs}s"><i class="fas fa-bell"></i></span>`;
+    return `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)" title="In Backpack — tracks are aggregated into the single Backpack playlist; polls every ${sub.pollIntervalSecs}s"><i class="fas fa-box"></i></span>`;
   }
-  return `<span style="color:var(--text-muted)" title="Not subscribed"><i class="far fa-bell"></i></span>`;
+  return `<span style="color:var(--text-muted)" title="Not in Backpack"><i class="fas fa-box-open"></i></span>`;
 }
 
 function deemixCell(r) {
@@ -226,9 +226,9 @@ function actions(r) {
     b += `<button class="btn btn-sm btn-green" data-act="create-tag" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Create tag from playlist name"><i class="fas fa-tag"></i></button> `;
 
   if (r.sub) {
-    b += `<button class="btn btn-sm btn-red" data-act="unsubscribe" data-sub-id="${r.sub.id}" data-id="${r.id}" title="Unsubscribe"><i class="fas fa-bell-slash"></i></button> `;
+    b += `<button class="btn btn-sm btn-red" data-act="unsubscribe" data-sub-id="${r.sub.id}" data-id="${r.id}" title="Remove from Backpack — stops polling this playlist"><i class="fas fa-box"></i></button> `;
   } else {
-    b += `<button class="btn btn-sm" data-act="subscribe" data-id="${r.id}" data-service="${r.svc}" data-playlist-id="${r.playlistId}" title="Subscribe (poll + auto-download new tracks via deemix)"><i class="fas fa-bell"></i></button> `;
+    b += `<button class="btn btn-sm" data-act="subscribe" data-id="${r.id}" data-service="${r.svc}" data-playlist-id="${r.playlistId}" title="Add to Backpack — tracks are aggregated into the single Backpack playlist and downloaded via deemix (stem > flac > mp3), prune-safe"><i class="fas fa-box-open"></i></button> `;
   }
 
   b += `<button class="btn btn-sm btn-delete-playlist" data-act="delete-playlist" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Delete playlist"><i class="fas fa-trash"></i></button> `;
@@ -302,9 +302,9 @@ function renderToolbar(state) {
         <div>
           <div class="filter-section-header" style="margin-top:0"><i class="fas fa-music"></i> Playlist Info</div>
           <div class="filter-row">
-            <span class="filter-row-label toggleable" data-filter="sub">Subscription</span>
+            <span class="filter-row-label toggleable" data-filter="sub">Backpack</span>
             <div class="filter-group">
-              <button class="filter-btn${state.subscribed ? " active" : ""}" data-value="subscribed"><i class="fas fa-bell"></i> Subscribed</button>
+              <button class="filter-btn${state.subscribed ? " active" : ""}" data-value="subscribed"><i class="fas fa-box"></i> Backpack</button>
             </div>
           </div>
           <div class="filter-row">
@@ -865,13 +865,13 @@ function wireContentEvents(container, signal, state) {
               method: "POST",
               body: JSON.stringify({ service: svc, playlistId: plId }),
             });
-            showToast("Subscribed", "success");
+            showToast("Added to Backpack", "success");
             updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
             fetchAndRender(container, signal, state);
           } catch (err) {
-            showToast(`Subscribe failed: ${err.message}`, "error");
+            showToast(`Add to Backpack failed: ${err.message}`, "error");
             b.disabled = false;
-            b.innerHTML = '<i class="fas fa-bell"></i>';
+            b.innerHTML = '<i class="fas fa-box-open"></i>';
           }
         } else if (act === "unsubscribe") {
           const subId = parseInt(b.dataset.subId, 10);
@@ -882,13 +882,13 @@ function wireContentEvents(container, signal, state) {
             await fetchJSON(`/api/playlists/subscriptions/${subId}`, {
               method: "DELETE",
             });
-            showToast("Unsubscribed", "success");
+            showToast("Removed from Backpack", "success");
             updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
             fetchAndRender(container, signal, state);
           } catch (err) {
-            showToast(`Unsubscribe failed: ${err.message}`, "error");
+            showToast(`Remove from Backpack failed: ${err.message}`, "error");
             b.disabled = false;
-            b.innerHTML = '<i class="fas fa-bell-slash"></i>';
+            b.innerHTML = '<i class="fas fa-box"></i>';
           }
         } else if (act === "delete-playlist") {
           const name = b.dataset.name;

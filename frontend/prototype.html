@@ -2757,7 +2757,7 @@
                 },
                 {
                     id: "subscribe",
-                    label: "Subscribe",
+                    label: "Backpack",
                     sortable: false,
                     defaultWidth: 8,
                 },
@@ -3294,8 +3294,8 @@
                 updated: (p) => formatTimestamp(p.updatedAt),
                 subscribe: (p) =>
                     p.subscribed
-                        ? `<span class="badge" style="background:rgba(34,197,94,0.1);color:var(--green);border-color:rgba(34,197,94,0.2)" title="Subscribed"><i class="fas fa-bell"></i></span>`
-                        : `<span style="color:var(--text-muted)" title="Not subscribed"><i class="far fa-bell"></i></span>`,
+                        ? `<span class="badge" style="background:rgba(34,197,94,0.1);color:var(--green);border-color:rgba(34,197,94,0.2)" title="In Backpack"><i class="fas fa-box"></i></span>`
+                        : `<span style="color:var(--text-muted)" title="Not in Backpack"><i class="fas fa-box-open"></i></span>`,
                 view: (p) =>
                     `<a href="#tracks?playlistId=${p.id}&playlistName=${encodeURIComponent(p.name)}" class="btn btn-sm btn-icon" title="View tracks"><i class="fa-solid fa-list-music"></i></a>`,
             };

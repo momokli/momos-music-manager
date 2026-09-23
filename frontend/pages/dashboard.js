@@ -4,7 +4,7 @@
  * Layout:
  *   Row 1 (4-col): TAGS | PLAYLISTS | TRACKS | FILES in library  (service % breakdown)
  *   Row 2 (4-col): TRAKTOR COLLECTION | SPOTIFY | SOUNDCLOUD | YOUTUBE  (status)
- *   Row 3 (2-col): MANAGED FOLDERS | SUBSCRIBED PLAYLISTS
+ *   Row 3 (2-col): MANAGED FOLDERS | BACKPACK
  *   Row 4 (3-col): TAGS FROM PLAYLISTS | AUTO-CATEGORIZE | COMMENT DIFFS
  */
 
@@ -252,7 +252,7 @@ function renderServiceStatusCard(conn) {
 }
 
 /* ================================================================== */
-/*  Row 3: Managed Folders + Subscribed Playlists                       */
+/*  Row 3: Managed Folders + Backpack                                    */
 /* ================================================================== */
 
 /**
@@ -299,12 +299,12 @@ function renderFoldersCard(folders) {
   );
 }
 
-function renderSubscribedPlaylistsCard(subscriptions) {
+function renderBackpackCard(subscriptions) {
   if (!subscriptions || subscriptions.length === 0) {
     return renderCard(
-      "Subscribed Playlists",
-      "fa-solid fa-list-check",
-      `<div class="empty-state" style="padding:var(--space-4) 0;"><p>No subscriptions. <a href="#playlists">Go to Playlists →</a></p></div>`,
+      "Backpack",
+      "fa-solid fa-box",
+      `<div class="empty-state" style="padding:var(--space-4) 0;"><p>Nothing in the Backpack yet. <a href="#playlists">Go to Playlists →</a></p></div>`,
     );
   }
 
@@ -333,8 +333,8 @@ function renderSubscribedPlaylistsCard(subscriptions) {
     .join("");
 
   return renderCard(
-    "Subscribed Playlists",
-    "fa-solid fa-list-check",
+    "Backpack",
+    "fa-solid fa-box",
     `<div style="margin-top:var(--space-1);">${rows}</div>`,
     `<a href="#playlists">Go to Playlists →</a>`,
   );
@@ -600,10 +600,10 @@ export async function init(container, signal) {
       ${youtubeConn ? renderServiceStatusCard(youtubeConn) : ""}
     </div>`;
 
-    // Row 3 – Folders + Subscribed Playlists (2 columns)
+    // Row 3 – Folders + Backpack (2 columns)
     const row3Html = `<div class="dashboard-two-col" style="margin-bottom:var(--space-6);">
       ${renderFoldersCard(folders)}
-      ${renderSubscribedPlaylistsCard(allSubs)}
+      ${renderBackpackCard(allSubs)}
     </div>`;
 
     // Row 4 – Action cards (3 columns)
