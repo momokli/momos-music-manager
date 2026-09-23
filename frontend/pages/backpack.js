@@ -6,7 +6,7 @@
  *
  * API:
  *   GET /api/tags?limit=500 → tags with backpack field
- *   POST /api/tags/{id}/backpack → toggle backpack
+ *   PUT /api/tags/{id}/backpack  → set backpack (true/false)
  *   GET /api/backpack → transport status (set size, playlist URL, dirty)
  *   POST /api/backpack/push → build/replace the single Spotify playlist
  *   POST /api/tasks/backpack-sync → trigger sync task (future)
@@ -109,6 +109,11 @@ function renderTagCard(tag) {
       <span class="backpack-tag-icon"><i class="${escapeHtml(tag.categoryIcon || "fa-solid fa-tag")}"></i></span>
       <span class="backpack-tag-name">${escapeHtml(tag.name)}</span>
       <span class="backpack-tag-count">${tag.fileCount || 0} tracks</span>
+      <button class="btn btn-sm btn-icon backpack-tag-remove" data-tag-id="${tag.id}"
+              data-tag-name="${escapeHtml(tag.name)}"
+              title="Remove from the Backpack">
+        <i class="fas fa-xmark"></i>
+      </button>
     </div>
   `;
 }
@@ -238,6 +243,31 @@ function wireEvents(container) {
   if (pushBtn) {
     pushBtn.addEventListener("click", () => handlePushToSpotify(container));
   }
+
+  // Delegated: tag cards are re-rendered, the list container is stable.
+  const tagsList = container.querySelector(".backpack-tags-list");
+  if (tagsList) {
+    tagsList.addEventListener("click", (ev) => {
+      const btn = ev.target.closest(".backpack-tag-remove");
+      if (btn) handleRemoveTag(container, btn.dataset.tagId, btn.dataset.tagName, btn);
+    });
+  }
+}
+
+/** Remove a tag from the Backpack (keeps the tag itself). */
+async function handleRemoveTag(container, tagId, tagName, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await fetchJSON(`/api/tags/${tagId}/backpack`, {
+      method: "PUT",
+      body: JSON.stringify({ backpack: false }),
+    });
+    showToast(`Removed "${tagName}" from the Backpack`, "success");
+    await init(container, _signal);
+  } catch (err) {
+    showToast(`Failed to remove "${tagName}": ${err.message}`, "error");
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ── Spotify transport playlist ──────────────────────────────────────────────
@@ -326,12 +356,15 @@ async function handlePushToSpotify() {
     if (data.verificationFailed) {
       showToast(
         "Playlist built, but Spotify did not match the Backpack set \u2014 will retry",
-        "error"
+        "error",
       );
     } else if (data.updated) {
       const n = data.trackCount ?? 0;
       const suffix = data.deemixSubmitted ? " and submitted to deemix" : "";
-      showToast(`${data.created ? "Created" : "Updated"} playlist with ${n} track(s)${suffix}`, "success");
+      showToast(
+        `${data.created ? "Created" : "Updated"} playlist with ${n} track(s)${suffix}`,
+        "success",
+      );
     } else {
       showToast("Playlist already up to date", "info");
     }

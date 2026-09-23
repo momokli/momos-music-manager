@@ -52,7 +52,9 @@ test.describe("Backpack Spotify playlist", () => {
     await expect(card).toBeVisible();
     await expect(card).toContainText("12");
     await expect(card).toContainText("9");
-    await expect(page.locator('.backpack-playlist-link a[href*="spotify.com"]')).toBeVisible();
+    await expect(
+      page.locator('.backpack-playlist-link a[href*="spotify.com"]'),
+    ).toBeVisible();
     await expect(page.locator("#backpack-push")).toBeVisible();
 
     expect(errors).toEqual([]);
@@ -81,8 +83,12 @@ test.describe("Backpack Spotify playlist", () => {
     await gotoBackpack(page);
     await page.click("#backpack-push");
 
-    await expect(page.locator(".toast-notification")).toContainText("12", { timeout: 6000 });
-    await expect(page.locator('.backpack-playlist-link a[href*="spotify.com"]')).toBeVisible();
+    await expect(page.locator(".toast-notification")).toContainText("12", {
+      timeout: 6000,
+    });
+    await expect(
+      page.locator('.backpack-playlist-link a[href*="spotify.com"]'),
+    ).toBeVisible();
 
     expect(errors).toEqual([]);
   });
@@ -113,5 +119,33 @@ test.describe("Backpack Spotify playlist", () => {
     await expect(page.locator(".toast-notification")).toBeVisible({ timeout: 6000 });
     expect(sentBody).not.toBeNull();
     expect(sentBody.submitToDeemix).toBe(false);
+  });
+
+  test("a backpack tag can be removed from the backpack page", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    // The `basic` seed has tag 8 ('Deep') with backpack = 1.
+    let sentMethod = null;
+    let sentBody = null;
+    await page.route("**/api/tags/*/backpack", async (route) => {
+      sentMethod = route.request().method();
+      sentBody = route.request().postDataJSON();
+      await route.fulfill({ json: { data: { id: 8, backpack: false } } });
+    });
+
+    await gotoBackpack(page);
+
+    const removeBtn = page.locator(".backpack-tag-remove").first();
+    await expect(removeBtn).toBeVisible();
+    await removeBtn.click();
+
+    await expect(page.locator(".toast-notification")).toContainText("Backpack", {
+      timeout: 6000,
+    });
+    expect(sentMethod).toBe("PUT");
+    expect(sentBody).toEqual({ backpack: false });
+
+    expect(errors).toEqual([]);
   });
 });
