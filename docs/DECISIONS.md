@@ -1359,3 +1359,40 @@ deemix-Downloads für dieselben Tracks und widersprach dem „ein Set, ein Submi
   Modell nur die Backpack-Zeile steht. Die `NotOnDeezer`-/`ZombiePlaylist`-
   Klassifikation pro Playlist greift dadurch praktisch nicht mehr — die track-genaue
   Gap-Heilung (spotDL-Fallback) läuft derzeit ins Leere. Als Folge-Issue vorgemerkt.
+
+## ADR-065: music-api ist die Download-Autorität (ISRC-Orders statt Spotify-URLs)
+
+**Date**: 2026-09-23
+**Status**: Accepted (implemented)
+
+**Context**: deemix kann Spotify-Links nicht mehr auflösen — eine App mit nur
+Client-ID/Secret bekommt seit Februar 2026 den Playlist-Namen, aber nicht die
+Songs, und beide Spotify-Apps (MMM `dd7caf…` und deemix `e7b09b7a…`) liefen in
+einen app-weiten 429 mit langer Penalty. Dazu ist der deemix-ARL ein
+Free-Account (nur 128 kbps). Der Backpack-Transport hing damit an einer Kette,
+die nicht mehr trägt.
+
+**Decision**: Ein eigenständiger Dienst `music-api` (Rust/Axum/SQLite, läuft auf
+dem Musik-Host hinter Caddy) ist die Download-Autorität. MMM bestellt **ISRCs**;
+`music-api` löst sie über die öffentliche Deezer-API auf (ohne Auth, ohne
+Spotify), lädt über eine dedizierte deemix-Instanz (FLAC mit Bitrate-Fallback)
+und liefert die Dateien per ISRC zurück. MMM importiert und verlinkt sie.
+
+- MMM schickt keine Spotify-URLs mehr an deemix; die Backpack-Spotify-Playlist
+  bleibt als Bestand, wird aber nicht mehr submitted.
+- Der deemix-Auto-Pfad in `download_guarantor` ist entfernt; spotDL bleibt als
+  Fallback für `absent`-ISRCs.
+- Der Spotify-/ARL-Aufwand lebt nur noch auf dem Musik-Host.
+
+**Consequences**:
+
+- Kein Spotify-App-Quota und kein Post-Feb-Problem im Downloadpfad.
+- Die Qualität hängt am Deezer-Tier des ARL: Premium → FLAC + 320 + 128; Free →
+  nur 128. Was tatsächlich ankam, wird per ffprobe klassifiziert
+  (`sourceFormat` = `flac` | `mp3-320` | `mp3-128`).
+- Ein neuer Dienst bedeutet neue Betriebsfläche (systemd + Container + Caddy);
+  MMM braucht die `[music_api]`-Config.
+- Additive Migration 027 (`music_api_imports`) als MMM-seitiges Ledger.
+- Bestehende Spotify-Importe bleiben unberührt: die Abgrenzung „Spotify
+  importieren = MMM, herunterladen = music-api“ ersetzt die vorherige enge
+  Kopplung.

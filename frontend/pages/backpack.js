@@ -9,8 +9,9 @@
  *   PUT /api/tags/{id}/backpack  → set backpack (true/false)
  *   GET /api/playlists/subscriptions → playlist sources
  *   DELETE /api/playlists/subscriptions/{id} → remove a playlist source
- *   GET /api/backpack → transport status (set size, playlist URL, dirty)
+ *   GET /api/backpack → transport status (set size, playlist URL, dirty, music-api progress)
  *   POST /api/backpack/push → build/replace the single Spotify playlist
+ *   POST /api/backpack/pull → run one music-api consumer cycle immediately
  *   POST /api/tasks/backpack-sync → trigger sync task (future)
  */
 
@@ -85,6 +86,8 @@ function renderPage(container, tags, playlists) {
     <div id="backpack-size-stats"></div>
 
     <div id="backpack-playlist-card"></div>
+
+    <div id="backpack-music-api-card"></div>
 
     <div class="backpack-summary">
       <div class="backpack-stat">
@@ -356,7 +359,9 @@ async function loadPlaylistStatus() {
   if (!el) return;
   try {
     const resp = await fetchJSON("/api/backpack");
-    renderPlaylistCard(resp?.data || {});
+    const data = resp?.data || {};
+    renderPlaylistCard(data);
+    renderMusicApiCard(data.musicApi || {});
   } catch (err) {
     el.innerHTML = `<div class="detail-error"><i class="fa-solid fa-triangle-exclamation"></i> Failed to load playlist status: ${escapeHtml(err.message)}</div>`;
   }
@@ -454,6 +459,106 @@ async function handlePushToSpotify() {
     if (btn) {
       btn.disabled = false;
       btn.innerHTML = '<i class="fas fa-upload"></i> Push to Spotify';
+    }
+  }
+}
+
+// ── music-api transport (orders ISRCs → delivered files) ────────────────────
+
+/** Compact stat items for the music-api card, in the order the backend reports them. */
+const MUSIC_API_STATS = [
+  ["demand", "Demand"],
+  ["ordered", "Ordered"],
+  ["ready", "Ready"],
+  ["imported", "Imported"],
+  ["absent", "Absent"],
+  ["failed", "Failed"],
+];
+
+function renderMusicApiCard(musicApi) {
+  const el = document.querySelector("#backpack-music-api-card");
+  if (!el) return;
+
+  const configured = !!musicApi.configured;
+  const pullButton = `
+    <button class="btn btn-sm btn-primary" id="backpack-music-api-pull"${configured ? "" : " disabled"}>
+      <i class="fas fa-cloud-arrow-down"></i> Pull now
+    </button>
+  `;
+
+  const head = `
+    <div class="backpack-playlist-head">
+      <h2 class="section-title" style="margin:0">
+        <i class="fas fa-cloud-arrow-down"></i> music-api
+      </h2>
+      ${pullButton}
+    </div>
+    <div class="text-muted" style="font-size:0.85rem">
+      Orders ISRCs and imports the delivered files.
+    </div>
+  `;
+
+  // Mirrors `.backpack-playlist-card` without reusing its class, so the
+  // existing unscoped `.backpack-playlist-card` selector stays unique.
+  const cardStyle =
+    "background:var(--bg-card);border:1px solid var(--border);" +
+    "border-radius:6px;padding:1rem;margin:1rem 0";
+
+  if (!configured) {
+    el.innerHTML = `
+      <div class="backpack-music-api-card" style="${cardStyle}">
+        ${head}
+        <div class="backpack-music-api-hint text-muted" style="font-size:0.85rem;margin-top:0.5rem">
+          Not configured \u2014 set <code>[music_api] base_url</code> and <code>token</code> in config.toml
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  const stats = MUSIC_API_STATS.map(
+    ([key, label]) => /* html */ `
+      <div class="backpack-stat" data-stat="${key}">
+        <span class="backpack-stat-value">${musicApi[key] ?? 0}</span>
+        <span class="backpack-stat-label">${label}</span>
+      </div>`,
+  ).join("");
+
+  el.innerHTML = `
+    <div class="backpack-music-api-card" style="${cardStyle}">
+      ${head}
+      <div class="backpack-summary backpack-music-api-stats" style="margin-bottom:0;margin-top:0.75rem">
+        ${stats}
+      </div>
+    </div>
+  `;
+
+  const pullBtn = el.querySelector("#backpack-music-api-pull");
+  if (pullBtn) {
+    pullBtn.addEventListener("click", () => handleMusicApiPull());
+  }
+}
+
+async function handleMusicApiPull() {
+  const pullBtn = document.querySelector("#backpack-music-api-pull");
+  try {
+    if (pullBtn) {
+      pullBtn.disabled = true;
+      pullBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Pulling...';
+    }
+
+    await fetchJSON("/api/backpack/pull", { method: "POST" });
+    showToast("music-api cycle started", "success");
+
+    // Same re-render pattern as the "Push to Spotify" button.
+    await loadPlaylistStatus();
+  } catch (err) {
+    showToast(`Pull failed: ${err.message}`, "error");
+  } finally {
+    const btn = document.querySelector("#backpack-music-api-pull");
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fas fa-cloud-arrow-down"></i> Pull now';
     }
   }
 }

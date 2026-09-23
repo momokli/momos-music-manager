@@ -676,6 +676,25 @@ async fn serve(
         tracing::info!("Backpack coordinator started");
     }
 
+    // Spawn the music-api consumer — orders missing Backpack ISRCs, imports the
+    // delivered files and triggers a scan of the destination folders. Skipped
+    // entirely when the service is not configured.
+    if state.config.music_api.is_configured() {
+        let ma_db = state.db.clone();
+        let ma_creds = state.config.clone();
+        let ma_tm = state.task_manager.clone();
+        let ma_cancel = poller_cancel.clone();
+        tokio::spawn(async move {
+            momos_music_manager::music_api_consumer::start_music_api_consumer(
+                ma_db, ma_creds, ma_tm, ma_cancel,
+            )
+            .await;
+        });
+        tracing::info!("music-api consumer started");
+    } else {
+        tracing::info!("music-api consumer skipped (not configured)");
+    }
+
     // Auto-backup-consistency on startup: remove stale file_locations.backup entries
     // for files that exist in the DB but are no longer on the NAS.
     let cc_db = state.db.clone();

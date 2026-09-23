@@ -40,6 +40,11 @@ async fn backpack_status_handler(State(state): State<Arc<AppState>>) -> impl Int
                 Err(_) => false,
             };
 
+            // music-api import progress (ISRC orders → delivered files).
+            let counts = crate::db::music_api::status_counts(&state.db).await;
+            let count_of = |key: &str| counts.get(key).copied().unwrap_or(0);
+            let demand = crate::db::music_api::demand_count(&state.db).await;
+
             Json(ApiResponse {
                 data: serde_json::json!({
                     "trackCount": status.track_count,
@@ -53,6 +58,15 @@ async fn backpack_status_handler(State(state): State<Arc<AppState>>) -> impl Int
                     "lastPushStatus": status.last_push_status,
                     "lastPushError": status.last_push_error,
                     "pushPending": push_pending,
+                    "musicApi": {
+                        "configured": state.config.music_api.is_configured(),
+                        "demand": demand,
+                        "ordered": count_of("ordered"),
+                        "ready": count_of("ready"),
+                        "imported": count_of("imported"),
+                        "absent": count_of("absent"),
+                        "failed": count_of("failed"),
+                    },
                 }),
             })
             .into_response()
@@ -134,21 +148,50 @@ async fn backpack_push_handler(
             return internal_error(format!("Spotify not configured: {e:#}")).into_response();
         }
     };
-    let deemix = crate::deemix::DeemixClient::from_db(state.db.clone()).await;
-
     let opts = MaterializeOptions {
         force: req.force,
-        submit_to_deemix: req.submit_to_deemix.unwrap_or(true),
+        // deemix is no longer pushed directly: importing is driven by the
+        // music-api consumer. The request toggle is intentionally ignored.
+        submit_to_deemix: false,
         dry_run: false,
     };
 
-    let result =
-        materialize_backpack_playlist_with(&state.db, &client, deemix.as_ref(), opts).await;
+    let result = materialize_backpack_playlist_with(
+        &state.db,
+        &client,
+        None::<&crate::deemix::DeemixClient>,
+        opts,
+    )
+    .await;
     match &result {
         Ok(_) => record_push_status(&state.db, "ok", None).await,
         Err(e) => record_push_status(&state.db, "error", Some(&format!("{e:#}"))).await,
     }
     respond(result)
+}
+
+/// POST /api/backpack/pull — run one music-api consumer cycle immediately.
+async fn backpack_pull_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Distinct from a cycle *failure*: nothing can be pulled until the service
+    // is configured, so this is a conflict, not a server error.
+    if !state.config.music_api.is_configured() {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            Json(crate::api::types::ErrorResponse {
+                error: "music-api is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    match crate::music_api_consumer::run_once(&state.db, &state.config, &state.task_manager).await
+    {
+        Ok(()) => Json(ApiResponse {
+            data: serde_json::json!({ "started": true }),
+        })
+        .into_response(),
+        Err(e) => internal_error(format!("music-api pull failed: {e:#}")).into_response(),
+    }
 }
 
 /// Render a materialisation result (or error) as the API response.
@@ -174,4 +217,5 @@ pub(super) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/backpack", get(backpack_status_handler))
         .route("/api/backpack/push", post(backpack_push_handler))
+        .route("/api/backpack/pull", post(backpack_pull_handler))
 }

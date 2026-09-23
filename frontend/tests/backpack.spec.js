@@ -221,4 +221,147 @@ test.describe("Backpack Spotify playlist", () => {
 
     expect(errors).toEqual([]);
   });
+
+  test("music-api card renders counters when configured", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await page.route("**/api/backpack", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({
+          json: {
+            data: {
+              ...STATUS_OK.data,
+              musicApi: {
+                configured: true,
+                demand: 5,
+                ordered: 2,
+                ready: 1,
+                imported: 10,
+                absent: 3,
+                failed: 0,
+              },
+            },
+          },
+        });
+      } else {
+        await route.continue();
+      }
+    });
+
+    await gotoBackpack(page);
+
+    const card = page.locator(".backpack-music-api-card");
+    await expect(card).toBeVisible();
+    await expect(card.locator('[data-stat="demand"] .backpack-stat-value')).toHaveText(
+      "5",
+    );
+    await expect(card.locator('[data-stat="ordered"] .backpack-stat-value')).toHaveText(
+      "2",
+    );
+    await expect(card.locator('[data-stat="ready"] .backpack-stat-value')).toHaveText(
+      "1",
+    );
+    await expect(card.locator('[data-stat="imported"] .backpack-stat-value')).toHaveText(
+      "10",
+    );
+    await expect(card.locator('[data-stat="absent"] .backpack-stat-value')).toHaveText(
+      "3",
+    );
+    await expect(card.locator('[data-stat="failed"] .backpack-stat-value')).toHaveText(
+      "0",
+    );
+    await expect(page.locator("#backpack-music-api-pull")).toBeEnabled();
+
+    expect(errors).toEqual([]);
+  });
+
+  test("music-api card shows hint and disables pull when not configured", async ({
+    page,
+  }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await page.route("**/api/backpack", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({
+          json: {
+            data: {
+              ...STATUS_OK.data,
+              musicApi: {
+                configured: false,
+                demand: 0,
+                ordered: 0,
+                ready: 0,
+                imported: 0,
+                absent: 0,
+                failed: 0,
+              },
+            },
+          },
+        });
+      } else {
+        await route.continue();
+      }
+    });
+
+    await gotoBackpack(page);
+
+    await expect(page.locator(".backpack-music-api-hint")).toContainText(
+      "Not configured",
+    );
+    await expect(page.locator("#backpack-music-api-pull")).toBeDisabled();
+
+    expect(errors).toEqual([]);
+  });
+
+  test("pull button posts to /api/backpack/pull and shows a success toast", async ({
+    page,
+  }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await page.route("**/api/backpack", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({
+          json: {
+            data: {
+              ...STATUS_OK.data,
+              musicApi: {
+                configured: true,
+                demand: 1,
+                ordered: 0,
+                ready: 0,
+                imported: 0,
+                absent: 0,
+                failed: 0,
+              },
+            },
+          },
+        });
+      } else {
+        await route.continue();
+      }
+    });
+
+    let pullMethod = null;
+    let pullHits = 0;
+    await page.route("**/api/backpack/pull", async (route) => {
+      pullHits += 1;
+      pullMethod = route.request().method();
+      await route.fulfill({ json: { data: { started: true } } });
+    });
+
+    await gotoBackpack(page);
+    await expect(page.locator("#backpack-music-api-pull")).toBeEnabled();
+    await page.click("#backpack-music-api-pull");
+
+    await expect(page.locator(".toast-notification")).toContainText("music-api", {
+      timeout: 6000,
+    });
+    expect(pullHits).toBe(1);
+    expect(pullMethod).toBe("POST");
+
+    expect(errors).toEqual([]);
+  });
 });

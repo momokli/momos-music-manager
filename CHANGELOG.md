@@ -8,6 +8,17 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **music-api-Consumer**: MMM bestellt fehlende Backpack-ISRCs bei `music-api`,
+  importiert die gelieferten Dateien (FLAC, sonst 320/128) in die Library und
+  stößt den Scan der Zielordner an. Neue Tabelle `music_api_imports` (Migration
+  027), `[music_api]`-Config (Base-URL + Token, env `MUSIC_API_URL` /
+  `MUSIC_API_TOKEN`), `GET /api/backpack` liefert den Fortschritt als
+  `musicApi`-Block, `POST /api/backpack/pull` startet einen Zyklus sofort
+  (409, solange nicht konfiguriert). Die Backpack-Seite zeigt die Zähler und
+  einen „Pull now“-Knopf.
+
+### Added
+
 - **Backpack-Seite verwaltet das Backpack**: Playlist-Quellen (subscribte Playlists)
   und Tag-Quellen werden nebeneinander gelistet und sind dort direkt entfernbar (Tag:
   `PUT /api/tags/{id}/backpack`, Playlist: `DELETE /api/playlists/subscriptions/{id}`).
@@ -33,6 +44,15 @@ All notable changes to Momo's Music Manager.
 - **`DownloadGuarantor` re-queuede Zombie-Einträge pro Playlist-URL**: Statt N
   Einzel-URLs wird bei Zombie-Einträgen jetzt genau der eine Backpack-Playlist-URL
   re-submittet (`ensure_queued` — Retry wenn terminal, No-Op wenn aktiv).
+
+### Removed
+
+- **deemix-Auto-Push entfernt**: Der Backpack-Coordinator und der Push-Handler
+  übergeben keine Spotify-Playlist mehr an deemix, und `download_guarantor`
+  re-queued keine Zombie-Playlists mehr. Grund: deemix löst Spotify-Links nicht
+  mehr auf (Client-Credentials-Apps bekommen seit Feb 2026 nur den Playlist-Namen,
+  keine Songs) und beide Spotify-Apps liefen in einen app-weiten 429. Der neue
+  Dienst `music-api` übernimmt den Download per ISRC-Order.
 
 ### Fixed
 

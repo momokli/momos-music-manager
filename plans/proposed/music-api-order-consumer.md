@@ -1,8 +1,8 @@
 # Plan: music-api order consumer (Backpack downloads without deemix-Spotify)
 
-**Status**: proposed
+**Status**: in-progress
 **Branch**: `feat/music-api-order-consumer`
-**Ready for review**: no
+**Ready for review**: yes
 **Depends on**: `feat/music-api` (the `music-api` service — API contract + deployed instance on `.200`)
 **Migration needed**: yes (one additive migration, `027_music_api_imports.sql`)
 
@@ -120,14 +120,14 @@ interval_secs = 900
 
 ### Acceptance Criteria
 
-- [ ] `cargo build` passes
-- [ ] `cargo test` passes (new `tests/api_music_api.rs` included)
-- [ ] `migration_integrity` passes with the new migration
-- [ ] `cd frontend && npx playwright test` passes
+- [x] `cargo build` passes
+- [x] `cargo test` passes (new `tests/api_music_api.rs`, `tests/music_api_client.rs`)
+- [x] `migration_integrity` passes with the new migration
+- [x] `cd frontend && npx playwright test` passes
 - [ ] A Backpack track with no local file is ordered, imported and linked
       end-to-end against the deployed `music-api` (manual verification)
 - [ ] An `absent` ISRC is recorded and never re-ordered on the next cycle
-- [ ] The old deemix-submit path no longer runs (no `addToQueue` from MMM)
+- [x] The old deemix-submit path no longer runs (no `addToQueue` from MMM)
 
 ### Open questions (need a decision before implementation)
 

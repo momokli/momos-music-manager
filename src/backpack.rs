@@ -856,14 +856,21 @@ pub async fn start_backpack_coordinator(
             last_reconcile = SystemTime::now();
             match SpotifyClient::from_stored_tokens(db.clone(), &credentials).await {
                 Ok(client) => {
-                    let deemix = crate::deemix::DeemixClient::from_db(db.clone()).await;
+                    // deemix is no longer pushed directly — the music-api
+                    // consumer owns ordering/importing. The materialisation
+                    // only maintains the Spotify playlist transport.
                     let opts = MaterializeOptions {
                         force: forced,
-                        submit_to_deemix: forced,
+                        submit_to_deemix: false,
                         dry_run: false,
                     };
-                    match materialize_backpack_playlist_with(&db, &client, deemix.as_ref(), opts)
-                        .await
+                    match materialize_backpack_playlist_with(
+                        &db,
+                        &client,
+                        None::<&crate::deemix::DeemixClient>,
+                        opts,
+                    )
+                    .await
                     {
                         Ok(outcome) if outcome.updated => {
                             coordinator.note_success();

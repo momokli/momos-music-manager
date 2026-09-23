@@ -178,6 +178,9 @@ struct TomlConfig {
     telemetry_receiver: Option<TelemetryReceiverToml>,
     autoupdate: Option<AutoupdateToml>,
     autoupgrade: Option<AutoupgradeToml>,
+    /// `[music_api]` — explicit rename because the struct is `kebab-case`.
+    #[serde(rename = "music_api")]
+    music_api: Option<MusicApiToml>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -302,6 +305,16 @@ struct AutoupgradeToml {
     enabled: Option<bool>,
 }
 
+/// `[music_api]` — ISRC orders against the `music-api` service.
+#[derive(Debug, Clone, Deserialize)]
+struct MusicApiToml {
+    enabled: Option<bool>,
+    base_url: Option<String>,
+    token: Option<String>,
+    batch_size: Option<usize>,
+    interval_secs: Option<u64>,
+}
+
 // ── Runtime representation ─────────────────────────────────────────────────
 
 /// Service credentials used throughout the application.
@@ -422,6 +435,10 @@ pub struct ServiceCredentials {
     /// Env `MOMOS_AUTOUPGRADE_ENABLED` > `[autoupgrade] enabled` > default
     /// `false` (opt-in — automatic replacement is destructive).
     pub autoupgrade_enabled: bool,
+
+    /// ISRC orders against the `music-api` service (env > `[music_api]` >
+    /// defaults). See [`crate::music_api::MusicApiConfig`].
+    pub music_api: crate::music_api::MusicApiConfig,
 }
 
 impl ServiceCredentials {
@@ -560,6 +577,41 @@ impl ServiceCredentials {
                 .and_then(|r| r.db_path.clone()),
         )
         .unwrap_or_else(|| format!("{}/telemetry.db", telemetry_receiver_base_dir.trim_end_matches('/')));
+
+        // music-api (ISRC orders): env > [music_api] > defaults.
+        let music_api = crate::music_api::MusicApiConfig {
+            enabled: std::env::var("MUSIC_API_ENABLED")
+                .ok()
+                .and_then(|v| v.parse::<bool>().ok())
+                .or_else(|| toml_config.music_api.as_ref().and_then(|m| m.enabled))
+                .unwrap_or(true),
+            base_url: env_or_toml_opt(
+                "MUSIC_API_URL",
+                toml_config
+                    .music_api
+                    .as_ref()
+                    .and_then(|m| m.base_url.clone()),
+            ),
+            token: env_or_toml_opt(
+                "MUSIC_API_TOKEN",
+                toml_config.music_api.as_ref().and_then(|m| m.token.clone()),
+            ),
+            batch_size: std::env::var("MUSIC_API_BATCH_SIZE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .or_else(|| toml_config.music_api.as_ref().and_then(|m| m.batch_size))
+                .unwrap_or(100),
+            interval_secs: std::env::var("MUSIC_API_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .or_else(|| {
+                    toml_config
+                        .music_api
+                        .as_ref()
+                        .and_then(|m| m.interval_secs)
+                })
+                .unwrap_or(900),
+        };
 
         let credentials = Self {
             spotify_client_id: spotify_id,
@@ -863,11 +915,22 @@ impl ServiceCredentials {
                         .and_then(|a| a.enabled)
                 })
                 .unwrap_or(false),
+
+            music_api,
         };
 
         info!(
             "Autoupgrade config: enabled={}",
             credentials.autoupgrade_enabled,
+        );
+
+        info!(
+            "music-api config: configured={}, enabled={}, base_url={:?}, batch_size={}, interval_secs={}",
+            credentials.music_api.is_configured(),
+            credentials.music_api.enabled,
+            credentials.music_api.base_url,
+            credentials.music_api.batch_size,
+            credentials.music_api.interval_secs,
         );
 
         info!(
@@ -1038,6 +1101,19 @@ impl ServiceCredentials {
             autoupgrade_enabled: env_var_optional("MOMOS_AUTOUPGRADE_ENABLED")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(false),
+            music_api: crate::music_api::MusicApiConfig {
+                enabled: env_var_optional("MUSIC_API_ENABLED")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(true),
+                base_url: env_var_optional("MUSIC_API_URL"),
+                token: env_var_optional("MUSIC_API_TOKEN"),
+                batch_size: env_var_optional("MUSIC_API_BATCH_SIZE")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(100),
+                interval_secs: env_var_optional("MUSIC_API_INTERVAL_SECS")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(900),
+            },
         }
     }
 
@@ -1533,6 +1609,7 @@ impl ServiceCredentials {
             autoupdate_has_toml: false,
             autoupdate_channel_toml: None,
             autoupgrade_enabled: false,
+            music_api: crate::music_api::MusicApiConfig::default(),
         }
     }
 }
@@ -1918,6 +1995,13 @@ pub(crate) mod tests {
         // Full-DB snapshot option defaults OFF (0) for tests.
         assert_eq!(creds.telemetry_full_db_interval_secs, 0);
         assert_eq!(creds.telemetry_interval_secs, 0);
+        // music-api defaults: enabled but unconfigured (no URL/token).
+        assert!(creds.music_api.enabled);
+        assert!(creds.music_api.base_url.is_none());
+        assert!(creds.music_api.token.is_none());
+        assert_eq!(creds.music_api.batch_size, 100);
+        assert_eq!(creds.music_api.interval_secs, 900);
+        assert!(!creds.music_api.is_configured());
     }
 
     // ── Configured checks ───────────────────────────────────────────
@@ -1985,6 +2069,38 @@ pub(crate) mod tests {
             ..ServiceCredentials::defaults_for_test()
         };
         assert!(!creds.is_youtube_configured());
+    }
+
+    #[test]
+    fn test_music_api_is_configured() {
+        let mut creds = ServiceCredentials::defaults_for_test();
+        assert!(!creds.music_api.is_configured());
+
+        creds.music_api.base_url = Some("https://music-api.example.com".to_string());
+        creds.music_api.token = Some("secret".to_string());
+        assert!(creds.music_api.is_configured());
+
+        // Explicitly disabled wins over set URL/token.
+        creds.music_api.enabled = false;
+        assert!(!creds.music_api.is_configured());
+    }
+
+    #[test]
+    fn test_music_api_toml_parses() {
+        let src = "[music_api]\nenabled = false\nbase_url = \"https://m.example.com\"\ntoken = \"t\"\nbatch_size = 7\ninterval_secs = 60\n";
+        let cfg: TomlConfig = toml::from_str(src).unwrap();
+        let m = cfg.music_api.expect("music_api section present");
+        assert_eq!(m.enabled, Some(false));
+        assert_eq!(m.base_url.as_deref(), Some("https://m.example.com"));
+        assert_eq!(m.token.as_deref(), Some("t"));
+        assert_eq!(m.batch_size, Some(7));
+        assert_eq!(m.interval_secs, Some(60));
+    }
+
+    #[test]
+    fn test_music_api_toml_absent_is_none() {
+        let cfg: TomlConfig = toml::from_str("[server]\nport = 3000\n").unwrap();
+        assert!(cfg.music_api.is_none());
     }
 
     // ── Telemetry TOML parsing (full-DB option) ───────────────────────
