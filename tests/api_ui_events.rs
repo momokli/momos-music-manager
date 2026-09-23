@@ -318,31 +318,12 @@ async fn ui_events_flow_end_to_end() {
     }
     wait_for_count(&pool, "client-ui", "ui.action.restore_dump", 1).await;
 
-    // ── f) deemix_enqueue: empty URL → 400; valid URL → 200 (no deemix
-    //        server configured in the test DB → local insert only) ──
-    let resp = client
-        .post(format!("{base_on}/api/services/deemix/queue"))
-        .json(&serde_json::json!({"url": ""}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 400);
-    let resp = client
-        .post(format!("{base_on}/api/services/deemix/queue"))
-        .json(&serde_json::json!({"url": "https://open.spotify.com/playlist/123"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    wait_for_count(&pool, "client-ui", "ui.action.deemix_enqueue", 2).await;
-
     // Give the flusher a moment to settle, then assert exact totals.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_count(&pool, "client-ui", "ui.view.opened", 1).await;
     assert_count(&pool, "client-ui", "ui.action.scan_folder", 2).await;
     assert_count(&pool, "client-ui", "ui.action.run_backup", 1).await;
     assert_count(&pool, "client-ui", "ui.action.restore_dump", 1).await;
-    assert_count(&pool, "client-ui", "ui.action.deemix_enqueue", 2).await;
     assert_count(&pool, "client-ui", "ui.action.traktor_import", 0).await;
     assert_count(&pool, "client-ui", "ui.action.recompute_embeddings", 0).await;
 

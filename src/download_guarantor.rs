@@ -438,58 +438,81 @@ impl DownloadGuarantor {
             fuzzy_matches: 0,
         };
 
-        // Collect unique zombie playlists to re-queue
-        let zombie_urls: HashSet<&str> = gaps
-            .iter()
-            .filter(|g| {
-                g.missing_tracks
-                    .iter()
-                    .any(|t| matches!(t.reason, MissingReason::ZombiePlaylist))
-            })
-            .map(|g| g.playlist_url.as_str())
-            .collect();
+        // Zombie remediation. The single Backpack playlist is the only deemix
+        // transport — individual playlists are never re-queued. A zombie (a
+        // queue entry deemix picked up but downloaded 0 tracks) is fixed by
+        // re-submitting that ONE Backpack URL: `ensure_queued` retries a
+        // terminal entry and is a no-op while it is still active.
+        let zombie_entries = crate::db::get_zombie_deemix_entries(&self.db)
+            .await
+            .unwrap_or_default();
+        if !zombie_entries.is_empty() {
+            let backpack_url = crate::db::settings::get_setting(
+                &self.db,
+                crate::db::settings::KEY_BACKPACK_PLAYLIST_URL,
+            )
+            .await
+            .ok()
+            .flatten();
 
-        if !zombie_urls.is_empty() {
-            // Try to get a deemix client for re-queuing
-            if let Some(client) = DeemixClient::from_db(self.db.clone()).await {
-                for url in &zombie_urls {
-                    self.task_manager
-                        .add_log(task_id, format!("Re-queuing zombie playlist: {}", url))
-                        .await;
-                    match client.add_to_queue(url).await {
-                        Ok(()) => {
-                            report.requeued_playlists += 1;
-                            info!("Re-queued zombie playlist: {}", url);
-                            crate::telemetry::emit::emit_event(
-                                crate::telemetry::events::EventType::DownloadStarted,
-                                serde_json::json!({
-                                    "source": "deemix",
-                                    "kind": "playlist",
-                                }),
-                            );
+            match backpack_url {
+                Some(url) => {
+                    if let Some(client) = DeemixClient::from_db(self.db.clone()).await {
+                        self.task_manager
+                            .add_log(
+                                task_id,
+                                format!("Zombie entry — re-submitting the Backpack playlist: {url}"),
+                            )
+                            .await;
+                        match client.ensure_queued(&url).await {
+                            Ok(()) => {
+                                report.requeued_playlists += 1;
+                                info!("Re-submitted Backpack playlist to deemix: {}", url);
+                                crate::telemetry::emit::emit_event(
+                                    crate::telemetry::events::EventType::DownloadStarted,
+                                    serde_json::json!({
+                                        "source": "deemix",
+                                        "kind": "backpack",
+                                    }),
+                                );
+                            }
+                            Err(e) => {
+                                warn!("Failed to re-submit Backpack playlist {}: {:#}", url, e);
+                                self.task_manager
+                                    .add_log(
+                                        task_id,
+                                        format!("Backpack re-submit FAILED for {}: {:#}", url, e),
+                                    )
+                                    .await;
+                                crate::telemetry::emit::emit_event(
+                                    crate::telemetry::events::EventType::DownloadFailed,
+                                    crate::telemetry::events::error_payload(&format!(
+                                        "deemix backpack re-submit failed: {e:#}"
+                                    )),
+                                );
+                            }
                         }
-                        Err(e) => {
-                            warn!("Failed to re-queue {}: {:#}", url, e);
-                            self.task_manager
-                                .add_log(task_id, format!("Re-queue FAILED for {}: {:#}", url, e))
-                                .await;
-                            crate::telemetry::emit::emit_event(
-                                crate::telemetry::events::EventType::DownloadFailed,
-                                crate::telemetry::events::error_payload(&format!(
-                                    "deemix re-queue failed: {e:#}"
-                                )),
-                            );
-                        }
+                    } else {
+                        warn!("Deemix not connected — cannot re-submit the Backpack playlist");
+                        self.task_manager
+                            .add_log(
+                                task_id,
+                                "Deemix not connected — skipping Backpack re-submit".to_string(),
+                            )
+                            .await;
                     }
                 }
-            } else {
-                warn!("Deemix not connected — cannot re-queue zombie playlists");
-                self.task_manager
-                    .add_log(
-                        task_id,
-                        "Deemix not connected — skipping zombie re-queue".to_string(),
-                    )
-                    .await;
+                None => {
+                    // No Backpack playlist yet — let the coordinator build it.
+                    let _ = crate::backpack::mark_backpack_dirty(&self.db).await;
+                    self.task_manager
+                        .add_log(
+                            task_id,
+                            "Zombie entry but no Backpack playlist yet — requested a Backpack materialisation"
+                                .to_string(),
+                        )
+                        .await;
+                }
             }
         }
 
@@ -579,20 +602,6 @@ impl DownloadGuarantor {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────
-
-    /// Re-queue a single playlist via the deemix API.
-    #[allow(dead_code)]
-    async fn requeue_playlist(&self, playlist_url: &str) -> Result<()> {
-        let client = DeemixClient::from_db(self.db.clone())
-            .await
-            .context("Deemix not connected")?;
-        client
-            .add_to_queue(playlist_url)
-            .await
-            .context("Failed to add to deemix queue")?;
-        info!("Re-queued playlist to deemix: {}", playlist_url);
-        Ok(())
-    }
 
     /// Download a single track via spotDL CLI.
     ///
@@ -804,6 +813,7 @@ struct SubscriptionGap {
     #[allow(dead_code)]
     subscription_id: i64,
     playlist_name: String,
+    #[allow(dead_code)]
     playlist_url: String,
     #[allow(dead_code)]
     total_tracks: usize,

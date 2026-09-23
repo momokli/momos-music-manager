@@ -1322,3 +1322,40 @@ verwaltet beide Quellen (Playlist- und Tag-Quellen) direkt.
 - „Aus dem Backpack entfernen“ ist jetzt auf der Backpack-Seite möglich; bei einer
   Playlist bedeutet das Unsubscribe (stoppt das Polling), bei einem Tag nur das
   Clear des Flags.
+
+## ADR-064: Nur die Backpack-Playlist wird an deemix gepusht
+
+**Date**: 2026-09-23
+**Status**: Accepted (implemented)
+
+**Context**: Der Backpack-Transport ist seit ADR-060/062 vereinheitlicht: das Backpack
+*Set* (subscribte Playlists ∪ Backpack-Tags) wird in EINE Spotify-Playlist
+materialisiert und genau diese eine URL an deemix übergeben. Trotzdem existierten
+weiterhin mehrere Pfade, die Einzel-Playlists an deemix schickten: der
+`DownloadGuarantor` re-queuede Zombie-Einträge pro Playlist-URL (alle 10 min), und
+`POST /api/services/deemix/queue` samt Plus-/Restart-Buttons sowie CLI `deemix add`
+erlaubten manuelle Einzel-Pushes. Zusätzlich legte die Playlists-API beim Anzeigen
+`deemix_downloads`-Zeilen pro Playlist an. Das erzeugte N konkurrierende
+deemix-Downloads für dieselben Tracks und widersprach dem „ein Set, ein Submit"-Modell.
+
+**Decision**: deemix erhält ausschließlich die eine Backpack-Playlist-URL.
+
+- Der generische Enqueue-Endpoint `POST /api/services/deemix/queue` wird entfernt
+  (die Route bleibt nur als `GET`; ein POST liefert **405**).
+- Die Playlists-Seite zeigt keine deemix-Spalte/Buttons mehr; Einzel-Playlist-Pushes
+  entfallen. In der Deemix-Queue bleiben Retry und Delete (sie betreffen die eine
+  Zeile).
+- `deemix add <url>` (CLI) entfällt.
+- Der `DownloadGuarantor` re-submittet bei Zombie-Einträgen die eine Backpack-URL
+  (`ensure_queued`: Retry wenn terminal, No-Op wenn aktiv).
+
+**Consequences**:
+
+- Es gibt genau einen deemix-Download; Zombie-Remediation ist idempotent.
+- Breaking API: `POST /api/services/deemix/queue` existiert nicht mehr.
+  Regressionstest `deemix_queue_post_removed` asserted 405.
+- Bekannte Altlast (nicht Teil dieser Änderung): `analyze_gaps` liest Deezer-/Zombie-
+  Zustand noch per Einzel-Playlist-URL aus `deemix_downloads`, wo im konsolidierten
+  Modell nur die Backpack-Zeile steht. Die `NotOnDeezer`-/`ZombiePlaylist`-
+  Klassifikation pro Playlist greift dadurch praktisch nicht mehr — die track-genaue
+  Gap-Heilung (spotDL-Fallback) läuft derzeit ins Leere. Als Folge-Issue vorgemerkt.

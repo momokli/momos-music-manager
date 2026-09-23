@@ -30,27 +30,26 @@ async fn deemix_queue_list() {
     );
 }
 
-/// POST /api/services/deemix/queue — add to queue (error: no server).
+/// POST /api/services/deemix/queue — the generic per-playlist enqueue endpoint
+/// was removed. Only the single Backpack playlist is submitted to deemix
+/// (via `POST /api/backpack/push`), so a POST here must be rejected.
 #[tokio::test]
-async fn deemix_queue_add_error() {
+async fn deemix_queue_post_removed() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
 
     let resp = client
         .post(format!("{}/api/services/deemix/queue", base))
-        .json(&serde_json::json!({"url": ""}))
+        .json(&serde_json::json!({"url": "https://open.spotify.com/playlist/abc"}))
         .send()
         .await
         .unwrap();
 
-    // Empty URL → 400 BAD_REQUEST
     let status = resp.status();
-    let body: Value = resp.json().await.unwrap();
-    eprintln!("deemix queue add error: {body}");
-
-    assert!(
-        status == 400 || status == 500,
-        "deemix queue add with empty URL should return 400 or 500, got {status}"
+    eprintln!("deemix queue POST status: {status}");
+    assert_eq!(
+        status, 405,
+        "POST /api/services/deemix/queue must be method-not-allowed, got {status}"
     );
 }
 

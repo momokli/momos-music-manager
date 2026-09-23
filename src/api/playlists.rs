@@ -521,83 +521,10 @@ async fn playlists_handler(
         }
     };
 
-    // Get deemix status via SQL LEFT JOIN (matches playlist_id in URL)
-    let playlist_ids: Vec<String> = playlists.iter().map(|p| p.playlist_id.clone()).collect();
-    // Single query with IN clause to find all deemix matches
-    let mut deemix_statuses: std::collections::HashMap<String, (Option<String>, Option<i64>)> =
-        std::collections::HashMap::new();
-
-    // Build placeholders for IN clause
-    let placeholders: Vec<String> = playlist_ids.iter().map(|_| "?".to_string()).collect();
-    if !placeholders.is_empty() {
-        let sql = format!(
-            "SELECT sp.playlist_id, dd.status, dd.id
-             FROM service_playlists sp
-             LEFT JOIN deemix_downloads dd ON dd.spotify_playlist_url = 'https://open.spotify.com/playlist/' || sp.playlist_id
-             WHERE sp.playlist_id IN ({})",
-            placeholders.join(",")
-        );
-        let mut q = sqlx::query(&sql);
-        for pid in &playlist_ids {
-            q = q.bind(pid);
-        }
-        if let Ok(rows) = q.fetch_all(&state.db).await {
-            for row in rows {
-                let pid: String = row.try_get("playlist_id").unwrap_or_default();
-                let status: Option<String> = row.try_get("status").ok();
-                let dd_id: Option<i64> = row.try_get("id").ok();
-                deemix_statuses.insert(pid, (status, dd_id));
-            }
-        }
-    }
-
-    // Fallback: check live deemix queue for playlists not found in local table
-    let now = chrono::Utc::now().timestamp();
-    if let Some(client) = super::deemix_api::load_deemix_client_from_db(&state.db).await
-        && let Ok(remote_queue) = client.get_queue().await
-    {
-        for p in &playlists {
-            if deemix_statuses.contains_key(&p.playlist_id) {
-                continue;
-            }
-            for item in remote_queue.values() {
-                if item.id == p.playlist_id {
-                    let status = match item.status.as_str() {
-                        "completed" | "withErrors" => "completed",
-                        "queued" => "queued",
-                        "downloading" => "downloading",
-                        _ => "queued",
-                    };
-                    deemix_statuses.insert(p.playlist_id.clone(), (Some(status.to_string()), None));
-                    // Backfill into local table for future lookups
-                    let url = format!("https://open.spotify.com/playlist/{}", item.id);
-                    let _ = sqlx::query(
-                        "INSERT OR IGNORE INTO deemix_downloads (spotify_playlist_url, playlist_name, status, track_count_total, track_count_downloaded, created_at, updated_at)
-                         VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    )
-                    .bind(&url)
-                    .bind(&item.title)
-                    .bind(status)
-                    .bind(item.size)
-                    .bind(item.downloaded)
-                    .bind(now)
-                    .bind(now)
-                    .execute(&state.db)
-                    .await;
-                    break;
-                }
-            }
-        }
-    }
-
-    // Build enriched playlist objects with deemix status
+    // Build enriched playlist objects
     let playlists_with_deemix: Vec<serde_json::Value> = playlists
         .iter()
         .map(|p| {
-            let (deemix_status, deemix_id) = deemix_statuses
-                .get(&p.playlist_id)
-                .cloned()
-                .unwrap_or((None, None));
             serde_json::json!({
                 "id": p.id,
                 "service": p.service,
@@ -615,8 +542,6 @@ async fn playlists_handler(
                 "metadataJson": p.metadata_json,
                 "tagName": p.tag_name,
                 "archiveDeleted": p.archive_deleted,
-                "deemixStatus": deemix_status,
-                "deemixId": deemix_id,
                 "services": p.services,
             })
         })

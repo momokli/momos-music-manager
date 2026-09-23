@@ -20,6 +20,20 @@ All notable changes to Momo's Music Manager.
   (eine aggregierte Backpack-Playlist → ein deemix-Submit, prune-safe). API-Pfade und
   interne Namen bleiben unverändert.
 
+### Removed
+
+- **Einzel-Playlist-Pushes an deemix entfernt**: Der einzige deemix-Transport ist
+  jetzt die eine aggregierte Backpack-Playlist. Entfernt wurden der generische
+  Endpoint `POST /api/services/deemix/queue` (die Route bleibt nur `GET`; ein POST
+  antwortet **405**), die deemix-Spalte samt Plus-/Restart-/Retry-Buttons auf der
+  Playlists-Seite, der „Restart"-Button der Deemix-Queue-Seite sowie
+  `momos-music-manager deemix add <url>`. Die Backend-Anreicherung
+  `deemixStatus`/`deemixId` der Playlists-API (inkl. Live-Queue-Call und Backfill
+  einzelner `deemix_downloads`-Zeilen) ist ebenfalls entfallen.
+- **`DownloadGuarantor` re-queuede Zombie-Einträge pro Playlist-URL**: Statt N
+  Einzel-URLs wird bei Zombie-Einträgen jetzt genau der eine Backpack-Playlist-URL
+  re-submittet (`ensure_queued` — Retry wenn terminal, No-Op wenn aktiv).
+
 ### Fixed
 
 - **Backpack-Playlist wurde nie angelegt**: `get_current_user_id` gab die rspotify-*URI*

@@ -130,7 +130,6 @@ const PLAYLISTS_COLUMNS = [
     defaultWidth: 80,
   },
   { id: "tags", label: "Tags", sortable: false, defaultWidth: 140 },
-  { id: "deemix", label: "Deemix", sortable: false, defaultWidth: 100 },
   { id: "sync", label: "Sync", sortable: false, defaultWidth: 80 },
   { id: "subscribe", label: "Backpack", sortable: false, defaultWidth: 80 },
   { id: "view", label: "View", sortable: false, defaultWidth: 60 },
@@ -172,29 +171,6 @@ function subCell(sub) {
     return `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)" title="In Backpack — tracks are aggregated into the single Backpack playlist; polls every ${sub.pollIntervalSecs}s"><i class="fas fa-box"></i></span>`;
   }
   return `<span style="color:var(--text-muted)" title="Not in Backpack"><i class="fas fa-box-open"></i></span>`;
-}
-
-function deemixCell(r) {
-  const status = r.deemixStatus;
-  const restartBtn = status
-    ? `<button class="btn btn-sm btn-icon" data-act="deemix-restart" data-deemix-id="${r.deemixId || ""}" data-name="${escapeHtml(r.name)}" data-id="${r.id}" title="Re-download via deemix"><i class="fa-solid fa-arrows-rotate"></i></button>`
-    : "";
-  const addBtn = `<button class="btn btn-sm btn-icon" data-act="deemix-add" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Add to Deemix download queue"><i class="fa-solid fa-plus"></i></button>`;
-
-  if (!status) return addBtn;
-  if (status === "queued") {
-    return `<span class="status-badge" style="background:rgba(245,158,11,0.1);color:var(--yellow)"><i class="fa-solid fa-clock"></i> Queued</span> ${restartBtn}`;
-  }
-  if (status === "downloading") {
-    return `<span class="status-badge" style="background:rgba(59,130,246,0.1);color:var(--blue, #3b82f6)"><i class="fa-solid fa-spinner fa-spin"></i> DL</span> ${restartBtn}`;
-  }
-  if (status === "completed") {
-    return `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)"><i class="fa-solid fa-check"></i></span> ${restartBtn}`;
-  }
-  if (status === "failed" && r.deemixId) {
-    return `<button class="btn btn-sm btn-icon" data-act="deemix-retry" data-deemix-id="${r.deemixId}" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Retry download"><i class="fa-solid fa-rotate"></i></button> ${restartBtn}`;
-  }
-  return `<span class="status-badge" style="background:rgba(245,158,11,0.1);color:var(--yellow)"><i class="fa-solid fa-clock"></i> ${escapeHtml(status)}</span> ${restartBtn}`;
 }
 
 function viewTracksCell(r) {
@@ -265,7 +241,6 @@ const PLAYLISTS_CELL_RENDERERS = {
       ? `<span class="font-mono text-xs">${new Date(r.updatedAt * 1000).toLocaleDateString()}</span>`
       : '<span class="text-muted">\u2014</span>',
   tags: (r) => tagCell(r.tag),
-  deemix: (r) => deemixCell(r),
   sync: (r) => syncCell(r.sync),
   subscribe: (r) => subCell(r.sub),
   archive: (r) => {
@@ -967,72 +942,6 @@ function wireContentEvents(container, signal, state) {
             showToast(`Refresh failed: ${err.message}`, "error");
             b.disabled = false;
             b.innerHTML = '<i class="fas fa-eye"></i>';
-          }
-        } else if (act === "deemix-add") {
-          const url = `https://open.spotify.com/playlist/${b.dataset.playlistId}`;
-          const name = b.dataset.name;
-          b.disabled = true;
-          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
-          try {
-            await fetchJSON("/api/services/deemix/queue", {
-              method: "POST",
-              body: JSON.stringify({ url }),
-            });
-            showToast(`Added "${name}" to Deemix download queue`, "success");
-            setTimeout(() => {
-              updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
-              fetchAndRender(container, signal, state);
-            }, 1500);
-          } catch (err) {
-            showToast(`Failed to add to Deemix queue: ${err.message}`, "error");
-            b.disabled = false;
-            b.innerHTML = '<i class="fa-solid fa-plus"></i>';
-          }
-        } else if (act === "deemix-restart") {
-          const deemixId = b.dataset.deemixId ? parseInt(b.dataset.deemixId, 10) : null;
-          const name = b.dataset.name;
-          b.disabled = true;
-          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
-          try {
-            if (deemixId) {
-              await fetchJSON(`/api/services/deemix/queue/${deemixId}/retry`, {
-                method: "POST",
-              });
-            } else {
-              const url = `https://open.spotify.com/playlist/${b.dataset.playlistId}`;
-              await fetchJSON("/api/services/deemix/queue", {
-                method: "POST",
-                body: JSON.stringify({ url }),
-              });
-            }
-            showToast(`Re-download triggered for "${name}"`, "success");
-            setTimeout(() => {
-              updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
-              fetchAndRender(container, signal, state);
-            }, 1500);
-          } catch (err) {
-            showToast(`Re-download failed: ${err.message}`, "error");
-            b.disabled = false;
-            b.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i>';
-          }
-        } else if (act === "deemix-retry") {
-          const deemixId = parseInt(b.dataset.deemixId, 10);
-          const name = b.dataset.name;
-          b.disabled = true;
-          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
-          try {
-            await fetchJSON(`/api/services/deemix/queue/${deemixId}/retry`, {
-              method: "POST",
-            });
-            showToast(`Retrying download for "${name}"`, "success");
-            setTimeout(() => {
-              updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
-              fetchAndRender(container, signal, state);
-            }, 1500);
-          } catch (err) {
-            showToast(`Retry failed: ${err.message}`, "error");
-            b.disabled = false;
-            b.innerHTML = '<i class="fa-solid fa-rotate"></i>';
           }
         } else if (act === "push-spotify") {
           b.disabled = true;
