@@ -211,6 +211,16 @@ async fn run_poll_cycle(
             break;
         }
 
+        // A 429 on any playlist sets the process-wide cooldown; abort the rest
+        // of the cycle instead of hammering the penalty window.
+        if let Some(secs) = spotify_cooldown().remaining_secs() {
+            warn!(
+                "Global poller: rate-limit cooldown set mid-cycle ({}s remaining), aborting cycle",
+                secs
+            );
+            break;
+        }
+
         let stored_info = db_snapshots.get(&sp.id);
 
         match stored_info {

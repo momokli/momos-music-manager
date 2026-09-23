@@ -127,6 +127,18 @@ pub async fn start_subscription_poller(
                     break;
                 }
 
+                // A 429 anywhere in this cycle sets the process-wide cooldown.
+                // Stop the cycle immediately instead of firing the remaining
+                // N-1 requests into the penalty window (that is what kept the
+                // limit saturated).
+                if let Some(secs) = spotify_cooldown().remaining_secs() {
+                    debug!(
+                        "Subscription poller: rate-limit cooldown set mid-cycle ({}s remaining), aborting cycle",
+                        secs
+                    );
+                    break 'cycle;
+                }
+
                 if let Err(e) =
                     poll_subscribed_playlist(&db, &spotify_client, subscription, &task_manager)
                         .await
