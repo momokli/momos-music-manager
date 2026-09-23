@@ -13,6 +13,9 @@ use rspotify::{
         playlist::FullPlaylist, track::FullTrack,
     },
 };
+// The `Id` trait provides `.id()` (bare id) — `Display`/`to_string()` give the
+// URI instead, which Spotify rejects where a bare id is expected.
+use rspotify::prelude::Id;
 use sqlx::Pool;
 use tokio_stream::StreamExt;
 use tracing::{error, info};
@@ -322,7 +325,10 @@ impl SpotifyClient {
             .current_user()
             .await
             .context("Failed to get current user")?;
-        Ok(user.id.to_string())
+        // `Id::to_string()` yields the URI (`spotify:user:<id>`), which Spotify
+        // rejects as a user id (400 on playlist creation). `.id()` is the bare
+        // id the API expects.
+        Ok(user.id.id().to_string())
     }
 
     /// Create a Spotify playlist. Returns (playlist_id, spotify_url).
@@ -346,7 +352,7 @@ impl SpotifyClient {
             .get("spotify")
             .cloned()
             .unwrap_or_default();
-        Ok((playlist.id.to_string(), url))
+        Ok((playlist.id.id().to_string(), url))
     }
 
     /// Add tracks to a Spotify playlist in batches of 100.
@@ -456,9 +462,11 @@ impl SpotifyClient {
             .map_err(|e| anyhow::anyhow!("Invalid playlist ID: {}", e))?;
 
         let mut uris = Vec::new();
-        let mut stream = self
-            .spotify
-            .playlist_items(pid, None, Some(Market::FromToken));
+        // Read *without* a market filter: with `Market::FromToken` Spotify
+        // returns `null` for tracks unavailable in the user's market, which
+        // would silently hide them from verification and make a correct mirror
+        // look like it is missing ~90 tracks.
+        let mut stream = self.spotify.playlist_items(pid, None, None);
         while let Some(item) = stream.next().await {
             let item = item.map_err(|e| anyhow::Error::from(e)).context("Spotify API error")?;
             if item.is_local {
@@ -467,7 +475,9 @@ impl SpotifyClient {
             if let Some(PlayableItem::Track(track)) = item.track
                 && let Some(id) = track.id
             {
-                uris.push(format!("spotify:track:{id}"));
+                // `{id}` would render the URI (`spotify:track:<id>`), producing
+                // a double-prefixed `spotify:track:spotify:track:<id>`.
+                uris.push(format!("spotify:track:{}", id.id()));
             }
         }
         Ok(uris)
@@ -502,5 +512,29 @@ impl SpotifyClient {
         )
         .await
         .context("Failed to save tokens to database")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression guard for the rspotify ID trap that made Backpack playlist
+    /// creation fail with HTTP 400: `Id::to_string()` renders the *URI*
+    /// (`spotify:user:<id>`), which Spotify rejects wherever a bare id is
+    /// expected. Always use `.id()` when a plain id is needed, and never feed
+    /// an `Id`'s `Display` output into a `spotify:<type>:` prefix.
+    #[test]
+    fn rspotify_id_display_renders_a_uri_not_a_bare_id() {
+        let user = UserId::from_id("imontouch").unwrap();
+        assert_eq!(user.id(), "imontouch");
+        assert_eq!(user.to_string(), "spotify:user:imontouch");
+
+        let track = TrackId::from_id("4y4VO05kYgUTo2bzbox1an").unwrap();
+        assert_eq!(track.id(), "4y4VO05kYgUTo2bzbox1an");
+        assert_eq!(track.to_string(), "spotify:track:4y4VO05kYgUTo2bzbox1an");
+
+        // The track URIs we hand to Spotify must come from `.id()`:
+        assert_eq!(format!("spotify:track:{}", track.id()), track.to_string());
     }
 }
