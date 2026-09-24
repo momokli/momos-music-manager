@@ -122,6 +122,11 @@ fn build_resolve_sql(db: &DynamicBundle) -> (String, Vec<String>, Vec<i64>, Vec<
     }
 
     // ── Base track filter (string binds) ──
+    //
+    // Matches the **resolved tags of the file** (`file_resolved_tags`), not a
+    // playlist name: tags resolve through the playlist-name mapping *and* the
+    // tag hierarchy (`tag_parents`), so a parent tag like `afterhours` matches
+    // even though no playlist carries its exact name.
     if !db.include_all_tracks {
         if let Some(ref base_tags_json) = db.base_tags {
             if let Ok(tags) = serde_json::from_str::<Vec<String>>(base_tags_json) {
@@ -130,12 +135,10 @@ fn build_resolve_sql(db: &DynamicBundle) -> (String, Vec<String>, Vec<i64>, Vec<
                     push_where(
                         &mut sql,
                         &format!(
-                            r#"vft.track_id IN (
-                                SELECT DISTINCT spt.track_id
-                                FROM service_playlist_tracks spt
-                                JOIN service_playlists sp ON sp.id = spt.playlist_id
-                                WHERE (sp.archive_deleted = 1 OR spt.deleted_at IS NULL)
-                                  AND LOWER(TRIM(sp.name)) IN ({})
+                            r#"vft.file_id IN (
+                                SELECT DISTINCT frt.file_id
+                                FROM file_resolved_tags frt
+                                WHERE LOWER(TRIM(frt.tag_name)) IN ({})
                             )"#,
                             placeholders.join(",")
                         ),
@@ -475,6 +478,8 @@ mod tests {
             .execute(&pool).await.unwrap();
         sqlx::query("CREATE TABLE IF NOT EXISTS track_resolved_tags (track_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, tag_name TEXT NOT NULL, category_id INTEGER NOT NULL, category_name TEXT NOT NULL, prefix TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT 0)")
             .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS file_resolved_tags (file_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, tag_name TEXT NOT NULL, category_id INTEGER NOT NULL, category_name TEXT NOT NULL, prefix TEXT NOT NULL, sort_order INTEGER DEFAULT 0, created_at INTEGER)")
+            .execute(&pool).await.unwrap();
         sqlx::query("CREATE TABLE IF NOT EXISTS dynamic_bundles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, tag_id INTEGER NOT NULL, base_tags TEXT, include_all_tracks BOOLEAN NOT NULL DEFAULT 0, bpm_min REAL, bpm_max REAL, pmv_categories TEXT, file_types TEXT, exclude_wav_sources BOOLEAN NOT NULL DEFAULT 1, keys TEXT, rating_min INTEGER, play_count_min INTEGER, created_at INTEGER DEFAULT 0, updated_at INTEGER DEFAULT 0)")
             .execute(&pool).await.unwrap();
 
@@ -741,17 +746,23 @@ mod tests {
     async fn test_resolve_dynamic_bundle_base_tags() {
         let pool = create_test_db().await;
 
-        // Create playlists + tracks + links
-        sqlx::query("INSERT INTO service_playlists (id, name, service, playlist_id) VALUES (1, 'house', 'test', 'p:1'), (2, 'techno', 'test', 'p:2')")
-            .execute(&pool).await.unwrap();
-
-        // Track 1 in playlist "house", Track 2 in playlist "techno", Track 3 in both
         insert_file(&pool, 1, "flac", None, None, 1).await;
         insert_file(&pool, 2, "flac", None, None, 2).await;
         insert_file(&pool, 3, "flac", None, None, 3).await;
 
-        sqlx::query("INSERT INTO service_playlist_tracks (playlist_id, track_id) VALUES (1, 1), (2, 2), (1, 3), (2, 3)")
-            .execute(&pool).await.unwrap();
+        // Base tags resolve against `file_resolved_tags`, which is what a
+        // parent tag (e.g. `afterhours`) yields too — no same-named playlist
+        // required. Mixed case checks the case-insensitive match.
+        for (file_id, tag) in [(1, "House"), (2, "techno"), (3, "techno")] {
+            sqlx::query(
+                "INSERT INTO file_resolved_tags (file_id, tag_id, tag_name, category_id, category_name, prefix, created_at) VALUES (?, 1, ?, 1, 'Setlist', 'S', 0)",
+            )
+            .bind(file_id)
+            .bind(tag)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
 
         let db = DynamicBundle {
             id: 1,
@@ -775,7 +786,7 @@ mod tests {
         assert_eq!(
             file_ids.len(),
             3,
-            "All three files have a track in at least one base playlist"
+            "each file's track resolves to at least one base tag"
         );
     }
 

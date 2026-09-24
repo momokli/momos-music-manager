@@ -99,6 +99,12 @@ All notable changes to Momo's Music Manager.
 
 ### Fixed
 
+- **Dynamic Bundles: BASE-Tags wirkten nicht**: Der `baseTags`-Filter matchte
+  exakte **Playlist-Namen** statt der aufgelösten Tags. Ein Parent-Tag wie
+  `afterhours` (das über `v_resolved_tags` auf 2725 Tracks auflöst, aber keine
+  gleichnamige Playlist hat) lieferte deshalb **0 Treffer**. Jetzt matcht der
+  Filter gegen `file_resolved_tags` (parent-aufgelöst, case-insensitiv).
+
 - **Backpack-Playlist wurde nie angelegt**: `get_current_user_id` gab die rspotify-*URI*
   (`spotify:user:<id>`) statt der blanken Id zurück → `POST
   /v1/users/spotify:user:<id>/playlists` → **400 Bad Request**. Ebenso lieferte
