@@ -11,11 +11,108 @@ use super::types::*;
 
 // ── Resolution ─────────────────────────────────────────────────────────────
 
+/// A candidate file plus the attributes needed for ranking + key balance.
+#[derive(Debug, Clone)]
+struct Candidate {
+    file_id: i64,
+    rating: i64,
+    play_count: i64,
+    last_played: i64,
+    musical_key: String,
+}
+
+/// Score used for "top N". `rank_by` picks the signal; the default blends
+/// rating (weighted) with the play count (log-scaled so a handful of heavily
+/// played tracks don't dominate).
+fn score(rank_by: Option<&str>, c: &Candidate) -> f64 {
+    let rating = c.rating as f64;
+    let plays = (1.0 + c.play_count as f64).ln();
+    match rank_by.unwrap_or("rating_playcount") {
+        "rating" => rating,
+        "playcount" => c.play_count as f64,
+        "recent" => c.last_played as f64,
+        "none" => 0.0,
+        // Default blend.
+        _ => rating * 3.0 + plays,
+    }
+}
+
+/// Sort candidates and apply the bundle's `diversify_keys` + `limit_count`.
+///
+/// Ordering is deterministic (score desc, then `file_id` asc) so the
+/// materialised tag membership is stable across refreshes.
+fn rank_and_select(mut candidates: Vec<Candidate>, db: &DynamicBundle) -> Vec<i64> {
+    candidates.sort_by(|a, b| {
+        score(db.rank_by.as_deref(), b)
+            .partial_cmp(&score(db.rank_by.as_deref(), a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.file_id.cmp(&b.file_id))
+    });
+
+    let selected: Vec<i64> = if db.diversify_keys {
+        diversify(&candidates, db.limit_count)
+    } else {
+        candidates.iter().map(|c| c.file_id).collect()
+    };
+
+    match db.limit_count {
+        Some(n) if n >= 0 => selected.into_iter().take(n as usize).collect(),
+        _ => selected,
+    }
+}
+
+/// Round-robin the ranked candidates across Camelot keys (24 keys plus a
+/// `(none)` bucket): each key contributes its best remaining file in turn, so a
+/// key with little material is exhausted early and the rest is filled by global
+/// score. With no `limit` every candidate is returned, just reordered.
+fn diversify(candidates: &[Candidate], limit: Option<i64>) -> Vec<i64> {
+    use std::collections::HashMap;
+
+    // Bucket by key, preserving the global rank order within each bucket.
+    let mut by_key: HashMap<&str, Vec<i64>> = HashMap::new();
+    let mut order: Vec<&str> = Vec::new();
+    for c in candidates {
+        let key = c.musical_key.trim();
+        if !by_key.contains_key(key) {
+            order.push(key);
+        }
+        by_key.entry(key).or_default().push(c.file_id);
+    }
+
+    let cap = match limit {
+        Some(n) if n >= 0 => n as usize,
+        _ => candidates.len(),
+    };
+
+    let mut out: Vec<i64> = Vec::with_capacity(cap);
+    let mut round = 0usize;
+    loop {
+        let mut progressed = false;
+        for key in &order {
+            if out.len() >= cap {
+                return out;
+            }
+            if let Some(bucket) = by_key.get(*key) {
+                if let Some(id) = bucket.get(round) {
+                    out.push(*id);
+                    progressed = true;
+                }
+            }
+        }
+        if !progressed {
+            return out;
+        }
+        round += 1;
+    }
+}
+
 /// Resolve a dynamic bundle's filter criteria against the files table.
-/// Returns the file IDs that match all active filters.
+/// Returns the file IDs that match all active filters, ranked and (optionally)
+/// key-balanced + capped per the bundle's `rank_by`/`limit_count`/
+/// `diversify_keys`.
 pub async fn resolve_dynamic_bundle(pool: &Pool<Sqlite>, db: &DynamicBundle) -> Result<Vec<i64>> {
     let (sql, string_binds, int_binds, f64_binds) = build_resolve_sql(db);
-    let mut q = sqlx::query_as::<_, (i64,)>(&sql);
+    let mut q = sqlx::query_as::<_, (i64, i64, i64, i64, String)>(&sql);
     for v in &string_binds {
         q = q.bind(v.as_str());
     }
@@ -25,8 +122,9 @@ pub async fn resolve_dynamic_bundle(pool: &Pool<Sqlite>, db: &DynamicBundle) -> 
     for v in &f64_binds {
         q = q.bind(*v);
     }
-    let rows: Vec<(i64,)> = q.fetch_all(pool).await?;
-    Ok(rows.into_iter().map(|r| r.0).collect())
+    let rows: Vec<(i64, i64, i64, i64, String)> = q.fetch_all(pool).await?;
+    let candidates = rows.into_iter().map(to_candidate).collect();
+    Ok(rank_and_select(candidates, db))
 }
 
 /// Same as `resolve_dynamic_bundle` but runs inside an existing transaction.
@@ -35,7 +133,7 @@ pub async fn resolve_dynamic_bundle_in_tx(
     db: &DynamicBundle,
 ) -> Result<Vec<i64>> {
     let (sql, string_binds, int_binds, f64_binds) = build_resolve_sql(db);
-    let mut q = sqlx::query_as::<_, (i64,)>(&sql);
+    let mut q = sqlx::query_as::<_, (i64, i64, i64, i64, String)>(&sql);
     for v in &string_binds {
         q = q.bind(v.as_str());
     }
@@ -45,8 +143,19 @@ pub async fn resolve_dynamic_bundle_in_tx(
     for v in &f64_binds {
         q = q.bind(*v);
     }
-    let rows: Vec<(i64,)> = q.fetch_all(&mut *tx).await?;
-    Ok(rows.into_iter().map(|r| r.0).collect())
+    let rows: Vec<(i64, i64, i64, i64, String)> = q.fetch_all(&mut *tx).await?;
+    let candidates = rows.into_iter().map(to_candidate).collect();
+    Ok(rank_and_select(candidates, db))
+}
+
+fn to_candidate(r: (i64, i64, i64, i64, String)) -> Candidate {
+    Candidate {
+        file_id: r.0,
+        rating: r.1,
+        play_count: r.2,
+        last_played: r.3,
+        musical_key: r.4,
+    }
 }
 
 /// Build the resolution SQL and collect bind values.
@@ -55,7 +164,12 @@ pub async fn resolve_dynamic_bundle_in_tx(
 /// WHERE clause order matches this: keys(string), pmv(string), base_tags(string),
 /// rating_min(int), play_count_min(int), bpm(f64).
 fn build_resolve_sql(db: &DynamicBundle) -> (String, Vec<String>, Vec<i64>, Vec<f64>) {
-    let mut sql = String::from("SELECT DISTINCT vft.file_id FROM v_file_track_link vft");
+    let mut sql = String::from(
+        "SELECT DISTINCT vft.file_id, \
+         COALESCE(f.rating, 0), COALESCE(f.play_count, 0), \
+         COALESCE(f.last_played, 0), COALESCE(f.musical_key, '') \
+         FROM v_file_track_link vft JOIN files f ON f.id = vft.file_id",
+    );
     let mut string_binds: Vec<String> = Vec::new();
     let mut int_binds: Vec<i64> = Vec::new();
     let mut f64_binds: Vec<f64> = Vec::new();
@@ -230,6 +344,9 @@ pub async fn create_dynamic_bundle(
     keys: Option<Vec<String>>,
     rating_min: Option<i64>,
     play_count_min: Option<i64>,
+    limit_count: Option<i64>,
+    rank_by: Option<String>,
+    diversify_keys: bool,
 ) -> Result<DynamicBundle> {
     // Find Setlist category
     let cat_id: i64 = sqlx::query_scalar("SELECT id FROM tag_categories WHERE name = 'Setlist'")
@@ -257,8 +374,8 @@ pub async fn create_dynamic_bundle(
 
     let bundle = sqlx::query_as::<_, DynamicBundle>(
         r#"
-        INSERT INTO dynamic_bundles (name, tag_id, base_tags, include_all_tracks, bpm_min, bpm_max, pmv_categories, file_types, exclude_wav_sources, keys, rating_min, play_count_min, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO dynamic_bundles (name, tag_id, base_tags, include_all_tracks, bpm_min, bpm_max, pmv_categories, file_types, exclude_wav_sources, keys, rating_min, play_count_min, limit_count, rank_by, diversify_keys, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING *
         "#,
     )
@@ -274,6 +391,9 @@ pub async fn create_dynamic_bundle(
     .bind(keys_json)
     .bind(rating_min)
     .bind(play_count_min)
+    .bind(limit_count)
+    .bind(rank_by)
+    .bind(diversify_keys)
     .bind(now)
     .bind(now)
     .fetch_one(pool)
@@ -300,6 +420,9 @@ pub async fn update_dynamic_bundle(
     keys: Option<Option<Vec<String>>>,
     rating_min: Option<Option<i64>>,
     play_count_min: Option<Option<i64>>,
+    limit_count: Option<Option<i64>>,
+    rank_by: Option<Option<String>>,
+    diversify_keys: Option<bool>,
 ) -> Result<DynamicBundle> {
     // Fetch existing bundle first
     let existing = get_dynamic_bundle(pool, id)
@@ -409,6 +532,35 @@ pub async fn update_dynamic_bundle(
         }
     }
 
+    if let Some(val) = limit_count {
+        match val {
+            Some(v) => {
+                set_clauses.push("limit_count = ?".to_string());
+                string_params.push(v.to_string());
+            }
+            None => {
+                set_clauses.push("limit_count = NULL".to_string());
+            }
+        }
+    }
+
+    if let Some(val) = rank_by {
+        match val {
+            Some(v) => {
+                set_clauses.push("rank_by = ?".to_string());
+                string_params.push(v);
+            }
+            None => {
+                set_clauses.push("rank_by = NULL".to_string());
+            }
+        }
+    }
+
+    if let Some(val) = diversify_keys {
+        set_clauses.push("diversify_keys = ?".to_string());
+        string_params.push((if val { 1 } else { 0 }).to_string());
+    }
+
     if set_clauses.is_empty() {
         return Ok(existing);
     }
@@ -465,7 +617,7 @@ mod tests {
             .execute(&pool).await.unwrap();
         sqlx::query("CREATE TABLE IF NOT EXISTS tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, category_id INTEGER NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0, backpack BOOLEAN NOT NULL DEFAULT 0)")
             .execute(&pool).await.unwrap();
-        sqlx::query("CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY AUTOINCREMENT, file_path TEXT NOT NULL DEFAULT '', file_hash TEXT NOT NULL DEFAULT '', file_type TEXT NOT NULL DEFAULT '', file_size INTEGER NOT NULL DEFAULT 0, last_modified INTEGER NOT NULL DEFAULT 0, last_scanned INTEGER NOT NULL DEFAULT 0, rating INTEGER NOT NULL DEFAULT 0, play_count INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, bpm REAL, source_of INTEGER, isrc TEXT, title TEXT, artist TEXT, musical_key TEXT)")
+        sqlx::query("CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY AUTOINCREMENT, file_path TEXT NOT NULL DEFAULT '', file_hash TEXT NOT NULL DEFAULT '', file_type TEXT NOT NULL DEFAULT '', file_size INTEGER NOT NULL DEFAULT 0, last_modified INTEGER NOT NULL DEFAULT 0, last_scanned INTEGER NOT NULL DEFAULT 0, rating INTEGER NOT NULL DEFAULT 0, play_count INTEGER NOT NULL DEFAULT 0, last_played INTEGER, created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, bpm REAL, source_of INTEGER, isrc TEXT, title TEXT, artist TEXT, musical_key TEXT)")
             .execute(&pool).await.unwrap();
         sqlx::query("CREATE TABLE IF NOT EXISTS service_tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL DEFAULT '', artist TEXT NOT NULL DEFAULT '', service TEXT NOT NULL DEFAULT '', service_id TEXT NOT NULL DEFAULT '', isrc TEXT, imported_at INTEGER NOT NULL DEFAULT 0)")
             .execute(&pool).await.unwrap();
@@ -480,7 +632,7 @@ mod tests {
             .execute(&pool).await.unwrap();
         sqlx::query("CREATE TABLE IF NOT EXISTS file_resolved_tags (file_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, tag_name TEXT NOT NULL, category_id INTEGER NOT NULL, category_name TEXT NOT NULL, prefix TEXT NOT NULL, sort_order INTEGER DEFAULT 0, created_at INTEGER)")
             .execute(&pool).await.unwrap();
-        sqlx::query("CREATE TABLE IF NOT EXISTS dynamic_bundles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, tag_id INTEGER NOT NULL, base_tags TEXT, include_all_tracks BOOLEAN NOT NULL DEFAULT 0, bpm_min REAL, bpm_max REAL, pmv_categories TEXT, file_types TEXT, exclude_wav_sources BOOLEAN NOT NULL DEFAULT 1, keys TEXT, rating_min INTEGER, play_count_min INTEGER, created_at INTEGER DEFAULT 0, updated_at INTEGER DEFAULT 0)")
+        sqlx::query("CREATE TABLE IF NOT EXISTS dynamic_bundles (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, tag_id INTEGER NOT NULL, base_tags TEXT, include_all_tracks BOOLEAN NOT NULL DEFAULT 0, bpm_min REAL, bpm_max REAL, pmv_categories TEXT, file_types TEXT, exclude_wav_sources BOOLEAN NOT NULL DEFAULT 1, keys TEXT, rating_min INTEGER, play_count_min INTEGER, limit_count INTEGER, rank_by TEXT, diversify_keys BOOLEAN NOT NULL DEFAULT 0, created_at INTEGER DEFAULT 0, updated_at INTEGER DEFAULT 0)")
             .execute(&pool).await.unwrap();
 
         pool
@@ -560,6 +712,9 @@ mod tests {
             keys: None,
             rating_min: None,
             play_count_min: None,
+            limit_count: None,
+            rank_by: None,
+            diversify_keys: false,
             created_at: 0,
             updated_at: 0,
         };
@@ -589,6 +744,9 @@ mod tests {
             keys: None,
             rating_min: None,
             play_count_min: None,
+            limit_count: None,
+            rank_by: None,
+            diversify_keys: false,
             created_at: 0,
             updated_at: 0,
         };
@@ -624,6 +782,9 @@ mod tests {
             keys: None,
             rating_min: None,
             play_count_min: None,
+            limit_count: None,
+            rank_by: None,
+            diversify_keys: false,
             created_at: 0,
             updated_at: 0,
         };
@@ -667,6 +828,9 @@ mod tests {
             keys: Some(r#"["4m"]"#.to_string()),
             rating_min: None,
             play_count_min: None,
+            limit_count: None,
+            rank_by: None,
+            diversify_keys: false,
             created_at: 0,
             updated_at: 0,
         };
@@ -705,6 +869,9 @@ mod tests {
             keys: None,
             rating_min: Some(2),
             play_count_min: None,
+            limit_count: None,
+            rank_by: None,
+            diversify_keys: false,
             created_at: 0,
             updated_at: 0,
         };
@@ -735,6 +902,9 @@ mod tests {
             keys: None,
             rating_min: None,
             play_count_min: None,
+            limit_count: None,
+            rank_by: None,
+            diversify_keys: false,
             created_at: 0,
             updated_at: 0,
         };
@@ -778,6 +948,9 @@ mod tests {
             keys: None,
             rating_min: None,
             play_count_min: None,
+            limit_count: None,
+            rank_by: None,
+            diversify_keys: false,
             created_at: 0,
             updated_at: 0,
         };
@@ -812,6 +985,9 @@ mod tests {
             keys: None,
             rating_min: None,
             play_count_min: None,
+            limit_count: None,
+            rank_by: None,
+            diversify_keys: false,
             created_at: 0,
             updated_at: 0,
         };
@@ -822,5 +998,80 @@ mod tests {
             0,
             "Files without v_file_track_link should not appear (track-based resolution)"
         );
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    fn cand(id: i64, rating: i64, plays: i64, key: &str) -> Candidate {
+        Candidate {
+            file_id: id,
+            rating,
+            play_count: plays,
+            last_played: 0,
+            musical_key: key.to_string(),
+        }
+    }
+
+    fn bundle(limit: Option<i64>, rank_by: Option<&str>, diversify: bool) -> DynamicBundle {
+        DynamicBundle {
+            id: 1,
+            name: "t".to_string(),
+            tag_id: 1,
+            base_tags: None,
+            include_all_tracks: true,
+            bpm_min: None,
+            bpm_max: None,
+            pmv_categories: None,
+            file_types: None,
+            exclude_wav_sources: false,
+            keys: None,
+            rating_min: None,
+            play_count_min: None,
+            limit_count: limit,
+            rank_by: rank_by.map(|s| s.to_string()),
+            diversify_keys: diversify,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn ranks_by_rating_playcount() {
+        let c = vec![cand(1, 0, 0, "1m"), cand(2, 5, 0, "1m"), cand(3, 0, 100, "1m")];
+        let out = rank_and_select(c, &bundle(None, None, false));
+        // rating*3 dominates a few plays; the play count breaks the 0-tie.
+        assert_eq!(out, vec![2, 3, 1]);
+    }
+
+    #[test]
+    fn limit_truncates_and_tiebreak_is_file_id() {
+        let c = vec![cand(3, 2, 0, "1m"), cand(1, 2, 0, "1m"), cand(2, 2, 0, "1m")];
+        let out = rank_and_select(c, &bundle(Some(2), Some("rating"), false));
+        assert_eq!(out, vec![1, 2], "equal score → lowest file_id, capped at 2");
+    }
+
+    #[test]
+    fn diversify_round_robins_across_keys() {
+        let c = vec![
+            cand(1, 5, 0, "1m"),
+            cand(2, 4, 0, "1m"),
+            cand(3, 3, 0, "1m"),
+            cand(4, 5, 0, "2m"),
+            cand(5, 5, 0, "3m"),
+            cand(6, 4, 0, "3m"),
+        ];
+        let out = rank_and_select(c, &bundle(Some(6), Some("rating"), true));
+        // round 0: 1m→1, 2m→4, 3m→5 ; round 1: 1m→2, 3m→6 ; round 2: 1m→3
+        assert_eq!(out, vec![1, 4, 5, 2, 6, 3]);
+    }
+
+    #[test]
+    fn diversify_without_limit_returns_everything() {
+        let c = vec![cand(1, 1, 0, "1m"), cand(2, 1, 0, "8d"), cand(3, 1, 0, "")];
+        let out = rank_and_select(c, &bundle(None, Some("none"), true));
+        assert_eq!(out.len(), 3);
     }
 }

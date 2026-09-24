@@ -45,6 +45,9 @@ const state = {
   editKeys: [],
   editRatingMin: null,
   editPlayCountMin: null,
+  editLimit: null,
+  editRankBy: null,
+  editDiversifyKeys: false,
 
   // Tag typeahead
   tagSearch: "",
@@ -265,6 +268,37 @@ function renderBundleDetail() {
       <div class="db-edit-section" style="flex:1;">
         <div class="db-edit-label">Min Plays</div>
         <input type="number" class="input-text" id="db-edit-play-count-min" value="${state.editPlayCountMin ?? ""}" placeholder="0" min="0" style="width:80px;">
+      </div>
+    </div>
+
+    <!-- Selection: top N + Camelot balance -->
+    <div style="display:flex;gap:var(--space-4);align-items:flex-end;flex-wrap:wrap;">
+      <div class="db-edit-section">
+        <div class="db-edit-label">Limit (top N)</div>
+        <input type="number" class="input-text" id="db-edit-limit" value="${state.editLimit ?? ""}" placeholder="all" min="0" style="width:90px;">
+      </div>
+      <div class="db-edit-section">
+        <div class="db-edit-label">Rank by</div>
+        <select class="input-text" id="db-edit-rank-by" style="width:190px;">
+          ${[
+            ["", "Rating + Plays (default)"],
+            ["rating", "Rating"],
+            ["playcount", "Play count"],
+            ["recent", "Recently played"],
+            ["none", "No ranking"],
+          ]
+            .map(
+              ([v, label]) =>
+                `<option value="${v}" ${(state.editRankBy ?? "") === v ? "selected" : ""}>${label}</option>`,
+            )
+            .join("")}
+        </select>
+      </div>
+      <div class="db-edit-section">
+        <label style="display:flex;align-items:center;gap:6px;font-size:0.85rem;cursor:pointer;">
+          <input type="checkbox" id="db-edit-diversify-keys" ${state.editDiversifyKeys ? "checked" : ""}>
+          Balance across Camelot keys
+        </label>
       </div>
     </div>
 
@@ -537,6 +571,31 @@ function wireEditFormEvents(container, signal) {
     });
   }
 
+  // ── Limit (top N) ──
+  const limitInput = container.querySelector("#db-edit-limit");
+  if (limitInput) {
+    limitInput.addEventListener("input", () => {
+      const v = limitInput.value.trim();
+      state.editLimit = v !== "" ? parseInt(v, 10) : null;
+    });
+  }
+
+  // ── Rank by ──
+  const rankBy = container.querySelector("#db-edit-rank-by");
+  if (rankBy) {
+    rankBy.addEventListener("change", () => {
+      state.editRankBy = rankBy.value || null;
+    });
+  }
+
+  // ── Diversify keys ──
+  const diversify = container.querySelector("#db-edit-diversify-keys");
+  if (diversify) {
+    diversify.addEventListener("change", () => {
+      state.editDiversifyKeys = diversify.checked;
+    });
+  }
+
   // ── Base tag typeahead ──
   wireBaseTagTypeahead(container, signal);
 
@@ -770,6 +829,9 @@ async function selectBundle(container, bundleId) {
     state.editKeys = b.keys ? (Array.isArray(b.keys) ? b.keys : JSON.parse(b.keys)) : [];
     state.editRatingMin = b.ratingMin ?? null;
     state.editPlayCountMin = b.playCountMin ?? null;
+    state.editLimit = b.limitCount ?? null;
+    state.editRankBy = b.rankBy ?? null;
+    state.editDiversifyKeys = b.diversifyKeys ?? false;
 
     // Re-render detail
     if (detail) {
@@ -820,6 +882,9 @@ async function saveBundle(container) {
     keys: state.editKeys.length > 0 ? state.editKeys : null,
     ratingMin: state.editRatingMin,
     playCountMin: state.editPlayCountMin,
+    limitCount: state.editLimit,
+    rankBy: state.editRankBy,
+    diversifyKeys: state.editDiversifyKeys,
   };
 
   try {
@@ -943,6 +1008,9 @@ function resetForm() {
   state.editKeys = [];
   state.editRatingMin = null;
   state.editPlayCountMin = null;
+  state.editLimit = null;
+  state.editRankBy = null;
+  state.editDiversifyKeys = false;
   state.previewTracks = [];
   state.previewLoading = false;
 }

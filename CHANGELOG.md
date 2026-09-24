@@ -8,6 +8,14 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **Dynamic Bundles: Top-N + Camelot-Balance**: Bundles können jetzt auf die
+  besten **N** Dateien begrenzt werden (`limitCount`) nach einem wählbaren
+  Ranking (`rankBy`: `rating_playcount` (Default: `rating*3 + ln(1+plays)`),
+  `rating`, `playcount`, `recent`, `none`) — und optional die Auswahl über die
+  24 Camelot-Keys **round-robin ausbalancieren** (`diversifyKeys`), sodass jeder
+  Key vertreten ist; dünn besetzte Keys geben alles, der Rest wird nach Score
+  aufgefüllt. Deterministisch (Tiebreak `file_id`). Neu in der UI im
+  Bundle-Editor; Migration 029.
 - **`cleanup-redundant` CLI**: löscht redundante lokale Formate (z. B. einen lokal
   vorhandenen flac, wenn der bevorzugte `stem.m4a` desselben Tracks ebenfalls lokal
   und der flac im Object Store gesichert ist). Die Sicherheitsprüfung akzeptiert nur

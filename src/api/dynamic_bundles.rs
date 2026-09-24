@@ -41,6 +41,12 @@ struct CreateDynamicBundleRequest {
     keys: Option<Vec<String>>,
     rating_min: Option<i64>,
     play_count_min: Option<i64>,
+    #[serde(default)]
+    limit_count: Option<i64>,
+    #[serde(default)]
+    rank_by: Option<String>,
+    #[serde(default)]
+    diversify_keys: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,6 +64,10 @@ struct UpdateDynamicBundleRequest {
     keys: Option<Option<Vec<String>>>,
     rating_min: Option<Option<i64>>,
     play_count_min: Option<Option<i64>>,
+    limit_count: Option<Option<i64>>,
+    #[serde(default)]
+    rank_by: Option<Option<String>>,
+    diversify_keys: Option<bool>,
 }
 
 /// Track preview row for the frontend preview table.
@@ -150,6 +160,9 @@ async fn create_handler(
         request.keys,
         request.rating_min,
         request.play_count_min,
+        request.limit_count,
+        request.rank_by,
+        request.diversify_keys,
     )
     .await
     {
@@ -228,6 +241,9 @@ async fn update_handler(
         request.keys,
         request.rating_min,
         request.play_count_min,
+        request.limit_count,
+        request.rank_by,
+        request.diversify_keys,
     )
     .await
     {
