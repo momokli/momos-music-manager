@@ -88,6 +88,8 @@ pub async fn init(pool: &Pool<Sqlite>, store: &Store) -> anyhow::Result<()> {
             original_path TEXT,
             isrc          TEXT,
             name          TEXT,
+            group_key     TEXT,
+            stem_type     TEXT,
             created_at    INTEGER NOT NULL
         );
         "#,
@@ -95,8 +97,101 @@ pub async fn init(pool: &Pool<Sqlite>, store: &Store) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    // Additive columns for stores created before stem grouping existed.
+    for col in ["group_key TEXT", "stem_type TEXT"] {
+        let _ = sqlx::query(&format!("ALTER TABLE store_objects ADD COLUMN {col}"))
+            .execute(pool)
+            .await;
+    }
+
     tokio::fs::create_dir_all(store.tmp_dir()).await?;
     Ok(())
+}
+
+/// Metadata for [`import_file`].
+#[derive(Debug, Default, Clone)]
+pub struct ImportMeta {
+    pub content_type: Option<String>,
+    pub original_path: Option<String>,
+    pub isrc: Option<String>,
+    pub name: Option<String>,
+    /// Track the object belongs to (stem grouping).
+    pub group_key: Option<String>,
+    /// Stem part (`vocals`/`bass`/`drums`/`instrumental`/`other`) when applicable.
+    pub stem_type: Option<String>,
+}
+
+/// Place the already-canonicalised file at `src` into the store under `hash` and
+/// record its metadata. Idempotent: an existing object is left untouched (but its
+/// metadata row is still ensured).
+///
+/// Returns `true` when the bytes were newly stored.
+///
+/// This is the filesystem/DB entry point used by the `store-import` migration; the
+/// HTTP `PUT` handler is the normal path for MMM uploads.
+///
+/// The caller is responsible for handing in **canonicalised** bytes (see MMM's
+/// `store::canonicalise_to`, which clears the Comment tag) so that the SHA-256
+/// matches objects uploaded by MMM.
+pub async fn import_file(
+    pool: &Pool<Sqlite>,
+    store: &Store,
+    hash: &str,
+    src: &Path,
+    meta: &ImportMeta,
+) -> anyhow::Result<bool> {
+    if !valid_hash(hash) {
+        anyhow::bail!("invalid hash {hash}");
+    }
+    let dest = store.path_for(hash);
+    let size = std::fs::metadata(src)?.len();
+
+    let stored = if dest.exists() {
+        false
+    } else {
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Rename is cheapest when src already lives on the store's filesystem;
+        // a staging directory elsewhere gives EXDEV, so fall back to a copy
+        // through the store's own tmp dir (same filesystem as the destination).
+        match std::fs::rename(src, &dest) {
+            Ok(()) => true,
+            Err(e) if e.raw_os_error() == Some(18) => {
+                std::fs::create_dir_all(store.tmp_dir())?;
+                let tmp = store
+                    .tmp_dir()
+                    .join(format!("{}-import", uuid::Uuid::new_v4()));
+                std::fs::copy(src, &tmp)?;
+                std::fs::rename(&tmp, &dest)?;
+                let _ = std::fs::remove_file(src);
+                true
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
+
+    sqlx::query(
+        "INSERT INTO store_objects
+           (hash, size, content_type, original_path, isrc, name, group_key, stem_type, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(hash) DO UPDATE SET
+           group_key = COALESCE(store_objects.group_key, excluded.group_key),
+           stem_type = COALESCE(store_objects.stem_type, excluded.stem_type)",
+    )
+    .bind(hash)
+    .bind(size as i64)
+    .bind(&meta.content_type)
+    .bind(&meta.original_path)
+    .bind(&meta.isrc)
+    .bind(&meta.name)
+    .bind(&meta.group_key)
+    .bind(&meta.stem_type)
+    .bind(crate::db::now())
+    .execute(pool)
+    .await?;
+
+    Ok(stored)
 }
 
 // ── Handlers ───────────────────────────────────────────────────────────────

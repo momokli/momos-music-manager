@@ -8,6 +8,11 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **`store-import`** (music-api): einmaliges Migrations-Bin, das einen Verzeichnisbaum
+  (z. B. die NAS-Backups) kanonisiert wie MMM (Comment-Tag geleert, WAV roh), in den
+  content-addressed Store auf `.200` legt und pro Objekt Metadaten schreibt. Neue
+  Spalten `store_objects.group_key` (Track) und `stem_type` (vocals/bass/drums/…) für
+  die Stem-Parts pro Track. Idempotent, schreibt ein Manifest für den DB-Abgleich.
 - **Remote object store (Upload-Seite)**: MMM lädt die Bibliothek in einen
   content-addressed Store auf dem Musik-Host und kann danach fragen, ob eine
   Datei gesichert ist. Objekte sind die **kanonisierte** Datei (Comment-Tag

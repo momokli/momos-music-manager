@@ -23,6 +23,7 @@ anyhow = "1"
 thiserror = "1"
 dotenvy = "0.15"
 walkdir = "2.5"
+lofty = "0.20"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
