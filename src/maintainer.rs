@@ -182,7 +182,9 @@ pub async fn start_maintainer(
                     }
                 };
 
-            if backpack_tag_count > 0 {
+            if backpack_tag_count > 0
+                && crate::backpack::backpack_sync_enabled(&db).await
+            {
                 crate::tasks::start_backpack_sync_task(&task_manager, &db, &store).await;
             }
         }
@@ -318,14 +320,6 @@ pub fn needs_full_scan(last_scanned: Option<i64>, now: i64, max_age_secs: u64) -
     }
 }
 
-/// Parse a backup path in the format `host:/remote/path` into its components.
-pub fn parse_backup_path(backup_path: &str) -> Option<(&str, &str)> {
-    backup_path.split_once(':')
-}
-
-/// Determine whether backup discovery should run, based on the last run timestamp
-/// and the configured interval.
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,44 +344,11 @@ mod tests {
         assert!(!needs_full_scan(Some(0), 3600, 3600));
     }
 
-    #[test]
-    fn test_parse_backup_path_valid() {
-        let result = parse_backup_path("backup:/volume1/media/stems");
-        assert_eq!(result, Some(("backup", "/volume1/media/stems")));
-    }
 
-    #[test]
-    fn test_parse_backup_path_no_colon() {
-        let result = parse_backup_path("invalidpath");
-        assert_eq!(result, None);
-    }
 
-    #[test]
-    fn test_parse_backup_path_multiple_colons() {
-        let result = parse_backup_path("host:/path/to/dir:extra");
-        assert_eq!(result, Some(("host", "/path/to/dir:extra")));
-    }
 
-    #[test]
-    fn test_parse_backup_path_empty_string() {
-        // Split on empty string returns None (no colon found)
-        let result = parse_backup_path("");
-        assert_eq!(result, None);
-    }
 
-    #[test]
-    fn test_parse_backup_path_empty_host() {
-        // Colon at start: host is empty, path is present
-        let result = parse_backup_path(":/remote/path");
-        assert_eq!(result, Some(("", "/remote/path")));
-    }
 
-    #[test]
-    fn test_parse_backup_path_no_path() {
-        // Colon at end: host is present, path is empty
-        let result = parse_backup_path("host:");
-        assert_eq!(result, Some(("host", "")));
-    }
 
 
 

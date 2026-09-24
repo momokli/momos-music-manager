@@ -107,6 +107,10 @@ All notable changes to Momo's Music Manager.
 
 ### Fixed
 
+- **Backpack-File-Sync-Schalter galt nicht im Maintainer**: Der Maintainer startete
+  den Backpack-File-Sync stündlich, auch wenn `backpack.sync_enabled = 0` gesetzt war
+  (der Schalter war nur am API-Handler und beim App-Start wirksam). Jetzt prüft auch
+  der Maintainer den Schalter. Toter `parse_backup_path` entfernt.
 - **Dynamic Bundles: BASE-Tags wirkten nicht**: Der `baseTags`-Filter matchte
   exakte **Playlist-Namen** statt der aufgelösten Tags. Ein Parent-Tag wie
   `afterhours` (das über `v_resolved_tags` auf 2725 Tracks auflöst, aber keine
