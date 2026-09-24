@@ -1465,7 +1465,8 @@ das Steuerelement dafür.
 
 Entfernt:
 - Endpunkte `GET /api/backpack`, `POST /api/backpack/push`, `POST /api/backpack/pull`,
-  `POST /api/backpack/sync-enabled` und die Backpack-Seite (Frontend).
+  `POST /api/backpack/sync-enabled` sowie die **Spotify-Transport-Karten** der
+  Backpack-Seite (Playlist-Status, Push, music-api-Pull).
 - Aus `src/backpack.rs`: Materialisierung, `BackpackSpotifyOps`/`BackpackDeemixOps`,
   `MaterializeOptions/Outcome`, `create_backpack_playlist`, `backpack_signature`,
   `resolve_backpack_track_uris`, `backpack_status`, `BackpackSyncCoordinator`,
@@ -1475,14 +1476,20 @@ Entfernt:
 - Die `settings`-Keys `backpack.{playlist_id,playlist_url,signature,dirty_at,last_push_*}`.
 
 Geblieben (Keep/Datei-Pflege):
+- Die **Backpack-Seite** — sie ist die Steuerung für „das will ich auf dem Mac
+  haben": Quellen (backpack-Tags ∪ aktive Subscriptions), Belegung, File-Sync-Schalter
+  und Sync All. Der Transport ist raus, die Keep-/Format-Pflege bleibt.
 - `get_backpack_track_ids`/`get_backpack_file_ids`/`get_backpack_family_file_ids`
   (prune-Schutz, Backpack-Pull-Kandidaten).
-- `backpack_sync_enabled` (+ `set_backpack_sync_enabled`) und `POST /api/storage/sync-backpack`
-  für den Datei-Sync (fehlende Dateien aus dem Store holen + redundante Formate aufräumen).
+- `backpack_sync_enabled` (+ `set_backpack_sync_enabled`), jetzt über
+  `GET`/`PUT /api/storage/settings/backpack-sync`, und `POST /api/storage/sync-backpack`
+  für den Datei-Sync (fehlende Dateien aus dem Store holen + redundante Formate aufräumen,
+  z. B. FLAC löschen, wenn `stem.m4a` da ist — Format-Priorität ist konfigurierbar).
 
 **Consequences**:
 - Keine Spotify-Playlist mehr; die bestehende Playlist muss **manuell** in Spotify gelöscht
   werden (der Transport-Code, der das könnte, ist weg).
-- Der File-Sync-Schalter ist nur noch per API/DB setzbar (keine UI mehr dafür).
+- Der File-Sync-Schalter ist wieder in der UI (Backpack-Seite), jetzt über
+  `PUT /api/storage/settings/backpack-sync`.
 - Der music-api-Order-Fortschritt (`demand/ordered/imported`) hatte nur auf der Backpack-Seite
   eine Anzeige; aktuell ohne UI (Follow-up: kleiner Status-Endpunkt / Karte auf der Services-Seite).

@@ -806,6 +806,75 @@ async fn storage_format_priority_put_invalid() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ═════════════════════════════════════════════════════════════════════════
+// /api/storage/settings/backpack-sync
+// ═════════════════════════════════════════════════════════════════════════
+
+/// Default is enabled when nothing has been persisted.
+#[tokio::test]
+async fn storage_backpack_sync_defaults_enabled() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/storage/settings/backpack-sync", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(resp.status().is_success(), "expected 200, got {}", resp.status());
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["data"]["enabled"], serde_json::json!(true));
+}
+
+/// PUT then GET roundtrips the switch, both directions.
+#[tokio::test]
+async fn storage_backpack_sync_put_and_get() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let put = client
+        .put(format!("{}/api/storage/settings/backpack-sync", base))
+        .json(&serde_json::json!({ "enabled": false }))
+        .send()
+        .await
+        .unwrap();
+    assert!(put.status().is_success(), "PUT expected 200, got {}", put.status());
+
+    let get = client
+        .get(format!("{}/api/storage/settings/backpack-sync", base))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = get.json().await.unwrap();
+    assert_eq!(body["data"]["enabled"], serde_json::json!(false));
+
+    // Persisted server-side.
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'backpack.sync_enabled'")
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored.as_deref(), Some("0"));
+
+    // Re-enable.
+    let put = client
+        .put(format!("{}/api/storage/settings/backpack-sync", base))
+        .json(&serde_json::json!({ "enabled": true }))
+        .send()
+        .await
+        .unwrap();
+    assert!(put.status().is_success());
+
+    let get = client
+        .get(format!("{}/api/storage/settings/backpack-sync", base))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = get.json().await.unwrap();
+    assert_eq!(body["data"]["enabled"], serde_json::json!(true));
+}
+
+// ═════════════════════════════════════════════════════════════════════════
 // /api/storage/sync-store
 // ═════════════════════════════════════════════════════════════════════════
 

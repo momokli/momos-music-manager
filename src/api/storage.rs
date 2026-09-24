@@ -166,6 +166,39 @@ async fn format_priority_put_handler(
     .into_response()
 }
 
+// ── Backpack file-sync switch ────────────────────────────────────────────────
+
+/// GET /api/storage/settings/backpack-sync
+/// Whether the Backpack *file* sync (pull missing files + format cleanup) may run.
+async fn backpack_sync_get_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let enabled = crate::backpack::backpack_sync_enabled(&state.db).await;
+    Json(ApiResponse {
+        data: serde_json::json!({ "enabled": enabled }),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct BackpackSyncRequest {
+    enabled: bool,
+}
+
+/// PUT /api/storage/settings/backpack-sync
+/// Persists the Backpack file-sync switch. Turning it off pauses every
+/// automatic pull (startup and tag toggles) as well as the manual Sync All.
+async fn backpack_sync_put_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BackpackSyncRequest>,
+) -> impl IntoResponse {
+    match crate::backpack::set_backpack_sync_enabled(&state.db, body.enabled).await {
+        Ok(()) => Json(ApiResponse {
+            data: serde_json::json!({ "enabled": body.enabled }),
+        })
+        .into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
 /// POST /api/storage/sync-backpack
 /// Pulls missing files from backup for all backpack tags.
 /// For each track in a backpack tag, ensures the best format exists locally.
@@ -417,6 +450,10 @@ pub(super) fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/storage/settings/format-priority",
             get(format_priority_get_handler).put(format_priority_put_handler),
+        )
+        .route(
+            "/api/storage/settings/backpack-sync",
+            get(backpack_sync_get_handler).put(backpack_sync_put_handler),
         )
                 .route("/api/storage/purge-orphans", post(purge_orphans_handler))
         .route(
