@@ -34,6 +34,12 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **Restore + Streaming aus dem Object Store**: Eine nicht mehr lokale Datei wird
+  jetzt aus dem content-addressed Store zurückgeholt statt per rsync. `BackpackSync`
+  lädt Objekte über `GET /objects/{hash}` und schreibt danach den **Comment aus der
+  DB neu** (der Upload hatte ihn geleert), `POST /api/files/{id}/pull-from-backup`
+  nutzt denselben Pfad, und `GET /api/files/{id}/stream` proxyt remote-only Dateien
+  aus dem Store inklusive `Range`-Durchreichung (Playback/ffmpeg bleiben intakt).
 - **Backpack-Seite verwaltet das Backpack**: Playlist-Quellen (subscribte Playlists)
   und Tag-Quellen werden nebeneinander gelistet und sind dort direkt entfernbar (Tag:
   `PUT /api/tags/{id}/backpack`, Playlist: `DELETE /api/playlists/subscriptions/{id}`).
@@ -48,6 +54,14 @@ All notable changes to Momo's Music Manager.
 
 ### Removed
 
+- **NAS/SSH-Backup im Default-Betrieb stillgelegt**: Der Maintainer fährt nur noch
+  Scan-/Refresh-/Prune-/Traktor-Checks — die SSH-Checks (Unbacked-Zähler,
+  Backup-Discovery, Backup-Verify) und der `auto_backup`-Poller sind entfernt, ebenso
+  das Auto-Reconcile beim Start. `BackpackSync` und der Pull-from-Backup-Handler
+  behandeln nur noch `store:<sha256>`-Locations; eine alte `host:/pfad`-Location wird
+  übersprungen und geloggt. `dufs` (`:5000`, `-A`) auf dem Musik-Host ist gestoppt.
+  `src/auto_backup.rs` ist gelöscht; `folders.backup_path`/`auto_backup` bleiben als
+  deprecated Spalten. Siehe ADR-066.
 - **Einzel-Playlist-Pushes an deemix entfernt**: Der einzige deemix-Transport ist
   jetzt die eine aggregierte Backpack-Playlist. Entfernt wurden der generische
   Endpoint `POST /api/services/deemix/queue` (die Route bleibt nur `GET`; ein POST

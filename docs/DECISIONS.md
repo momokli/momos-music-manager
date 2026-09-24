@@ -1396,3 +1396,45 @@ und liefert die Dateien per ISRC zurück. MMM importiert und verlinkt sie.
 - Bestehende Spotify-Importe bleiben unberührt: die Abgrenzung „Spotify
   importieren = MMM, herunterladen = music-api“ ersetzt die vorherige enge
   Kopplung.
+
+## ADR-066: Restore/Streaming kommen aus dem Object Store — NAS-Pfade sind stillgelegt
+
+**Date**: 2026-09-24
+**Status**: Accepted (implemented)
+
+**Context**: Der Remote-Object-Store (ADR folgt den Store-Uploads, `[store]`,
+`files.content_hash`) machte die rsync/SSH-Backups auf die NAS überflüssig,
+aber die *Lese*-Wege hingen noch am NAS: `BackpackSync` zog fehlende Dateien per
+`rsync`, `POST /api/files/{id}/pull-from-backup` rsyncte, der Maintainer prüfte
+und entdeckte Backups per SSH, und ein `auto_backup`-Poller sowie ein
+Auto-Reconcile beim Start versuchten regelmäßig SSH-Verbindungen. Der NAS-Pfad
+war brüchig (stille Teilfehler, Verifikation nur über Pfad + Größe) und sollte
+weg.
+
+**Decision**: Alles Lesen kommt aus dem content-addressed Store; SSH wird im
+Standard-Betrieb nicht mehr angefasst.
+
+- `backup`-Location ist nur noch restorable, wenn sie `store:<sha256>` ist
+  (`store::store_hash`). Eine alte `host:/pfad`-Location wird übersprungen und
+  geloggt, nicht mehr per rsync behandelt.
+- `BackpackSync` holt Objekte via `store::restore_object` (`GET /objects/{hash}`)
+  und schreibt danach den **Comment aus der DB neu** (`compute_target_comment` →
+  `write_comment_to_file`) — das Ablegen des Comments beim Upload bleibt damit
+  verlustfrei.
+- `file_stream_handler` proxyt remote-only Dateien aus dem Store und reicht
+  `Range` durch (der Store ist range-fähig), damit Playback/ffmpeg weiterlaufen.
+- Der Maintainer fährt nur noch Scan-/Refresh-/Prune-/Traktor-Checks; die
+  SSH-Checks (Unbacked-Zähler, Backup-Discovery, Backup-Verify) und der
+  `auto_backup`-Poller sind entfernt, ebenso das Auto-Reconcile beim Start.
+- `dufs` (`:5000`, `-A`) auf dem Musik-Host ist gestoppt und startet nicht mehr.
+
+**Consequences**:
+
+- Kein SSH/rsync mehr im Default-Pfad — Backup ist eine Hash-Tatsache.
+- Restore ist nur möglich, solange der Store das Objekt noch hat; eine
+  nicht-gesyncte Datei ist nicht restorable (bewusst, `auto_prune` prüft das).
+- Die manuellen NAS-Endpunkte (`/api/storage/backup/*`, `backup-wavs`,
+  `discover-backup`, `/api/backup/test|explore`) und `BackupEngine` existieren
+  noch, werden aber von keinem Default-Flow mehr benutzt und sollen als Nächstes
+  vollständig fallen.
+- `folders.backup_path` / `auto_backup` bleiben als Spalten (deprecated) erhalten.

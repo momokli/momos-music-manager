@@ -1651,8 +1651,12 @@ async fn tag_backpack_handler(
             // When toggling TO backpack, trigger a background sync task
             // (unless the Backpack file sync is switched off).
             if backpack && crate::backpack::backpack_sync_enabled(&state.db).await {
-                let task_id =
-                    crate::tasks::start_backpack_sync_task(&state.task_manager, &state.db).await;
+                let task_id = crate::tasks::start_backpack_sync_task(
+                    &state.task_manager,
+                    &state.db,
+                    &state.config.store,
+                )
+                .await;
                 if task_id.is_empty() {
                     return Json(ApiResponse {
                         data: serde_json::json!({

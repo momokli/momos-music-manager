@@ -505,7 +505,6 @@ async fn serve(
     let global_cancel = poller_cancel.clone();
     let maint_interval = config.maintainer_interval_secs;
     let maint_full_scan_max_age = config.maintainer_full_scan_max_age_secs;
-    let maint_backup_discovery_interval = config.maintainer_backup_discovery_interval_secs;
     let maint_auto_prune = config.maintainer_auto_prune;
     let maint_auto_cleanup_dirs = config.maintainer_auto_cleanup_dirs;
     let maint_traktor_import = config.maintainer_traktor_import_enabled;
@@ -603,43 +602,14 @@ async fn serve(
 
     let _folder_watcher = folder_watcher;
 
-    // Auto-reconcile on startup
-    let recon_db = state.db.clone();
-    let recon_tm = state.task_manager.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        let folders: Vec<momos_music_manager::db::Folder> = sqlx::query_as::<_, momos_music_manager::db::Folder>(
-            "SELECT * FROM folders WHERE backup_path IS NOT NULL AND backup_path != '' AND auto_backup = 1",
-        )
-        .fetch_all(&recon_db)
-        .await
-        .unwrap_or_default();
-        for folder in folders {
-            let unbacked = momos_music_manager::db::get_unbacked_up_files(&recon_db, folder.id)
-                .await
-                .unwrap_or_default();
-            if !unbacked.is_empty() {
-                tracing::info!(
-                    "Auto-reconcile: folder '{}' has {} unbacked files - starting reconcile",
-                    folder.folder_path,
-                    unbacked.len()
-                );
-                momos_music_manager::tasks::start_backup_folder_task(
-                    &recon_tm, &recon_db, folder.id,
-                )
-                .await;
-            } else {
-                tracing::info!(
-                    "Auto-reconcile: folder '{}' already fully backed up",
-                    folder.folder_path
-                );
-            }
-        }
-    });
+    // Auto-reconcile on startup — retired with the NAS backup path. Local
+    // durability is now the object store (`StoreSync`), and restore/pull is
+    // driven by `BackpackSync` and the prune flow.
 
     // Auto-backpack-sync on startup
     let bp_db = state.db.clone();
     let bp_tm = state.task_manager.clone();
+    let bp_store = state.config.store.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(5)).await;
         if !momos_music_manager::backpack::backpack_sync_enabled(&bp_db).await {
@@ -655,7 +625,7 @@ async fn serve(
                 "Startup backpack sync: {} backpack tags found, starting sync",
                 count
             );
-            momos_music_manager::tasks::start_backpack_sync_task(&bp_tm, &bp_db).await;
+            momos_music_manager::tasks::start_backpack_sync_task(&bp_tm, &bp_db, &bp_store).await;
         } else {
             tracing::info!("Startup backpack sync: no backpack tags, skipping");
         }
@@ -774,13 +744,14 @@ async fn serve(
     // Start maintainer
     if maint_interval > 0 {
         let maint_db = state.db.clone();
+        let maint_store = state.config.store.clone();
         tokio::spawn(async move {
             momos_music_manager::maintainer::start_maintainer(
                 maint_db,
                 maint_tm,
+                maint_store,
                 maint_interval,
                 maint_full_scan_max_age,
-                maint_backup_discovery_interval,
                 maint_auto_prune,
                 maint_auto_cleanup_dirs,
                 maint_traktor_import,
@@ -793,12 +764,7 @@ async fn serve(
         info!("Maintainer disabled (interval=0)");
     }
 
-    // Auto-backup poller: every 10 min
-    let auto_db = state.db.clone();
-    let auto_tm = state.task_manager.clone();
-    tokio::spawn(async move {
-        momos_music_manager::auto_backup::start_auto_backup_poller(auto_db, auto_tm).await;
-    });
+    // Auto-backup poller (NAS) — retired; the object store replaces it.
 
     // Telemetry loop: periodic full-DB snapshot + metadata push. Defaults
     // OFF — starts only when telemetry.enabled AND an interval is set. The

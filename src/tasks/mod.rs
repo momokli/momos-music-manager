@@ -3655,18 +3655,29 @@ pub async fn start_prune_files_task(
 /// Start a background task to sync files in backpack tags.
 /// For each track in backpack tags:
 /// 1. Find best local file (stem > FLAC > MP3)
-/// 2. If no local file but backup exists: pull from backup
+/// 2. If no local file but a store backup exists: restore it from the object store
 /// 3. If multiple formats: keep only best one, mark others as safe-to-delete
 /// 4. Skip WAV source files entirely
+///
+/// The NAS (rsync/SSH) is retired: a `backup` location is only pullable when it
+/// is a `store:<sha256>` object. A legacy location is skipped and logged.
 pub async fn start_backpack_sync_task(
     task_manager: &TaskManager,
     db: &sqlx::Pool<sqlx::Sqlite>,
+    store: &crate::store::StoreConfig,
 ) -> String {
     let task_type = TaskType::BackpackSync;
     let task = Task::new(task_type, None);
     let task_id = task.id.clone();
     let worker_task_id = task_id.clone();
     let _cancel_token = task.cancel_token.clone();
+
+    let store_client = store.is_configured().then(|| {
+        StoreClient::new(
+            store.base_url.as_deref().unwrap_or_default(),
+            store.token.as_deref().unwrap_or_default(),
+        )
+    });
 
     match task_manager.start_task_unique(task).await {
         Ok(_) => {}
@@ -3762,27 +3773,30 @@ pub async fn start_backpack_sync_task(
                 return Ok(());
             }
 
-            // Resolve backup host
-            let (ssh_host, remote_path) =
-                match crate::db::resolve_backup_host(&db_clone, &c.backup_path).await {
-                    Ok((h, p)) => (h, p),
-                    Err(e) => {
-                        let msg = format!(
-                            "FAILED #{} ({}): cannot resolve backup host — {}",
-                            c.file_id, c.title, e
-                        );
-                        warn!("Backpack sync: {}", msg);
-                        tm.add_log(&worker_task_id, msg).await;
-                        failed += 1;
-                        continue;
-                    }
-                };
+            // Restore from the object store. A backup location is only
+            // pullable when it is a `store:<sha256>` object; the NAS
+            // (rsync/SSH) is retired and a legacy location is skipped.
+            let Some(hash) = crate::store::store_hash(&c.backup_path) else {
+                let msg = format!(
+                    "SKIPPED #{} ({}): backup location '{}' is not a store object (NAS retired)",
+                    c.file_id, c.title, c.backup_path
+                );
+                warn!("Backpack sync: {}", msg);
+                tm.add_log(&worker_task_id, msg).await;
+                failed += 1;
+                continue;
+            };
 
-            let engine = crate::backup::BackupEngine::new(ssh_host.to_string());
             let local = std::path::Path::new(&c.local_path);
+            let restored = match &store_client {
+                Some(client) => {
+                    crate::store::restore_object(client, &db_clone, c.file_id, hash, local).await
+                }
+                None => Err(anyhow::anyhow!("object store is not configured")),
+            };
 
-            match engine.pull_file(&remote_path, local).await {
-                Ok((true, size)) => {
+            match restored {
+                Ok(size) => {
                     pulled += 1;
                     let msg = format!("PULLED #{} ({}) — {} bytes", c.file_id, c.title, size);
                     info!("Backpack sync: {}", msg);
@@ -3802,17 +3816,9 @@ pub async fn start_backpack_sync_task(
                     .execute(&db_clone)
                     .await;
                 }
-                Ok((false, _)) => {
-                    let msg = format!(
-                        "FAILED #{} ({}): rsync returned failure — check SSH config",
-                        c.file_id, c.title
-                    );
-                    warn!("Backpack sync: {}", msg);
-                    tm.add_log(&worker_task_id, msg).await;
-                    failed += 1;
-                }
                 Err(e) => {
-                    let msg = format!("FAILED #{} ({}): pull error — {}", c.file_id, c.title, e);
+                    let msg =
+                        format!("FAILED #{} ({}): store restore error — {}", c.file_id, c.title, e);
                     warn!("Backpack sync: {}", msg);
                     tm.add_log(&worker_task_id, msg).await;
                     failed += 1;

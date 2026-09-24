@@ -33,6 +33,18 @@ use lofty::prelude::*;
 use lofty::tag::ItemKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlx::{Pool, Sqlite};
+
+/// Prefix of a store-backed `file_locations.path` (`backup` type).
+///
+/// A store location is `store:<sha256>`; anything else is a legacy rsync/SSH
+/// location and is ignored for restore (the NAS is retired).
+pub const STORE_PATH_PREFIX: &str = "store:";
+
+/// The object key of a `store:` backup location, or `None` for anything else.
+pub fn store_hash(backup_path: &str) -> Option<&str> {
+    backup_path.strip_prefix(STORE_PATH_PREFIX)
+}
 
 // ── Configuration ──────────────────────────────────────────────────────────
 
@@ -229,6 +241,30 @@ impl StoreClient {
             .with_context(|| format!("store: writing {}", dest.display()))?;
         Ok(())
     }
+
+    /// `GET /objects/{hash}` with a forwarded `Range` header — used by the
+    /// stream proxy so playback/`ffmpeg` keep working for remote-only files.
+    ///
+    /// Returns the raw upstream response so the caller can copy the status,
+    /// `Content-Range`/`Content-Length` headers and the body through unchanged.
+    pub async fn get_range(
+        &self,
+        hash: &str,
+        range: Option<&str>,
+    ) -> Result<reqwest::Response> {
+        let mut req = self
+            .http
+            .get(self.url(&format!("objects/{hash}")))
+            .bearer_auth(&self.token);
+        if let Some(range) = range {
+            req = req.header(reqwest::header::RANGE, range);
+        }
+        let resp = req.send().await.context("store: GET /objects/{hash}")?;
+        if !resp.status().is_success() {
+            return Err(Self::error_for(resp).await);
+        }
+        Ok(resp)
+    }
 }
 
 // ── Canonicalisation + hashing ─────────────────────────────────────────────
@@ -287,6 +323,50 @@ pub fn canonicalise_to(src: &Path, dest: &Path) -> Result<String> {
         let _ = std::fs::remove_file(dest);
     }
     result
+}
+
+// ── Restore ────────────────────────────────────────────────────────────────
+
+/// Restore the object `hash` into `dest` and rewrite its comment from the DB.
+///
+/// The stored object is the *canonical* copy with MMM's Comment tag cleared, so
+/// restoring has two halves: fetch the bytes, then put the comment back. The
+/// comment is regenerated deterministically (`db::compute_target_comment`) from
+/// the file's resolved tags and service IDs — which is precisely why clearing
+/// it before upload was safe. The regenerated value is also written back to
+/// `files.comment` so the DB and the file agree again.
+///
+/// Returns the size of the restored file in bytes.
+pub async fn restore_object(
+    client: &StoreClient,
+    db: &Pool<Sqlite>,
+    file_id: i64,
+    hash: &str,
+    dest: &Path,
+) -> Result<i64> {
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("store: creating {}", parent.display()))?;
+    }
+
+    client.get_to(hash, dest).await?;
+
+    let comment = crate::db::compute_target_comment(db, file_id).await?;
+    let path_str = dest.to_string_lossy().to_string();
+    if let Err(e) = crate::db::write_comment_to_file(&path_str, &comment).await {
+        // The audio is restored either way; a comment-write failure is not fatal.
+        tracing::warn!(
+            "store: restored #{file_id} but could not write the comment: {e:#}"
+        );
+    }
+    let _ = crate::db::update_file_comment(db, file_id, &comment).await;
+
+    let size = tokio::fs::metadata(dest)
+        .await
+        .with_context(|| format!("store: stat {}", dest.display()))?
+        .len() as i64;
+    Ok(size)
 }
 
 #[cfg(test)]
@@ -353,5 +433,14 @@ mod tests {
             serde_json::from_str(r#"{"present":["a"],"missing":["b"]}"#).unwrap();
         assert_eq!(parsed.present, vec!["a".to_string()]);
         assert_eq!(parsed.missing, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn store_hash_reads_only_store_locations() {
+        let hash = "a".repeat(64);
+        assert_eq!(store_hash(&format!("store:{hash}")), Some(hash.as_str()));
+        // Legacy rsync/SSH locations are not restorable.
+        assert_eq!(store_hash("nas:/volume1/stems/song.flac"), None);
+        assert_eq!(store_hash(""), None);
     }
 }

@@ -1,6 +1,6 @@
 # Plan: remote object store on .200 — submits instead of rsync backups
 
-**Status**: in-progress (phases 1-2 done)
+**Status**: in-progress (phases 1-4 done, 5 partly — manual NAS endpoints remain)
 **Branch**: `feat/remote-object-store`
 **Ready for review**: yes
 **Depends on**: `feat/music-api` (the `.200` service: Axum/SQLite, bearer auth, systemd, Caddy)
@@ -120,9 +120,15 @@ keep it off the LAN.
 - [x] A mismatching digest is rejected; re-upload is a no-op; `/objects/check`
       answers present/missing for a bulk list  **(verified live)**
 - [x] MMM writes `file_locations('backup','store:<sha256>')` only for verified objects  **(live: 160 rows, spot-checked against the object's size on `.200`)**
-- [ ] A locally deleted file is restorable from the store **with its comment restored**
-- [ ] A remote-only file streams through `file_stream_handler` with Range support
-- [ ] No default flow uses rsync/SSH; `backup:` is gone from config
+- [x] A locally deleted file is restorable from the store **with its comment restored**
+      (`store::restore_object`; `BackpackSync` + `pull-from-backup`)
+- [x] A remote-only file streams through `file_stream_handler` with Range support
+      (`stream_from_store`, forwards `Range`)
+- [x] No default flow uses rsync/SSH (maintainer SSH checks, `auto_backup` poller and
+      startup auto-reconcile removed). `dufs` stopped. `backup:` was already absent
+      from config; `folders.backup_path`/`auto_backup` remain as deprecated columns.
+- [ ] The manual NAS endpoints (`/api/storage/backup/*`, `backup-wavs`,
+      `discover-backup`, `/api/backup/test|explore`) and `BackupEngine` are deleted
 
 ### Progress
 
@@ -174,3 +180,21 @@ keep it off the LAN.
 | `frontend/pages/{files,storage,folders}.js`    | store config, "backed up", Sync action                              |
 | `tests/*`, `frontend/tests/*`                  | store contract + gate tests                                         |
 | `docs/DECISIONS.md`, `CHANGELOG.md`            | ADR + changelog                                                     |
+
+**Phase 3 — done.** Restore comes from the store.
+
+- `store::restore_object` = `GET /objects/{hash}` + rewrite the comment from the DB
+  (`compute_target_comment` → `write_comment_to_file`), and record `files.comment`.
+- `BackpackSync` and `POST /api/files/{id}/pull-from-backup` use it. A
+  `backup` location is only restorable when it is `store:<sha256>`
+  (`store::store_hash`); a legacy `host:/pfad` location is skipped and logged.
+
+**Phase 4 — done.** `file_stream_handler` proxies remote-only files from the store
+(`stream_from_store`), forwarding `Range` and passing the upstream status /
+`Content-Range` through, so playback and `ffmpeg` keep working.
+
+**Phase 5 — partly done.** The *default* flows no longer touch SSH: the maintainer's
+Unbacked counter, Backup-Discovery and Backup-Verify checks are gone, as are the
+`auto_backup` poller (`src/auto_backup.rs` deleted) and the startup auto-reconcile.
+`dufs` was stopped on the host. The manual endpoints and `BackupEngine` still exist
+(unused by any default flow) and are the remaining step.

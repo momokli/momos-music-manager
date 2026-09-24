@@ -41,12 +41,32 @@ fn authorized(headers: &HeaderMap) -> bool {
 }
 
 async fn spawn_mock() -> String {
-    async fn get_handler(State(state): State<MockState>, Path(hash): Path<String>) -> Response {
+    async fn get_handler(
+        State(state): State<MockState>,
+        Path(hash): Path<String>,
+        headers: HeaderMap,
+    ) -> Response {
         let objects = state.objects.lock().unwrap();
-        match objects.get(&hash) {
-            Some(bytes) => (StatusCode::OK, bytes.clone()).into_response(),
-            None => StatusCode::NOT_FOUND.into_response(),
+        let Some(bytes) = objects.get(&hash) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        // Honour a simple `bytes=start-end` Range so the proxy can be tested.
+        if let Some(range) = headers.get(header::RANGE).and_then(|v| v.to_str().ok())
+            && let Some(rest) = range.strip_prefix("bytes=")
+            && let Some((s, e)) = rest.split_once('-')
+        {
+            let start: usize = s.parse().unwrap_or(0);
+            let end: usize = e.parse().unwrap_or(bytes.len() - 1).min(bytes.len() - 1);
+            let slice = bytes[start..=end].to_vec();
+            let content_range = format!("bytes {start}-{end}/{}", bytes.len());
+            return (
+                StatusCode::PARTIAL_CONTENT,
+                [(header::CONTENT_RANGE, content_range)],
+                slice,
+            )
+                .into_response();
         }
+        (StatusCode::OK, bytes.clone()).into_response()
     }
 
     async fn put_handler(
@@ -204,4 +224,39 @@ async fn client_reports_unauthorized() {
         msg.contains("401") || msg.to_lowercase().contains("unauthor"),
         "error should mention the rejection, got: {msg}"
     );
+}
+
+/// `get_range` forwards the `Range` header upstream and returns the partial
+/// response untouched — the stream proxy relies on both the status and the
+/// `Content-Range` header passing through.
+#[tokio::test]
+async fn client_get_range_forwards_range() {
+    let base = spawn_mock().await;
+    let client = StoreClient::new(&base, TOKEN);
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("canon.flac");
+    let bytes = b"0123456789".to_vec();
+    std::fs::write(&file, &bytes).unwrap();
+    let hash = hex(Sha256::digest(&bytes));
+    client
+        .put(&hash, &file, "/test/canon.flac", None)
+        .await
+        .expect("put");
+
+    let resp = client
+        .get_range(&hash, Some("bytes=2-5"))
+        .await
+        .expect("get_range");
+    assert_eq!(resp.status().as_u16(), 206, "Range must yield 206");
+    assert_eq!(
+        resp.headers().get(header::CONTENT_RANGE).unwrap(),
+        "bytes 2-5/10"
+    );
+    assert_eq!(resp.bytes().await.unwrap().as_ref(), b"2345");
+
+    // No Range → full 200 body.
+    let full = client.get_range(&hash, None).await.expect("get_range full");
+    assert_eq!(full.status().as_u16(), 200);
+    assert_eq!(full.bytes().await.unwrap().as_ref(), bytes.as_slice());
 }

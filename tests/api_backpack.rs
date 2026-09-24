@@ -165,9 +165,13 @@ async fn backpack_sync_switch_gates_the_sync_endpoint() {
         .send()
         .await
         .unwrap();
-    assert_ne!(
-        resp.status(),
-        409,
-        "re-enabled Backpack sync must be allowed again"
+    // The switch is on again, but the object store is not configured in this
+    // test — so the refusal must now be about the store, not the switch.
+    assert_eq!(resp.status(), 409);
+    let json: Value = resp.json().await.unwrap();
+    let error = json["data"]["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("Object store"),
+        "after re-enabling, the only refusal may be the missing store, got: {error}"
     );
 }

@@ -366,7 +366,20 @@ async fn sync_backpack_handler(State(state): State<Arc<AppState>>) -> impl IntoR
             .into_response();
     }
 
-    let task_id = crate::tasks::start_backpack_sync_task(&state.task_manager, &state.db).await;
+    // Restore is only possible from the object store (NAS retired).
+    if !state.config.store.is_configured() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResponse {
+                data: serde_json::json!({ "error": "Object store is not configured" }),
+            }),
+        )
+            .into_response();
+    }
+
+    let task_id =
+        crate::tasks::start_backpack_sync_task(&state.task_manager, &state.db, &state.config.store)
+            .await;
     if task_id.is_empty() {
         return Json(ApiResponse {
             data: serde_json::json!({
@@ -495,50 +508,41 @@ async fn file_pull_from_backup_handler(
             .into_response();
     }
 
-    // 4. Parse backup path to get SSH host and remote path
-    let (ssh_host, remote_path) = match backup_loc.path.split_once(':') {
-        Some((host, path)) => (host.to_string(), path.to_string()),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "Invalid backup path format".to_string(),
-                }),
-            )
-                .into_response();
-        }
+    // 4. Only a store object can be restored — the NAS (rsync/SSH) is retired.
+    let Some(hash) = crate::store::store_hash(&backup_loc.path) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Backup location is not a store object (NAS retired)".to_string(),
+            }),
+        )
+            .into_response();
     };
 
-    // 5. Ensure local parent directory exists
-    if let Some(parent) = local_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent).unwrap_or_default();
-        }
+    // 5. Restore from the object store, rewriting the comment from the DB.
+    if !state.config.store.is_configured() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Object store is not configured".to_string(),
+            }),
+        )
+            .into_response();
     }
 
-    // 6. Rsync from backup to local
-    let dest = format!("{}:{}", ssh_host, remote_path);
-    let output = tokio::process::Command::new("rsync")
-        .arg("-a")
-        .arg("--rsh=ssh")
-        .arg(&dest)
-        .arg(local_path.to_string_lossy().as_ref())
-        .output()
-        .await;
-
-    match output {
-        Ok(out) if out.status.success() => {
-            // 7. Update file_locations: add 'local' entry
-            if let Ok(metadata) = std::fs::metadata(local_path) {
-                let file_size = metadata.len() as i64;
-                let _ = set_file_location(&state.db, id, "local", &file.file_path, file_size).await;
-                // 8. Update last_verified_local
-                let _ =
-                    sqlx::query("UPDATE files SET last_verified_local = unixepoch() WHERE id = ?")
-                        .bind(id)
-                        .execute(&state.db)
-                        .await;
-            }
+    let client = crate::store::StoreClient::new(
+        state.config.store.base_url.as_deref().unwrap_or_default(),
+        state.config.store.token.as_deref().unwrap_or_default(),
+    );
+    let local_dest = std::path::Path::new(&file.file_path);
+    match crate::store::restore_object(&client, &state.db, id, hash, local_dest).await {
+        Ok(size) => {
+            // 6. Record the restored local copy.
+            let _ = set_file_location(&state.db, id, "local", &file.file_path, size).await;
+            let _ = sqlx::query("UPDATE files SET last_verified_local = unixepoch() WHERE id = ?")
+                .bind(id)
+                .execute(&state.db)
+                .await;
 
             Json(ApiResponse {
                 data: serde_json::json!({
@@ -549,17 +553,13 @@ async fn file_pull_from_backup_handler(
             })
             .into_response()
         }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Rsync failed: {}", stderr),
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => internal_error(e).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Store restore failed: {e}"),
+            }),
+        )
+            .into_response(),
     }
 }
 
