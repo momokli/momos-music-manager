@@ -1,12 +1,19 @@
 //! Per-ISRC state of the `music-api` import flow (table `music_api_imports`).
 //!
 //! The table is the local mirror of what MMM ordered and imported. It makes the
-//! demand loop idempotent: `imported`/`absent`/`failed` are terminal, so a track
-//! is never ordered (or downloaded) twice.
+//! demand loop idempotent: a settled ISRC is never ordered twice. Settled means
+//! in flight or done (`ordered`/`ready`/`imported`), genuinely absent (`absent`),
+//! or `failed` past [`MAX_FAILED_ATTEMPTS`] — a `failed` ISRC below the budget
+//! stays in the demand and is retried.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use sqlx::{FromRow, Pool, Sqlite};
+
+/// How many times a `failed` ISRC is re-ordered before it settles. `absent` is
+/// always terminal; `failed` usually covers transient reasons (download timeout,
+/// file not found after download) and deserves a few more tries.
+pub const MAX_FAILED_ATTEMPTS: i64 = 3;
 
 /// One row of `music_api_imports`.
 #[derive(Debug, Clone, FromRow)]
@@ -14,6 +21,8 @@ pub struct MusicApiImport {
     pub isrc: String,
     /// `ordered` | `ready` | `imported` | `absent` | `failed`.
     pub state: String,
+    /// Failed attempts so far (drives the retry budget).
+    pub attempts: i64,
     /// Placed format (`flac` | `320` | `128`).
     pub format: Option<String>,
     pub file_path: Option<String>,
@@ -23,11 +32,9 @@ pub struct MusicApiImport {
     pub updated_at: i64,
 }
 
-/// Terminal states — an ISRC here is never re-ordered.
-// A row in `music_api_imports` means the ISRC is already handled — ordered,
-// downloaded (`ready`), imported, or terminal. None of those may be ordered
-// again: re-ordering an in-flight ISRC would spam `music-api` every cycle and
-// stall progress at the first batch.
+// A settled ISRC must not be ordered again: re-ordering an in-flight ISRC would
+// spam `music-api` every cycle and stall progress at the first batch. See
+// `settled_isrcs`.
 
 /// Convert the backpack helpers' `anyhow` error into an `sqlx::Error`.
 fn as_sqlx(e: anyhow::Error) -> sqlx::Error {
@@ -36,9 +43,10 @@ fn as_sqlx(e: anyhow::Error) -> sqlx::Error {
 
 /// Record that an ISRC was placed in a `music-api` order.
 ///
-/// An existing row in a terminal state (`imported`/`absent`/`failed`) is left
-/// untouched, and a `ready` row keeps its state — so an order re-issue can
-/// never rewind a track that already has a delivered file.
+/// Never rewinds a track that already has a delivered file: a `ready` row keeps
+/// its state, and `imported`/`absent`/settled-`failed` rows are left untouched.
+/// A `failed` row below [`MAX_FAILED_ATTEMPTS`] is retried — it goes back to
+/// `ordered` (keeping its attempt count) so the loop can consume it again.
 pub async fn upsert_ordered(
     pool: &Pool<Sqlite>,
     isrc: &str,
@@ -48,12 +56,17 @@ pub async fn upsert_ordered(
         r#"INSERT INTO music_api_imports (isrc, state, order_id, updated_at)
            VALUES (?, 'ordered', ?, unixepoch())
            ON CONFLICT(isrc) DO UPDATE SET
+               state = 'ordered',
                order_id = excluded.order_id,
+               error = NULL,
                updated_at = excluded.updated_at
-           WHERE music_api_imports.state NOT IN ('ready', 'imported', 'absent', 'failed')"#,
+           WHERE music_api_imports.state NOT IN ('ready', 'imported', 'absent')
+             AND NOT (music_api_imports.state = 'failed'
+                      AND music_api_imports.attempts >= ?)"#,
     )
     .bind(isrc)
     .bind(order_id)
+    .bind(MAX_FAILED_ATTEMPTS)
     .execute(pool)
     .await?;
     Ok(())
@@ -82,6 +95,29 @@ pub async fn set_state(
     .bind(state)
     .bind(format)
     .bind(file_path)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Record a `failed` state and bump the retry counter. `absent` uses
+/// [`set_state`] directly — it is terminal and has no retry budget.
+pub async fn record_failure(
+    pool: &Pool<Sqlite>,
+    isrc: &str,
+    error: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"INSERT INTO music_api_imports (isrc, state, error, attempts, updated_at)
+           VALUES (?, 'failed', ?, 1, unixepoch())
+           ON CONFLICT(isrc) DO UPDATE SET
+               state = 'failed',
+               error = excluded.error,
+               attempts = music_api_imports.attempts + 1,
+               updated_at = unixepoch()"#,
+    )
+    .bind(isrc)
     .bind(error)
     .execute(pool)
     .await?;
@@ -171,11 +207,15 @@ async fn isrcs_for_tracks(
     query.fetch_all(pool).await
 }
 
-/// ISRCs that are already in a terminal state (never ordered again).
-/// Every ISRC the ledger already knows about, in any state.
-async fn known_isrcs(pool: &Pool<Sqlite>) -> Result<HashSet<String>, sqlx::Error> {
-    let sql = "SELECT isrc FROM music_api_imports";
-    Ok(sqlx::query_scalar::<_, String>(&sql)
+/// ISRCs that are settled and must never be ordered again: in flight or done
+/// (`ordered`/`ready`/`imported`), genuinely absent (`absent`), or `failed` past
+/// the retry budget. A `failed` ISRC *below* the budget stays in the demand.
+async fn settled_isrcs(pool: &Pool<Sqlite>) -> Result<HashSet<String>, sqlx::Error> {
+    let sql = "SELECT isrc FROM music_api_imports
+               WHERE state IN ('ordered', 'ready', 'imported', 'absent')
+                  OR (state = 'failed' AND attempts >= ?)";
+    Ok(sqlx::query_scalar::<_, String>(sql)
+        .bind(MAX_FAILED_ATTEMPTS)
         .fetch_all(pool)
         .await?
         .into_iter()
@@ -207,7 +247,7 @@ pub async fn demand_isrcs(pool: &Pool<Sqlite>, limit: usize) -> Result<Vec<Strin
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let known = known_isrcs(pool).await?;
+    let known = settled_isrcs(pool).await?;
     let mut out: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -238,7 +278,7 @@ pub async fn demand_isrcs(pool: &Pool<Sqlite>, limit: usize) -> Result<Vec<Strin
 }
 
 /// Cheap count of [`demand_isrcs`] (no limit): every library ISRC without a
-/// linked file and without a ledger row. Covers both the priority and the
+/// linked file that is not settled yet. Covers both the priority and the
 /// backlog, so it agrees with the sum of what [`demand_isrcs`] would return.
 pub async fn demand_count(pool: &Pool<Sqlite>) -> i64 {
     sqlx::query_scalar(
@@ -246,8 +286,13 @@ pub async fn demand_count(pool: &Pool<Sqlite>) -> i64 {
             SELECT DISTINCT st.isrc FROM service_tracks st
              WHERE st.isrc IS NOT NULL
                AND st.id NOT IN (SELECT track_id FROM v_file_track_link)
-         ) WHERE isrc NOT IN (SELECT isrc FROM music_api_imports)",
+         ) WHERE isrc NOT IN (
+            SELECT isrc FROM music_api_imports
+             WHERE state IN ('ordered', 'ready', 'imported', 'absent')
+                OR (state = 'failed' AND attempts >= ?)
+         )",
     )
+    .bind(MAX_FAILED_ATTEMPTS)
     .fetch_one(pool)
     .await
     .unwrap_or(0)
@@ -278,7 +323,8 @@ mod tests {
         sqlx::query(
             r#"CREATE TABLE music_api_imports (
                 isrc TEXT PRIMARY KEY, state TEXT NOT NULL, format TEXT, file_path TEXT,
-                deezer_id TEXT, error TEXT, order_id TEXT, updated_at INTEGER NOT NULL)"#,
+                deezer_id TEXT, error TEXT, order_id TEXT, updated_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0)"#,
         )
         .execute(&pool)
         .await
@@ -585,6 +631,54 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_is_retried_until_the_budget_is_spent() {
+        let pool = test_db().await;
+        make_backpack_track(&pool, 1, "ISRC-A").await;
+
+        // A first failure below the budget keeps the ISRC in the demand.
+        upsert_ordered(&pool, "ISRC-A", "order-1").await.unwrap();
+        record_failure(&pool, "ISRC-A", Some("download timeout"))
+            .await
+            .unwrap();
+        assert_eq!(get(&pool, "ISRC-A").await.unwrap().attempts, 1);
+        assert_eq!(demand_isrcs(&pool, 100).await.unwrap(), vec!["ISRC-A"]);
+
+        // Re-ordering is allowed and does not reset the attempt count.
+        upsert_ordered(&pool, "ISRC-A", "order-2").await.unwrap();
+        let row = get(&pool, "ISRC-A").await.unwrap();
+        assert_eq!(row.state, "ordered");
+        assert_eq!(row.attempts, 1);
+
+        // Two more failures reach the budget -> settled, out of the demand.
+        record_failure(&pool, "ISRC-A", Some("download timeout"))
+            .await
+            .unwrap();
+        record_failure(&pool, "ISRC-A", Some("download timeout"))
+            .await
+            .unwrap();
+        assert_eq!(get(&pool, "ISRC-A").await.unwrap().attempts, 3);
+        assert!(demand_isrcs(&pool, 100).await.unwrap().is_empty());
+        assert_eq!(demand_count(&pool).await, 0);
+
+        // A settled failure can no longer be re-ordered.
+        upsert_ordered(&pool, "ISRC-A", "order-3").await.unwrap();
+        assert_eq!(get(&pool, "ISRC-A").await.unwrap().state, "failed");
+    }
+
+    #[tokio::test]
+    async fn absent_is_terminal_and_never_retried() {
+        let pool = test_db().await;
+        make_backpack_track(&pool, 1, "ISRC-A").await;
+        set_state(&pool, "ISRC-A", "absent", None, None, Some("not streamable"))
+            .await
+            .unwrap();
+
+        assert!(demand_isrcs(&pool, 100).await.unwrap().is_empty());
+        upsert_ordered(&pool, "ISRC-A", "order-1").await.unwrap();
+        assert_eq!(get(&pool, "ISRC-A").await.unwrap().state, "absent");
     }
 
     #[tokio::test]

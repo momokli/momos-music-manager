@@ -69,6 +69,11 @@ All notable changes to Momo's Music Manager.
 
 ### Changed
 
+- **music-api: begrenzte Retries für `failed`** (`failed` ist nicht mehr sofort terminal):
+  Transiente Fehler (download timeout, abgebrochener Download) werden bis zu **3×** erneut
+  geordert (Migration 030 `music_api_imports.attempts`). `absent` (kein streambarer Treffer)
+  bleibt terminal. Vorher verlor jeder Timeout den Track dauerhaft.
+
 - **music-api: Demand = ganze Bibliothek (Backpack zuerst)**: Der Consumer bestellt
   nicht mehr nur Backpack-ISRCs, sondern jeden Track ohne verlinkte Datei. Backpack-Tracks
   werden zuerst geordert, damit sie nie hinter dem Backlog warten. Siehe ADR-068.

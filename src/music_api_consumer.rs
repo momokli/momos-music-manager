@@ -151,12 +151,12 @@ async fn run_cycle(
                     Ok(false) => {}
                     Err(e) => warn!("music-api: failed to import ISRC {}: {e:#}", item.isrc),
                 },
-                "absent" | "failed" => {
-                    // Terminal — never re-ordered.
+                "absent" => {
+                    // Terminally absent — the service has no streamable match.
                     if let Err(e) = db::music_api::set_state(
                         db,
                         &item.isrc,
-                        &item.state,
+                        "absent",
                         None,
                         None,
                         item.error.as_deref(),
@@ -165,10 +165,21 @@ async fn run_cycle(
                     {
                         warn!("music-api: failed to record {} state: {e}", item.isrc);
                     } else {
+                        info!("music-api: ISRC {} is 'absent' (terminal)", item.isrc);
+                    }
+                }
+                "failed" => {
+                    // Usually transient (timeout / cut download): retry until the
+                    // budget is spent, then the ISRC settles.
+                    if let Err(e) =
+                        db::music_api::record_failure(db, &item.isrc, item.error.as_deref()).await
+                    {
+                        warn!("music-api: failed to record {} failure: {e}", item.isrc);
+                    } else {
                         info!(
-                            "music-api: ISRC {} is '{}' (terminal){}",
+                            "music-api: ISRC {} failed (retried up to {}x){}",
                             item.isrc,
-                            item.state,
+                            db::music_api::MAX_FAILED_ATTEMPTS,
                             item.error
                                 .as_deref()
                                 .map(|e| format!(": {e}"))
