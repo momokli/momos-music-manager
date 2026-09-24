@@ -1,7 +1,7 @@
 # Plan: music-api order consumer (Backpack downloads without deemix-Spotify)
 
-**Status**: in-progress
-**Branch**: `feat/music-api-order-consumer`
+**Status**: done
+**Branch**: `feat/music-api-order-consumer` (merged via `review/all-features`, released v1.13.0)
 **Ready for review**: yes
 **Depends on**: `feat/music-api` (the `music-api` service — API contract + deployed instance on `.200`)
 **Migration needed**: yes (one additive migration, `027_music_api_imports.sql`)
@@ -21,13 +21,13 @@ Spotify round-trip disappears from the download path.
 
 **Contract (already built, `music-api/README.md`)**
 
-| Method | Path | Use |
-|---|---|---|
-| `POST` | `/orders` | `{"items":[{"isrc":"…"}]}` → `{orderId,status,count}` |
-| `GET` | `/orders/{id}` | per-ISRC `{state,deezerId,title,artist,formats[],error}` |
-| `GET` | `/orders?status=open` | outstanding orders |
-| `GET` | `/isrc/{isrc}` | single ISRC state |
-| `GET` | `/isrc/{isrc}/{flac\|320\|128}` | the file |
+| Method | Path                            | Use                                                      |
+| ------ | ------------------------------- | -------------------------------------------------------- |
+| `POST` | `/orders`                       | `{"items":[{"isrc":"…"}]}` → `{orderId,status,count}`    |
+| `GET`  | `/orders/{id}`                  | per-ISRC `{state,deezerId,title,artist,formats[],error}` |
+| `GET`  | `/orders?status=open`           | outstanding orders                                       |
+| `GET`  | `/isrc/{isrc}`                  | single ISRC state                                        |
+| `GET`  | `/isrc/{isrc}/{flac\|320\|128}` | the file                                                 |
 
 Auth: `Authorization: Bearer <token>`.
 
@@ -103,20 +103,20 @@ interval_secs = 900
 
 ### Files to modify
 
-| File | Change |
-|------|--------|
-| `migrations/027_music_api_imports.sql` | new table (additive) |
-| `src/music_api.rs` | client (orders/status/download) + config struct |
-| `src/music_api_consumer.rs` | the background cycle |
-| `src/config.rs` | `[music_api]` section + env overrides |
-| `src/main.rs` | spawn the consumer, wire the manual-pull handler |
-| `src/api/backpack.rs` | "music-api" status + `POST …/pull` handler |
-| `src/download_guarantor.rs` | retire the deemix auto path (spotDL fallback stays) |
-| `frontend/pages/backpack.js` | music-api card + Pull button |
-| `frontend/tests/backpack.spec.js` | card renders, pull posts, errors surface |
-| `tests/api_music_api.rs` | client + consumer contract, mocked upstream |
-| `docs/DECISIONS.md` | ADR (music-api is the download authority) |
-| `CHANGELOG.md` | Added/Changed |
+| File                                   | Change                                              |
+| -------------------------------------- | --------------------------------------------------- |
+| `migrations/027_music_api_imports.sql` | new table (additive)                                |
+| `src/music_api.rs`                     | client (orders/status/download) + config struct     |
+| `src/music_api_consumer.rs`            | the background cycle                                |
+| `src/config.rs`                        | `[music_api]` section + env overrides               |
+| `src/main.rs`                          | spawn the consumer, wire the manual-pull handler    |
+| `src/api/backpack.rs`                  | "music-api" status + `POST …/pull` handler          |
+| `src/download_guarantor.rs`            | retire the deemix auto path (spotDL fallback stays) |
+| `frontend/pages/backpack.js`           | music-api card + Pull button                        |
+| `frontend/tests/backpack.spec.js`      | card renders, pull posts, errors surface            |
+| `tests/api_music_api.rs`               | client + consumer contract, mocked upstream         |
+| `docs/DECISIONS.md`                    | ADR (music-api is the download authority)           |
+| `CHANGELOG.md`                         | Added/Changed                                       |
 
 ### Acceptance Criteria
 
@@ -138,7 +138,7 @@ downloaded and imported — 7 as FLAC into the FLAC library dir, 1 as MP3-320
 and linked in `files`. 2 ISRCs came back `absent` ("not streamable on deezer")
 and are terminal.
 
-**Known gap**: `absent` ISRCs currently get *no* automatic fallback. The plan
+**Known gap**: `absent` ISRCs currently get _no_ automatic fallback. The plan
 promised spotDL would cover them, but the old `download_guarantor` spotDL path
 is driven by per-playlist deemix rows and is not wired to the new ledger. Either
 a follow-up plan connects it, or the fallback is dropped deliberately.
@@ -155,3 +155,14 @@ a follow-up plan connects it, or the fallback is dropped deliberately.
 4. **TLS/edge**: is `music-api` reached through Caddy on `.149` from the Mac, or
    directly over the LAN (`http://192.168.178.200:8710`)? Affects whether the
    token travels in clear text on the wire.
+
+### Shipped (v1.13.0) — deviations from this plan
+
+- The Backpack **music-api card + Pull button** (UI section) were removed again
+  together with the whole Spotify-playlist transport (ADR-067). Order progress has
+  no UI right now; a Services-page card is an open follow-up.
+- The demand is **no longer Backpack-only**: every library track without a linked
+  file is ordered, Backpack first (ADR-068).
+- `failed` is no longer terminal — retried up to 3× (migration 030, ADR-068 context).
+- The spotDL fallback for `absent` ISRCs was dropped deliberately (still an open
+  question above).

@@ -6,6 +6,8 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-09-24
+
 ### Added
 
 - **Backpack-Datei-Sync wieder in der UI**: `GET`/`PUT /api/storage/settings/backpack-sync`

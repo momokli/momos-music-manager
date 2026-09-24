@@ -93,6 +93,21 @@ user_id  = "your_soundcloud_user_id"
 api_key      = "your_youtube_api_key"
 playlist_id  = "your_youtube_playlist_id"
 
+[music_api]
+# ISRC order API in front of deemix (download authority since v1.13.0).
+enabled       = true
+base_url      = "http://192.168.178.200:8710"
+token         = "your_music_api_token"
+batch_size    = 200   # ISRCs ordered per consumer cycle
+interval_secs = 300   # seconds between cycles
+
+[store]
+# Remote content-addressed object store. Files are uploaded here and pruned
+# locally once present; the Backpack set is never pruned.
+enabled  = true
+base_url = "http://192.168.178.200:8710"
+token    = "your_store_token"
+
 [autoupdate]
 enabled = true
 # base_url = "https://github.com/momokli/momos-music-manager/releases/download/latest-main"
@@ -101,22 +116,30 @@ enabled = true
 
 ### Environment variables (override config.toml)
 
-| Variable                | Description                                         |
-| ----------------------- | --------------------------------------------------- |
-| `DATABASE_URL`          | Database URL, e.g. `sqlite:~/.../library.db`        |
-| `SPOTIFY_CLIENT_ID`     | Spotify OAuth client ID                             |
-| `SPOTIFY_CLIENT_SECRET` | Spotify OAuth client secret                         |
-| `SPOTIFY_REDIRECT_URI`  | Spotify OAuth redirect URI                          |
-| `PUBLIC_URL`            | Public URL for OAuth callbacks behind reverse proxy |
-| `HOST`                  | Server bind address                                 |
-| `PORT`                  | Server port                                         |
-| `RUST_LOG`              | Log level (debug, info, warn, error)                |
-| `MOMOS_AUTOUPDATE_ENABLED` | Enable the startup update check + the periodic auto-apply loop (`true`/`false`, default `true`) |
-| `MOMOS_AUTOUPDATE_CHANNEL` | Update channel (`release`/`rolling`; default = channel of the running build — dev → `rolling`, release → `release`; see [docs/versioning.md](docs/versioning.md)) |
-| `MOMOS_AUTOUPDATE_BASE_URL` | Autoupdate source base URL override (default follows the selected channel: `rolling` → `latest-main`, `release` → `releases/latest`; see [docs/versioning.md](docs/versioning.md)) |
-| `MOMOS_AUTOUPDATE_HEALTH_GRACE_SECS` | Seconds the new binary must stay healthy before an update is committed (default `60`) |
-| `MOMOS_AUTOUPDATE_INTERVAL_SECS` | Seconds between two automatic check+apply cycles (`0` = off — startup check only; default `14400` = 4 h; UI setting has precedence over this only when unset here, see [docs/versioning.md](docs/versioning.md) §7) |
-| `MOMOS_AUTOUPDATE_APP_DIR` | macOS only: directory whose `Momo's Music Manager.app` the DMG self-install replaces (default `/Applications`) |
+| Variable                             | Description                                                                                                                                                                                                         |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                       | Database URL, e.g. `sqlite:~/.../library.db`                                                                                                                                                                        |
+| `SPOTIFY_CLIENT_ID`                  | Spotify OAuth client ID                                                                                                                                                                                             |
+| `SPOTIFY_CLIENT_SECRET`              | Spotify OAuth client secret                                                                                                                                                                                         |
+| `SPOTIFY_REDIRECT_URI`               | Spotify OAuth redirect URI                                                                                                                                                                                          |
+| `PUBLIC_URL`                         | Public URL for OAuth callbacks behind reverse proxy                                                                                                                                                                 |
+| `HOST`                               | Server bind address                                                                                                                                                                                                 |
+| `PORT`                               | Server port                                                                                                                                                                                                         |
+| `MUSIC_API_URL`                      | `music-api` base URL (ISRC orders + file delivery)                                                                                                                                                                  |
+| `MUSIC_API_TOKEN`                    | `music-api` bearer token                                                                                                                                                                                            |
+| `MUSIC_API_ENABLED`                  | Enable the music-api consumer (`true`/`false`)                                                                                                                                                                      |
+| `MUSIC_API_BATCH_SIZE`               | ISRCs ordered per cycle (default `100`)                                                                                                                                                                             |
+| `MUSIC_API_INTERVAL_SECS`            | Seconds between consumer cycles (default `900`)                                                                                                                                                                     |
+| `STORE_URL`                          | Object-store base URL                                                                                                                                                                                               |
+| `STORE_TOKEN`                        | Object-store bearer token                                                                                                                                                                                           |
+| `STORE_ENABLED`                      | Enable the object store (`true`/`false`)                                                                                                                                                                            |
+| `RUST_LOG`                           | Log level (debug, info, warn, error)                                                                                                                                                                                |
+| `MOMOS_AUTOUPDATE_ENABLED`           | Enable the startup update check + the periodic auto-apply loop (`true`/`false`, default `true`)                                                                                                                     |
+| `MOMOS_AUTOUPDATE_CHANNEL`           | Update channel (`release`/`rolling`; default = channel of the running build — dev → `rolling`, release → `release`; see [docs/versioning.md](docs/versioning.md))                                                   |
+| `MOMOS_AUTOUPDATE_BASE_URL`          | Autoupdate source base URL override (default follows the selected channel: `rolling` → `latest-main`, `release` → `releases/latest`; see [docs/versioning.md](docs/versioning.md))                                  |
+| `MOMOS_AUTOUPDATE_HEALTH_GRACE_SECS` | Seconds the new binary must stay healthy before an update is committed (default `60`)                                                                                                                               |
+| `MOMOS_AUTOUPDATE_INTERVAL_SECS`     | Seconds between two automatic check+apply cycles (`0` = off — startup check only; default `14400` = 4 h; UI setting has precedence over this only when unset here, see [docs/versioning.md](docs/versioning.md) §7) |
+| `MOMOS_AUTOUPDATE_APP_DIR`           | macOS only: directory whose `Momo's Music Manager.app` the DMG self-install replaces (default `/Applications`)                                                                                                      |
 
 ---
 
@@ -184,8 +207,8 @@ break it. Where it goes — the first **writable** directory of:
 3. `~/.local/bin` — per-user XDG dir (created on demand, no admin rights)
 
 > **`~/.local/bin` is not on the default macOS `PATH`.** When the app had to
-> fall back to it, add one line to `~/.zprofile` (the Settings page → *CLI
-> access* card shows the exact command):
+> fall back to it, add one line to `~/.zprofile` (the Settings page → _CLI
+> access_ card shows the exact command):
 >
 > ```bash
 > export PATH="$HOME/.local/bin:$PATH"
@@ -262,7 +285,7 @@ unzip, and run from a terminal:
 ```
 
 > Note: builds are unsigned — SmartScreen may show a warning ("More info → Run
-yet"). For background operation use Task Scheduler or NSSM.
+> yet"). For background operation use Task Scheduler or NSSM.
 
 ### From Source
 
@@ -291,7 +314,7 @@ build):
 An explicit channel switch (dropdown with confirm modal) is **not** an
 error: `check`/`apply` run against the selected channel, and `Update now`
 may install the other channel type's binary. The channel guard
-(`ChannelMismatch`) only fires when the update source serves the *other*
+(`ChannelMismatch`) only fires when the update source serves the _other_
 channel than selected (e.g. a `base_url` override pointing at the wrong
 feed).
 
@@ -306,7 +329,7 @@ Verification chain (nothing is installed unless every step passes):
    `scripts/minisign.pub`).
 3. Resolve the platform artifact by its **versioned** name
    (`momos-music-manager-<version>-<os-arch>.<ext>`) and compare versions
-   (semver) against the running build; if the source serves the *other*
+   (semver) against the running build; if the source serves the _other_
    channel than selected, the update is refused (`ChannelMismatch`).
 4. On `update apply`: download the artifact, verify its **SHA256** against the
    signed manifest, extract the binary — and only then swap.
@@ -360,7 +383,7 @@ a newer version is published. Manual "Update now" stays available anytime.
 > bundle is relaunched via LaunchServices). If the self-install fails, the
 > verified DMG is kept in `~/Downloads` for manual installation.
 >
-> **Windows**: replacing a *running* executable is not allowed — stop the
+> **Windows**: replacing a _running_ executable is not allowed — stop the
 > server before `update apply` (the error message tells you). Automatic
 > updates therefore require the service manager to perform the restart.
 >
@@ -516,23 +539,23 @@ Open Traktor → run "Consistency Check" over all tracks → Comments visible �
 
 ## SPA Pages
 
-| Route              | Module                     | Description                              |
-| ------------------ | -------------------------- | ---------------------------------------- |
-| `#dashboard`       | `pages/dashboard.js`       | Stats + Services dashboard               |
+| Route              | Module                     | Description                                            |
+| ------------------ | -------------------------- | ------------------------------------------------------ |
+| `#dashboard`       | `pages/dashboard.js`       | Stats + Services dashboard                             |
 | `#files`           | `pages/files.js`           | Local files with BPM/Key, comment status, STEMS filter |
-| `#tracks`          | `pages/tracks.js`          | Service tracks, playlist/tag/PMV filter  |
-| `#playlists`       | `pages/playlists.js`       | All service playlists                    |
-| `#tags`            | `pages/tags.js`            | Tags (paginated list)                    |
-| `#tag-categories`  | `pages/tag-categories.js`  | Tag categories                           |
-| `#services`        | `pages/services.js`        | Service status + OAuth/Sync              |
-| `#folders`         | `pages/folders.js`         | Managed folder configuration             |
-| `#tasks`           | `pages/tasks.js`           | Task manager (sync/write-comment jobs)   |
-| `#auto-categorize` | `pages/auto-categorize.js` | AI tag categorization wizard             |
-| `#traktor-import`  | `pages/traktor-import.js`  | Traktor collection import                |
-| `#digging`         | `pages/digging.js`         | Digging curator — chain-based sessions   |
-| `#data`            | `pages/data.js`            | Import/Export database                   |
-| `#tag-curation`    | `pages/tag-curation.js`    | Tag parent curation workflow             |
-| `#backpack`        | `pages/backpack.js`        | Backpack tags + Spotify transport playlist |
+| `#tracks`          | `pages/tracks.js`          | Service tracks, playlist/tag/PMV filter                |
+| `#playlists`       | `pages/playlists.js`       | All service playlists                                  |
+| `#tags`            | `pages/tags.js`            | Tags (paginated list)                                  |
+| `#tag-categories`  | `pages/tag-categories.js`  | Tag categories                                         |
+| `#services`        | `pages/services.js`        | Service status + OAuth/Sync                            |
+| `#folders`         | `pages/folders.js`         | Managed folder configuration                           |
+| `#tasks`           | `pages/tasks.js`           | Task manager (sync/write-comment jobs)                 |
+| `#auto-categorize` | `pages/auto-categorize.js` | AI tag categorization wizard                           |
+| `#traktor-import`  | `pages/traktor-import.js`  | Traktor collection import                              |
+| `#digging`         | `pages/digging.js`         | Digging curator — chain-based sessions                 |
+| `#data`            | `pages/data.js`            | Import/Export database                                 |
+| `#tag-curation`    | `pages/tag-curation.js`    | Tag parent curation workflow                           |
+| `#backpack`        | `pages/backpack.js`        | Backpack tags + Spotify transport playlist             |
 
 ---
 
@@ -553,7 +576,7 @@ Open Traktor → run "Consistency Check" over all tracks → Comments visible �
 | Parents     | `GET/PUT /api/tags/{id}/parents`                                                 |
 | Corrections | `GET/PUT /api/files/{id}/track-corrections`, `/api/tracks/{id}/file-corrections` |
 | Digging     | `GET/POST /api/digging/...`                                                      |
-| Backpack    | `GET /api/backpack`, `POST /api/backpack/push`                                    |
+| Backpack    | `GET /api/backpack`, `POST /api/backpack/push`                                   |
 | Health      | `GET /api/health`                                                                |
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
@@ -627,13 +650,17 @@ momos-music-manager/
 │       ├── data.js
 │       ├── auto-categorize.js
 │       ├── digging.js
+│       ├── storage.js
+│       ├── backpack.js
 │       └── traktor-import.js
 ├── migrations/
 │   ├── 001_initial_schema.sql             # Initial schema
-│   ├── 002_playlist_fetch_tracking.sql    # Playlist sync tracking + tag parent resolution
-│   ├── 003_remote_unique_count.sql        # Remote unique track count column
-│   ├── 004_unique_tags_nocase.sql         # Case-insensitive unique constraint on tags
-│   └── 005_v_playlist_tag_category.sql   # Playlist→tag→category resolution view
+│   ├── ...                                # 002 … 025
+│   ├── 026_name_match_indexes.sql         # Playlist↔tag name-match indexes
+│   ├── 027_music_api_imports.sql          # Per-ISRC state for music-api orders
+│   ├── 028_file_content_hash.sql          # files.content_hash (store dedup)
+│   ├── 029_dynamic_bundle_limits.sql      # Bundle top-N + Camelot key balance
+│   └── 030_music_api_attempts.sql         # Bounded retries for failed imports
 └── docs/
     ├── ARCHITECTURE.md     # System architecture
     ├── COMMENT_SYSTEM.md   # Comment format spec
@@ -647,10 +674,9 @@ momos-music-manager/
 
 - **Delete old DB files** after schema changes: `rm -f app.db*`
 - **Column config**: uses `columnConfig_v2_` localStorage key (pixel-based); old percentage-based config is ignored
-- If you see "migration 27" errors: delete all DB files and restart
-- Migrations are additive (`001_initial_schema.sql` through `023_file_track_corrections.sql`)
+- Migrations are additive (`001_initial_schema.sql` through `030_music_api_attempts.sql`). Never edit an applied migration — SQLx verifies its checksum and refuses to start on a mismatch; add a new file instead.
 - SoundCloud and YouTube OAuth are not yet implemented
-- Playlist subscriptions poll every 30 seconds in the background
+- Playlist subscriptions poll every 30 seconds in the background; the maintainer runs every hour (store sync + auto-prune)
 - The digging page (`digging.html`) is a standalone page, not part of the SPA
 
 ---

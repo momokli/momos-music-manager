@@ -1,6 +1,6 @@
 # Momo's Music Manager — Agent Guidance
 
-> **Last Updated**: 2026-08-29 — v1.0.1 (release prep: merged feat/fix branches into review/all-features, ADRs 053–057)
+> **Last Updated**: 2026-09-24 — v1.13.0 (music-api owns downloads, object store + prune, Backpack transport removed; ADRs 061–068)
 
 ---
 
@@ -43,7 +43,7 @@ When bundling features for a release:
 
 ### Architecture
 
-6. **Schema**: 14 tables — `tag_categories`, `tags`, `service_tracks`, `service_playlists`, `service_playlist_tracks`, `files`, `service_config`, `folders`, `subscriptions`, `tag_embeddings`, `tag_energy_levels`, `tag_similarities`, `tag_parents`, `file_resolved_tags` (plus views: `unified_tracks`, `v_file_track_link`, `v_tag_playlist`, `v_file_tags`, `v_subscriptions`, `v_tag_categories`, `v_tags_with_categories`, `v_resolved_tags`, `v_file_resolved_tags`)
+6. **Schema**: 23 tables — `files`, `folders`, `file_locations`, `file_resolved_tags`, `file_track_corrections`, `track_resolved_tags`, `music_api_imports`, `settings`, `task_history`, `dynamic_bundles`, `tag_bundles`, `tag_categories`, `tag_embeddings`, `tag_energy_levels`, `tag_parents`, `tag_similarities`, `tags`, `service_config`, `service_tracks`, `service_playlists`, `service_playlist_tracks`, `playlist_subscriptions`, `deemix_downloads` (plus 12 views)
 7. **Separate Types**: `File` (local files with BPM/Key) vs `ServiceTrack` (service entries, no BPM/Key) — linked via `v_file_track_link` view
 8. **Tags = Playlists**: Via name matching (case-insensitive). Setlist is default category.
 9. **Comment Format**: `[{phase_char}{mood_char}{vibe_char}] {tags} {source_id}` — e.g. `[PMV] build jazzy warehouse sp:xxx`
@@ -53,7 +53,7 @@ When bundling features for a release:
 13. **Sync State**: In-memory `TaskManager` — tasks auto-pruned 5 min after completion
 14. **Config Priority** (highest wins): Env vars > `~/.config/momos-music-manager/config.toml` > built-in defaults
 15. **Server-Side Filtering**: All filters must be server-side on paginated pages. Client-side filtering after pagination breaks page counts.
-16. **Testing**: 744 tests (423 unit + 18 binary + 303 integration). Every endpoint tested, every query param covered. 59.28% line coverage target (goal: ≥75%). See `tests/README.md`.
+16. **Testing**: ~1120 tests (755 lib + ~365 integration/binary). Every endpoint tested, every query param covered. Line-coverage goal: ≥75%. See `tests/README.md`.
 
 ---
 
@@ -148,7 +148,7 @@ Testing is **not optional**. Every feature must be validated at both the backend
   include "add/update integration test" as an acceptance criterion.**
 - **Coverage threshold**: ≥75% line coverage (via `cargo llvm-cov`). Run
   `cargo llvm-cov --fail-under-lines 75` before merging.
-- **744 tests**: 423 lib + 18 bin + 303 integration. See `tests/README.md` for
+- **~1120 tests**: 755 lib + ~365 integration/binary. See `tests/README.md` for
   the full breakdown.
 - **Unit tests** go in `#[cfg(test)] mod tests` within the source file for pure
   functions. Integration tests go in `tests/api_*.rs` files.
@@ -274,7 +274,7 @@ cargo run -- serve  # then use the Traktor import page in the frontend
 
 ---
 
-## Current Migration Map (001–018)
+## Current Migration Map (001–030)
 
 Use this as a quick index. For actual SQL, query the live DB with `sqlite3 app.db ".schema"`.
 
@@ -298,6 +298,18 @@ Use this as a quick index. For actual SQL, query the live DB with `sqlite3 app.d
 | `016_backpack_rename.sql`         | Renamed `tags.followed` to `tags.backpack`                                                                                                           |
 | `017_tag_bundles.sql`             | New `tag_bundles` table for bundle/curation tags — aggregate multiple member tags into one                                                           |
 | `018_canonical_playlist_id.sql`   | `canonical_playlist_id` on `service_playlists` for multi-provider playlist linking (daily-tagging-queue push-to-spotify)                             |
+| `019_dynamic_bundles.sql`         | `dynamic_bundles` table — rule-based auto-bundles                                                                                                    |
+| `020_dynamic_bundle_filters.sql`  | BPM/key/rating/play-count filter keys on `dynamic_bundles`                                                                                           |
+| `021_folder_id_on_files.sql`      | `folder_id` on `files` + backfill (longest-prefix folder match)                                                                                      |
+| `022_task_history.sql`            | `task_history` table for completed task records                                                                                                      |
+| `023_file_track_corrections.sql`  | `file_track_corrections` — manual file↔track link include/exclude overrides                                                                          |
+| `024_settings.sql`                | `settings` key/value table (autoupdate toggle, backpack switch, …)                                                                                   |
+| `025_backpack_concept.sql`        | Unifies “subscribed playlists” + `tags.backpack` into the Backpack concept                                                                           |
+| `026_name_match_indexes.sql`      | Expression indexes for the tag↔playlist name match                                                                                                   |
+| `027_music_api_imports.sql`       | `music_api_imports` — per-ISRC ledger for music-api orders                                                                                           |
+| `028_file_content_hash.sql`       | `content_hash` on `files` (object-store dedup)                                                                                                       |
+| `029_dynamic_bundle_limits.sql`   | Dynamic-bundle top-N limit + Camelot key balance                                                                                                     |
+| `030_music_api_attempts.sql`      | `attempts` on `music_api_imports` — bounded retries for transient failures                                                                           |
 
 ---
 
@@ -427,4 +439,4 @@ Plans live in [`plans/`](plans/) — one file per plan. See [`plans/README.md`](
 
 **To create a plan**: Copy [`plans/_TEMPLATE.md`](plans/_TEMPLATE.md), fill it in, and add it to the index in `plans/README.md`.
 
-**Quick stats**: 49 done · 0 in progress · 17 proposed
+**Quick stats**: 56 done · 0 in progress · 17 proposed
