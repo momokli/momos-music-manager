@@ -31,8 +31,8 @@ async fn deemix_queue_list() {
 }
 
 /// POST /api/services/deemix/queue — the generic per-playlist enqueue endpoint
-/// was removed. Only the single Backpack playlist is submitted to deemix
-/// (via `POST /api/backpack/push`), so a POST here must be rejected.
+/// was removed. deemix is now driven by the music-api ISRC orders, so a POST
+/// here must be rejected.
 #[tokio::test]
 async fn deemix_queue_post_removed() {
     let (client, base, pool) = common::spawn_test_app().await;

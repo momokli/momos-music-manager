@@ -536,10 +536,6 @@ async fn serve(
     // Autoupdater (M6) settings — captured before `config` moves into AppState.
     let au_grace_secs = config.autoupdate_health_grace_secs;
 
-    let backpack_coordinator = Arc::new(
-        momos_music_manager::backpack::BackpackSyncCoordinator::new(),
-    );
-
     let state = Arc::new(AppState {
         db,
         config,
@@ -547,7 +543,6 @@ async fn serve(
         embeddings: Mutex::new(None),
         category_means: tokio::sync::Mutex::new(None),
         public_url,
-        backpack_coordinator,
     });
 
     // Refresh materialized tag tables so comment computation is correct from startup.
@@ -662,25 +657,6 @@ async fn serve(
         tracing::info!("Startup store sync scheduled (store configured)");
     } else {
         tracing::info!("Startup store sync skipped (store not configured)");
-    }
-
-    // Spawn Backpack coordinator — materialises the single Spotify playlist after
-    // membership mutations (dirty-marker + debounce) and on manual push requests.
-    {
-        let bp_coord_db = state.db.clone();
-        let bp_coord_creds = state.config.clone();
-        let bp_coord = state.backpack_coordinator.clone();
-        let bp_coord_cancel = poller_cancel.clone();
-        tokio::spawn(async move {
-            momos_music_manager::backpack::start_backpack_coordinator(
-                bp_coord_db,
-                bp_coord_creds,
-                bp_coord,
-                bp_coord_cancel,
-            )
-            .await;
-        });
-        tracing::info!("Backpack coordinator started");
     }
 
     // Spawn the music-api consumer — orders missing Backpack ISRCs, imports the
@@ -1359,9 +1335,6 @@ mod tests {
             embeddings: Mutex::new(None),
             category_means: tokio::sync::Mutex::new(None),
             public_url: None,
-            backpack_coordinator: Arc::new(
-                momos_music_manager::backpack::BackpackSyncCoordinator::new(),
-            ),
         });
         let _router = momos_music_manager::build_router(state);
     }

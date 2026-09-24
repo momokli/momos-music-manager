@@ -850,9 +850,6 @@ async fn storage_sync_store_starts_task_when_configured() {
         embeddings: tokio::sync::Mutex::new(None),
         category_means: tokio::sync::Mutex::new(None),
         public_url: None,
-        backpack_coordinator: Arc::new(
-            momos_music_manager::backpack::BackpackSyncCoordinator::new(),
-        ),
     });
 
     let app = momos_music_manager::build_router(state);

@@ -72,6 +72,16 @@ All notable changes to Momo's Music Manager.
 
 ### Removed
 
+- **Backpack-Playlist-Transport entfernt**: Die aggregierte Spotify-„backpack"-Playlist
+  (Materialisierung aus Tags ∪ Subscriptions, Push, Mirror) ist weg — sie war nur der
+  deemix-Download-Pfad und ist seit music-api obsolet. Entfernt: die Endpunkte
+  `/api/backpack`, `/api/backpack/push`, `/api/backpack/pull`, `/api/backpack/sync-enabled`,
+  die Backpack-Seite, der Coordinator + die Materialisierung in `src/backpack.rs`, das
+  `AppState.backpack_coordinator`-Feld und die `backpack.{playlist_*,signature,dirty_at,last_push_*}`
+  Settings-Keys. Die **Keep-Regel bleibt** (Backpack = Tags ∪ Subscriptions; `prune` schützt sie),
+  ebenso der `backpack`-Toggle auf der Tags-Seite und der Datei-Sync (`/api/storage/sync-backpack`).
+  Die bestehende Spotify-Playlist muss manuell gelöscht werden. Siehe ADR-067.
+
 - **NAS/SSH-Backup vollständig entfernt**: Das `backup`-Modul (`BackupEngine`) und
   die Tasks `BackupFolder`/`BackupWavs`/`BackupDiscovery`/`BackupVerify`/
   `AutoBackupCheck` sind gelöscht, ebenso die Endpunkte `/api/storage/backup/{id}`,

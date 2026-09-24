@@ -59,8 +59,7 @@ pub async fn start_music_api_consumer(
     }
 }
 
-/// Run a single consumer cycle now (used by the periodic loop and by
-/// `POST /api/backpack/pull`).
+/// Run a single consumer cycle now (used by the periodic loop).
 pub async fn run_once(
     db: &Pool<Sqlite>,
     creds: &ServiceCredentials,

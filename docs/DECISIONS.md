@@ -1443,3 +1443,46 @@ Standard-Betrieb nicht mehr angefasst.
   nicht-gesyncte Datei ist nicht restorable (bewusst, `auto_prune` prüft das).
 - `folders.backup_path` / `auto_backup` bleiben als deprecated Spalten in der DB
   (keine Migration), werden aber von keiner API mehr gelesen oder geschrieben.
+
+## ADR-067: Backpack-Playlist-Transport entfernt
+
+**Date**: 2026-09-24
+**Status**: Accepted (implemented)
+**Supersedes**: ADR-060 (Backpack-Playlist als Spiegel), ADR-062/063 (Transport-Details)
+
+**Context**: Der Backpack wurde ursprünglich als **eine aggregierte Spotify-Playlist**
+materialisiert (Tags ∪ Subscriptions, Mirror statt Append) und genau diese eine Playlist
+an deemix übergeben — das war der Download-Pfad (ADR-060/062/063). Seit music-api die
+Download-Autorität per ISRC-Order ist (ADR-065), braucht niemand mehr die Spotify-Playlist;
+sie ist reiner Ballast: ein Coordinator, Settings-Sentinels, eine eigene Seite, eigene
+Endpunkte, Spotify-Rate-Limits (429) und ein Mirror, der bei jeder Membership-Änderung
+nachgezogen werden muss.
+
+**Decision**: Der **Transport** wird komplett entfernt. Die **Keep-Semantik bleibt**:
+Backpack ist weiterhin „Tags ∪ aktive Subscriptions", und `prune` schützt genau diese
+Menge (`get_backpack_file_ids`). Der `tags.backpack`-Schalter auf der Tags-Seite bleibt
+das Steuerelement dafür.
+
+Entfernt:
+- Endpunkte `GET /api/backpack`, `POST /api/backpack/push`, `POST /api/backpack/pull`,
+  `POST /api/backpack/sync-enabled` und die Backpack-Seite (Frontend).
+- Aus `src/backpack.rs`: Materialisierung, `BackpackSpotifyOps`/`BackpackDeemixOps`,
+  `MaterializeOptions/Outcome`, `create_backpack_playlist`, `backpack_signature`,
+  `resolve_backpack_track_uris`, `backpack_status`, `BackpackSyncCoordinator`,
+  `start_backpack_coordinator`, `mark_backpack_dirty`, Push-Status-Funktionen.
+- `AppState.backpack_coordinator`, der Coordinator-Spawn und alle `mark_backpack_dirty`-
+  Aufrufe (Tags-/Playlist-/Track-Handler, Poller, Global-Poller).
+- Die `settings`-Keys `backpack.{playlist_id,playlist_url,signature,dirty_at,last_push_*}`.
+
+Geblieben (Keep/Datei-Pflege):
+- `get_backpack_track_ids`/`get_backpack_file_ids`/`get_backpack_family_file_ids`
+  (prune-Schutz, Backpack-Pull-Kandidaten).
+- `backpack_sync_enabled` (+ `set_backpack_sync_enabled`) und `POST /api/storage/sync-backpack`
+  für den Datei-Sync (fehlende Dateien aus dem Store holen + redundante Formate aufräumen).
+
+**Consequences**:
+- Keine Spotify-Playlist mehr; die bestehende Playlist muss **manuell** in Spotify gelöscht
+  werden (der Transport-Code, der das könnte, ist weg).
+- Der File-Sync-Schalter ist nur noch per API/DB setzbar (keine UI mehr dafür).
+- Der music-api-Order-Fortschritt (`demand/ordered/imported`) hatte nur auf der Backpack-Seite
+  eine Anzeige; aktuell ohne UI (Follow-up: kleiner Status-Endpunkt / Karte auf der Services-Seite).

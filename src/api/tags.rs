@@ -1645,9 +1645,6 @@ async fn tag_backpack_handler(
 
     match set_tag_backpack(&state.db, id, backpack).await {
         Ok(()) => {
-            // Membership changed → mark the Backpack transport dirty so the
-            // coordinator rebuilds the Spotify playlist (debounced).
-            let _ = crate::backpack::mark_backpack_dirty(&state.db).await;
             // When toggling TO backpack, trigger a background sync task
             // (unless the Backpack file sync is switched off).
             if backpack && crate::backpack::backpack_sync_enabled(&state.db).await {

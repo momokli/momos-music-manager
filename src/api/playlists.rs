@@ -658,8 +658,6 @@ async fn subscribe_handler(
     .await
     {
         Ok(id) => {
-            // Subscribing changes Backpack membership — mark dirty.
-            let _ = crate::backpack::mark_backpack_dirty(&state.db).await;
             Json(ApiResponse {
                 data: serde_json::json!({"id": id, "service": body.service, "playlistId": body.playlist_id}),
             })
@@ -676,8 +674,6 @@ async fn unsubscribe_handler(
 ) -> impl IntoResponse {
     match unsubscribe_from_playlist(&state.db, id).await {
         Ok(()) => {
-            // Unsubscribing changes Backpack membership — mark dirty.
-            let _ = crate::backpack::mark_backpack_dirty(&state.db).await;
             Json(ApiResponse {
                 data: serde_json::json!({"unsubscribed": true}),
             })

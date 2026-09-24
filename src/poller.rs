@@ -170,17 +170,6 @@ pub async fn start_subscription_poller(
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
 
-            // Single Backpack transport: materialise the union (subscribed
-            // playlists + backpack tags) into ONE Spotify playlist and submit
-            // only that ONE URL to deemix. Replaces the old N per-playlist
-            // auto-download submits.
-            if membership_changed {
-                // Membership changed remotely — mark dirty and let the Backpack
-                // coordinator materialise (debounced) instead of doing it inline
-                // on this poll tick.
-                let _ = crate::backpack::mark_backpack_dirty(&db).await;
-            }
-
             info!(
                 "Subscription poller: checked {} due subscription(s)",
                 due_count,
