@@ -1427,14 +1427,19 @@ Standard-Betrieb nicht mehr angefasst.
   SSH-Checks (Unbacked-Zähler, Backup-Discovery, Backup-Verify) und der
   `auto_backup`-Poller sind entfernt, ebenso das Auto-Reconcile beim Start.
 - `dufs` (`:5000`, `-A`) auf dem Musik-Host ist gestoppt und startet nicht mehr.
+- **Vollständig entfernt**: das `backup`-Modul (`BackupEngine`), die Tasks
+  `BackupFolder`/`BackupWavs`/`BackupDiscovery`/`BackupVerify`/`AutoBackupCheck`,
+  die Endpunkte `/api/storage/backup/{id}`, `/api/storage/backup-wavs/{id}`,
+  `/api/storage/discover-backup/{id}`, `/api/storage/backfill-backup-sizes`,
+  `/api/backup/test`, `/api/backup/explore`, `/api/folders/{id}/backup`,
+  `/api/folders/{id}/auto-backup`, die zugehörigen DB-Helfer und das
+  Backup-Frontend (Spalten, Modal-Felder, Storage-Buttons). `scan_sources`
+  wandert in den regulären `PUT /api/folders/{id}`.
 
 **Consequences**:
 
-- Kein SSH/rsync mehr im Default-Pfad — Backup ist eine Hash-Tatsache.
+- Kein SSH/rsync mehr — Backup ist eine Hash-Tatsache.
 - Restore ist nur möglich, solange der Store das Objekt noch hat; eine
   nicht-gesyncte Datei ist nicht restorable (bewusst, `auto_prune` prüft das).
-- Die manuellen NAS-Endpunkte (`/api/storage/backup/*`, `backup-wavs`,
-  `discover-backup`, `/api/backup/test|explore`) und `BackupEngine` existieren
-  noch, werden aber von keinem Default-Flow mehr benutzt und sollen als Nächstes
-  vollständig fallen.
-- `folders.backup_path` / `auto_backup` bleiben als Spalten (deprecated) erhalten.
+- `folders.backup_path` / `auto_backup` bleiben als deprecated Spalten in der DB
+  (keine Migration), werden aber von keiner API mehr gelesen oder geschrieben.

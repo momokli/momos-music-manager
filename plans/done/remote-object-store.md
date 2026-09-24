@@ -1,6 +1,6 @@
 # Plan: remote object store on .200 — submits instead of rsync backups
 
-**Status**: in-progress (phases 1-4 done, 5 partly — manual NAS endpoints remain)
+**Status**: done (phases 1-5)
 **Branch**: `feat/remote-object-store`
 **Ready for review**: yes
 **Depends on**: `feat/music-api` (the `.200` service: Axum/SQLite, bearer auth, systemd, Caddy)
@@ -127,8 +127,10 @@ keep it off the LAN.
 - [x] No default flow uses rsync/SSH (maintainer SSH checks, `auto_backup` poller and
       startup auto-reconcile removed). `dufs` stopped. `backup:` was already absent
       from config; `folders.backup_path`/`auto_backup` remain as deprecated columns.
-- [ ] The manual NAS endpoints (`/api/storage/backup/*`, `backup-wavs`,
-      `discover-backup`, `/api/backup/test|explore`) and `BackupEngine` are deleted
+- [x] The manual NAS endpoints (`/api/storage/backup/*`, `backup-wavs`,
+      `discover-backup`, `/api/backup/test|explore`, `/api/folders/{id}/backup`,
+      `/api/folders/{id}/auto-backup`), the `BackupEngine` module and its tasks,
+      and the backup frontend are deleted
 
 ### Progress
 

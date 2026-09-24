@@ -54,14 +54,18 @@ All notable changes to Momo's Music Manager.
 
 ### Removed
 
-- **NAS/SSH-Backup im Default-Betrieb stillgelegt**: Der Maintainer fährt nur noch
-  Scan-/Refresh-/Prune-/Traktor-Checks — die SSH-Checks (Unbacked-Zähler,
-  Backup-Discovery, Backup-Verify) und der `auto_backup`-Poller sind entfernt, ebenso
-  das Auto-Reconcile beim Start. `BackpackSync` und der Pull-from-Backup-Handler
-  behandeln nur noch `store:<sha256>`-Locations; eine alte `host:/pfad`-Location wird
-  übersprungen und geloggt. `dufs` (`:5000`, `-A`) auf dem Musik-Host ist gestoppt.
-  `src/auto_backup.rs` ist gelöscht; `folders.backup_path`/`auto_backup` bleiben als
-  deprecated Spalten. Siehe ADR-066.
+- **NAS/SSH-Backup vollständig entfernt**: Das `backup`-Modul (`BackupEngine`) und
+  die Tasks `BackupFolder`/`BackupWavs`/`BackupDiscovery`/`BackupVerify`/
+  `AutoBackupCheck` sind gelöscht, ebenso die Endpunkte `/api/storage/backup/{id}`,
+  `/api/storage/backup-wavs/{id}`, `/api/storage/discover-backup/{id}`,
+  `/api/storage/backfill-backup-sizes`, `/api/backup/test`, `/api/backup/explore`,
+  `/api/folders/{id}/backup` und `/api/folders/{id}/auto-backup`. Der Maintainer
+  fährt nur noch Scan-/Refresh-/Prune-/Traktor-Checks; `auto_backup`-Poller und
+  Auto-Reconcile sind weg. `BackpackSync` und der Pull-from-Backup-Handler
+  behandeln nur noch `store:<sha256>`-Locations. Das Backup-Frontend (Spalten,
+  Modal-Felder, Storage-Buttons) ist entfernt; `scan_sources` läuft jetzt über
+  `PUT /api/folders/{id}`. `dufs` (`:5000`, `-A`) auf dem Musik-Host ist gestoppt.
+  `folders.backup_path`/`auto_backup` bleiben als deprecated Spalten. Siehe ADR-066.
 - **Einzel-Playlist-Pushes an deemix entfernt**: Der einzige deemix-Transport ist
   jetzt die eine aggregierte Backpack-Playlist. Entfernt wurden der generische
   Endpoint `POST /api/services/deemix/queue` (die Route bleibt nur `GET`; ein POST

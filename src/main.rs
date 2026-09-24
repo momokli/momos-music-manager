@@ -685,61 +685,7 @@ async fn serve(
         tracing::info!("music-api consumer skipped (not configured)");
     }
 
-    // Auto-backup-consistency on startup: remove stale file_locations.backup entries
-    // for files that exist in the DB but are no longer on the NAS.
-    let cc_db = state.db.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(8)).await;
-        #[derive(sqlx::FromRow)]
-        struct FolderBackupRow {
-            id: i64,
-            backup_path: String,
-        }
-        let folders: Vec<FolderBackupRow> = sqlx::query_as(
-            "SELECT id, backup_path FROM folders WHERE backup_path IS NOT NULL AND backup_path != ''"
-        )
-        .fetch_all(&cc_db)
-        .await
-        .unwrap_or_default();
-
-        for folder in &folders {
-            if let Some((ssh_host, remote_base)) = folder.backup_path.split_once(':') {
-                let engine = momos_music_manager::backup::BackupEngine::new(ssh_host.to_string());
-                let max_depth: u32 = 2;
-                match engine.list_remote_files_full(remote_base, max_depth).await {
-                    Ok(remote_files) if !remote_files.is_empty() => {
-                        match momos_music_manager::db::cleanup_stale_backup_entries(
-                            &cc_db,
-                            folder.id,
-                            &remote_files,
-                        )
-                        .await
-                        {
-                            Ok(n) if n > 0 => tracing::info!(
-                                "Startup consistency: removed {} stale backup entries from folder #{}",
-                                n,
-                                folder.id
-                            ),
-                            Ok(_) => {
-                                tracing::info!("Startup consistency: folder #{} clean", folder.id)
-                            }
-                            Err(e) => tracing::warn!(
-                                "Startup consistency: folder #{} error: {}",
-                                folder.id,
-                                e
-                            ),
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(
-                        "Startup consistency: can't list folder #{}: {}",
-                        folder.id,
-                        e
-                    ),
-                }
-            }
-        }
-    });
+    // Auto-backup-consistency on startup (NAS) — retired with the backup path.
 
     // Start maintainer
     if maint_interval > 0 {

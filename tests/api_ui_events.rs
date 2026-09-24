@@ -290,15 +290,6 @@ async fn ui_events_flow_end_to_end() {
     ok_values.sort_unstable();
     assert_eq!(ok_values, vec![false, true]);
 
-    // ── d) run_backup: folder without backup_path → 400 + ok:false ──
-    let resp = client
-        .post(format!("{base_on}/api/storage/backup/1"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 400);
-    wait_for_count(&pool, "client-ui", "ui.action.run_backup", 1).await;
-
     // ── e) restore_dump without confirm → 400 + ok:false (single event) ──
     // A proper multipart body is required for the Multipart extractor to
     // reach the handler (its rejection would otherwise 400 without emit).
@@ -322,7 +313,6 @@ async fn ui_events_flow_end_to_end() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_count(&pool, "client-ui", "ui.view.opened", 1).await;
     assert_count(&pool, "client-ui", "ui.action.scan_folder", 2).await;
-    assert_count(&pool, "client-ui", "ui.action.run_backup", 1).await;
     assert_count(&pool, "client-ui", "ui.action.restore_dump", 1).await;
     assert_count(&pool, "client-ui", "ui.action.traktor_import", 0).await;
     assert_count(&pool, "client-ui", "ui.action.recompute_embeddings", 0).await;

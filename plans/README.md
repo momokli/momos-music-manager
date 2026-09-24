@@ -1,6 +1,6 @@
 # Active Plans
 
-**54 done** · **0 in progress** · **18 proposed**
+**55 done** · **0 in progress** · **17 proposed**
 
 ## Proposed
 
@@ -22,7 +22,6 @@
 - [laboratory-analysis-pipeline](proposed/laboratory-analysis-pipeline.md) — `feat/laboratory-analysis`
 - [fix-deemix-auto-download-retry](proposed/fix-deemix-auto-download-retry.md) — `fix/deemix-auto-download-retry`
 - [music-api-order-consumer](proposed/music-api-order-consumer.md) — `feat/music-api-order-consumer`
-- [remote-object-store](proposed/remote-object-store.md) — `feat/remote-object-store`
 
 ## Done
 
@@ -82,3 +81,4 @@
 - [macos-shippable-app](done/macos-shippable-app.md) — `feat/macos-app-bundle`
 - [tray-icon](done/tray-icon.md) — `feat/tray-icon`
 - [telemetry-analytics](done/telemetry-analytics.md) — `feat/telemetry-analytics`
+- [remote-object-store](done/remote-object-store.md) — `feat/music-api`

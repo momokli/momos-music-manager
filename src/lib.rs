@@ -23,7 +23,6 @@ use tower_http::cors::CorsLayer;
 pub mod api;
 pub mod audio_extensions;
 pub mod autoupdate;
-pub mod backup;
 pub mod backpack;
 pub mod cli_link;
 pub mod comment;

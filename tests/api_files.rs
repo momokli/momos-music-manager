@@ -1783,12 +1783,12 @@ pub async fn files_backup_status() {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Error: pull-from-backup (no SSH configured)
+// Error: pull-from-backup (not a store object)
 // ────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-/// `POST /api/files/{id}/pull-from-backup` returns an error when SSH is not configured
-/// (backup path lacks a host: prefix in seed data).
+/// `POST /api/files/{id}/pull-from-backup` returns an error when the backup
+/// location is not a `store:<sha256>` object (seed data uses a legacy path).
 pub async fn files_pull_from_backup_error() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;

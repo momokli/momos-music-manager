@@ -226,7 +226,6 @@ struct PollingToml {
 struct MaintainerToml {
     interval_secs: Option<u64>,
     full_scan_max_age_secs: Option<u64>,
-    backup_discovery_interval_secs: Option<u64>,
     auto_prune: Option<bool>,
     auto_cleanup_dirs: Option<bool>,
     traktor_import_enabled: Option<bool>,
@@ -364,7 +363,6 @@ pub struct ServiceCredentials {
     // Maintainer configuration
     pub maintainer_interval_secs: u64,
     pub maintainer_full_scan_max_age_secs: u64,
-    pub maintainer_backup_discovery_interval_secs: u64,
     pub maintainer_auto_prune: bool,
     pub maintainer_auto_cleanup_dirs: bool,
     pub maintainer_traktor_import_enabled: bool,
@@ -750,19 +748,6 @@ impl ServiceCredentials {
                 })
                 .unwrap_or(86400), // 24 hours default
 
-            maintainer_backup_discovery_interval_secs: std::env::var(
-                "MOMOS_MAINTAINER_BACKUP_DISCOVERY_INTERVAL",
-            )
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .or_else(|| {
-                toml_config
-                    .maintainer
-                    .as_ref()
-                    .and_then(|m| m.backup_discovery_interval_secs)
-            })
-            .unwrap_or(86400), // 1 day default
-
             maintainer_auto_prune: std::env::var("MOMOS_MAINTAINER_AUTO_PRUNE")
                 .ok()
                 .and_then(|v| v.parse::<bool>().ok())
@@ -989,11 +974,10 @@ impl ServiceCredentials {
         );
 
         info!(
-            "Maintainer config: interval={}s, full_scan_max_age={}s, backup_discovery_interval={}s, \
+            "Maintainer config: interval={}s, full_scan_max_age={}s, \
              auto_prune={}, auto_cleanup_dirs={}, traktor_import={}",
             credentials.maintainer_interval_secs,
             credentials.maintainer_full_scan_max_age_secs,
-            credentials.maintainer_backup_discovery_interval_secs,
             credentials.maintainer_auto_prune,
             credentials.maintainer_auto_cleanup_dirs,
             credentials.maintainer_traktor_import_enabled,
@@ -1054,11 +1038,6 @@ impl ServiceCredentials {
                 .unwrap_or(3600),
             maintainer_full_scan_max_age_secs: env_var_optional(
                 "MOMOS_MAINTAINER_FULL_SCAN_MAX_AGE_SECS",
-            )
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(86400),
-            maintainer_backup_discovery_interval_secs: env_var_optional(
-                "MOMOS_MAINTAINER_BACKUP_DISCOVERY_INTERVAL_SECS",
             )
             .and_then(|v| v.parse().ok())
             .unwrap_or(86400),
@@ -1626,7 +1605,6 @@ impl ServiceCredentials {
             cold_start_threshold_secs: 86400,
             maintainer_interval_secs: 0,
             maintainer_full_scan_max_age_secs: 86400,
-            maintainer_backup_discovery_interval_secs: 604800,
             maintainer_auto_prune: false,
             maintainer_auto_cleanup_dirs: false,
             maintainer_traktor_import_enabled: false,
@@ -2031,7 +2009,6 @@ pub(crate) mod tests {
         assert_eq!(creds.cold_start_threshold_secs, 86400);
         assert_eq!(creds.maintainer_interval_secs, 0);
         assert_eq!(creds.maintainer_full_scan_max_age_secs, 86400);
-        assert_eq!(creds.maintainer_backup_discovery_interval_secs, 604800);
         assert!(creds.spotify_client_id.is_none());
         assert!(creds.spotify_client_secret.is_none());
         assert_eq!(creds.spotify_redirect_uri, "http://localhost:3000/callback");
