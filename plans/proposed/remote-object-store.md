@@ -1,6 +1,6 @@
 # Plan: remote object store on .200 — submits instead of rsync backups
 
-**Status**: in-progress (phase 1 done)
+**Status**: in-progress (phases 1-2 done)
 **Branch**: `feat/remote-object-store`
 **Ready for review**: yes
 **Depends on**: `feat/music-api` (the `.200` service: Axum/SQLite, bearer auth, systemd, Caddy)
@@ -119,7 +119,7 @@ keep it off the LAN.
       only by comment ⇒ same hash  **(probed on FLAC/MP3/stem M4A — all YES)**
 - [x] A mismatching digest is rejected; re-upload is a no-op; `/objects/check`
       answers present/missing for a bulk list  **(verified live)**
-- [ ] MMM writes `file_locations('backup','store:<sha256>')` only for verified objects
+- [x] MMM writes `file_locations('backup','store:<sha256>')` only for verified objects  **(live: 160 rows, spot-checked against the object's size on `.200`)**
 - [ ] A locally deleted file is restorable from the store **with its comment restored**
 - [ ] A remote-only file streams through `file_stream_handler` with Range support
 - [ ] No default flow uses rsync/SSH; `backup:` is gone from config
@@ -139,6 +139,25 @@ keep it off the LAN.
   clearing the Comment tag with `lofty` is byte-stable across two saves **and**
   comment-independent on FLAC, MP3 and stem M4A. The raw-payload-hash fallback in
   the design is therefore *not* needed.
+
+**Phase 2 — done.** MMM uploads its library to the store.
+
+- `files.content_hash` (additive migration 028) holds the canonical SHA-256.
+- Task `StoreSync` (startup when configured, or `POST /api/storage/sync-store`)
+  works **per batch: hash → `POST /objects/check` → `PUT` the missing ones →
+  record `file_locations('backup','store:<sha256>')`**. It was first written as
+  three strict phases (hash everything, then verify, then upload); on 14 845 files
+  that delayed the first upload by over an hour and re-canonicalised every file,
+  so it is now interleaved. Files that fail in a run are deferred, not retried
+  forever.
+- `get_prune_candidates` now requires `backup.path LIKE 'store:%'`: the legacy
+  rsync rows can no longer authorise a deletion.
+- UI: a "Sync to store" button on the Storage page (`409` when unconfigured).
+- Verified live on the Mac: in ~90 s, **160 store backup locations (9.0 GB)** and
+  **173 objects (9.2 GB)** on `.200`; a recorded `store:<hash>` matches the object
+  and its size exactly. `auto_prune` was deliberately left **off** for now, so
+  nothing has been deleted (the maintainer logged "0 candidates after removing
+  4719 backpack-protected files").
 
 ### Files to touch (indicative)
 
