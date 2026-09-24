@@ -47,11 +47,12 @@ pub async fn start_music_api_consumer(
     let interval = creds.music_api.interval_secs.max(1);
     info!("music-api consumer started (interval: {interval}s)");
 
-    // Run one cycle straight away: a restart must not idle for a whole interval
-    // (the demand is the whole library, so waiting a day costs real progress).
-    if let Err(e) = run_once(&db, &creds, &task_manager).await {
-        warn!("music-api consumer cycle failed: {e:#}");
-    }
+    // The first cycle runs immediately; a *failed* cycle retries on a short
+    // backoff instead of burning a whole interval. At startup the interface is
+    // often not ready yet, and one lost cycle at `interval=86400s` would idle a
+    // full day.
+    const RETRY_DELAY_SECS: u64 = 60;
+    let mut next_delay = Duration::ZERO;
 
     loop {
         tokio::select! {
@@ -59,10 +60,14 @@ pub async fn start_music_api_consumer(
                 info!("music-api consumer shutting down");
                 break;
             }
-            _ = tokio::time::sleep(Duration::from_secs(interval)) => {
-                if let Err(e) = run_once(&db, &creds, &task_manager).await {
-                    warn!("music-api consumer cycle failed: {e:#}");
-                }
+            _ = tokio::time::sleep(next_delay) => {
+                next_delay = match run_once(&db, &creds, &task_manager).await {
+                    Ok(()) => Duration::from_secs(interval),
+                    Err(e) => {
+                        warn!("music-api consumer cycle failed: {e:#}");
+                        Duration::from_secs(RETRY_DELAY_SECS)
+                    }
+                };
             }
         }
     }
