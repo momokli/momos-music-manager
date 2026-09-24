@@ -47,6 +47,12 @@ pub async fn start_music_api_consumer(
     let interval = creds.music_api.interval_secs.max(1);
     info!("music-api consumer started (interval: {interval}s)");
 
+    // Run one cycle straight away: a restart must not idle for a whole interval
+    // (the demand is the whole library, so waiting a day costs real progress).
+    if let Err(e) = run_once(&db, &creds, &task_manager).await {
+        warn!("music-api consumer cycle failed: {e:#}");
+    }
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
