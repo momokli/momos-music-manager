@@ -20,7 +20,7 @@ struct FolderRow {
 pub async fn start_maintainer(
     db: SqlitePool,
     task_manager: crate::tasks::TaskManager,
-    store: crate::store::StoreConfig,
+    creds: crate::config::ServiceCredentials,
     interval_secs: u64,
     full_scan_max_age: u64,
     auto_prune: bool,
@@ -164,7 +164,18 @@ pub async fn start_maintainer(
 
         }
 
-        // ── Check 4: Backpack sync ──────────────────────────────────
+        // ── Check 4: Store sync ─────────────────────────────────────
+        //
+        // Upload local files to the object store and verify its records. Without
+        // this, files that arrived via the music-api consumer only reach the
+        // store on the next app restart. Newly imported files are scanned by the
+        // consumer's folder scan, so they are visible to the upload here at the
+        // latest on the following cycle.
+        if creds.store.is_configured() {
+            crate::tasks::start_store_sync_task(&task_manager, &db, &creds).await;
+        }
+
+        // ── Check 4b: Backpack sync ─────────────────────────────────
         //
         // Periodically ensure files in backpack tags are available locally
         // by triggering a background sync task.
@@ -185,7 +196,7 @@ pub async fn start_maintainer(
             if backpack_tag_count > 0
                 && crate::backpack::backpack_sync_enabled(&db).await
             {
-                crate::tasks::start_backpack_sync_task(&task_manager, &db, &store).await;
+                crate::tasks::start_backpack_sync_task(&task_manager, &db, &creds.store).await;
             }
         }
 

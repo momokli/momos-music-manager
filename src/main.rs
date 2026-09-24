@@ -683,7 +683,7 @@ async fn serve(
     // Start maintainer
     if maint_interval > 0 {
         let maint_db = state.db.clone();
-        let maint_store = state.config.store.clone();
+        let maint_store = state.config.clone();
         tokio::spawn(async move {
             momos_music_manager::maintainer::start_maintainer(
                 maint_db,

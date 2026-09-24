@@ -69,6 +69,10 @@ All notable changes to Momo's Music Manager.
 
 ### Changed
 
+- **Store-Sync läuft jetzt periodisch** (Maintainer-Zyklus, std. 1 h) statt nur beim
+  App-Start. Ohne das erreichten per music-api geladene Dateien den Object Store erst
+  beim nächsten Neustart — also praktisch nie.
+
 - **music-api: begrenzte Retries für `failed`** (`failed` ist nicht mehr sofort terminal):
   Transiente Fehler (download timeout, abgebrochener Download) werden bis zu **3×** erneut
   geordert (Migration 030 `music_api_imports.attempts`). `absent` (kein streambarer Treffer)
