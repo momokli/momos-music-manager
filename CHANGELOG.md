@@ -8,6 +8,11 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **`cleanup-redundant` CLI**: löscht redundante lokale Formate (z. B. einen lokal
+  vorhandenen flac, wenn der bevorzugte `stem.m4a` desselben Tracks ebenfalls lokal
+  und der flac im Object Store gesichert ist). Die Sicherheitsprüfung akzeptiert nur
+  noch `store:`-Backups — eine alte NAS-Zeile autorisiert keine Löschung mehr. Damit
+  ließ sich der Mac um ~56 GiB entlasten.
 - **`store-import`** (music-api): einmaliges Migrations-Bin, das einen Verzeichnisbaum
   (z. B. die NAS-Backups) kanonisiert wie MMM (Comment-Tag geleert, WAV roh), in den
   content-addressed Store auf `.200` legt und pro Objekt Metadaten schreibt. Neue

@@ -47,6 +47,9 @@ enum Commands {
     },
     /// Show database status
     DbStatus,
+    /// Delete redundant local formats (e.g. a local flac when the preferred
+    /// stem.m4a is local and the flac is backed up in the object store)
+    CleanupRedundant,
     /// Scan a single file and print metadata
     ScanFile {
         #[arg(help = "Path to the file to scan")]
@@ -210,6 +213,20 @@ fn main() -> Result<()> {
             rt.block_on(async {
                 let db = create_db_pool().await?;
                 db_status(&db).await
+            })?;
+        }
+        Commands::CleanupRedundant => {
+            let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+            rt.block_on(async {
+                let db = create_db_pool().await?;
+                let (deleted, freed) =
+                    momos_music_manager::db::cleanup_redundant_backpack_files(&db).await?;
+                println!(
+                    "Redundant-format cleanup: {} files deleted, {:.2} GiB freed",
+                    deleted,
+                    freed as f64 / 1073741824.0
+                );
+                Ok::<(), anyhow::Error>(())
             })?;
         }
         Commands::ScanFile { path } => {

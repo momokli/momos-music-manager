@@ -2256,9 +2256,16 @@ pub async fn cleanup_redundant_backpack_files(pool: &Pool<Sqlite>) -> Result<(us
     };
 
     let is_backed_up = |file_id: i64| -> bool {
+        // Only a `store:` location counts. A legacy rsync/NAS row must never
+        // authorise a delete — the NAS is retired and the object may not exist
+        // in the store at all (same rule as `get_prune_candidates`).
         locs_by_file
             .get(&file_id)
-            .map(|locs| locs.iter().any(|l| l.location_type == "backup"))
+            .map(|locs| {
+                locs.iter().any(|l| {
+                    l.location_type == "backup" && l.path.starts_with(crate::store::STORE_PATH_PREFIX)
+                })
+            })
             .unwrap_or(false)
     };
 
