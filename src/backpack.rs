@@ -13,9 +13,10 @@
 //!   2. **Prune-safe** — never a prune candidate, see
 //!      [`crate::db::get_prune_candidates`].
 //!
-//! The Backpack *playlist* is pure transport: the whole set is materialised into
-//! ONE Spotify playlist named `Backpack`, and only that ONE playlist URL is
-//! submitted to deemix. This replaces the old "N single-playlist submits".
+//! The Backpack is also the **download priority**: the music-api consumer orders
+//! the whole library, but Backpack members jump the queue (see
+//! [`crate::db::music_api::demand_isrcs`]). The former Spotify-playlist transport
+//! was removed in ADR-067.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

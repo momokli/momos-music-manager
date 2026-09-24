@@ -1,5 +1,8 @@
-//! `music-api` consumer — orders missing Backpack ISRCs, polls open orders,
-//! imports delivered files and triggers a scan of the destination folders.
+//! `music-api` consumer — orders missing ISRCs, polls open orders, imports
+//! delivered files and triggers a scan of the destination folders.
+//!
+//! The demand is the **whole library** (every track without a linked file), but
+//! Backpack tracks are ordered first so they never wait behind the backlog
 //!
 //! Replaces the old "submit a Spotify playlist URL at deemix" transport. The
 //! per-ISRC state lives in `music_api_imports` (see [`crate::db::music_api`]).

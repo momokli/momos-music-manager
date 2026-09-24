@@ -165,12 +165,12 @@ function syncCell(v) {
   return `<span style="color:var(--text-muted)" title="${d.toLocaleString()}">${label}</span>`;
 }
 
-/** Backpack membership of a playlist: solid box = in, open box = not in. */
+/** Backpack membership of a playlist: a bag = in, a muted bag = not in. */
 function subCell(sub) {
   if (sub) {
-    return `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)" title="In Backpack — tracks are aggregated into the single Backpack playlist; polls every ${sub.pollIntervalSecs}s"><i class="fas fa-box"></i></span>`;
+    return `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)" title="In your Backpack \u2014 polls every ${sub.pollIntervalSecs}s; files are kept on your Mac"><i class="fas fa-bag-shopping"></i></span>`;
   }
-  return `<span style="color:var(--text-muted)" title="Not in Backpack"><i class="fas fa-box-open"></i></span>`;
+  return `<span style="color:var(--text-muted)" title="Not in your Backpack"><i class="fas fa-bag-shopping"></i></span>`;
 }
 
 function viewTracksCell(r) {
@@ -202,9 +202,9 @@ function actions(r) {
     b += `<button class="btn btn-sm btn-green" data-act="create-tag" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Create tag from playlist name"><i class="fas fa-tag"></i></button> `;
 
   if (r.sub) {
-    b += `<button class="btn btn-sm btn-red" data-act="unsubscribe" data-sub-id="${r.sub.id}" data-id="${r.id}" title="Remove from Backpack — stops polling this playlist"><i class="fas fa-box"></i></button> `;
+    b += `<button class="btn btn-sm btn-red" data-act="unsubscribe" data-sub-id="${r.sub.id}" data-id="${r.id}" title="Remove from your Backpack — stops polling this playlist"><i class="fas fa-bag-shopping"></i></button> `;
   } else {
-    b += `<button class="btn btn-sm" data-act="subscribe" data-id="${r.id}" data-service="${r.svc}" data-playlist-id="${r.playlistId}" title="Add to Backpack — tracks are aggregated into the single Backpack playlist and downloaded via deemix (stem > flac > mp3), prune-safe"><i class="fas fa-box-open"></i></button> `;
+    b += `<button class="btn btn-sm" data-act="subscribe" data-id="${r.id}" data-service="${r.svc}" data-playlist-id="${r.playlistId}" title="Add to your Backpack — kept on your Mac, prune-safe"><i class="fas fa-bag-shopping"></i></button> `;
   }
 
   b += `<button class="btn btn-sm btn-delete-playlist" data-act="delete-playlist" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Delete playlist"><i class="fas fa-trash"></i></button> `;
@@ -244,11 +244,11 @@ const PLAYLISTS_CELL_RENDERERS = {
   sync: (r) => syncCell(r.sync),
   subscribe: (r) => subCell(r.sub),
   archive: (r) => {
-    const icon = r.archiveDeleted ? "fa-archive" : "fa-box-open";
-    const title = r.archiveDeleted
-      ? "Archiving: deleted tracks remain active for tagging"
-      : "Active: deleted tracks are removed from tagging";
-    return `<button class="btn btn-sm btn-icon archive-toggle-btn" data-id="${r.id}" data-archive="${r.archiveDeleted ? "1" : "0"}" title="${title}"><i class="fas ${icon}"></i></button>`;
+    const on = !!r.archiveDeleted;
+    const title = on
+      ? "Archiving on \u2014 deleted Spotify tracks are kept for tagging"
+      : "Archiving off \u2014 deleted Spotify tracks are removed";
+    return `<button class="btn btn-sm btn-icon archive-toggle-btn" data-id="${r.id}" data-archive="${on ? "1" : "0"}" title="${title}"><i class="fas fa-box-archive" style="${on ? "color:var(--yellow)" : "color:var(--text-muted)"}"></i></button>`;
   },
   view: (r) => viewTracksCell(r),
   actions: (r) => actions(r),
@@ -279,7 +279,7 @@ function renderToolbar(state) {
           <div class="filter-row">
             <span class="filter-row-label toggleable" data-filter="sub">Backpack</span>
             <div class="filter-group">
-              <button class="filter-btn${state.subscribed ? " active" : ""}" data-value="subscribed"><i class="fas fa-box"></i> Backpack</button>
+              <button class="filter-btn${state.subscribed ? " active" : ""}" data-value="subscribed"><i class="fas fa-bag-shopping"></i> Backpack</button>
             </div>
           </div>
           <div class="filter-row">
@@ -321,7 +321,7 @@ function renderToolbar(state) {
           <div class="filter-row">
             <span class="filter-row-label toggleable" data-filter="archive">Archive</span>
             <div class="filter-group">
-              <button class="filter-btn${state.archive === "archived" ? " active" : ""}" data-value="archived"><i class="fas fa-archive"></i> Archiving</button>
+              <button class="filter-btn${state.archive === "archived" ? " active" : ""}" data-value="archived"><i class="fas fa-box-archive"></i> Archiving</button>
               <button class="filter-btn${state.archive === "active" ? " active" : ""}" data-value="active"><i class="fas fa-box-open"></i> Active</button>
               <button class="filter-btn${state.archive === "all" ? " active" : ""}" data-value="all">All</button>
             </div>
@@ -846,7 +846,7 @@ function wireContentEvents(container, signal, state) {
           } catch (err) {
             showToast(`Add to Backpack failed: ${err.message}`, "error");
             b.disabled = false;
-            b.innerHTML = '<i class="fas fa-box-open"></i>';
+            b.innerHTML = '<i class="fas fa-bag-shopping"></i>';
           }
         } else if (act === "unsubscribe") {
           const subId = parseInt(b.dataset.subId, 10);
@@ -863,7 +863,7 @@ function wireContentEvents(container, signal, state) {
           } catch (err) {
             showToast(`Remove from Backpack failed: ${err.message}`, "error");
             b.disabled = false;
-            b.innerHTML = '<i class="fas fa-box"></i>';
+            b.innerHTML = '<i class="fas fa-bag-shopping"></i>';
           }
         } else if (act === "delete-playlist") {
           const name = b.dataset.name;
@@ -998,11 +998,12 @@ function wireContentEvents(container, signal, state) {
       btn.dataset.archive = newArchive ? "1" : "0";
       const icon = btn.querySelector("i");
       if (icon) {
-        icon.className = "fas " + (newArchive ? "fa-archive" : "fa-box-open");
+        icon.className = "fas fa-box-archive";
+        icon.style.color = newArchive ? "var(--yellow)" : "var(--text-muted)";
       }
       btn.title = newArchive
-        ? "Archiving: deleted tracks remain active for tagging"
-        : "Active: deleted tracks are removed from tagging";
+        ? "Archiving on \u2014 deleted Spotify tracks are kept for tagging"
+        : "Archiving off \u2014 deleted Spotify tracks are removed";
 
       fetchJSON(`/api/playlists/${id}/archive`, {
         method: "PUT",
@@ -1018,11 +1019,12 @@ function wireContentEvents(container, signal, state) {
           // Revert on error
           btn.dataset.archive = currentArchive ? "1" : "0";
           if (icon) {
-            icon.className = "fas " + (currentArchive ? "fa-archive" : "fa-box-open");
+            icon.className = "fas fa-box-archive";
+            icon.style.color = currentArchive ? "var(--yellow)" : "var(--text-muted)";
           }
           btn.title = currentArchive
-            ? "Archiving: deleted tracks remain active for tagging"
-            : "Active: deleted tracks are removed from tagging";
+            ? "Archiving on \u2014 deleted Spotify tracks are kept for tagging"
+            : "Archiving off \u2014 deleted Spotify tracks are removed";
           showToast(`Failed to toggle archive: ${err.message}`, "error");
         });
     },

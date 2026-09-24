@@ -1493,3 +1493,30 @@ Geblieben (Keep/Datei-Pflege):
   `PUT /api/storage/settings/backpack-sync`.
 - Der music-api-Order-Fortschritt (`demand/ordered/imported`) hatte nur auf der Backpack-Seite
   eine Anzeige; aktuell ohne UI (Follow-up: kleiner Status-Endpunkt / Karte auf der Services-Seite).
+
+
+## ADR-068: music-api demand covers the whole library, Backpack first
+
+**Date**: 2026-09-24
+**Status**: Accepted (implemented)
+**Relates**: ADR-065 (music-api as download authority), ADR-067 (Backpack transport removed)
+
+**Context**: Der music-api-Consumer bestellte per `demand_isrcs` nur ISRCs von
+**Backpack**-Tracks ohne Datei. Alles andere blieb unangetastet, auch wenn es
+nie als Datei ankam. Gleichzeitig soll die Bibliothek langfristig vollständig
+im Object Store (`.200`) vorliegen. Ein reiner Backpack-Demand lässt den Rest
+für immer liegen.
+
+**Decision**: Die Demand ist die **gesamte Bibliothek** — jeder `service_track`
+mit ISRC, der keine verlinkte Datei und keine Ledger-Zeile hat. Backpack-Tracks
+werden aber **zuerst** bestellt (`demand_isrcs` gibt erst die Backpack-ISRCs,
+dann den Rest, jeweils gedeckelt durch `batch_size`). Der Nutzer wartet so nie
+hinter dem Backlog.
+
+**Consequences**:
+- Die Demand ist groß (Stand 2026-09-24: ~46k ISRCs, davon ~3.4k Backpack).
+  Der Store/`.200` braucht entsprechend Platz; `batch_size` und das
+  Consumer-Intervall bestimmen das Tempo („nach und nach").
+- `demand_count` zählt jetzt Priority + Backlog zusammen.
+- Kein neues Schema, keine neuen Endpunkte — nur die Auswahl in
+  `src/db/music_api.rs` (`demand_isrcs`, neue `missing_track_isrcs`).

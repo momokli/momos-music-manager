@@ -69,7 +69,7 @@ function renderPage(container, tags, playlists) {
 
   container.innerHTML = `
     <div class="page-header">
-      <h1><i class="fa-solid fa-box"></i> Backpack</h1>
+      <h1><i class="fa-solid fa-bag-shopping"></i> Backpack</h1>
       <p class="text-muted" style="margin-top:0.25rem">
         The Backpack is what you want on your Mac. It is the union of the playlist and tag
         sources below, kept in the best available local format. Prune never deletes anything

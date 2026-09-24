@@ -182,54 +182,75 @@ async fn known_isrcs(pool: &Pool<Sqlite>) -> Result<HashSet<String>, sqlx::Error
         .collect())
 }
 
-/// ISRCs of Backpack tracks that have `isrc` set, no linked file and no row in
-/// the ledger yet — the demand to order from `music-api`. Deduplicated, capped
-/// at `limit`.
+/// Distinct ISRCs of *every* service track that has no linked file — the whole
+/// library backlog, ordered stably by ISRC. The Backpack is a subset of this;
+/// [`demand_isrcs`] drains the Backpack part first.
+async fn missing_track_isrcs(pool: &Pool<Sqlite>) -> Result<Vec<String>, sqlx::Error> {
+    // A plain scan of the `track_id` column of the view is cheap (~40 ms on a
+    // production library); only a `track_id IN (<huge list>)` predicate
+    // degenerates, and this query has none.
+    sqlx::query_scalar(
+        "SELECT DISTINCT st.isrc
+           FROM service_tracks st
+          WHERE st.isrc IS NOT NULL
+            AND st.id NOT IN (SELECT track_id FROM v_file_track_link)
+          ORDER BY st.isrc",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// ISRCs to order from `music-api`: every library track that has `isrc` set, no
+/// linked file and no ledger row yet — **Backpack tracks first** so they never
+/// wait behind the backlog. Deduplicated, capped at `limit`.
 pub async fn demand_isrcs(pool: &Pool<Sqlite>, limit: usize) -> Result<Vec<String>, sqlx::Error> {
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let missing = missing_backpack_track_ids(pool).await?;
-    if missing.is_empty() {
-        return Ok(Vec::new());
-    }
-    let isrcs = isrcs_for_tracks(pool, &missing).await?;
     let known = known_isrcs(pool).await?;
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
 
-    let mut out = Vec::new();
-    for isrc in isrcs {
-        if known.contains(&isrc) {
+    // (1) Priority: missing Backpack ISRCs jump the queue.
+    let missing_backpack = missing_backpack_track_ids(pool).await?;
+    for isrc in isrcs_for_tracks(pool, &missing_backpack).await? {
+        if known.contains(&isrc) || !seen.insert(isrc.clone()) {
             continue;
         }
         out.push(isrc);
         if out.len() >= limit {
-            break;
+            return Ok(out);
         }
     }
+
+    // (2) Backlog: everything else in the library, in ISRC order.
+    for isrc in missing_track_isrcs(pool).await? {
+        if known.contains(&isrc) || !seen.insert(isrc.clone()) {
+            continue;
+        }
+        out.push(isrc);
+        if out.len() >= limit {
+            return Ok(out);
+        }
+    }
+
     Ok(out)
 }
 
-/// Cheap count of [`demand_isrcs`] (no ISRC list materialisation, no limit).
-/// Shares the coverage computation with [`demand_isrcs`], so both agree.
+/// Cheap count of [`demand_isrcs`] (no limit): every library ISRC without a
+/// linked file and without a ledger row. Covers both the priority and the
+/// backlog, so it agrees with the sum of what [`demand_isrcs`] would return.
 pub async fn demand_count(pool: &Pool<Sqlite>) -> i64 {
-    let missing = match missing_backpack_track_ids(pool).await {
-        Ok(ids) if !ids.is_empty() => ids,
-        _ => return 0,
-    };
-    if missing.is_empty() {
-        return 0;
-    }
-    let placeholders = missing.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let sql = format!(
-        "SELECT COUNT(DISTINCT isrc) FROM service_tracks
-          WHERE isrc IS NOT NULL AND id IN ({placeholders})
-            AND isrc NOT IN (SELECT isrc FROM music_api_imports)"
-    );
-    let mut query = sqlx::query_scalar::<_, i64>(&sql);
-    for id in &missing {
-        query = query.bind(id);
-    }
-    query.fetch_one(pool).await.unwrap_or(0)
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (
+            SELECT DISTINCT st.isrc FROM service_tracks st
+             WHERE st.isrc IS NOT NULL
+               AND st.id NOT IN (SELECT track_id FROM v_file_track_link)
+         ) WHERE isrc NOT IN (SELECT isrc FROM music_api_imports)",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0)
 }
 
 /// Rows still in flight (`ordered`/`ready`).
@@ -553,10 +574,66 @@ mod tests {
         assert_eq!(demand_count(&pool).await, 0);
     }
 
+    /// Seed a plain (non-Backpack) library track.
+    async fn make_track(pool: &Pool<Sqlite>, track_id: i64, isrc: &str) {
+        sqlx::query(
+            "INSERT INTO service_tracks (id, service, service_id, isrc) VALUES (?, 'spotify', ?, ?)",
+        )
+        .bind(track_id)
+        .bind(format!("sp-{track_id}"))
+        .bind(isrc)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
-    async fn demand_zero_when_no_backpack_tracks() {
+    async fn demand_zero_when_library_empty() {
         let pool = test_db().await;
         assert!(demand_isrcs(&pool, 100).await.unwrap().is_empty());
         assert_eq!(demand_count(&pool).await, 0);
+    }
+
+    #[tokio::test]
+    async fn demand_includes_non_backpack_tracks() {
+        let pool = test_db().await;
+        make_backpack_track(&pool, 1, "ISRC-A").await;
+        make_track(&pool, 2, "ISRC-Z").await; // not in the Backpack
+
+        // Backlog tracks are ordered too, not just Backpack ones.
+        assert_eq!(demand_isrcs(&pool, 100).await.unwrap(), vec!["ISRC-A", "ISRC-Z"]);
+        assert_eq!(demand_count(&pool).await, 2);
+    }
+
+    #[tokio::test]
+    async fn demand_orders_backpack_before_backlog() {
+        let pool = test_db().await;
+        // Backlog ISRC sorts *before* the Backpack ISRC alphabetically, so a
+        // plain ISRC order would put it first — the Backpack must win anyway.
+        make_track(&pool, 1, "ISRC-AAA").await;
+        make_backpack_track(&pool, 2, "ISRC-ZZZ").await;
+
+        assert_eq!(demand_isrcs(&pool, 100).await.unwrap(), vec!["ISRC-ZZZ", "ISRC-AAA"]);
+
+        // The limit is spent on the Backpack first.
+        assert_eq!(demand_isrcs(&pool, 1).await.unwrap(), vec!["ISRC-ZZZ"]);
+    }
+
+    #[tokio::test]
+    async fn demand_skips_linked_and_known_backlog_tracks() {
+        let pool = test_db().await;
+        make_track(&pool, 1, "ISRC-A").await;
+        make_track(&pool, 2, "ISRC-B").await;
+        make_track(&pool, 3, "ISRC-C").await;
+
+        // A linked file removes ISRC-B from the backlog.
+        link_file(&pool, 10, 2, "ISRC-B").await;
+        // A ledger row removes ISRC-C (e.g. terminal/absent).
+        set_state(&pool, "ISRC-C", "absent", None, None, Some("nope"))
+            .await
+            .unwrap();
+
+        assert_eq!(demand_isrcs(&pool, 100).await.unwrap(), vec!["ISRC-A"]);
+        assert_eq!(demand_count(&pool).await, 1);
     }
 }

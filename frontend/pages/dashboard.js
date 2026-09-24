@@ -303,7 +303,7 @@ function renderBackpackCard(subscriptions) {
   if (!subscriptions || subscriptions.length === 0) {
     return renderCard(
       "Backpack",
-      "fa-solid fa-box",
+      "fa-solid fa-bag-shopping",
       `<div class="empty-state" style="padding:var(--space-4) 0;"><p>Nothing in the Backpack yet. <a href="#playlists">Go to Playlists →</a></p></div>`,
     );
   }
@@ -334,7 +334,7 @@ function renderBackpackCard(subscriptions) {
 
   return renderCard(
     "Backpack",
-    "fa-solid fa-box",
+    "fa-solid fa-bag-shopping",
     `<div style="margin-top:var(--space-1);">${rows}</div>`,
     `<a href="#playlists">Go to Playlists →</a>`,
   );

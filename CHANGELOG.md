@@ -69,10 +69,19 @@ All notable changes to Momo's Music Manager.
 
 ### Changed
 
+- **music-api: Demand = ganze Bibliothek (Backpack zuerst)**: Der Consumer bestellt
+  nicht mehr nur Backpack-ISRCs, sondern jeden Track ohne verlinkte Datei. Backpack-Tracks
+  werden zuerst geordert, damit sie nie hinter dem Backlog warten. Siehe ADR-068.
+- **Backpack ≠ Archive (UI)**: Backpack ist jetzt durchgängig ein **Beutel**
+  (`fa-bag-shopping`, an = `--primary`), Archive eine **Archivbox** (`fa-box-archive`,
+  an = `--yellow`). Vorher war der Aus-Zustand beider Buttons dasselbe Icon
+  (`fa-box-open`) und damit nicht unterscheidbar. Betrifft Playlists-, Tags-, Tracks-,
+  Dashboard- und Backpack-Seite.
+
 - **„Subscribe“ heißt in der UI jetzt „Backpack“ (#40)**: Spalte, Filter, Buttons
-  (Box-Icon), Dashboard-Karte und Toasts. Die Tooltips beschreiben die reale Semantik
-  (eine aggregierte Backpack-Playlist → ein deemix-Submit, prune-safe). API-Pfade und
-  interne Namen bleiben unverändert.
+  (Beutel-Icon `fa-bag-shopping`), Dashboard-Karte und Toasts. Die Tooltips beschreiben
+  die reale Semantik (Mitglied der Keep-Menge → auf dem Mac vorhalten, prune-safe).
+  API-Pfade und interne Namen bleiben unverändert.
 
 ### Removed
 
