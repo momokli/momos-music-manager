@@ -5,7 +5,7 @@
 //! Sync state is tracked in memory, not in the database, to avoid locking issues
 //! and provide real-time progress updates.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::config::ServiceCredentials;
 use crate::embeddings::serialize_embedding;
 use crate::spotify::{client::SpotifyClient, sync_worker::SpotifySyncWorker};
+use crate::store::{canonicalise_to, StoreClient};
 
 // ============================================================
 // TaskType — unified enum for all background operations
@@ -58,6 +59,9 @@ pub enum TaskType {
     PruneFiles { file_ids: Vec<i64> },
     /// BackpackSync: Ensure files in backpack tags are available locally
     BackpackSync,
+    /// StoreSync: Canonicalise + upload local files to the remote object store
+    /// and verify the store's records (SHA-256 facts).
+    StoreSync,
     /// Verify backup records still exist on NAS (periodic integrity check)
     BackupVerify { folder_id: i64 },
     /// Subscription poller: single subscription poll cycle
@@ -444,6 +448,7 @@ pub fn task_type_conflict_key(task_type: &TaskType) -> Option<String> {
         TaskType::BackupDiscovery { folder_id } => Some(format!("backup_discovery:{}", folder_id)),
         TaskType::PruneFiles { .. } => None, // prunes don't conflict — multiple can run
         TaskType::BackpackSync => Some("backpack_sync".to_string()),
+        TaskType::StoreSync => Some("store_sync".to_string()),
         TaskType::BackupVerify { folder_id } => Some(format!("backup_verify:{}", folder_id)),
         TaskType::PollSubscription { .. } => None,
         TaskType::GlobalPollCycle => None,
@@ -623,6 +628,7 @@ impl Task {
             TaskType::BackupDiscovery { .. } => "backup_discovery".to_string(),
             TaskType::PruneFiles { .. } => "prune_files".to_string(),
             TaskType::BackpackSync => "backpack_sync".to_string(),
+            TaskType::StoreSync => "store_sync".to_string(),
             TaskType::BackupVerify { .. } => "backup_verify".to_string(),
             TaskType::PollSubscription { .. } => "poll_subscription".to_string(),
             TaskType::GlobalPollCycle => "global_poll_cycle".to_string(),
@@ -1264,6 +1270,7 @@ pub fn task_type_label(task_type: &TaskType) -> String {
         }
         TaskType::PruneFiles { file_ids } => format!("Prune {} files", file_ids.len()),
         TaskType::BackpackSync => "Backpack sync all tags".to_string(),
+        TaskType::StoreSync => "Sync to object store".to_string(),
         TaskType::BackupVerify { folder_id } => {
             format!("Verify backup records for folder #{}", folder_id)
         }
@@ -3874,6 +3881,267 @@ pub async fn start_backpack_sync_task(
 
     task_manager.set_join_handle(&task_id, join_handle).await;
     task_id
+}
+
+// ============================================================
+// StoreSync worker
+// ============================================================
+
+/// Files per batch: hashed, checked and uploaded together.
+const STORE_SYNC_BATCH: i64 = 200;
+
+/// Temp path for a file's canonical copy, keeping the source extension so
+/// `lofty` writes the same container.
+fn store_temp_path(file_id: i64, file_path: &str) -> std::path::PathBuf {
+    let ext = std::path::Path::new(file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "mmm-store-{}-{}{}",
+        std::process::id(),
+        file_id,
+        ext
+    ))
+}
+
+/// Start a background task that backs up local files to the remote object store.
+///
+/// Three phases, each throttled and logged to the task:
+/// 1. **Backfill** — canonicalise (clear the Comment tag) every local file whose
+///    `content_hash` is still `NULL`, and record the resulting object hash.
+/// 2. **Verify** — one `POST /objects/check` per batch: present hashes refresh
+///    the `store:<hash>` backup location, missing ones drop a stale record.
+/// 3. **Upload** — canonicalise + `PUT` every local file that still lacks a
+///    store backup location, then record it.
+///
+/// A soft no-op — no task is created — when the store is not configured.
+pub async fn start_store_sync_task(
+    task_manager: &TaskManager,
+    db: &sqlx::Pool<sqlx::Sqlite>,
+    creds: &ServiceCredentials,
+) -> String {
+    if !creds.store.is_configured() {
+        info!("Store sync skipped: store not configured");
+        return String::new();
+    }
+    let base_url = creds.store.base_url.clone().unwrap_or_default();
+    let token = creds.store.token.clone().unwrap_or_default();
+    let client = StoreClient::new(&base_url, &token);
+
+    let task = Task::new(TaskType::StoreSync, None);
+    let task_id = task.id.clone();
+    let worker_task_id = task_id.clone();
+    let _cancel_token = task.cancel_token.clone();
+
+    match task_manager.start_task_unique(task).await {
+        Ok(_) => {}
+        Err(TaskConflictError::AlreadyRunning { .. }) => {
+            info!("Store sync already running, skipping");
+            return String::new();
+        }
+    };
+
+    let tm = task_manager.clone();
+    let db_clone = db.clone();
+    let join_handle = tokio::spawn(async move {
+        tm.update_task_status(&worker_task_id, TaskStatus::Running)
+            .await;
+        tm.update_progress(&worker_task_id, |p| {
+            p.status = TaskStatus::Running;
+            p.message = "Store sync: scanning local files...".to_string();
+        })
+        .await;
+
+        match run_store_sync(&tm, &db_clone, &client, &worker_task_id).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let err_msg = format!("Store sync failed: {e}");
+                error!("{}", err_msg);
+                tm.add_log(&worker_task_id, err_msg.clone()).await;
+                tm.update_task_status(&worker_task_id, TaskStatus::Failed)
+                    .await;
+                tm.update_progress(&worker_task_id, |p| {
+                    p.status = TaskStatus::Failed;
+                    p.message = err_msg.clone();
+                })
+                .await;
+                Err(anyhow::anyhow!(err_msg))
+            }
+        }
+    });
+
+    task_manager.set_join_handle(&task_id, join_handle).await;
+    task_id
+}
+
+/// The body of the StoreSync worker (extracted so errors set the task Failed).
+///
+/// Interleaved on purpose: each batch is hashed, checked and uploaded before the
+/// next one is read. Hashing the whole library first would push the first upload
+/// hours out on a large collection, hide progress, and re-canonicalise every file
+/// a second time later on.
+async fn run_store_sync(
+    tm: &TaskManager,
+    db: &sqlx::Pool<sqlx::Sqlite>,
+    client: &StoreClient,
+    task_id: &str,
+) -> anyhow::Result<()> {
+    let mut hashed = 0usize;
+    let mut uploaded = 0usize;
+    let mut already = 0usize;
+    let mut verified = 0usize;
+    let mut failed = 0usize;
+    // Files that failed in this run (unreadable container, or a transient upload
+    // error) are skipped for the rest of it — they stay in the candidate set, so
+    // without this the loop would never move past them. The next run retries.
+    let mut deferred: HashSet<i64> = HashSet::new();
+
+    loop {
+        if store_sync_cancelled(tm, task_id).await {
+            store_sync_cancelled_done(tm, task_id).await;
+            return Ok(());
+        }
+
+        let batch: Vec<_> = crate::db::local_files_needing_store_backup(db, STORE_SYNC_BATCH)
+            .await?
+            .into_iter()
+            .filter(|c| !deferred.contains(&c.file_id))
+            .collect();
+        if batch.is_empty() {
+            break;
+        }
+
+        // 1. Make sure every candidate has a content hash.
+        let mut hashes = Vec::new();
+        for c in &batch {
+            match c.content_hash.as_deref() {
+                Some(h) if !h.is_empty() => hashes.push((c, h.to_string())),
+                _ => {
+                    let tmp = store_temp_path(c.file_id, &c.file_path);
+                    match canonicalise_to(std::path::Path::new(&c.file_path), &tmp) {
+                        Ok(hash) => {
+                            let _ = std::fs::remove_file(&tmp);
+                            sqlx::query("UPDATE files SET content_hash = ? WHERE id = ?")
+                                .bind(&hash)
+                                .bind(c.file_id)
+                                .execute(db)
+                                .await?;
+                            hashed += 1;
+                            hashes.push((c, hash));
+                        }
+                        Err(e) => {
+                            let _ = std::fs::remove_file(&tmp);
+                            warn!(
+                                "Store sync: canonicalise #{} ({}) failed: {}",
+                                c.file_id, c.file_path, e
+                            );
+                            deferred.insert(c.file_id);
+                            failed += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. One round trip to learn which of this batch the store already has.
+        let hash_list: Vec<String> = hashes.iter().map(|(_, h)| h.clone()).collect();
+        let present: HashSet<String> = if hash_list.is_empty() {
+            HashSet::new()
+        } else {
+            client.check(&hash_list).await?.present.into_iter().collect()
+        };
+
+        // 3. Upload the missing ones; record the store location either way.
+        for (c, hash) in &hashes {
+            if present.contains(hash) {
+                crate::db::upsert_store_backup_location(db, c.file_id, hash, c.file_size).await?;
+                verified += 1;
+                continue;
+            }
+
+            let tmp = store_temp_path(c.file_id, &c.file_path);
+            let canonical = match canonicalise_to(std::path::Path::new(&c.file_path), &tmp) {
+                Ok(h) => h,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    warn!(
+                        "Store sync: canonicalise #{} ({}) failed: {}",
+                        c.file_id, c.file_path, e
+                    );
+                    deferred.insert(c.file_id);
+                    failed += 1;
+                    continue;
+                }
+            };
+
+            match client
+                .put(&canonical, &tmp, &c.file_path, c.isrc.as_deref())
+                .await
+            {
+                Ok(stored) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    crate::db::upsert_store_backup_location(db, c.file_id, &canonical, c.file_size)
+                        .await?;
+                    if stored {
+                        uploaded += 1;
+                    } else {
+                        already += 1;
+                    }
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    warn!(
+                        "Store sync: upload #{} ({}) failed: {}",
+                        c.file_id, c.file_path, e
+                    );
+                    deferred.insert(c.file_id);
+                    failed += 1;
+                }
+            }
+        }
+
+        tm.update_progress_text(
+            task_id,
+            format!(
+                "Store sync: {uploaded} uploaded, {verified} already in the store, {already} deduped, {failed} failed"
+            ),
+        )
+        .await;
+    }
+
+    let msg = format!(
+        "Store sync: {hashed} hashed, {uploaded} uploaded, {verified} verified present, \
+         {already} already present, {failed} failed"
+    );
+    info!("{}", msg);
+    tm.add_log(task_id, msg.clone()).await;
+    tm.update_progress_text(task_id, msg.clone()).await;
+    tm.update_task_status(task_id, TaskStatus::Completed).await;
+    tm.update_progress(task_id, |p| {
+        p.status = TaskStatus::Completed;
+        p.percent = Some(100.0);
+        p.message = msg.clone();
+    })
+    .await;
+    Ok(())
+}
+
+/// `true` when the task's cancellation token has been triggered.
+async fn store_sync_cancelled(tm: &TaskManager, task_id: &str) -> bool {
+    matches!(tm.get_cancel_token(task_id).await, Some(ct) if ct.is_cancelled())
+}
+
+/// Mark the task cancelled (used on the cancel path).
+async fn store_sync_cancelled_done(tm: &TaskManager, task_id: &str) {
+    warn!("Store sync cancelled");
+    tm.update_task_status(task_id, TaskStatus::Cancelled).await;
+    tm.update_progress(task_id, |p| {
+        p.status = TaskStatus::Cancelled;
+        p.message = "Store sync cancelled".to_string();
+    })
+    .await;
 }
 
 #[cfg(test)]

@@ -8,6 +8,15 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **Remote object store (Upload-Seite)**: MMM lädt die Bibliothek in einen
+  content-addressed Store auf dem Musik-Host und kann danach fragen, ob eine
+  Datei gesichert ist. Objekte sind die **kanonisierte** Datei (Comment-Tag
+  geleert) — Dateien, die sich nur im Comment unterscheiden, deduplizieren.
+  Neu: Spalte `files.content_hash` (Migration 028), `[store]`-Config, Task
+  `StoreSync` (pro Batch: hashen → `POST /objects/check` → `PUT` fehlende),
+  `POST /api/storage/sync-store` und ein „Sync to store“-Knopf auf der
+  Storage-Seite. `auto_prune` stützt sich nur noch auf `store:`-Backups, nicht
+  mehr auf die alten rsync-Zeilen.
 - **Schalter für den Backpack-File-Sync**: Der Backpack-Sync (fehlende Files per
   rsync aus dem Backup ziehen, Formate aufräumen) lief bisher immer beim
   App-Start und beim Umschalten eines Tags. Neuer Settings-Key

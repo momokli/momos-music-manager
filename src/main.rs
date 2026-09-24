@@ -661,6 +661,22 @@ async fn serve(
         }
     });
 
+    // Auto store sync on startup — upload local files to the remote object store
+    // and verify its records. Skipped entirely when the store is not configured.
+    if state.config.store.is_configured() {
+        let store_db = state.db.clone();
+        let store_creds = state.config.clone();
+        let store_tm = state.task_manager.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            momos_music_manager::tasks::start_store_sync_task(&store_tm, &store_db, &store_creds)
+                .await;
+        });
+        tracing::info!("Startup store sync scheduled (store configured)");
+    } else {
+        tracing::info!("Startup store sync skipped (store not configured)");
+    }
+
     // Spawn Backpack coordinator — materialises the single Spotify playlist after
     // membership mutations (dirty-marker + debounce) and on manual push requests.
     {

@@ -155,3 +155,65 @@ test.describe("Storage Page - Ghost Records", () => {
     expect(purgeCalled).toBeTruthy();
   });
 });
+
+test.describe("Storage Page - Sync to Store", () => {
+  test.beforeEach(async ({ request }) => {
+    await request.post("/api/testing/seed", {
+      data: { scenario: "basic" },
+    });
+  });
+
+  test("sync button posts once and shows a success toast", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    let syncHits = 0;
+    let syncMethod = null;
+    await page.route("**/api/storage/sync-store", async (route) => {
+      syncHits += 1;
+      syncMethod = route.request().method();
+      await route.fulfill({ json: { data: { taskId: "task-123" } } });
+    });
+
+    await page.goto("/#storage");
+    await page.waitForSelector("#storage-sync-store", { timeout: 8000 });
+    await expect(page.locator("#storage-sync-store")).toBeVisible();
+
+    await page.click("#storage-sync-store");
+
+    await expect(page.locator(".toast-notification")).toContainText("background", {
+      timeout: 6000,
+    });
+    expect(syncHits).toBe(1);
+    expect(syncMethod).toBe("POST");
+
+    // Button is re-enabled after the request settles
+    await expect(page.locator("#storage-sync-store")).toBeEnabled({ timeout: 8000 });
+
+    expect(errors).toEqual([]);
+  });
+
+  test("not configured surfaces a store-not-configured hint", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await page.route("**/api/storage/sync-store", async (route) => {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "store is not configured" }),
+      });
+    });
+
+    await page.goto("/#storage");
+    await page.waitForSelector("#storage-sync-store", { timeout: 8000 });
+
+    await page.click("#storage-sync-store");
+
+    await expect(page.locator(".toast-notification")).toContainText("not configured", {
+      timeout: 6000,
+    });
+
+    expect(errors).toEqual([]);
+  });
+});

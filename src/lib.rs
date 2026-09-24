@@ -44,6 +44,7 @@ pub mod music_api_consumer;
 pub mod poller;
 pub mod scan_cache;
 pub mod spotify;
+pub mod store;
 pub mod tasks;
 pub mod telemetry;
 pub mod traktor;

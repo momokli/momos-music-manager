@@ -25,6 +25,25 @@ mod common;
 
 use momos_music_manager::db::refresh_file_resolved_tags;
 
+/// Mark a file's `backup` location as a store object.
+///
+/// Seed data uses legacy rsync `/backup/...` paths, which no longer authorise a
+/// prune; only `store:<hash>` locations do. Call this for the files a prune
+/// test expects to be eligible.
+async fn mark_store_backed_up(pool: &sqlx::SqlitePool, file_ids: &[i64]) {
+    for id in file_ids {
+        sqlx::query(
+            "UPDATE file_locations SET path = 'store:' || printf('%064x', ?) \
+             WHERE file_id = ? AND location_type = 'backup'",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
 // ═════════════════════════════════════════════════════════════════════════
 // /api/storage/status
 // ═════════════════════════════════════════════════════════════════════════
@@ -190,13 +209,15 @@ async fn storage_status_counts() {
 /// Verify the prune preview response shape.
 ///
 /// After `seed_basic_data` + refreshing `file_resolved_tags`:
-/// - Files 1 and 2 are backed up, local, have metadata, and are NOT in a backpack tag
-///   (tag "Groovy" has backpack=0) → these are prune candidates.
-/// - File 3 is backed up but has NO local entry → excluded by the SQL EXISTS filter.
+/// - Files 1 and 2 are backed up **to the store**, local, have metadata, and are
+///   NOT in a backpack tag (tag "Groovy" has backpack=0) → prune candidates.
+/// - File 3 has a legacy rsync backup but NO local entry → excluded.
 #[tokio::test]
 async fn storage_prune_preview() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
+    // Only store-backed-up files are prune candidates.
+    mark_store_backed_up(&pool, &[1, 2]).await;
 
     // Populate file_resolved_tags so the backpack-filter subquery works.
     refresh_file_resolved_tags(&pool).await.unwrap();
@@ -268,13 +289,15 @@ async fn storage_prune_preview() {
 /// Verify which files appear as prune candidates and their properties.
 ///
 /// Files 1 and 2 should be candidates because they satisfy all conditions:
-/// backed up + local + has metadata + tag "Groovy" has backpack=0.
+/// store-backed-up + local + tag "Groovy" has backpack=0.
 ///
 /// File 3 should NOT be a candidate because it has no local entry.
 #[tokio::test]
 async fn storage_prune_preview_candidates() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
+    // Only store-backed-up files are prune candidates.
+    mark_store_backed_up(&pool, &[1, 2]).await;
     refresh_file_resolved_tags(&pool).await.unwrap();
 
     let resp = client
@@ -350,8 +373,8 @@ async fn storage_prune_preview_candidates() {
 /// Verify that, when WAV source files have local presence, they appear in the
 /// prune preview with `hasStemVariant: true` and `reason: "wav_backed_up"`.
 ///
-/// The WAV files (IDs 20-24) are backed up and have `source_of=2` (linked to
-/// stem file 2). They also need local entries to satisfy the EXISTS subquery
+/// The WAV files (IDs 20-24) are store-backed-up and have `source_of=2` (linked
+/// to stem file 2). They also need local entries to satisfy the EXISTS subquery
 /// in `get_prune_candidates` — this test adds those inline after the standard
 /// seeds so WAVs become eligible candidates.
 #[tokio::test]
@@ -359,6 +382,8 @@ async fn storage_prune_preview_wav_variants() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
     common::seed_wav_variant_data(&pool).await;
+    // Only store-backed-up files are prune candidates (WAVs 20-24 + files 1, 2).
+    mark_store_backed_up(&pool, &[1, 2, 20, 21, 22, 23, 24]).await;
 
     // WAVs need local entries to appear as prune candidates (the prune query
     // requires `EXISTS (SELECT 1 FROM file_locations WHERE type='local')`).
@@ -1045,6 +1070,77 @@ async fn storage_backfill_backup_sizes_with_zero_size() {
     // Should spawn a task (which will fail gracefully since no SSH)
     assert!(data["taskId"].is_string(), "should return a taskId string");
     assert!(data["message"].is_string(), "should include a message");
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// /api/storage/sync-store
+// ═════════════════════════════════════════════════════════════════════════
+
+/// `POST /api/storage/sync-store` — 409 when the object store is not configured
+/// (the test app's default config).
+#[tokio::test]
+async fn storage_sync_store_unconfigured_is_conflict() {
+    let (client, base, _pool) = common::spawn_test_app().await;
+
+    let resp = client
+        .post(format!("{}/api/storage/sync-store", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 409, "unconfigured store must be a conflict");
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        json["data"]["error"].as_str().is_some(),
+        "conflict should carry an error message, got {json:#}"
+    );
+}
+
+/// `POST /api/storage/sync-store` — returns a task id when the store is
+/// configured. No files are seeded, so the worker completes immediately without
+/// any network round-trip.
+#[tokio::test]
+async fn storage_sync_store_starts_task_when_configured() {
+    use std::sync::Arc;
+
+    let pool = common::create_test_db().await;
+    let mut config = momos_music_manager::config::ServiceCredentials::defaults_for_test();
+    config.store = momos_music_manager::store::StoreConfig {
+        enabled: true,
+        base_url: Some("http://127.0.0.1:9".to_string()),
+        token: Some("test-token".to_string()),
+    };
+    let state = Arc::new(momos_music_manager::AppState {
+        db: pool,
+        config,
+        task_manager: momos_music_manager::tasks::TaskManager::new(),
+        embeddings: tokio::sync::Mutex::new(None),
+        category_means: tokio::sync::Mutex::new(None),
+        public_url: None,
+        backpack_coordinator: Arc::new(
+            momos_music_manager::backpack::BackpackSyncCoordinator::new(),
+        ),
+    });
+
+    let app = momos_music_manager::build_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/storage/sync-store", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "configured store returns 200");
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        json["data"]["taskId"].is_string(),
+        "configured store should start a task, got {json:#}"
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════

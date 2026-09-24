@@ -381,6 +381,37 @@ async fn sync_backpack_handler(State(state): State<Arc<AppState>>) -> impl IntoR
     })
     .into_response()
 }
+/// POST /api/storage/sync-store
+/// Canonicalise + upload local files to the remote object store, then verify
+/// the store's records (SHA-256 facts).
+async fn sync_store_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if !state.config.store.is_configured() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResponse {
+                data: serde_json::json!({ "error": "Object store is not configured" }),
+            }),
+        )
+            .into_response();
+    }
+
+    let task_id =
+        crate::tasks::start_store_sync_task(&state.task_manager, &state.db, &state.config).await;
+    if task_id.is_empty() {
+        return Json(ApiResponse {
+            data: serde_json::json!({
+                "taskId": null,
+                "message": "Store sync already in progress",
+            }),
+        })
+        .into_response();
+    }
+    Json(ApiResponse {
+        data: serde_json::json!({ "taskId": task_id }),
+    })
+    .into_response()
+}
+
 // ── Purge Orphans ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -815,6 +846,7 @@ pub(super) fn router() -> Router<Arc<AppState>> {
             post(storage_discover_backup_handler),
         )
         .route("/api/storage/sync-backpack", post(sync_backpack_handler))
+        .route("/api/storage/sync-store", post(sync_store_handler))
         .route("/api/storage/backpack-size", get(backpack_size_handler))
         .route(
             "/api/storage/settings/format-priority",

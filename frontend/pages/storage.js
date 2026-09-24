@@ -55,6 +55,12 @@ function renderLayout(container) {
     <div class="page-header">
       <h1><i class="fas fa-hdd"></i> Storage</h1>
     </div>
+    <div class="storage-actions" id="storage-actions" style="display:flex;align-items:center;gap:0.5rem;margin-bottom:1rem;">
+      <button id="storage-sync-store" class="btn btn-primary">
+        <i class="fas fa-cloud-arrow-up"></i> Sync to store
+      </button>
+      <span id="storage-sync-store-status" class="text-muted"></span>
+    </div>
     <div id="storage-status-cards"></div>
     <div id="storage-file-types"></div>
     <div id="storage-format-priority"></div>
@@ -101,7 +107,9 @@ function renderStatusCards(container, status) {
   }
 
   const orphanCount = status.orphanedFileCount ?? 0;
-  const orphanHtml = orphanCount > 0 ? `
+  const orphanHtml =
+    orphanCount > 0
+      ? `
     <div class="card" id="orphan-card">
       <h3><i class="fas fa-ghost"></i> Ghost Records</h3>
       <p class="help-text">
@@ -119,7 +127,8 @@ function renderStatusCards(container, status) {
         ⚠️ This permanently deletes these records from the database.
         Backed-up files on the NAS are not affected.
       </p>
-    </div>` : '';
+    </div>`
+      : "";
 
   el.innerHTML = `
     ${warningHtml}
@@ -544,6 +553,41 @@ function wireEvents(container) {
 
   // Delegate clicks
   container.addEventListener("click", async (e) => {
+    // Sync library to remote content-addressed store
+    const storeSyncBtn = e.target.closest("#storage-sync-store");
+    if (storeSyncBtn) {
+      const statusEl = container.querySelector("#storage-sync-store-status");
+      storeSyncBtn.disabled = true;
+      storeSyncBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Syncing...';
+      if (statusEl) statusEl.textContent = "Starting store sync...";
+      try {
+        const resp = await fetchJSON("/api/storage/sync-store", { method: "POST" });
+        const data = resp?.data || resp || {};
+        if (data.taskId) {
+          showToast("Store sync started — running in the background", "success");
+          if (statusEl) statusEl.textContent = `Task ${data.taskId}`;
+        } else {
+          const msg = data.message || "Store sync already running";
+          showToast(msg, "info");
+          if (statusEl) statusEl.textContent = msg;
+        }
+      } catch (err) {
+        if (String(err.message).includes("409")) {
+          const hint = "Store not configured — set [store] in config.toml";
+          showToast(hint, "warning");
+          if (statusEl) statusEl.textContent = hint;
+        } else {
+          showToast(`Store sync failed: ${err.message}`, "error");
+          if (statusEl) statusEl.textContent = "Store sync failed";
+        }
+      } finally {
+        storeSyncBtn.disabled = false;
+        storeSyncBtn.innerHTML = '<i class="fas fa-cloud-arrow-up"></i> Sync to store';
+        await loadStatus(container);
+      }
+      return;
+    }
+
     // Full scan button (in warning banner)
     const scanBtn = e.target.closest("#full-scan-btn");
     if (scanBtn) {
@@ -791,7 +835,11 @@ function wireEvents(container) {
     const purgeBtn = e.target.closest("#purge-orphans-btn");
     if (purgeBtn) {
       const count = state.status?.orphanedFileCount ?? 0;
-      if (!confirm(`Permanently delete ${count} orphaned records?\n\nThis cannot be undone.`)) {
+      if (
+        !confirm(
+          `Permanently delete ${count} orphaned records?\n\nThis cannot be undone.`,
+        )
+      ) {
         return;
       }
       purgeBtn.disabled = true;

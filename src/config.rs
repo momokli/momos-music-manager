@@ -181,6 +181,8 @@ struct TomlConfig {
     /// `[music_api]` — explicit rename because the struct is `kebab-case`.
     #[serde(rename = "music_api")]
     music_api: Option<MusicApiToml>,
+    /// `[store]` — the remote content-addressed object store.
+    store: Option<StoreToml>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -315,6 +317,14 @@ struct MusicApiToml {
     interval_secs: Option<u64>,
 }
 
+/// `[store]` — the remote content-addressed object store on `.200`.
+#[derive(Debug, Clone, Deserialize)]
+struct StoreToml {
+    enabled: Option<bool>,
+    base_url: Option<String>,
+    token: Option<String>,
+}
+
 // ── Runtime representation ─────────────────────────────────────────────────
 
 /// Service credentials used throughout the application.
@@ -439,6 +449,11 @@ pub struct ServiceCredentials {
     /// ISRC orders against the `music-api` service (env > `[music_api]` >
     /// defaults). See [`crate::music_api::MusicApiConfig`].
     pub music_api: crate::music_api::MusicApiConfig,
+
+    /// Remote content-addressed object store (env > `[store]` > default OFF).
+    /// Opt-in: nothing happens until it is configured. See
+    /// [`crate::store::StoreConfig`].
+    pub store: crate::store::StoreConfig,
 }
 
 impl ServiceCredentials {
@@ -611,6 +626,23 @@ impl ServiceCredentials {
                         .and_then(|m| m.interval_secs)
                 })
                 .unwrap_or(900),
+        };
+
+        // Remote object store: env > [store] > default OFF (opt-in).
+        let store = crate::store::StoreConfig {
+            enabled: std::env::var("STORE_ENABLED")
+                .ok()
+                .and_then(|v| v.parse::<bool>().ok())
+                .or_else(|| toml_config.store.as_ref().and_then(|s| s.enabled))
+                .unwrap_or(false),
+            base_url: env_or_toml_opt(
+                "STORE_URL",
+                toml_config.store.as_ref().and_then(|s| s.base_url.clone()),
+            ),
+            token: env_or_toml_opt(
+                "STORE_TOKEN",
+                toml_config.store.as_ref().and_then(|s| s.token.clone()),
+            ),
         };
 
         let credentials = Self {
@@ -917,6 +949,7 @@ impl ServiceCredentials {
                 .unwrap_or(false),
 
             music_api,
+            store,
         };
 
         info!(
@@ -931,6 +964,13 @@ impl ServiceCredentials {
             credentials.music_api.base_url,
             credentials.music_api.batch_size,
             credentials.music_api.interval_secs,
+        );
+
+        info!(
+            "store config: configured={}, enabled={}, base_url={:?}",
+            credentials.store.is_configured(),
+            credentials.store.enabled,
+            credentials.store.base_url,
         );
 
         info!(
@@ -1113,6 +1153,13 @@ impl ServiceCredentials {
                 interval_secs: env_var_optional("MUSIC_API_INTERVAL_SECS")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(900),
+            },
+            store: crate::store::StoreConfig {
+                enabled: env_var_optional("STORE_ENABLED")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(false),
+                base_url: env_var_optional("STORE_URL"),
+                token: env_var_optional("STORE_TOKEN"),
             },
         }
     }
@@ -1610,6 +1657,7 @@ impl ServiceCredentials {
             autoupdate_channel_toml: None,
             autoupgrade_enabled: false,
             music_api: crate::music_api::MusicApiConfig::default(),
+            store: crate::store::StoreConfig::default(),
         }
     }
 }
@@ -2101,6 +2149,31 @@ pub(crate) mod tests {
     fn test_music_api_toml_absent_is_none() {
         let cfg: TomlConfig = toml::from_str("[server]\nport = 3000\n").unwrap();
         assert!(cfg.music_api.is_none());
+    }
+
+    #[test]
+    fn test_store_toml_parses() {
+        let src = "[store]\nenabled = true\nbase_url = \"http://store.example.com\"\ntoken = \"t\"\n";
+        let cfg: TomlConfig = toml::from_str(src).unwrap();
+        let s = cfg.store.expect("store section present");
+        assert_eq!(s.enabled, Some(true));
+        assert_eq!(s.base_url.as_deref(), Some("http://store.example.com"));
+        assert_eq!(s.token.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn test_store_toml_absent_is_none() {
+        let cfg: TomlConfig = toml::from_str("[server]\nport = 3000\n").unwrap();
+        assert!(cfg.store.is_none());
+    }
+
+    #[test]
+    fn test_store_defaults_to_disabled() {
+        let creds = ServiceCredentials::defaults_for_test();
+        assert!(!creds.store.enabled);
+        assert!(creds.store.base_url.is_none());
+        assert!(creds.store.token.is_none());
+        assert!(!creds.store.is_configured());
     }
 
     // ── Telemetry TOML parsing (full-DB option) ───────────────────────
