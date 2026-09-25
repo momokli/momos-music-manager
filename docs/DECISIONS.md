@@ -1617,3 +1617,42 @@ des nächsten Hintergrund-Zyklus:
 - Kein Schema, keine Migration.
 - Test `deleting_a_tag_refreshes_resolved_tags_immediately` beweist es: ohne den
   Refresh im Delete-Handler fällt der Filter-Treffer von 4 nicht auf 0 (verifiziert).
+
+
+## ADR-072: Grabsteine in `service_playlist_tracks` nur für archivierende Playlists
+
+**Date**: 2026-09-25
+**Status**: Accepted (implemented)
+**Relates**: ADR-008 (playlist archive), ADR-070/071 (Backpack-Filter, Refresh)
+
+**Context**: Der Playlist-Sync markiert vor dem Wieder-Einfügen **alle** Einträge als
+gelöscht (`mark_playlist_tracks_deleted`) und reaktiviert danach die noch vorhandenen.
+Entfernte Tracks bleiben so als `deleted_at`-Grabstein liegen. Die Design-Regel steht
+seit Migration 008 in `set_playlist_archive_deleted`: *„When true: deleted tracks remain
+active for tag resolution. When false: deleted tracks are excluded."*
+
+Umgesetzt war sie nur in `v_file_resolved_tags` / `v_file_tags`
+(`WHERE sp.archive_deleted = 1 OR spt.deleted_at IS NULL`). `v_track_tags` (Migration 014)
+und etliche Inline-Queries (Debug-View, `in_backpack`, Track-/File-Tags) hatten den Guard
+nicht. Folge: ein aus einer nicht-archivierenden Playlist entfernter Track blieb über den
+gleichnamigen `backpack = 1`-Tag im Backpack — prune-geschützt, aber ohne Comment
+(weil die Comment-Seite den Guard hat). Widersprüchliche Sichten auf dieselbe Zeile.
+
+**Decision**: Die Regel gilt für **alle** Konsumenten, durchgesetzt an der Quelle:
+- **Invariante**: `deleted_at IS NOT NULL ⇒ archive_deleted = 1`. Der Sync purgt die
+  Grabsteine nicht-archivierender Playlists direkt nach dem Sync
+  (`purge_deleted_tracks_for_playlist`); das Ausschalten von Archiving purgt ebenfalls.
+- **Migration 031**: räumt die Altlasten (5960 Grabsteine) und gibt `v_track_tags`
+  denselben Guard wie die anderen Views.
+- Die beiden Subscription-Hälften der Backpack-Definition (`backpack.rs`, Files-Filter)
+  bekommen die Archiv-Ausnahme, damit archivierende Playlists ihre entfernten Tracks
+  behalten.
+
+**Consequences**:
+- Nach dem Sync sind Grabsteine nur dort, wo sie gewollt sind. Jede Query — auch eine
+  künftige, die den Guard vergisst — liefert damit das dokumentierte Verhalten.
+- Archivieren aus → die bis dahin gehaltenen Grabsteine werden gelöscht (kein Zurückholen
+  beim Wieder-Einschalten; die Tracks sind ja aus der Playlist raus).
+- Entfernte Tracks verlassen Backpack und Prune-Schutz; bei `auto_prune` werden ihre
+  store-gesicherten Dateien lokal gelöscht.
+- Kein neues Tabellen-Schema; Migration 031 ist Daten-Cleanup + View-Rebuild.

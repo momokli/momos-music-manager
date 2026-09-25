@@ -947,6 +947,28 @@ impl SpotifySyncWorker {
             playlist_name, track_count, remote_total
         );
 
+        // The sync soft-deleted every track before re-inserting the survivors, so
+        // the rows that stayed deleted are exactly the removed ones. For a
+        // non-archiving playlist those tombstones are junk that would leak into
+        // tag resolution, backpack membership and comments — drop them.
+        let pl_row_id: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM service_playlists WHERE service = 'spotify' AND playlist_id = ?",
+        )
+        .bind(playlist_id)
+        .fetch_optional(&self.db)
+        .await
+        .ok()
+        .flatten();
+        if let Some(pl_row_id) = pl_row_id {
+            match crate::db::purge_deleted_tracks_for_playlist(&self.db, pl_row_id).await {
+                Ok(purged) if purged > 0 => {
+                    debug!("Purged {purged} removed track(s) from '{}'", playlist_name);
+                }
+                Ok(_) => {}
+                Err(e) => error!("Failed to purge removed tracks of '{}': {:?}", playlist_name, e),
+            }
+        }
+
         Ok(SyncResult::success(
             0,
             track_count,

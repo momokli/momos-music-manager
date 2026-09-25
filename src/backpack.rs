@@ -42,7 +42,8 @@ pub async fn get_backpack_track_ids(pool: &Pool<Sqlite>) -> Result<Vec<i64>> {
            JOIN service_playlists sp
              ON sp.service = ps.service AND sp.playlist_id = ps.playlist_id
            JOIN service_playlist_tracks spt
-             ON spt.playlist_id = sp.id AND spt.deleted_at IS NULL
+             ON spt.playlist_id = sp.id
+            AND (sp.archive_deleted = 1 OR spt.deleted_at IS NULL)
            WHERE ps.is_active = 1"#,
     )
     .fetch_all(pool)
@@ -291,6 +292,7 @@ mod tests {
                 service TEXT NOT NULL,
                 playlist_id TEXT NOT NULL,
                 name TEXT NOT NULL,
+                archive_deleted BOOLEAN NOT NULL DEFAULT 0,
                 UNIQUE(service, playlist_id)
             )",
         )

@@ -713,7 +713,8 @@ const BACKPACK_FILE_CLAUSE: &str = "(EXISTS (\
               JOIN service_playlists sp ON sp.id = spt.playlist_id \
               JOIN playlist_subscriptions ps ON ps.service = sp.service \
                   AND ps.playlist_id = sp.playlist_id AND ps.is_active = 1 \
-              WHERE spt.track_id = v.track_id AND spt.deleted_at IS NULL))))";
+              WHERE spt.track_id = v.track_id \
+                AND (sp.archive_deleted = 1 OR spt.deleted_at IS NULL)))))";
 
 /// Append the "Backpack" filter: `Some(true)` = in the Backpack, `Some(false)` =
 /// not in it. `None` leaves the query untouched.

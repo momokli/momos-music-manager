@@ -986,6 +986,7 @@ mod tests {
                 service TEXT NOT NULL,
                 playlist_id TEXT NOT NULL,
                 name TEXT NOT NULL,
+                archive_deleted BOOLEAN NOT NULL DEFAULT 0,
                 UNIQUE(service, playlist_id)
             )",
         )

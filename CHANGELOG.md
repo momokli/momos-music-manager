@@ -27,6 +27,17 @@ All notable changes to Momo's Music Manager.
   (N)** im Actions-Panel der Files-Seite — der Count ist dort direkt sichtbar. Anders als
   „Stage for Conversion" braucht er keine Filter/Auswahl.
 
+### Fixed
+
+- **Aus Playlists entfernte Tracks sind jetzt wirklich weg** (außer bei Archiving):
+  `service_playlist_tracks.deleted_at` ist ein Grabstein, der nur für archivierende
+  Playlists (`archive_deleted = 1`) gedacht ist. Der Sync hat ihn aber bei *jeder*
+  Playlist hinterlassen, und diese Zeilen leckten in Tag-Auflösung, Backpack-Zugehörigkeit
+  und Comment-Ziele — z. B. blieb ein aus einer Beatport-Playlist entfernter Track im
+  Backpack (und damit prune-geschützt). Migration 031 räumt die Altlasten auf (5960 Zeilen)
+  und gibt `v_track_tags` den Guard, den alle anderen Auflösungs-Views schon hatten.
+  Der Sync und der Archive-Schalter halten die Invariante ab jetzt selbst.
+
 ## [1.13.0] — 2026-09-24
 
 ### Added
@@ -163,6 +174,7 @@ All notable changes to Momo's Music Manager.
   Dienst `music-api` übernimmt den Download per ISRC-Order.
 
 ### Fixed
+
 
 - **Backpack-File-Sync-Schalter galt nicht im Maintainer**: Der Maintainer startete
   den Backpack-File-Sync stündlich, auch wenn `backpack.sync_enabled = 0` gesetzt war
