@@ -1550,3 +1550,35 @@ die lokal vorhanden sind, aber noch keinen Stem haben. Es fehlte sowohl die Hand
   überlebt ein Löschen der Quelle nicht stillschweigend.
 - Die `stem.m4a`-Formatpräferenz bleibt die Quelle der Wahrheit dafür, was als
   „konvertiert" gilt.
+
+
+## ADR-070: Backpack-Filter serverseitig, mit der autoritativen Definition
+
+**Date**: 2026-09-24
+**Status**: Accepted (implemented)
+
+**Context**: Die Files-Seite hatte keinen Weg, „nur was im Backpack ist" zu sehen. Der
+Backpack wird in `src/backpack.rs` aus **zwei** Hälften berechnet (Tracks in aktiven
+Subscriptions ∪ Tracks mit `backpack = 1`-Tag, aufgelöst über `v_track_tags`, dann
+deren Dateien). Ein Filter muss aber auf der paginierten SQL-Seite liegen
+(AGENTS-Regel: kein Client-Filter nach der Pagination).
+
+Erste Fassung nutzte `file_resolved_tags` für die Tag-Hälfte — liefert **4160** Dateien
+statt 3756, weil die materialisierte Tabelle zusätzlich Tag-Vererbung auflöst und
+stale sein kann. Das ist genau die Divergenz, die man nicht will: der Filter hätte
+mehr gezeigt als `prune` schützt.
+
+**Decision**: `append_backpack_filter` erzeugt eine reine SQL-Klausel (keine
+Bind-Parameter), die die Rust-Logik 1:1 spiegelt: ein File ist im Backpack, wenn es
+mit einem Track verknüpft ist, der in einer aktiven Subscription liegt **oder** über
+`v_track_tags` einen `backpack = 1`-Tag trägt. `?backpack=true` = in, `false` = nicht in.
+Verwendet in `get_files`, `get_files_count` und `build_files_filter_sql` (letzteres für
+alle POST-„select all"-Pfade) — damit stimmen Liste, Count und POST-Filter überein.
+
+**Consequences**:
+- Kein neues Schema, keine Migration.
+- Der Filter ist konsistent mit der Prune-Schutzmenge (getestet: `in + not-in == total`,
+  und der POST-Zähler matcht den GET-Count).
+- Kosten: ~135 ms Korrelations-Subquery über ~17k Dateien — akzeptabel, kein Index nötig.
+- `file_resolved_tags` bleibt die Grundlage der Comment-/Tag-Anzeige, ist aber für
+  Backpack-Zugehörigkeit *nicht* die Wahrheit.

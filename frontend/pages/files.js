@@ -87,6 +87,7 @@ const HASH_SCHEMA = {
   safeToDelete: { type: "boolean", default: null },
   stems: { type: "boolean", default: null },
   isLocal: { type: "boolean", default: null },
+  backpack: { type: "boolean", default: null },
   ratingMin: { type: "number", default: 0 },
   playCountMin: { type: "number", default: 0 },
 };
@@ -114,6 +115,7 @@ const HASH_DEFAULTS = {
   safeToDelete: null,
   stems: null,
   isLocal: null,
+  backpack: null,
   ratingMin: 0,
   playCountMin: 0,
 };
@@ -606,6 +608,14 @@ function renderToolbar(state) {
                 <button class="filter-btn${state.stems === false ? " active" : ""}" data-stem-filter="no" title="Stem files plus files that already have a stem.m4a"><i class="fas fa-check"></i> Has</button>
               </div>
             </div>
+            <div class="filter-row" data-filter="backpack">
+              <span class="filter-row-label toggleable" data-filter="backpack">Backpack</span>
+              <div class="filter-group">
+                <button class="filter-btn${state.backpack === null ? " active" : ""}" data-backpack-filter="all">All</button>
+                <button class="filter-btn${state.backpack === true ? " active" : ""}" data-backpack-filter="in" title="Only files in the Backpack (kept on your Mac)"><i class="fas fa-bag-shopping"></i> In</button>
+                <button class="filter-btn${state.backpack === false ? " active" : ""}" data-backpack-filter="out" title="Only files not in the Backpack"><i class="fas fa-box-open"></i> Not in</button>
+              </div>
+            </div>
           </div>
         </div>
         <div class="filter-row" style="margin-top:var(--space-2)">
@@ -774,6 +784,7 @@ function buildParams(state) {
   if (state.safeToDelete !== null) params.set("safeToDelete", String(state.safeToDelete));
   if (state.stems !== null) params.set("stems", String(state.stems));
   if (state.isLocal !== null) params.set("isLocal", String(state.isLocal));
+  if (state.backpack !== null) params.set("backpack", String(state.backpack));
   if (state.sort) params.set("sort", state.sort);
   if (state.order === "desc") params.set("order", "desc");
   return params;
@@ -809,6 +820,7 @@ function buildFilterParams(state) {
   if (state.safeToDelete !== null) f.safeToDelete = state.safeToDelete;
   if (state.stems !== null) f.stems = state.stems;
   if (state.isLocal !== null) f.isLocal = state.isLocal;
+  if (state.backpack !== null) f.backpack = state.backpack;
   return f;
 }
 
@@ -1521,6 +1533,25 @@ function wireToolbarEvents(container, signal, state) {
     );
   });
 
+  // ── Backpack filter ──
+  filterPanel?.querySelectorAll("[data-backpack-filter]").forEach((btn) => {
+    btn.addEventListener(
+      "click",
+      () => {
+        const val = btn.dataset.backpackFilter;
+        state.backpack = val === "all" ? null : val === "in";
+        state.page = 0;
+        filterPanel
+          .querySelectorAll("[data-backpack-filter]")
+          .forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        updateHash("files", state, HASH_DEFAULTS, HASH_SCHEMA);
+        fetchAndRender(container, signal, state);
+      },
+      { signal },
+    );
+  });
+
   // ── Generic toggle for data-filter labels ──
   filterPanel?.querySelectorAll("[data-filter]").forEach((label) => {
     function updateFilterUI() {
@@ -1962,6 +1993,7 @@ export async function init(container, signal, hashParams) {
     isLocal: parsed.isLocal,
     safeToDelete: parsed.safeToDelete,
     stems: parsed.stems,
+    backpack: parsed.backpack,
     // Filter section enable/disable flags
     bpmEnabled: true,
     keyEnabled: true,

@@ -161,6 +161,8 @@ pub struct FilesQuery {
     /// stems=true: non-stem files whose track has no stem.m4a with the same ISRC.
     /// stems=false: stem files plus files that already have a stem.m4a for the track.
     pub stems: Option<bool>,
+    /// Backpack membership — true = in, false = not in (None = all).
+    pub backpack: Option<bool>,
     pub sort: Option<String>,
     pub order: Option<String>,
     pub page_size: Option<i64>,
@@ -253,6 +255,8 @@ struct FilesFilterAll {
     pub is_local: Option<bool>,
     pub safe_to_delete: Option<bool>,
     pub stems: Option<bool>,
+    /// Backpack membership — true = in, false = not in (None = all).
+    pub backpack: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -668,6 +672,8 @@ fn build_files_filter_sql(filter: &FilesFilterAll) -> String {
     // STEMS filter: non-stem files whose track has no stem.m4a with the same ISRC
     append_stems_filter(&mut sql, filter.stems);
 
+    append_backpack_filter(&mut sql, filter.backpack);
+
     sql
 }
 
@@ -680,6 +686,43 @@ fn append_stems_filter(sql: &mut String, stems: Option<bool>) {
         sql.push_str(" AND NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.isrc != '' AND f2.file_type = 'stem.m4a')");
     } else if let Some(false) = stems {
         sql.push_str(" AND (files.file_type = 'stem.m4a' OR EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.isrc != '' AND f2.file_type = 'stem.m4a'))");
+    }
+}
+
+/// Backpack membership of a single `files.id` row, as pure SQL (no bind params).
+///
+/// Mirrors [`crate::backpack::get_backpack_track_ids`] at the file level so the
+/// Files page filters and paginates server-side with *exactly* the same set that
+/// `prune` protects: a file is in the Backpack when it links to a track that is
+/// either in an **active** subscription (non-deleted playlist entry) or carries a
+/// `backpack = 1` tag (resolved through the live `v_track_tags` view).
+const BACKPACK_FILE_CLAUSE: &str = "(EXISTS (\
+     SELECT 1 FROM v_file_track_link v \
+     WHERE v.file_id = files.id \
+       AND (EXISTS (\
+              SELECT 1 FROM v_track_tags vtt \
+              JOIN tags t ON t.id = vtt.tag_id AND t.backpack = 1 \
+              WHERE vtt.track_id = v.track_id) \
+            OR EXISTS (\
+              SELECT 1 FROM service_playlist_tracks spt \
+              JOIN service_playlists sp ON sp.id = spt.playlist_id \
+              JOIN playlist_subscriptions ps ON ps.service = sp.service \
+                  AND ps.playlist_id = sp.playlist_id AND ps.is_active = 1 \
+              WHERE spt.track_id = v.track_id AND spt.deleted_at IS NULL))))";
+
+/// Append the "Backpack" filter: `Some(true)` = in the Backpack, `Some(false)` =
+/// not in it. `None` leaves the query untouched.
+fn append_backpack_filter(sql: &mut String, backpack: Option<bool>) {
+    match backpack {
+        Some(true) => {
+            sql.push_str(" AND ");
+            sql.push_str(BACKPACK_FILE_CLAUSE);
+        }
+        Some(false) => {
+            sql.push_str(" AND NOT ");
+            sql.push_str(BACKPACK_FILE_CLAUSE);
+        }
+        None => {}
     }
 }
 
@@ -1314,6 +1357,7 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
 
     // STEMS filter: non-stem files whose track has no stem.m4a with the same ISRC
     append_stems_filter(&mut sql, query.stems);
+    append_backpack_filter(&mut sql, query.backpack);
 
     apply_sort(
         &mut sql,
@@ -1783,6 +1827,7 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
 
     // STEMS filter: non-stem files whose track has no stem.m4a with the same ISRC
     append_stems_filter(&mut sql, query.stems);
+    append_backpack_filter(&mut sql, query.backpack);
 
     let mut q = sqlx::query(&sql);
 

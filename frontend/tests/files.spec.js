@@ -249,4 +249,26 @@ test.describe("Files Page", () => {
 
     expect(errors).toEqual([]);
   });
+
+  test("Backpack filter (In / Not in) drives the request", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    const urls = [];
+    await page.route(/\/api\/files(\?|$)/, async (route) => {
+      urls.push(route.request().url());
+      await route.continue();
+    });
+
+    await page.goto("/#files");
+    await page.waitForSelector("#files-content table tbody tr", { timeout: 8000 });
+
+    await page.locator('[data-backpack-filter="in"]').click();
+    await expect.poll(() => urls.some((u) => u.includes("backpack=true"))).toBe(true);
+
+    await page.locator('[data-backpack-filter="out"]').click();
+    await expect.poll(() => urls.some((u) => u.includes("backpack=false"))).toBe(true);
+
+    expect(errors).toEqual([]);
+  });
 });

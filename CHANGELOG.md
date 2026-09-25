@@ -8,6 +8,12 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **Backpack-Filter auf der Files-Seite**: `?backpack=true|false` (und als POST-Filterfeld)
+  filtert serverseitig nach Backpack-Zugehörigkeit — Buttons **In / Not in**. Die Definition
+  ist exakt die autoritative Menge aus `get_backpack_track_ids` (Tracks in aktiven
+  Subscriptions ∪ Tracks mit `backpack = 1`-Tag), also dieselbe, die `prune` schützt.
+  Kombiniert sich mit allen anderen Filtern (z. B. „In + STEMS Missing").
+
 - **Backpack-Stem-Staging**: `GET`/`POST /api/files/backpack-conversion` zählt die
   Backpack-Tracks, die lokal vorliegen, aber noch keinen lokalen `stem.m4a` haben, und
   legt für sie Symlinks in `~/Music/backpack_conversion` ab (Ziel per

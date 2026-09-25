@@ -2701,3 +2701,105 @@ async fn backpack_conversion_stages_symlinks_into_the_target_dir() {
     let _ = std::fs::remove_dir_all(&dir);
     unsafe { std::env::remove_var("MOMOS_BACKPACK_CONVERSION_DIR") };
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Backpack filter on /api/files
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// `backpack=true|false` partitions the library, and the POST-side filter
+/// (`build_files_filter_sql`) agrees with the GET-side count.
+#[tokio::test]
+async fn files_backpack_filter_partitions_the_library() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    seed_backpack_conversion(&pool).await;
+
+    async fn count(client: &reqwest::Client, url: String) -> u64 {
+        let resp = client.get(url).send().await.unwrap();
+        let json: Value = resp.json().await.unwrap();
+        json["data"].as_u64().expect("count must be a number")
+    }
+
+    let all = count(&client, format!("{base}/api/files/count")).await;
+    let in_bp = count(&client, format!("{base}/api/files/count?backpack=true")).await;
+    let out_bp = count(&client, format!("{base}/api/files/count?backpack=false")).await;
+
+    assert_eq!(
+        in_bp + out_bp,
+        all,
+        "in ({in_bp}) + not-in ({out_bp}) must cover all ({all})"
+    );
+    assert!(in_bp > 0 && out_bp > 0, "both sides must be non-empty");
+
+    // The four 'convbp' playlist files are Backpack members …
+    let resp = client
+        .get(format!("{base}/api/files?backpack=true&pageSize=200"))
+        .send()
+        .await
+        .unwrap();
+    let json: Value = resp.json().await.unwrap();
+    let in_ids: Vec<i64> = json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["id"].as_i64().unwrap())
+        .collect();
+    for want in [900, 901, 902, 903] {
+        assert!(
+            in_ids.contains(&want),
+            "file {want} must be in the Backpack: {in_ids:?}"
+        );
+    }
+
+    // … and none of them is on the other side.
+    let resp = client
+        .get(format!("{base}/api/files?backpack=false&pageSize=200"))
+        .send()
+        .await
+        .unwrap();
+    let json: Value = resp.json().await.unwrap();
+    let out_ids: Vec<i64> = json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["id"].as_i64().unwrap())
+        .collect();
+    for id in [900, 901, 902, 903] {
+        assert!(
+            !out_ids.contains(&id),
+            "file {id} must not be outside the Backpack"
+        );
+    }
+    assert_eq!(
+        out_ids.len() as u64,
+        out_bp,
+        "list length matches the not-in count"
+    );
+
+    // The POST-side filter builder must agree with the GET-side count.
+    let resp = client
+        .post(format!("{base}/api/files/needs-comment-count-all"))
+        .json(&serde_json::json!({ "backpack": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: Value = resp.json().await.unwrap();
+    assert_eq!(
+        json["data"]["totalFiles"].as_u64().unwrap(),
+        in_bp,
+        "POST filter (build_files_filter_sql) must match the GET count"
+    );
+
+    // It composes with the other filters — the point of the feature.
+    let bp_stems_missing = count(
+        &client,
+        format!("{base}/api/files/count?backpack=true&stems=true"),
+    )
+    .await;
+    let stems_missing = count(&client, format!("{base}/api/files/count?stems=true")).await;
+    assert!(
+        bp_stems_missing <= in_bp && bp_stems_missing <= stems_missing,
+        "backpack+stems must be a subset of both (bp={in_bp}, stems={stems_missing}, both={bp_stems_missing})"
+    );
+}
