@@ -8,6 +8,12 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **Tag-/Playlist-Löschung aktualisiert die Filter jetzt sofort**: `file_resolved_tags` /
+  `track_resolved_tags` werden nach Tag- oder Playlist-Änderungen (create/update/delete,
+  Kategorie-Änderung, Reorder, Categorize) sowie vor jedem Comment-Count/-Write
+  neu aufgebaut. Vorher konnte ein gelöschter Tag bis zum nächsten Hintergrund-Refresh
+  (Maintainer 1 h, Scan/Poller) weiter filtern — und im neu geschriebenen Comment stehen.
+
 - **Backpack-Filter auf der Files-Seite**: `?backpack=true|false` (und als POST-Filterfeld)
   filtert serverseitig nach Backpack-Zugehörigkeit — Buttons **In / Not in**. Die Definition
   ist exakt die autoritative Menge aus `get_backpack_track_ids` (Tracks in aktiven

@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::config::ServiceCredentials;
 use crate::embeddings::serialize_embedding;
 use crate::spotify::{client::SpotifyClient, sync_worker::SpotifySyncWorker};
-use crate::store::{canonicalise_to, StoreClient};
+use crate::store::{StoreClient, canonicalise_to};
 
 // ============================================================
 // TaskType — unified enum for all background operations
@@ -1458,6 +1458,12 @@ pub async fn start_write_comment_task(
         })
         .await;
 
+        // Rebuild the resolved-tag tables once per task: `compute_target_comment`
+        // reads `file_resolved_tags`, so a tag/playlist deleted moments ago must
+        // not leak into the comment we are about to write. This covers every
+        // caller of this task, not just the Files-page handlers.
+        crate::db::refresh_resolved_tags(&db_clone).await;
+
         let total = file_ids.len();
         let mut written = 0usize;
         let mut skipped = 0usize;
@@ -2683,8 +2689,10 @@ pub async fn start_backpack_sync_task(
                     .await;
                 }
                 Err(e) => {
-                    let msg =
-                        format!("FAILED #{} ({}): store restore error — {}", c.file_id, c.title, e);
+                    let msg = format!(
+                        "FAILED #{} ({}): store restore error — {}",
+                        c.file_id, c.title, e
+                    );
                     warn!("Backpack sync: {}", msg);
                     tm.add_log(&worker_task_id, msg).await;
                     failed += 1;
@@ -2922,7 +2930,12 @@ async fn run_store_sync(
         let present: HashSet<String> = if hash_list.is_empty() {
             HashSet::new()
         } else {
-            client.check(&hash_list).await?.present.into_iter().collect()
+            client
+                .check(&hash_list)
+                .await?
+                .present
+                .into_iter()
+                .collect()
         };
 
         // 3. Upload the missing ones; record the store location either way.
@@ -3059,12 +3072,12 @@ mod tests {
 
     #[test]
     fn task_transition_started_payload_has_machine_label() {
-        let task = Task::new(TaskType::ScanFolder { folder_id: 7 }, Some("scan".to_string()));
-        let t = TaskTransition::started(&task);
-        assert_eq!(
-            t.event,
-            crate::telemetry::events::EventType::TaskStarted
+        let task = Task::new(
+            TaskType::ScanFolder { folder_id: 7 },
+            Some("scan".to_string()),
         );
+        let t = TaskTransition::started(&task);
+        assert_eq!(t.event, crate::telemetry::events::EventType::TaskStarted);
         assert_eq!(t.payload["task_type"], "scan_folder");
         assert_eq!(t.payload["service"], "scan");
     }
@@ -3073,10 +3086,7 @@ mod tests {
     fn task_transition_terminal_payload_has_duration() {
         let task = Task::new(TaskType::DeemixSync, None);
         let t = TaskTransition::terminal(&task, TaskStatus::Completed);
-        assert_eq!(
-            t.event,
-            crate::telemetry::events::EventType::TaskCompleted
-        );
+        assert_eq!(t.event, crate::telemetry::events::EventType::TaskCompleted);
         assert_eq!(t.payload["task_type"], "deemix_sync");
         assert!(t.payload["duration_ms"].as_u64().unwrap_or(0) >= 0);
         assert!(t.payload.get("error_message").is_none());
@@ -3090,10 +3100,7 @@ mod tests {
         *task.error_message.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(format!("boom at {home_str}/secret/file.flac"));
         let t = TaskTransition::terminal(&task, TaskStatus::Failed);
-        assert_eq!(
-            t.event,
-            crate::telemetry::events::EventType::TaskFailed
-        );
+        assert_eq!(t.event, crate::telemetry::events::EventType::TaskFailed);
         let err = t.payload["error_message"].as_str().unwrap();
         assert!(!err.contains(&home_str), "payload leaks home path: {err}");
         assert!(t.payload["duration_ms"].as_u64().is_some());
@@ -3148,8 +3155,6 @@ mod tests {
         );
     }
 
-
-
     #[tokio::test]
     async fn scan_wav_sources_returns_empty_on_conflict() {
         let tm = TaskManager::new();
@@ -3164,7 +3169,4 @@ mod tests {
         let task_id = start_scan_wav_sources_task(&tm, &pool, 1).await;
         assert!(task_id.is_empty(), "Should return empty string on conflict");
     }
-
-
-
 }

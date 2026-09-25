@@ -554,7 +554,11 @@ async fn create_tag_category_handler(
     )
     .await
     {
-        Ok(category) => Json(ApiResponse { data: category }).into_response(),
+        Ok(category) => {
+            // Category prefix/is_default feed the resolved-tag tables.
+            crate::db::refresh_resolved_tags(&state.db).await;
+            Json(ApiResponse { data: category }).into_response()
+        }
         Err(e) => internal_error(e).into_response(),
     }
 }
@@ -576,7 +580,10 @@ async fn update_tag_category_metadata_handler(
     )
     .await
     {
-        Ok(category) => Json(ApiResponse { data: category }).into_response(),
+        Ok(category) => {
+            crate::db::refresh_resolved_tags(&state.db).await;
+            Json(ApiResponse { data: category }).into_response()
+        }
         Err(e) => internal_error(e).into_response(),
     }
 }
@@ -587,7 +594,10 @@ async fn delete_tag_category_handler(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     match delete_tag_category(&state.db, id).await {
-        Ok(_) => Json(ApiResponse { data: () }).into_response(),
+        Ok(_) => {
+            crate::db::refresh_resolved_tags(&state.db).await;
+            Json(ApiResponse { data: () }).into_response()
+        }
         Err(e) => internal_error(e).into_response(),
     }
 }
@@ -632,10 +642,14 @@ async fn reorder_tags_batch_handler(
     Json(request): Json<BatchReorderRequest>,
 ) -> impl IntoResponse {
     match reorder_tags_batch(&state.db, &request.tags).await {
-        Ok(_) => Json(ApiResponse {
-            data: serde_json::json!({ "message": "Tags reordered" }),
-        })
-        .into_response(),
+        Ok(_) => {
+            // `sort_order` decides the tag order inside generated comments.
+            crate::db::refresh_resolved_tags(&state.db).await;
+            Json(ApiResponse {
+                data: serde_json::json!({ "message": "Tags reordered" }),
+            })
+            .into_response()
+        }
         Err(e) => internal_error(e).into_response(),
     }
 }
@@ -675,7 +689,10 @@ async fn update_tag_category_handler(
     )
     .await
     {
-        Ok(category) => Json(ApiResponse { data: category }).into_response(),
+        Ok(category) => {
+            crate::db::refresh_resolved_tags(&state.db).await;
+            Json(ApiResponse { data: category }).into_response()
+        }
         Err(e) => internal_error(e).into_response(),
     }
 }
@@ -732,6 +749,8 @@ async fn create_tag_handler(
 ) -> impl IntoResponse {
     match create_tag(&state.db, &request.name, request.category_id).await {
         Ok(tag) => {
+            // A new tag can immediately match an existing playlist name.
+            crate::db::refresh_resolved_tags(&state.db).await;
             // Auto-compute embedding and similarity pairs for the new tag
             auto_update_tag_embedding_and_similarities(&state, tag.id, &tag.name).await;
 
@@ -766,6 +785,8 @@ async fn update_tag_handler(
 ) -> impl IntoResponse {
     match update_tag(&state.db, id, request.name.as_deref(), request.category_id).await {
         Ok(tag) => {
+            // Rename/category change alters resolution (name matches a playlist).
+            crate::db::refresh_resolved_tags(&state.db).await;
             // If name changed, recompute embedding and similarity pairs
             if request.name.is_some() {
                 auto_update_tag_embedding_and_similarities(&state, tag.id, &tag.name).await;
@@ -801,7 +822,12 @@ async fn delete_tag_handler(
 ) -> impl IntoResponse {
     match get_tag_by_id(&state.db, id).await {
         Ok(Some(_)) => match delete_tag(&state.db, id).await {
-            Ok(_) => Json(ApiResponse { data: () }).into_response(),
+            Ok(_) => {
+                // `file_resolved_tags.tag_id` has no FK — the deleted tag's rows
+                // would otherwise linger until the next background refresh.
+                crate::db::refresh_resolved_tags(&state.db).await;
+                Json(ApiResponse { data: () }).into_response()
+            }
             Err(e) => internal_error(e).into_response(),
         },
         Ok(None) => (
@@ -1077,6 +1103,8 @@ async fn categorize_tag_handler(
     // 2. Update category_id + reviewed_at
     match db_categorize_tag(&state.db, id, request.category_id).await {
         Ok(tag) => {
+            // Category (→ prefix) changed.
+            crate::db::refresh_resolved_tags(&state.db).await;
             // 3. Embedding-Cache aktualisieren (falls Modell geladen)
             let cache = state.embeddings.lock().await;
             if let Some(ref model) = *cache {
@@ -1154,10 +1182,13 @@ async fn bulk_categorize_handler(
             .into_response();
     }
     match bulk_categorize_tags(&state.db, &request.tag_ids, request.category_id).await {
-        Ok(count) => Json(ApiResponse {
-            data: serde_json::json!({ "updated": count }),
-        })
-        .into_response(),
+        Ok(count) => {
+            crate::db::refresh_resolved_tags(&state.db).await;
+            Json(ApiResponse {
+                data: serde_json::json!({ "updated": count }),
+            })
+            .into_response()
+        }
         Err(e) => internal_error(e).into_response(),
     }
 }

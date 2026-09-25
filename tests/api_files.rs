@@ -2803,3 +2803,43 @@ async fn files_backpack_filter_partitions_the_library() {
         "backpack+stems must be a subset of both (bp={in_bp}, stems={stems_missing}, both={bp_stems_missing})"
     );
 }
+
+/// Deleting a tag must refresh the materialised resolution tables itself —
+/// otherwise the tag filter (and every comment target) keeps matching the
+/// deleted tag until the next background refresh.
+#[tokio::test]
+async fn deleting_a_tag_refreshes_resolved_tags_immediately() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    seed_backpack_conversion(&pool).await;
+    // Populate the materialised table the way a normal cycle would, so the
+    // "after" assertion really tests the delete path and not an empty table.
+    momos_music_manager::db::refresh_file_resolved_tags(&pool)
+        .await
+        .unwrap();
+
+    async fn count(client: &reqwest::Client, url: String) -> u64 {
+        let resp = client.get(url).send().await.unwrap();
+        let json: Value = resp.json().await.unwrap();
+        json["data"].as_u64().expect("count must be a number")
+    }
+
+    let before = count(&client, format!("{base}/api/files/count?tags=convbp")).await;
+    assert_eq!(before, 4, "the four convbp files resolve to the tag");
+
+    // Delete the tag through the API …
+    let resp = client
+        .delete(format!("{base}/api/tags/900"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "tag delete should succeed");
+
+    // … and the filter must reflect it right away, with no other refresh in
+    // between (the count endpoint does not refresh on read).
+    let after = count(&client, format!("{base}/api/files/count?tags=convbp")).await;
+    assert_eq!(
+        after, 0,
+        "deleted tag must stop matching immediately (was {before} before the delete)"
+    );
+}

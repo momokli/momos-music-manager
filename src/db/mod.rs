@@ -33,3 +33,22 @@ pub use tags::*;
 pub use testing::*;
 pub use tracks::*;
 pub use types::*;
+
+/// Rebuild both materialised tag-resolution tables (`file_resolved_tags` and
+/// `track_resolved_tags`). Best-effort — a failure is logged, never propagated.
+///
+/// Call this after any mutation that changes tag resolution (tag create/rename/
+/// delete, category changes, playlist delete) so that filters and comment targets
+/// see the new state immediately, instead of waiting for the next background
+/// refresh (maintainer cycle / folder scan / global poller).
+///
+/// `file_resolved_tags.tag_id` has no foreign key onto `tags`, so a deleted tag
+/// leaves denormalised rows behind until this rebuild runs.
+pub async fn refresh_resolved_tags(pool: &sqlx::Pool<sqlx::Sqlite>) {
+    if let Err(e) = refresh_file_resolved_tags(pool).await {
+        tracing::warn!("refresh_file_resolved_tags failed: {e:#}");
+    }
+    if let Err(e) = refresh_track_resolved_tags(pool).await {
+        tracing::warn!("refresh_track_resolved_tags failed: {e:#}");
+    }
+}

@@ -1582,3 +1582,38 @@ alle POST-„select all"-Pfade) — damit stimmen Liste, Count und POST-Filter �
 - Kosten: ~135 ms Korrelations-Subquery über ~17k Dateien — akzeptabel, kein Index nötig.
 - `file_resolved_tags` bleibt die Grundlage der Comment-/Tag-Anzeige, ist aber für
   Backpack-Zugehörigkeit *nicht* die Wahrheit.
+
+
+## ADR-071: Refresh der abgeleiteten Tag-Tabellen gehört an die Mutation
+
+**Date**: 2026-09-24
+**Status**: Accepted (implemented)
+**Relates**: ADR-011 (materialised `file_resolved_tags`), ADR-070 (Backpack-Filter)
+
+**Context**: `file_resolved_tags` und `track_resolved_tags` sind materialisierte
+Ableitungen der Live-Views `v_file_resolved_tags` / `v_track_tags`. Filter (Tags, PMV,
+`nonDefaultOnly`) und die Comment-Berechnung lesen die materialisierte Tabelle.
+`file_resolved_tags.tag_id` hat **keinen Foreign Key** auf `tags` — ein gelöschter Tag
+lässt seine denormalisierten Zeilen (`tag_name`, `prefix`) also stehen, bis ein Refresh
+läuft. Refreshes passierten bisher nur indirekt (Start, Maintainer 1 h, Folder-Scan,
+Global-Poller, einige Sonder-Handler). Nach „Tags löschen → Comments neu schreiben"
+konnte ein neu geschriebener Comment den **gerade gelöschten Tag** enthalten.
+
+**Decision**: Der Refresh hängt an den Mutationen bzw. am Comment-Pfad, nicht am Zufall
+des nächsten Hintergrund-Zyklus:
+- Neuer Helfer `db::refresh_resolved_tags(pool)` (file + track, best-effort mit Warn-Log).
+- Aufruf nach Tag-Mutationen: create/update/delete Tag, Kategorie create/update/delete,
+  Reorder-Batch, Categorize (einzeln + bulk) — und nach `delete_playlist`.
+- Aufruf vor jedem Comment-Pfad: `needs-comment-count(-all)`, `write-comments-all`,
+  `write-comments-by-ids`, `bulk-sync` — plus **einmal pro WriteComment-Task** (deckt
+  alle Aufrufer ab, inkl. Tracks-/Digging-Pfade).
+
+**Consequences**:
+- Nach Löschen/Ändern ist die Filter- und Comment-Sicht **sofort** korrekt; der
+  Hintergrund-Refresh bleibt als Sicherheitsnetz.
+- Mutationen kosten jetzt einen Refresh (DELETE + INSERT über die View, auf der
+  Produktions-DB ~0,5–2 s). Bewusst in Kauf genommen — Löschungen sind selten, und der
+  Comment-Pfad ist eine explizite Nutzeraktion.
+- Kein Schema, keine Migration.
+- Test `deleting_a_tag_refreshes_resolved_tags_immediately` beweist es: ohne den
+  Refresh im Delete-Handler fällt der Filter-Treffer von 4 nicht auf 0 (verifiziert).

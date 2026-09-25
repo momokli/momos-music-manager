@@ -316,10 +316,14 @@ async fn delete_playlist_handler(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     match delete_playlist(&state.db, id).await {
-        Ok(true) => Json(ApiResponse {
-            data: serde_json::json!({"deleted": true, "id": id}),
-        })
-        .into_response(),
+        Ok(true) => {
+            // The playlist name drove tag resolution — rebuild the tables.
+            crate::db::refresh_resolved_tags(&state.db).await;
+            Json(ApiResponse {
+                data: serde_json::json!({"deleted": true, "id": id}),
+            })
+            .into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -673,12 +677,10 @@ async fn unsubscribe_handler(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     match unsubscribe_from_playlist(&state.db, id).await {
-        Ok(()) => {
-            Json(ApiResponse {
-                data: serde_json::json!({"unsubscribed": true}),
-            })
-            .into_response()
-        }
+        Ok(()) => Json(ApiResponse {
+            data: serde_json::json!({"unsubscribed": true}),
+        })
+        .into_response(),
         Err(e) => internal_error(format!("Failed to unsubscribe: {}", e)).into_response(),
     }
 }
