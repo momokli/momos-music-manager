@@ -702,14 +702,16 @@ async fn files_filter_stems() {
     let json: Value = resp.json().await.unwrap();
     let files = json["data"].as_array().unwrap();
 
-    assert_eq!(
-        files.len(),
-        2,
-        "stems=true should return 2 files (3 and 4)"
-    );
+    assert_eq!(files.len(), 2, "stems=true should return 2 files (3 and 4)");
     let ids: Vec<i64> = files.iter().map(|f| f["id"].as_i64().unwrap()).collect();
-    assert!(ids.contains(&3), "file 3 (flac US002, no stem) must be included");
-    assert!(ids.contains(&4), "file 4 (flac US999, no stem) must be included");
+    assert!(
+        ids.contains(&3),
+        "file 3 (flac US002, no stem) must be included"
+    );
+    assert!(
+        ids.contains(&4),
+        "file 4 (flac US999, no stem) must be included"
+    );
     assert!(!ids.contains(&1), "file 1 has a stem and must be excluded");
     assert!(!ids.contains(&2), "file 2 IS the stem and must be excluded");
     for f in files {
@@ -2566,4 +2568,136 @@ async fn files_select_all_respects_tags() {
         "tags=groovy: files 1,2 (via ISRC) + 50-53 (via playlist) = 6; got {}",
         total
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// /api/files/backpack-conversion
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A Backpack-tagged playlist with three tracks:
+/// * 900 → local FLAC, no stem     → conversion candidate
+/// * 901 → local FLAC **and** stem → already converted, skipped
+/// * 902 → only a store backup     → wants a download, not conversion
+async fn seed_backpack_conversion(pool: &sqlx::SqlitePool) {
+    sqlx::query("INSERT INTO tags (id, name, category_id, backpack) VALUES (900, 'convbp', 3, 1)")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO service_playlists (id, service, playlist_id, name, snapshot_id) \
+         VALUES (900, 'spotify', 'spotify:playlist:convbp', 'convbp', 'snapC')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO service_tracks (id, service, service_id, title, artist, isrc, imported_at)
+           VALUES (900, 'spotify', 'sp:c1', 'NeedsStem', 'Art', 'USC001', 1700000000),
+                  (901, 'spotify', 'sp:c2', 'HasStem',   'Art', 'USC002', 1700000000),
+                  (902, 'spotify', 'sp:c3', 'StoreOnly', 'Art', 'USC003', 1700000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO service_playlist_tracks (playlist_id, track_id, position, added_at)
+           VALUES (900, 900, 0, 1700000000),
+                  (900, 901, 1, 1700000000),
+                  (900, 902, 2, 1700000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO files (id, file_path, file_type, file_size, last_modified, title, artist, isrc, file_hash)
+           VALUES (900, '/test/conv/NeedsStem.flac',   'flac',     1000, 1700000000, 'NeedsStem', 'Art', 'USC001', 'h900'),
+                  (901, '/test/conv/HasStem.flac',     'flac',     1000, 1700000000, 'HasStem',   'Art', 'USC002', 'h901'),
+                  (902, '/test/conv/HasStem.stem.m4a', 'stem.m4a', 1000, 1700000000, 'HasStem',   'Art', 'USC002', 'h902'),
+                  (903, '/test/conv/StoreOnly.flac',   'flac',     1000, 1700000000, 'StoreOnly', 'Art', 'USC003', 'h903')"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO file_locations (file_id, location_type, path, file_size)
+           VALUES (900, 'local',  '/test/conv/NeedsStem.flac',   1000),
+                  (901, 'local',  '/test/conv/HasStem.flac',     1000),
+                  (902, 'local',  '/test/conv/HasStem.stem.m4a', 1000),
+                  (903, 'backup', 'store:storeonly',             1000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn backpack_conversion_counts_only_unconverted_local_tracks() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    seed_backpack_conversion(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/files/backpack-conversion", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["data"]["needsConversion"], 1,
+        "only track 900 (local, no stem) wants a stem: {body:#}"
+    );
+    assert!(body["data"]["directory"].is_string());
+}
+
+#[tokio::test]
+async fn backpack_conversion_stages_symlinks_into_the_target_dir() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    seed_backpack_conversion(&pool).await;
+
+    // Point the staging dir at a temp location — never touch ~/Music.
+    let dir = std::env::temp_dir().join(format!("mmm-bp-conv-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // SAFETY: only this test sets the var (and `remove_var` at the end).
+    unsafe { std::env::set_var("MOMOS_BACKPACK_CONVERSION_DIR", &dir) };
+
+    let resp = client
+        .post(format!("{}/api/files/backpack-conversion", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["data"]["staged"], 1, "one symlink expected: {body:#}");
+    assert_eq!(body["data"]["needsConversion"], 1);
+
+    let entries: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(entries.len(), 1, "exactly one staged symlink");
+    let link = entries[0].path();
+    assert!(
+        link.symlink_metadata().unwrap().file_type().is_symlink(),
+        "staged entry must be a symlink"
+    );
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        std::path::PathBuf::from("/test/conv/NeedsStem.flac")
+    );
+
+    // Re-running rebuilds the dir — still exactly one entry (idempotent).
+    let resp = client
+        .post(format!("{}/api/files/backpack-conversion", base))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["data"]["staged"], 1);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+    unsafe { std::env::remove_var("MOMOS_BACKPACK_CONVERSION_DIR") };
 }

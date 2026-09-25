@@ -1520,3 +1520,33 @@ hinter dem Backlog.
 - `demand_count` zählt jetzt Priority + Backlog zusammen.
 - Kein neues Schema, keine neuen Endpunkte — nur die Auswahl in
   `src/db/music_api.rs` (`demand_isrcs`, neue `missing_track_isrcs`).
+
+
+## ADR-069: Backpack-Stem-Staging als eigene, filter-lose Aktion
+
+**Date**: 2026-09-24
+**Status**: Accepted (implemented)
+
+**Context**: Für die Stem-Konvertierung gab es `POST /api/files/stage-for-conversion`,
+das die aktuell gefilterte Files-Tabelle hardlinkt. Das ist filterabhängig und sagt
+nichts darüber aus, was der Nutzer wirklich konvertieren will: die **Backpack**-Tracks,
+die lokal vorhanden sind, aber noch keinen Stem haben. Es fehlte sowohl die Handlung
+(ein Klick, ohne Filter) als auch die Sichtbarkeit („wie viele sind es noch?").
+
+**Decision**: Eine eigene, filter-lose Aktion:
+- `GET /api/files/backpack-conversion` → `{ needsConversion, directory }`.
+- `POST /api/files/backpack-conversion` → baut `~/Music/backpack_conversion` neu auf und
+  legt **Symlinks** (eine pro Track) auf die beste lokale Quelle (WAVs ausgenommen — das
+  sind Stem-Bestandteile, keine Quellen). Ziel per `MOMOS_BACKPACK_CONVERSION_DIR`
+  überschreibbar (Tests schreiben nie ins echte `~/Music`).
+- Button „Stage Backpack → Stems (N)" im Actions-Panel der Files-Seite; `N` ist die
+  Live-Zahl aus dem GET.
+- Ein Track zählt nur, wenn er **lokal** ist. Ohne lokale Datei ist er ein
+  Download-Kandidat (`music-api`), kein Konvertierungs-Kandidat.
+
+**Consequences**:
+- Kein neues Schema, keine Migration.
+- Symlink statt Hardlink (Nutzerwunsch): die Konvertierung liest nur, und ein Symlink
+  überlebt ein Löschen der Quelle nicht stillschweigend.
+- Die `stem.m4a`-Formatpräferenz bleibt die Quelle der Wahrheit dafür, was als
+  „konvertiert" gilt.

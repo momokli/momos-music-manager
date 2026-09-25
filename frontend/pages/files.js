@@ -16,7 +16,12 @@ import {
   showModal,
 } from "../shared/components.js";
 import { renderActionsPanel, updateSelectionCount } from "../shared/actions-panel.js";
-import { formatBPM, formatDuration, placeholderUnset, placeholderUnknown } from "../shared/format.js";
+import {
+  formatBPM,
+  formatDuration,
+  placeholderUnset,
+  placeholderUnknown,
+} from "../shared/format.js";
 import { fetchJSON } from "../shared/api.js";
 import { renderSearchInput, wireSearchFilter } from "../shared/search-filter.js";
 import { renderCommentWriter, wireCommentWriter } from "../shared/comment-writer.js";
@@ -2008,7 +2013,29 @@ export async function init(container, signal, hashParams) {
       cls: "btn-accent",
       action: "stage-conversion",
     },
+    {
+      id: "stage-backpack",
+      label: "Stage Backpack → Stems",
+      icon: "fas fa-bag-shopping",
+      cls: "btn-accent",
+      action: "stage-backpack",
+    },
   ]);
+
+  // Live count of Backpack tracks that still want stem conversion. Shown in the
+  // button label so it is visible without opening anything.
+  const setBackpackStemLabel = (n) => {
+    const btn = container.querySelector("#files-actions-stage-backpack");
+    if (!btn) return;
+    btn.innerHTML =
+      `<i class="fas fa-bag-shopping"></i> Stage Backpack → Stems` +
+      (typeof n === "number" ? ` (${n})` : "");
+  };
+  const refreshBackpackStemCount = () => {
+    fetchJSON("/api/files/backpack-conversion")
+      .then((resp) => setBackpackStemLabel(resp?.data?.needsConversion))
+      .catch(() => {});
+  };
 
   // Render toolbar ONCE (stable, preserves focus)
   container.innerHTML = `
@@ -2027,6 +2054,7 @@ export async function init(container, signal, hashParams) {
   import("../shared/actions-panel.js").then(({ wireActionsRefresh }) => {
     wireActionsRefresh(container, "files", () => {
       state.page = 0;
+      refreshBackpackStemCount();
       return fetchAndRender(container, signal, state);
     });
   });
@@ -2060,6 +2088,33 @@ export async function init(container, signal, hashParams) {
       } finally {
         stageBtn.disabled = false;
         stageBtn.innerHTML = originalHtml;
+      }
+    };
+  }
+
+  // Wire Stage Backpack → Stems button in actions panel
+  const backpackStageBtn = container.querySelector("#files-actions-stage-backpack");
+  if (backpackStageBtn) {
+    refreshBackpackStemCount();
+    backpackStageBtn.onclick = async () => {
+      backpackStageBtn.disabled = true;
+      backpackStageBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Staging…';
+      try {
+        const resp = await fetchJSON("/api/files/backpack-conversion", {
+          method: "POST",
+        });
+        const data = resp.data;
+        showToast(
+          `${data.staged} Backpack track(s) staged in ${data.directory}`,
+          data.staged > 0 ? "success" : "info",
+        );
+        backpackStageBtn.disabled = false;
+        setBackpackStemLabel(data.needsConversion);
+      } catch (err) {
+        showToast(`Backpack staging failed: ${err.message}`, "error");
+        backpackStageBtn.disabled = false;
+        backpackStageBtn.innerHTML =
+          '<i class="fas fa-bag-shopping"></i> Stage Backpack → Stems';
       }
     };
   }

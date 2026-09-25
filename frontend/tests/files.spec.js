@@ -162,7 +162,9 @@ test.describe("Files Page", () => {
     await page.waitForSelector("#files-content table tbody tr", { timeout: 8000 });
 
     // Total in stats row must be 5
-    const statsText = await page.locator("#files-content .stats-row strong").textContent();
+    const statsText = await page
+      .locator("#files-content .stats-row strong")
+      .textContent();
     expect(parseInt(statsText, 10)).toBe(5);
 
     // The filter button row is present and "Missing" is active
@@ -184,7 +186,9 @@ test.describe("Files Page", () => {
     await page.goto("/#files?stems=true&backedUp=true");
     await page.waitForSelector("#files-content table tbody tr", { timeout: 8000 });
 
-    const statsText = await page.locator("#files-content .stats-row strong").textContent();
+    const statsText = await page
+      .locator("#files-content .stats-row strong")
+      .textContent();
     expect(parseInt(statsText, 10)).toBe(5);
   });
 
@@ -194,7 +198,55 @@ test.describe("Files Page", () => {
     await page.goto("/#files?stems=true&isLocal=true");
     await page.waitForTimeout(800);
 
-    const statsText = await page.locator("#files-content .stats-row strong").textContent();
+    const statsText = await page
+      .locator("#files-content .stats-row strong")
+      .textContent();
     expect(parseInt(statsText, 10)).toBe(0);
+  });
+
+  test("Backpack stem button shows the live count and stages on click", async ({
+    page,
+  }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    let posted = false;
+    await page.route("**/api/files/backpack-conversion", async (route) => {
+      if (route.request().method() === "POST") {
+        posted = true;
+        await route.fulfill({
+          json: {
+            data: {
+              staged: 7,
+              directory: "/Users/momo/Music/backpack_conversion",
+              needsConversion: 7,
+            },
+          },
+        });
+      } else {
+        await route.fulfill({
+          json: {
+            data: {
+              needsConversion: 7,
+              directory: "/Users/momo/Music/backpack_conversion",
+            },
+          },
+        });
+      }
+    });
+
+    await page.goto("/#files");
+    await page.waitForSelector("#files-content table tbody tr", { timeout: 8000 });
+
+    const btn = page.locator("#files-actions-stage-backpack");
+    await expect(btn).toBeVisible();
+    // The count of Backpack tracks still wanting stems is in the label.
+    await expect(btn).toContainText("(7)");
+
+    await btn.click();
+    await expect.poll(() => posted).toBe(true);
+    await expect(btn).toContainText("(7)");
+
+    expect(errors).toEqual([]);
   });
 });

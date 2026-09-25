@@ -6,6 +6,15 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+### Added
+
+- **Backpack-Stem-Staging**: `GET`/`POST /api/files/backpack-conversion` zählt die
+  Backpack-Tracks, die lokal vorliegen, aber noch keinen lokalen `stem.m4a` haben, und
+  legt für sie Symlinks in `~/Music/backpack_conversion` ab (Ziel per
+  `MOMOS_BACKPACK_CONVERSION_DIR` überschreibbar). Neuer Button **„Stage Backpack → Stems"
+  (N)** im Actions-Panel der Files-Seite — der Count ist dort direkt sichtbar. Anders als
+  „Stage for Conversion" braucht er keine Filter/Auswahl.
+
 ## [1.13.0] — 2026-09-24
 
 ### Added

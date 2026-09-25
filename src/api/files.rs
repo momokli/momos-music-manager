@@ -7,10 +7,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::{
-        HeaderMap, HeaderValue, Request, StatusCode,
-        header,
-    },
+    http::{HeaderMap, HeaderValue, Request, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -2655,6 +2652,106 @@ async fn stage_for_conversion_handler(
     .into_response()
 }
 
+// ── Backpack stem conversion ──────────────────────────────────────────────
+
+/// Where the "Stage Backpack for Stems" button links the sources.
+///
+/// Defaults to `~/Music/backpack_conversion`; override with
+/// `MOMOS_BACKPACK_CONVERSION_DIR` (used by tests so they never touch the real
+/// music folder).
+fn backpack_conversion_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("MOMOS_BACKPACK_CONVERSION_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/Users/momo".to_string()))
+        .join("Music/backpack_conversion")
+}
+
+/// GET /api/files/backpack-conversion
+/// How many Backpack tracks still want stem conversion, and where they'd land.
+async fn backpack_conversion_status_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match crate::db::files::get_backpack_conversion_candidates(&state.db).await {
+        Ok(candidates) => Json(ApiResponse {
+            data: serde_json::json!({
+                "needsConversion": candidates.len(),
+                "directory": backpack_conversion_dir().to_string_lossy(),
+            }),
+        })
+        .into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+/// POST /api/files/backpack-conversion
+/// Rebuilds `~/Music/backpack_conversion` as a flat set of symlinks — one per
+/// Backpack track that still wants stem conversion. Unlike the filter-driven
+/// `stage-for-conversion`, this is scoped to the Backpack and never needs a
+/// selection.
+async fn stage_backpack_conversion_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let target_dir = backpack_conversion_dir();
+
+    let candidates = match crate::db::files::get_backpack_conversion_candidates(&state.db).await {
+        Ok(c) => c,
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    // Rebuild from scratch so the directory always reflects the current set.
+    if target_dir.exists() {
+        if let Err(e) = tokio::fs::remove_dir_all(&target_dir).await {
+            return internal_error(format!("Failed to clear {}: {e}", target_dir.display()))
+                .into_response();
+        }
+    }
+    if let Err(e) = tokio::fs::create_dir_all(&target_dir).await {
+        return internal_error(format!("Failed to create {}: {e}", target_dir.display()))
+            .into_response();
+    }
+
+    let mut staged = 0usize;
+    for c in &candidates {
+        let src = std::path::Path::new(&c.file_path);
+        let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Keep names unique — two tracks may share "Artist - Title.flac".
+        let mut dst = target_dir.join(name);
+        if dst.exists() {
+            let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+            let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("");
+            let unique = if ext.is_empty() {
+                format!("{stem} [{}]", c.file_id)
+            } else {
+                format!("{stem} [{}].{ext}", c.file_id)
+            };
+            dst = target_dir.join(unique);
+        }
+        match tokio::fs::symlink(src, &dst).await {
+            Ok(()) => staged += 1,
+            Err(e) => {
+                tracing::warn!("Failed to symlink {} → {}: {e}", c.file_path, dst.display())
+            }
+        }
+    }
+
+    tracing::info!(
+        "Staged {staged} Backpack track(s) for stem conversion in {}",
+        target_dir.display()
+    );
+
+    Json(ApiResponse {
+        data: serde_json::json!({
+            "staged": staged,
+            "directory": target_dir.to_string_lossy(),
+            "needsConversion": candidates.len(),
+        }),
+    })
+    .into_response()
+}
+
 // ── Router ────────────────────────────────────────────────────────────────
 
 pub(super) fn router() -> Router<Arc<AppState>> {
@@ -2703,6 +2800,10 @@ pub(super) fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/files/stage-for-conversion",
             post(stage_for_conversion_handler),
+        )
+        .route(
+            "/api/files/backpack-conversion",
+            get(backpack_conversion_status_handler).post(stage_backpack_conversion_handler),
         )
         // File-track correction overrides (manual file↔track linking)
         .route(
