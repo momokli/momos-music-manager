@@ -6,6 +6,8 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-10-02
+
 ### Added
 
 - **`db::rediscovery` — TrackFacts-Zugang über `v_track_forgotten_facts` (#62)**: neues
