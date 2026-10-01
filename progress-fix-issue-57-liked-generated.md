@@ -214,3 +214,66 @@ INSERT INTO tag_categories (id,name,prefix,is_default) VALUES (1,'Setlist','s',1
   Volle `cargo test --lib` → 762 passed / 0 failed. Keine Regression.
 - **Commit-Hash:** 4d57970 (Implementierung; Parent dieses Progress-Commits)
 - **Push:** PLACEHOLDER
+
+---
+
+## Verify (verifier)
+
+**Verdikt: PASS** ✅
+
+Quality Gate read-only für Issue #57, Branch `fix/issue-57-liked-generated` (HEAD `54921d8`, Diff gegen `origin/main`).
+
+### Geprüfte Aspekte
+1. **Diff-Scope** — nur `src/db/playlists.rs` (+210/-1) und die Progress-Datei. Keine unrelated Diffs, keine anderen Dateien.
+2. **GENAU 4 Query-Stellen gefiltert** — bestätigt:
+   - `get_spotify_playlist_snapshots` (Z.717): `WHERE service = 'spotify' AND playlist_kind = 'curated'` → liked+generated raus. Deckt via `src/global_poller.rs:139` (Step 1) UND `:347` (Step 4) ab — beide nutzen exakt diese Funktion.
+   - `get_playlists_without_tags` (Z.18): `AND sp.playlist_kind != 'generated'`
+   - `create_tags_from_playlists` (Z.49): `AND sp.playlist_kind != 'generated'`
+   - `refresh_track_tags` (Z.416): `AND sp.playlist_kind != 'generated'`
+   - Tag-Queries lassen `liked` bewusst drin (gewollt, #50-Epic); nur `generated` ausgeschlossen. NULL-Altbestand bleibt ebenfalls (Default `'curated'` aus Migration 032).
+3. **Keine Verhaltensänderung für kuratierte Playlists** — kein `!= 'curated'` an falscher Stelle; kuratierte Zeilen erfüllen `= 'curated'` bzw. `!= 'generated'`.
+4. **Tests / DoD** — alle 4 neuen Tests vorhanden und decken die 4 DoD-Punkte ab:
+   - `test_get_spotify_playlist_snapshots_excludes_liked_and_generated` (US1)
+   - `test_tag_creation_liked_but_not_generated` (US2, inkl. `get_playlists_without_tags` + `refresh_track_tags`)
+   - `test_liked_playlist_not_marked_deleted_in_poll_cycle` (US3, Step-4-Nachbildung)
+   - `test_curated_playlists_still_detected_as_deleted` (US4 Regression/Positiv-Kontrolle)
+   - Helper `test_db_with_tags()` sauber ergänzt (tag_categories/tags + Views).
+5. **Security/Scope** — keine Secrets, keine Debug-Prints/console.log; Migration 032 unangetastet (nicht im Diff). Test-SQL ohne Injection-Risiko (statische Statements).
+
+### Testlauf (selbst ausgeführt)
+- `cargo test --lib playlists` → **36 passed; 0 failed; 0 ignored** (726 filtered out). Alle 4 neuen Tests grün.
+
+### Findings / Blocker
+- Keine. Kein Blocker, kein Issue nötig.
+- Anmerkung (nicht blockierend): Schritt 4 wird im Test nachgebildet statt end-to-end; die eigentliche Absicherung leistet US1 über die Query — bewusst so gewählt und dokumentiert.
+
+---
+
+## Test (tester)
+
+**Verdikt: PASS** ✅ — Suite grün, DoD end-to-end/query-Ebene belastbar abgedeckt, keine Regressionslücke, kein ergänzender Test nötig, kein Commit.
+
+### Kommandos & Ergebnisse
+- `cargo test --lib` → **762 passed; 0 failed; 0 ignored**.
+- `cargo test` (volle Suite inkl. Integration `tests/*.rs` + Doctests) → **EXIT 0**.
+  Aggregiert über 32 Test-Binaries: **1136 passed; 0 failed; 1 ignored**.
+  Die 1 ignored ist `deemix_live_lifecycle_e2e` (benötigt live deemix + ARL, bewusst manuell).
+- DoD-Tests namentlich grün: `test_get_spotify_playlist_snapshots_excludes_liked_and_generated`,
+  `test_tag_creation_liked_but_not_generated`, `test_liked_playlist_not_marked_deleted_in_poll_cycle`,
+  `test_curated_playlists_still_detected_as_deleted`.
+
+### DoD-Abdeckung / Integrationsanalyse
+- Produktions-Consumer der Query verifiziert: `get_spotify_playlist_snapshots` wird ausschliesslich
+  in `src/global_poller.rs:139` (Step 1) und `:347` (Step 4) aufgerufen — keine weiteren Aufrufer.
+  Beide nutzen denselben `playlist_kind = 'curated'`-Filter → liked/generated werden in beiden
+  Schritten ausgeschlossen.
+- `test_liked_playlist_not_marked_deleted_in_poll_cycle` bildet die Step-4-Schleife
+  (`get_spotify_playlist_snapshots` → `!spotify_ids.contains(pid)` → `mark_playlist_inactive`)
+  deckungsgleich zur Produktion nach (`src/global_poller.rs:347-358`) und assertet
+  `deleted_count == 0` + unveränderten `snapshot_id`. US4-Positivkontrolle
+  (`test_curated_playlists_still_detected_as_deleted`) beweist, dass der Filter nur liked/generated trifft.
+- Echtes End-to-End (global_poller) ist ohne Spotify-Client nicht testbar; die einzige
+  Austauschstelle (die Query) ist über die Tests + Code-Inspektion abgesichert. Da ein zusätzlicher
+  `tests/`-Test dieselbe Schleife nur duplizieren würde (kein Zugriff auf Step 4 isoliert), besteht
+  **keine echte Integrations-/Regressionslücke** → bewusst kein neuer Test, kein Commit.
+- **Ergänzter Test:** keiner. **Commit:** keiner. **Blocker:** keiner.
