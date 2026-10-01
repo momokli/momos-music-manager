@@ -75,6 +75,7 @@ pub struct ServicePlaylist {
     pub remote_track_count: i64,
     pub remote_unique_count: i64,
     pub archive_deleted: bool,
+    pub playlist_kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
