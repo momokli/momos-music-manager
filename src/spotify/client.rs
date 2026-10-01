@@ -9,8 +9,8 @@ use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth, Token,
     clients::{BaseClient, OAuthClient},
     model::{
-        Market, PlayableId, PlayableItem, PlaylistId, SimplifiedPlaylist, TrackId, UserId,
-        playlist::FullPlaylist, track::FullTrack,
+        Market, PlayableId, PlayableItem, PlaylistId, SavedTrack, SimplifiedPlaylist, TrackId,
+        UserId, playlist::FullPlaylist, track::FullTrack,
     },
 };
 // The `Id` trait provides `.id()` (bare id) — `Display`/`to_string()` give the
@@ -245,6 +245,42 @@ impl SpotifyClient {
             }
             Err(e) => {
                 error!("Failed to fetch playlist: {}", e);
+                Err(anyhow::Error::from(e)).context("Spotify API error")
+            }
+        }))
+    }
+
+    /// Gesamtzahl der vom Nutzer gespeicherten ("gelikten") Tracks.
+    ///
+    /// Nutzt einen minimalen Seitenaufruf (limit=1), liest nur `total` aus der
+    /// Antwort und gibt es als `i64` zurück (direkt verwendbar für DB-Zähler).
+    pub async fn get_saved_tracks_total(&self) -> Result<i64> {
+        self.refresh_token_if_needed().await?;
+
+        let page = self
+            .spotify
+            .current_user_saved_tracks_manual(None, Some(1), Some(0))
+            .await
+            .context("Failed to fetch liked songs page")?;
+
+        Ok(page.total as i64)
+    }
+
+    /// Vom Nutzer gespeicherte ("gelikte") Tracks (streaming).
+    ///
+    /// # Returns
+    /// * Stream of saved tracks (newest first, Spotify order)
+    pub async fn get_saved_tracks<'a>(
+        &'a self,
+    ) -> Result<impl tokio_stream::Stream<Item = Result<SavedTrack>> + 'a> {
+        self.refresh_token_if_needed().await?;
+
+        let stream = self.spotify.current_user_saved_tracks(None);
+
+        Ok(stream.map(|item| match item {
+            Ok(t) => Ok(t),
+            Err(e) => {
+                error!("Failed to fetch saved track: {}", e);
                 Err(anyhow::Error::from(e)).context("Spotify API error")
             }
         }))
