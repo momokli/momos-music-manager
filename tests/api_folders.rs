@@ -7,6 +7,8 @@ mod common;
 
 use serde_json::Value;
 
+use momos_music_manager::tasks::{Task, TaskType};
+
 /// GET /api/folders — returns array with seeded folder.
 #[tokio::test]
 async fn folders_list() {
@@ -474,10 +476,11 @@ async fn folders_scan_sources() {
 }
 
 #[tokio::test]
-/// `POST /api/folders/{id}/scan-sources` — second call for same folder
-/// returns null taskId with "already in progress" message.
+/// `POST /api/folders/{id}/scan-sources` — a second call while a scan for the
+/// same folder is already in progress returns a null taskId plus the
+/// "already in progress" message.
 async fn folders_scan_sources_rejects_concurrent() {
-    let (client, base, pool) = common::spawn_test_app().await;
+    let (client, base, pool, state) = common::spawn_test_app_with_state().await;
     common::seed_basic_data(&pool).await;
 
     // Enable backup_path and scan_sources first
@@ -491,28 +494,35 @@ async fn folders_scan_sources_rejects_concurrent() {
         .await
         .unwrap();
 
-    // Fire both calls concurrently so the second arrives while the first
-    // task is still Pending (before the background worker transitions it).
-    let (resp1, resp2) = tokio::join!(
-        client
-            .post(format!("{}/api/folders/1/scan-sources", base))
-            .send(),
-        client
-            .post(format!("{}/api/folders/1/scan-sources", base))
-            .send(),
-    );
-    let resp1 = resp1.unwrap();
-    let resp2 = resp2.unwrap();
-    assert_eq!(resp1.status(), 200, "first call should return 200");
-    assert_eq!(resp2.status(), 200, "second call should return 200");
-    let json1: Value = resp1.json().await.unwrap();
-    let json2: Value = resp2.json().await.unwrap();
-    let resp1_conflict = json1["data"]["taskId"].is_null()
-        && json1["data"]["message"] == "Scan WAV sources already in progress for this folder";
-    let resp2_conflict = json2["data"]["taskId"].is_null()
-        && json2["data"]["message"] == "Scan WAV sources already in progress for this folder";
+    // Register the scan task by hand so it is guaranteed to stay `Pending`: no
+    // worker is spawned for it, so there is no scheduling race.
+    //
+    // This used to fire two concurrent HTTP calls via `tokio::join!` and assert
+    // that at least one was rejected. That depended on the first worker still
+    // being Pending when the second request reached the guard; on a fast CI
+    // runner the scan had already completed, so the second call legitimately
+    // started a new task and the assertion failed (flaky, see PR #86).
+    state
+        .task_manager
+        .start_task(Task::new(
+            TaskType::ScanWavSources { folder_id: 1 },
+            Some("scan_wavs".to_string()),
+        ))
+        .await;
+
+    let resp = client
+        .post(format!("{}/api/folders/1/scan-sources", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "second call should return 200");
+    let json: Value = resp.json().await.unwrap();
     assert!(
-        resp1_conflict || resp2_conflict,
-        "at least one call should be rejected, got resp1={json1:#} resp2={json2:#}"
+        json["data"]["taskId"].is_null(),
+        "a scan while one is already in progress must be rejected, got {json:#}"
+    );
+    assert_eq!(
+        json["data"]["message"], "Scan WAV sources already in progress for this folder",
+        "the guard message must be returned, got {json:#}"
     );
 }

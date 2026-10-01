@@ -23,6 +23,8 @@
 
 mod common;
 
+use momos_music_manager::tasks::{Task, TaskType};
+
 use momos_music_manager::db::refresh_file_resolved_tags;
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -851,10 +853,11 @@ async fn storage_format_priority_put_invalid() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-/// `POST /api/storage/backup/{id}` — second call for same folder returns
-/// null taskId with "already in progress" message.
+/// `POST /api/storage/backup/{id}` — a second call while the task for the same
+/// folder is already in progress returns a null taskId plus the
+/// "already in progress" message.
 async fn storage_backup_rejects_concurrent() {
-    let (client, base, pool) = common::spawn_test_app().await;
+    let (client, base, pool, state) = common::spawn_test_app_with_state().await;
     common::seed_basic_data(&pool).await;
 
     // Set backup_path first so the handler doesn't reject with 400
@@ -868,41 +871,44 @@ async fn storage_backup_rejects_concurrent() {
         .await
         .unwrap();
 
-    // Fire both calls concurrently so the second arrives while the first
-    // task is still Pending (before the background worker transitions it).
-    let (resp1, resp2) = tokio::join!(
-        client.post(format!("{}/api/storage/backup/1", base)).send(),
-        client.post(format!("{}/api/storage/backup/1", base)).send(),
-    );
-    let resp1 = resp1.unwrap();
-    let resp2 = resp2.unwrap();
-    assert_eq!(resp1.status(), 200);
-    assert_eq!(resp2.status(), 200);
+    // Register the task by hand so it is guaranteed to stay `Pending`: no worker is
+    // spawned for it, so there is no scheduling race. Firing two concurrent calls
+    // instead (the previous shape) only rejected one as long as the first worker was
+    // still Pending — flaky on a fast CI runner (see PR #86).
+    state
+        .task_manager
+        .start_task(Task::new(
+            TaskType::BackupFolder { folder_id: 1 },
+            Some("backup".to_string()),
+        ))
+        .await;
 
-    // Must consume both bodies to avoid connection hangs in reqwest
-    let json1: serde_json::Value = resp1.json().await.unwrap();
-    let json2: serde_json::Value = resp2.json().await.unwrap();
-    eprintln!("backup: resp1={json1:#}, resp2={json2:#}");
-
-    // At least one of the calls must be a rejection (can't have two
-    // backups for the same folder running simultaneously).
-    let resp1_conflict = json1["data"]["taskId"].is_null()
-        && json1["data"]["message"] == "Backup already in progress for this folder";
-    let resp2_conflict = json2["data"]["taskId"].is_null()
-        && json2["data"]["message"] == "Backup already in progress for this folder";
+    let resp = client
+        .post(format!("{}/api/storage/backup/1", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
     assert!(
-        resp1_conflict || resp2_conflict,
-        "at least one call should be rejected, got resp1={json1:#} resp2={json2:#}"
+        json["data"]["taskId"].is_null(),
+        "a second call while one is already in progress must be rejected, got {json:#}"
+    );
+    assert_eq!(
+        json["data"]["message"], "Backup already in progress for this folder",
+        "the guard message must be returned, got {json:#}"
     );
 }
 
 #[tokio::test]
-/// `POST /api/storage/backup-wavs/{id}` — second call returns null taskId.
+/// `POST /api/storage/backup-wavs/{id}` — a second call while the task for the same
+/// folder is already in progress returns a null taskId plus the
+/// "already in progress" message.
 async fn storage_backup_wavs_rejects_concurrent() {
-    let (client, base, pool) = common::spawn_test_app().await;
+    let (client, base, pool, state) = common::spawn_test_app_with_state().await;
     common::seed_basic_data(&pool).await;
 
-    // Set backup_path first
+    // Set backup_path first so the handler doesn't reject with 400
     client
         .put(format!("{}/api/folders/1/backup", base))
         .json(&serde_json::json!({
@@ -913,38 +919,44 @@ async fn storage_backup_wavs_rejects_concurrent() {
         .await
         .unwrap();
 
-    // Fire both calls concurrently
-    let (resp1, resp2) = tokio::join!(
-        client
-            .post(format!("{}/api/storage/backup-wavs/1", base))
-            .send(),
-        client
-            .post(format!("{}/api/storage/backup-wavs/1", base))
-            .send(),
-    );
-    let resp1 = resp1.unwrap();
-    let resp2 = resp2.unwrap();
-    assert_eq!(resp1.status(), 200);
-    assert_eq!(resp2.status(), 200);
-    let json1: serde_json::Value = resp1.json().await.unwrap();
-    let json2: serde_json::Value = resp2.json().await.unwrap();
-    let resp1_conflict = json1["data"]["taskId"].is_null()
-        && json1["data"]["message"] == "Backup WAVs already in progress for this folder";
-    let resp2_conflict = json2["data"]["taskId"].is_null()
-        && json2["data"]["message"] == "Backup WAVs already in progress for this folder";
+    // Register the task by hand so it is guaranteed to stay `Pending`: no worker is
+    // spawned for it, so there is no scheduling race. Firing two concurrent calls
+    // instead (the previous shape) only rejected one as long as the first worker was
+    // still Pending — flaky on a fast CI runner (see PR #86).
+    state
+        .task_manager
+        .start_task(Task::new(
+            TaskType::BackupWavs { folder_id: 1 },
+            Some("backup_wavs".to_string()),
+        ))
+        .await;
+
+    let resp = client
+        .post(format!("{}/api/storage/backup-wavs/1", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
     assert!(
-        resp1_conflict || resp2_conflict,
-        "at least one call should be rejected, got resp1={json1:#} resp2={json2:#}"
+        json["data"]["taskId"].is_null(),
+        "a second call while one is already in progress must be rejected, got {json:#}"
+    );
+    assert_eq!(
+        json["data"]["message"], "Backup WAVs already in progress for this folder",
+        "the guard message must be returned, got {json:#}"
     );
 }
 
 #[tokio::test]
-/// `POST /api/storage/discover-backup/{id}` — second call returns null taskId.
+/// `POST /api/storage/discover-backup/{id}` — a second call while the task for the same
+/// folder is already in progress returns a null taskId plus the
+/// "already in progress" message.
 async fn storage_discover_backup_rejects_concurrent() {
-    let (client, base, pool) = common::spawn_test_app().await;
+    let (client, base, pool, state) = common::spawn_test_app_with_state().await;
     common::seed_basic_data(&pool).await;
 
-    // Set backup_path first
+    // Set backup_path first so the handler doesn't reject with 400
     client
         .put(format!("{}/api/folders/1/backup", base))
         .json(&serde_json::json!({
@@ -955,28 +967,32 @@ async fn storage_discover_backup_rejects_concurrent() {
         .await
         .unwrap();
 
-    // Fire both calls concurrently
-    let (resp1, resp2) = tokio::join!(
-        client
-            .post(format!("{}/api/storage/discover-backup/1", base))
-            .send(),
-        client
-            .post(format!("{}/api/storage/discover-backup/1", base))
-            .send(),
-    );
-    let resp1 = resp1.unwrap();
-    let resp2 = resp2.unwrap();
-    assert_eq!(resp1.status(), 200);
-    assert_eq!(resp2.status(), 200);
-    let json1: serde_json::Value = resp1.json().await.unwrap();
-    let json2: serde_json::Value = resp2.json().await.unwrap();
-    let resp1_conflict = json1["data"]["taskId"].is_null()
-        && json1["data"]["message"] == "Backup discovery already in progress for this folder";
-    let resp2_conflict = json2["data"]["taskId"].is_null()
-        && json2["data"]["message"] == "Backup discovery already in progress for this folder";
+    // Register the task by hand so it is guaranteed to stay `Pending`: no worker is
+    // spawned for it, so there is no scheduling race. Firing two concurrent calls
+    // instead (the previous shape) only rejected one as long as the first worker was
+    // still Pending — flaky on a fast CI runner (see PR #86).
+    state
+        .task_manager
+        .start_task(Task::new(
+            TaskType::BackupDiscovery { folder_id: 1 },
+            Some("backup_discovery".to_string()),
+        ))
+        .await;
+
+    let resp = client
+        .post(format!("{}/api/storage/discover-backup/1", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
     assert!(
-        resp1_conflict || resp2_conflict,
-        "at least one call should be rejected, got resp1={json1:#} resp2={json2:#}"
+        json["data"]["taskId"].is_null(),
+        "a second call while one is already in progress must be rejected, got {json:#}"
+    );
+    assert_eq!(
+        json["data"]["message"], "Backup discovery already in progress for this folder",
+        "the guard message must be returned, got {json:#}"
     );
 }
 

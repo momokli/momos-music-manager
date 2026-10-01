@@ -6,6 +6,18 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+    # Nur noch, wenn die Packaging-Kette selbst angefasst wird: die fuenf
+    # Plattform-Builds sind teuer. Quellcode-Regressionen decken `ci-pr.yml`
+    # (Build + Test) ab, und `publish` laeuft weiterhin bei jedem Push auf `main`.
+    paths:
+      - "scripts/package-*"
+      - "scripts/publish-assets.sh"
+      - "scripts/release-notes.sh"
+      - "scripts/resolve-version.sh"
+      - ".github/workflows/build-all.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
   workflow_dispatch:
 
 permissions:
