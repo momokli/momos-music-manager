@@ -2029,6 +2029,122 @@ pub async fn get_backpack_pull_candidates(
     Ok(candidates)
 }
 
+/// A Backpack track that has a local file but no local `stem.m4a` yet — i.e. it
+/// still wants stem conversion. `file_path` is the best local source to convert.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackpackConversionCandidate {
+    pub file_id: i64,
+    pub file_path: String,
+    pub file_type: String,
+    pub file_size: i64,
+    pub title: String,
+    pub artist: String,
+    pub isrc: Option<String>,
+}
+
+/// Backpack tracks that still need stem conversion.
+///
+/// For every track in the Backpack set (subscribed playlists ∪ backpack tags):
+/// 1. gather its file variants (same key-resolution as the pull path),
+/// 2. skip the track when a **local** `stem.m4a` already exists,
+/// 3. otherwise return its best **local** source file — WAVs are excluded (they
+///    are stem components, not sources), and a track with no local file at all is
+///    a *download* candidate, not a conversion candidate.
+///
+/// One entry per track: the row count drives the "Stage Backpack" button and its
+/// live count on the Files page.
+pub async fn get_backpack_conversion_candidates(
+    pool: &Pool<sqlx::Sqlite>,
+) -> Result<Vec<BackpackConversionCandidate>> {
+    let priorities = load_format_priorities(pool).await;
+
+    let backpack_file_ids: Vec<i64> = crate::backpack::get_backpack_file_ids(pool).await?;
+    if backpack_file_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let family_file_ids: Vec<i64> =
+        crate::backpack::get_backpack_family_file_ids(pool, &backpack_file_ids).await?;
+    let all_files = get_files_by_ids_ordered(pool, &family_file_ids).await?;
+
+    // file_id → track_id (the view's cheap `file_id` direction).
+    let track_id_placeholders: Vec<String> = all_files.iter().map(|_| "?".to_string()).collect();
+    let track_sql = format!(
+        "SELECT file_id, track_id FROM v_file_track_link WHERE file_id IN ({})",
+        track_id_placeholders.join(",")
+    );
+    let mut track_query = sqlx::query_as::<_, (i64, i64)>(&track_sql);
+    for f in &all_files {
+        track_query = track_query.bind(f.id);
+    }
+    let file_track_map: HashMap<i64, i64> =
+        track_query.fetch_all(pool).await?.into_iter().collect();
+
+    // Group by track. Only real track groups count — a file with no track link
+    // is not a track that can be converted.
+    let mut groups: HashMap<i64, Vec<&File>> = HashMap::new();
+    for f in &all_files {
+        if let Some(&track_id) = file_track_map.get(&f.id) {
+            groups.entry(track_id).or_default().push(f);
+        }
+    }
+
+    // File locations, indexed by file id.
+    let loc_placeholders: Vec<String> = all_files.iter().map(|_| "?".to_string()).collect();
+    let loc_sql = format!(
+        "SELECT * FROM file_locations WHERE file_id IN ({})",
+        loc_placeholders.join(",")
+    );
+    let mut loc_query = sqlx::query_as::<_, FileLocation>(&loc_sql);
+    for f in &all_files {
+        loc_query = loc_query.bind(f.id);
+    }
+    let all_locations: Vec<FileLocation> = loc_query.fetch_all(pool).await?;
+
+    let mut locs_by_file: HashMap<i64, Vec<&FileLocation>> = HashMap::new();
+    for loc in &all_locations {
+        locs_by_file.entry(loc.file_id).or_default().push(loc);
+    }
+    let is_local = |file_id: i64| -> bool {
+        locs_by_file
+            .get(&file_id)
+            .map(|locs| locs.iter().any(|l| l.location_type == "local"))
+            .unwrap_or(false)
+    };
+
+    let mut candidates: Vec<BackpackConversionCandidate> = Vec::new();
+    for group in groups.values() {
+        // Already converted: the track has a local stem.
+        if group
+            .iter()
+            .any(|f| f.file_type == "stem.m4a" && is_local(f.id))
+        {
+            continue;
+        }
+
+        // Best local source, WAVs excluded.
+        let mut sorted: Vec<&File> = group.iter().copied().collect();
+        sorted.sort_by_key(|f| format_preference_with(&f.file_type, &priorities));
+        let Some(source) = sorted.iter().copied().find(|f| is_local(f.id)) else {
+            continue;
+        };
+
+        candidates.push(BackpackConversionCandidate {
+            file_id: source.id,
+            file_path: source.file_path.clone(),
+            file_type: source.file_type.clone(),
+            file_size: source.file_size,
+            title: source.title.clone().unwrap_or_default(),
+            artist: source.artist.clone().unwrap_or_default(),
+            isrc: source.isrc.clone(),
+        });
+    }
+
+    candidates.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+    Ok(candidates)
+}
+
 /// Compute size statistics for backpack-tagged files.
 ///
 /// For each track whose tags have `backpack = 1`:
@@ -2263,7 +2379,8 @@ pub async fn cleanup_redundant_backpack_files(pool: &Pool<Sqlite>) -> Result<(us
             .get(&file_id)
             .map(|locs| {
                 locs.iter().any(|l| {
-                    l.location_type == "backup" && l.path.starts_with(crate::store::STORE_PATH_PREFIX)
+                    l.location_type == "backup"
+                        && l.path.starts_with(crate::store::STORE_PATH_PREFIX)
                 })
             })
             .unwrap_or(false)

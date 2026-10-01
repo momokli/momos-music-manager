@@ -7,10 +7,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::{
-        HeaderMap, HeaderValue, Request, StatusCode,
-        header,
-    },
+    http::{HeaderMap, HeaderValue, Request, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -164,6 +161,8 @@ pub struct FilesQuery {
     /// stems=true: non-stem files whose track has no stem.m4a with the same ISRC.
     /// stems=false: stem files plus files that already have a stem.m4a for the track.
     pub stems: Option<bool>,
+    /// Backpack membership — true = in, false = not in (None = all).
+    pub backpack: Option<bool>,
     pub sort: Option<String>,
     pub order: Option<String>,
     pub page_size: Option<i64>,
@@ -256,6 +255,8 @@ struct FilesFilterAll {
     pub is_local: Option<bool>,
     pub safe_to_delete: Option<bool>,
     pub stems: Option<bool>,
+    /// Backpack membership — true = in, false = not in (None = all).
+    pub backpack: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -671,6 +672,8 @@ fn build_files_filter_sql(filter: &FilesFilterAll) -> String {
     // STEMS filter: non-stem files whose track has no stem.m4a with the same ISRC
     append_stems_filter(&mut sql, filter.stems);
 
+    append_backpack_filter(&mut sql, filter.backpack);
+
     sql
 }
 
@@ -683,6 +686,43 @@ fn append_stems_filter(sql: &mut String, stems: Option<bool>) {
         sql.push_str(" AND NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.isrc != '' AND f2.file_type = 'stem.m4a')");
     } else if let Some(false) = stems {
         sql.push_str(" AND (files.file_type = 'stem.m4a' OR EXISTS (SELECT 1 FROM files f2 WHERE f2.isrc = files.isrc AND f2.isrc IS NOT NULL AND f2.isrc != '' AND f2.file_type = 'stem.m4a'))");
+    }
+}
+
+/// Backpack membership of a single `files.id` row, as pure SQL (no bind params).
+///
+/// Mirrors [`crate::backpack::get_backpack_track_ids`] at the file level so the
+/// Files page filters and paginates server-side with *exactly* the same set that
+/// `prune` protects: a file is in the Backpack when it links to a track that is
+/// either in an **active** subscription (non-deleted playlist entry) or carries a
+/// `backpack = 1` tag (resolved through the live `v_track_tags` view).
+const BACKPACK_FILE_CLAUSE: &str = "(EXISTS (\
+     SELECT 1 FROM v_file_track_link v \
+     WHERE v.file_id = files.id \
+       AND (EXISTS (\
+              SELECT 1 FROM v_track_tags vtt \
+              JOIN tags t ON t.id = vtt.tag_id AND t.backpack = 1 \
+              WHERE vtt.track_id = v.track_id) \
+            OR EXISTS (\
+              SELECT 1 FROM service_playlist_tracks spt \
+              JOIN service_playlists sp ON sp.id = spt.playlist_id \
+              JOIN playlist_subscriptions ps ON ps.service = sp.service \
+                  AND ps.playlist_id = sp.playlist_id AND ps.is_active = 1 \
+              WHERE spt.track_id = v.track_id AND spt.deleted_at IS NULL))))";
+
+/// Append the "Backpack" filter: `Some(true)` = in the Backpack, `Some(false)` =
+/// not in it. `None` leaves the query untouched.
+fn append_backpack_filter(sql: &mut String, backpack: Option<bool>) {
+    match backpack {
+        Some(true) => {
+            sql.push_str(" AND ");
+            sql.push_str(BACKPACK_FILE_CLAUSE);
+        }
+        Some(false) => {
+            sql.push_str(" AND NOT ");
+            sql.push_str(BACKPACK_FILE_CLAUSE);
+        }
+        None => {}
     }
 }
 
@@ -1317,6 +1357,7 @@ async fn get_files(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<Vec<ApiFil
 
     // STEMS filter: non-stem files whose track has no stem.m4a with the same ISRC
     append_stems_filter(&mut sql, query.stems);
+    append_backpack_filter(&mut sql, query.backpack);
 
     apply_sort(
         &mut sql,
@@ -1786,6 +1827,7 @@ async fn get_files_count(pool: &Pool<Sqlite>, query: &FilesQuery) -> Result<i64>
 
     // STEMS filter: non-stem files whose track has no stem.m4a with the same ISRC
     append_stems_filter(&mut sql, query.stems);
+    append_backpack_filter(&mut sql, query.backpack);
 
     let mut q = sqlx::query(&sql);
 
@@ -2655,6 +2697,106 @@ async fn stage_for_conversion_handler(
     .into_response()
 }
 
+// ── Backpack stem conversion ──────────────────────────────────────────────
+
+/// Where the "Stage Backpack for Stems" button links the sources.
+///
+/// Defaults to `~/Music/backpack_conversion`; override with
+/// `MOMOS_BACKPACK_CONVERSION_DIR` (used by tests so they never touch the real
+/// music folder).
+fn backpack_conversion_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("MOMOS_BACKPACK_CONVERSION_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/Users/momo".to_string()))
+        .join("Music/backpack_conversion")
+}
+
+/// GET /api/files/backpack-conversion
+/// How many Backpack tracks still want stem conversion, and where they'd land.
+async fn backpack_conversion_status_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match crate::db::files::get_backpack_conversion_candidates(&state.db).await {
+        Ok(candidates) => Json(ApiResponse {
+            data: serde_json::json!({
+                "needsConversion": candidates.len(),
+                "directory": backpack_conversion_dir().to_string_lossy(),
+            }),
+        })
+        .into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
+/// POST /api/files/backpack-conversion
+/// Rebuilds `~/Music/backpack_conversion` as a flat set of symlinks — one per
+/// Backpack track that still wants stem conversion. Unlike the filter-driven
+/// `stage-for-conversion`, this is scoped to the Backpack and never needs a
+/// selection.
+async fn stage_backpack_conversion_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let target_dir = backpack_conversion_dir();
+
+    let candidates = match crate::db::files::get_backpack_conversion_candidates(&state.db).await {
+        Ok(c) => c,
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    // Rebuild from scratch so the directory always reflects the current set.
+    if target_dir.exists() {
+        if let Err(e) = tokio::fs::remove_dir_all(&target_dir).await {
+            return internal_error(format!("Failed to clear {}: {e}", target_dir.display()))
+                .into_response();
+        }
+    }
+    if let Err(e) = tokio::fs::create_dir_all(&target_dir).await {
+        return internal_error(format!("Failed to create {}: {e}", target_dir.display()))
+            .into_response();
+    }
+
+    let mut staged = 0usize;
+    for c in &candidates {
+        let src = std::path::Path::new(&c.file_path);
+        let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Keep names unique — two tracks may share "Artist - Title.flac".
+        let mut dst = target_dir.join(name);
+        if dst.exists() {
+            let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+            let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("");
+            let unique = if ext.is_empty() {
+                format!("{stem} [{}]", c.file_id)
+            } else {
+                format!("{stem} [{}].{ext}", c.file_id)
+            };
+            dst = target_dir.join(unique);
+        }
+        match tokio::fs::symlink(src, &dst).await {
+            Ok(()) => staged += 1,
+            Err(e) => {
+                tracing::warn!("Failed to symlink {} → {}: {e}", c.file_path, dst.display())
+            }
+        }
+    }
+
+    tracing::info!(
+        "Staged {staged} Backpack track(s) for stem conversion in {}",
+        target_dir.display()
+    );
+
+    Json(ApiResponse {
+        data: serde_json::json!({
+            "staged": staged,
+            "directory": target_dir.to_string_lossy(),
+            "needsConversion": candidates.len(),
+        }),
+    })
+    .into_response()
+}
+
 // ── Router ────────────────────────────────────────────────────────────────
 
 pub(super) fn router() -> Router<Arc<AppState>> {
@@ -2703,6 +2845,10 @@ pub(super) fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/files/stage-for-conversion",
             post(stage_for_conversion_handler),
+        )
+        .route(
+            "/api/files/backpack-conversion",
+            get(backpack_conversion_status_handler).post(stage_backpack_conversion_handler),
         )
         // File-track correction overrides (manual file↔track linking)
         .route(

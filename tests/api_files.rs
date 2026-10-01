@@ -702,14 +702,16 @@ async fn files_filter_stems() {
     let json: Value = resp.json().await.unwrap();
     let files = json["data"].as_array().unwrap();
 
-    assert_eq!(
-        files.len(),
-        2,
-        "stems=true should return 2 files (3 and 4)"
-    );
+    assert_eq!(files.len(), 2, "stems=true should return 2 files (3 and 4)");
     let ids: Vec<i64> = files.iter().map(|f| f["id"].as_i64().unwrap()).collect();
-    assert!(ids.contains(&3), "file 3 (flac US002, no stem) must be included");
-    assert!(ids.contains(&4), "file 4 (flac US999, no stem) must be included");
+    assert!(
+        ids.contains(&3),
+        "file 3 (flac US002, no stem) must be included"
+    );
+    assert!(
+        ids.contains(&4),
+        "file 4 (flac US999, no stem) must be included"
+    );
     assert!(!ids.contains(&1), "file 1 has a stem and must be excluded");
     assert!(!ids.contains(&2), "file 2 IS the stem and must be excluded");
     for f in files {
@@ -2565,5 +2567,239 @@ async fn files_select_all_respects_tags() {
         total >= 5,
         "tags=groovy: files 1,2 (via ISRC) + 50-53 (via playlist) = 6; got {}",
         total
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// /api/files/backpack-conversion
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A Backpack-tagged playlist with three tracks:
+/// * 900 → local FLAC, no stem     → conversion candidate
+/// * 901 → local FLAC **and** stem → already converted, skipped
+/// * 902 → only a store backup     → wants a download, not conversion
+async fn seed_backpack_conversion(pool: &sqlx::SqlitePool) {
+    sqlx::query("INSERT INTO tags (id, name, category_id, backpack) VALUES (900, 'convbp', 3, 1)")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO service_playlists (id, service, playlist_id, name, snapshot_id) \
+         VALUES (900, 'spotify', 'spotify:playlist:convbp', 'convbp', 'snapC')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO service_tracks (id, service, service_id, title, artist, isrc, imported_at)
+           VALUES (900, 'spotify', 'sp:c1', 'NeedsStem', 'Art', 'USC001', 1700000000),
+                  (901, 'spotify', 'sp:c2', 'HasStem',   'Art', 'USC002', 1700000000),
+                  (902, 'spotify', 'sp:c3', 'StoreOnly', 'Art', 'USC003', 1700000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO service_playlist_tracks (playlist_id, track_id, position, added_at)
+           VALUES (900, 900, 0, 1700000000),
+                  (900, 901, 1, 1700000000),
+                  (900, 902, 2, 1700000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO files (id, file_path, file_type, file_size, last_modified, title, artist, isrc, file_hash)
+           VALUES (900, '/test/conv/NeedsStem.flac',   'flac',     1000, 1700000000, 'NeedsStem', 'Art', 'USC001', 'h900'),
+                  (901, '/test/conv/HasStem.flac',     'flac',     1000, 1700000000, 'HasStem',   'Art', 'USC002', 'h901'),
+                  (902, '/test/conv/HasStem.stem.m4a', 'stem.m4a', 1000, 1700000000, 'HasStem',   'Art', 'USC002', 'h902'),
+                  (903, '/test/conv/StoreOnly.flac',   'flac',     1000, 1700000000, 'StoreOnly', 'Art', 'USC003', 'h903')"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO file_locations (file_id, location_type, path, file_size)
+           VALUES (900, 'local',  '/test/conv/NeedsStem.flac',   1000),
+                  (901, 'local',  '/test/conv/HasStem.flac',     1000),
+                  (902, 'local',  '/test/conv/HasStem.stem.m4a', 1000),
+                  (903, 'backup', 'store:storeonly',             1000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn backpack_conversion_counts_only_unconverted_local_tracks() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    seed_backpack_conversion(&pool).await;
+
+    let resp = client
+        .get(format!("{}/api/files/backpack-conversion", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["data"]["needsConversion"], 1,
+        "only track 900 (local, no stem) wants a stem: {body:#}"
+    );
+    assert!(body["data"]["directory"].is_string());
+}
+
+#[tokio::test]
+async fn backpack_conversion_stages_symlinks_into_the_target_dir() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    seed_backpack_conversion(&pool).await;
+
+    // Point the staging dir at a temp location — never touch ~/Music.
+    let dir = std::env::temp_dir().join(format!("mmm-bp-conv-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // SAFETY: only this test sets the var (and `remove_var` at the end).
+    unsafe { std::env::set_var("MOMOS_BACKPACK_CONVERSION_DIR", &dir) };
+
+    let resp = client
+        .post(format!("{}/api/files/backpack-conversion", base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "expected 200 OK");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["data"]["staged"], 1, "one symlink expected: {body:#}");
+    assert_eq!(body["data"]["needsConversion"], 1);
+
+    let entries: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(entries.len(), 1, "exactly one staged symlink");
+    let link = entries[0].path();
+    assert!(
+        link.symlink_metadata().unwrap().file_type().is_symlink(),
+        "staged entry must be a symlink"
+    );
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        std::path::PathBuf::from("/test/conv/NeedsStem.flac")
+    );
+
+    // Re-running rebuilds the dir — still exactly one entry (idempotent).
+    let resp = client
+        .post(format!("{}/api/files/backpack-conversion", base))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["data"]["staged"], 1);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+    unsafe { std::env::remove_var("MOMOS_BACKPACK_CONVERSION_DIR") };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Backpack filter on /api/files
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// `backpack=true|false` partitions the library, and the POST-side filter
+/// (`build_files_filter_sql`) agrees with the GET-side count.
+#[tokio::test]
+async fn files_backpack_filter_partitions_the_library() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    seed_backpack_conversion(&pool).await;
+
+    async fn count(client: &reqwest::Client, url: String) -> u64 {
+        let resp = client.get(url).send().await.unwrap();
+        let json: Value = resp.json().await.unwrap();
+        json["data"].as_u64().expect("count must be a number")
+    }
+
+    let all = count(&client, format!("{base}/api/files/count")).await;
+    let in_bp = count(&client, format!("{base}/api/files/count?backpack=true")).await;
+    let out_bp = count(&client, format!("{base}/api/files/count?backpack=false")).await;
+
+    assert_eq!(
+        in_bp + out_bp,
+        all,
+        "in ({in_bp}) + not-in ({out_bp}) must cover all ({all})"
+    );
+    assert!(in_bp > 0 && out_bp > 0, "both sides must be non-empty");
+
+    // The four 'convbp' playlist files are Backpack members …
+    let resp = client
+        .get(format!("{base}/api/files?backpack=true&pageSize=200"))
+        .send()
+        .await
+        .unwrap();
+    let json: Value = resp.json().await.unwrap();
+    let in_ids: Vec<i64> = json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["id"].as_i64().unwrap())
+        .collect();
+    for want in [900, 901, 902, 903] {
+        assert!(
+            in_ids.contains(&want),
+            "file {want} must be in the Backpack: {in_ids:?}"
+        );
+    }
+
+    // … and none of them is on the other side.
+    let resp = client
+        .get(format!("{base}/api/files?backpack=false&pageSize=200"))
+        .send()
+        .await
+        .unwrap();
+    let json: Value = resp.json().await.unwrap();
+    let out_ids: Vec<i64> = json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["id"].as_i64().unwrap())
+        .collect();
+    for id in [900, 901, 902, 903] {
+        assert!(
+            !out_ids.contains(&id),
+            "file {id} must not be outside the Backpack"
+        );
+    }
+    assert_eq!(
+        out_ids.len() as u64,
+        out_bp,
+        "list length matches the not-in count"
+    );
+
+    // The POST-side filter builder must agree with the GET-side count.
+    let resp = client
+        .post(format!("{base}/api/files/needs-comment-count-all"))
+        .json(&serde_json::json!({ "backpack": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: Value = resp.json().await.unwrap();
+    assert_eq!(
+        json["data"]["totalFiles"].as_u64().unwrap(),
+        in_bp,
+        "POST filter (build_files_filter_sql) must match the GET count"
+    );
+
+    // It composes with the other filters — the point of the feature.
+    let bp_stems_missing = count(
+        &client,
+        format!("{base}/api/files/count?backpack=true&stems=true"),
+    )
+    .await;
+    let stems_missing = count(&client, format!("{base}/api/files/count?stems=true")).await;
+    assert!(
+        bp_stems_missing <= in_bp && bp_stems_missing <= stems_missing,
+        "backpack+stems must be a subset of both (bp={in_bp}, stems={stems_missing}, both={bp_stems_missing})"
     );
 }
