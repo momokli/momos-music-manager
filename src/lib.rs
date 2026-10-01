@@ -36,6 +36,7 @@ pub mod embeddings;
 pub mod extended_mix;
 pub mod external_tools;
 pub mod global_poller;
+pub mod liked_sync;
 pub mod maintainer;
 pub mod music_api;
 pub mod music_api_consumer;
