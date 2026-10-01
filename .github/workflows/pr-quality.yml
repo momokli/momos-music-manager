@@ -1,0 +1,109 @@
+name: PR Quality
+
+# Qualitaets-Gates fuer Pull Requests:
+#  - semantic-title:  PR-Titel muss Conventional Commits folgen (HARD FAIL).
+#  - issue-reference: PR-Titel/-Body MUSS den Issue mit einem Closing-Keyword
+#                     schliessen ("Closes/Fixes/Resolves #123"); fehlt es: Kommentar
+#                     am PR + HARD FAIL. Reines "Refs #123" genuegt NICHT — nur
+#                     ein Closing-Keyword schliesst das Issue beim Merge automatisch,
+#                     sonst bleibt der Triage-Slot des Fokus-Milestones blockiert.
+# Least privilege: contents:read (Titel/Body lesen) + pull-requests:write (Kommentar).
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  semantic-title:
+    name: Conventional-Commit-Titel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Erlaubte Typen (Conventional Commits).
+          types: |
+            feat
+            fix
+            docs
+            chore
+            ci
+            refactor
+            test
+            build
+            perf
+            style
+            revert
+
+  issue-reference:
+    name: Issue-Referenz im PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: PR-Titel/-Body auf Issue-Referenz pruefen (Hard-Fail)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = (context.payload.pull_request.title || '');
+            const body = (context.payload.pull_request.body || '');
+
+            // Pflicht: ein CLOSING-Keyword ("Closes/Fixes/Resolves #123", optional mit
+            // Doppelpunkt und owner/repo-Prefix). Reines "Refs #123" genuegt NICHT:
+            // nur ein Closing-Keyword laesst GitHub das Issue beim Merge automatisch
+            // schliessen. Bleibt es offen, klebt orchestrator:dispatched daran und der
+            // Triage-Slot des Fokus-Milestones steht still.
+            const closing = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s+(?:[\w.-]+\/[\w.-]+)?#\d+/i;
+            const hasRef = closing.test(title) || closing.test(body);
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            if (hasRef) {
+              core.info('Closing-Referenz gefunden (Titel/Body) — kein Kommentar noetig.');
+              return;
+            }
+
+            const marker = '<!-- pr-quality: issue-reference -->';
+            const text = [
+              marker,
+              '❌ **Issue-Referenz fehlt (Closing-Keyword)**',
+              '',
+              'Dieser Pull Request schliesst in Titel und Beschreibung kein Issue.',
+              'Pflicht ist ein Closing-Keyword, damit GitHub das Issue beim Merge',
+              'automatisch schliesst: `Closes #123` (oder `Fixes #123`).',
+              '',
+              'Reines `Refs #123` genuegt nicht — dann bleibt das Issue offen und der',
+              'Triage-Slot des Fokus-Milestones bleibt blockiert.',
+              'Die Pruefung laeuft bei jeder Titel-/Body-Aenderung erneut.',
+              '',
+              'Details: [AGENT.md](../blob/main/AGENT.md).',
+            ].join('\n');
+
+            try {
+              // Idempotenz: den Hinweis nur einmal setzen.
+              const { data: comments } = await github.rest.issues.listComments({
+                owner, repo, issue_number, per_page: 100,
+              });
+              if (comments.some((c) => c.body && c.body.includes(marker))) {
+                core.info('Hinweiskommentar existiert bereits — uebersprungen.');
+              } else {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number, body: text,
+                });
+                core.info('Hinweiskommentar zur fehlenden Issue-Referenz gesetzt.');
+              }
+            } catch (err) {
+              core.warning(
+                'Hinweiskommentar konnte nicht gesetzt werden ' +
+                '(z. B. Fork-PR ohne Schreibrechte): ' + err.message
+              );
+            }
+
+            core.setFailed(
+              'PR schliesst kein Issue — siehe AGENT.md ' +
+              '(Pflicht: "Closes #N" im Body/Titel).'
+            );

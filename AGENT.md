@@ -21,25 +21,52 @@ Single developer, no production data, no backward compatibility needed.
 
 ### Workflow
 
-1. **`main` is always clean** — never commit directly to `main`. Every change goes through a feature branch or the review staging branch.
+1. **`main` is always clean** — never commit directly to `main`. Every change goes
+   through a feature branch and a pull request.
 2. **Feature branches** — `feat/short-description` or `fix/short-description`, branched from `main`.
-3. **Staging branch** — `review/all-features` collects feature branches for a release. Feature branches are merged into it (not rebased). Small features or cleanup can be committed directly on it.
+3. **One issue = one branch = one PR** — each change is a PR against `main`
+   (`Closes #<n>` in the body, Conventional Commit title) merged with squash.
+   `main` stays linear; the former staging branch `review/all-features` is no
+   longer used.
 4. **Plan first** — every task starts with a Plan entry in Section 2 of this file. User reviews the plan, then agents are spawned.
 5. **Additive migrations** — never modify `001_initial_schema.sql`. New schema changes get a new migration file. Before release, consolidate same-release migrations into the earliest one (e.g. `003_*.sql` → merged into `002_*.sql` if both are new in this release).
+
+### PR gate & required checks
+
+PRs against `main` are gated by required status checks (branch protection):
+
+- `Build + Test (cargo)` (`ci-pr.yml`) — `cargo build --locked` + `cargo test --locked`
+  (with `flac` / `ffmpeg` / `exiftool` installed for the media paths).
+- `Conventional-Commit-Titel` and `Issue-Referenz im PR` (`pr-quality.yml`).
+
+`cargo fmt` and `cargo clippy` run informationally only (`continue-on-error`) — the
+codebase is not rustfmt-/clippy-clean yet (provisional figure: `cargo fmt --check`
+reports ~296 sites).
+
+The autonomous runners (`mmm-triage` / `mmm-pr-gate`) work the focus milestone as a
+queue: triage dispatches one issue at a time (WIP = 1, stack depth <= 3), the gate
+reviews and merges only when `[VERDICT: APPROVE]` + `mergeStateStatus: CLEAN` + **all
+checks green** line up. **Zero check runs do not count as green** — no checks, no merge.
 
 ### Release Process
 
 When bundling features for a release:
 
-1. **Collect branches** — merge all `feat/*` and `fix/*` branches into `review/all-features`. Commit any remaining work directly on it.
+1. **Collect PRs** — every issue planned for the version is merged (the focus
+   milestone is code-complete). There is no staging branch any more: `main` is
+   the state.
 2. **Consolidate migrations** — merge same-release migration files into the earliest new one. Only one net-new migration per release.
-3. **Write CHANGELOG** — create/update `CHANGELOG.md` from `git diff main..review/all-features`. Group by Added / Changed / Fixed.
+3. **Write CHANGELOG** — create/update `CHANGELOG.md` from the PRs merged since the
+   last tag (`git log --oneline <last-tag>..main`). Group by Added / Changed / Fixed.
 4. **Update ADRs** — add an ADR per feature in `docs/DECISIONS.md` (ADR-### format, date, status, context, decision, consequences).
 5. **Update README** — new pages, new endpoints, new migrations, updated project structure.
 6. **Update plans** — move completed plans to `plans/done/`, update `plans/README.md`, bump AGENT.md "Last Updated" date.
 7. **Verify** — `cargo build` must pass. Delete `app.db*` and test migrations from scratch.
-8. **Rebase onto main** — `git rebase main` on `review/all-features`, then `git checkout main && git merge --ff-only review/all-features`. Linear history preserved.
-9. **Tag** — `git tag v0.X.0` on `main`.
+8. **Release PR** — branch `release/<version>` from `main`, carrying the changelog
+   and the version bump (`Cargo.toml`, `site/index.html`). It is labelled
+   `release:human-merge` and is **never** merged automatically.
+9. **Merge + Tag** — merge the release PR, then push `git tag v0.X.0` on `main`.
+   The tag push builds the release assets and rolls out via the autoupdater.
 
 ### Architecture
 

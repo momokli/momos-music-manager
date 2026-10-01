@@ -3020,6 +3020,43 @@ async fn store_sync_cancelled_done(tm: &TaskManager, task_id: &str) {
 mod tests {
     use super::*;
 
+    /// Der Anspruch eines Scan-Tasks ist deterministisch: hier wird **kein**
+    /// Worker gespawnt, der erste Task bleibt also garantiert `Pending`.
+    /// Frueher pruefte das ein Integrationstest ueber zwei parallele HTTP-Requests —
+    /// der hing daran, ob der erste Scan schon `Completed` war (flaky, siehe PR #86).
+    #[tokio::test]
+    async fn start_task_unique_rejects_second_scan_wavs_while_pending() {
+        let tm = TaskManager::new();
+
+        let first = tm
+            .start_task_unique(Task::new(
+                TaskType::ScanWavSources { folder_id: 1 },
+                Some("scan_wavs".to_string()),
+            ))
+            .await;
+        assert!(first.is_ok(), "first claim must succeed: {first:?}");
+
+        let second = tm
+            .start_task_unique(Task::new(
+                TaskType::ScanWavSources { folder_id: 1 },
+                Some("scan_wavs".to_string()),
+            ))
+            .await;
+        assert!(
+            matches!(second, Err(TaskConflictError::AlreadyRunning { .. })),
+            "a second scan for the same folder must be rejected while the first is pending, got {second:?}"
+        );
+
+        // Ein anderer Ordner hat einen anderen Konflikt-Key und darf nicht blockiert sein.
+        let other = tm
+            .start_task_unique(Task::new(
+                TaskType::ScanWavSources { folder_id: 2 },
+                Some("scan_wavs".to_string()),
+            ))
+            .await;
+        assert!(other.is_ok(), "another folder must not be blocked: {other:?}");
+    }
+
     #[test]
     fn task_transition_started_payload_has_machine_label() {
         let task = Task::new(TaskType::ScanFolder { folder_id: 7 }, Some("scan".to_string()));
