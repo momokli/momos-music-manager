@@ -293,6 +293,7 @@ mod tests {
                 playlist_id TEXT NOT NULL,
                 name TEXT NOT NULL,
                 archive_deleted BOOLEAN NOT NULL DEFAULT 0,
+                playlist_kind TEXT NOT NULL DEFAULT 'curated',
                 UNIQUE(service, playlist_id)
             )",
         )

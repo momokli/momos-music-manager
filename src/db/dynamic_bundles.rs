@@ -621,7 +621,7 @@ mod tests {
             .execute(&pool).await.unwrap();
         sqlx::query("CREATE TABLE IF NOT EXISTS service_tracks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL DEFAULT '', artist TEXT NOT NULL DEFAULT '', service TEXT NOT NULL DEFAULT '', service_id TEXT NOT NULL DEFAULT '', isrc TEXT, imported_at INTEGER NOT NULL DEFAULT 0)")
             .execute(&pool).await.unwrap();
-        sqlx::query("CREATE TABLE IF NOT EXISTS service_playlists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL DEFAULT '', service TEXT NOT NULL DEFAULT '', playlist_id TEXT NOT NULL DEFAULT '', archive_deleted BOOLEAN NOT NULL DEFAULT 0)")
+        sqlx::query("CREATE TABLE IF NOT EXISTS service_playlists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL DEFAULT '', service TEXT NOT NULL DEFAULT '', playlist_id TEXT NOT NULL DEFAULT '', archive_deleted BOOLEAN NOT NULL DEFAULT 0, playlist_kind TEXT NOT NULL DEFAULT 'curated')")
             .execute(&pool).await.unwrap();
         sqlx::query("CREATE TABLE IF NOT EXISTS service_playlist_tracks (playlist_id INTEGER NOT NULL, track_id INTEGER NOT NULL, position INTEGER NOT NULL DEFAULT 0, added_at INTEGER, deleted_at INTEGER)")
             .execute(&pool).await.unwrap();

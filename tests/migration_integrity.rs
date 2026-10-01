@@ -1,6 +1,6 @@
 //! Migration integrity test.
 //!
-//! Creates a fresh in-memory DB, runs all 16 migrations, and asserts the
+//! Creates a fresh in-memory DB, runs all 32 migrations, and asserts the
 //! expected tables and views exist. This is the canary — if a migration breaks
 //! the chain, this test catches it before any domain test runs.
 
@@ -74,6 +74,7 @@ async fn all_migrations_run_cleanly() {
         "v_playlist_tag_category",
         "v_tag_file_counts",
         "v_track_tags",
+        "v_track_forgotten_facts",
     ];
 
     for view in &expected_views {
@@ -101,6 +102,7 @@ async fn all_migrations_run_cleanly() {
         "idx_tags_name_norm",
         "idx_service_playlists_name_norm",
         "idx_frt_tag_name_norm",
+        "idx_service_playlists_kind",
     ] {
         assert!(
             indexes.contains(&idx.to_string()),
