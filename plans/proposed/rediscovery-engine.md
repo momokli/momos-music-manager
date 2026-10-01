@@ -52,6 +52,16 @@ Two supporting goals:
 | M4  | Traktor Analysis Farm | Real Traktor on the server, BPM/key for everything, calibrated against Traktor  | 034       |
 | M5  | Order missing tracks  | Order liked/playlisted-but-unowned tracks via music-api                         | —         |
 
+**GitHub milestones** (title = continued semver tag; each milestone is a release
+with release PR, CHANGELOG and tag): M1 → `1.14.0`, M2 → `1.15.0`,
+M3 → `1.16.0`, M4 → `1.17.0`, M5 → `1.18.0`.
+
+The per-iteration work order is the **leaf checklist in the milestone
+description** — not this table. Only leaf issues are worked; the phase epics
+(#50–#55) and the roadmap epic (#54) are context only. An iteration is unlocked
+by the line `Freigabe: ja` in its milestone description; initially only `1.14.0`
+carries it. Methodology: `openclaw-deploy/docs/milestone-methodology.md`.
+
 ```mermaid
 graph LR
     M1[M1 signals] --> M2[M2 query engine]
