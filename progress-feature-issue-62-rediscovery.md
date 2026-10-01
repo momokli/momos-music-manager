@@ -17,8 +17,8 @@ PR target: main
 | 1 planner | pending | |
 | 2 setup | done | Baseline grün — siehe Abschnitt „Setup-Baseline" |
 | 3 developer | done | 6/6 Unit-Tests grün; `cargo check --lib` grün; Commit `28e571d` (+ Docs) |
-| 4 verifier | pending | |
-| 5 tester | pending | |
+| 4 verifier | done | PASS (Rework wg. `liked = 1`-Filter) — Commit `3ad42d0` |
+| 5 tester | done | PASS — Suite grün (1155/0/1 ignored); DoD-Integration bestätigt — siehe Stage 5 |
 | 6 developer (PR) | pending | |
 | 7 reviewer | pending | |
 
@@ -182,3 +182,34 @@ curated+liked) — ein zusätzlicher `liked`-Filter ist falsch.
 
 ### Commit
 - `3ad42d0` fix: count_touched_before counts curated and liked contacts
+
+## Stage 5 — Tester
+
+Head: `e15549a` — Branch `feature/issue-62-rediscovery-track-facts`.
+
+### Kommandos / Exit-Codes (echter Exit in Logdatei, kein Pipe-Maskieren)
+| Kommando | Log | Exit | Ergebnis |
+| --- | --- | --- | --- |
+| `cargo test --lib db::rediscovery` | `/tmp/t62_lib.log` | **0** | 6 passed; 0 failed (764 filtered) |
+| `cargo test --test migration_032_forgotten_facts` | `/tmp/t62_mig.log` | **0** | 4 passed; 0 failed |
+| `cargo test --test migration_integrity` | `/tmp/t62_integ.log` | **0** | 1 passed; 0 failed |
+| `cargo test` (volle Suite) | `/tmp/t62_all.log` | **0** | **1155 passed; 0 failed; 1 ignored** |
+
+- Einzige ignored: `tests/deemix_e2e.rs` (vorbestehend, unabhängig von #62).
+- Doc-Tests: 2 passed; 0 failed.
+- Keine Flakes, keine Fehlschläge, keine vorbestehenden roten Tests.
+- `TMPDIR=/dev/shm/telemetry-test` vorbereitet; kein SQLite-Timeout aufgetreten.
+
+### DoD-Integration (v_track_forgotten_facts + v_file_track_link)
+- `get_track_facts_seed_values`: Track 1 (curated+liked, zwei Files) liefert
+  `playlist_count=1` aus der View **und** `bpm=Some(128.0)` / `musical_key=Some("4m")`
+  aus dem File-Join — View + Join greifen zusammen.
+- Deterministischer Tie-Break bestätigt: Track 1 hat file1 (bpm 128.0) **und** file2
+  (bpm 128.5); geliefert wird `128.0` = niedrigste `files.id` (`ORDER BY f.id LIMIT 1`).
+- Track 3 (kein File): alle file-seitigen Felder `None`, inkl. `in_backpack=None`; kein Fehler.
+- `unknown_track_returns_none`: nicht in der View -> `Ok(None)`.
+- `count_touched_before`: zählt curated **und** liked (Track 3 `liked=false` zählt mit; == 3).
+
+### Ergebnis
+**PASS** — keine Blocker, kein neuer Test nötig (keine offene Integrationslücke).
+Keine Code-Änderung in Stage 5.
