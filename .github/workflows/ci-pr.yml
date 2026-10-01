@@ -49,18 +49,20 @@ jobs:
   fmt:
     name: cargo fmt (informativ)
     runs-on: ubuntu-22.04
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      # Step-level continue-on-error: der Job bleibt gruen, der Check erscheint
+      # nicht als Fehler (job-level `continue-on-error` wuerde als "failed check"
+      # angezeigt und koennte versehentlich als Required-Check gesetzt werden).
+      - continue-on-error: true
+        run: cargo fmt --all -- --check
 
   clippy:
     name: cargo clippy (informativ)
     runs-on: ubuntu-22.04
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -70,4 +72,8 @@ jobs:
         with:
           workspaces: . -> target
           key: ci-pr
-      - run: cargo clippy --locked --all-targets
+      # Step-level continue-on-error: der Job bleibt gruen, der Check erscheint
+      # nicht als Fehler (job-level `continue-on-error` wuerde als "failed check"
+      # angezeigt und koennte versehentlich als Required-Check gesetzt werden).
+      - continue-on-error: true
+        run: cargo clippy --locked --all-targets
