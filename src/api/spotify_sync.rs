@@ -177,6 +177,52 @@ async fn spotify_sync_playlists_handler(State(state): State<Arc<AppState>>) -> i
     }
 }
 
+/// Sync the user's Liked Songs into the local `spotify:liked` mirror playlist.
+///
+/// Runs synchronously (no task) and returns the merge outcome.
+/// Route: `POST /api/spotify/sync-liked`.
+async fn spotify_sync_liked_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    // Check if Spotify is configured in .env
+    if !state.config.is_spotify_configured() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                data: "Spotify not configured. Add SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET to .env file".to_string(),
+            }),
+        ).into_response();
+    }
+
+    let client = match crate::spotify::client::SpotifyClient::from_stored_tokens(
+        state.db.clone(),
+        &state.config,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return internal_error(format!("Failed to create Spotify client: {}", e))
+                .into_response();
+        }
+    };
+
+    match crate::liked_sync::sync_liked_songs(&state.db, &client).await {
+        Ok(stats) => Json(ApiResponse {
+            data: serde_json::json!({
+                "linked": stats.linked,
+                "retired": stats.retired,
+                "total": stats.total,
+            }),
+        })
+        .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to sync liked songs: {:#}", e);
+            internal_error(format!("Failed to sync liked songs: {}", e)).into_response()
+        }
+    }
+}
+
 /// Start a new-playlist sync: fetch playlist list from Spotify, diff against DB,
 /// only sync metadata + tracks for playlists that don't yet exist.
 async fn spotify_sync_new_playlists_handler(
@@ -555,5 +601,9 @@ pub(super) fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/services/spotify/sync/playlists/batch",
             post(spotify_sync_playlists_batch_handler),
+        )
+        .route(
+            "/api/spotify/sync-liked",
+            post(spotify_sync_liked_handler),
         )
 }

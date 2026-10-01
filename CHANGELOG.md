@@ -42,6 +42,15 @@ All notable changes to Momo's Music Manager.
   `v_track_forgotten_facts` liked/generated-Semantik prüfbar wird (Track 1 geliked +
   `playlist_count=1`, Track 2 nur geliked, Track 3 in zwei kuratierten Playlists).
 
+- **Liked-Sync läuft im Global Poller mit + Endpoint `POST /api/spotify/sync-liked`**: der
+  Global Poller ruft pro Zyklus (nach Playlist-Sync/Deleted-Detection, vor der Summary)
+  genau einmal `liked_sync::sync_liked_songs` auf. Der Schritt respektiert den
+  prozessweiten Spotify-Cooldown (429 im Playlist-Teil überspringt ihn), und ein Fehler
+  bricht den Zyklus nicht ab. Die Zyklus-Zusammenfassung nennt `linked`/`retired`/`total`,
+  und bei neuen Liked-Memberships wird der Tag-Refresh (Step 6) ebenfalls ausgelöst.
+  Neuer synchroner Endpoint `POST /api/spotify/sync-liked` liefert
+  `{"linked":n,"retired":n,"total":n}`.
+
 ### Fixed
 
 - **Aus Playlists entfernte Tracks sind jetzt wirklich weg** (außer bei Archiving):
