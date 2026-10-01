@@ -19,7 +19,7 @@ PR target: main
 | 3 developer | done | 6/6 Unit-Tests grün; `cargo check --lib` grün; Commit `28e571d` (+ Docs) |
 | 4 verifier | done | PASS (Rework wg. `liked = 1`-Filter) — Commit `3ad42d0` |
 | 5 tester | done | PASS — Suite grün (1155/0/1 ignored); DoD-Integration bestätigt — siehe Stage 5 |
-| 6 developer (PR) | pending | |
+| 6 developer (PR) | done | PR #109 offen — https://github.com/momokli/momos-music-manager/pull/109 (Commit `5f0cedf`) |
 | 7 reviewer | pending | |
 
 ## Setup-Baseline (Stage 2)
