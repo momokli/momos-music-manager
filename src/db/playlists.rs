@@ -15,6 +15,7 @@ pub async fn get_playlists_without_tags(pool: &Pool<Sqlite>) -> Result<Vec<Servi
         SELECT DISTINCT sp.*
         FROM service_playlists sp
         WHERE TRIM(sp.name) != ''
+          AND sp.playlist_kind != 'generated'
           AND NOT EXISTS (
             SELECT 1 FROM v_tag_playlist vtp WHERE vtp.playlist_id = sp.id
           )
@@ -45,6 +46,7 @@ pub async fn create_tags_from_playlists(pool: &Pool<Sqlite>) -> Result<usize> {
             unixepoch() as created_at
         FROM service_playlists sp
         WHERE TRIM(sp.name) != ''
+          AND sp.playlist_kind != 'generated'
           AND NOT EXISTS (
             SELECT 1 FROM v_tag_playlist vtp WHERE vtp.playlist_id = sp.id
           )
@@ -411,6 +413,7 @@ pub async fn refresh_track_tags(pool: &Pool<Sqlite>) -> Result<()> {
         FROM service_playlists sp
         LEFT JOIN tags t ON sp.name = t.name COLLATE NOCASE
         WHERE t.id IS NULL
+          AND sp.playlist_kind != 'generated'
         ORDER BY sp.name
         "#,
     )
@@ -710,7 +713,8 @@ pub async fn get_spotify_playlist_snapshots(
     pool: &Pool<Sqlite>,
 ) -> Result<Vec<(i64, String, Option<String>)>> {
     let rows = sqlx::query_as::<_, (i64, String, Option<String>)>(
-        "SELECT id, playlist_id, snapshot_id FROM service_playlists WHERE service = 'spotify'",
+        "SELECT id, playlist_id, snapshot_id FROM service_playlists \
+         WHERE service = 'spotify' AND playlist_kind = 'curated'",
     )
     .fetch_all(pool)
     .await?;
@@ -1065,6 +1069,71 @@ mod tests {
                COALESCE((SELECT COUNT(*) FROM service_playlist_tracks spt WHERE spt.playlist_id = sp.id), 0) AS track_count
              FROM playlist_subscriptions ps
              LEFT JOIN service_playlists sp ON ps.service_playlist_id = sp.id",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        pool
+    }
+
+    /// Like `test_db()`, plus the tag schema (tag_categories/tags + v_tag_playlist
+    /// and v_tag_categories views) needed by the tag-generation queries.
+    async fn test_db_with_tags() -> SqlitePool {
+        let pool = test_db().await;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tag_categories (
+                id INTEGER PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                icon TEXT NOT NULL DEFAULT '',
+                prefix CHAR(1) UNIQUE NOT NULL,
+                sort_order INTEGER DEFAULT 0,
+                is_default BOOLEAN DEFAULT FALSE,
+                created_at INTEGER DEFAULT (unixepoch())
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                category_id INTEGER NOT NULL,
+                sort_order INTEGER DEFAULT 0,
+                created_at INTEGER DEFAULT (unixepoch()),
+                reviewed_at INTEGER,
+                backpack BOOLEAN NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE VIEW IF NOT EXISTS v_tag_playlist AS
+             SELECT t.id AS tag_id, t.name AS tag_name, t.category_id,
+                    sp.id AS playlist_id, sp.name AS playlist_name, sp.service
+             FROM tags t
+             JOIN service_playlists sp ON LOWER(TRIM(t.name)) = LOWER(TRIM(sp.name))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE VIEW IF NOT EXISTS v_tag_categories AS
+             SELECT tc.*, (SELECT COUNT(*) FROM tags WHERE category_id = tc.id) AS tag_count
+             FROM tag_categories tc",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO tag_categories (id, name, prefix, is_default) VALUES (1, 'Setlist', 's', 1)",
         )
         .execute(&pool)
         .await
@@ -1878,6 +1947,145 @@ mod tests {
         assert_eq!(snapshots[0].1, "pl-snap-1");
         assert_eq!(snapshots[0].2.as_deref(), Some("snap-a"));
         assert_eq!(snapshots[1].1, "pl-snap-2");
+    }
+
+    #[tokio::test]
+    async fn test_get_spotify_playlist_snapshots_excludes_liked_and_generated() {
+        let pool = test_db().await;
+
+        sqlx::query(
+            "INSERT INTO service_playlists (service, playlist_id, name, playlist_kind, snapshot_id, imported_at, updated_at)
+             VALUES ('spotify', 'pl-c', 'C', 'curated', 'c1', 0, 0),
+                    ('spotify', 'spotify:liked', 'liked', 'liked', 'l1', 0, 0),
+                    ('spotify', 'gen-1', 'Daily-1', 'generated', 'g1', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let snapshots = get_spotify_playlist_snapshots(&pool).await.unwrap();
+        assert_eq!(snapshots.len(), 1, "liked/generated must be excluded");
+        assert_eq!(snapshots[0].1, "pl-c");
+        assert_eq!(snapshots[0].2.as_deref(), Some("c1"));
+        assert!(!snapshots.iter().any(|(_, pid, _)| pid == "spotify:liked"));
+        assert!(!snapshots.iter().any(|(_, pid, _)| pid == "gen-1"));
+    }
+
+    #[tokio::test]
+    async fn test_tag_creation_liked_but_not_generated() {
+        let pool = test_db_with_tags().await;
+
+        sqlx::query(
+            "INSERT INTO service_playlists (service, playlist_id, name, playlist_kind, imported_at, updated_at)
+             VALUES ('spotify', 'spotify:liked', 'liked', 'liked', 0, 0),
+                    ('spotify', 'gen-1', 'Today''s Selection', 'generated', 0, 0),
+                    ('spotify', 'pl-c', 'C', 'curated', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let created = create_tags_from_playlists(&pool).await.unwrap();
+        assert_eq!(created, 2, "liked + curated create tags, generated does not");
+
+        let liked_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tags WHERE name = 'liked'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(liked_count.0, 1, "liked must still create a tag");
+
+        let gen_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM tags WHERE name = 'Today''s Selection'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(gen_count.0, 0, "generated must not create a tag");
+
+        // get_playlists_without_tags must not report the generated row
+        let without_tags = get_playlists_without_tags(&pool).await.unwrap();
+        assert!(!without_tags.iter().any(|p| p.playlist_id == "gen-1"));
+
+        // refresh_track_tags must skip generated playlist names too
+        sqlx::query(
+            "INSERT INTO service_playlists (service, playlist_id, name, playlist_kind, imported_at, updated_at)
+             VALUES ('spotify', 'gen-2', 'Daily-X', 'generated', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        refresh_track_tags(&pool).await.unwrap();
+        let daily_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM tags WHERE name = 'Daily-X'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(daily_count.0, 0, "refresh_track_tags must skip generated");
+    }
+
+    #[tokio::test]
+    async fn test_liked_playlist_not_marked_deleted_in_poll_cycle() {
+        let pool = test_db().await;
+
+        sqlx::query(
+            "INSERT INTO service_playlists (service, playlist_id, name, playlist_kind, snapshot_id, imported_at, updated_at)
+             VALUES ('spotify', 'spotify:liked', 'liked', 'liked', 'liked-snap', 0, 0),
+                    ('spotify', 'pl-c', 'C', 'curated', 'c-snap', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Simulate Step 4: remote ids come from GET /me/playlists (liked is absent)
+        let rows = get_spotify_playlist_snapshots(&pool).await.unwrap();
+        let remote_ids = vec!["pl-c".to_string()];
+        let mut deleted_count = 0;
+        for (db_id, pid, _) in &rows {
+            if !remote_ids.contains(pid) {
+                mark_playlist_inactive(&pool, *db_id).await.unwrap();
+                deleted_count += 1;
+            }
+        }
+        assert_eq!(deleted_count, 0, "liked must never be seen as deleted");
+
+        let (liked_snap,): (Option<String>,) = sqlx::query_as(
+            "SELECT snapshot_id FROM service_playlists WHERE playlist_id = 'spotify:liked'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(liked_snap.as_deref(), Some("liked-snap"));
+    }
+
+    #[tokio::test]
+    async fn test_curated_playlists_still_detected_as_deleted() {
+        let pool = test_db().await;
+
+        sqlx::query(
+            "INSERT INTO service_playlists (service, playlist_id, name, playlist_kind, snapshot_id, imported_at, updated_at)
+             VALUES ('spotify', 'pl-gone', 'Gone', 'curated', 'g-snap', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows = get_spotify_playlist_snapshots(&pool).await.unwrap();
+        let remote_ids: Vec<String> = vec![];
+        let mut deleted_count = 0;
+        for (db_id, pid, _) in &rows {
+            if !remote_ids.contains(pid) {
+                mark_playlist_inactive(&pool, *db_id).await.unwrap();
+                deleted_count += 1;
+            }
+        }
+        assert_eq!(deleted_count, 1, "curated playlist still detected as deleted");
+
+        let (gone_snap,): (Option<String>,) = sqlx::query_as(
+            "SELECT snapshot_id FROM service_playlists WHERE playlist_id = 'pl-gone'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(gone_snap, None, "snapshot_id nulled for deleted curated playlist");
     }
 
     #[tokio::test]
