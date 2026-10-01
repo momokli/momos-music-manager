@@ -363,20 +363,32 @@ async fn run_poll_cycle(
     }
 
     // ── Step 5: Summary ──────────────────────────────────────────────────
+    // ── Step 4b: Sync Liked Songs (exactly once per cycle) ────────────
+    // Best-effort: respects cancellation + the process-wide cooldown and never
+    // aborts the cycle on failure (a 429 reports itself into the cooldown).
+    let liked_stats = run_liked_sync_step(db, &spotify_client, cancel_token).await;
+    let liked_linked = liked_stats.as_ref().map(|s| s.linked).unwrap_or(0);
+
+    let liked_summary = match &liked_stats {
+        Some(s) => format!("linked={}, retired={}, total={}", s.linked, s.retired, s.total),
+        None => "skipped".to_string(),
+    };
     let summary = format!(
-        "{} playlists: {} new, {} changed, {} skipped, {} deleted, {} new track(s)",
+        "{} playlists: {} new, {} changed, {} skipped, {} deleted, {} new track(s); liked sync: {}",
         spotify_count,
         new_playlists,
         changed_playlists,
         skipped_playlists,
         deleted_count,
         new_tracks_total,
+        liked_summary,
     );
     task_manager.add_log(&task_id, summary.clone()).await;
     info!("Global poller: cycle complete — {}", summary);
 
     // ── Step 6: Refresh materialized tag tables if tracks were added ────
-    if new_tracks_total > 0 {
+    // Liked-sync memberships also produce new `track_resolved_tags` rows.
+    if new_tracks_total > 0 || liked_linked > 0 {
         if let Err(e) = crate::db::refresh_file_resolved_tags(db).await {
             error!("Global poller: failed to refresh file_resolved_tags: {}", e);
         }
@@ -398,6 +410,43 @@ async fn run_poll_cycle(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Gate for the liked-sync step: allowed only without an active process-wide
+/// Spotify cooldown. Free function so the gate is testable without network.
+fn liked_sync_allowed() -> bool {
+    spotify_cooldown().remaining_secs().is_none()
+}
+
+/// Run one liked-songs sync pass, honouring cancellation and the process-wide
+/// cooldown. Returns the stats on success, or `None` when the step was skipped
+/// (cancelled / cooling down) or failed.
+async fn run_liked_sync_step(
+    db: &Pool<Sqlite>,
+    spotify_client: &SpotifyClient,
+    cancel_token: &CancellationToken,
+) -> Option<crate::liked_sync::LikedSyncStats> {
+    if cancel_token.is_cancelled() {
+        debug!("Global poller: liked-sync skipped (cancelled)");
+        return None;
+    }
+    if !liked_sync_allowed() {
+        let secs = spotify_cooldown().remaining_secs().unwrap_or(0);
+        debug!(
+            "Global poller: liked-sync skipped ({}s cooldown remaining)",
+            secs
+        );
+        return None;
+    }
+
+    match crate::liked_sync::sync_liked_songs(db, spotify_client).await {
+        Ok(stats) => Some(stats),
+        Err(e) => {
+            // Never abort the poll cycle on this best-effort step.
+            warn!("Global poller: liked-sync failed: {:#}", e);
+            None
+        }
+    }
+}
 
 struct SimplifiedPlaylistData {
     id: String,
@@ -571,4 +620,33 @@ async fn fetch_and_store_playlist_tracks(
     }
 
     Ok(new_track_count)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The process-wide cooldown is shared state; tests that mutate it must
+    // serialise against each other. This mutex guards the cooldown assertions.
+    static COOLDOWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn liked_sync_allowed_without_cooldown() {
+        let _guard = COOLDOWN_LOCK.lock().unwrap();
+        spotify_cooldown().clear();
+        assert!(liked_sync_allowed());
+    }
+
+    #[test]
+    fn liked_sync_blocked_during_cooldown() {
+        let _guard = COOLDOWN_LOCK.lock().unwrap();
+        spotify_cooldown().note_retry_after(60);
+        assert!(!liked_sync_allowed());
+        spotify_cooldown().clear();
+        assert!(liked_sync_allowed());
+    }
 }

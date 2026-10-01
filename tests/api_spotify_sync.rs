@@ -39,6 +39,37 @@ async fn spotify_sync_playlists_error() {
     );
 }
 
+/// POST /api/spotify/sync-liked — error (Spotify not configured).
+#[tokio::test]
+async fn spotify_sync_liked_error() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+
+    let resp = client
+        .post(format!("{}/api/spotify/sync-liked", base))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    eprintln!("spotify sync liked error: {body}");
+
+    assert_eq!(
+        status, 400,
+        "sync liked without config should return 400, got {status}"
+    );
+    assert!(
+        body["data"]
+            .as_str()
+            .map_or(false, |s| s.contains("not configured"))
+            || body["error"]
+                .as_str()
+                .map_or(false, |s| s.contains("not configured")),
+        "response should indicate not configured, got: {body}"
+    );
+}
+
 /// POST /api/services/spotify/sync/new-playlists — error (Spotify not configured).
 #[tokio::test]
 async fn spotify_sync_new_playlists_error() {
