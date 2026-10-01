@@ -212,5 +212,5 @@ INSERT INTO tag_categories (id,name,prefix,is_default) VALUES (1,'Setlist','s',1
   - `test_curated_playlists_still_detected_as_deleted`
 - **Testergebnis:** `cargo test --lib playlists` → 36 passed / 0 failed.
   Volle `cargo test --lib` → 762 passed / 0 failed. Keine Regression.
-- **Commit-Hash:** f491c6d
+- **Commit-Hash:** 4d57970 (Implementierung; Parent dieses Progress-Commits)
 - **Push:** PLACEHOLDER
