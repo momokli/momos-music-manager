@@ -1,8 +1,10 @@
 # Active Plans
 
-**56 done** · **0 in progress** · **17 proposed**
+**56 done** · **0 in progress** · **18 proposed**
 
 ## Proposed
+
+- [rediscovery-engine](proposed/rediscovery-engine.md) — `feat/rediscovery-engine` (M1–M5)
 
 - [tracks-filter-overhaul](proposed/tracks-filter-overhaul.md) — `feat/tracks-filter-overhaul`
 - [multi-provider-playlists](proposed/multi-provider-playlists.md) — `feat/multi-provider-playlists`
