@@ -23,3 +23,6 @@ resources/icon.iconset/
 download-service/__pycache__/
 *.pyc
 scripts/keys/
+
+# Tool-/Editor-Backups neben Quelldateien (a9c64c8 hatte so eine versehentlich eingecheckt)
+*.dbgbak
