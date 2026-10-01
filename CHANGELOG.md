@@ -8,6 +8,15 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **`db::rediscovery` — TrackFacts-Zugang über `v_track_forgotten_facts` (#62)**: neues
+  Modul `src/db/rediscovery.rs` mit `get_track_facts(pool, track_id)` (typisierte
+  Track-Fakten inkl. Spiel-/Like-Zeit, BPM/Key/Genre/Playcount und `in_backpack` aus
+  dem File-Join über `v_file_track_link`, deterministisch per niedrigster `files.id`)
+  und `count_touched_before(pool, days)` (zählt kuratierte **und** gelikte Kontakte
+  älter als die Grenze; Scope kommt aus der View, kein zusätzlicher `liked`-Filter).
+  `in_backpack` nutzt die Backpack-Definition aus `crate::backpack`, kein Duplikat.
+  Kein `SELECT *`.
+
 - **Liked-Songs-Sync (`liked_sync`)**: neues Modul `src/liked_sync.rs` spiegelt die
   Spotify-Liked-Songs in eine synthetische Playlist (`playlist_id = 'spotify:liked'`,
   `playlist_kind = 'liked'`) und setzt dabei **immer** das Spotify-Like-Datum als
