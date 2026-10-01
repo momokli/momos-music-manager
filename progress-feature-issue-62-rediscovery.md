@@ -181,4 +181,4 @@ curated+liked) — ein zusätzlicher `liked`-Filter ist falsch.
   `6 passed; 0 failed`.
 
 ### Commit
-- (siehe Commit-Hash im Log) fix: count_touched_before counts curated and liked contacts
+- `3ad42d0` fix: count_touched_before counts curated and liked contacts
