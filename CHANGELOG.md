@@ -27,6 +27,12 @@ All notable changes to Momo's Music Manager.
   (N)** im Actions-Panel der Files-Seite — der Count ist dort direkt sichtbar. Anders als
   „Stage for Conversion" braucht er keine Filter/Auswahl.
 
+- **Test-Seed-Szenario `liked_songs`**: `POST /api/testing/seed {"scenario":"liked_songs"}`
+  erweitert das Basic-Szenario um die Likes-Spiegel (Playlist 5 `liked`, Playlist 7 `Likes`),
+  die generierte Playlist 6 `Today's Selection` und die Track-Verknüpfungen, mit denen
+  `v_track_forgotten_facts` liked/generated-Semantik prüfbar wird (Track 1 geliked +
+  `playlist_count=1`, Track 2 nur geliked, Track 3 in zwei kuratierten Playlists).
+
 ### Fixed
 
 - **Aus Playlists entfernte Tracks sind jetzt wirklich weg** (außer bei Archiving):

@@ -490,7 +490,7 @@ async fn tag_similarities_status_handler(State(state): State<Arc<AppState>>) -> 
 // ── Testing Seed Endpoint ─────────────────────────────────────────────────
 
 /// POST /api/testing/seed — Seed known test data for Playwright E2E tests.
-/// Accepts `{ "scenario": "basic" | "files_filter" | "digging" | "wav_variants" }`.
+/// Accepts `{ "scenario": "basic" | "files_filter" | "digging" | "wav_variants" | "comment_diff" | "dynamic_bundles" | "liked_songs" }`.
 /// Returns row counts per table.
 async fn testing_seed_handler(
     State(state): State<Arc<AppState>>,
@@ -510,11 +510,12 @@ async fn testing_seed_handler(
         "wav_variants" => testing::seed_wav_variant_scenario(&state.db).await,
         "comment_diff" => testing::seed_comment_diff_scenario(&state.db).await,
         "dynamic_bundles" => testing::seed_dynamic_bundles_scenario(&state.db).await,
+        "liked_songs" => testing::seed_liked_songs_scenario(&state.db).await,
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
-                    "error": format!("Unknown scenario: {}. Valid: basic, files_filter, digging, wav_variants, comment_diff, dynamic_bundles", scenario)
+                    "error": format!("Unknown scenario: {}. Valid: basic, files_filter, digging, wav_variants, comment_diff, dynamic_bundles, liked_songs", scenario)
                 })),
             )
                 .into_response();
