@@ -362,7 +362,6 @@ async fn run_poll_cycle(
         }
     }
 
-    // ── Step 5: Summary ──────────────────────────────────────────────────
     // ── Step 4b: Sync Liked Songs (exactly once per cycle) ────────────
     // Best-effort: respects cancellation + the process-wide cooldown and never
     // aborts the cycle on failure (a 429 reports itself into the cooldown).
@@ -373,6 +372,7 @@ async fn run_poll_cycle(
         Some(s) => format!("linked={}, retired={}, total={}", s.linked, s.retired, s.total),
         None => "skipped".to_string(),
     };
+    // ── Step 5: Summary ──────────────────────────────────────────────────
     let summary = format!(
         "{} playlists: {} new, {} changed, {} skipped, {} deleted, {} new track(s); liked sync: {}",
         spotify_count,
