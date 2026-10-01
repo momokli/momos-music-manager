@@ -67,6 +67,8 @@ in the rediscovery pool) but not M3. M5 needs M2 only.
 
 ## M1 — Library signals
 
+> Detailed plan: [`liked-songs-sync.md`](liked-songs-sync.md)
+
 ### M1.1 Liked Songs sync (`/me/tracks`)
 
 Verified API (rspotify 0.15.1 → `rspotify-model` 0.15.1):
@@ -108,11 +110,14 @@ UPDATE service_playlists SET playlist_kind = 'liked'
 
 -- backfill: our own generated playlists never count as curation
 UPDATE service_playlists SET playlist_kind = 'generated'
- WHERE service = 'local'
-   AND (name LIKE 'Daily-%' OR name LIKE 'Rediscover%' OR name LIKE '%Selection');
+ WHERE service = 'local' AND name LIKE 'Daily-%';
 
 CREATE INDEX idx_service_playlists_kind ON service_playlists(playlist_kind);
 ```
+
+Only the known `Daily-%` prefix is matched by name. M3 sets
+`playlist_kind='generated'` explicitly when it creates a pack, so no fragile
+name matching is needed for the new names (`Today's Selection`, …).
 
 `playlist_count` counts **only** `playlist_kind='curated'`: likes are the
 baseline everyone shares, and generated playlists are our own output — counting
