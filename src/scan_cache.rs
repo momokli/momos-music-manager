@@ -280,17 +280,32 @@ pub async fn entry_count() -> usize {
 mod tests {
     use super::*;
     use std::env;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// `SCAN_CACHE` / `SCAN_CACHE_DIR` sind **prozess-global**, und Cargo faehrt die
+    /// Tests parallel in EINEM Prozess. Ohne Serialisierung zieht ein Test dem anderen
+    /// die Variable unter den Fuessen weg — real beobachtet: `test_scan_cache_mode_record`
+    /// sah `Live`, weil ein anderer Test zwischen `set_var` und `from_env()` aufgeraeumt
+    /// hat. Jeder Test, der die Variablen setzt, loescht oder ihren Wert liest, nimmt
+    /// deshalb diesen Lock.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_guard() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     // ── ScanCacheMode tests ────────────────────────────────────────────
 
     #[test]
     fn test_scan_cache_mode_default_is_live() {
+        let _env = env_guard();
         unsafe { env::remove_var("SCAN_CACHE") };
         assert_eq!(ScanCacheMode::from_env(), ScanCacheMode::Live);
     }
 
     #[test]
     fn test_scan_cache_mode_record() {
+        let _env = env_guard();
         unsafe { env::set_var("SCAN_CACHE", "record") };
         let mode = ScanCacheMode::from_env();
         assert_eq!(mode, ScanCacheMode::Record);
@@ -301,6 +316,7 @@ mod tests {
 
     #[test]
     fn test_scan_cache_mode_replay() {
+        let _env = env_guard();
         unsafe { env::set_var("SCAN_CACHE", "replay") };
         let mode = ScanCacheMode::from_env();
         assert_eq!(mode, ScanCacheMode::Replay);
@@ -311,6 +327,7 @@ mod tests {
 
     #[test]
     fn test_scan_cache_mode_off_is_live() {
+        let _env = env_guard();
         unsafe { env::set_var("SCAN_CACHE", "off") };
         assert_eq!(ScanCacheMode::from_env(), ScanCacheMode::Live);
         unsafe { env::remove_var("SCAN_CACHE") };
@@ -423,6 +440,7 @@ mod tests {
 
     #[test]
     fn test_cache_root_default() {
+        let _env = env_guard();
         unsafe { env::remove_var("SCAN_CACHE_DIR") };
         let root = cache_root();
         assert_eq!(root, PathBuf::from("./dev-data/scan-cache"));
@@ -430,6 +448,7 @@ mod tests {
 
     #[test]
     fn test_cache_root_from_env() {
+        let _env = env_guard();
         unsafe { env::set_var("SCAN_CACHE_DIR", "/tmp/test-scan-cache") };
         let root = cache_root();
         assert_eq!(root, PathBuf::from("/tmp/test-scan-cache"));
