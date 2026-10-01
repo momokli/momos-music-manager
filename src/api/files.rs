@@ -7,7 +7,10 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::{Request, StatusCode, header},
+    http::{
+        HeaderMap, HeaderValue, Request, StatusCode,
+        header,
+    },
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -24,9 +27,10 @@ use crate::api::types::{ApiResponse, ErrorResponse, apply_sort, internal_error};
 use crate::comment::generate_target_comment;
 use crate::db::{
     File, compute_target_comment, compute_target_comments_batch, find_tag_similar_tracks,
-    get_file_detail, get_file_variants, get_key_comparison,
+    get_file_detail, get_file_locations, get_file_variants, get_key_comparison,
 };
 use crate::external_tools::resolve_tool;
+use crate::store::StoreClient;
 use crate::tasks::start_write_comment_task;
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -2274,12 +2278,18 @@ async fn file_stream_handler(
         _ => "application/octet-stream",
     };
 
-    // 3. Open file
+    // 3. Open file — if it is not on disk, proxy the object store instead so
+    //    remote-only files stay playable (the store serves Range too).
     let file_path = &file.file_path;
     let metadata = match tokio::fs::metadata(file_path).await {
         Ok(m) => m,
         Err(_) => {
-            return (StatusCode::NOT_FOUND, "File not found on disk").into_response();
+            let range = request
+                .headers()
+                .get(header::RANGE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            return stream_from_store(&state, id, content_type, range).await;
         }
     };
     let file_size = metadata.len();
@@ -2424,6 +2434,70 @@ async fn file_stream_handler(
     ];
 
     (StatusCode::OK, headers, buf).into_response()
+}
+
+/// Proxy a file that is not on local disk from the remote object store.
+///
+/// Looks up the file's `store:<sha256>` backup location and streams the object
+/// through, forwarding a client `Range` so seeking and `ffmpeg` keep working.
+/// The stored object is the canonical copy — audio-identical, only MMM's
+/// comment tag cleared — so this is transparent for playback.
+async fn stream_from_store(
+    state: &Arc<AppState>,
+    id: i64,
+    content_type: &'static str,
+    range: Option<String>,
+) -> Response {
+    let locations = get_file_locations(&state.db, id).await.unwrap_or_default();
+    let Some(hash) = locations
+        .iter()
+        .find(|l| l.location_type == "backup")
+        .and_then(|l| crate::store::store_hash(&l.path).map(str::to_string))
+    else {
+        return (StatusCode::NOT_FOUND, "File not found on disk").into_response();
+    };
+
+    if !state.config.store.is_configured() {
+        tracing::warn!(
+            "file {id} is remote-only but the object store is not configured; cannot stream"
+        );
+        return (StatusCode::NOT_FOUND, "File not found on disk").into_response();
+    }
+
+    let client = StoreClient::new(
+        state.config.store.base_url.as_deref().unwrap_or_default(),
+        state.config.store.token.as_deref().unwrap_or_default(),
+    );
+    let resp = match client.get_range(&hash, range.as_deref()).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("store stream for file {id} failed: {e:#}");
+            return (StatusCode::BAD_GATEWAY, "Object store error").into_response();
+        }
+    };
+
+    let status = resp.status();
+    let upstream_range = resp
+        .headers()
+        .get(header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_GATEWAY, "Object store read error").into_response(),
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    if let Some(cr) = upstream_range
+        && let Ok(v) = HeaderValue::from_str(&cr)
+    {
+        headers.insert(header::CONTENT_RANGE, v);
+    }
+
+    (status, headers, bytes).into_response()
 }
 
 // ── Stage for Conversion ──────────────────────────────────────────────────

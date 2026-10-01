@@ -176,6 +176,13 @@ pub struct DynamicBundle {
     pub keys: Option<String>, // JSON array of Camelot keys
     pub rating_min: Option<i64>,
     pub play_count_min: Option<i64>,
+    /// Cap the bundle to the top N files (`NULL` = all).
+    pub limit_count: Option<i64>,
+    /// Scoring for "top": `rating_playcount` (default), `rating`, `playcount`,
+    /// `recent`, `none`.
+    pub rank_by: Option<String>,
+    /// Round-robin the selection across the 24 Camelot keys (plus `(none)`).
+    pub diversify_keys: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }

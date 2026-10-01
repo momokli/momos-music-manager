@@ -130,9 +130,8 @@ const PLAYLISTS_COLUMNS = [
     defaultWidth: 80,
   },
   { id: "tags", label: "Tags", sortable: false, defaultWidth: 140 },
-  { id: "deemix", label: "Deemix", sortable: false, defaultWidth: 100 },
   { id: "sync", label: "Sync", sortable: false, defaultWidth: 80 },
-  { id: "subscribe", label: "Subscribed", sortable: false, defaultWidth: 80 },
+  { id: "subscribe", label: "Backpack", sortable: false, defaultWidth: 80 },
   { id: "view", label: "View", sortable: false, defaultWidth: 60 },
   { id: "actions", label: "Actions", sortable: false, defaultWidth: 120 },
 ];
@@ -166,35 +165,12 @@ function syncCell(v) {
   return `<span style="color:var(--text-muted)" title="${d.toLocaleString()}">${label}</span>`;
 }
 
-/** Show a subscription bell icon (green = subscribed, muted = not subscribed) */
+/** Backpack membership of a playlist: a bag = in, a muted bag = not in. */
 function subCell(sub) {
   if (sub) {
-    return `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)" title="Subscribed — polls every ${sub.pollIntervalSecs}s"><i class="fas fa-bell"></i></span>`;
+    return `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)" title="In your Backpack \u2014 polls every ${sub.pollIntervalSecs}s; files are kept on your Mac"><i class="fas fa-bag-shopping"></i></span>`;
   }
-  return `<span style="color:var(--text-muted)" title="Not subscribed"><i class="far fa-bell"></i></span>`;
-}
-
-function deemixCell(r) {
-  const status = r.deemixStatus;
-  const restartBtn = status
-    ? `<button class="btn btn-sm btn-icon" data-act="deemix-restart" data-deemix-id="${r.deemixId || ""}" data-name="${escapeHtml(r.name)}" data-id="${r.id}" title="Re-download via deemix"><i class="fa-solid fa-arrows-rotate"></i></button>`
-    : "";
-  const addBtn = `<button class="btn btn-sm btn-icon" data-act="deemix-add" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Add to Deemix download queue"><i class="fa-solid fa-plus"></i></button>`;
-
-  if (!status) return addBtn;
-  if (status === "queued") {
-    return `<span class="status-badge" style="background:rgba(245,158,11,0.1);color:var(--yellow)"><i class="fa-solid fa-clock"></i> Queued</span> ${restartBtn}`;
-  }
-  if (status === "downloading") {
-    return `<span class="status-badge" style="background:rgba(59,130,246,0.1);color:var(--blue, #3b82f6)"><i class="fa-solid fa-spinner fa-spin"></i> DL</span> ${restartBtn}`;
-  }
-  if (status === "completed") {
-    return `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)"><i class="fa-solid fa-check"></i></span> ${restartBtn}`;
-  }
-  if (status === "failed" && r.deemixId) {
-    return `<button class="btn btn-sm btn-icon" data-act="deemix-retry" data-deemix-id="${r.deemixId}" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Retry download"><i class="fa-solid fa-rotate"></i></button> ${restartBtn}`;
-  }
-  return `<span class="status-badge" style="background:rgba(245,158,11,0.1);color:var(--yellow)"><i class="fa-solid fa-clock"></i> ${escapeHtml(status)}</span> ${restartBtn}`;
+  return `<span style="color:var(--text-muted)" title="Not in your Backpack"><i class="fas fa-bag-shopping"></i></span>`;
 }
 
 function viewTracksCell(r) {
@@ -226,9 +202,9 @@ function actions(r) {
     b += `<button class="btn btn-sm btn-green" data-act="create-tag" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Create tag from playlist name"><i class="fas fa-tag"></i></button> `;
 
   if (r.sub) {
-    b += `<button class="btn btn-sm btn-red" data-act="unsubscribe" data-sub-id="${r.sub.id}" data-id="${r.id}" title="Unsubscribe"><i class="fas fa-bell-slash"></i></button> `;
+    b += `<button class="btn btn-sm btn-red" data-act="unsubscribe" data-sub-id="${r.sub.id}" data-id="${r.id}" title="Remove from your Backpack — stops polling this playlist"><i class="fas fa-bag-shopping"></i></button> `;
   } else {
-    b += `<button class="btn btn-sm" data-act="subscribe" data-id="${r.id}" data-service="${r.svc}" data-playlist-id="${r.playlistId}" title="Subscribe (poll + auto-download new tracks via deemix)"><i class="fas fa-bell"></i></button> `;
+    b += `<button class="btn btn-sm" data-act="subscribe" data-id="${r.id}" data-service="${r.svc}" data-playlist-id="${r.playlistId}" title="Add to your Backpack — kept on your Mac, prune-safe"><i class="fas fa-bag-shopping"></i></button> `;
   }
 
   b += `<button class="btn btn-sm btn-delete-playlist" data-act="delete-playlist" data-id="${r.id}" data-name="${escapeHtml(r.name)}" title="Delete playlist"><i class="fas fa-trash"></i></button> `;
@@ -265,15 +241,14 @@ const PLAYLISTS_CELL_RENDERERS = {
       ? `<span class="font-mono text-xs">${new Date(r.updatedAt * 1000).toLocaleDateString()}</span>`
       : '<span class="text-muted">\u2014</span>',
   tags: (r) => tagCell(r.tag),
-  deemix: (r) => deemixCell(r),
   sync: (r) => syncCell(r.sync),
   subscribe: (r) => subCell(r.sub),
   archive: (r) => {
-    const icon = r.archiveDeleted ? "fa-archive" : "fa-box-open";
-    const title = r.archiveDeleted
-      ? "Archiving: deleted tracks remain active for tagging"
-      : "Active: deleted tracks are removed from tagging";
-    return `<button class="btn btn-sm btn-icon archive-toggle-btn" data-id="${r.id}" data-archive="${r.archiveDeleted ? "1" : "0"}" title="${title}"><i class="fas ${icon}"></i></button>`;
+    const on = !!r.archiveDeleted;
+    const title = on
+      ? "Archiving on \u2014 deleted Spotify tracks are kept for tagging"
+      : "Archiving off \u2014 deleted Spotify tracks are removed";
+    return `<button class="btn btn-sm btn-icon archive-toggle-btn" data-id="${r.id}" data-archive="${on ? "1" : "0"}" title="${title}"><i class="fas fa-box-archive" style="${on ? "color:var(--yellow)" : "color:var(--text-muted)"}"></i></button>`;
   },
   view: (r) => viewTracksCell(r),
   actions: (r) => actions(r),
@@ -302,9 +277,9 @@ function renderToolbar(state) {
         <div>
           <div class="filter-section-header" style="margin-top:0"><i class="fas fa-music"></i> Playlist Info</div>
           <div class="filter-row">
-            <span class="filter-row-label toggleable" data-filter="sub">Subscription</span>
+            <span class="filter-row-label toggleable" data-filter="sub">Backpack</span>
             <div class="filter-group">
-              <button class="filter-btn${state.subscribed ? " active" : ""}" data-value="subscribed"><i class="fas fa-bell"></i> Subscribed</button>
+              <button class="filter-btn${state.subscribed ? " active" : ""}" data-value="subscribed"><i class="fas fa-bag-shopping"></i> Backpack</button>
             </div>
           </div>
           <div class="filter-row">
@@ -346,7 +321,7 @@ function renderToolbar(state) {
           <div class="filter-row">
             <span class="filter-row-label toggleable" data-filter="archive">Archive</span>
             <div class="filter-group">
-              <button class="filter-btn${state.archive === "archived" ? " active" : ""}" data-value="archived"><i class="fas fa-archive"></i> Archiving</button>
+              <button class="filter-btn${state.archive === "archived" ? " active" : ""}" data-value="archived"><i class="fas fa-box-archive"></i> Archiving</button>
               <button class="filter-btn${state.archive === "active" ? " active" : ""}" data-value="active"><i class="fas fa-box-open"></i> Active</button>
               <button class="filter-btn${state.archive === "all" ? " active" : ""}" data-value="all">All</button>
             </div>
@@ -865,13 +840,13 @@ function wireContentEvents(container, signal, state) {
               method: "POST",
               body: JSON.stringify({ service: svc, playlistId: plId }),
             });
-            showToast("Subscribed", "success");
+            showToast("Added to Backpack", "success");
             updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
             fetchAndRender(container, signal, state);
           } catch (err) {
-            showToast(`Subscribe failed: ${err.message}`, "error");
+            showToast(`Add to Backpack failed: ${err.message}`, "error");
             b.disabled = false;
-            b.innerHTML = '<i class="fas fa-bell"></i>';
+            b.innerHTML = '<i class="fas fa-bag-shopping"></i>';
           }
         } else if (act === "unsubscribe") {
           const subId = parseInt(b.dataset.subId, 10);
@@ -882,13 +857,13 @@ function wireContentEvents(container, signal, state) {
             await fetchJSON(`/api/playlists/subscriptions/${subId}`, {
               method: "DELETE",
             });
-            showToast("Unsubscribed", "success");
+            showToast("Removed from Backpack", "success");
             updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
             fetchAndRender(container, signal, state);
           } catch (err) {
-            showToast(`Unsubscribe failed: ${err.message}`, "error");
+            showToast(`Remove from Backpack failed: ${err.message}`, "error");
             b.disabled = false;
-            b.innerHTML = '<i class="fas fa-bell-slash"></i>';
+            b.innerHTML = '<i class="fas fa-bag-shopping"></i>';
           }
         } else if (act === "delete-playlist") {
           const name = b.dataset.name;
@@ -968,72 +943,6 @@ function wireContentEvents(container, signal, state) {
             b.disabled = false;
             b.innerHTML = '<i class="fas fa-eye"></i>';
           }
-        } else if (act === "deemix-add") {
-          const url = `https://open.spotify.com/playlist/${b.dataset.playlistId}`;
-          const name = b.dataset.name;
-          b.disabled = true;
-          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
-          try {
-            await fetchJSON("/api/services/deemix/queue", {
-              method: "POST",
-              body: JSON.stringify({ url }),
-            });
-            showToast(`Added "${name}" to Deemix download queue`, "success");
-            setTimeout(() => {
-              updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
-              fetchAndRender(container, signal, state);
-            }, 1500);
-          } catch (err) {
-            showToast(`Failed to add to Deemix queue: ${err.message}`, "error");
-            b.disabled = false;
-            b.innerHTML = '<i class="fa-solid fa-plus"></i>';
-          }
-        } else if (act === "deemix-restart") {
-          const deemixId = b.dataset.deemixId ? parseInt(b.dataset.deemixId, 10) : null;
-          const name = b.dataset.name;
-          b.disabled = true;
-          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
-          try {
-            if (deemixId) {
-              await fetchJSON(`/api/services/deemix/queue/${deemixId}/retry`, {
-                method: "POST",
-              });
-            } else {
-              const url = `https://open.spotify.com/playlist/${b.dataset.playlistId}`;
-              await fetchJSON("/api/services/deemix/queue", {
-                method: "POST",
-                body: JSON.stringify({ url }),
-              });
-            }
-            showToast(`Re-download triggered for "${name}"`, "success");
-            setTimeout(() => {
-              updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
-              fetchAndRender(container, signal, state);
-            }, 1500);
-          } catch (err) {
-            showToast(`Re-download failed: ${err.message}`, "error");
-            b.disabled = false;
-            b.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i>';
-          }
-        } else if (act === "deemix-retry") {
-          const deemixId = parseInt(b.dataset.deemixId, 10);
-          const name = b.dataset.name;
-          b.disabled = true;
-          b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
-          try {
-            await fetchJSON(`/api/services/deemix/queue/${deemixId}/retry`, {
-              method: "POST",
-            });
-            showToast(`Retrying download for "${name}"`, "success");
-            setTimeout(() => {
-              updateHash("playlists", state, HASH_DEFAULTS, HASH_SCHEMA);
-              fetchAndRender(container, signal, state);
-            }, 1500);
-          } catch (err) {
-            showToast(`Retry failed: ${err.message}`, "error");
-            b.disabled = false;
-            b.innerHTML = '<i class="fa-solid fa-rotate"></i>';
-          }
         } else if (act === "push-spotify") {
           b.disabled = true;
           b.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Push';
@@ -1089,11 +998,12 @@ function wireContentEvents(container, signal, state) {
       btn.dataset.archive = newArchive ? "1" : "0";
       const icon = btn.querySelector("i");
       if (icon) {
-        icon.className = "fas " + (newArchive ? "fa-archive" : "fa-box-open");
+        icon.className = "fas fa-box-archive";
+        icon.style.color = newArchive ? "var(--yellow)" : "var(--text-muted)";
       }
       btn.title = newArchive
-        ? "Archiving: deleted tracks remain active for tagging"
-        : "Active: deleted tracks are removed from tagging";
+        ? "Archiving on \u2014 deleted Spotify tracks are kept for tagging"
+        : "Archiving off \u2014 deleted Spotify tracks are removed";
 
       fetchJSON(`/api/playlists/${id}/archive`, {
         method: "PUT",
@@ -1109,11 +1019,12 @@ function wireContentEvents(container, signal, state) {
           // Revert on error
           btn.dataset.archive = currentArchive ? "1" : "0";
           if (icon) {
-            icon.className = "fas " + (currentArchive ? "fa-archive" : "fa-box-open");
+            icon.className = "fas fa-box-archive";
+            icon.style.color = currentArchive ? "var(--yellow)" : "var(--text-muted)";
           }
           btn.title = currentArchive
-            ? "Archiving: deleted tracks remain active for tagging"
-            : "Active: deleted tracks are removed from tagging";
+            ? "Archiving on \u2014 deleted Spotify tracks are kept for tagging"
+            : "Archiving off \u2014 deleted Spotify tracks are removed";
           showToast(`Failed to toggle archive: ${err.message}`, "error");
         });
     },

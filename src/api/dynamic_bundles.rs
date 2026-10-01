@@ -12,7 +12,7 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, post, put},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
 use crate::AppState;
@@ -41,23 +41,52 @@ struct CreateDynamicBundleRequest {
     keys: Option<Vec<String>>,
     rating_min: Option<i64>,
     play_count_min: Option<i64>,
+    #[serde(default)]
+    limit_count: Option<i64>,
+    #[serde(default)]
+    rank_by: Option<String>,
+    #[serde(default)]
+    diversify_keys: bool,
+}
+
+/// Distinguish "field missing" from "field explicitly `null`".
+///
+/// With a plain `Option<Option<T>>` serde maps a JSON `null` to the *outer*
+/// `None`, so an explicit `null` (the way the UI clears a field) would be
+/// indistinguishable from an omitted one and the column could never be reset.
+/// This maps `null` to `Some(None)` and a value to `Some(Some(v))`.
+fn deserialize_double_option<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Option::<T>::deserialize(de).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateDynamicBundleRequest {
     name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     base_tags: Option<Option<Vec<String>>>,
     include_all_tracks: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     bpm_min: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     bpm_max: Option<Option<f64>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     pmv_categories: Option<Option<Vec<String>>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     keys: Option<Option<Vec<String>>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     rating_min: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     play_count_min: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    limit_count: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    rank_by: Option<Option<String>>,
+    diversify_keys: Option<bool>,
 }
 
 /// Track preview row for the frontend preview table.
@@ -150,6 +179,9 @@ async fn create_handler(
         request.keys,
         request.rating_min,
         request.play_count_min,
+        request.limit_count,
+        request.rank_by,
+        request.diversify_keys,
     )
     .await
     {
@@ -228,6 +260,9 @@ async fn update_handler(
         request.keys,
         request.rating_min,
         request.play_count_min,
+        request.limit_count,
+        request.rank_by,
+        request.diversify_keys,
     )
     .await
     {

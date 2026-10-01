@@ -1,52 +1,5 @@
 import { test, expect } from "@playwright/test";
 
-test.describe("Storage Page Backfill", () => {
-  test.beforeEach(async ({ request }) => {
-    await request.post("/api/testing/seed", {
-      data: { scenario: "basic" },
-    });
-  });
-
-  test("shows backfill backup sizes section", async ({ page }) => {
-    const errors = [];
-    page.on("pageerror", (err) => errors.push(err));
-
-    await page.goto("/#storage");
-    await page.waitForSelector("#backfill-section", { timeout: 8000 });
-    await expect(page.locator("#backfill-section")).toBeVisible();
-    await expect(page.locator("#btn-backfill")).toBeVisible();
-
-    expect(errors).toEqual([]);
-  });
-
-  test("backfill button triggers API call and shows result", async ({ page }) => {
-    const errors = [];
-    page.on("pageerror", (err) => errors.push(err));
-
-    await page.goto("/#storage");
-    await page.waitForSelector("#btn-backfill", { timeout: 8000 });
-
-    // Click the backfill button
-    await page.click("#btn-backfill");
-
-    // Wait for the status to be non-empty (task started, no records, or error)
-    await expect(page.locator("#backfill-status")).not.toBeEmpty({
-      timeout: 10000,
-    });
-
-    // Button should be re-enabled after completion
-    await expect(page.locator("#btn-backfill")).toBeEnabled({ timeout: 10000 });
-
-    // Either shows "No records need backfill" or task started or error
-    const statusText = await page.locator("#backfill-status").textContent();
-    const validStatuses = ["No records need backfill", "Task started", "Error", "Failed"];
-    const hasValidStatus = validStatuses.some((s) => statusText.includes(s));
-    expect(hasValidStatus).toBeTruthy();
-
-    expect(errors).toEqual([]);
-  });
-});
-
 test.describe("Storage Page - Ghost Records", () => {
   test.beforeEach(async ({ request }) => {
     await request.post("/api/testing/seed", {
@@ -153,5 +106,67 @@ test.describe("Storage Page - Ghost Records", () => {
     // Wait for the card to be removed (via JS: card.remove())
     await page.waitForSelector("#orphan-card", { state: "detached", timeout: 8000 });
     expect(purgeCalled).toBeTruthy();
+  });
+});
+
+test.describe("Storage Page - Sync to Store", () => {
+  test.beforeEach(async ({ request }) => {
+    await request.post("/api/testing/seed", {
+      data: { scenario: "basic" },
+    });
+  });
+
+  test("sync button posts once and shows a success toast", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    let syncHits = 0;
+    let syncMethod = null;
+    await page.route("**/api/storage/sync-store", async (route) => {
+      syncHits += 1;
+      syncMethod = route.request().method();
+      await route.fulfill({ json: { data: { taskId: "task-123" } } });
+    });
+
+    await page.goto("/#storage");
+    await page.waitForSelector("#storage-sync-store", { timeout: 8000 });
+    await expect(page.locator("#storage-sync-store")).toBeVisible();
+
+    await page.click("#storage-sync-store");
+
+    await expect(page.locator(".toast-notification")).toContainText("background", {
+      timeout: 6000,
+    });
+    expect(syncHits).toBe(1);
+    expect(syncMethod).toBe("POST");
+
+    // Button is re-enabled after the request settles
+    await expect(page.locator("#storage-sync-store")).toBeEnabled({ timeout: 8000 });
+
+    expect(errors).toEqual([]);
+  });
+
+  test("not configured surfaces a store-not-configured hint", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await page.route("**/api/storage/sync-store", async (route) => {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "store is not configured" }),
+      });
+    });
+
+    await page.goto("/#storage");
+    await page.waitForSelector("#storage-sync-store", { timeout: 8000 });
+
+    await page.click("#storage-sync-store");
+
+    await expect(page.locator(".toast-notification")).toContainText("not configured", {
+      timeout: 6000,
+    });
+
+    expect(errors).toEqual([]);
   });
 });

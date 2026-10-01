@@ -1,22 +1,21 @@
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{get, post},
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::AppState;
 use crate::api::types::{ApiResponse, ErrorResponse, internal_error};
-use crate::backup::BackupEngine;
 use crate::db::{
-    get_file_by_id, get_file_locations, get_folder_by_id, get_prune_candidates, get_storage_status,
+    get_file_by_id, get_file_locations, get_prune_candidates, get_storage_status,
     set_file_location,
 };
 
-use crate::tasks::{Task, TaskStatus, TaskType, start_prune_files_task};
+use crate::tasks::start_prune_files_task;
 
 // ── Request/Response types ─────────────────────────────────────────────────
 
@@ -24,21 +23,6 @@ use crate::tasks::{Task, TaskStatus, TaskType, start_prune_files_task};
 struct PruneRequest {
     #[serde(default)]
     file_ids: Vec<i64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BackupTestResponse {
-    ok: bool,
-    error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BackupExploreResponse {
-    dirs: Vec<String>,
-    writable: bool,
-    error: Option<String>,
 }
 
 // ── Handlers ───────────────────────────────────────────────────────────────
@@ -74,78 +58,6 @@ async fn backpack_size_handler(State(state): State<Arc<AppState>>) -> impl IntoR
     }
 }
 
-async fn storage_backup_handler(
-    State(state): State<Arc<AppState>>,
-    Path(folder_id): Path<i64>,
-) -> impl IntoResponse {
-    // Validate folder exists
-    let folder = match get_folder_by_id(&state.db, folder_id).await {
-        Ok(Some(f)) => f,
-        Ok(None) => {
-            crate::api::ui_events::emit_action(
-                &state,
-                crate::telemetry::events::EventType::UiActionRunBackup,
-                false,
-                Some("Folder not found"),
-            );
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse {
-                    data: serde_json::json!({"error": "Folder not found"}),
-                }),
-            )
-                .into_response();
-        }
-        Err(e) => return internal_error(e).into_response(),
-    };
-
-    if folder.backup_path.is_none() {
-        crate::api::ui_events::emit_action(
-            &state,
-            crate::telemetry::events::EventType::UiActionRunBackup,
-            false,
-            Some("Folder has no backup_path configured"),
-        );
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                data: serde_json::json!({"error": "Folder has no backup_path configured"}),
-            }),
-        )
-            .into_response();
-    }
-
-    let task_id =
-        crate::tasks::start_backup_folder_task(&state.task_manager, &state.db, folder_id).await;
-
-    if task_id.is_empty() {
-        crate::api::ui_events::emit_action(
-            &state,
-            crate::telemetry::events::EventType::UiActionRunBackup,
-            true,
-            None,
-        );
-        return Json(ApiResponse {
-            data: serde_json::json!({
-                "taskId": null,
-                "message": "Backup already in progress for this folder",
-            }),
-        })
-        .into_response();
-    }
-
-    crate::api::ui_events::emit_action(
-        &state,
-        crate::telemetry::events::EventType::UiActionRunBackup,
-        true,
-        None,
-    );
-    Json(ApiResponse {
-        data: serde_json::json!({ "taskId": task_id }),
-    })
-    .into_response()
-}
-
 async fn prune_preview_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match get_prune_candidates(&state.db).await {
         Ok(candidates) => Json(ApiResponse { data: candidates }).into_response(),
@@ -168,102 +80,6 @@ async fn prune_execute_handler(
     }
 
     let task_id = start_prune_files_task(&state.task_manager, &state.db, body.file_ids).await;
-
-    Json(ApiResponse {
-        data: serde_json::json!({ "taskId": task_id }),
-    })
-    .into_response()
-}
-
-async fn backup_wavs_handler(
-    State(state): State<Arc<AppState>>,
-    Path(folder_id): Path<i64>,
-) -> impl IntoResponse {
-    let folder = match get_folder_by_id(&state.db, folder_id).await {
-        Ok(Some(f)) => f,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Folder not found".to_string(),
-                }),
-            )
-                .into_response();
-        }
-        Err(e) => return internal_error(e).into_response(),
-    };
-
-    if folder.backup_path.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Folder has no backup_path configured".to_string(),
-            }),
-        )
-            .into_response();
-    }
-
-    let task_id =
-        crate::tasks::start_backup_wavs_task(&state.task_manager, &state.db, folder_id).await;
-
-    if task_id.is_empty() {
-        return Json(ApiResponse {
-            data: serde_json::json!({
-                "taskId": null,
-                "message": "Backup WAVs already in progress for this folder",
-            }),
-        })
-        .into_response();
-    }
-
-    Json(ApiResponse {
-        data: serde_json::json!({ "taskId": task_id }),
-    })
-    .into_response()
-}
-
-/// POST /api/storage/discover-backup/{folder_id}
-/// Triggers a background task to scan NAS backup and discover backup-only files.
-async fn storage_discover_backup_handler(
-    State(state): State<Arc<AppState>>,
-    Path(folder_id): Path<i64>,
-) -> impl IntoResponse {
-    let folder = match get_folder_by_id(&state.db, folder_id).await {
-        Ok(Some(f)) => f,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Folder not found".to_string(),
-                }),
-            )
-                .into_response();
-        }
-        Err(e) => return internal_error(e).into_response(),
-    };
-
-    if folder.backup_path.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Folder has no backup_path configured".to_string(),
-            }),
-        )
-            .into_response();
-    }
-
-    let task_id =
-        crate::tasks::start_backup_discovery_task(&state.task_manager, &state.db, folder_id).await;
-
-    if task_id.is_empty() {
-        return Json(ApiResponse {
-            data: serde_json::json!({
-                "taskId": null,
-                "message": "Backup discovery already in progress for this folder",
-            }),
-        })
-        .into_response();
-    }
 
     Json(ApiResponse {
         data: serde_json::json!({ "taskId": task_id }),
@@ -350,11 +166,69 @@ async fn format_priority_put_handler(
     .into_response()
 }
 
+// ── Backpack file-sync switch ────────────────────────────────────────────────
+
+/// GET /api/storage/settings/backpack-sync
+/// Whether the Backpack *file* sync (pull missing files + format cleanup) may run.
+async fn backpack_sync_get_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let enabled = crate::backpack::backpack_sync_enabled(&state.db).await;
+    Json(ApiResponse {
+        data: serde_json::json!({ "enabled": enabled }),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct BackpackSyncRequest {
+    enabled: bool,
+}
+
+/// PUT /api/storage/settings/backpack-sync
+/// Persists the Backpack file-sync switch. Turning it off pauses every
+/// automatic pull (startup and tag toggles) as well as the manual Sync All.
+async fn backpack_sync_put_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BackpackSyncRequest>,
+) -> impl IntoResponse {
+    match crate::backpack::set_backpack_sync_enabled(&state.db, body.enabled).await {
+        Ok(()) => Json(ApiResponse {
+            data: serde_json::json!({ "enabled": body.enabled }),
+        })
+        .into_response(),
+        Err(e) => internal_error(e).into_response(),
+    }
+}
+
 /// POST /api/storage/sync-backpack
 /// Pulls missing files from backup for all backpack tags.
 /// For each track in a backpack tag, ensures the best format exists locally.
 async fn sync_backpack_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let task_id = crate::tasks::start_backpack_sync_task(&state.task_manager, &state.db).await;
+    // The switch turns the Backpack file sync (NAS pulls + format cleanup) off
+    // entirely, including this manual trigger.
+    if !crate::backpack::backpack_sync_enabled(&state.db).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResponse {
+                data: serde_json::json!({ "error": "Backpack file sync is disabled" }),
+            }),
+        )
+            .into_response();
+    }
+
+    // Restore is only possible from the object store (NAS retired).
+    if !state.config.store.is_configured() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResponse {
+                data: serde_json::json!({ "error": "Object store is not configured" }),
+            }),
+        )
+            .into_response();
+    }
+
+    let task_id =
+        crate::tasks::start_backpack_sync_task(&state.task_manager, &state.db, &state.config.store)
+            .await;
     if task_id.is_empty() {
         return Json(ApiResponse {
             data: serde_json::json!({
@@ -369,6 +243,37 @@ async fn sync_backpack_handler(State(state): State<Arc<AppState>>) -> impl IntoR
     })
     .into_response()
 }
+/// POST /api/storage/sync-store
+/// Canonicalise + upload local files to the remote object store, then verify
+/// the store's records (SHA-256 facts).
+async fn sync_store_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if !state.config.store.is_configured() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiResponse {
+                data: serde_json::json!({ "error": "Object store is not configured" }),
+            }),
+        )
+            .into_response();
+    }
+
+    let task_id =
+        crate::tasks::start_store_sync_task(&state.task_manager, &state.db, &state.config).await;
+    if task_id.is_empty() {
+        return Json(ApiResponse {
+            data: serde_json::json!({
+                "taskId": null,
+                "message": "Store sync already in progress",
+            }),
+        })
+        .into_response();
+    }
+    Json(ApiResponse {
+        data: serde_json::json!({ "taskId": task_id }),
+    })
+    .into_response()
+}
+
 // ── Purge Orphans ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -452,50 +357,41 @@ async fn file_pull_from_backup_handler(
             .into_response();
     }
 
-    // 4. Parse backup path to get SSH host and remote path
-    let (ssh_host, remote_path) = match backup_loc.path.split_once(':') {
-        Some((host, path)) => (host.to_string(), path.to_string()),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "Invalid backup path format".to_string(),
-                }),
-            )
-                .into_response();
-        }
+    // 4. Only a store object can be restored — the NAS (rsync/SSH) is retired.
+    let Some(hash) = crate::store::store_hash(&backup_loc.path) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Backup location is not a store object (NAS retired)".to_string(),
+            }),
+        )
+            .into_response();
     };
 
-    // 5. Ensure local parent directory exists
-    if let Some(parent) = local_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent).unwrap_or_default();
-        }
+    // 5. Restore from the object store, rewriting the comment from the DB.
+    if !state.config.store.is_configured() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Object store is not configured".to_string(),
+            }),
+        )
+            .into_response();
     }
 
-    // 6. Rsync from backup to local
-    let dest = format!("{}:{}", ssh_host, remote_path);
-    let output = tokio::process::Command::new("rsync")
-        .arg("-a")
-        .arg("--rsh=ssh")
-        .arg(&dest)
-        .arg(local_path.to_string_lossy().as_ref())
-        .output()
-        .await;
-
-    match output {
-        Ok(out) if out.status.success() => {
-            // 7. Update file_locations: add 'local' entry
-            if let Ok(metadata) = std::fs::metadata(local_path) {
-                let file_size = metadata.len() as i64;
-                let _ = set_file_location(&state.db, id, "local", &file.file_path, file_size).await;
-                // 8. Update last_verified_local
-                let _ =
-                    sqlx::query("UPDATE files SET last_verified_local = unixepoch() WHERE id = ?")
-                        .bind(id)
-                        .execute(&state.db)
-                        .await;
-            }
+    let client = crate::store::StoreClient::new(
+        state.config.store.base_url.as_deref().unwrap_or_default(),
+        state.config.store.token.as_deref().unwrap_or_default(),
+    );
+    let local_dest = std::path::Path::new(&file.file_path);
+    match crate::store::restore_object(&client, &state.db, id, hash, local_dest).await {
+        Ok(size) => {
+            // 6. Record the restored local copy.
+            let _ = set_file_location(&state.db, id, "local", &file.file_path, size).await;
+            let _ = sqlx::query("UPDATE files SET last_verified_local = unixepoch() WHERE id = ?")
+                .bind(id)
+                .execute(&state.db)
+                .await;
 
             Json(ApiResponse {
                 data: serde_json::json!({
@@ -506,17 +402,13 @@ async fn file_pull_from_backup_handler(
             })
             .into_response()
         }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Rsync failed: {}", stderr),
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => internal_error(e).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Store restore failed: {e}"),
+            }),
+        )
+            .into_response(),
     }
 }
 
@@ -541,240 +433,6 @@ async fn file_backup_status_handler(
     .into_response()
 }
 
-/// GET /api/backup/test?host=...
-async fn backup_test_handler(
-    Query(params): Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    let host = match params.get("host") {
-        Some(h) if !h.is_empty() => h,
-        _ => {
-            return Json(ApiResponse {
-                data: BackupTestResponse {
-                    ok: false,
-                    error: Some("Missing 'host' query parameter".to_string()),
-                },
-            })
-            .into_response();
-        }
-    };
-
-    let engine = BackupEngine::new(host.clone());
-    match engine.test_host().await {
-        Ok(true) => Json(ApiResponse {
-            data: BackupTestResponse {
-                ok: true,
-                error: None,
-            },
-        })
-        .into_response(),
-        Ok(false) => Json(ApiResponse {
-            data: BackupTestResponse {
-                ok: false,
-                error: Some(
-                    "Connection failed — host unreachable or SSH key not accepted".to_string(),
-                ),
-            },
-        })
-        .into_response(),
-        Err(e) => Json(ApiResponse {
-            data: BackupTestResponse {
-                ok: false,
-                error: Some(format!("SSH error: {}", e)),
-            },
-        })
-        .into_response(),
-    }
-}
-
-/// GET /api/backup/explore?host=...&path=...
-async fn backup_explore_handler(
-    Query(params): Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    let host = match params.get("host") {
-        Some(h) if !h.is_empty() => h,
-        _ => {
-            return Json(ApiResponse {
-                data: BackupExploreResponse {
-                    dirs: vec![],
-                    writable: false,
-                    error: Some("Missing 'host' query parameter".to_string()),
-                },
-            })
-            .into_response();
-        }
-    };
-
-    let path = params.get("path").map(|s| s.as_str()).unwrap_or("/");
-    let engine = BackupEngine::new(host.clone());
-
-    match engine.explore_dir(path).await {
-        Ok((dirs, writable)) => Json(ApiResponse {
-            data: BackupExploreResponse {
-                dirs,
-                writable,
-                error: None,
-            },
-        })
-        .into_response(),
-        Err(e) => Json(ApiResponse {
-            data: BackupExploreResponse {
-                dirs: vec![],
-                writable: false,
-                error: Some(format!("Explore failed: {}", e)),
-            },
-        })
-        .into_response(),
-    }
-}
-
-/// POST /api/storage/backfill-backup-sizes
-///
-/// Background task that queries `file_locations.backup` records with `file_size=0`
-/// and attempts to get the actual file size from the NAS via SSH.
-async fn backfill_backup_sizes_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let zero_size = match crate::db::get_records_needing_backfill(&state.db).await {
-        Ok(records) => records.len(),
-        Err(e) => {
-            tracing::warn!("Backfill: failed to query records: {}", e);
-            return internal_error(e).into_response();
-        }
-    };
-
-    if zero_size == 0 {
-        return Json(ApiResponse {
-            data: serde_json::json!({
-                "taskId": null,
-                "zeroSizeRecords": 0,
-                "message": "No backup records need backfill"
-            }),
-        })
-        .into_response();
-    }
-
-    // Create a task and register it
-    let task = Task::new(
-        TaskType::BackupDiscovery { folder_id: 0 },
-        Some("backup".to_string()),
-    );
-    let task_id = task.id.clone();
-    let worker_task_id = task_id.clone();
-    let cancel_token = task.cancel_token.clone();
-
-    state.task_manager.start_task(task).await;
-
-    let db = state.db.clone();
-    let tm = state.task_manager.clone();
-
-    tokio::spawn(async move {
-        tm.update_task_status(&worker_task_id, TaskStatus::Running)
-            .await;
-        tm.update_progress_text(&worker_task_id, "Backfilling backup sizes...".to_string())
-            .await;
-        tm.update_progress(&worker_task_id, |p| {
-            p.status = TaskStatus::Running;
-            p.message = "Backfilling backup sizes...".to_string();
-        })
-        .await;
-
-        // Get folders with backup paths to extract SSH hosts
-        let folders: Vec<(i64, String)> = match sqlx::query_as(
-            "SELECT id, backup_path FROM folders WHERE backup_path IS NOT NULL AND backup_path != ''"
-        )
-        .fetch_all(&db)
-        .await
-        {
-            Ok(f) => f,
-            Err(e) => {
-                tm.add_log(&worker_task_id, format!("Failed to query folders: {}", e)).await;
-                tm.update_task_status(&worker_task_id, TaskStatus::Failed).await;
-                tm.update_progress(&worker_task_id, |p| {
-                    p.status = TaskStatus::Failed;
-                    p.message = format!("DB error: {}", e);
-                }).await;
-                return;
-            }
-        };
-
-        if folders.is_empty() {
-            tm.add_log(
-                &worker_task_id,
-                "No folders with backup paths configured".to_string(),
-            )
-            .await;
-            tm.update_task_status(&worker_task_id, TaskStatus::Failed)
-                .await;
-            tm.update_progress(&worker_task_id, |p| {
-                p.status = TaskStatus::Failed;
-                p.message = "No folders with backup paths configured".to_string();
-            })
-            .await;
-            return;
-        }
-
-        let mut total_checked = 0usize;
-        let mut total_fixed = 0usize;
-        let mut total_failed = 0usize;
-
-        for (folder_id, backup_path) in &folders {
-            if cancel_token.is_cancelled() {
-                tm.update_task_status(&worker_task_id, TaskStatus::Cancelled)
-                    .await;
-                return;
-            }
-
-            // Extract SSH host from backup_path (format: "host:/remote/path" or just "host")
-            let ssh_host = backup_path.split(':').next().unwrap_or(backup_path);
-            let engine = crate::backup::BackupEngine::new(ssh_host.to_string());
-
-            match crate::db::backfill_backup_sizes(&db, &engine).await {
-                Ok((checked, fixed, failed)) => {
-                    total_checked += checked;
-                    total_fixed += fixed;
-                    total_failed += failed;
-                    tm.add_log(
-                        &worker_task_id,
-                        format!(
-                            "Folder #{}: {}/{} fixed, {}/{} failed",
-                            folder_id, fixed, checked, failed, checked
-                        ),
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    tm.add_log(
-                        &worker_task_id,
-                        format!("Folder #{} backfill failed: {}", folder_id, e),
-                    )
-                    .await;
-                    // We don't know how many records this folder had, assume all failed
-                    total_checked += 0;
-                    total_failed += 0; // Can't track per-folder failures precisely without separate count
-                }
-            }
-        }
-
-        tm.update_progress(&worker_task_id, |p| {
-            p.status = TaskStatus::Completed;
-            p.message = format!(
-                "Backfill complete: {}/{} fixed, {} failed",
-                total_fixed, total_checked, total_failed
-            );
-        })
-        .await;
-        tm.update_task_status(&worker_task_id, TaskStatus::Completed)
-            .await;
-    });
-
-    Json(ApiResponse {
-        data: serde_json::json!({
-            "taskId": task_id,
-            "zeroSizeRecords": zero_size,
-            "message": format!("Backfill task started for {} records", zero_size)
-        }),
-    })
-    .into_response()
-}
-
 // ── Router ─────────────────────────────────────────────────────────────────
 
 pub(super) fn router() -> Router<Arc<AppState>> {
@@ -784,33 +442,20 @@ pub(super) fn router() -> Router<Arc<AppState>> {
             "/api/storage/settings",
             get(storage_settings_get_handler).put(storage_settings_put_handler),
         )
-        .route(
-            "/api/storage/backup/{folder_id}",
-            post(storage_backup_handler),
-        )
         .route("/api/storage/prune-preview", post(prune_preview_handler))
         .route("/api/storage/prune", post(prune_execute_handler))
-        .route(
-            "/api/storage/backup-wavs/{folder_id}",
-            post(backup_wavs_handler),
-        )
-        .route(
-            "/api/storage/backfill-backup-sizes",
-            post(backfill_backup_sizes_handler),
-        )
-        .route(
-            "/api/storage/discover-backup/{folder_id}",
-            post(storage_discover_backup_handler),
-        )
         .route("/api/storage/sync-backpack", post(sync_backpack_handler))
+        .route("/api/storage/sync-store", post(sync_store_handler))
         .route("/api/storage/backpack-size", get(backpack_size_handler))
         .route(
             "/api/storage/settings/format-priority",
             get(format_priority_get_handler).put(format_priority_put_handler),
         )
+        .route(
+            "/api/storage/settings/backpack-sync",
+            get(backpack_sync_get_handler).put(backpack_sync_put_handler),
+        )
                 .route("/api/storage/purge-orphans", post(purge_orphans_handler))
-        .route("/api/backup/test", get(backup_test_handler))
-        .route("/api/backup/explore", get(backup_explore_handler))
         .route(
             "/api/files/{id}/backup-status",
             get(file_backup_status_handler),

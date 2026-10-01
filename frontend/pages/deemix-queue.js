@@ -130,8 +130,6 @@ const DEEMIX_CELL_RENDERERS = {
     let html = "";
     if (item.status === "failed" && item.id)
       html += `<button class="btn btn-sm btn-icon" data-act="retry" data-id="${item.id}" title="Retry"><i class="fa-solid fa-rotate"></i></button>`;
-    if (item.spotifyPlaylistUrl)
-      html += `<button class="btn btn-sm btn-icon" data-act="restart" data-id="${item.id || ""}" data-url="${escapeHtml(item.spotifyPlaylistUrl)}" title="Re-download via deemix"><i class="fa-solid fa-arrows-rotate"></i></button>`;
     if (item.id)
       html += `<button class="btn btn-sm btn-icon" data-act="delete" data-id="${item.id}" title="Remove"><i class="fa-solid fa-trash"></i></button>`;
     return html || '<span class="text-muted">—</span>';
@@ -392,32 +390,6 @@ function wireContentEvents(container, signal, state) {
             showToast(`Retry failed: ${err.message}`, "error");
             btn.disabled = false;
             btn.innerHTML = '<i class="fa-solid fa-rotate"></i>';
-          }
-        } else if (act === "restart") {
-          const localId = parseInt(btn.dataset.id, 10);
-          const url = btn.dataset.url;
-          if (!url) return;
-          btn.disabled = true;
-          btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
-          try {
-            if (localId) {
-              // Has local DB entry — call retryDownload (UUID-based)
-              await fetchJSON(`/api/services/deemix/queue/${localId}/retry`, {
-                method: "POST",
-              });
-            } else {
-              // Remote-only — re-add the URL
-              await fetchJSON("/api/services/deemix/queue", {
-                method: "POST",
-                body: JSON.stringify({ url }),
-              });
-            }
-            showToast("Re-download triggered", "success");
-            await fetchAndRender(container, signal, state);
-          } catch (err) {
-            showToast(`Re-download failed: ${err.message}`, "error");
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i>';
           }
         } else if (act === "delete") {
           if (!confirm("Remove this item?")) return;

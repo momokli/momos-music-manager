@@ -1229,3 +1229,294 @@ und wird deshalb **vollständig ersetzt**, nie ergänzt:
   versucht erneut, statt einen falschen Zustand als synchron zu markieren.
 - Keine Migration nötig: Settings-Keys (024) und `deemix_downloads.is_backpack`
   (025) existieren bereits.
+
+## ADR-061: Spotify-Rate-Limit — prozessweiter Cooldown + Backoff
+
+**Date**: 2026-09-23
+**Status**: Accepted (implemented, Issue #49)
+
+**Context**: Ein fehlgeschlagener Backpack-Push wurde bei jedem Coordinator-Tick
+(5 s) erneut versucht (2081 Versuche an einem Tag, 0 Erfolge), und sowohl der
+Coordinator als auch Subscription- und Global-Poller verwarfen Spotifys
+`Retry-After` (auf 300 s geklemmt bzw. gar nicht gelesen). Spotifys Limit ist ein
+gleitendes Fenster — Retries *im* Penalty-Fenster halten es gesättigt, die App
+sperrt sich selbst aus (beobachtet: ein Tag lang 0 von 58 Subscription-Polls
+erfolgreich, obwohl der Token-Refresh durchgehend funktionierte).
+
+**Decision**:
+
+1. **`SpotifyCooldown`** (`src/spotify/cooldown.rs`) ist die einzige Wahrheit für
+   „dürfen wir Spotify gerade ansprechen“: ein prozessweiter Deadline-Wert, der nur
+   verlängert (nie verkürzt), aus `Retry-After` gesetzt und bei Erfolg gelöscht wird
+   und nach Ablauf selbst heilt (Cap 24 h — Spotify vergibt auch mehrstündige Penalties, beobachtet: `Retry-After: 22h 37m`; ein kürzerer Cap würde zu früh wieder anklopfen).
+2. **Alle Spotify-Loops konsultieren ihn** vor dem Request (Subscription-Poller,
+   Global-Poller, Backpack-Coordinator).
+3. **Kein Inline-Retry im Penalty-Fenster**: bei 429 wird der Cooldown gesetzt und
+   der Zyklus abgebrochen, statt 3× innerhalb des Fensters zu retryen.
+4. **Backoff statt Tick-Retry**: der Coordinator plant den nächsten automatischen
+   Versuch exponentiell (60 s → 1800 s), angehoben auf `Retry-After`, und setzt ihn
+   nur bei Erfolg zurück. Ein manueller Push (`force`) kommt weiter durch.
+
+**Consequences**:
+
+- Ein einzelner 429 pausiert alle Spotify-Caller — gewollt: nur so kann das
+  gleitende Fenster leerlaufen.
+- `Retry-After` wird nicht mehr geklemmt; pathologische Werte sind auf 6 h begrenzt.
+- ADR-060 („der bestehende 429-Retry greift“) ist damit überholt.
+
+## ADR-062: Backpack-Transport — ID-Fallstricke, marktfreier Read, tolerante Verifikation
+
+**Date**: 2026-09-23
+**Status**: Accepted (implemented)
+
+**Context**: Die Backpack-Playlist konnte nie angelegt werden, obwohl Retry- und
+Verifikationslogik mehrfach nachgebessert wurden. Ursache waren drei unabhängige
+Fehler im Zusammenspiel mit rspotify 0.15 und Spotifys Marktverhalten.
+
+**Decision**:
+
+1. **rspotify-IDs**: `Id::to_string()`/`Display` liefern die *URI*
+   (`spotify:user:<id>`), `Id::id()` die blanke Id. Alle Stellen, die eine Id
+   brauchen (`get_current_user_id`, `create_playlist`-Rückgabe), nutzen `.id()`;
+   Track-URIs werden nie aus `Display` zusammengesetzt. Ein Regressionstest
+   (`spotify::client::tests`) pinnt die Falle.
+2. **Verifikations-Read ohne Market**: `Market::FromToken` liefert für
+   markt-nicht-verfügbare Tracks `null`, wodurch eine korrekte Playlist
+   unvollständig aussah.
+3. **Tolerante Verifikation**: Spotify verwirft markt-nicht-verfügbare Tracks beim
+   Schreiben still, ein exakter Set-Match ist nicht erreichbar. Nur eine *grobe*
+   Abweichung gilt als Fehler (>1 %, min 5 Tracks); ein Read-Fehler ist „unklar“
+   (Signatur wird fortgeschrieben), kein Mismatch.
+4. **Materialisierungen sind serialisiert** (prozessweiter Lock), damit Coordinator
+   und manueller Push sich nicht auf derselben Playlist verheddern.
+
+**Consequences**:
+
+- `backpack.signature` wird nach einem erfolgreichen Write auch bei kleiner
+  Abweichung fortgeschrieben → kein Rebuild-Loop mehr.
+- ADR-060 Punkt 3 („nur bei Gleichheit“) ist damit überholt; ein Mismatch bleibt
+  sichtbar (`verification_failed`, Log mit Diff-Sample).
+- Die 2 dauerhaft nicht spiegelbaren Tracks (Markt/Region) sind dokumentiert
+  akzeptiert.
+
+## ADR-063: „Backpack“ ist der UI-Oberbegriff für Subscribe
+
+**Date**: 2026-09-23
+**Status**: Accepted (implemented, Issue #40)
+
+**Context**: `Subscribe` und `Backpack` sind dasselbe Konzept — PR #34 hat den
+Transport vereinheitlicht (eine aggregierte Playlist, ein deemix-Submit), die UI
+zeigte aber weiterhin Glocke, „Subscribed“ und „Unsubscribe“. Zusätzlich listete die
+Backpack-Seite nur Tag-Quellen und verschwieg die subscribten Playlists, was den
+Eindruck zweier Systeme erzeugte.
+
+**Decision**: UI-Terminologie durchgängig „Backpack“ — Spalte, Filter, Buttons
+(Box-Icon: `fa-box` = drin, `fa-box-open` = nicht drin), Dashboard-Karte, Toasts,
+Tooltips mit der realen Semantik. API-Pfade und interne Bezeichner bleiben
+(`/api/playlists/subscriptions`, `state.subscribed`). Die Backpack-Seite zeigt und
+verwaltet beide Quellen (Playlist- und Tag-Quellen) direkt.
+
+**Consequences**:
+
+- Kein Breaking der REST-Routen oder der DB.
+- „Aus dem Backpack entfernen“ ist jetzt auf der Backpack-Seite möglich; bei einer
+  Playlist bedeutet das Unsubscribe (stoppt das Polling), bei einem Tag nur das
+  Clear des Flags.
+
+## ADR-064: Nur die Backpack-Playlist wird an deemix gepusht
+
+**Date**: 2026-09-23
+**Status**: Accepted (implemented)
+
+**Context**: Der Backpack-Transport ist seit ADR-060/062 vereinheitlicht: das Backpack
+*Set* (subscribte Playlists ∪ Backpack-Tags) wird in EINE Spotify-Playlist
+materialisiert und genau diese eine URL an deemix übergeben. Trotzdem existierten
+weiterhin mehrere Pfade, die Einzel-Playlists an deemix schickten: der
+`DownloadGuarantor` re-queuede Zombie-Einträge pro Playlist-URL (alle 10 min), und
+`POST /api/services/deemix/queue` samt Plus-/Restart-Buttons sowie CLI `deemix add`
+erlaubten manuelle Einzel-Pushes. Zusätzlich legte die Playlists-API beim Anzeigen
+`deemix_downloads`-Zeilen pro Playlist an. Das erzeugte N konkurrierende
+deemix-Downloads für dieselben Tracks und widersprach dem „ein Set, ein Submit"-Modell.
+
+**Decision**: deemix erhält ausschließlich die eine Backpack-Playlist-URL.
+
+- Der generische Enqueue-Endpoint `POST /api/services/deemix/queue` wird entfernt
+  (die Route bleibt nur als `GET`; ein POST liefert **405**).
+- Die Playlists-Seite zeigt keine deemix-Spalte/Buttons mehr; Einzel-Playlist-Pushes
+  entfallen. In der Deemix-Queue bleiben Retry und Delete (sie betreffen die eine
+  Zeile).
+- `deemix add <url>` (CLI) entfällt.
+- Der `DownloadGuarantor` re-submittet bei Zombie-Einträgen die eine Backpack-URL
+  (`ensure_queued`: Retry wenn terminal, No-Op wenn aktiv).
+
+**Consequences**:
+
+- Es gibt genau einen deemix-Download; Zombie-Remediation ist idempotent.
+- Breaking API: `POST /api/services/deemix/queue` existiert nicht mehr.
+  Regressionstest `deemix_queue_post_removed` asserted 405.
+- Bekannte Altlast (nicht Teil dieser Änderung): `analyze_gaps` liest Deezer-/Zombie-
+  Zustand noch per Einzel-Playlist-URL aus `deemix_downloads`, wo im konsolidierten
+  Modell nur die Backpack-Zeile steht. Die `NotOnDeezer`-/`ZombiePlaylist`-
+  Klassifikation pro Playlist greift dadurch praktisch nicht mehr — die track-genaue
+  Gap-Heilung (spotDL-Fallback) läuft derzeit ins Leere. Als Folge-Issue vorgemerkt.
+
+## ADR-065: music-api ist die Download-Autorität (ISRC-Orders statt Spotify-URLs)
+
+**Date**: 2026-09-23
+**Status**: Accepted (implemented)
+
+**Context**: deemix kann Spotify-Links nicht mehr auflösen — eine App mit nur
+Client-ID/Secret bekommt seit Februar 2026 den Playlist-Namen, aber nicht die
+Songs, und beide Spotify-Apps (MMM `dd7caf…` und deemix `e7b09b7a…`) liefen in
+einen app-weiten 429 mit langer Penalty. Dazu ist der deemix-ARL ein
+Free-Account (nur 128 kbps). Der Backpack-Transport hing damit an einer Kette,
+die nicht mehr trägt.
+
+**Decision**: Ein eigenständiger Dienst `music-api` (Rust/Axum/SQLite, läuft auf
+dem Musik-Host hinter Caddy) ist die Download-Autorität. MMM bestellt **ISRCs**;
+`music-api` löst sie über die öffentliche Deezer-API auf (ohne Auth, ohne
+Spotify), lädt über eine dedizierte deemix-Instanz (FLAC mit Bitrate-Fallback)
+und liefert die Dateien per ISRC zurück. MMM importiert und verlinkt sie.
+
+- MMM schickt keine Spotify-URLs mehr an deemix; die Backpack-Spotify-Playlist
+  bleibt als Bestand, wird aber nicht mehr submitted.
+- Der deemix-Auto-Pfad in `download_guarantor` ist entfernt; spotDL bleibt als
+  Fallback für `absent`-ISRCs.
+- Der Spotify-/ARL-Aufwand lebt nur noch auf dem Musik-Host.
+
+**Consequences**:
+
+- Kein Spotify-App-Quota und kein Post-Feb-Problem im Downloadpfad.
+- Die Qualität hängt am Deezer-Tier des ARL: Premium → FLAC + 320 + 128; Free →
+  nur 128. Was tatsächlich ankam, wird per ffprobe klassifiziert
+  (`sourceFormat` = `flac` | `mp3-320` | `mp3-128`).
+- Ein neuer Dienst bedeutet neue Betriebsfläche (systemd + Container + Caddy);
+  MMM braucht die `[music_api]`-Config.
+- Additive Migration 027 (`music_api_imports`) als MMM-seitiges Ledger.
+- Bestehende Spotify-Importe bleiben unberührt: die Abgrenzung „Spotify
+  importieren = MMM, herunterladen = music-api“ ersetzt die vorherige enge
+  Kopplung.
+
+## ADR-066: Restore/Streaming kommen aus dem Object Store — NAS-Pfade sind stillgelegt
+
+**Date**: 2026-09-24
+**Status**: Accepted (implemented)
+
+**Context**: Der Remote-Object-Store (ADR folgt den Store-Uploads, `[store]`,
+`files.content_hash`) machte die rsync/SSH-Backups auf die NAS überflüssig,
+aber die *Lese*-Wege hingen noch am NAS: `BackpackSync` zog fehlende Dateien per
+`rsync`, `POST /api/files/{id}/pull-from-backup` rsyncte, der Maintainer prüfte
+und entdeckte Backups per SSH, und ein `auto_backup`-Poller sowie ein
+Auto-Reconcile beim Start versuchten regelmäßig SSH-Verbindungen. Der NAS-Pfad
+war brüchig (stille Teilfehler, Verifikation nur über Pfad + Größe) und sollte
+weg.
+
+**Decision**: Alles Lesen kommt aus dem content-addressed Store; SSH wird im
+Standard-Betrieb nicht mehr angefasst.
+
+- `backup`-Location ist nur noch restorable, wenn sie `store:<sha256>` ist
+  (`store::store_hash`). Eine alte `host:/pfad`-Location wird übersprungen und
+  geloggt, nicht mehr per rsync behandelt.
+- `BackpackSync` holt Objekte via `store::restore_object` (`GET /objects/{hash}`)
+  und schreibt danach den **Comment aus der DB neu** (`compute_target_comment` →
+  `write_comment_to_file`) — das Ablegen des Comments beim Upload bleibt damit
+  verlustfrei.
+- `file_stream_handler` proxyt remote-only Dateien aus dem Store und reicht
+  `Range` durch (der Store ist range-fähig), damit Playback/ffmpeg weiterlaufen.
+- Der Maintainer fährt nur noch Scan-/Refresh-/Prune-/Traktor-Checks; die
+  SSH-Checks (Unbacked-Zähler, Backup-Discovery, Backup-Verify) und der
+  `auto_backup`-Poller sind entfernt, ebenso das Auto-Reconcile beim Start.
+- `dufs` (`:5000`, `-A`) auf dem Musik-Host ist gestoppt und startet nicht mehr.
+- **Vollständig entfernt**: das `backup`-Modul (`BackupEngine`), die Tasks
+  `BackupFolder`/`BackupWavs`/`BackupDiscovery`/`BackupVerify`/`AutoBackupCheck`,
+  die Endpunkte `/api/storage/backup/{id}`, `/api/storage/backup-wavs/{id}`,
+  `/api/storage/discover-backup/{id}`, `/api/storage/backfill-backup-sizes`,
+  `/api/backup/test`, `/api/backup/explore`, `/api/folders/{id}/backup`,
+  `/api/folders/{id}/auto-backup`, die zugehörigen DB-Helfer und das
+  Backup-Frontend (Spalten, Modal-Felder, Storage-Buttons). `scan_sources`
+  wandert in den regulären `PUT /api/folders/{id}`.
+
+**Consequences**:
+
+- Kein SSH/rsync mehr — Backup ist eine Hash-Tatsache.
+- Restore ist nur möglich, solange der Store das Objekt noch hat; eine
+  nicht-gesyncte Datei ist nicht restorable (bewusst, `auto_prune` prüft das).
+- `folders.backup_path` / `auto_backup` bleiben als deprecated Spalten in der DB
+  (keine Migration), werden aber von keiner API mehr gelesen oder geschrieben.
+
+## ADR-067: Backpack-Playlist-Transport entfernt
+
+**Date**: 2026-09-24
+**Status**: Accepted (implemented)
+**Supersedes**: ADR-060 (Backpack-Playlist als Spiegel), ADR-062/063 (Transport-Details)
+
+**Context**: Der Backpack wurde ursprünglich als **eine aggregierte Spotify-Playlist**
+materialisiert (Tags ∪ Subscriptions, Mirror statt Append) und genau diese eine Playlist
+an deemix übergeben — das war der Download-Pfad (ADR-060/062/063). Seit music-api die
+Download-Autorität per ISRC-Order ist (ADR-065), braucht niemand mehr die Spotify-Playlist;
+sie ist reiner Ballast: ein Coordinator, Settings-Sentinels, eine eigene Seite, eigene
+Endpunkte, Spotify-Rate-Limits (429) und ein Mirror, der bei jeder Membership-Änderung
+nachgezogen werden muss.
+
+**Decision**: Der **Transport** wird komplett entfernt. Die **Keep-Semantik bleibt**:
+Backpack ist weiterhin „Tags ∪ aktive Subscriptions", und `prune` schützt genau diese
+Menge (`get_backpack_file_ids`). Der `tags.backpack`-Schalter auf der Tags-Seite bleibt
+das Steuerelement dafür.
+
+Entfernt:
+- Endpunkte `GET /api/backpack`, `POST /api/backpack/push`, `POST /api/backpack/pull`,
+  `POST /api/backpack/sync-enabled` sowie die **Spotify-Transport-Karten** der
+  Backpack-Seite (Playlist-Status, Push, music-api-Pull).
+- Aus `src/backpack.rs`: Materialisierung, `BackpackSpotifyOps`/`BackpackDeemixOps`,
+  `MaterializeOptions/Outcome`, `create_backpack_playlist`, `backpack_signature`,
+  `resolve_backpack_track_uris`, `backpack_status`, `BackpackSyncCoordinator`,
+  `start_backpack_coordinator`, `mark_backpack_dirty`, Push-Status-Funktionen.
+- `AppState.backpack_coordinator`, der Coordinator-Spawn und alle `mark_backpack_dirty`-
+  Aufrufe (Tags-/Playlist-/Track-Handler, Poller, Global-Poller).
+- Die `settings`-Keys `backpack.{playlist_id,playlist_url,signature,dirty_at,last_push_*}`.
+
+Geblieben (Keep/Datei-Pflege):
+- Die **Backpack-Seite** — sie ist die Steuerung für „das will ich auf dem Mac
+  haben": Quellen (backpack-Tags ∪ aktive Subscriptions), Belegung, File-Sync-Schalter
+  und Sync All. Der Transport ist raus, die Keep-/Format-Pflege bleibt.
+- `get_backpack_track_ids`/`get_backpack_file_ids`/`get_backpack_family_file_ids`
+  (prune-Schutz, Backpack-Pull-Kandidaten).
+- `backpack_sync_enabled` (+ `set_backpack_sync_enabled`), jetzt über
+  `GET`/`PUT /api/storage/settings/backpack-sync`, und `POST /api/storage/sync-backpack`
+  für den Datei-Sync (fehlende Dateien aus dem Store holen + redundante Formate aufräumen,
+  z. B. FLAC löschen, wenn `stem.m4a` da ist — Format-Priorität ist konfigurierbar).
+
+**Consequences**:
+- Keine Spotify-Playlist mehr; die bestehende Playlist muss **manuell** in Spotify gelöscht
+  werden (der Transport-Code, der das könnte, ist weg).
+- Der File-Sync-Schalter ist wieder in der UI (Backpack-Seite), jetzt über
+  `PUT /api/storage/settings/backpack-sync`.
+- Der music-api-Order-Fortschritt (`demand/ordered/imported`) hatte nur auf der Backpack-Seite
+  eine Anzeige; aktuell ohne UI (Follow-up: kleiner Status-Endpunkt / Karte auf der Services-Seite).
+
+
+## ADR-068: music-api demand covers the whole library, Backpack first
+
+**Date**: 2026-09-24
+**Status**: Accepted (implemented)
+**Relates**: ADR-065 (music-api as download authority), ADR-067 (Backpack transport removed)
+
+**Context**: Der music-api-Consumer bestellte per `demand_isrcs` nur ISRCs von
+**Backpack**-Tracks ohne Datei. Alles andere blieb unangetastet, auch wenn es
+nie als Datei ankam. Gleichzeitig soll die Bibliothek langfristig vollständig
+im Object Store (`.200`) vorliegen. Ein reiner Backpack-Demand lässt den Rest
+für immer liegen.
+
+**Decision**: Die Demand ist die **gesamte Bibliothek** — jeder `service_track`
+mit ISRC, der keine verlinkte Datei und keine Ledger-Zeile hat. Backpack-Tracks
+werden aber **zuerst** bestellt (`demand_isrcs` gibt erst die Backpack-ISRCs,
+dann den Rest, jeweils gedeckelt durch `batch_size`). Der Nutzer wartet so nie
+hinter dem Backlog.
+
+**Consequences**:
+- Die Demand ist groß (Stand 2026-09-24: ~46k ISRCs, davon ~3.4k Backpack).
+  Der Store/`.200` braucht entsprechend Platz; `batch_size` und das
+  Consumer-Intervall bestimmen das Tempo („nach und nach").
+- `demand_count` zählt jetzt Priority + Backlog zusammen.
+- Kein neues Schema, keine neuen Endpunkte — nur die Auswahl in
+  `src/db/music_api.rs` (`demand_isrcs`, neue `missing_track_isrcs`).

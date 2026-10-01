@@ -1,14 +1,12 @@
 //! Storage/backup/prune-related database queries.
 
 use std::collections::HashSet;
-use std::path::Path;
 
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Pool, Row, Sqlite};
 use tracing::info;
-use unicode_normalization::UnicodeNormalization;
 
 use super::types::*;
 
@@ -44,6 +42,25 @@ pub struct PullCandidate {
     pub isrc: Option<String>,
 }
 
+/// A local file that is not yet backed up to the remote object store.
+///
+/// Used by the `StoreSync` task to decide what to canonicalise, hash and upload.
+/// A file qualifies when it has a `local` location and no `backup` location
+/// pointing at the store (`path LIKE 'store:%'`). `content_hash` is `None` until
+/// the backfill step has canonicalised the file.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreBackupCandidate {
+    pub file_id: i64,
+    pub file_path: String,
+    pub file_type: String,
+    pub file_size: i64,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub isrc: Option<String>,
+    pub content_hash: Option<String>,
+}
+
 /// Size statistics for backpack-tagged files — used by the Backpack page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,16 +89,6 @@ pub struct ServiceConfig {
     pub remote_tracks_count: i64,
     pub created_at: i64,
     pub updated_at: i64,
-}
-
-/// Result of a backup discovery scan
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BackupDiscoveryResult {
-    pub files_on_backup: usize,
-    pub already_tracked: usize,
-    pub newly_discovered: usize,
-    pub missing_from_backup: Vec<(i64, String)>,
 }
 
 // ============================================================================
@@ -278,23 +285,6 @@ pub async fn get_file_locations(pool: &Pool<Sqlite>, file_id: i64) -> Result<Vec
 // Backup
 // ============================================================================
 
-/// Get files in a folder that have no backup location recorded
-pub async fn get_unbacked_up_files(pool: &Pool<Sqlite>, folder_id: i64) -> Result<Vec<File>> {
-    let files = sqlx::query_as::<_, File>(
-        "SELECT f.* FROM files f
-         JOIN folders fol ON fol.folder_path = substr(f.file_path, 1, length(fol.folder_path))
-         WHERE fol.id = ?
-           AND f.id NOT IN (
-               SELECT file_id FROM file_locations WHERE location_type = 'backup'
-           )
-         ORDER BY f.file_path",
-    )
-    .bind(folder_id)
-    .fetch_all(pool)
-    .await?;
-    Ok(files)
-}
-
 /// Record a successful backup result
 pub async fn record_backup_result(
     pool: &Pool<Sqlite>,
@@ -307,165 +297,6 @@ pub async fn record_backup_result(
         set_file_location(pool, file_id, "backup", backup_path, file_size).await?;
     }
     Ok(())
-}
-
-/// Discover files that exist on backup (NAS) but not in the local DB.
-/// Called by the BackupDiscovery background task.
-pub async fn discover_backup_files(
-    pool: &Pool<Sqlite>,
-    folder_id: i64,
-    remote_files: &[String], // full relative paths from backup
-    remote_base: &str,
-) -> Result<BackupDiscoveryResult> {
-    // 1. Get the folder's local path
-    let folder_path: String = sqlx::query_scalar("SELECT folder_path FROM folders WHERE id = ?")
-        .bind(folder_id)
-        .fetch_one(pool)
-        .await?;
-
-    let mut result = BackupDiscoveryResult {
-        files_on_backup: remote_files.len(),
-        already_tracked: 0,
-        newly_discovered: 0,
-        missing_from_backup: vec![],
-    };
-
-    for rel_path in remote_files {
-        // Normalize to NFC to match DB (NAS stores NFD, DB stores NFC)
-        let rel_path: String = rel_path.nfc().collect();
-        // Reconstruct local path: folder_path + / + rel_path
-        let local_path = format!("{}/{}", folder_path.trim_end_matches('/'), rel_path);
-
-        // Check if this file exists in DB
-        let existing: Option<File> = sqlx::query_as("SELECT * FROM files WHERE file_path = ?")
-            .bind(&local_path)
-            .fetch_optional(pool)
-            .await?;
-
-        if let Some(_f) = existing {
-            // File exists in DB but may or may not have backup location
-            let has_backup: bool = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM file_locations WHERE file_id = ? AND location_type = 'backup'",
-            )
-            .bind(_f.id)
-            .fetch_one(pool)
-            .await
-            .unwrap_or(0)
-                > 0;
-
-            if !has_backup {
-                // Create backup location
-                let remote_path = format!("{}/{}", remote_base.trim_end_matches('/'), rel_path);
-                let _ = set_file_location(pool, _f.id, "backup", &remote_path, _f.file_size).await;
-                result.already_tracked += 1;
-            } else {
-                result.already_tracked += 1;
-            }
-        } else {
-            // File on backup but NOT in DB — create backup-only record
-            let path = std::path::Path::new(&local_path);
-            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let file_type = match ext.to_lowercase().as_str() {
-                "flac" => "flac",
-                "m4a" if filename.ends_with(".stem.m4a") => "stem.m4a",
-                "m4a" => "m4a",
-                "wav" => "wav",
-                "mp3" => "mp3",
-                _ => ext,
-            };
-
-            let file_size: i64 = 0; // Will be updated on first scan
-            let now = Utc::now().timestamp();
-
-            let _ = sqlx::query(
-                "INSERT INTO files (file_path, file_hash, file_type, file_size, last_modified, last_scanned, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(&local_path)
-            .bind(format!("backup-only-{}", file_size)) // sentinel hash
-            .bind(file_type)
-            .bind(file_size)
-            .bind(now) // last_modified = now (unknown)
-            .bind(now) // last_scanned = now
-            .bind(now)
-            .bind(now)
-            .execute(pool)
-            .await?;
-
-            // Get the new file ID
-            if let Ok(Some(new_file)) = crate::db::get_file_by_path(pool, &local_path).await {
-                let remote_path = format!("{}/{}", remote_base.trim_end_matches('/'), rel_path);
-                let _ =
-                    set_file_location(pool, new_file.id, "backup", &remote_path, file_size).await;
-                result.newly_discovered += 1;
-            }
-        }
-    }
-
-    Ok(result)
-}
-
-/// Remove file_locations.backup entries for files that no longer exist on NAS.
-///
-/// `remote_files` should be paths relative to the backup root (e.g. "Artist - Title.flac"),
-/// already normalized to NFC by the caller.
-/// Returns the number of stale entries removed.
-pub async fn cleanup_stale_backup_entries(
-    pool: &Pool<Sqlite>,
-    folder_id: i64,
-    remote_files: &[String],
-) -> Result<usize> {
-    // Build NFC-normalized set of NAS filenames (just the filename, not full path)
-    let nas_filenames: std::collections::HashSet<String> = remote_files
-        .iter()
-        .map(|p| {
-            std::path::Path::new(p)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .nfc()
-                .collect::<String>()
-        })
-        .collect();
-
-    // Get all files with backup entries for this folder
-    #[derive(sqlx::FromRow)]
-    struct BackupEntry {
-        file_id: i64,
-        path: String,
-    }
-
-    let backed_up: Vec<BackupEntry> = sqlx::query_as(
-        "SELECT fl.file_id, fl.path FROM file_locations fl
-         JOIN files f ON f.id = fl.file_id
-         JOIN folders fol ON fol.folder_path = substr(f.file_path, 1, length(fol.folder_path))
-         WHERE fl.location_type = 'backup' AND fol.id = ?",
-    )
-    .bind(folder_id)
-    .fetch_all(pool)
-    .await?;
-
-    let mut removed = 0usize;
-    for entry in &backed_up {
-        let filename = std::path::Path::new(&entry.path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        if !nas_filenames.contains(&filename) {
-            sqlx::query(
-                "DELETE FROM file_locations WHERE file_id = ? AND location_type = 'backup'",
-            )
-            .bind(entry.file_id)
-            .execute(pool)
-            .await?;
-            removed += 1;
-        }
-    }
-
-    Ok(removed)
 }
 
 // ============================================================================
@@ -495,178 +326,9 @@ pub async fn get_verify_backup_candidates(
     Ok(records)
 }
 
-/// Verify a sample of backup records for a folder using SSH.
-/// Returns (verified, missing, errors).
-pub async fn verify_backup_records(
-    pool: &Pool<Sqlite>,
-    folder_id: i64,
-    engine: &crate::backup::BackupEngine,
-    sample_size: usize,
-) -> Result<(usize, usize, usize)> {
-    let candidates = get_verify_backup_candidates(pool, folder_id, sample_size).await?;
-    let mut verified = 0usize;
-    let mut missing = 0usize;
-    let mut errors = 0usize;
-
-    let mut backfilled = 0usize;
-    for (file_id, loc_id, file_size, remote_path) in &candidates {
-        if *file_size <= 0 {
-            // Zero-size record — can't verify by comparison.
-            // Resolve by checking remote directly: if the file exists, update
-            // the record with the real size. If not, remove the stale record.
-            match engine.remote_file_size(remote_path).await {
-                Ok(Some(actual_size)) if actual_size > 0 => {
-                    let _ = sqlx::query(
-                        "UPDATE file_locations SET file_size = ?, last_verified = ? WHERE id = ?",
-                    )
-                    .bind(actual_size)
-                    .bind(Utc::now().timestamp())
-                    .bind(loc_id)
-                    .execute(pool)
-                    .await;
-                    backfilled += 1;
-                }
-                Ok(_) => {
-                    tracing::warn!(
-                        "Backup verification: file #{} at {} not found on NAS (zero-size record), removing",
-                        file_id,
-                        remote_path
-                    );
-                    let _ = sqlx::query(
-                        "DELETE FROM file_locations WHERE id = ? AND location_type = 'backup'",
-                    )
-                    .bind(loc_id)
-                    .execute(pool)
-                    .await;
-                    missing += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Backup verification: failed to resolve zero-size file #{}: {}",
-                        file_id,
-                        e
-                    );
-                    errors += 1;
-                }
-            }
-            continue;
-        }
-        match engine.verify_file(remote_path, *file_size).await {
-            Ok(true) => {
-                let _ = sqlx::query("UPDATE file_locations SET last_verified = ? WHERE id = ?")
-                    .bind(Utc::now().timestamp())
-                    .bind(loc_id)
-                    .execute(pool)
-                    .await;
-                verified += 1;
-            }
-            Ok(false) => {
-                tracing::warn!(
-                    "Backup verification: file #{} at {} not found on NAS, removing backup record",
-                    file_id,
-                    remote_path
-                );
-                let _ = sqlx::query(
-                    "DELETE FROM file_locations WHERE id = ? AND location_type = 'backup'",
-                )
-                .bind(loc_id)
-                .execute(pool)
-                .await;
-                missing += 1;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Backup verification: failed to verify file #{}: {}",
-                    file_id,
-                    e
-                );
-                errors += 1;
-            }
-        }
-    }
-    if backfilled > 0 {
-        tracing::info!(
-            "Backup verification: backfilled {} zero-size records with actual remote sizes",
-            backfilled
-        );
-    }
-
-    Ok((verified, missing, errors))
-}
-
 // ============================================================================
 // Backup Size Backfill
 // ============================================================================
-
-/// A record needing size backfill.
-#[derive(Debug, FromRow)]
-pub struct BackfillRecord {
-    pub file_id: i64,
-    pub location_id: i64,
-    pub remote_path: String,
-}
-
-/// Get file_locations.backup records that have file_size=0 or NULL.
-pub async fn get_records_needing_backfill(pool: &Pool<Sqlite>) -> Result<Vec<BackfillRecord>> {
-    let records = sqlx::query_as::<_, BackfillRecord>(
-        "SELECT fl.file_id, fl.id AS location_id, fl.path AS remote_path
-         FROM file_locations fl
-         WHERE fl.location_type = 'backup' AND (fl.file_size = 0 OR fl.file_size IS NULL)
-         ORDER BY fl.file_id",
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(records)
-}
-
-/// For backup records with file_size=0, attempt to get the actual
-/// remote file size via SSH and update the record.
-/// Returns (total_checked, fixed, failed).
-pub async fn backfill_backup_sizes(
-    pool: &Pool<Sqlite>,
-    engine: &crate::backup::BackupEngine,
-) -> Result<(usize, usize, usize)> {
-    let records = get_records_needing_backfill(pool).await?;
-    let total = records.len();
-    let mut fixed = 0usize;
-    let mut failed = 0usize;
-
-    for record in &records {
-        match engine.remote_file_size(&record.remote_path).await {
-            Ok(Some(size)) if size > 0 => {
-                let _ = sqlx::query(
-                    "UPDATE file_locations SET file_size = ?, last_verified = ? WHERE id = ?",
-                )
-                .bind(size)
-                .bind(Utc::now().timestamp())
-                .bind(record.location_id)
-                .execute(pool)
-                .await;
-                fixed += 1;
-            }
-            Ok(_) => {
-                tracing::warn!(
-                    "Backfill: file #{} remote size is 0 or missing",
-                    record.file_id
-                );
-                failed += 1;
-            }
-            Err(e) => {
-                tracing::warn!("Backfill: failed to stat file #{}: {}", record.file_id, e);
-                failed += 1;
-            }
-        }
-    }
-
-    tracing::info!(
-        "Backfill complete: {}/{} fixed, {}/{} failed",
-        fixed,
-        total,
-        failed,
-        total
-    );
-    Ok((total, fixed, failed))
-}
 
 /// Clear all backup locations for files in a folder (for re-backup)
 pub async fn clear_backup_status(pool: &Pool<Sqlite>, folder_id: i64) -> Result<()> {
@@ -745,26 +407,91 @@ pub async fn get_files_by_source(pool: &Pool<Sqlite>, source_file_id: i64) -> Re
 }
 
 // ============================================================================
+// Remote object store locations
+// ============================================================================
+
+/// Record that `file_id` is backed up in the remote store under `hash`.
+///
+/// Writes the `backup` location as `store:<hash>` with the object size, marking
+/// it verified now. The upsert also overwrites a legacy rsync row, replacing the
+/// untrustworthy path with the hash-backed one.
+pub async fn upsert_store_backup_location(
+    pool: &Pool<Sqlite>,
+    file_id: i64,
+    hash: &str,
+    size: i64,
+) -> Result<()> {
+    set_file_location(pool, file_id, "backup", &format!("store:{hash}"), size).await
+}
+
+/// Remove a `store:` backup location for `file_id` (the object is gone).
+///
+/// Only touches rows whose path starts with `store:` — a legacy rsync row is
+/// left alone, since it is not the store's record to delete.
+pub async fn delete_store_backup_location(pool: &Pool<Sqlite>, file_id: i64) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM file_locations
+         WHERE file_id = ? AND location_type = 'backup' AND path LIKE 'store:%'",
+    )
+    .bind(file_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Local files that still need uploading to the store, oldest id first.
+///
+/// A candidate has a `local` location and no `backup` location with a `store:`
+/// path. `content_hash` may be `NULL` — the sync task backfills it first.
+pub async fn local_files_needing_store_backup(
+    pool: &Pool<Sqlite>,
+    limit: i64,
+) -> Result<Vec<StoreBackupCandidate>> {
+    let rows = sqlx::query_as::<_, StoreBackupCandidate>(
+        "SELECT f.id AS file_id, f.file_path, f.file_type, f.file_size,
+                f.title, f.artist, f.isrc, f.content_hash
+         FROM files f
+         JOIN file_locations fl ON fl.file_id = f.id AND fl.location_type = 'local'
+         WHERE NOT EXISTS (
+             SELECT 1 FROM file_locations b
+             WHERE b.file_id = f.id
+               AND b.location_type = 'backup'
+               AND b.path LIKE 'store:%'
+         )
+         ORDER BY f.id
+         LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+// ============================================================================
 // Prune
 // ============================================================================
 
-/// Get all files that can be safely pruned (backed up, not in the Backpack
-/// set, and currently on local disk).
+/// Get all files that can be safely pruned (backed up to the object store, not
+/// in the Backpack set, and currently on local disk).
 ///
-/// A file is safe to delete if: backed up + local + not in the Backpack.
-/// No other gates — the user trusts backup.
+/// A file is safe to delete if: backed up **to the store** + local + not in the
+/// Backpack. No other gates — the user trusts the store, which verifies the
+/// SHA-256 of every object, so `store:<hash>` is a real hash fact. Legacy rsync
+/// `backup` rows (any other path) are deliberately *not* trusted here: they only
+/// proved path + size, which is exactly what made the old backup brittle.
 ///
 /// Two-step approach (the Backpack set is resolved via the single concept in
 /// `crate::backpack` — union of subscribed playlists + backpack tags):
-/// 1. Get all backed-up+local file IDs (fast, uses indexes)
+/// 1. Get all store-backed-up+local file IDs (fast, uses indexes)
 /// 2. Get all file IDs with backpack tags via file_resolved_tags
 /// 3. Subtract in Rust, then fetch details for remaining candidates
 pub async fn get_prune_candidates(pool: &Pool<Sqlite>) -> Result<Vec<PruneCandidate>> {
-    // Step 1: backed-up file IDs (fast — file_locations has indexes)
+    // Step 1: store-backed-up file IDs (fast — file_locations has indexes)
     let backed_up: Vec<i64> = sqlx::query_scalar(
         "SELECT DISTINCT fl.file_id FROM file_locations fl
          JOIN files f ON f.id = fl.file_id
          WHERE fl.location_type = 'backup'
+           AND fl.path LIKE 'store:%'
            AND EXISTS (
                SELECT 1 FROM file_locations fl2
                WHERE fl2.file_id = f.id AND fl2.location_type = 'local'
@@ -1126,6 +853,7 @@ mod tests {
                 youtube_id TEXT,
                 source_of INTEGER,
                 stem_type TEXT,
+                content_hash TEXT,
                 last_verified_local INTEGER,
                 folder_id INTEGER,
                 created_at INTEGER NOT NULL DEFAULT 0,
@@ -1445,7 +1173,7 @@ mod tests {
         set_file_location(&pool, 1, "local", "/test/song.flac", 100)
             .await
             .unwrap();
-        set_file_location(&pool, 1, "backup", "/backup/test/song.flac", 100)
+        set_file_location(&pool, 1, "backup", "store:1111111111111111111111111111111111111111111111111111111111111111", 100)
             .await
             .unwrap();
 
@@ -1473,14 +1201,14 @@ mod tests {
         let pool = test_db().await;
         insert_file(&pool, 1, "/test/song.flac", "flac", 100, None, None, None).await;
 
-        record_backup_result(&pool, 1, true, 100, "/backup/test/song.flac")
+        record_backup_result(&pool, 1, true, 100, "store:1111111111111111111111111111111111111111111111111111111111111111")
             .await
             .unwrap();
 
         let locations = get_file_locations(&pool, 1).await.unwrap();
         assert_eq!(locations.len(), 1);
         assert_eq!(locations[0].location_type, "backup");
-        assert_eq!(locations[0].path, "/backup/test/song.flac");
+        assert_eq!(locations[0].path, "store:1111111111111111111111111111111111111111111111111111111111111111");
     }
 
     #[tokio::test]
@@ -1488,7 +1216,7 @@ mod tests {
         let pool = test_db().await;
         insert_file(&pool, 1, "/test/song.flac", "flac", 100, None, None, None).await;
 
-        record_backup_result(&pool, 1, false, 0, "/backup/test/song.flac")
+        record_backup_result(&pool, 1, false, 0, "store:1111111111111111111111111111111111111111111111111111111111111111")
             .await
             .unwrap();
 
@@ -1583,7 +1311,7 @@ mod tests {
         set_file_location(&pool, fid, "local", "/test/song.flac", 1000)
             .await
             .unwrap();
-        set_file_location(&pool, fid, "backup", "/backup/test/song.flac", 1000)
+        set_file_location(&pool, fid, "backup", "store:1111111111111111111111111111111111111111111111111111111111111111", 1000)
             .await
             .unwrap();
 
@@ -1610,7 +1338,7 @@ mod tests {
         set_file_location(&pool, fid, "local", "/test/song.flac", 1000)
             .await
             .unwrap();
-        set_file_location(&pool, fid, "backup", "/backup/test/song.flac", 1000)
+        set_file_location(&pool, fid, "backup", "store:1111111111111111111111111111111111111111111111111111111111111111", 1000)
             .await
             .unwrap();
 
@@ -1665,7 +1393,7 @@ mod tests {
         )
         .await;
         // Backed up but NOT local
-        set_file_location(&pool, fid, "backup", "/backup/test/song.flac", 1000)
+        set_file_location(&pool, fid, "backup", "store:1111111111111111111111111111111111111111111111111111111111111111", 1000)
             .await
             .unwrap();
 
@@ -1695,7 +1423,7 @@ mod tests {
         set_file_location(&pool, fid, "local", "/test/song.flac", 1000)
             .await
             .unwrap();
-        set_file_location(&pool, fid, "backup", "/backup/test/song.flac", 1000)
+        set_file_location(&pool, fid, "backup", "store:1111111111111111111111111111111111111111111111111111111111111111", 1000)
             .await
             .unwrap();
 
@@ -1738,7 +1466,7 @@ mod tests {
         set_file_location(&pool, wav_id, "local", "/test/sub/vocals.wav", 500)
             .await
             .unwrap();
-        set_file_location(&pool, wav_id, "backup", "/backup/sub/vocals.wav", 500)
+        set_file_location(&pool, wav_id, "backup", "store:2222222222222222222222222222222222222222222222222222222222222222", 500)
             .await
             .unwrap();
 
@@ -1772,7 +1500,7 @@ mod tests {
         set_file_location(&pool, wav_id, "local", "/test/sub/vocals.wav", 500)
             .await
             .unwrap();
-        set_file_location(&pool, wav_id, "backup", "/backup/sub/vocals.wav", 500)
+        set_file_location(&pool, wav_id, "backup", "store:2222222222222222222222222222222222222222222222222222222222222222", 500)
             .await
             .unwrap();
         // No source_of set — still a candidate if backed up + local
@@ -1816,7 +1544,7 @@ mod tests {
         set_file_location(&pool, flac, "local", "/test/song.flac", 1000)
             .await
             .unwrap();
-        set_file_location(&pool, flac, "backup", "/backup/test/song.flac", 1000)
+        set_file_location(&pool, flac, "backup", "store:1111111111111111111111111111111111111111111111111111111111111111", 1000)
             .await
             .unwrap();
 
@@ -1826,6 +1554,117 @@ mod tests {
             candidates[0].has_stem_variant,
             "FLAC with same-ISRC stem should have stem variant"
         );
+    }
+
+    // ── Legacy rsync backups are NOT trusted ───────────────────
+
+    #[tokio::test]
+    async fn test_prune_candidates_ignores_legacy_rsync_backup() {
+        let pool = test_db().await;
+        let fid = insert_file(
+            &pool,
+            1,
+            "/test/song.flac",
+            "flac",
+            1000,
+            Some("ISRC-1"),
+            Some(120.0),
+            None,
+        )
+        .await;
+        set_file_location(&pool, fid, "local", "/test/song.flac", 1000)
+            .await
+            .unwrap();
+        // A legacy rsync/SSH `backup` row (not a store object).
+        set_file_location(&pool, fid, "backup", "/backup/test/song.flac", 1000)
+            .await
+            .unwrap();
+
+        let candidates = get_prune_candidates(&pool).await.unwrap();
+        assert_eq!(
+            candidates.len(),
+            0,
+            "a legacy rsync backup row must not authorise deletion"
+        );
+
+        // Once a store location is recorded, the file becomes a candidate.
+        upsert_store_backup_location(&pool, fid, "abc123", 1000)
+            .await
+            .unwrap();
+        let candidates = get_prune_candidates(&pool).await.unwrap();
+        assert_eq!(candidates.len(), 1, "store-backed-up file is a candidate");
+        assert_eq!(candidates[0].file_id, fid);
+    }
+
+    // ── Store backup locations ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_store_backup_location_upsert_and_delete() {
+        let pool = test_db().await;
+        insert_file(&pool, 1, "/test/song.flac", "flac", 1000, None, None, None).await;
+
+        upsert_store_backup_location(&pool, 1, "deadbeef", 1000)
+            .await
+            .unwrap();
+        let locations = get_file_locations(&pool, 1).await.unwrap();
+        let backup = locations
+            .iter()
+            .find(|l| l.location_type == "backup")
+            .expect("store backup recorded");
+        assert_eq!(backup.path, "store:deadbeef");
+        assert_eq!(backup.file_size, Some(1000));
+
+        delete_store_backup_location(&pool, 1).await.unwrap();
+        let locations = get_file_locations(&pool, 1).await.unwrap();
+        assert!(
+            !locations.iter().any(|l| l.location_type == "backup"),
+            "store backup record removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_store_backup_location_leaves_legacy_row() {
+        let pool = test_db().await;
+        insert_file(&pool, 1, "/test/song.flac", "flac", 1000, None, None, None).await;
+        set_file_location(&pool, 1, "backup", "/backup/test/song.flac", 1000)
+            .await
+            .unwrap();
+
+        delete_store_backup_location(&pool, 1).await.unwrap();
+        let locations = get_file_locations(&pool, 1).await.unwrap();
+        assert_eq!(locations.len(), 1, "the legacy rsync row is left alone");
+        assert_eq!(locations[0].path, "/backup/test/song.flac");
+    }
+
+    #[tokio::test]
+    async fn test_local_files_needing_store_backup() {
+        let pool = test_db().await;
+        // File 1: local, no store backup → candidate.
+        insert_file(&pool, 1, "/test/a.flac", "flac", 1000, Some("ISRC-1"), None, None).await;
+        set_file_location(&pool, 1, "local", "/test/a.flac", 1000)
+            .await
+            .unwrap();
+        // File 2: local + store backup → excluded.
+        insert_file(&pool, 2, "/test/b.flac", "flac", 2000, None, None, None).await;
+        set_file_location(&pool, 2, "local", "/test/b.flac", 2000)
+            .await
+            .unwrap();
+        upsert_store_backup_location(&pool, 2, "abc", 2000)
+            .await
+            .unwrap();
+        // File 3: backup only (no local) → excluded.
+        insert_file(&pool, 3, "/test/c.flac", "flac", 3000, None, None, None).await;
+        set_file_location(&pool, 3, "backup", "/backup/c.flac", 3000)
+            .await
+            .unwrap();
+
+        let candidates = local_files_needing_store_backup(&pool, 100)
+            .await
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].file_id, 1);
+        assert_eq!(candidates[0].file_path, "/test/a.flac");
+        assert!(candidates[0].content_hash.is_none());
     }
 
     // ── Storage Status ─────────────────────────────────────────────────
@@ -1849,7 +1688,7 @@ mod tests {
         set_file_location(&pool, 1, "local", "/test/track.stem.m4a", 5000)
             .await
             .unwrap();
-        set_file_location(&pool, 1, "backup", "/backup/track.stem.m4a", 5000)
+        set_file_location(&pool, 1, "backup", "store:3333333333333333333333333333333333333333333333333333333333333333", 5000)
             .await
             .unwrap();
 
@@ -1867,13 +1706,13 @@ mod tests {
         set_file_location(&pool, 2, "local", "/test/track.flac", 10000)
             .await
             .unwrap();
-        set_file_location(&pool, 2, "backup", "/backup/track.flac", 10000)
+        set_file_location(&pool, 2, "backup", "store:4444444444444444444444444444444444444444444444444444444444444444", 10000)
             .await
             .unwrap();
 
         // Insert a backup-only file (not local)
         insert_file(&pool, 3, "/test/old.flac", "flac", 2000, None, None, None).await;
-        set_file_location(&pool, 3, "backup", "/backup/old.flac", 2000)
+        set_file_location(&pool, 3, "backup", "store:5555555555555555555555555555555555555555555555555555555555555555", 2000)
             .await
             .unwrap();
 
@@ -1906,56 +1745,6 @@ mod tests {
     // ── Unbacked-up files ───────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_get_unbacked_up_files() {
-        let pool = test_db().await;
-
-        // Insert a folder with path matching our test files
-        sqlx::query(
-            "INSERT INTO folders (id, folder_path, active, created_at, updated_at)
-             VALUES (1, '/test', 1, 0, 0)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        // File in the folder, not backed up
-        insert_file(&pool, 1, "/test/song.flac", "flac", 1000, None, None, None).await;
-        set_file_location(&pool, 1, "local", "/test/song.flac", 1000)
-            .await
-            .unwrap();
-
-        // File in the folder, backed up
-        insert_file(
-            &pool,
-            2,
-            "/test/backed.flac",
-            "flac",
-            2000,
-            None,
-            None,
-            None,
-        )
-        .await;
-        set_file_location(&pool, 2, "local", "/test/backed.flac", 2000)
-            .await
-            .unwrap();
-        set_file_location(&pool, 2, "backup", "/backup/test/backed.flac", 2000)
-            .await
-            .unwrap();
-
-        // File outside the folder
-        insert_file(&pool, 3, "/other/song.flac", "flac", 3000, None, None, None).await;
-
-        let unbacked = get_unbacked_up_files(&pool, 1).await.unwrap();
-        assert_eq!(
-            unbacked.len(),
-            1,
-            "only the file without backup should appear"
-        );
-        assert_eq!(unbacked[0].id, 1);
-    }
-
-    #[tokio::test]
     async fn test_clear_backup_status() {
         let pool = test_db().await;
 
@@ -1968,7 +1757,7 @@ mod tests {
         .unwrap();
 
         insert_file(&pool, 1, "/test/song.flac", "flac", 1000, None, None, None).await;
-        set_file_location(&pool, 1, "backup", "/backup/test/song.flac", 1000)
+        set_file_location(&pool, 1, "backup", "store:1111111111111111111111111111111111111111111111111111111111111111", 1000)
             .await
             .unwrap();
         set_file_location(&pool, 1, "local", "/test/song.flac", 1000)
@@ -2117,74 +1906,6 @@ mod tests {
         assert_eq!(expiry, Some(9999999999));
     }
 
-    #[tokio::test]
-    async fn test_discover_backup_files_new_files() {
-        let pool = test_db().await;
-
-        sqlx::query(
-            "INSERT INTO folders (id, folder_path, active, created_at, updated_at)
-             VALUES (1, '/music/stems', 1, 0, 0)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let remote_files = vec!["track1.flac".to_string(), "track2.stem.m4a".to_string()];
-
-        let result = discover_backup_files(&pool, 1, &remote_files, "/backup")
-            .await
-            .unwrap();
-        assert_eq!(result.files_on_backup, 2);
-        assert_eq!(
-            result.newly_discovered, 2,
-            "both files should be newly discovered"
-        );
-        assert_eq!(result.already_tracked, 0);
-
-        // Verify files were created
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(count, 2);
-    }
-
-    #[tokio::test]
-    async fn test_discover_backup_files_already_tracked() {
-        let pool = test_db().await;
-
-        sqlx::query(
-            "INSERT INTO folders (id, folder_path, active, created_at, updated_at)
-             VALUES (1, '/music', 1, 0, 0)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        // Existing file in DB
-        insert_file(&pool, 1, "/music/song.flac", "flac", 500, None, None, None).await;
-
-        let remote_files = vec!["song.flac".to_string()];
-
-        let result = discover_backup_files(&pool, 1, &remote_files, "/backup")
-            .await
-            .unwrap();
-        assert_eq!(
-            result.already_tracked, 1,
-            "file already in DB should be tracked"
-        );
-        assert_eq!(result.newly_discovered, 0);
-
-        // Should have created a backup file location
-        let locations = get_file_locations(&pool, 1).await.unwrap();
-        assert_eq!(
-            locations.len(),
-            1,
-            "backup location should have been created"
-        );
-        assert_eq!(locations[0].location_type, "backup");
-    }
-
     // ── File Deletion ───────────────────────────────────────────────────
 
     #[tokio::test]
@@ -2306,7 +2027,7 @@ mod tests {
         )
         .await;
 
-        set_file_location(&pool, 1, "backup", "/backup/test/song.flac", 1000)
+        set_file_location(&pool, 1, "backup", "store:1111111111111111111111111111111111111111111111111111111111111111", 1000)
             .await
             .unwrap();
         set_file_location(&pool, 2, "backup", "/backup/other/track.flac", 2000)
@@ -2321,58 +2042,4 @@ mod tests {
 
     // ── Backup Size Backfill ───────────────────────────────────────────────
 
-    #[tokio::test]
-    async fn test_get_records_needing_backfill_finds_zero_size() {
-        let pool = test_db().await;
-
-        insert_file(&pool, 1, "/test/song.flac", "flac", 0, None, None, None).await;
-        set_file_location(&pool, 1, "backup", "/backup/test/song.flac", 0)
-            .await
-            .unwrap();
-
-        let records = get_records_needing_backfill(&pool).await.unwrap();
-        assert_eq!(records.len(), 1, "should find the zero-size record");
-        assert_eq!(records[0].file_id, 1);
-        assert_eq!(records[0].remote_path, "/backup/test/song.flac");
-    }
-
-    #[tokio::test]
-    async fn test_get_records_needing_backfill_skips_nonzero_size() {
-        let pool = test_db().await;
-
-        insert_file(&pool, 1, "/test/song.flac", "flac", 1000, None, None, None).await;
-        insert_file(&pool, 2, "/test/zero.flac", "flac", 0, None, None, None).await;
-
-        set_file_location(&pool, 1, "backup", "/backup/test/song.flac", 1000)
-            .await
-            .unwrap();
-        set_file_location(&pool, 2, "backup", "/backup/test/zero.flac", 0)
-            .await
-            .unwrap();
-
-        let records = get_records_needing_backfill(&pool).await.unwrap();
-        assert_eq!(records.len(), 1, "only the zero-size record");
-        assert_eq!(records[0].file_id, 2);
-    }
-
-    #[tokio::test]
-    async fn test_get_records_needing_backfill_only_backup_type() {
-        let pool = test_db().await;
-
-        insert_file(&pool, 1, "/test/song.flac", "flac", 0, None, None, None).await;
-        // local with size 0 should NOT appear
-        set_file_location(&pool, 1, "local", "/test/song.flac", 0)
-            .await
-            .unwrap();
-        // backup with size > 0 should NOT appear
-        set_file_location(&pool, 1, "backup", "/backup/test/song.flac", 500)
-            .await
-            .unwrap();
-
-        let records = get_records_needing_backfill(&pool).await.unwrap();
-        assert!(
-            records.is_empty(),
-            "backup record has non-zero size, local excluded"
-        );
-    }
 }

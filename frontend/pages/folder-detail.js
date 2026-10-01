@@ -21,7 +21,9 @@ let abortController = null;
 export async function init(container, signal) {
   const id = getIdFromHash();
   if (!id) {
-    container.innerHTML = renderError("No folder ID specified. Use #folder-detail?id=123");
+    container.innerHTML = renderError(
+      "No folder ID specified. Use #folder-detail?id=123",
+    );
     return;
   }
 
@@ -126,28 +128,11 @@ function renderFileTypeBreakdown(s) {
 }
 
 function renderConfigTable(s) {
-  const backupPath = s.backupPath ?? s.backup_path;
   return renderKvTable([
-    [
-      "Backup Path",
-      backupPath ? `<code>${escHtml(backupPath)}</code>` : '<span class="text-muted">Not configured</span>',
-    ],
-    [
-      "WAV Sources",
-      (s.scanSources ?? s.scan_sources) ? "Enabled" : "Disabled",
-    ],
-    [
-      "Watching",
-      (s.watchEnabled ?? s.watch_enabled) ? "Active" : "Paused",
-    ],
-    [
-      "Recursive",
-      (s.scanRecursive ?? s.scan_recursive) ? "Yes" : "No",
-    ],
-    [
-      "Max Depth",
-      s.maxDepth ?? s.max_depth ?? 1,
-    ],
+    ["WAV Sources", (s.scanSources ?? s.scan_sources) ? "Enabled" : "Disabled"],
+    ["Watching", (s.watchEnabled ?? s.watch_enabled) ? "Active" : "Paused"],
+    ["Recursive", (s.scanRecursive ?? s.scan_recursive) ? "Yes" : "No"],
+    ["Max Depth", s.maxDepth ?? s.max_depth ?? 1],
     [
       "Last Scanned",
       (s.lastScanned ?? s.last_scanned)

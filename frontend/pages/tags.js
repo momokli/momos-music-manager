@@ -101,14 +101,13 @@ const TAGS_CELL_RENDERERS = {
   },
   backpack: (t) => {
     const backpack = t.backpack ? true : false;
-    const icon = backpack ? "fa-box" : "fa-box-open";
     const title = backpack
-      ? "Backpack \u2014 files for this tag are kept offline"
-      : "Not backpack \u2014 files may be pruned if backed up";
+      ? "In your Backpack \u2014 kept on your Mac (prune-safe)"
+      : "Not in your Backpack \u2014 may be pruned once backed up";
     return `<button class="btn btn-sm btn-icon backpack-toggle-btn"
       data-id="${t.id}" data-backpack="${backpack ? "1" : "0"}"
       title="${title}">
-      <i class="fas ${icon}" style="${backpack ? "color:var(--primary)" : "color:var(--text-muted)"}"></i>
+      <i class="fas fa-bag-shopping" style="${backpack ? "color:var(--primary)" : "color:var(--text-muted)"}"></i>
     </button>`;
   },
   actions: (t) => {
@@ -1095,8 +1094,9 @@ export async function init(container, signal, hashParams) {
         } catch (err) {
           showToast(`Backpack toggle failed: ${err.message}`, "error");
           backpackBtn.disabled = false;
-          const icon = currentBackpack ? "fa-box" : "fa-box-open";
-          backpackBtn.innerHTML = `<i class="fas ${icon}"></i>`;
+          backpackBtn.innerHTML = `<i class="fas fa-bag-shopping" style="${
+            currentBackpack ? "color:var(--primary)" : "color:var(--text-muted)"
+          }"></i>`;
           backpackBtn.dataset.backpack = currentBackpack ? "1" : "0";
         }
       })();

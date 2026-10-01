@@ -1,24 +1,25 @@
 /**
- * backpack.js — Backpack management page.
+ * backpack.js — Backpack page: "what I want on my Mac".
  *
- * Shows all tracks in backpack tags (tags with backpack=true) with their file status.
- * Provides "Sync All" action to ensure files are available locally.
+ * The Backpack set is the union of the playlist and tag sources below. It is:
+ *   - the set `prune` never deletes (see `get_prune_candidates`), and
+ *   - the set the file sync keeps in the best available local format
+ *     (default preference stem.m4a > flac > mp3 > wav; configurable on the
+ *     Storage page).
  *
  * API:
- *   GET /api/tags?limit=500 → tags with backpack field
- *   POST /api/tags/{id}/backpack → toggle backpack
- *   GET /api/backpack → transport status (set size, playlist URL, dirty)
- *   POST /api/backpack/push → build/replace the single Spotify playlist
- *   POST /api/tasks/backpack-sync → trigger sync task (future)
+ *   GET  /api/tags?limit=500                 → tags with backpack field
+ *   PUT  /api/tags/{id}/backpack             → set backpack (true/false)
+ *   GET  /api/playlists/subscriptions        → playlist sources
+ *   DELETE /api/playlists/subscriptions/{id} → remove a playlist source
+ *   GET  /api/storage/backpack-size          → local/target size of the set
+ *   GET  /api/storage/settings/backpack-sync → file-sync switch state
+ *   PUT  /api/storage/settings/backpack-sync → set the file-sync switch
+ *   POST /api/storage/sync-backpack          → pull missing files + drop redundant formats
  */
 
 import { fetchJSON } from "../shared/api.js";
 import { escapeHtml, renderLoading, showToast } from "../shared/components.js";
-
-let state = {
-  tags: [],
-  loading: false,
-};
 
 let _container = null;
 let _signal = null;
@@ -38,21 +39,22 @@ export async function init(container, signal) {
   container.innerHTML = renderLoading();
 
   try {
-    // Fetch all tags, filter to backpack=true
-    const resp = await fetchJSON("/api/tags?limit=500", { signal });
+    // Both halves of the Backpack set: subscribed playlists + backpack tags.
+    const [tagsResp, subsResp] = await Promise.all([
+      fetchJSON("/api/tags?limit=500", { signal }),
+      fetchJSON("/api/playlists/subscriptions", { signal }),
+    ]);
     if (signal.aborted) return;
-    const tags = (resp.data || []).filter((t) => t.backpack);
-    state.tags = tags;
-    renderPage(container, tags);
+    const tags = (tagsResp.data || []).filter((t) => t.backpack);
+    const playlists = (subsResp.data || []).filter((s) => s.isActive !== false);
+    renderPage(container, tags, playlists);
     wireEvents(container);
 
-    // Load size stats asynchronously (nice-to-have, won't block page render)
+    // Load size stats + file-sync switch asynchronously (won't block render).
     loadSizeStats();
+    loadSyncSettings();
 
-    // Load + render the Spotify transport playlist status
-    loadPlaylistStatus();
-
-    // Poll every 5s for live ETA during active pull
+    // Poll every 5s for live ETA during an active pull.
     if (_pollInterval) clearInterval(_pollInterval);
     _pollInterval = setInterval(pollSizeStats, 5000);
     pollSizeStats();
@@ -62,53 +64,103 @@ export async function init(container, signal) {
   }
 }
 
-function renderPage(container, tags) {
+function renderPage(container, tags, playlists) {
   const totalTracks = tags.reduce((sum, t) => sum + (t.fileCount || 0), 0);
 
   container.innerHTML = `
     <div class="page-header">
-      <h1><i class="fa-solid fa-box"></i> Backpack</h1>
+      <h1><i class="fa-solid fa-bag-shopping"></i> Backpack</h1>
+      <p class="text-muted" style="margin-top:0.25rem">
+        The Backpack is what you want on your Mac. It is the union of the playlist and tag
+        sources below, kept in the best available local format. Prune never deletes anything
+        in this set; use <a href="#storage">Storage</a> to change the format preference.
+      </p>
     </div>
 
     <div id="backpack-size-stats"></div>
 
-    <div id="backpack-playlist-card"></div>
-
     <div class="backpack-summary">
+      <div class="backpack-stat">
+        <span class="backpack-stat-value">${playlists.length}</span>
+        <span class="backpack-stat-label">Playlists</span>
+      </div>
       <div class="backpack-stat">
         <span class="backpack-stat-value">${tags.length}</span>
         <span class="backpack-stat-label">Tags</span>
       </div>
       <div class="backpack-stat">
         <span class="backpack-stat-value">${totalTracks}</span>
-        <span class="backpack-stat-label">Tracks</span>
+        <span class="backpack-stat-label">Tag tracks</span>
       </div>
     </div>
 
-    ${
-      tags.length === 0
-        ? '<div class="text-muted" style="padding:1rem">No backpack tags. Toggle "Backpack" on a tag in the Tags page.</div>'
-        : `
     <div class="backpack-section">
       <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem">
-        <h2 class="section-title" style="margin:0"><i class="fa-solid fa-tags"></i> Backpack Tags</h2>
+        <h2 class="section-title" style="margin:0"><i class="fa-solid fa-list-music"></i> Playlist Sources</h2>
+      </div>
+      ${
+        playlists.length === 0
+          ? '<div class="text-muted" style="padding:1rem">No playlists in the Backpack. Add one on the Playlists page.</div>'
+          : `<div class="backpack-tags-list">${playlists.map(renderPlaylistRow).join("")}</div>`
+      }
+    </div>
+
+    <div class="backpack-section">
+      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem">
+        <h2 class="section-title" style="margin:0"><i class="fa-solid fa-tags"></i> Tag Sources</h2>
+        <label class="backpack-playlist-option" title="Pull missing Backpack files from the object store and drop redundant local formats (e.g. keep stem.m4a when a FLAC also exists). Off pauses every automatic pull (startup and tag toggles) as well as the Sync All button.">
+          <input type="checkbox" id="backpack-sync-enabled" checked />
+          file sync
+        </label>
         <button class="btn btn-sm" id="backpack-sync-all"><i class="fas fa-sync"></i> Sync All</button>
       </div>
-      <div class="backpack-tags-list">
-        ${tags.map(renderTagCard).join("")}
-      </div>
+      ${
+        tags.length === 0
+          ? '<div class="text-muted" style="padding:1rem">No backpack tags. Toggle "Backpack" on a tag in the Tags page.</div>'
+          : `<div class="backpack-tags-list">${tags.map(renderTagCard).join("")}</div>`
+      }
     </div>
-    `
-    }
   `;
 }
 
+const SERVICE_ICONS = {
+  spotify: "fa-brands fa-spotify",
+  soundcloud: "fa-brands fa-soundcloud",
+  youtube: "fa-brands fa-youtube",
+  tidal: "fa-solid fa-water",
+  local: "fa-solid fa-hard-drive",
+};
+
+/** A tag whose (name-matched) playlist tracks contribute to the set. */
 function renderTagCard(tag) {
   return /* html */ `
     <div class="backpack-tag-card">
       <span class="backpack-tag-icon"><i class="${escapeHtml(tag.categoryIcon || "fa-solid fa-tag")}"></i></span>
       <span class="backpack-tag-name">${escapeHtml(tag.name)}</span>
       <span class="backpack-tag-count">${tag.fileCount || 0} tracks</span>
+      <button class="btn btn-sm btn-icon backpack-tag-remove" data-tag-id="${tag.id}"
+              data-tag-name="${escapeHtml(tag.name)}"
+              title="Remove from the Backpack">
+        <i class="fas fa-xmark"></i>
+      </button>
+    </div>
+  `;
+}
+
+/** A subscribed playlist: all of its tracks belong to the set. */
+function renderPlaylistRow(p) {
+  const name = p.playlistName || p.playlistId;
+  const icon = SERVICE_ICONS[p.service] || "fa-solid fa-list-music";
+  return /* html */ `
+    <div class="backpack-tag-card">
+      <span class="backpack-tag-icon"><i class="${icon}"></i></span>
+      <span class="backpack-tag-name">${escapeHtml(name)}</span>
+      <span class="backpack-tag-count">${p.trackCount || 0} tracks</span>
+      <button class="btn btn-sm btn-icon backpack-playlist-remove" data-sub-id="${p.id}"
+              data-playlist-name="${escapeHtml(name)}"
+              title="Remove from the Backpack — stops polling this playlist">
+        <i class="fas fa-xmark"></i>
+      </button>
     </div>
   `;
 }
@@ -234,117 +286,104 @@ function wireEvents(container) {
     syncBtn.addEventListener("click", () => handleSyncAll(container));
   }
 
-  const pushBtn = container.querySelector("#backpack-push");
-  if (pushBtn) {
-    pushBtn.addEventListener("click", () => handlePushToSpotify(container));
+  const syncToggle = container.querySelector("#backpack-sync-enabled");
+  if (syncToggle) {
+    syncToggle.addEventListener("change", () =>
+      handleSyncToggle(container, syncToggle.checked),
+    );
   }
-}
 
-// ── Spotify transport playlist ──────────────────────────────────────────────
-
-function formatTimestamp(secs) {
-  if (!secs) return "never";
-  return new Date(secs * 1000).toLocaleString();
-}
-
-async function loadPlaylistStatus() {
-  const el = document.querySelector("#backpack-playlist-card");
-  if (!el) return;
-  try {
-    const resp = await fetchJSON("/api/backpack");
-    renderPlaylistCard(resp?.data || {});
-  } catch (err) {
-    el.innerHTML = `<div class="detail-error"><i class="fa-solid fa-triangle-exclamation"></i> Failed to load playlist status: ${escapeHtml(err.message)}</div>`;
-  }
-}
-
-function renderPlaylistCard(status) {
-  const el = document.querySelector("#backpack-playlist-card");
-  if (!el) return;
-
-  const dirty = !!status.dirty;
-  const hasPlaylist = !!status.playlistUrl;
-  const syncBadge = dirty
-    ? '<span class="backpack-badge backpack-badge-dirty">out of sync</span>'
-    : '<span class="backpack-badge backpack-badge-ok">in sync</span>';
-
-  el.innerHTML = `
-    <div class="backpack-playlist-card">
-      <div class="backpack-playlist-head">
-        <h2 class="section-title" style="margin:0">
-          <i class="fa-brands fa-spotify"></i> Spotify Playlist ${syncBadge}
-        </h2>
-        <button class="btn btn-sm btn-primary" id="backpack-push">
-          <i class="fas fa-upload"></i> Push to Spotify
-        </button>
-      </div>
-      <div class="backpack-playlist-meta">
-        <span><strong>${status.trackCount ?? 0}</strong> tracks in Backpack</span>
-        <span><strong>${status.fileCount ?? 0}</strong> local files</span>
-        <span>Last push: ${escapeHtml(formatTimestamp(status.lastPushAt))}</span>
-      </div>
-      ${
-        hasPlaylist
-          ? `<div class="backpack-playlist-link"><a href="${escapeHtml(status.playlistUrl)}" target="_blank" rel="noopener"><i class="fa-solid fa-arrow-up-right-from-square"></i> Open \u201cBackpack\u201d playlist</a></div>`
-          : '<div class="text-muted" style="font-size:0.85rem">No playlist yet \u2014 push to create it.</div>'
+  // Delegated: rows are re-rendered, the list containers are stable.
+  container.querySelectorAll(".backpack-tags-list").forEach((list) => {
+    list.addEventListener("click", (ev) => {
+      const tagBtn = ev.target.closest(".backpack-tag-remove");
+      if (tagBtn) {
+        handleRemoveTag(container, tagBtn.dataset.tagId, tagBtn.dataset.tagName, tagBtn);
+        return;
       }
-      ${
-        status.lastPushStatus === "error" && status.lastPushError
-          ? `<div class="backpack-playlist-error"><i class="fa-solid fa-triangle-exclamation"></i> Last push failed: ${escapeHtml(status.lastPushError)}</div>`
-          : ""
+      const plBtn = ev.target.closest(".backpack-playlist-remove");
+      if (plBtn) {
+        handleRemovePlaylist(
+          container,
+          plBtn.dataset.subId,
+          plBtn.dataset.playlistName,
+          plBtn,
+        );
       }
-      <label class="backpack-playlist-option">
-        <input type="checkbox" id="backpack-submit-deemix" checked />
-        also submit to deemix
-      </label>
-    </div>
-  `;
-
-  const pushBtn = el.querySelector("#backpack-push");
-  if (pushBtn) {
-    pushBtn.addEventListener("click", () => handlePushToSpotify());
-  }
-}
-
-async function handlePushToSpotify() {
-  const pushBtn = document.querySelector("#backpack-push");
-  const submitCheckbox = document.querySelector("#backpack-submit-deemix");
-  const submitToDeemix = submitCheckbox ? submitCheckbox.checked : true;
-
-  try {
-    if (pushBtn) {
-      pushBtn.disabled = true;
-      pushBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Pushing...';
-    }
-
-    const resp = await fetchJSON("/api/backpack/push", {
-      method: "POST",
-      body: JSON.stringify({ force: true, submitToDeemix }),
     });
-    const data = resp?.data || {};
+  });
+}
 
-    if (data.verificationFailed) {
-      showToast(
-        "Playlist built, but Spotify did not match the Backpack set \u2014 will retry",
-        "error"
-      );
-    } else if (data.updated) {
-      const n = data.trackCount ?? 0;
-      const suffix = data.deemixSubmitted ? " and submitted to deemix" : "";
-      showToast(`${data.created ? "Created" : "Updated"} playlist with ${n} track(s)${suffix}`, "success");
-    } else {
-      showToast("Playlist already up to date", "info");
-    }
-
-    await loadPlaylistStatus();
+/** Remove a tag from the Backpack (keeps the tag itself). */
+async function handleRemoveTag(container, tagId, tagName, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await fetchJSON(`/api/tags/${tagId}/backpack`, {
+      method: "PUT",
+      body: JSON.stringify({ backpack: false }),
+    });
+    showToast(`Removed "${tagName}" from the Backpack`, "success");
+    await init(container, _signal);
   } catch (err) {
-    showToast(`Push failed: ${err.message}`, "error");
+    showToast(`Failed to remove "${tagName}": ${err.message}`, "error");
+    if (btn) btn.disabled = false;
+  }
+}
+
+/** Remove a playlist source from the Backpack (unsubscribes from polling it). */
+async function handleRemovePlaylist(container, subId, name, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await fetchJSON(`/api/playlists/subscriptions/${subId}`, { method: "DELETE" });
+    showToast(`Removed "${name}" from the Backpack`, "success");
+    await init(container, _signal);
+  } catch (err) {
+    showToast(`Failed to remove "${name}": ${err.message}`, "error");
+    if (btn) btn.disabled = false;
+  }
+}
+
+/** Reflect the Backpack file-sync switch in the toggle + Sync All button. */
+function applySyncSwitch(data) {
+  const toggle = document.querySelector("#backpack-sync-enabled");
+  const btn = document.querySelector("#backpack-sync-all");
+  const enabled = data?.enabled !== false;
+  if (toggle) toggle.checked = enabled;
+  if (btn) {
+    btn.disabled = !enabled;
+    btn.title = enabled ? "" : "Backpack file sync is off";
+  }
+}
+
+async function loadSyncSettings() {
+  try {
+    const resp = await fetchJSON("/api/storage/settings/backpack-sync");
+    applySyncSwitch(resp?.data);
+  } catch {
+    // Leave the toggle at its default; Sync All still guards server-side.
+  }
+}
+
+/** Turn the Backpack file sync on/off and persist it. */
+async function handleSyncToggle(container, enabled) {
+  const toggle = container.querySelector("#backpack-sync-enabled");
+  const btn = container.querySelector("#backpack-sync-all");
+  if (toggle) toggle.disabled = true;
+  try {
+    await fetchJSON("/api/storage/settings/backpack-sync", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    });
+    showToast(
+      enabled ? "Backpack file sync enabled" : "Backpack file sync disabled",
+      "success",
+    );
+    if (btn) btn.disabled = !enabled;
+  } catch (err) {
+    showToast(`Failed to change backpack sync: ${err.message}`, "error");
+    if (toggle) toggle.checked = !enabled;
   } finally {
-    const btn = document.querySelector("#backpack-push");
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = '<i class="fas fa-upload"></i> Push to Spotify';
-    }
+    if (toggle) toggle.disabled = false;
   }
 }
 

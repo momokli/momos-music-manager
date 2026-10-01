@@ -22,9 +22,7 @@ use tower_http::cors::CorsLayer;
 
 pub mod api;
 pub mod audio_extensions;
-pub mod auto_backup;
 pub mod autoupdate;
-pub mod backup;
 pub mod backpack;
 pub mod cli_link;
 pub mod comment;
@@ -39,9 +37,12 @@ pub mod extended_mix;
 pub mod external_tools;
 pub mod global_poller;
 pub mod maintainer;
+pub mod music_api;
+pub mod music_api_consumer;
 pub mod poller;
 pub mod scan_cache;
 pub mod spotify;
+pub mod store;
 pub mod tasks;
 pub mod telemetry;
 pub mod traktor;
@@ -61,8 +62,6 @@ pub struct AppState {
     pub embeddings: Mutex<Option<crate::embeddings::EmbeddingModel>>,
     pub category_means: tokio::sync::Mutex<Option<CategoryMeans>>,
     pub public_url: Option<String>,
-    /// Backpack materialisation coordinator (dirty-marker debounce + manual push).
-    pub backpack_coordinator: Arc<crate::backpack::BackpackSyncCoordinator>,
 }
 
 // ── Embedded Frontend Assets ───────────────────────────────────────────────

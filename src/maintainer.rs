@@ -9,9 +9,7 @@ use crate::tasks::{Task, TaskStatus, TaskType};
 struct FolderRow {
     id: i64,
     folder_path: String,
-    backup_path: Option<String>,
     last_scanned: Option<i64>,
-    auto_backup: bool,
 }
 
 /// Background maintainer task.
@@ -22,27 +20,24 @@ struct FolderRow {
 pub async fn start_maintainer(
     db: SqlitePool,
     task_manager: crate::tasks::TaskManager,
+    creds: crate::config::ServiceCredentials,
     interval_secs: u64,
     full_scan_max_age: u64,
-    backup_discovery_interval: u64,
     auto_prune: bool,
     auto_cleanup_dirs: bool,
     traktor_import_enabled: bool,
     cancel_token: CancellationToken,
 ) {
     info!(
-        "Maintainer started (interval={}s, full_scan_max_age={}s, backup_discovery_interval={}s, \
-         auto_prune={}, auto_cleanup_dirs={}, traktor_import={})",
+        "Maintainer started (interval={}s, full_scan_max_age={}s, auto_prune={}, \
+         auto_cleanup_dirs={}, traktor_import={})",
         interval_secs,
         full_scan_max_age,
-        backup_discovery_interval,
         auto_prune,
         auto_cleanup_dirs,
         traktor_import_enabled,
     );
 
-    // Track when we last ran backup discovery (start at 0 so it runs on first cycle)
-    let mut last_backup_discovery: i64 = 0;
     // Track collection.nml mtime for Traktor auto-import detection
     let mut last_nml_mtime: Option<i64> = None;
 
@@ -119,8 +114,7 @@ pub async fn start_maintainer(
         // `full_scan_max_age`. If so, trigger a full scan. This ensures
         // file_locations.local stays in sync with the filesystem.
         let folders: Vec<FolderRow> = match sqlx::query_as(
-            "SELECT id, folder_path, backup_path, last_scanned, auto_backup \
-             FROM folders WHERE active = 1",
+            "SELECT id, folder_path, last_scanned FROM folders WHERE active = 1",
         )
         .fetch_all(&db)
         .await
@@ -168,155 +162,20 @@ pub async fn start_maintainer(
                 }
             }
 
-            // ── Check 2: Unbacked-up files (auto-backup folders) ──────
-            if folder.auto_backup && folder.backup_path.is_some() {
-                let unbacked: i64 = match sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM files f \
-                     WHERE f.id NOT IN (SELECT file_id FROM file_locations WHERE location_type = 'backup') \
-                     AND instr(f.file_path, ?) = 1",
-                )
-                .bind(&folder.folder_path)
-                .fetch_one(&db)
-                .await
-                {
-                    Ok(count) => count,
-                    Err(e) => {
-                        warn!(
-                            "Maintainer: failed to count unbacked files for folder #{}: {}",
-                            folder.id, e
-                        );
-                        0
-                    }
-                };
-
-                if unbacked > 0 {
-                    warn!(
-                        "Maintainer: folder #{} has {} unbacked-up files — manual backup may be needed",
-                        folder.id, unbacked
-                    );
-                }
-            }
         }
 
-        // ── Check 3: Backup discovery (weekly) ────────────────────────
+        // ── Check 4: Store sync ─────────────────────────────────────
         //
-        // For folders with a backup_path configured, scan the NAS for files
-        // that exist on backup but not in the local DB. Creates bare records
-        // with sentinel hashes so they show up in the files index.
-        if now - last_backup_discovery > backup_discovery_interval as i64 {
-            #[derive(Debug, FromRow)]
-            struct FolderBackupRow {
-                id: i64,
-                backup_path: String,
-            }
-
-            let folders_with_backup: Vec<FolderBackupRow> = match sqlx::query_as(
-                "SELECT id, backup_path FROM folders WHERE backup_path IS NOT NULL AND backup_path != ''",
-            )
-            .fetch_all(&db)
-            .await
-            {
-                Ok(folders) => folders,
-                Err(e) => {
-                    warn!("Maintainer: failed to fetch folders with backup_path: {}", e);
-                    continue;
-                }
-            };
-
-            for folder in &folders_with_backup {
-                info!(
-                    "Maintainer: triggering backup discovery for folder #{}",
-                    folder.id
-                );
-
-                // Parse backup_path: format is "host:/remote/path"
-                if let Some((ssh_host, remote_base)) = folder.backup_path.split_once(':') {
-                    let engine = crate::backup::BackupEngine::new(ssh_host.to_string());
-                    let max_depth: u32 = 2; // match typical folder config depth
-
-                    match engine.list_remote_files_full(remote_base, max_depth).await {
-                        Ok(remote_files) => {
-                            if remote_files.is_empty() {
-                                info!(
-                                    "Maintainer: no files found on backup for folder #{}",
-                                    folder.id
-                                );
-                            } else {
-                                match crate::db::discover_backup_files(
-                                    &db,
-                                    folder.id,
-                                    &remote_files,
-                                    remote_base,
-                                )
-                                .await
-                                {
-                                    Ok(result) => {
-                                        info!(
-                                            "Maintainer: backup discovery for folder #{}: \
-                                             {} on backup, {} already tracked, {} newly discovered, \
-                                             {} missing from backup",
-                                            folder.id,
-                                            result.files_on_backup,
-                                            result.already_tracked,
-                                            result.newly_discovered,
-                                            result.missing_from_backup.len(),
-                                        );
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            "Maintainer: backup discovery failed for folder #{}: {}",
-                                            folder.id, e
-                                        );
-                                    }
-                                }
-
-                                // ── Also clean up stale backup entries ──
-                                //
-                                // Remove file_locations.backup for files that
-                                // exist in the DB but no longer on the NAS.
-                                match crate::db::cleanup_stale_backup_entries(
-                                    &db,
-                                    folder.id,
-                                    &remote_files,
-                                )
-                                .await
-                                {
-                                    Ok(removed) if removed > 0 => {
-                                        info!(
-                                            "Maintainer: removed {} stale backup entries for folder #{}",
-                                            removed, folder.id
-                                        );
-                                    }
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        warn!(
-                                            "Maintainer: stale backup cleanup failed for folder #{}: {}",
-                                            folder.id, e
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Maintainer: failed to list remote files for folder #{}: {}",
-                                folder.id, e
-                            );
-                        }
-                    }
-                } else {
-                    warn!(
-                        "Maintainer: invalid backup_path format for folder #{}: {} \
-                         (expected 'host:/remote/path')",
-                        folder.id, folder.backup_path
-                    );
-                }
-            }
-
-            last_backup_discovery = now;
+        // Upload local files to the object store and verify its records. Without
+        // this, files that arrived via the music-api consumer only reach the
+        // store on the next app restart. Newly imported files are scanned by the
+        // consumer's folder scan, so they are visible to the upload here at the
+        // latest on the following cycle.
+        if creds.store.is_configured() {
+            crate::tasks::start_store_sync_task(&task_manager, &db, &creds).await;
         }
 
-        // ── Check 4: Backpack sync ──────────────────────────────────
+        // ── Check 4b: Backpack sync ─────────────────────────────────
         //
         // Periodically ensure files in backpack tags are available locally
         // by triggering a background sync task.
@@ -334,69 +193,10 @@ pub async fn start_maintainer(
                     }
                 };
 
-            if backpack_tag_count > 0 {
-                crate::tasks::start_backpack_sync_task(&task_manager, &db).await;
-            }
-        }
-
-        // ── Check 5: Backup record verification (daily) ────────────────
-        //
-        // For each folder with a backup_path, verify a sample of backup
-        // records that haven't been checked recently. Uses SSH to stat
-        // remote files and updates last_verified or removes stale entries.
-        let daily_check = (now % (24 * 3600)) as u64;
-        if daily_check < interval_secs {
-            #[derive(Debug, FromRow)]
-            struct FolderBackupRow {
-                id: i64,
-                backup_path: String,
-            }
-
-            let folders_with_backup: Vec<FolderBackupRow> = match sqlx::query_as(
-                "SELECT id, backup_path FROM folders \
-                 WHERE backup_path IS NOT NULL AND backup_path != ''",
-            )
-            .fetch_all(&db)
-            .await
+            if backpack_tag_count > 0
+                && crate::backpack::backpack_sync_enabled(&db).await
             {
-                Ok(folders) => folders,
-                Err(e) => {
-                    warn!(
-                        "Maintainer: failed to fetch folders for backup verification: {}",
-                        e
-                    );
-                    continue;
-                }
-            };
-
-            for folder in &folders_with_backup {
-                if let Some((ssh_host, _remote_base)) = folder.backup_path.split_once(':') {
-                    let engine = crate::backup::BackupEngine::new(ssh_host.to_string());
-                    let task_id = crate::tasks::start_backup_verify_task(
-                        &task_manager,
-                        &db,
-                        folder.id,
-                        engine,
-                        100, // sample size
-                    )
-                    .await;
-                    if !task_id.is_empty() {
-                        info!(
-                            "Maintainer: started backup verify task {} for folder #{}",
-                            task_id, folder.id
-                        );
-                    } else {
-                        debug!(
-                            "Maintainer: backup verify already running for folder #{}",
-                            folder.id
-                        );
-                    }
-                } else {
-                    warn!(
-                        "Maintainer: invalid backup_path format for folder #{}: {}",
-                        folder.id, folder.backup_path
-                    );
-                }
+                crate::tasks::start_backpack_sync_task(&task_manager, &db, &creds.store).await;
             }
         }
 
@@ -531,17 +331,6 @@ pub fn needs_full_scan(last_scanned: Option<i64>, now: i64, max_age_secs: u64) -
     }
 }
 
-/// Parse a backup path in the format `host:/remote/path` into its components.
-pub fn parse_backup_path(backup_path: &str) -> Option<(&str, &str)> {
-    backup_path.split_once(':')
-}
-
-/// Determine whether backup discovery should run, based on the last run timestamp
-/// and the configured interval.
-pub fn should_run_backup_discovery(now: i64, last_run: i64, interval_secs: u64) -> bool {
-    now - last_run > interval_secs as i64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,74 +355,25 @@ mod tests {
         assert!(!needs_full_scan(Some(0), 3600, 3600));
     }
 
-    #[test]
-    fn test_parse_backup_path_valid() {
-        let result = parse_backup_path("backup:/volume1/media/stems");
-        assert_eq!(result, Some(("backup", "/volume1/media/stems")));
-    }
 
-    #[test]
-    fn test_parse_backup_path_no_colon() {
-        let result = parse_backup_path("invalidpath");
-        assert_eq!(result, None);
-    }
 
-    #[test]
-    fn test_parse_backup_path_multiple_colons() {
-        let result = parse_backup_path("host:/path/to/dir:extra");
-        assert_eq!(result, Some(("host", "/path/to/dir:extra")));
-    }
 
-    #[test]
-    fn test_parse_backup_path_empty_string() {
-        // Split on empty string returns None (no colon found)
-        let result = parse_backup_path("");
-        assert_eq!(result, None);
-    }
 
-    #[test]
-    fn test_parse_backup_path_empty_host() {
-        // Colon at start: host is empty, path is present
-        let result = parse_backup_path(":/remote/path");
-        assert_eq!(result, Some(("", "/remote/path")));
-    }
 
-    #[test]
-    fn test_parse_backup_path_no_path() {
-        // Colon at end: host is present, path is empty
-        let result = parse_backup_path("host:");
-        assert_eq!(result, Some(("host", "")));
-    }
 
-    #[test]
-    fn test_should_run_backup_discovery_never_run() {
-        assert!(!should_run_backup_discovery(100000, 0, 604800));
-    }
 
-    #[test]
-    fn test_should_run_backup_discovery_after_interval() {
-        assert!(should_run_backup_discovery(700000, 0, 604800));
-    }
 
-    #[test]
-    fn test_should_run_backup_discovery_within_interval() {
-        assert!(!should_run_backup_discovery(600000, 500000, 604800));
-    }
 
     #[test]
     fn test_folder_row_construction() {
         let row = FolderRow {
             id: 1,
             folder_path: "/music/stems".to_string(),
-            backup_path: Some("backup:/volume1/stems".to_string()),
             last_scanned: Some(1000000),
-            auto_backup: true,
         };
 
         assert_eq!(row.id, 1);
         assert_eq!(row.folder_path, "/music/stems");
-        assert!(row.auto_backup);
-        assert!(row.backup_path.is_some());
     }
 
     // ── Zero / large interval edge cases ────────────────────────────
@@ -674,21 +414,6 @@ mod tests {
         assert!(needs_full_scan(Some(0), 61, 60));
     }
 
-    #[test]
-    fn test_should_run_backup_discovery_exact_boundary() {
-        // now - last_run == interval → not yet (strictly greater)
-        assert!(!should_run_backup_discovery(604800, 0, 604800));
-    }
 
-    #[test]
-    fn test_should_run_backup_discovery_just_over_boundary() {
-        // now - last_run == interval + 1 → should run
-        assert!(should_run_backup_discovery(604801, 0, 604800));
-    }
 
-    #[test]
-    fn test_should_run_backup_discovery_zero_interval() {
-        // interval=0, any positive elapsed time should trigger
-        assert!(should_run_backup_discovery(1, 0, 0));
-    }
 }

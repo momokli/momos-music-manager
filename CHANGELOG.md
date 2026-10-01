@@ -6,6 +6,190 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-09-24
+
+### Added
+
+- **Backpack-Datei-Sync wieder in der UI**: `GET`/`PUT /api/storage/settings/backpack-sync`
+  liefern/setzen den File-Sync-Schalter; die Backpack-Seite zeigt ihn als Toggle neben
+  „Sync All".
+
+- **Dynamic Bundles: Top-N + Camelot-Balance**: Bundles können jetzt auf die
+  besten **N** Dateien begrenzt werden (`limitCount`) nach einem wählbaren
+  Ranking (`rankBy`: `rating_playcount` (Default: `rating*3 + ln(1+plays)`),
+  `rating`, `playcount`, `recent`, `none`) — und optional die Auswahl über die
+  24 Camelot-Keys **round-robin ausbalancieren** (`diversifyKeys`), sodass jeder
+  Key vertreten ist; dünn besetzte Keys geben alles, der Rest wird nach Score
+  aufgefüllt. Deterministisch (Tiebreak `file_id`). Neu in der UI im
+  Bundle-Editor; Migration 029.
+- **`cleanup-redundant` CLI**: löscht redundante lokale Formate (z. B. einen lokal
+  vorhandenen flac, wenn der bevorzugte `stem.m4a` desselben Tracks ebenfalls lokal
+  und der flac im Object Store gesichert ist). Die Sicherheitsprüfung akzeptiert nur
+  noch `store:`-Backups — eine alte NAS-Zeile autorisiert keine Löschung mehr. Damit
+  ließ sich der Mac um ~56 GiB entlasten.
+- **`store-import`** (music-api): einmaliges Migrations-Bin, das einen Verzeichnisbaum
+  (z. B. die NAS-Backups) kanonisiert wie MMM (Comment-Tag geleert, WAV roh), in den
+  content-addressed Store auf `.200` legt und pro Objekt Metadaten schreibt. Neue
+  Spalten `store_objects.group_key` (Track) und `stem_type` (vocals/bass/drums/…) für
+  die Stem-Parts pro Track. Idempotent, schreibt ein Manifest für den DB-Abgleich.
+- **Remote object store (Upload-Seite)**: MMM lädt die Bibliothek in einen
+  content-addressed Store auf dem Musik-Host und kann danach fragen, ob eine
+  Datei gesichert ist. Objekte sind die **kanonisierte** Datei (Comment-Tag
+  geleert) — Dateien, die sich nur im Comment unterscheiden, deduplizieren.
+  Neu: Spalte `files.content_hash` (Migration 028), `[store]`-Config, Task
+  `StoreSync` (pro Batch: hashen → `POST /objects/check` → `PUT` fehlende),
+  `POST /api/storage/sync-store` und ein „Sync to store“-Knopf auf der
+  Storage-Seite. `auto_prune` stützt sich nur noch auf `store:`-Backups, nicht
+  mehr auf die alten rsync-Zeilen.
+- **Schalter für den Backpack-File-Sync**: Der Backpack-Sync (fehlende Files per
+  rsync aus dem Backup ziehen, Formate aufräumen) lief bisher immer beim
+  App-Start und beim Umschalten eines Tags. Neuer Settings-Key
+  `backpack.sync_enabled` (Default an), Toggle auf der Backpack-Seite, und
+  `POST /api/backpack/sync-enabled`. Aus = kein Auto-Pull beim Start, kein Sync
+  beim Tag-Toggle, und `POST /api/storage/sync-backpack` antwortet **409**.
+- **music-api-Consumer**: MMM bestellt fehlende Backpack-ISRCs bei `music-api`,
+  importiert die gelieferten Dateien (FLAC, sonst 320/128) in die Library und
+  stößt den Scan der Zielordner an. Neue Tabelle `music_api_imports` (Migration
+  027), `[music_api]`-Config (Base-URL + Token, env `MUSIC_API_URL` /
+  `MUSIC_API_TOKEN`), `GET /api/backpack` liefert den Fortschritt als
+  `musicApi`-Block, `POST /api/backpack/pull` startet einen Zyklus sofort
+  (409, solange nicht konfiguriert). Die Backpack-Seite zeigt die Zähler und
+  einen „Pull now“-Knopf.
+
+### Added
+
+- **Restore + Streaming aus dem Object Store**: Eine nicht mehr lokale Datei wird
+  jetzt aus dem content-addressed Store zurückgeholt statt per rsync. `BackpackSync`
+  lädt Objekte über `GET /objects/{hash}` und schreibt danach den **Comment aus der
+  DB neu** (der Upload hatte ihn geleert), `POST /api/files/{id}/pull-from-backup`
+  nutzt denselben Pfad, und `GET /api/files/{id}/stream` proxyt remote-only Dateien
+  aus dem Store inklusive `Range`-Durchreichung (Playback/ffmpeg bleiben intakt).
+- **Backpack-Seite verwaltet das Backpack**: Playlist-Quellen (subscribte Playlists)
+  und Tag-Quellen werden nebeneinander gelistet und sind dort direkt entfernbar (Tag:
+  `PUT /api/tags/{id}/backpack`, Playlist: `DELETE /api/playlists/subscriptions/{id}`).
+  Die Seite war bisher read-only.
+
+### Changed
+
+- **Store-Sync läuft jetzt periodisch** (Maintainer-Zyklus, std. 1 h) statt nur beim
+  App-Start. Ohne das erreichten per music-api geladene Dateien den Object Store erst
+  beim nächsten Neustart — also praktisch nie.
+
+- **music-api: begrenzte Retries für `failed`** (`failed` ist nicht mehr sofort terminal):
+  Transiente Fehler (download timeout, abgebrochener Download) werden bis zu **3×** erneut
+  geordert (Migration 030 `music_api_imports.attempts`). `absent` (kein streambarer Treffer)
+  bleibt terminal. Vorher verlor jeder Timeout den Track dauerhaft.
+
+- **music-api: Demand = ganze Bibliothek (Backpack zuerst)**: Der Consumer bestellt
+  nicht mehr nur Backpack-ISRCs, sondern jeden Track ohne verlinkte Datei. Backpack-Tracks
+  werden zuerst geordert, damit sie nie hinter dem Backlog warten. Siehe ADR-068.
+- **Backpack ≠ Archive (UI)**: Backpack ist jetzt durchgängig ein **Beutel**
+  (`fa-bag-shopping`, an = `--primary`), Archive eine **Archivbox** (`fa-box-archive`,
+  an = `--yellow`). Vorher war der Aus-Zustand beider Buttons dasselbe Icon
+  (`fa-box-open`) und damit nicht unterscheidbar. Betrifft Playlists-, Tags-, Tracks-,
+  Dashboard- und Backpack-Seite.
+
+- **„Subscribe“ heißt in der UI jetzt „Backpack“ (#40)**: Spalte, Filter, Buttons
+  (Beutel-Icon `fa-bag-shopping`), Dashboard-Karte und Toasts. Die Tooltips beschreiben
+  die reale Semantik (Mitglied der Keep-Menge → auf dem Mac vorhalten, prune-safe).
+  API-Pfade und interne Namen bleiben unverändert.
+
+### Removed
+
+- **Backpack-Playlist-Transport entfernt**: Die aggregierte Spotify-„backpack"-Playlist
+  (Materialisierung aus Tags ∪ Subscriptions, Push, Mirror) ist weg — sie war nur der
+  deemix-Download-Pfad und ist seit music-api obsolet. Entfernt: die Endpunkte
+  `/api/backpack`, `/api/backpack/push`, `/api/backpack/pull`, `/api/backpack/sync-enabled`,
+  die Spotify-Transport-Karten der Backpack-Seite, der Coordinator + die Materialisierung in
+  `src/backpack.rs`, das `AppState.backpack_coordinator`-Feld und die
+  `backpack.{playlist_*,signature,dirty_at,last_push_*}` Settings-Keys. Die **Keep-Regel bleibt**
+  (Backpack = Tags ∪ Subscriptions; `prune` schützt sie) — die Backpack-Seite bleibt als Steuerung
+  für „das will ich auf dem Mac haben" (Quellen, Belegung, File-Sync, Sync All), ebenso der
+  `backpack`-Toggle auf der Tags-Seite. Die bestehende Spotify-Playlist muss manuell gelöscht
+  werden. Siehe ADR-067.
+
+- **NAS/SSH-Backup vollständig entfernt**: Das `backup`-Modul (`BackupEngine`) und
+  die Tasks `BackupFolder`/`BackupWavs`/`BackupDiscovery`/`BackupVerify`/
+  `AutoBackupCheck` sind gelöscht, ebenso die Endpunkte `/api/storage/backup/{id}`,
+  `/api/storage/backup-wavs/{id}`, `/api/storage/discover-backup/{id}`,
+  `/api/storage/backfill-backup-sizes`, `/api/backup/test`, `/api/backup/explore`,
+  `/api/folders/{id}/backup` und `/api/folders/{id}/auto-backup`. Der Maintainer
+  fährt nur noch Scan-/Refresh-/Prune-/Traktor-Checks; `auto_backup`-Poller und
+  Auto-Reconcile sind weg. `BackpackSync` und der Pull-from-Backup-Handler
+  behandeln nur noch `store:<sha256>`-Locations. Das Backup-Frontend (Spalten,
+  Modal-Felder, Storage-Buttons) ist entfernt; `scan_sources` läuft jetzt über
+  `PUT /api/folders/{id}`. `dufs` (`:5000`, `-A`) auf dem Musik-Host ist gestoppt.
+  `folders.backup_path`/`auto_backup` bleiben als deprecated Spalten. Siehe ADR-066.
+- **Einzel-Playlist-Pushes an deemix entfernt**: Der einzige deemix-Transport ist
+  jetzt die eine aggregierte Backpack-Playlist. Entfernt wurden der generische
+  Endpoint `POST /api/services/deemix/queue` (die Route bleibt nur `GET`; ein POST
+  antwortet **405**), die deemix-Spalte samt Plus-/Restart-/Retry-Buttons auf der
+  Playlists-Seite, der „Restart"-Button der Deemix-Queue-Seite sowie
+  `momos-music-manager deemix add <url>`. Die Backend-Anreicherung
+  `deemixStatus`/`deemixId` der Playlists-API (inkl. Live-Queue-Call und Backfill
+  einzelner `deemix_downloads`-Zeilen) ist ebenfalls entfallen.
+- **`DownloadGuarantor` re-queuede Zombie-Einträge pro Playlist-URL**: Statt N
+  Einzel-URLs wird bei Zombie-Einträgen jetzt genau der eine Backpack-Playlist-URL
+  re-submittet (`ensure_queued` — Retry wenn terminal, No-Op wenn aktiv).
+
+### Removed
+
+- **deemix-Auto-Push entfernt**: Der Backpack-Coordinator und der Push-Handler
+  übergeben keine Spotify-Playlist mehr an deemix, und `download_guarantor`
+  re-queued keine Zombie-Playlists mehr. Grund: deemix löst Spotify-Links nicht
+  mehr auf (Client-Credentials-Apps bekommen seit Feb 2026 nur den Playlist-Namen,
+  keine Songs) und beide Spotify-Apps liefen in einen app-weiten 429. Der neue
+  Dienst `music-api` übernimmt den Download per ISRC-Order.
+
+### Fixed
+
+- **Backpack-File-Sync-Schalter galt nicht im Maintainer**: Der Maintainer startete
+  den Backpack-File-Sync stündlich, auch wenn `backpack.sync_enabled = 0` gesetzt war
+  (der Schalter war nur am API-Handler und beim App-Start wirksam). Jetzt prüft auch
+  der Maintainer den Schalter. Toter `parse_backup_path` entfernt.
+- **Dynamic Bundles: BASE-Tags wirkten nicht**: Der `baseTags`-Filter matchte
+  exakte **Playlist-Namen** statt der aufgelösten Tags. Ein Parent-Tag wie
+  `afterhours` (das über `v_resolved_tags` auf 2725 Tracks auflöst, aber keine
+  gleichnamige Playlist hat) lieferte deshalb **0 Treffer**. Jetzt matcht der
+  Filter gegen `file_resolved_tags` (parent-aufgelöst, case-insensitiv).
+
+- **Backpack-Playlist wurde nie angelegt**: `get_current_user_id` gab die rspotify-_URI_
+  (`spotify:user:<id>`) statt der blanken Id zurück → `POST
+/v1/users/spotify:user:<id>/playlists` → **400 Bad Request**. Ebenso lieferte
+  `create_playlist` die Playlist-URI zurück und `get_playlist_track_uris` baute
+  `spotify:track:spotify:track:<id>`.
+- **429-Sturm (#49)**: Coordinator, Subscription- und Global-Poller ignorierten
+  `Retry-After` (auf 300 s geklemmt bzw. gar nicht gelesen) und retryten im
+  Penalty-Fenster; der Coordinator zusätzlich alle 5 s (2081 Versuche/Tag, 0 Erfolge).
+  Jetzt: prozessweiter Cooldown, exponentielles Backoff (60 s → 30 min) und
+  Zyklus-Abbruch beim ersten 429.
+- **Backpack-Verifikation** las mit `Market::FromToken`, wodurch Spotify für
+  markt-nicht-verfügbare Tracks `null` liefert (~90 von 6480) — die Playlist sah
+  „unvollständig“ aus und `backpack.signature` wurde nie gesetzt (Rebuild-Loop). Der
+  Read ist jetzt marktfrei, die Verifikation toleriert kleine Abweichungen (1 %, min 5)
+  und ein Read-Fehler gilt als unklar statt als Mismatch. Zusätzlich sind
+  Materialisierungen serialisiert (Coordinator vs. manueller Push).
+- **`v_track_tags`-Backpack-Query 8,8 s → 0,05 s** (Migration 026: Expression-Indizes
+  auf `LOWER(TRIM(name))`). Das war die Ursache der leeren Backpack-Karte
+  (`/api/backpack`-Timeout) und beschleunigt zugleich `refresh_track_resolved_tags`,
+  die Digging-Queries und die Files-Tag-Filter.
+
+- **Dirty-Marker blieb stehen**: Ein signature-gated Lauf ohne Änderung
+  (`unchanged`) räumte `backpack.dirty_at` nicht auf. Dadurch blieb das
+  Debounce-Gate des Coordinators dauerhaft offen und das komplette Set wurde
+  alle 5 s neu aufgelöst (vor Migration 026: jedes Mal ~8,8 s).
+
+- **Backpack-Badge sagte dauerhaft „out of sync“**: `dirty` heißt „eine
+  Membership-Mutation ist vorgemerkt“, nicht „die Playlist ist falsch“ — und der
+  Poller setzte es zusätzlich in jeder Runde mit fälligen Subscriptions (also fast
+  immer). `GET /api/backpack` liefert jetzt `inSync` (Vergleich der gespeicherten
+  Signatur mit dem aktuellen Set) und die UI stützt das Badge darauf; der Poller
+  markiert dirty nur noch, wenn wirklich Tracks dazukamen oder die Playlist
+  umbenannt wurde (der Name steuert das Tag↔Playlist-Matching).
+- **Silenter Coordinator-Fehler**: schlug `from_stored_tokens` fehl, backte der
+  Coordinator nur auf `debug` ab (im Default-Log unsichtbar) — der Backpack-
+  Transport war damit unbemerkt still. Jetzt `warn` inklusive nächstem Versuch.
+
 ## [1.12.0] — 2026-09-21
 
 ### Fixed
@@ -19,7 +203,7 @@ All notable changes to Momo's Music Manager.
   ist ein Update), eine ältere **Basisversion** bleibt ausgeschlossen.
   Zusätzlich verglich ein Kanalwechsel über die Pre-Release-Grenze: ein
   Release-Build (`1.11.0`) auf dem Rolling-Kanal bekam `1.11.0-dev+<sha>`
-  nie angeboten, weil stabile Versionen *über* ihren Pre-Releases stehen.
+  nie angeboten, weil stabile Versionen _über_ ihren Pre-Releases stehen.
   Cross-Channel gilt jetzt „gleiche/neuere Basisversion + andere
   Zeichenkette → Update", ohne Silent-Downgrade. Tests:
   `rolling_offers_new_dev_build_whose_sha_sorts_lower`,
@@ -104,7 +288,7 @@ All notable changes to Momo's Music Manager.
   (`find_upgrade_candidates`). Neuer read-only Endpoint
   `GET /api/extended-mix/candidates`; `is_extended_mix` auf Digging-Ergebnissen.
   Opt-in-Toggle `autoupgrade` (Env `MOMOS_AUTOUPGRADE_ENABLED` > `[autoupgrade]
-  enabled` > Default aus). Der eigentliche Download-/Ersetzungsschritt folgt als
+enabled` > Default aus). Der eigentliche Download-/Ersetzungsschritt folgt als
   separater PR (benötigt ARL/Single-Track-Download).
 
 ## [1.7.0] — 2026-09-11
@@ -171,19 +355,19 @@ All notable changes to Momo's Music Manager.
   Keys `ui_events_enabled` + `log_shipping_enabled` (beide `false`),
   `log_min_level` (`"warn"`, error/warn/info/debug/trace) und
   `log_max_events_per_sec` (`50`, Pflicht-Cap 1–10000, ungültig → Default
-  + Warn) mit `MOMOS_TELEMETRY_UI_EVENTS_ENABLED`/
-  `MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED`/`MOMOS_TELEMETRY_LOG_MIN_LEVEL`/
-  `MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC`; Env > TOML > Default wie
-  gehabt. Neuer interner Endpoint `POST /api/ui-events` (mappt nur `ui.*`
-  auf die Allowlist, antwortet **immer 204** — Flag aus, unbekannter Typ,
-  ungültiger Payload oder keine Pipeline erzeugen nie 4xx). Settings-UI:
-  zwei neue Toggles, Log-Level-Select und Max-Events/s-Feld in der
-  Telemetry-Card (persistiert in `config.toml`, Env-Pinning/409 wie die
-  bestehenden Felder). Receiver: neue Migration
-  `migrations/telemetry/002_ui_log_views.sql` mit **nur Views**
-  (`v_ui_views`, `v_ui_actions`, `v_log_volume`; 001 bleibt unangetastet —
-  Checksumme); Rollout-Hinweis: Receiver-Binary vor Aktivierung neu
-  deployen (alter v1.2.1-Receiver droppt unbekannte Typen nach 3× 4xx).
+  - Warn) mit `MOMOS_TELEMETRY_UI_EVENTS_ENABLED`/
+    `MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED`/`MOMOS_TELEMETRY_LOG_MIN_LEVEL`/
+    `MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC`; Env > TOML > Default wie
+    gehabt. Neuer interner Endpoint `POST /api/ui-events` (mappt nur `ui.*`
+    auf die Allowlist, antwortet **immer 204** — Flag aus, unbekannter Typ,
+    ungültiger Payload oder keine Pipeline erzeugen nie 4xx). Settings-UI:
+    zwei neue Toggles, Log-Level-Select und Max-Events/s-Feld in der
+    Telemetry-Card (persistiert in `config.toml`, Env-Pinning/409 wie die
+    bestehenden Felder). Receiver: neue Migration
+    `migrations/telemetry/002_ui_log_views.sql` mit **nur Views**
+    (`v_ui_views`, `v_ui_actions`, `v_log_volume`; 001 bleibt unangetastet —
+    Checksumme); Rollout-Hinweis: Receiver-Binary vor Aktivierung neu
+    deployen (alter v1.2.1-Receiver droppt unbekannte Typen nach 3× 4xx).
 
 ---
 
@@ -262,7 +446,7 @@ All notable changes to Momo's Music Manager.
   (`MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS`), Default `0` = AUS. Gating:
   `telemetry.enabled=true` + Intervall > 0 (wie bisher); es wird die
   bestehende Snapshot-Infrastruktur wiederverwendet (`PUT
-  /api/telemetry/{instance}/db/{ts}` mit Bearer-Auth, kein Neubau).
+/api/telemetry/{instance}/db/{ts}` mit Bearer-Auth, kein Neubau).
   Legacy-Key `interval_secs` (Analytics-Ära) bleibt als Alias voll
   wirksam — explizite Option gewinnt, kein Verhaltenswechsel für
   Bestands-Configs. Getriggert bleibt der One-Shot-Push über die CLI
@@ -273,37 +457,37 @@ All notable changes to Momo's Music Manager.
   ergänzend zum bestehenden Snapshot-Push. Client: stabile persistierte
   Client-ID, Ringbuffer (10k), crash-sicherer JSONL-Spool im Data-Dir,
   Async-Flusher mit Batch-Limit (≤200 Events / ~1 MB), Exponential-Backoff
-  + Jitter (Cap 1h), 4xx-Drop nach 3 Versuchen, Shutdown-Drain; Events
-  überleben Neustarts (Spool→Buffer-Reload, Dedup über `event_id`).
-  Server: eigene `telemetry.db` (eigene Migrationskette
-  `migrations/telemetry/`, Hauptkette unverändert), `POST /api/telemetry`
-  mit Bearer-Auth, Validierung, Idempotenz-Dedup, Clients-Upsert,
-  Retention-Prune (`retention_days`, Default 30) und 6 SQL-Views
-  (`v_tasks_per_hour`, `v_error_rate`, `v_downloads_by_source`,
-  `v_scan_duration_trend`, `v_client_versions`, `v_clients_last_seen`).
-  Config: `telemetry.events_endpoint`
-  (`MOMOS_TELEMETRY_EVENTS_ENDPOINT`), `telemetry_receiver.db_path`
-  (`MOMOS_TELEMETRY_RECEIVER_DB_PATH`), `telemetry_receiver.retention_days`
-  (`MOMOS_TELEMETRY_RECEIVER_RETENTION_DAYS`); alles aus per Default
-  (`telemetry.enabled=false`) — kein Verhaltenswechsel. Payload-Hygiene:
-  keine Secrets, Pfade werden gestrippt/gekürzt. Konzept-Doc:
-  `plans/proposed/telemetry-events.md`. Keine UI-Actions, keine Heartbeats.
+  - Jitter (Cap 1h), 4xx-Drop nach 3 Versuchen, Shutdown-Drain; Events
+    überleben Neustarts (Spool→Buffer-Reload, Dedup über `event_id`).
+    Server: eigene `telemetry.db` (eigene Migrationskette
+    `migrations/telemetry/`, Hauptkette unverändert), `POST /api/telemetry`
+    mit Bearer-Auth, Validierung, Idempotenz-Dedup, Clients-Upsert,
+    Retention-Prune (`retention_days`, Default 30) und 6 SQL-Views
+    (`v_tasks_per_hour`, `v_error_rate`, `v_downloads_by_source`,
+    `v_scan_duration_trend`, `v_client_versions`, `v_clients_last_seen`).
+    Config: `telemetry.events_endpoint`
+    (`MOMOS_TELEMETRY_EVENTS_ENDPOINT`), `telemetry_receiver.db_path`
+    (`MOMOS_TELEMETRY_RECEIVER_DB_PATH`), `telemetry_receiver.retention_days`
+    (`MOMOS_TELEMETRY_RECEIVER_RETENTION_DAYS`); alles aus per Default
+    (`telemetry.enabled=false`) — kein Verhaltenswechsel. Payload-Hygiene:
+    keine Secrets, Pfade werden gestrippt/gekürzt. Konzept-Doc:
+    `plans/proposed/telemetry-events.md`. Keine UI-Actions, keine Heartbeats.
 
 - **Nachhaltiges Versioning-Konzept**: Release-Builds beziehen ihre Version
   aus dem Git-Tag (`v1.2.0` → `1.2.0`), Dev-Builds aus der Cargo.toml-Basis
-  + Commit-SHA (`1.1.0-dev+<sha8>`, rolling `main`). Mechanik: `build.rs`
-  injiziert `MMM_VERSION` (Env, Fallback Cargo.toml),
-  `scripts/resolve-version.sh` ist die einzige CI-Versionsquelle,
-  Packaging-Skripte versionieren aus `MMM_VERSION`. CI benennt Assets nach
-  Schema (`momos-music-manager-<version>-<os-arch>.<ext>`, Dev zusätzlich
-  stabile `-latest-`-Namen), publiziert versionierte Dev-Assets inkl.
-  signiertem Manifest und räumt stale/legacy Assets aus `latest-main` auf.
-  Autoupdater-Kanäle: Dev → `latest-main`, Release → `releases/latest`,
-  mit Kanal-Guards (kein automatischer dev↔release-Wechsel) und
-  rolling-Vergleich über den SHA. Doku: `docs/versioning.md`
-  (Schema, Kanäle, Release-Runbook, Alt-Tag-Repair),
-  `repair-release.yml` für die v1.1.0-Nachbesserung (Assets
-  `1.0.1` → `1.1.0`, Neu-Signatur des Manifests).
+  - Commit-SHA (`1.1.0-dev+<sha8>`, rolling `main`). Mechanik: `build.rs`
+    injiziert `MMM_VERSION` (Env, Fallback Cargo.toml),
+    `scripts/resolve-version.sh` ist die einzige CI-Versionsquelle,
+    Packaging-Skripte versionieren aus `MMM_VERSION`. CI benennt Assets nach
+    Schema (`momos-music-manager-<version>-<os-arch>.<ext>`, Dev zusätzlich
+    stabile `-latest-`-Namen), publiziert versionierte Dev-Assets inkl.
+    signiertem Manifest und räumt stale/legacy Assets aus `latest-main` auf.
+    Autoupdater-Kanäle: Dev → `latest-main`, Release → `releases/latest`,
+    mit Kanal-Guards (kein automatischer dev↔release-Wechsel) und
+    rolling-Vergleich über den SHA. Doku: `docs/versioning.md`
+    (Schema, Kanäle, Release-Runbook, Alt-Tag-Repair),
+    `repair-release.yml` für die v1.1.0-Nachbesserung (Assets
+    `1.0.1` → `1.1.0`, Neu-Signatur des Manifests).
 
 - **Update-Kanal-Wahl (`release` | `rolling`)**: Die Settings-Seite
   (`#settings`) bekommt ein Kanal-Dropdown neben dem Auto-Update-Toggle
@@ -317,7 +501,7 @@ All notable changes to Momo's Music Manager.
   `check`/`apply` laufen gegen den gewählten Kanal (Basis-URL folgt dem
   Kanal; ein `base_url`-Override behält Vorrang). **Cross-Channel-
   Semantik**: Ein expliziter Kanalwechsel ist kein Fehler mehr —
-  `ChannelMismatch` greift nur noch, wenn die Update-Quelle den *anderen*
+  `ChannelMismatch` greift nur noch, wenn die Update-Quelle den _anderen_
   Kanal ausliefert als gewählt (inkonsistenter Override); die UI erklärt
   den Mismatch entsprechend. Ein Kanalwechsel löscht den gecachten letzten
   Check (Ergebnisse vom alten Kanal gelten nicht für den neuen). Doku:
@@ -331,25 +515,25 @@ All notable changes to Momo's Music Manager.
   `autoupdate.interval_secs` in der KV-Tabelle, `[autoupdate] interval_secs`;
   `0` = periodische Schleife aus, Startup-Check läuft weiter; Default
   14400 s = 4 h). Einstellbar in der Settings-Seite (neuer Select, gesperrt
-  + Hinweis bei Env/TOML-Pinning wie Toggle/Kanal). Self-Restart-Guards:
-  Swap-Marker (laufendes Update) blockiert Folge-Apply; Crash-Loop-Breaker
-  (persistierter Auto-Apply-State, aktiviert beim Startup-Auto-Rollback)
-  verhindert Endlos-Restart-Loops derselben Version; unter systemd
-  (`INVOCATION_ID`) übernimmt der Service-Manager den Neustart
-  (`Restart=always`), sonst startet ein detachter Relauncher das neue Binary
-  nach 2 s neu (macOS `.app`: `open` des ersetzten Bundles, nur wenn das
-  laufende Bundle im Installations-Verzeichnis liegt). **macOS DMG-Handling**:  
-  verifizierter DMG wird gemountet (`hdiutil attach`), das `.app`-Bundle
-  atomar ersetzt (`ditto` → Staging → Swap, alte Version als
-  `<App>.app.updater-bak` für manuelle Wiederherstellung, Restore bei
-  Fehlern), wieder unmountet, DMG aufgeräumt; Installations-Ziel
-  konfigurierbar (`MOMOS_AUTOUPDATE_APP_DIR` / `[autoupdate] app_dir`,
-  Default `/Applications`). Schlägt der Self-Install fehl, bleibt der
-  verifizierte Download in `~/Downloads` (v1-Fallback). `ApplyOutcome::
-  Installed`-Pfad/Status-JSON unverändert → Telemetry-PR #20 (`app.updated`
-  bei Versionswechsel) bleibt kompatibel. Neue Module: `update_auto.rs`,
-  `restart.rs`, `dmg.rs`, `macos.rs`; Doku: README, `.env.example`,
-  `docs/versioning.md` §6/§7, PLATFORM-SUPPORT.
+  - Hinweis bei Env/TOML-Pinning wie Toggle/Kanal). Self-Restart-Guards:
+    Swap-Marker (laufendes Update) blockiert Folge-Apply; Crash-Loop-Breaker
+    (persistierter Auto-Apply-State, aktiviert beim Startup-Auto-Rollback)
+    verhindert Endlos-Restart-Loops derselben Version; unter systemd
+    (`INVOCATION_ID`) übernimmt der Service-Manager den Neustart
+    (`Restart=always`), sonst startet ein detachter Relauncher das neue Binary
+    nach 2 s neu (macOS `.app`: `open` des ersetzten Bundles, nur wenn das
+    laufende Bundle im Installations-Verzeichnis liegt). **macOS DMG-Handling**:  
+    verifizierter DMG wird gemountet (`hdiutil attach`), das `.app`-Bundle
+    atomar ersetzt (`ditto` → Staging → Swap, alte Version als
+    `<App>.app.updater-bak` für manuelle Wiederherstellung, Restore bei
+    Fehlern), wieder unmountet, DMG aufgeräumt; Installations-Ziel
+    konfigurierbar (`MOMOS_AUTOUPDATE_APP_DIR` / `[autoupdate] app_dir`,
+    Default `/Applications`). Schlägt der Self-Install fehl, bleibt der
+    verifizierte Download in `~/Downloads` (v1-Fallback). `ApplyOutcome::
+Installed`-Pfad/Status-JSON unverändert → Telemetry-PR #20 (`app.updated`
+    bei Versionswechsel) bleibt kompatibel. Neue Module: `update_auto.rs`,
+    `restart.rs`, `dmg.rs`, `macos.rs`; Doku: README, `.env.example`,
+    `docs/versioning.md` §6/§7, PLATFORM-SUPPORT.
 
 ---
 
@@ -364,7 +548,7 @@ All notable changes to Momo's Music Manager.
   `.bak` + `update-state.json`-Marker, Health-Grace nach Neustart (mit
   Selbst-Probe von `/api/health`), Auto-Rollback bei wiederholten Fehlstarts,
   manuelles `update rollback`. Neue CLI: `update check | apply | rollback |
-  status`. Opt-out: `serve --no-autoupdate`, `MOMOS_AUTOUPDATE_ENABLED=false`,
+status`. Opt-out: `serve --no-autoupdate`, `MOMOS_AUTOUPDATE_ENABLED=false`,
   `[autoupdate] enabled = false`. CI (Publish-Job) signiert das Manifest mit
   dem Secret `MINISIGN_SECRET_KEY` (base64 der `minisign.key`) und lädt
   `SHA256SUMS.minisig` hoch; ohne Secret bleibt es unsigned und der

@@ -520,3 +520,72 @@ async fn dynamic_bundles_backpack_toggle() {
         "bundle should reflect changed backpack status"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Ranking + Camelot diversification
+// ────────────────────────────────────────────────────────────────────────────
+
+/// `limitCount` caps the matched set; `rankBy`/`diversifyKeys` round-trip.
+#[tokio::test]
+async fn dynamic_bundles_create_with_ranking_and_diversify() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_dynamic_bundles_data(&pool).await;
+
+    let resp = client
+        .post(format!("{}/api/dynamic-bundles", base))
+        .json(&serde_json::json!({
+            "name": "Top afterhours",
+            "includeAllTracks": true,
+            "limitCount": 2,
+            "rankBy": "rating",
+            "diversifyKeys": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 201);
+    let body: Value = resp.json().await.unwrap();
+    let b = data_value(body);
+    assert_eq!(b["limitCount"], 2);
+    assert_eq!(b["rankBy"], "rating");
+    assert_eq!(b["diversifyKeys"], true);
+    assert_eq!(
+        b["matchingFileCount"], 2,
+        "limitCount caps the resolved set"
+    );
+}
+
+/// An explicit `null` clears a previously set field (missing = unchanged).
+#[tokio::test]
+async fn dynamic_bundles_update_can_clear_limit() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_dynamic_bundles_data(&pool).await;
+
+    let create = client
+        .post(format!("{}/api/dynamic-bundles", base))
+        .json(&serde_json::json!({
+            "name": "Clearable",
+            "includeAllTracks": true,
+            "limitCount": 2,
+            "bpmMin": 100,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = create.json().await.unwrap();
+    let id = data_value(body)["id"].as_i64().unwrap();
+
+    // Explicit null must clear, not be treated as "unchanged".
+    let resp = client
+        .put(format!("{}/api/dynamic-bundles/{}", base, id))
+        .json(&serde_json::json!({ "limitCount": null, "bpmMin": null }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let b = data_value(body);
+    assert!(b["limitCount"].is_null(), "limitCount should be cleared");
+    assert!(b["bpmMin"].is_null(), "bpmMin should be cleared");
+}

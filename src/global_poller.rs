@@ -34,6 +34,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::ServiceCredentials;
 use crate::db;
 use crate::spotify::client::SpotifyClient;
+use crate::spotify::cooldown::cooldown as spotify_cooldown;
 use crate::spotify::models::TrackInfo;
 use crate::spotify::retry::extract_retry_after_secs;
 use crate::spotify::retry::format_duration;
@@ -94,6 +95,15 @@ async fn run_poll_cycle(
     task_manager: &TaskManager,
     cancel_token: &CancellationToken,
 ) -> Result<()> {
+    // Honour a process-wide rate-limit cooldown before touching Spotify.
+    if let Some(secs) = spotify_cooldown().remaining_secs() {
+        debug!(
+            "Global poller: Spotify rate-limit cooldown active ({}s remaining), skipping cycle",
+            secs
+        );
+        return Ok(());
+    }
+
     let task_id = task_manager
         .start_task(Task::new(TaskType::GlobalPollCycle, Some("spotify".into())))
         .await;
@@ -140,34 +150,20 @@ async fn run_poll_cycle(
     let mut spotify_playlists: Vec<SimplifiedPlaylistData> = Vec::new();
 
     // ── Step 2: Fetch all playlists from Spotify ─────────────────────────
-    let stream = {
-        let mut attempt = 0;
-        loop {
-            match spotify_client.get_user_playlists().await {
-                Ok(stream) => break stream,
-                Err(e) => {
-                    if let Some(secs) = extract_retry_after_secs(&e) {
-                        let clamped = secs.min(300);
-                        attempt += 1;
-                        if attempt >= 3 {
-                            error!(
-                                "Global poller: failed to get playlists stream after {} retries (rate limited)",
-                                attempt
-                            );
-                            return Err(e);
-                        }
-                        let sleep_secs = clamped + 1;
-                        warn!(
-                            "Global poller: rate limited fetching playlist list. Retry-After: {} ({secs}s total, clamped to {clamped}s), attempt {attempt}/3, waiting {sleep_secs}s",
-                            format_duration(secs),
-                        );
-                        tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
-                    } else {
-                        error!("Global poller: failed to get playlists stream: {:#}", e);
-                        return Err(e);
-                    }
-                }
+    let stream = match spotify_client.get_user_playlists().await {
+        Ok(stream) => stream,
+        Err(e) => {
+            if let Some(secs) = extract_retry_after_secs(&e) {
+                spotify_cooldown().note_retry_after(secs);
+                warn!(
+                    "Global poller: rate limited fetching playlist list. \
+                     Retry-After: {} — cooling down, no inline retry",
+                    format_duration(secs),
+                );
+            } else {
+                error!("Global poller: failed to get playlists stream: {:#}", e);
             }
+            return Err(e);
         }
     };
 
@@ -184,12 +180,13 @@ async fn run_poll_cycle(
             }
             Err(e) => {
                 if let Some(secs) = extract_retry_after_secs(&e) {
+                    spotify_cooldown().note_retry_after(secs);
                     warn!(
-                        "Global poller: rate limited fetching playlist list. Retry-After: {}s",
-                        secs
+                        "Global poller: rate limited fetching playlist list. \
+                         Retry-After: {} — aborting this cycle",
+                        format_duration(secs),
                     );
-                    tokio::time::sleep(Duration::from_secs(secs + 1)).await;
-                    continue;
+                    break;
                 }
                 warn!("Global poller: error fetching playlist: {:#}", e);
                 continue;
@@ -211,6 +208,16 @@ async fn run_poll_cycle(
 
     for sp in &spotify_playlists {
         if cancel_token.is_cancelled() {
+            break;
+        }
+
+        // A 429 on any playlist sets the process-wide cooldown; abort the rest
+        // of the cycle instead of hammering the penalty window.
+        if let Some(secs) = spotify_cooldown().remaining_secs() {
+            warn!(
+                "Global poller: rate-limit cooldown set mid-cycle ({}s remaining), aborting cycle",
+                secs
+            );
             break;
         }
 
@@ -317,9 +324,6 @@ async fn run_poll_cycle(
                                 sp.name, track_count
                             );
                         }
-                        // A changed (subscribed) playlist may alter Backpack
-                        // membership — mark the transport dirty.
-                        let _ = backpack_dirty(db, &sp.id).await;
                     }
                     Err(e) => {
                         error!(
@@ -353,8 +357,6 @@ async fn run_poll_cycle(
                         db_id, e
                     );
                 }
-                // A deleted playlist drops all its tracks from the Backpack.
-                let _ = backpack_dirty(db, &pid).await;
                 deleted_count += 1;
             }
         }
@@ -396,21 +398,6 @@ async fn run_poll_cycle(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Mark the Backpack transport dirty if `playlist_id` is (or was) part of the
-/// Backpack — i.e. if it is actively subscribed. Non-fatal by design.
-async fn backpack_dirty(db: &Pool<Sqlite>, playlist_id: &str) {
-    let subscribed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM playlist_subscriptions WHERE playlist_id = ? AND is_active = 1",
-    )
-    .bind(playlist_id)
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
-    if subscribed > 0 {
-        let _ = crate::backpack::mark_backpack_dirty(db).await;
-    }
-}
 
 struct SimplifiedPlaylistData {
     id: String,
@@ -459,13 +446,13 @@ async fn fetch_and_store_playlist_tracks(
             Ok(item) => item,
             Err(e) => {
                 if let Some(secs) = extract_retry_after_secs(&e) {
-                    let clamped = secs.min(300);
+                    spotify_cooldown().note_retry_after(secs);
                     warn!(
-                        "Global poller: rate limited on '{}' tracks. Retry-After: {} ({secs}s total, clamped to {clamped}s)",
+                        "Global poller: rate limited on '{}' tracks. \
+                         Retry-After: {} — skipping, no inline retry",
                         playlist.name,
                         format_duration(secs),
                     );
-                    tokio::time::sleep(Duration::from_secs(clamped + 1)).await;
                     continue;
                 }
                 warn!(

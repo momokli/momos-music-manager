@@ -18,9 +18,6 @@ pub enum DeemixCommand {
     },
     Status,
     Queue,
-    Add {
-        url: String,
-    },
     Retry {
         id: i64,
     },
@@ -101,20 +98,6 @@ mod tests {
             .try_get_matches_from(vec!["deemix", "queue"])
             .unwrap();
         assert_eq!(matches.subcommand_name(), Some("queue"));
-    }
-
-    #[test]
-    fn test_deemix_command_add() {
-        let matches = deemix_cmd()
-            .try_get_matches_from(vec![
-                "deemix",
-                "add",
-                "https://open.spotify.com/playlist/abc",
-            ])
-            .unwrap();
-        let sub = matches.subcommand_matches("add").unwrap();
-        let url: &String = sub.get_one::<String>("url").unwrap();
-        assert_eq!(url, "https://open.spotify.com/playlist/abc");
     }
 
     #[test]
@@ -282,14 +265,6 @@ pub async fn run(cmd: DeemixCommand) -> Result<()> {
                 }
             }
             println!("{}", serde_json::to_string_pretty(&combined)?);
-        }
-        DeemixCommand::Add { url } => {
-            let db = connect_db().await?;
-            let (c, _) = load_deemix(&db).await?;
-            let now = chrono::Utc::now().timestamp();
-            sqlx::query("INSERT INTO deemix_downloads(spotify_playlist_url,status,created_at,updated_at)VALUES(?,'queued',?,?)ON CONFLICT(spotify_playlist_url)DO UPDATE SET status='queued',error_message=NULL,updated_at=excluded.updated_at").bind(&url).bind(now).bind(now).execute(&db).await?;
-            c.add_to_queue(&url).await?;
-            println!("Added: {url}");
         }
         DeemixCommand::Retry { id } => {
             let db = connect_db().await?;

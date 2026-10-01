@@ -1,117 +1,101 @@
 import { test, expect } from "@playwright/test";
 
 /**
- * Backpack Spotify transport playlist.
+ * Backpack page — the "what I want on my Mac" control.
  *
- * The page renders a status card from `GET /api/backpack` and a
- * "Push to Spotify" button that POSTs `/api/backpack/push`. Spotify is not
- * configured in the Playwright environment, so the push endpoints are stubbed
- * at the network layer — these tests cover the UI wiring, not the Spotify calls
- * (those are covered by the Rust integration tests).
+ * Covers the keep set (backpack tags + subscribed playlists), the file-sync
+ * switch and the Sync All trigger. The Spotify playlist transport was removed
+ * (ADR-067); these tests assert it stays gone.
  */
-
-const STATUS_OK = {
-  data: {
-    trackCount: 12,
-    fileCount: 9,
-    playlistUrl: "https://open.spotify.com/playlist/bp-id-1",
-    signature: "abc123",
-    dirty: false,
-    dirtyAt: null,
-    lastPushAt: 1700000000,
-    lastPushStatus: "ok",
-    lastPushError: null,
-    pushPending: false,
-  },
-};
 
 async function gotoBackpack(page) {
   await page.goto("/#backpack");
-  await page.waitForSelector("#backpack-playlist-card", { timeout: 8000 });
+  await page.waitForSelector("#backpack-sync-enabled", { timeout: 8000 });
 }
 
-test.describe("Backpack Spotify playlist", () => {
-  test.beforeEach(async ({ request, page }) => {
+test.describe("Backpack page (keep / best-format control)", () => {
+  test.beforeEach(async ({ request }) => {
     await request.post("/api/testing/seed", { data: { scenario: "basic" } });
-    await page.route("**/api/backpack", async (route) => {
-      if (route.request().method() === "GET") {
-        await route.fulfill({ json: STATUS_OK });
+  });
+
+  test("renders the set and no longer shows the Spotify transport", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await gotoBackpack(page);
+
+    await expect(page.locator("h1")).toContainText("Backpack");
+    await expect(page.locator(".backpack-section")).toHaveCount(2);
+    await expect(page.locator("#backpack-sync-all")).toBeVisible();
+    await expect(page.locator("#backpack-sync-enabled")).toBeChecked();
+
+    // Transport is gone: no playlist card, no push button, no music-api card.
+    await expect(page.locator("#backpack-playlist-card")).toHaveCount(0);
+    await expect(page.locator("#backpack-push")).toHaveCount(0);
+    await expect(page.locator("#backpack-music-api-card")).toHaveCount(0);
+
+    expect(errors).toEqual([]);
+  });
+
+  test("a backpack tag shows as a source and can be removed", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await gotoBackpack(page);
+
+    const cards = page.locator(".backpack-tag-card");
+    await expect(cards).toHaveCount(1);
+    await expect(cards.first()).toContainText("Deep");
+
+    await cards.first().locator(".backpack-tag-remove").click();
+
+    // The tag stays in the DB but leaves the Backpack, so the list empties.
+    await expect(page.locator(".backpack-tag-card")).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
+  test("the file-sync switch persists via the settings endpoint", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await gotoBackpack(page);
+
+    let putBody = null;
+    await page.route("**/api/storage/settings/backpack-sync", async (route) => {
+      if (route.request().method() === "PUT") {
+        putBody = route.request().postDataJSON();
+        await route.fulfill({ json: { data: { enabled: putBody.enabled } } });
       } else {
         await route.continue();
       }
     });
+
+    await page.locator("#backpack-sync-enabled").uncheck();
+
+    await expect.poll(() => putBody && putBody.enabled).toBe(false);
+    // Sync All is disabled while the switch is off.
+    await expect(page.locator("#backpack-sync-all")).toBeDisabled();
+    expect(errors).toEqual([]);
   });
 
-  test("renders status card with set size and playlist link", async ({ page }) => {
+  test("Sync All starts a backpack sync task", async ({ page }) => {
     const errors = [];
     page.on("pageerror", (err) => errors.push(err));
 
     await gotoBackpack(page);
 
-    const card = page.locator(".backpack-playlist-card");
-    await expect(card).toBeVisible();
-    await expect(card).toContainText("12");
-    await expect(card).toContainText("9");
-    await expect(page.locator('.backpack-playlist-link a[href*="spotify.com"]')).toBeVisible();
-    await expect(page.locator("#backpack-push")).toBeVisible();
-
-    expect(errors).toEqual([]);
-  });
-
-  test("push button reports the outcome and keeps the link visible", async ({ page }) => {
-    const errors = [];
-    page.on("pageerror", (err) => errors.push(err));
-
-    await page.route("**/api/backpack/push", async (route) => {
-      await route.fulfill({
-        json: {
-          data: {
-            trackCount: 12,
-            created: false,
-            updated: true,
-            spotifyUrl: "https://open.spotify.com/playlist/bp-id-1",
-            deemixSubmitted: true,
-            dryRun: false,
-            verificationFailed: false,
-          },
-        },
-      });
+    let posted = false;
+    await page.route("**/api/storage/sync-backpack", async (route) => {
+      posted = true;
+      await route.fulfill({ json: { data: { taskId: "task-1" } } });
+    });
+    await page.route("**/api/tasks/task-1", async (route) => {
+      await route.fulfill({ json: { data: { status: "completed" } } });
     });
 
-    await gotoBackpack(page);
-    await page.click("#backpack-push");
+    await page.locator("#backpack-sync-all").click();
 
-    await expect(page.locator(".toast-notification")).toContainText("12", { timeout: 6000 });
-    await expect(page.locator('.backpack-playlist-link a[href*="spotify.com"]')).toBeVisible();
-
+    await expect.poll(() => posted).toBe(true);
     expect(errors).toEqual([]);
-  });
-
-  test("cleared deemix checkbox sends submitToDeemix=false", async ({ page }) => {
-    let sentBody = null;
-    await page.route("**/api/backpack/push", async (route) => {
-      sentBody = route.request().postDataJSON();
-      await route.fulfill({
-        json: {
-          data: {
-            trackCount: 12,
-            created: false,
-            updated: true,
-            spotifyUrl: "https://open.spotify.com/playlist/bp-id-1",
-            deemixSubmitted: false,
-            dryRun: false,
-            verificationFailed: false,
-          },
-        },
-      });
-    });
-
-    await gotoBackpack(page);
-    await page.uncheck("#backpack-submit-deemix");
-    await page.click("#backpack-push");
-
-    await expect(page.locator(".toast-notification")).toBeVisible({ timeout: 6000 });
-    expect(sentBody).not.toBeNull();
-    expect(sentBody.submitToDeemix).toBe(false);
   });
 });

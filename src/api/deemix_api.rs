@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::AppState;
 use crate::api::types::ApiResponse;
 use crate::deemix::{
-    DeemixAuthRequest, DeemixClient, DeemixCombinedQueueItem, DeemixEnqueueRequest,
+    DeemixAuthRequest, DeemixClient, DeemixCombinedQueueItem,
 };
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -400,99 +400,6 @@ async fn deemix_queue_handler(
     .into_response()
 }
 
-/// POST /api/services/deemix/queue
-///
-/// Add a Spotify playlist URL to the deemix download queue.
-/// Body: { "url": "https://open.spotify.com/playlist/..." }
-async fn deemix_enqueue_handler(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<DeemixEnqueueRequest>,
-) -> impl IntoResponse {
-    use axum::http::StatusCode;
-
-    if request.url.is_empty() {
-        crate::api::ui_events::emit_action(
-            &state,
-            crate::telemetry::events::EventType::UiActionDeemixEnqueue,
-            false,
-            Some("URL is required"),
-        );
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                data: "URL is required".to_string(),
-            }),
-        )
-            .into_response();
-    }
-
-    // Insert into local deemix_downloads table
-    let now = chrono::Utc::now().timestamp();
-    let insert_result = sqlx::query(
-        r#"
-        INSERT INTO deemix_downloads (spotify_playlist_url, status, created_at, updated_at)
-        VALUES (?, 'queued', ?, ?)
-        ON CONFLICT(spotify_playlist_url) DO UPDATE SET
-            status = 'queued',
-            error_message = NULL,
-            updated_at = excluded.updated_at
-        "#,
-    )
-    .bind(&request.url)
-    .bind(now)
-    .bind(now)
-    .execute(&state.db)
-    .await;
-
-    if let Err(e) = insert_result {
-        tracing::error!("Failed to insert deemix download: {}", e);
-        crate::api::ui_events::emit_action(
-            &state,
-            crate::telemetry::events::EventType::UiActionDeemixEnqueue,
-            false,
-            Some(&format!("Failed to queue download: {}", e)),
-        );
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse {
-                data: format!("Failed to queue download: {}", e),
-            }),
-        )
-            .into_response();
-    }
-
-    // Forward to deemix server
-    if let Some(client) = load_deemix_client_from_db(&state.db).await
-        && let Err(e) = client.add_to_queue(&request.url).await
-    {
-        tracing::error!("Failed to forward URL to deemix server: {}", e);
-        crate::api::ui_events::emit_action(
-            &state,
-            crate::telemetry::events::EventType::UiActionDeemixEnqueue,
-            false,
-            Some(&format!("Deemix server rejected the request: {}", e)),
-        );
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(ApiResponse {
-                data: format!("Deemix server rejected the request: {}", e),
-            }),
-        )
-            .into_response();
-    }
-
-    crate::api::ui_events::emit_action(
-        &state,
-        crate::telemetry::events::EventType::UiActionDeemixEnqueue,
-        true,
-        None,
-    );
-    Json(ApiResponse {
-        data: "Playlist added to download queue",
-    })
-    .into_response()
-}
-
 /// POST /api/services/deemix/queue/{id}/retry
 ///
 /// Retry a failed download.
@@ -613,10 +520,7 @@ pub(super) async fn load_deemix_client_from_db(db: &Pool<Sqlite>) -> Option<Deem
 pub(super) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/services/deemix/auth", post(deemix_auth_handler))
-        .route(
-            "/api/services/deemix/queue",
-            get(deemix_queue_handler).post(deemix_enqueue_handler),
-        )
+        .route("/api/services/deemix/queue", get(deemix_queue_handler))
         .route(
             "/api/services/deemix/queue/{id}/retry",
             post(deemix_retry_handler),

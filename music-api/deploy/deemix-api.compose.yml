@@ -1,0 +1,28 @@
+# Dedicated deemix instance for music-api.
+#
+# Why dedicated: music-api needs a predictable download location and a FLAC
+# request with *bitrate fallback* enabled, so a track without a lossless master
+# falls back to 320 instead of erroring with `CantStream`. Keeping it separate
+# from the user's deemix-flac/-320/-128 instances avoids cross-talk.
+#
+# Bind to loopback only — music-api is the only client.
+#
+#   docker compose -f deemix-api.compose.yml up -d
+#   # then, once, via an SSH tunnel (:6599), log in with the ARL and set
+#   #   Settings → Quality = FLAC,  "Bitrate fallback" = ON
+services:
+  deemix-api:
+    image: ghcr.io/bambanah/deemix:latest
+    container_name: deemix-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6599:6595"
+    volumes:
+      - /opt/music-api/deemix-config:/config
+      # The store lives on the big data volume, NOT on the 30G root fs.
+      - /data/public/media/music-api/incoming:/downloads
+    environment:
+      - DEEMIX_SINGLE_USER=true
+      - PUID=1000
+      - PGID=1000
+      - UMASK_SET=022

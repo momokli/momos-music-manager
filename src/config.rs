@@ -178,6 +178,11 @@ struct TomlConfig {
     telemetry_receiver: Option<TelemetryReceiverToml>,
     autoupdate: Option<AutoupdateToml>,
     autoupgrade: Option<AutoupgradeToml>,
+    /// `[music_api]` — explicit rename because the struct is `kebab-case`.
+    #[serde(rename = "music_api")]
+    music_api: Option<MusicApiToml>,
+    /// `[store]` — the remote content-addressed object store.
+    store: Option<StoreToml>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -221,7 +226,6 @@ struct PollingToml {
 struct MaintainerToml {
     interval_secs: Option<u64>,
     full_scan_max_age_secs: Option<u64>,
-    backup_discovery_interval_secs: Option<u64>,
     auto_prune: Option<bool>,
     auto_cleanup_dirs: Option<bool>,
     traktor_import_enabled: Option<bool>,
@@ -302,6 +306,24 @@ struct AutoupgradeToml {
     enabled: Option<bool>,
 }
 
+/// `[music_api]` — ISRC orders against the `music-api` service.
+#[derive(Debug, Clone, Deserialize)]
+struct MusicApiToml {
+    enabled: Option<bool>,
+    base_url: Option<String>,
+    token: Option<String>,
+    batch_size: Option<usize>,
+    interval_secs: Option<u64>,
+}
+
+/// `[store]` — the remote content-addressed object store on `.200`.
+#[derive(Debug, Clone, Deserialize)]
+struct StoreToml {
+    enabled: Option<bool>,
+    base_url: Option<String>,
+    token: Option<String>,
+}
+
 // ── Runtime representation ─────────────────────────────────────────────────
 
 /// Service credentials used throughout the application.
@@ -341,7 +363,6 @@ pub struct ServiceCredentials {
     // Maintainer configuration
     pub maintainer_interval_secs: u64,
     pub maintainer_full_scan_max_age_secs: u64,
-    pub maintainer_backup_discovery_interval_secs: u64,
     pub maintainer_auto_prune: bool,
     pub maintainer_auto_cleanup_dirs: bool,
     pub maintainer_traktor_import_enabled: bool,
@@ -422,6 +443,15 @@ pub struct ServiceCredentials {
     /// Env `MOMOS_AUTOUPGRADE_ENABLED` > `[autoupgrade] enabled` > default
     /// `false` (opt-in — automatic replacement is destructive).
     pub autoupgrade_enabled: bool,
+
+    /// ISRC orders against the `music-api` service (env > `[music_api]` >
+    /// defaults). See [`crate::music_api::MusicApiConfig`].
+    pub music_api: crate::music_api::MusicApiConfig,
+
+    /// Remote content-addressed object store (env > `[store]` > default OFF).
+    /// Opt-in: nothing happens until it is configured. See
+    /// [`crate::store::StoreConfig`].
+    pub store: crate::store::StoreConfig,
 }
 
 impl ServiceCredentials {
@@ -561,6 +591,58 @@ impl ServiceCredentials {
         )
         .unwrap_or_else(|| format!("{}/telemetry.db", telemetry_receiver_base_dir.trim_end_matches('/')));
 
+        // music-api (ISRC orders): env > [music_api] > defaults.
+        let music_api = crate::music_api::MusicApiConfig {
+            enabled: std::env::var("MUSIC_API_ENABLED")
+                .ok()
+                .and_then(|v| v.parse::<bool>().ok())
+                .or_else(|| toml_config.music_api.as_ref().and_then(|m| m.enabled))
+                .unwrap_or(true),
+            base_url: env_or_toml_opt(
+                "MUSIC_API_URL",
+                toml_config
+                    .music_api
+                    .as_ref()
+                    .and_then(|m| m.base_url.clone()),
+            ),
+            token: env_or_toml_opt(
+                "MUSIC_API_TOKEN",
+                toml_config.music_api.as_ref().and_then(|m| m.token.clone()),
+            ),
+            batch_size: std::env::var("MUSIC_API_BATCH_SIZE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .or_else(|| toml_config.music_api.as_ref().and_then(|m| m.batch_size))
+                .unwrap_or(100),
+            interval_secs: std::env::var("MUSIC_API_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .or_else(|| {
+                    toml_config
+                        .music_api
+                        .as_ref()
+                        .and_then(|m| m.interval_secs)
+                })
+                .unwrap_or(900),
+        };
+
+        // Remote object store: env > [store] > default OFF (opt-in).
+        let store = crate::store::StoreConfig {
+            enabled: std::env::var("STORE_ENABLED")
+                .ok()
+                .and_then(|v| v.parse::<bool>().ok())
+                .or_else(|| toml_config.store.as_ref().and_then(|s| s.enabled))
+                .unwrap_or(false),
+            base_url: env_or_toml_opt(
+                "STORE_URL",
+                toml_config.store.as_ref().and_then(|s| s.base_url.clone()),
+            ),
+            token: env_or_toml_opt(
+                "STORE_TOKEN",
+                toml_config.store.as_ref().and_then(|s| s.token.clone()),
+            ),
+        };
+
         let credentials = Self {
             spotify_client_id: spotify_id,
             spotify_client_secret: spotify_secret,
@@ -665,19 +747,6 @@ impl ServiceCredentials {
                         .and_then(|m| m.full_scan_max_age_secs)
                 })
                 .unwrap_or(86400), // 24 hours default
-
-            maintainer_backup_discovery_interval_secs: std::env::var(
-                "MOMOS_MAINTAINER_BACKUP_DISCOVERY_INTERVAL",
-            )
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .or_else(|| {
-                toml_config
-                    .maintainer
-                    .as_ref()
-                    .and_then(|m| m.backup_discovery_interval_secs)
-            })
-            .unwrap_or(86400), // 1 day default
 
             maintainer_auto_prune: std::env::var("MOMOS_MAINTAINER_AUTO_PRUNE")
                 .ok()
@@ -863,11 +932,30 @@ impl ServiceCredentials {
                         .and_then(|a| a.enabled)
                 })
                 .unwrap_or(false),
+
+            music_api,
+            store,
         };
 
         info!(
             "Autoupgrade config: enabled={}",
             credentials.autoupgrade_enabled,
+        );
+
+        info!(
+            "music-api config: configured={}, enabled={}, base_url={:?}, batch_size={}, interval_secs={}",
+            credentials.music_api.is_configured(),
+            credentials.music_api.enabled,
+            credentials.music_api.base_url,
+            credentials.music_api.batch_size,
+            credentials.music_api.interval_secs,
+        );
+
+        info!(
+            "store config: configured={}, enabled={}, base_url={:?}",
+            credentials.store.is_configured(),
+            credentials.store.enabled,
+            credentials.store.base_url,
         );
 
         info!(
@@ -886,11 +974,10 @@ impl ServiceCredentials {
         );
 
         info!(
-            "Maintainer config: interval={}s, full_scan_max_age={}s, backup_discovery_interval={}s, \
+            "Maintainer config: interval={}s, full_scan_max_age={}s, \
              auto_prune={}, auto_cleanup_dirs={}, traktor_import={}",
             credentials.maintainer_interval_secs,
             credentials.maintainer_full_scan_max_age_secs,
-            credentials.maintainer_backup_discovery_interval_secs,
             credentials.maintainer_auto_prune,
             credentials.maintainer_auto_cleanup_dirs,
             credentials.maintainer_traktor_import_enabled,
@@ -951,11 +1038,6 @@ impl ServiceCredentials {
                 .unwrap_or(3600),
             maintainer_full_scan_max_age_secs: env_var_optional(
                 "MOMOS_MAINTAINER_FULL_SCAN_MAX_AGE_SECS",
-            )
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(86400),
-            maintainer_backup_discovery_interval_secs: env_var_optional(
-                "MOMOS_MAINTAINER_BACKUP_DISCOVERY_INTERVAL_SECS",
             )
             .and_then(|v| v.parse().ok())
             .unwrap_or(86400),
@@ -1038,6 +1120,26 @@ impl ServiceCredentials {
             autoupgrade_enabled: env_var_optional("MOMOS_AUTOUPGRADE_ENABLED")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(false),
+            music_api: crate::music_api::MusicApiConfig {
+                enabled: env_var_optional("MUSIC_API_ENABLED")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(true),
+                base_url: env_var_optional("MUSIC_API_URL"),
+                token: env_var_optional("MUSIC_API_TOKEN"),
+                batch_size: env_var_optional("MUSIC_API_BATCH_SIZE")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(100),
+                interval_secs: env_var_optional("MUSIC_API_INTERVAL_SECS")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(900),
+            },
+            store: crate::store::StoreConfig {
+                enabled: env_var_optional("STORE_ENABLED")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(false),
+                base_url: env_var_optional("STORE_URL"),
+                token: env_var_optional("STORE_TOKEN"),
+            },
         }
     }
 
@@ -1503,7 +1605,6 @@ impl ServiceCredentials {
             cold_start_threshold_secs: 86400,
             maintainer_interval_secs: 0,
             maintainer_full_scan_max_age_secs: 86400,
-            maintainer_backup_discovery_interval_secs: 604800,
             maintainer_auto_prune: false,
             maintainer_auto_cleanup_dirs: false,
             maintainer_traktor_import_enabled: false,
@@ -1533,6 +1634,8 @@ impl ServiceCredentials {
             autoupdate_has_toml: false,
             autoupdate_channel_toml: None,
             autoupgrade_enabled: false,
+            music_api: crate::music_api::MusicApiConfig::default(),
+            store: crate::store::StoreConfig::default(),
         }
     }
 }
@@ -1906,7 +2009,6 @@ pub(crate) mod tests {
         assert_eq!(creds.cold_start_threshold_secs, 86400);
         assert_eq!(creds.maintainer_interval_secs, 0);
         assert_eq!(creds.maintainer_full_scan_max_age_secs, 86400);
-        assert_eq!(creds.maintainer_backup_discovery_interval_secs, 604800);
         assert!(creds.spotify_client_id.is_none());
         assert!(creds.spotify_client_secret.is_none());
         assert_eq!(creds.spotify_redirect_uri, "http://localhost:3000/callback");
@@ -1918,6 +2020,13 @@ pub(crate) mod tests {
         // Full-DB snapshot option defaults OFF (0) for tests.
         assert_eq!(creds.telemetry_full_db_interval_secs, 0);
         assert_eq!(creds.telemetry_interval_secs, 0);
+        // music-api defaults: enabled but unconfigured (no URL/token).
+        assert!(creds.music_api.enabled);
+        assert!(creds.music_api.base_url.is_none());
+        assert!(creds.music_api.token.is_none());
+        assert_eq!(creds.music_api.batch_size, 100);
+        assert_eq!(creds.music_api.interval_secs, 900);
+        assert!(!creds.music_api.is_configured());
     }
 
     // ── Configured checks ───────────────────────────────────────────
@@ -1985,6 +2094,63 @@ pub(crate) mod tests {
             ..ServiceCredentials::defaults_for_test()
         };
         assert!(!creds.is_youtube_configured());
+    }
+
+    #[test]
+    fn test_music_api_is_configured() {
+        let mut creds = ServiceCredentials::defaults_for_test();
+        assert!(!creds.music_api.is_configured());
+
+        creds.music_api.base_url = Some("https://music-api.example.com".to_string());
+        creds.music_api.token = Some("secret".to_string());
+        assert!(creds.music_api.is_configured());
+
+        // Explicitly disabled wins over set URL/token.
+        creds.music_api.enabled = false;
+        assert!(!creds.music_api.is_configured());
+    }
+
+    #[test]
+    fn test_music_api_toml_parses() {
+        let src = "[music_api]\nenabled = false\nbase_url = \"https://m.example.com\"\ntoken = \"t\"\nbatch_size = 7\ninterval_secs = 60\n";
+        let cfg: TomlConfig = toml::from_str(src).unwrap();
+        let m = cfg.music_api.expect("music_api section present");
+        assert_eq!(m.enabled, Some(false));
+        assert_eq!(m.base_url.as_deref(), Some("https://m.example.com"));
+        assert_eq!(m.token.as_deref(), Some("t"));
+        assert_eq!(m.batch_size, Some(7));
+        assert_eq!(m.interval_secs, Some(60));
+    }
+
+    #[test]
+    fn test_music_api_toml_absent_is_none() {
+        let cfg: TomlConfig = toml::from_str("[server]\nport = 3000\n").unwrap();
+        assert!(cfg.music_api.is_none());
+    }
+
+    #[test]
+    fn test_store_toml_parses() {
+        let src = "[store]\nenabled = true\nbase_url = \"http://store.example.com\"\ntoken = \"t\"\n";
+        let cfg: TomlConfig = toml::from_str(src).unwrap();
+        let s = cfg.store.expect("store section present");
+        assert_eq!(s.enabled, Some(true));
+        assert_eq!(s.base_url.as_deref(), Some("http://store.example.com"));
+        assert_eq!(s.token.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn test_store_toml_absent_is_none() {
+        let cfg: TomlConfig = toml::from_str("[server]\nport = 3000\n").unwrap();
+        assert!(cfg.store.is_none());
+    }
+
+    #[test]
+    fn test_store_defaults_to_disabled() {
+        let creds = ServiceCredentials::defaults_for_test();
+        assert!(!creds.store.enabled);
+        assert!(creds.store.base_url.is_none());
+        assert!(creds.store.token.is_none());
+        assert!(!creds.store.is_configured());
     }
 
     // ── Telemetry TOML parsing (full-DB option) ───────────────────────

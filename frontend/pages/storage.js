@@ -1,7 +1,7 @@
 /**
  * storage.js — Storage management page.
  *
- * Views local vs backup storage status, triggers backups per folder,
+ * Views local vs store storage status, prune candidates,
  * previews and executes pruning of backed-up files.
  */
 
@@ -41,7 +41,6 @@ export async function init(container, signal) {
   await loadStatus(container);
   await loadFolders(container);
   await loadFormatPriority(container);
-  renderBackfillSection(container);
   await loadPrunePreview(container);
   wireEvents(container);
 }
@@ -55,11 +54,16 @@ function renderLayout(container) {
     <div class="page-header">
       <h1><i class="fas fa-hdd"></i> Storage</h1>
     </div>
+    <div class="storage-actions" id="storage-actions" style="display:flex;align-items:center;gap:0.5rem;margin-bottom:1rem;">
+      <button id="storage-sync-store" class="btn btn-primary">
+        <i class="fas fa-cloud-arrow-up"></i> Sync to store
+      </button>
+      <span id="storage-sync-store-status" class="text-muted"></span>
+    </div>
     <div id="storage-status-cards"></div>
     <div id="storage-file-types"></div>
     <div id="storage-format-priority"></div>
     <div id="storage-folders"></div>
-    <div id="storage-backfill"></div>
     <div id="storage-prune-section">
       <h2 class="section-title"><i class="fas fa-trash-alt"></i> Prune Preview</h2>
       <div id="storage-prune-filters"></div>
@@ -101,7 +105,9 @@ function renderStatusCards(container, status) {
   }
 
   const orphanCount = status.orphanedFileCount ?? 0;
-  const orphanHtml = orphanCount > 0 ? `
+  const orphanHtml =
+    orphanCount > 0
+      ? `
     <div class="card" id="orphan-card">
       <h3><i class="fas fa-ghost"></i> Ghost Records</h3>
       <p class="help-text">
@@ -117,9 +123,10 @@ function renderStatusCards(container, status) {
       </button>
       <p class="help-text" style="margin-top:0.5rem">
         ⚠️ This permanently deletes these records from the database.
-        Backed-up files on the NAS are not affected.
+        Files in the object store are not affected.
       </p>
-    </div>` : '';
+    </div>`
+      : "";
 
   el.innerHTML = `
     ${warningHtml}
@@ -139,7 +146,7 @@ function renderStatusCards(container, status) {
           <div class="storage-card-icon"><i class="fas fa-cloud"></i></div>
           <div class="storage-card-body">
             <div class="storage-card-value">${bc.toLocaleString()}</div>
-            <div class="storage-card-label">On Backup</div>
+            <div class="storage-card-label">In Store</div>
           </div>
         </div>
         <div class="storage-card" style="flex:1">
@@ -154,8 +161,8 @@ function renderStatusCards(container, status) {
           <div class="storage-card-icon"><i class="fas fa-clock"></i></div>
           <div class="storage-card-body">
             <div class="storage-card-value">${nb.toLocaleString()}</div>
-            <div class="storage-card-label">Not Backed Up</div>
-            <div class="storage-card-hint">files need backup</div>
+            <div class="storage-card-label">Not In Store</div>
+            <div class="storage-card-hint">files not in store</div>
           </div>
         </div>
         <div class="storage-card" style="flex:1;border-color: ${pcc > 0 ? "var(--red)" : "var(--green)"}">
@@ -241,33 +248,20 @@ function renderFolders(container, folders) {
     for (const f of folders) {
       const folderPath = escapeHtml(f.path ?? f.folderPath ?? f.folder_path ?? "?");
       const fileCount = f.fileCount ?? f.file_count ?? "—";
-      const bp = f.backupPath ?? f.backup_path ?? "";
-      const hasBackup = !!bp;
       const scanSrc = f.scanSources ?? f.scan_sources ?? false;
 
-      html += `<div class="folder-card${hasBackup ? " has-backup" : ""}">
+      html += `<div class="folder-card">
         <div class="folder-card-header">
           <code class="folder-path">${folderPath}</code>
           <span class="folder-file-count">${fileCount} files</span>
         </div>
         <div class="folder-card-body">
           <div class="folder-info-row">
-            <span class="folder-info-label">Backup</span>
-            <span class="folder-info-value">${hasBackup ? escapeHtml(bp) : '<span class="text-muted">Not configured</span>'}</span>
-          </div>
-          <div class="folder-info-row">
             <span class="folder-info-label">WAV Sources</span>
             <span class="folder-info-value">${scanSrc ? '<span style="color:var(--green)">Enabled</span>' : '<span class="text-muted">Disabled</span>'}</span>
           </div>
-          <div class="folder-info-row">
-            <span class="folder-info-label">Auto Backup</span>
-            <span class="folder-info-value">${(f.autoBackup ?? f.auto_backup ?? true) ? '<span style="color:var(--green)">Enabled</span>' : '<span class="text-muted">Disabled</span>'}</span>
-          </div>
         </div>
         <div class="folder-card-actions">
-          <button class="btn btn-sm" data-act="backup-folder" data-id="${f.id}" ${hasBackup ? "" : "disabled title='Set backup path first'"}>
-            <i class="fas fa-cloud-upload-alt"></i> Backup
-          </button>
           ${
             scanSrc
               ? `<button class="btn btn-sm" data-act="scan-wavs" data-id="${f.id}">
@@ -360,7 +354,7 @@ function renderPrunePreview(container, candidates) {
   html +=
     '<div class="table-wrap" style="max-height:400px;overflow-y:auto"><table class="table"><thead><tr>';
   html +=
-    '<th style="width:32px"></th><th>Title</th><th>Artist</th><th>Type</th><th>Stem Variant</th><th>Size</th><th>Reason</th><th>Backup</th>';
+    '<th style="width:32px"></th><th>Title</th><th>Artist</th><th>Type</th><th>Stem Variant</th><th>Size</th><th>Reason</th><th>Store</th>';
   html += "</tr></thead><tbody>";
 
   for (const c of filtered) {
@@ -376,7 +370,7 @@ function renderPrunePreview(container, candidates) {
     }</td>`;
     html += `<td>${formatBytes(c.fileSize)}</td>`;
     html += `<td>${reasonLabels[c.reason] || c.reason}</td>`;
-    html += `<td>${c.backupPath ? escapeHtml(c.backupPath) : '<span class="text-muted">—</span>'}</td>`;
+    html += `<td>${(c.backupPath ?? "").startsWith("store:") ? '<i class="fas fa-check" style="color:var(--green)" title="Backed up in the object store"></i>' : '<span class="text-muted">—</span>'}</td>`;
     html += "</tr>";
   }
 
@@ -448,32 +442,10 @@ async function loadFormatPriority(container) {
 /*  Backfill Section                                                     */
 /* ------------------------------------------------------------------ */
 
-function renderBackfillSection(container) {
-  const el = container.querySelector("#storage-backfill");
-  if (!el) return;
-  el.innerHTML = `
-    <div class="card" id="backfill-section">
-      <h3><i class="fas fa-ruler-combined"></i> Backup Size Integrity</h3>
-      <p class="help-text">
-        Some backup records have <code>file_size=0</code> because the size wasn&apos;t
-        recorded during backup. This tool checks the actual file size on the NAS
-        via SSH and updates the database records.
-      </p>
-      <div class="backfill-actions">
-        <button id="btn-backfill" class="btn btn-primary">
-          <i class="fas fa-sync"></i> Backfill Backup Sizes
-        </button>
-        <span id="backfill-status" class="text-muted" style="margin-left: 1rem;"></span>
-      </div>
-      <div id="backfill-results" style="margin-top: 0.75rem; font-size: 0.85rem;"></div>
-    </div>
-  `;
-}
-
 function renderFormatPriority(el, priorities) {
   let html = `<div class="card" id="format-priority-card">
     <h3><i class="fas fa-sort-amount-down"></i> Format Priority</h3>
-    <p class="help-text">When pulling from backup, higher formats are preferred.</p>
+    <p class="help-text">When restoring from the store, higher formats are preferred.</p>
     <ul class="format-priority-list" id="format-priority-list">
       ${priorities
         .map(
@@ -544,6 +516,41 @@ function wireEvents(container) {
 
   // Delegate clicks
   container.addEventListener("click", async (e) => {
+    // Sync library to remote content-addressed store
+    const storeSyncBtn = e.target.closest("#storage-sync-store");
+    if (storeSyncBtn) {
+      const statusEl = container.querySelector("#storage-sync-store-status");
+      storeSyncBtn.disabled = true;
+      storeSyncBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Syncing...';
+      if (statusEl) statusEl.textContent = "Starting store sync...";
+      try {
+        const resp = await fetchJSON("/api/storage/sync-store", { method: "POST" });
+        const data = resp?.data || resp || {};
+        if (data.taskId) {
+          showToast("Store sync started — running in the background", "success");
+          if (statusEl) statusEl.textContent = `Task ${data.taskId}`;
+        } else {
+          const msg = data.message || "Store sync already running";
+          showToast(msg, "info");
+          if (statusEl) statusEl.textContent = msg;
+        }
+      } catch (err) {
+        if (String(err.message).includes("409")) {
+          const hint = "Store not configured — set [store] in config.toml";
+          showToast(hint, "warning");
+          if (statusEl) statusEl.textContent = hint;
+        } else {
+          showToast(`Store sync failed: ${err.message}`, "error");
+          if (statusEl) statusEl.textContent = "Store sync failed";
+        }
+      } finally {
+        storeSyncBtn.disabled = false;
+        storeSyncBtn.innerHTML = '<i class="fas fa-cloud-arrow-up"></i> Sync to store';
+        await loadStatus(container);
+      }
+      return;
+    }
+
     // Full scan button (in warning banner)
     const scanBtn = e.target.closest("#full-scan-btn");
     if (scanBtn) {
@@ -577,28 +584,6 @@ function wireEvents(container) {
     if (actBtn) {
       const act = actBtn.dataset.act;
       const id = parseInt(actBtn.dataset.id, 10);
-
-      if (act === "backup-folder") {
-        actBtn.disabled = true;
-        actBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-        try {
-          const resp = await fetchJSON(`/api/storage/backup/${id}`, {
-            method: "POST",
-          });
-          const result = resp.data;
-          showToast(
-            `Backup complete: ${result.copied} copied, ${result.verified} verified, ${result.errors} errors`,
-            "success",
-          );
-          await loadStatus(container);
-          await loadFolders(container);
-          await loadPrunePreview(container);
-        } catch (err) {
-          showToast(`Backup failed: ${err.message}`, "error");
-          actBtn.disabled = false;
-          actBtn.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Backup';
-        }
-      }
 
       if (act === "scan-wavs") {
         actBtn.disabled = true;
@@ -748,50 +733,15 @@ function wireEvents(container) {
       updatePruneSelectedCount(container);
     }
 
-    // Backfill backup sizes button
-    const backfillBtn = e.target.closest("#btn-backfill");
-    if (backfillBtn) {
-      const status = container.querySelector("#backfill-status");
-      const results = container.querySelector("#backfill-results");
-      backfillBtn.disabled = true;
-      backfillBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Backfilling...';
-      status.textContent = "Starting backfill...";
-      results.innerHTML = "";
-
-      try {
-        const resp = await fetchJSON("/api/storage/backfill-backup-sizes", {
-          method: "POST",
-        });
-        const data = resp.data || resp;
-
-        if (data.zeroSizeRecords === 0) {
-          status.textContent = "\u2705 No records need backfill";
-          results.innerHTML = `<p class="text-muted">All backup records have valid file sizes.</p>`;
-        } else if (data.taskId) {
-          status.textContent = `\u23f3 Task started for ${data.zeroSizeRecords} records`;
-          results.innerHTML = `
-            <p>Task ID: <code>${escapeHtml(data.taskId)}</code></p>
-            <p class="help-text">Check the Tasks page for progress.</p>
-          `;
-        } else {
-          status.textContent = "\u274c Failed to start backfill";
-          results.innerHTML = `<p class="text-danger">${escapeHtml(data.message || "Unknown error")}</p>`;
-        }
-      } catch (err) {
-        status.textContent = "\u274c Error";
-        results.innerHTML = `<p class="text-danger">${escapeHtml(err.message)}</p>`;
-      } finally {
-        backfillBtn.disabled = false;
-        backfillBtn.innerHTML = '<i class="fas fa-sync"></i> Backfill Backup Sizes';
-      }
-      return;
-    }
-
     // Purge ghost records
     const purgeBtn = e.target.closest("#purge-orphans-btn");
     if (purgeBtn) {
       const count = state.status?.orphanedFileCount ?? 0;
-      if (!confirm(`Permanently delete ${count} orphaned records?\n\nThis cannot be undone.`)) {
+      if (
+        !confirm(
+          `Permanently delete ${count} orphaned records?\n\nThis cannot be undone.`,
+        )
+      ) {
         return;
       }
       purgeBtn.disabled = true;

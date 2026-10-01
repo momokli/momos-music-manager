@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Pool;
@@ -14,8 +14,7 @@ use crate::AppState;
 use crate::api::types::{ApiResponse, ErrorResponse, internal_error};
 use crate::db::{
     delete_folder, get_folder_by_id, get_folder_file_count, get_folder_stats,
-    get_folders as db_get_folders, update_folder_active, update_folder_backup_config,
-    update_folder_with_config,
+    get_folders as db_get_folders, update_folder_active, update_folder_with_config,
 };
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -43,9 +42,7 @@ pub struct FolderInfo {
     pub max_depth: i32,
     pub file_count: i64,
     pub last_scanned: Option<i64>,
-    pub backup_path: Option<String>,
     pub scan_sources: bool,
-    pub auto_backup: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,13 +69,8 @@ pub struct UpdateFolderRequest {
     pub fixed_extensions: Option<bool>,
     pub file_extensions: Option<String>,
     pub max_depth: Option<i32>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FolderBackupConfig {
-    pub backup_path: Option<String>,
-    pub scan_sources: bool,
+    /// Scan WAV source subdirectories for stem linking (independent of backup).
+    pub scan_sources: Option<bool>,
 }
 
 fn default_file_extensions() -> String {
@@ -107,14 +99,6 @@ pub(super) fn router() -> Router<Arc<AppState>> {
         .route("/api/folders/{id}/watch", post(toggle_watch_handler))
         .route("/api/folders/{id}/scan", post(scan_folder_handler))
         .route("/api/folders/{id}/stats", get(folder_stats_handler))
-        .route(
-            "/api/folders/{id}/auto-backup",
-            put(folder_auto_backup_handler),
-        )
-        .route(
-            "/api/folders/{id}/backup",
-            put(folder_backup_config_handler),
-        )
         .route(
             "/api/folders/{id}/scan-sources",
             post(folder_scan_sources_handler),
@@ -146,9 +130,7 @@ async fn get_folders(
             max_depth: folder.max_depth,
             file_count,
             last_scanned: folder.last_scanned,
-            backup_path: folder.backup_path.clone(),
             scan_sources: folder.scan_sources,
-            auto_backup: folder.auto_backup,
         });
     }
 
@@ -222,9 +204,7 @@ pub async fn get_folders_count(
             max_depth: folder.max_depth,
             file_count,
             last_scanned: folder.last_scanned,
-            backup_path: folder.backup_path.clone(),
             scan_sources: folder.scan_sources,
-            auto_backup: folder.auto_backup,
         });
     }
 
@@ -302,10 +282,8 @@ async fn add_folder_handler(
                 max_depth: folder.max_depth,
                 file_count: 0,
                 last_scanned: folder.last_scanned,
-                backup_path: folder.backup_path.clone(),
-                scan_sources: folder.scan_sources,
-                auto_backup: folder.auto_backup,
-            };
+                    scan_sources: folder.scan_sources,
+                };
             Json(ApiResponse { data: folder_info }).into_response()
         }
         Err(e) => internal_error(e).into_response(),
@@ -336,10 +314,8 @@ async fn toggle_watch_handler(
                         max_depth: updated_folder.max_depth,
                         file_count,
                         last_scanned: updated_folder.last_scanned,
-                        backup_path: updated_folder.backup_path.clone(),
-                        scan_sources: updated_folder.scan_sources,
-                        auto_backup: updated_folder.auto_backup,
-                    };
+                                    scan_sources: updated_folder.scan_sources,
+                                };
                     Json(ApiResponse { data: folder_info }).into_response()
                 }
                 Err(e) => internal_error(e).into_response(),
@@ -375,10 +351,8 @@ async fn get_folder_handler(
                 max_depth: folder.max_depth,
                 file_count,
                 last_scanned: folder.last_scanned,
-                backup_path: folder.backup_path.clone(),
-                scan_sources: folder.scan_sources,
-                auto_backup: folder.auto_backup,
-            };
+                    scan_sources: folder.scan_sources,
+                };
             Json(ApiResponse { data: folder_info }).into_response()
         }
         Ok(None) => (
@@ -446,7 +420,19 @@ async fn update_folder_handler(
     )
     .await
     {
-        Ok(folder) => {
+        Ok(mut folder) => {
+            // `scan_sources` is not part of the config update above.
+            if let Some(scan_sources) = request.scan_sources {
+                if let Err(e) = sqlx::query("UPDATE folders SET scan_sources = ? WHERE id = ?")
+                    .bind(scan_sources)
+                    .bind(id)
+                    .execute(&state.db)
+                    .await
+                {
+                    return internal_error(e).into_response();
+                }
+                folder.scan_sources = scan_sources;
+            }
             let file_count = get_folder_file_count(&state.db, folder.id)
                 .await
                 .unwrap_or(0);
@@ -460,10 +446,8 @@ async fn update_folder_handler(
                 max_depth: folder.max_depth,
                 file_count,
                 last_scanned: folder.last_scanned,
-                backup_path: folder.backup_path.clone(),
-                scan_sources: folder.scan_sources,
-                auto_backup: folder.auto_backup,
-            };
+                    scan_sources: folder.scan_sources,
+                };
             Json(ApiResponse { data: folder_info }).into_response()
         }
         Err(e) => internal_error(e).into_response(),
@@ -589,89 +573,6 @@ async fn folder_stats_handler(
                 internal_error(e).into_response()
             }
         }
-    }
-}
-
-async fn folder_auto_backup_handler(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    match crate::db::get_folder_by_id(&state.db, id).await {
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: format!("Folder not found with id: {}", id),
-                }),
-            )
-                .into_response();
-        }
-        Err(e) => return internal_error(e).into_response(),
-        _ => {}
-    }
-
-    let auto_backup = body
-        .get("autoBackup")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    match sqlx::query("UPDATE folders SET auto_backup = ?, updated_at = unixepoch() WHERE id = ?")
-        .bind(auto_backup)
-        .bind(id)
-        .execute(&state.db)
-        .await
-    {
-        Ok(_) => Json(ApiResponse {
-            data: serde_json::json!({ "autoBackup": auto_backup }),
-        })
-        .into_response(),
-        Err(e) => internal_error(e).into_response(),
-    }
-}
-
-async fn folder_backup_config_handler(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    match crate::db::get_folder_by_id(&state.db, id).await {
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: format!("Folder not found with id: {}", id),
-                }),
-            )
-                .into_response();
-        }
-        Err(e) => return internal_error(e).into_response(),
-        _ => {}
-    }
-
-    let backup_path = body.get("backupPath").and_then(|v| v.as_str());
-    let scan_sources = body.get("scanSources").and_then(|v| v.as_bool());
-
-    match update_folder_backup_config(&state.db, id, backup_path, scan_sources).await {
-        Ok(()) => {
-            // Fetch updated folder
-            match get_folder_by_id(&state.db, id).await {
-                Ok(Some(folder)) => Json(ApiResponse {
-                    data: FolderBackupConfig {
-                        backup_path: folder.backup_path.clone(),
-                        scan_sources: folder.scan_sources,
-                    },
-                })
-                .into_response(),
-                _ => Json(ApiResponse {
-                    data: FolderBackupConfig {
-                        backup_path: backup_path.map(|s| s.to_string()),
-                        scan_sources: scan_sources.unwrap_or(false),
-                    },
-                })
-                .into_response(),
-            }
-        }
-        Err(e) => internal_error(e).into_response(),
     }
 }
 

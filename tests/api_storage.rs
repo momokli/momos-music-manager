@@ -23,9 +23,26 @@
 
 mod common;
 
-use momos_music_manager::tasks::{Task, TaskType};
-
 use momos_music_manager::db::refresh_file_resolved_tags;
+
+/// Mark a file's `backup` location as a store object.
+///
+/// Seed data uses legacy rsync `/backup/...` paths, which no longer authorise a
+/// prune; only `store:<hash>` locations do. Call this for the files a prune
+/// test expects to be eligible.
+async fn mark_store_backed_up(pool: &sqlx::SqlitePool, file_ids: &[i64]) {
+    for id in file_ids {
+        sqlx::query(
+            "UPDATE file_locations SET path = 'store:' || printf('%064x', ?) \
+             WHERE file_id = ? AND location_type = 'backup'",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
 
 // ═════════════════════════════════════════════════════════════════════════
 // /api/storage/status
@@ -192,13 +209,15 @@ async fn storage_status_counts() {
 /// Verify the prune preview response shape.
 ///
 /// After `seed_basic_data` + refreshing `file_resolved_tags`:
-/// - Files 1 and 2 are backed up, local, have metadata, and are NOT in a backpack tag
-///   (tag "Groovy" has backpack=0) → these are prune candidates.
-/// - File 3 is backed up but has NO local entry → excluded by the SQL EXISTS filter.
+/// - Files 1 and 2 are backed up **to the store**, local, have metadata, and are
+///   NOT in a backpack tag (tag "Groovy" has backpack=0) → prune candidates.
+/// - File 3 has a legacy rsync backup but NO local entry → excluded.
 #[tokio::test]
 async fn storage_prune_preview() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
+    // Only store-backed-up files are prune candidates.
+    mark_store_backed_up(&pool, &[1, 2]).await;
 
     // Populate file_resolved_tags so the backpack-filter subquery works.
     refresh_file_resolved_tags(&pool).await.unwrap();
@@ -270,13 +289,15 @@ async fn storage_prune_preview() {
 /// Verify which files appear as prune candidates and their properties.
 ///
 /// Files 1 and 2 should be candidates because they satisfy all conditions:
-/// backed up + local + has metadata + tag "Groovy" has backpack=0.
+/// store-backed-up + local + tag "Groovy" has backpack=0.
 ///
 /// File 3 should NOT be a candidate because it has no local entry.
 #[tokio::test]
 async fn storage_prune_preview_candidates() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
+    // Only store-backed-up files are prune candidates.
+    mark_store_backed_up(&pool, &[1, 2]).await;
     refresh_file_resolved_tags(&pool).await.unwrap();
 
     let resp = client
@@ -352,8 +373,8 @@ async fn storage_prune_preview_candidates() {
 /// Verify that, when WAV source files have local presence, they appear in the
 /// prune preview with `hasStemVariant: true` and `reason: "wav_backed_up"`.
 ///
-/// The WAV files (IDs 20-24) are backed up and have `source_of=2` (linked to
-/// stem file 2). They also need local entries to satisfy the EXISTS subquery
+/// The WAV files (IDs 20-24) are store-backed-up and have `source_of=2` (linked
+/// to stem file 2). They also need local entries to satisfy the EXISTS subquery
 /// in `get_prune_candidates` — this test adds those inline after the standard
 /// seeds so WAVs become eligible candidates.
 #[tokio::test]
@@ -361,6 +382,8 @@ async fn storage_prune_preview_wav_variants() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
     common::seed_wav_variant_data(&pool).await;
+    // Only store-backed-up files are prune candidates (WAVs 20-24 + files 1, 2).
+    mark_store_backed_up(&pool, &[1, 2, 20, 21, 22, 23, 24]).await;
 
     // WAVs need local entries to appear as prune candidates (the prune query
     // requires `EXISTS (SELECT 1 FROM file_locations WHERE type='local')`).
@@ -530,76 +553,6 @@ async fn storage_settings_put() {
 // ═══════════════════════════════════════════════════════════════════════════
 // Phase 4 — Backup endpoints (no SSH configured → error)
 // ═══════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-/// `POST /api/storage/backup/1` — expects error because folder has no backup_path.
-async fn storage_backup_no_ssh() {
-    let (client, base, pool) = common::spawn_test_app().await;
-    common::seed_basic_data(&pool).await;
-
-    let resp = client
-        .post(format!("{}/api/storage/backup/1", base))
-        .send()
-        .await
-        .unwrap();
-
-    // Folder has no backup_path → 400
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().await.unwrap();
-    eprintln!("backup error response: {body}");
-
-    assert!(
-        status == 400 || status == 500,
-        "backup without config should return 400 or 500, got {}",
-        status
-    );
-}
-
-#[tokio::test]
-/// `POST /api/storage/backup-wavs/1` — expects error because folder has no backup_path.
-async fn storage_backup_wavs_no_ssh() {
-    let (client, base, pool) = common::spawn_test_app().await;
-    common::seed_basic_data(&pool).await;
-
-    let resp = client
-        .post(format!("{}/api/storage/backup-wavs/1", base))
-        .send()
-        .await
-        .unwrap();
-
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().await.unwrap();
-    eprintln!("backup-wavs error response: {body}");
-
-    assert!(
-        status == 400 || status == 500,
-        "backup-wavs without config should return 400 or 500, got {}",
-        status
-    );
-}
-
-#[tokio::test]
-/// `POST /api/storage/discover-backup/1` — expects error because folder has no backup_path.
-async fn storage_discover_backup_no_ssh() {
-    let (client, base, pool) = common::spawn_test_app().await;
-    common::seed_basic_data(&pool).await;
-
-    let resp = client
-        .post(format!("{}/api/storage/discover-backup/1", base))
-        .send()
-        .await
-        .unwrap();
-
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().await.unwrap();
-    eprintln!("discover-backup error response: {body}");
-
-    assert!(
-        status == 400 || status == 500,
-        "discover-backup without config should return 400 or 500, got {}",
-        status
-    );
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Phase 5 — Settings edge cases & Prune execute
@@ -852,215 +805,141 @@ async fn storage_format_priority_put_invalid() {
 // Phase 6 — Concurrent task rejection
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ═════════════════════════════════════════════════════════════════════════
+// /api/storage/settings/backpack-sync
+// ═════════════════════════════════════════════════════════════════════════
+
+/// Default is enabled when nothing has been persisted.
 #[tokio::test]
-/// `POST /api/storage/backup/{id}` — a second call while the task for the same
-/// folder is already in progress returns a null taskId plus the
-/// "already in progress" message.
-async fn storage_backup_rejects_concurrent() {
-    let (client, base, pool, state) = common::spawn_test_app_with_state().await;
-    common::seed_basic_data(&pool).await;
-
-    // Set backup_path first so the handler doesn't reject with 400
-    client
-        .put(format!("{}/api/folders/1/backup", base))
-        .json(&serde_json::json!({
-            "backupPath": "/backups/test",
-            "scanSources": false
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    // Register the task by hand so it is guaranteed to stay `Pending`: no worker is
-    // spawned for it, so there is no scheduling race. Firing two concurrent calls
-    // instead (the previous shape) only rejected one as long as the first worker was
-    // still Pending — flaky on a fast CI runner (see PR #86).
-    state
-        .task_manager
-        .start_task(Task::new(
-            TaskType::BackupFolder { folder_id: 1 },
-            Some("backup".to_string()),
-        ))
-        .await;
-
-    let resp = client
-        .post(format!("{}/api/storage/backup/1", base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert!(
-        json["data"]["taskId"].is_null(),
-        "a second call while one is already in progress must be rejected, got {json:#}"
-    );
-    assert_eq!(
-        json["data"]["message"], "Backup already in progress for this folder",
-        "the guard message must be returned, got {json:#}"
-    );
-}
-
-#[tokio::test]
-/// `POST /api/storage/backup-wavs/{id}` — a second call while the task for the same
-/// folder is already in progress returns a null taskId plus the
-/// "already in progress" message.
-async fn storage_backup_wavs_rejects_concurrent() {
-    let (client, base, pool, state) = common::spawn_test_app_with_state().await;
-    common::seed_basic_data(&pool).await;
-
-    // Set backup_path first so the handler doesn't reject with 400
-    client
-        .put(format!("{}/api/folders/1/backup", base))
-        .json(&serde_json::json!({
-            "backupPath": "/backups/test",
-            "scanSources": false
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    // Register the task by hand so it is guaranteed to stay `Pending`: no worker is
-    // spawned for it, so there is no scheduling race. Firing two concurrent calls
-    // instead (the previous shape) only rejected one as long as the first worker was
-    // still Pending — flaky on a fast CI runner (see PR #86).
-    state
-        .task_manager
-        .start_task(Task::new(
-            TaskType::BackupWavs { folder_id: 1 },
-            Some("backup_wavs".to_string()),
-        ))
-        .await;
-
-    let resp = client
-        .post(format!("{}/api/storage/backup-wavs/1", base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert!(
-        json["data"]["taskId"].is_null(),
-        "a second call while one is already in progress must be rejected, got {json:#}"
-    );
-    assert_eq!(
-        json["data"]["message"], "Backup WAVs already in progress for this folder",
-        "the guard message must be returned, got {json:#}"
-    );
-}
-
-#[tokio::test]
-/// `POST /api/storage/discover-backup/{id}` — a second call while the task for the same
-/// folder is already in progress returns a null taskId plus the
-/// "already in progress" message.
-async fn storage_discover_backup_rejects_concurrent() {
-    let (client, base, pool, state) = common::spawn_test_app_with_state().await;
-    common::seed_basic_data(&pool).await;
-
-    // Set backup_path first so the handler doesn't reject with 400
-    client
-        .put(format!("{}/api/folders/1/backup", base))
-        .json(&serde_json::json!({
-            "backupPath": "/backups/test",
-            "scanSources": false
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    // Register the task by hand so it is guaranteed to stay `Pending`: no worker is
-    // spawned for it, so there is no scheduling race. Firing two concurrent calls
-    // instead (the previous shape) only rejected one as long as the first worker was
-    // still Pending — flaky on a fast CI runner (see PR #86).
-    state
-        .task_manager
-        .start_task(Task::new(
-            TaskType::BackupDiscovery { folder_id: 1 },
-            Some("backup_discovery".to_string()),
-        ))
-        .await;
-
-    let resp = client
-        .post(format!("{}/api/storage/discover-backup/1", base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert!(
-        json["data"]["taskId"].is_null(),
-        "a second call while one is already in progress must be rejected, got {json:#}"
-    );
-    assert_eq!(
-        json["data"]["message"], "Backup discovery already in progress for this folder",
-        "the guard message must be returned, got {json:#}"
-    );
-}
-
-#[tokio::test]
-/// `POST /api/storage/backfill-backup-sizes` — returns taskId even when no zero-size records.
-async fn storage_backfill_backup_sizes_no_records() {
+async fn storage_backpack_sync_defaults_enabled() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
 
     let resp = client
-        .post(format!("{}/api/storage/backfill-backup-sizes", base))
+        .get(format!("{}/api/storage/settings/backpack-sync", base))
         .send()
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 200, "should return 200");
-    let json: serde_json::Value = resp.json().await.unwrap();
-    let data = &json["data"];
-
-    // Seed data has no zero-size backup records → taskId should be null
-    assert_eq!(
-        data["zeroSizeRecords"].as_i64().unwrap_or(-1),
-        0,
-        "seed data has no zero-size backup records"
-    );
-    assert!(
-        data["taskId"].is_null(),
-        "should not spawn a task when no records need backfill"
-    );
-    assert!(
-        data["message"].is_string(),
-        "should include a message explaining no records need backfill"
-    );
+    assert!(resp.status().is_success(), "expected 200, got {}", resp.status());
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["data"]["enabled"], serde_json::json!(true));
 }
 
+/// PUT then GET roundtrips the switch, both directions.
 #[tokio::test]
-/// `POST /api/storage/backfill-backup-sizes` — with a zero-size record, spawns a task.
-async fn storage_backfill_backup_sizes_with_zero_size() {
+async fn storage_backpack_sync_put_and_get() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
 
-    // Set an existing backup record's file_size to 0 so it needs backfill
-    sqlx::query(
-        r#"UPDATE file_locations SET file_size = 0 WHERE file_id = 3 AND location_type = 'backup'"#,
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    let put = client
+        .put(format!("{}/api/storage/settings/backpack-sync", base))
+        .json(&serde_json::json!({ "enabled": false }))
+        .send()
+        .await
+        .unwrap();
+    assert!(put.status().is_success(), "PUT expected 200, got {}", put.status());
+
+    let get = client
+        .get(format!("{}/api/storage/settings/backpack-sync", base))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = get.json().await.unwrap();
+    assert_eq!(body["data"]["enabled"], serde_json::json!(false));
+
+    // Persisted server-side.
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'backpack.sync_enabled'")
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored.as_deref(), Some("0"));
+
+    // Re-enable.
+    let put = client
+        .put(format!("{}/api/storage/settings/backpack-sync", base))
+        .json(&serde_json::json!({ "enabled": true }))
+        .send()
+        .await
+        .unwrap();
+    assert!(put.status().is_success());
+
+    let get = client
+        .get(format!("{}/api/storage/settings/backpack-sync", base))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = get.json().await.unwrap();
+    assert_eq!(body["data"]["enabled"], serde_json::json!(true));
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// /api/storage/sync-store
+// ═════════════════════════════════════════════════════════════════════════
+
+/// `POST /api/storage/sync-store` — 409 when the object store is not configured
+/// (the test app's default config).
+#[tokio::test]
+async fn storage_sync_store_unconfigured_is_conflict() {
+    let (client, base, _pool) = common::spawn_test_app().await;
 
     let resp = client
-        .post(format!("{}/api/storage/backfill-backup-sizes", base))
+        .post(format!("{}/api/storage/sync-store", base))
         .send()
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 200, "should return 200");
+    assert_eq!(resp.status(), 409, "unconfigured store must be a conflict");
     let json: serde_json::Value = resp.json().await.unwrap();
-    let data = &json["data"];
-
-    // Should have found the zero-size record
     assert!(
-        data["zeroSizeRecords"].as_i64().unwrap_or(0) > 0,
-        "should find the zero-size record, got zeroSizeRecords={:#}",
-        data["zeroSizeRecords"]
+        json["data"]["error"].as_str().is_some(),
+        "conflict should carry an error message, got {json:#}"
     );
-    // Should spawn a task (which will fail gracefully since no SSH)
-    assert!(data["taskId"].is_string(), "should return a taskId string");
-    assert!(data["message"].is_string(), "should include a message");
+}
+
+/// `POST /api/storage/sync-store` — returns a task id when the store is
+/// configured. No files are seeded, so the worker completes immediately without
+/// any network round-trip.
+#[tokio::test]
+async fn storage_sync_store_starts_task_when_configured() {
+    use std::sync::Arc;
+
+    let pool = common::create_test_db().await;
+    let mut config = momos_music_manager::config::ServiceCredentials::defaults_for_test();
+    config.store = momos_music_manager::store::StoreConfig {
+        enabled: true,
+        base_url: Some("http://127.0.0.1:9".to_string()),
+        token: Some("test-token".to_string()),
+    };
+    let state = Arc::new(momos_music_manager::AppState {
+        db: pool,
+        config,
+        task_manager: momos_music_manager::tasks::TaskManager::new(),
+        embeddings: tokio::sync::Mutex::new(None),
+        category_means: tokio::sync::Mutex::new(None),
+        public_url: None,
+    });
+
+    let app = momos_music_manager::build_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/storage/sync-store", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "configured store returns 200");
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        json["data"]["taskId"].is_string(),
+        "configured store should start a task, got {json:#}"
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════

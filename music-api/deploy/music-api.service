@@ -1,0 +1,23 @@
+[Unit]
+Description=music-api — ISRC order/consume API in front of deemix
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=momo
+WorkingDirectory=/opt/music-api
+EnvironmentFile=/opt/music-api/music-api.env
+ExecStart=/opt/music-api/music-api
+Restart=on-failure
+RestartSec=5
+
+# Hardening: the service only needs its own tree and the deemix socket.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/music-api/data /data/public/media/music-api
+
+[Install]
+WantedBy=multi-user.target

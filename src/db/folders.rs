@@ -406,30 +406,6 @@ pub async fn get_folder_file_count(pool: &Pool<Sqlite>, folder_id: i64) -> Resul
 
 // ── Folder Config ──────────────────────────────────────────────────────
 
-/// Update folder backup configuration (backup_path, scan_sources)
-pub async fn update_folder_backup_config(
-    pool: &Pool<Sqlite>,
-    folder_id: i64,
-    backup_path: Option<&str>,
-    scan_sources: Option<bool>,
-) -> Result<()> {
-    if let Some(bp) = backup_path {
-        sqlx::query("UPDATE folders SET backup_path = ? WHERE id = ?")
-            .bind(bp)
-            .bind(folder_id)
-            .execute(pool)
-            .await?;
-    }
-    if let Some(ss) = scan_sources {
-        sqlx::query("UPDATE folders SET scan_sources = ? WHERE id = ?")
-            .bind(ss)
-            .bind(folder_id)
-            .execute(pool)
-            .await?;
-    }
-    Ok(())
-}
-
 /// Get comprehensive stats for a folder, including per-type file counts,
 /// backup status, and WAV source information.
 pub async fn get_folder_stats(pool: &Pool<Sqlite>, folder_id: i64) -> Result<FolderStats> {

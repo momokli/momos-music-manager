@@ -1,0 +1,35 @@
+# Caddyfile snippet for the .149 host (public TLS termination).
+#
+# music-api enforces the bearer token itself, so a route that bypasses this
+# matcher is still safe — but checking at the edge keeps unauthenticated traffic
+# off the LAN entirely (defence in depth).
+#
+# Set the same value in the Caddy service environment:
+#   MUSIC_API_TOKEN=<same token as /opt/music-api/music-api.env>
+#
+# Adjust the hostname; the name must resolve to .149.
+
+music.example.com {
+    encode gzip
+
+    @authorized header Authorization "Bearer {$MUSIC_API_TOKEN}"
+
+    handle @authorized {
+        reverse_proxy 192.168.178.200:8710
+    }
+
+    respond "unauthorized" 401
+}
+
+# If you also want to poke at it from a browser (GET /isrc/<isrc>/flac in a
+# player), you can put basic_auth in front instead of / in addition to the
+# bearer check. Players usually cannot send a custom Authorization header, so
+# for those a signed link or basic_auth is more practical:
+#
+# music.example.com {
+#     encode gzip
+#     basic_auth {
+#         momo <bcrypt-hash>   # caddy hash-password
+#     }
+#     reverse_proxy 192.168.178.200:8710
+# }

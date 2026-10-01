@@ -215,14 +215,13 @@ const TRACKS_CELL_RENDERERS = {
     const inBackpack =
       t.playlistTags &&
       t.playlistTags.some((pt) => pt.tagName && pt.tagName.toLowerCase() === "backpack");
-    const displayIcon = inBackpack ? "fa-box" : "fa-box-open";
     const title = inBackpack
-      ? "In backpack \u2014 kept locally"
-      : "Not in backpack \u2014 may be pruned";
+      ? "In your Backpack \u2014 kept on your Mac"
+      : "Not in your Backpack \u2014 may be pruned";
     return `<button class="btn btn-sm btn-icon backpack-toggle-btn"
       data-track-id="${t.id}" data-in-backpack="${inBackpack ? "1" : "0"}"
       title="${title}">
-      <i class="fas ${displayIcon}" style="${inBackpack ? "color:var(--green)" : "color:var(--text-muted)"}"></i>
+      <i class="fas fa-bag-shopping" style="${inBackpack ? "color:var(--primary)" : "color:var(--text-muted)"}"></i>
     </button>`;
   },
 };
@@ -2183,8 +2182,9 @@ export async function init(container, signal, hashParams) {
     } catch (err) {
       showToast(`Backpack toggle failed: ${err.message}`, "error");
       backpackBtn.disabled = false;
-      const icon = inBackpack ? "fa-box" : "fa-box-open";
-      backpackBtn.innerHTML = `<i class="fas ${icon}"></i>`;
+      backpackBtn.innerHTML = `<i class="fas fa-bag-shopping" style="${
+        inBackpack ? "color:var(--primary)" : "color:var(--text-muted)"
+      }"></i>`;
       backpackBtn.dataset.inBackpack = inBackpack ? "1" : "0";
     }
   });

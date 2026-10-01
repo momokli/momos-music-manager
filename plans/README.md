@@ -1,6 +1,6 @@
 # Active Plans
 
-**54 done** · **0 in progress** · **16 proposed**
+**56 done** · **0 in progress** · **17 proposed**
 
 ## Proposed
 
@@ -80,3 +80,5 @@
 - [macos-shippable-app](done/macos-shippable-app.md) — `feat/macos-app-bundle`
 - [tray-icon](done/tray-icon.md) — `feat/tray-icon`
 - [telemetry-analytics](done/telemetry-analytics.md) — `feat/telemetry-analytics`
+- [remote-object-store](done/remote-object-store.md) — `feat/music-api`
+- [music-api-order-consumer](done/music-api-order-consumer.md) — `feat/music-api-order-consumer`

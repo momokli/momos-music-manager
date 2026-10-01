@@ -364,81 +364,6 @@ async fn folders_scan() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Phase 7 — Folder backup config
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-/// `PUT /api/folders/1/backup` sets backup_path and scan_sources on a folder.
-async fn folders_backup_config() {
-    let (client, base, pool) = common::spawn_test_app().await;
-    common::seed_basic_data(&pool).await;
-
-    let resp = client
-        .put(format!("{}/api/folders/1/backup", base))
-        .json(&serde_json::json!({
-            "backupPath": "/backups/test",
-            "scanSources": true
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200, "backup config should return 200");
-
-    let json: Value = resp.json().await.unwrap();
-    let data = &json["data"];
-    assert_eq!(
-        data["backupPath"].as_str(),
-        Some("/backups/test"),
-        "backupPath should match"
-    );
-    assert!(
-        data["scanSources"].as_bool().unwrap_or(false),
-        "scanSources should be true"
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Phase 8 — Folder auto-backup toggle
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-/// `PUT /api/folders/1/auto-backup` toggles the auto_backup flag.
-async fn folders_auto_backup() {
-    let (client, base, pool) = common::spawn_test_app().await;
-    common::seed_basic_data(&pool).await;
-
-    // The folder already exists in DB (seed data), and auto-backup doesn't validate existing path
-    let resp = client
-        .put(format!("{}/api/folders/1/auto-backup", base))
-        .json(&serde_json::json!({"autoBackup": false}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200, "auto-backup toggle should return 200");
-
-    let json: Value = resp.json().await.unwrap();
-    assert!(
-        !json["data"]["autoBackup"].as_bool().unwrap_or(true),
-        "autoBackup should now be false"
-    );
-
-    // Verify via GET folder endpoint
-    let get_resp = client
-        .get(format!("{}/api/folders/1", base))
-        .send()
-        .await
-        .unwrap();
-    let get_json: Value = get_resp.json().await.unwrap();
-    eprintln!("folder response: {get_json}");
-    // The folder endpoint returns autoBackup in the data
-    assert_eq!(
-        get_json["data"]["autoBackup"].as_bool(),
-        Some(false),
-        "folder should reflect autoBackup=false"
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // Phase 9 — Folder scan sources
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -449,13 +374,10 @@ async fn folders_scan_sources() {
     let (client, base, pool) = common::spawn_test_app().await;
     common::seed_basic_data(&pool).await;
 
-    // Enable scan_sources first
+    // Enable scan_sources via the regular folder update
     client
-        .put(format!("{}/api/folders/1/backup", base))
-        .json(&serde_json::json!({
-            "backupPath": "/backups/test",
-            "scanSources": true
-        }))
+        .put(format!("{}/api/folders/1", base))
+        .json(&serde_json::json!({ "scanSources": true }))
         .send()
         .await
         .unwrap();
@@ -483,13 +405,10 @@ async fn folders_scan_sources_rejects_concurrent() {
     let (client, base, pool, state) = common::spawn_test_app_with_state().await;
     common::seed_basic_data(&pool).await;
 
-    // Enable backup_path and scan_sources first
+    // Enable scan_sources via the regular folder update
     client
-        .put(format!("{}/api/folders/1/backup", base))
-        .json(&serde_json::json!({
-            "backupPath": "/backups/test",
-            "scanSources": true
-        }))
+        .put(format!("{}/api/folders/1", base))
+        .json(&serde_json::json!({ "scanSources": true }))
         .send()
         .await
         .unwrap();

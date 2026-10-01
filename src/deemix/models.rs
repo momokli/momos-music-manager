@@ -252,13 +252,6 @@ pub struct DeemixAuthRequest {
     pub host: String,
 }
 
-/// Request body for POST /api/services/deemix/queue
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct DeemixEnqueueRequest {
-    pub url: String,
-}
-
 /// Combined queue item for the frontend (local DB + remote deemix queue)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -458,14 +451,6 @@ mod tests {
         assert_eq!(item.progress, 60);
         assert_eq!(item.downloaded, 30);
         assert_eq!(item.size, 50);
-    }
-
-    #[test]
-    fn test_deemix_enqueue_request() {
-        let req = DeemixEnqueueRequest {
-            url: "https://open.spotify.com/playlist/abc".to_string(),
-        };
-        assert_eq!(req.url, "https://open.spotify.com/playlist/abc");
     }
 
     #[test]

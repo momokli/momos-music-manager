@@ -438,61 +438,6 @@ impl DownloadGuarantor {
             fuzzy_matches: 0,
         };
 
-        // Collect unique zombie playlists to re-queue
-        let zombie_urls: HashSet<&str> = gaps
-            .iter()
-            .filter(|g| {
-                g.missing_tracks
-                    .iter()
-                    .any(|t| matches!(t.reason, MissingReason::ZombiePlaylist))
-            })
-            .map(|g| g.playlist_url.as_str())
-            .collect();
-
-        if !zombie_urls.is_empty() {
-            // Try to get a deemix client for re-queuing
-            if let Some(client) = DeemixClient::from_db(self.db.clone()).await {
-                for url in &zombie_urls {
-                    self.task_manager
-                        .add_log(task_id, format!("Re-queuing zombie playlist: {}", url))
-                        .await;
-                    match client.add_to_queue(url).await {
-                        Ok(()) => {
-                            report.requeued_playlists += 1;
-                            info!("Re-queued zombie playlist: {}", url);
-                            crate::telemetry::emit::emit_event(
-                                crate::telemetry::events::EventType::DownloadStarted,
-                                serde_json::json!({
-                                    "source": "deemix",
-                                    "kind": "playlist",
-                                }),
-                            );
-                        }
-                        Err(e) => {
-                            warn!("Failed to re-queue {}: {:#}", url, e);
-                            self.task_manager
-                                .add_log(task_id, format!("Re-queue FAILED for {}: {:#}", url, e))
-                                .await;
-                            crate::telemetry::emit::emit_event(
-                                crate::telemetry::events::EventType::DownloadFailed,
-                                crate::telemetry::events::error_payload(&format!(
-                                    "deemix re-queue failed: {e:#}"
-                                )),
-                            );
-                        }
-                    }
-                }
-            } else {
-                warn!("Deemix not connected — cannot re-queue zombie playlists");
-                self.task_manager
-                    .add_log(
-                        task_id,
-                        "Deemix not connected — skipping zombie re-queue".to_string(),
-                    )
-                    .await;
-            }
-        }
-
         // spotDL downloads for Deezer-gap tracks
         let deezer_gap_tracks: Vec<&MissingTrack> = gaps
             .iter()
@@ -579,20 +524,6 @@ impl DownloadGuarantor {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────
-
-    /// Re-queue a single playlist via the deemix API.
-    #[allow(dead_code)]
-    async fn requeue_playlist(&self, playlist_url: &str) -> Result<()> {
-        let client = DeemixClient::from_db(self.db.clone())
-            .await
-            .context("Deemix not connected")?;
-        client
-            .add_to_queue(playlist_url)
-            .await
-            .context("Failed to add to deemix queue")?;
-        info!("Re-queued playlist to deemix: {}", playlist_url);
-        Ok(())
-    }
 
     /// Download a single track via spotDL CLI.
     ///
@@ -804,6 +735,7 @@ struct SubscriptionGap {
     #[allow(dead_code)]
     subscription_id: i64,
     playlist_name: String,
+    #[allow(dead_code)]
     playlist_url: String,
     #[allow(dead_code)]
     total_tracks: usize,
