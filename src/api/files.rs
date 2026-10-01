@@ -398,6 +398,9 @@ async fn files_needs_comment_count_by_ids_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<FilesBulkRequest>,
 ) -> impl IntoResponse {
+    // Comment targets read the materialised `file_resolved_tags`; rebuild it first
+    // so a just-deleted/renamed tag is not still applied.
+    crate::db::refresh_resolved_tags(&state.db).await;
     let total_files = body.file_ids.len();
     if total_files == 0 {
         return Json(ApiResponse {
@@ -458,6 +461,8 @@ async fn files_write_comments_by_ids_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<FilesBulkRequest>,
 ) -> impl IntoResponse {
+    // See `files_needs_comment_count_by_ids_handler` — refresh before computing.
+    crate::db::refresh_resolved_tags(&state.db).await;
     if body.file_ids.is_empty() {
         return Json(ApiResponse {
             data: FilesBulkWriteCommentsResponse {
@@ -708,7 +713,8 @@ const BACKPACK_FILE_CLAUSE: &str = "(EXISTS (\
               JOIN service_playlists sp ON sp.id = spt.playlist_id \
               JOIN playlist_subscriptions ps ON ps.service = sp.service \
                   AND ps.playlist_id = sp.playlist_id AND ps.is_active = 1 \
-              WHERE spt.track_id = v.track_id AND spt.deleted_at IS NULL))))";
+              WHERE spt.track_id = v.track_id \
+                AND (sp.archive_deleted = 1 OR spt.deleted_at IS NULL)))))";
 
 /// Append the "Backpack" filter: `Some(true)` = in the Backpack, `Some(false)` =
 /// not in it. `None` leaves the query untouched.
@@ -733,6 +739,9 @@ async fn files_needs_comment_count_all_handler(
     State(state): State<Arc<AppState>>,
     Json(filter): Json<FilesFilterAll>,
 ) -> impl IntoResponse {
+    // The filter matches on `file_resolved_tags` — rebuild it before SELECTing so
+    // both the selection and the targets reflect the current tags.
+    crate::db::refresh_resolved_tags(&state.db).await;
     let sql = build_files_filter_sql(&filter);
 
     let mut q = sqlx::query_as::<_, crate::db::File>(&sql);
@@ -844,6 +853,8 @@ async fn files_write_comments_all_handler(
     State(state): State<Arc<AppState>>,
     Json(filter): Json<FilesFilterAll>,
 ) -> impl IntoResponse {
+    // Refresh before building the filter SQL (see the count handler above).
+    crate::db::refresh_resolved_tags(&state.db).await;
     let sql = build_files_filter_sql(&filter);
 
     let mut q = sqlx::query_as::<_, crate::db::File>(&sql);
@@ -1096,6 +1107,8 @@ async fn bulk_sync_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<BulkSyncRequest>,
 ) -> impl IntoResponse {
+    // Filter + targets both read `file_resolved_tags` — refresh first.
+    crate::db::refresh_resolved_tags(&state.db).await;
     // Build dynamic SQL to filter files based on request parameters
     let mut sql = String::from("SELECT * FROM files WHERE 1=1");
     let mut tag_params: Vec<String> = Vec::new();

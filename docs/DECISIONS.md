@@ -1582,3 +1582,77 @@ alle POST-„select all"-Pfade) — damit stimmen Liste, Count und POST-Filter �
 - Kosten: ~135 ms Korrelations-Subquery über ~17k Dateien — akzeptabel, kein Index nötig.
 - `file_resolved_tags` bleibt die Grundlage der Comment-/Tag-Anzeige, ist aber für
   Backpack-Zugehörigkeit *nicht* die Wahrheit.
+
+
+## ADR-071: Refresh der abgeleiteten Tag-Tabellen gehört an die Mutation
+
+**Date**: 2026-09-24
+**Status**: Accepted (implemented)
+**Relates**: ADR-011 (materialised `file_resolved_tags`), ADR-070 (Backpack-Filter)
+
+**Context**: `file_resolved_tags` und `track_resolved_tags` sind materialisierte
+Ableitungen der Live-Views `v_file_resolved_tags` / `v_track_tags`. Filter (Tags, PMV,
+`nonDefaultOnly`) und die Comment-Berechnung lesen die materialisierte Tabelle.
+`file_resolved_tags.tag_id` hat **keinen Foreign Key** auf `tags` — ein gelöschter Tag
+lässt seine denormalisierten Zeilen (`tag_name`, `prefix`) also stehen, bis ein Refresh
+läuft. Refreshes passierten bisher nur indirekt (Start, Maintainer 1 h, Folder-Scan,
+Global-Poller, einige Sonder-Handler). Nach „Tags löschen → Comments neu schreiben"
+konnte ein neu geschriebener Comment den **gerade gelöschten Tag** enthalten.
+
+**Decision**: Der Refresh hängt an den Mutationen bzw. am Comment-Pfad, nicht am Zufall
+des nächsten Hintergrund-Zyklus:
+- Neuer Helfer `db::refresh_resolved_tags(pool)` (file + track, best-effort mit Warn-Log).
+- Aufruf nach Tag-Mutationen: create/update/delete Tag, Kategorie create/update/delete,
+  Reorder-Batch, Categorize (einzeln + bulk) — und nach `delete_playlist`.
+- Aufruf vor jedem Comment-Pfad: `needs-comment-count(-all)`, `write-comments-all`,
+  `write-comments-by-ids`, `bulk-sync` — plus **einmal pro WriteComment-Task** (deckt
+  alle Aufrufer ab, inkl. Tracks-/Digging-Pfade).
+
+**Consequences**:
+- Nach Löschen/Ändern ist die Filter- und Comment-Sicht **sofort** korrekt; der
+  Hintergrund-Refresh bleibt als Sicherheitsnetz.
+- Mutationen kosten jetzt einen Refresh (DELETE + INSERT über die View, auf der
+  Produktions-DB ~0,5–2 s). Bewusst in Kauf genommen — Löschungen sind selten, und der
+  Comment-Pfad ist eine explizite Nutzeraktion.
+- Kein Schema, keine Migration.
+- Test `deleting_a_tag_refreshes_resolved_tags_immediately` beweist es: ohne den
+  Refresh im Delete-Handler fällt der Filter-Treffer von 4 nicht auf 0 (verifiziert).
+
+
+## ADR-072: Grabsteine in `service_playlist_tracks` nur für archivierende Playlists
+
+**Date**: 2026-09-25
+**Status**: Accepted (implemented)
+**Relates**: ADR-008 (playlist archive), ADR-070/071 (Backpack-Filter, Refresh)
+
+**Context**: Der Playlist-Sync markiert vor dem Wieder-Einfügen **alle** Einträge als
+gelöscht (`mark_playlist_tracks_deleted`) und reaktiviert danach die noch vorhandenen.
+Entfernte Tracks bleiben so als `deleted_at`-Grabstein liegen. Die Design-Regel steht
+seit Migration 008 in `set_playlist_archive_deleted`: *„When true: deleted tracks remain
+active for tag resolution. When false: deleted tracks are excluded."*
+
+Umgesetzt war sie nur in `v_file_resolved_tags` / `v_file_tags`
+(`WHERE sp.archive_deleted = 1 OR spt.deleted_at IS NULL`). `v_track_tags` (Migration 014)
+und etliche Inline-Queries (Debug-View, `in_backpack`, Track-/File-Tags) hatten den Guard
+nicht. Folge: ein aus einer nicht-archivierenden Playlist entfernter Track blieb über den
+gleichnamigen `backpack = 1`-Tag im Backpack — prune-geschützt, aber ohne Comment
+(weil die Comment-Seite den Guard hat). Widersprüchliche Sichten auf dieselbe Zeile.
+
+**Decision**: Die Regel gilt für **alle** Konsumenten, durchgesetzt an der Quelle:
+- **Invariante**: `deleted_at IS NOT NULL ⇒ archive_deleted = 1`. Der Sync purgt die
+  Grabsteine nicht-archivierender Playlists direkt nach dem Sync
+  (`purge_deleted_tracks_for_playlist`); das Ausschalten von Archiving purgt ebenfalls.
+- **Migration 031**: räumt die Altlasten (5960 Grabsteine) und gibt `v_track_tags`
+  denselben Guard wie die anderen Views.
+- Die beiden Subscription-Hälften der Backpack-Definition (`backpack.rs`, Files-Filter)
+  bekommen die Archiv-Ausnahme, damit archivierende Playlists ihre entfernten Tracks
+  behalten.
+
+**Consequences**:
+- Nach dem Sync sind Grabsteine nur dort, wo sie gewollt sind. Jede Query — auch eine
+  künftige, die den Guard vergisst — liefert damit das dokumentierte Verhalten.
+- Archivieren aus → die bis dahin gehaltenen Grabsteine werden gelöscht (kein Zurückholen
+  beim Wieder-Einschalten; die Tracks sind ja aus der Playlist raus).
+- Entfernte Tracks verlassen Backpack und Prune-Schutz; bei `auto_prune` werden ihre
+  store-gesicherten Dateien lokal gelöscht.
+- Kein neues Tabellen-Schema; Migration 031 ist Daten-Cleanup + View-Rebuild.

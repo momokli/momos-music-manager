@@ -288,7 +288,39 @@ pub async fn set_playlist_archive_deleted(
         .bind(playlist_id)
         .execute(pool)
         .await?;
+    if !archive {
+        // Switching archiving off means the kept tombstones are no longer wanted.
+        let _ = purge_deleted_tracks_for_playlist(pool, playlist_id).await;
+    }
     Ok(())
+}
+
+/// Delete the tombstones of a playlist that is **not** archiving.
+///
+/// `deleted_at` is only meaningful for archiving playlists — that mode exists so
+/// removed tracks "stay around for tagging". For every other playlist a
+/// soft-deleted row is junk that leaks into tag resolution, backpack membership
+/// and comment targets, because all of those resolve playlist membership by
+/// reading `service_playlist_tracks` directly.
+///
+/// Call this after a playlist sync (and archiving was just switched off) so the
+/// invariant `deleted_at IS NOT NULL ⇒ archive_deleted = 1` holds everywhere.
+pub async fn purge_deleted_tracks_for_playlist(
+    pool: &Pool<Sqlite>,
+    playlist_id: i64,
+) -> Result<u64> {
+    let rows = sqlx::query(
+        "DELETE FROM service_playlist_tracks
+          WHERE playlist_id = ?1
+            AND deleted_at IS NOT NULL
+            AND EXISTS (SELECT 1 FROM service_playlists sp \
+                        WHERE sp.id = ?1 AND sp.archive_deleted = 0)",
+    )
+    .bind(playlist_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(rows)
 }
 
 /// Delete a playlist and its track associations (cascade).
@@ -1299,6 +1331,64 @@ mod tests {
                 .await
                 .unwrap();
         assert!(!arch, "archive_deleted should be false");
+    }
+
+    #[tokio::test]
+    async fn purge_deleted_tracks_skips_archiving_playlists() {
+        let pool = test_db().await;
+
+        // Two playlists: one plain, one archiving.
+        let plain = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO service_playlists (service, playlist_id, name, imported_at, updated_at)
+             VALUES ('spotify', 'pl-purge-plain', 'Plain', 0, 0) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let arch = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO service_playlists (service, playlist_id, name, imported_at, updated_at, archive_deleted)
+             VALUES ('spotify', 'pl-purge-arch', 'Arch', 0, 0, 1) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // One tombstone in each.
+        for pl in [plain, arch] {
+            sqlx::query(
+                "INSERT INTO service_playlist_tracks (playlist_id, track_id, position, added_at, deleted_at)
+                 VALUES (?, 1, 0, 0, 1234)",
+            )
+            .bind(pl)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Non-archiving loses it, archiving keeps it.
+        assert_eq!(
+            purge_deleted_tracks_for_playlist(&pool, plain).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            purge_deleted_tracks_for_playlist(&pool, arch).await.unwrap(),
+            0
+        );
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM service_playlist_tracks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 1, "only the archiving playlist keeps its tombstone");
+
+        // Switching archiving off purges the tombstone it was keeping.
+        set_playlist_archive_deleted(&pool, arch, false)
+            .await
+            .unwrap();
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM service_playlist_tracks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0, "archiving off must drop the kept tombstones");
     }
 
     #[tokio::test]

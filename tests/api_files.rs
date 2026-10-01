@@ -2803,3 +2803,109 @@ async fn files_backpack_filter_partitions_the_library() {
         "backpack+stems must be a subset of both (bp={in_bp}, stems={stems_missing}, both={bp_stems_missing})"
     );
 }
+
+/// Deleting a tag must refresh the materialised resolution tables itself —
+/// otherwise the tag filter (and every comment target) keeps matching the
+/// deleted tag until the next background refresh.
+#[tokio::test]
+async fn deleting_a_tag_refreshes_resolved_tags_immediately() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    seed_backpack_conversion(&pool).await;
+    // Populate the materialised table the way a normal cycle would, so the
+    // "after" assertion really tests the delete path and not an empty table.
+    momos_music_manager::db::refresh_file_resolved_tags(&pool)
+        .await
+        .unwrap();
+
+    async fn count(client: &reqwest::Client, url: String) -> u64 {
+        let resp = client.get(url).send().await.unwrap();
+        let json: Value = resp.json().await.unwrap();
+        json["data"].as_u64().expect("count must be a number")
+    }
+
+    let before = count(&client, format!("{base}/api/files/count?tags=convbp")).await;
+    assert_eq!(before, 4, "the four convbp files resolve to the tag");
+
+    // Delete the tag through the API …
+    let resp = client
+        .delete(format!("{base}/api/tags/900"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "tag delete should succeed");
+
+    // … and the filter must reflect it right away, with no other refresh in
+    // between (the count endpoint does not refresh on read).
+    let after = count(&client, format!("{base}/api/files/count?tags=convbp")).await;
+    assert_eq!(
+        after, 0,
+        "deleted tag must stop matching immediately (was {before} before the delete)"
+    );
+}
+
+/// "Removed" means removed — unless the playlist archives. `v_track_tags` used
+/// to ignore `deleted_at`, so a track removed from a non-archiving playlist
+/// stayed in the Backpack forever.
+#[tokio::test]
+async fn removed_track_leaves_the_backpack_unless_the_playlist_archives() {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_basic_data(&pool).await;
+    seed_backpack_conversion(&pool).await;
+
+    async fn count(client: &reqwest::Client, url: String) -> u64 {
+        let resp = client.get(url).send().await.unwrap();
+        let json: Value = resp.json().await.unwrap();
+        json["data"].as_u64().expect("count must be a number")
+    }
+    async fn ids(client: &reqwest::Client, url: String) -> Vec<i64> {
+        let resp = client.get(url).send().await.unwrap();
+        let json: Value = resp.json().await.unwrap();
+        json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["id"].as_i64().unwrap())
+            .collect()
+    }
+
+    let bp_url = format!("{base}/api/files?backpack=true&pageSize=200");
+    let before = count(&client, format!("{base}/api/files/count?backpack=true")).await;
+    assert!(
+        ids(&client, bp_url.clone()).await.contains(&900),
+        "file 900 starts out in the Backpack"
+    );
+
+    // Remove track 900 from the (non-archiving) playlist.
+    sqlx::query(
+        "UPDATE service_playlist_tracks SET deleted_at = 12345 \
+         WHERE playlist_id = 900 AND track_id = 900",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let after_removal = count(&client, format!("{base}/api/files/count?backpack=true")).await;
+    assert_eq!(
+        after_removal,
+        before - 1,
+        "a track removed from a non-archiving playlist must leave the Backpack"
+    );
+    assert!(
+        !ids(&client, bp_url.clone()).await.contains(&900),
+        "file 900 must be gone from the Backpack list"
+    );
+
+    // Archiving ON: the removed track is kept for tagging again.
+    sqlx::query("UPDATE service_playlists SET archive_deleted = 1 WHERE id = 900")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let archived = count(&client, format!("{base}/api/files/count?backpack=true")).await;
+    assert_eq!(
+        archived, before,
+        "an archiving playlist keeps its removed tracks in the Backpack"
+    );
+    assert!(ids(&client, bp_url).await.contains(&900));
+}
