@@ -11,8 +11,10 @@ name: CI (PR)
 # Stellen). Vor dem Hochstufen erst einmalig aufräumen.
 
 on:
+  # Bewusst OHNE `branches`-Filter: sonst liefe die CI auf gestackten PRs nicht
+  # (Basis = Vorgaenger-Branch statt `main`). Gerade dort braucht man sie, weil
+  # `runner-*.sh` Stacktiefe <= 3 faehrt.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
