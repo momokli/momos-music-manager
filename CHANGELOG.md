@@ -8,6 +8,15 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **Liked-Songs-Sync (`liked_sync`)**: neues Modul `src/liked_sync.rs` spiegelt die
+  Spotify-Liked-Songs in eine synthetische Playlist (`playlist_id = 'spotify:liked'`,
+  `playlist_kind = 'liked'`) und setzt dabei **immer** das Spotify-Like-Datum als
+  `added_at` — auch für bereits vorhandene Memberships (Relike-Semantik, bewusster
+  Unterschied zum Global Poller). `retire_missing_likes` tombstoned nur Memberships,
+  die nicht mehr geliked sind (Tracks in anderen Playlists bleiben unberührt).
+  Fetch- und DB-Schicht sind getrennt, damit die Merge-Logik ohne Netzwerk testbar ist
+  (`tests/liked_sync.rs`, 7 Tests).
+
 - **Tag-/Playlist-Löschung aktualisiert die Filter jetzt sofort**: `file_resolved_tags` /
   `track_resolved_tags` werden nach Tag- oder Playlist-Änderungen (create/update/delete,
   Kategorie-Änderung, Reorder, Categorize) sowie vor jedem Comment-Count/-Write
