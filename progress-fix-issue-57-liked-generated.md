@@ -277,3 +277,33 @@ Quality Gate read-only für Issue #57, Branch `fix/issue-57-liked-generated` (HE
   `tests/`-Test dieselbe Schleife nur duplizieren würde (kein Zugriff auf Step 4 isoliert), besteht
   **keine echte Integrations-/Regressionslücke** → bewusst kein neuer Test, kein Commit.
 - **Ergänzter Test:** keiner. **Commit:** keiner. **Blocker:** keiner.
+
+---
+
+## PR (developer)
+
+- **PR-Nr.:** #104
+- **URL:** https://github.com/momokli/momos-music-manager/pull/104
+- **base/head:** `main` ← `fix/issue-57-liked-generated` (HEAD 6df081e, gepusht)
+- **state:** OPEN · **mergeable:** MERGEABLE
+- **Body-Referenz:** erste Zeile `Closes #57` (verifiziert via `clanker-gh pr view 104`)
+- **Kein Merge** erfolgt (kein Automerge).
+
+---
+
+## Review (reviewer)
+
+**Verdikt: APPROVE** ✅ (Final Review, read-only, kein Merge)
+
+Geprüft gegen `origin/main...origin/fix/issue-57-liked-generated`:
+- Diff-Scope: nur `src/db/playlists.rs` (+210/-1) + Progress-Datei; keine unrelated Änderungen.
+- 4 Query-Stellen korrekt gefiltert: `get_spotify_playlist_snapshots` → `AND playlist_kind = 'curated'`
+  (deckt `global_poller.rs:139` Step 1 + `:347` Step 4); Tag-Queries → `AND playlist_kind != 'generated'`
+  (liked bleibt, #50). Beide Snapshot-Caller nur Step 1/Step 4.
+- Migration 032: `playlist_kind TEXT NOT NULL DEFAULT 'curated'` → keine NULL-Ausreißer.
+- Tests selbst ausgeführt: `cargo test --lib playlists::tests` → 36 passed / 0 failed;
+  volle `cargo test --lib` → 762 passed / 0 failed. Alle 4 DoD-Tests namentlich grün.
+- PR-Body erste Zeile `Closes #57` verifiziert.
+
+**PR-Kommentar:** https://github.com/momokli/momos-music-manager/pull/104#issuecomment-5939776926
+**Blocker:** keine.
