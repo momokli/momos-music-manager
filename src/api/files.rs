@@ -2725,6 +2725,22 @@ fn backpack_conversion_dir() -> std::path::PathBuf {
         .join("Music/backpack_conversion")
 }
 
+/// Create one symlink in the "Stage Backpack for Stems" directory.
+///
+/// There is no cross-platform tokio API: `tokio::fs::symlink` is Unix-only and
+/// `tokio::fs::symlink_file` is Windows-only (the Windows build failed on the
+/// former with `E0425: cannot find function `symlink` in module `tokio::fs``).
+/// Each platform therefore gets the function that actually exists.
+#[cfg(unix)]
+async fn stage_symlink(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    tokio::fs::symlink(src, dst).await
+}
+
+#[cfg(windows)]
+async fn stage_symlink(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    tokio::fs::symlink_file(src, dst).await
+}
+
 /// GET /api/files/backpack-conversion
 /// How many Backpack tracks still want stem conversion, and where they'd land.
 async fn backpack_conversion_status_handler(
@@ -2787,7 +2803,7 @@ async fn stage_backpack_conversion_handler(
             };
             dst = target_dir.join(unique);
         }
-        match tokio::fs::symlink(src, &dst).await {
+        match stage_symlink(src, &dst).await {
             Ok(()) => staged += 1,
             Err(e) => {
                 tracing::warn!("Failed to symlink {} → {}: {e}", c.file_path, dst.display())
