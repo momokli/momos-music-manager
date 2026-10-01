@@ -995,6 +995,7 @@ mod tests {
                 remote_track_count INTEGER NOT NULL DEFAULT 0,
                 remote_unique_count INTEGER NOT NULL DEFAULT 0,
                 archive_deleted INTEGER NOT NULL DEFAULT 0,
+                playlist_kind TEXT NOT NULL DEFAULT 'curated',
                 snapshot_id TEXT,
                 UNIQUE(service, playlist_id)
             )",

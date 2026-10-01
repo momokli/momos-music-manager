@@ -378,7 +378,8 @@ mod tests {
             r#"CREATE TABLE service_playlists (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL DEFAULT '',
                 service TEXT NOT NULL DEFAULT '', playlist_id TEXT NOT NULL DEFAULT '',
-                archive_deleted BOOLEAN NOT NULL DEFAULT 0)"#,
+                archive_deleted BOOLEAN NOT NULL DEFAULT 0,
+                playlist_kind TEXT NOT NULL DEFAULT 'curated')"#,
         )
         .execute(&pool)
         .await
