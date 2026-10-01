@@ -157,3 +157,28 @@ setzt aber Struct (1) und Query (2) voraus. Story 7 erst nach 2–6.
 - Plan-Story 7b nannte für Track 3 (kein File) `in_backpack=Some(false)`; Story 4
   und der Task-Auftrag verlangen dagegen file-seitig `None`. Umgesetzt wurde
   `None` (maßgeblich: Story 4 + Deliverable); Test entsprechend angepasst.
+
+## Stage 4 — Verifier-Rework (Finding: falscher `liked = 1`-Filter)
+
+### Finding (kritisch)
+`count_touched_before` filterte zusätzlich `liked = 1`. Das widerspricht der
+M2-AC (`plans/proposed/rediscovery-engine.md:227`): „`touchedBeforeDays` uses
+`last_added_at` across curated **and** liked playlists". Der curated+liked-Scope
+kommt bereits aus der View `v_track_forgotten_facts` (per Definition nur
+curated+liked) — ein zusätzlicher `liked`-Filter ist falsch.
+
+### Fix
+- `src/db/rediscovery.rs` / `count_touched_before`: `liked = 1` entfernt; nur noch
+  `last_touched_at IS NOT NULL AND last_touched_at < (strftime('%s','now') - ? * 86400)`.
+  Doc-Kommentar korrigiert: Scope = View (curated+liked), unabhängig vom `liked`-Flag.
+- Tests umbenannt/korrigiert:
+  - `count_touched_before_counts_curated_and_liked` → `count_touched_before(365) == 3`
+    (Track 3 `liked=false` zählt jetzt mit).
+  - `count_touched_before_zero_days_includes_all_past_touches` → `count_touched_before(0) == 3`.
+
+### Tests
+- `TMPDIR=/dev/shm/tmp62 cargo test --lib db::rediscovery` → **EXIT=0**,
+  `6 passed; 0 failed`.
+
+### Commit
+- (siehe Commit-Hash im Log) fix: count_touched_before counts curated and liked contacts

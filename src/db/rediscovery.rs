@@ -100,14 +100,15 @@ pub async fn get_track_facts(pool: &Pool<Sqlite>, track_id: i64) -> Result<Optio
 
 /// Count tracks whose last curated/liked contact is older than `days`.
 ///
-/// Uses only `v_track_forgotten_facts` — the curated+liked guard lives in the
-/// view. Only liked tracks are counted (`liked = 1`).
+/// Uses only `v_track_forgotten_facts` — the curated+liked scope lives in the
+/// view (it contains exactly the tracks in curated and liked playlists), so no
+/// `liked = 1` filter is applied here: the count spans curated **and** liked
+/// contacts, independent of whether the track is liked.
 pub async fn count_touched_before(pool: &Pool<Sqlite>, days: i64) -> Result<i64> {
     let count: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)
            FROM v_track_forgotten_facts
-           WHERE liked = 1
-             AND last_touched_at IS NOT NULL
+           WHERE last_touched_at IS NOT NULL
              AND last_touched_at < (strftime('%s','now') - ? * 86400)"#,
     )
     .bind(days)
@@ -199,21 +200,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn count_touched_before_counts_only_old_likes() {
+    async fn count_touched_before_counts_curated_and_liked() {
         let pool = seeded_pool().await;
 
-        // Both liked tracks were last touched long ago (1.4e9 / 1.6e9);
-        // Track 3 is not liked (liked = 0) and must not count.
+        // All three tracks were last touched long ago (1.4e9 / 1.6e9 / 1.7e9)
+        // and all are in at least one curated or liked playlist. The count
+        // spans curated+liked contacts regardless of the `liked` flag, so the
+        // not-liked Track 3 counts too.
         let count = count_touched_before(&pool, 365).await.unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(count, 3);
     }
 
     #[tokio::test]
-    async fn count_touched_before_zero_days_excludes_recent() {
+    async fn count_touched_before_zero_days_includes_all_past_touches() {
         let pool = seeded_pool().await;
 
-        // Nothing is touched within the last 0 days (all seeds are 2020-2023).
+        // Nothing is touched within the last 0 days (all seeds are 2020-2023),
+        // so every curated+liked track counts.
         let count = count_touched_before(&pool, 0).await.unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(count, 3);
     }
 }
