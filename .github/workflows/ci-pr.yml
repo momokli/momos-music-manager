@@ -1,0 +1,73 @@
+name: CI (PR)
+
+# Required-Checks für Pull Requests gegen `main`.
+#
+# Bewusst KEINE `paths`-Filter auf den Required-Jobs: ein geskippter Check ist
+# nicht "grün" — der PR-Gate mergt bei `CLEAN` nur, wenn die Checks tatsächlich
+# gelaufen und grün sind.
+#
+# `fmt` und `clippy` sind bewusst NICHT required (continue-on-error): der
+# Bestand ist noch nicht rustfmt-/clippy-clean (cargo fmt --check meldet ~296
+# Stellen). Vor dem Hochstufen erst einmalig aufräumen.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: Build + Test (cargo)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          key: ci-pr
+      # metaflac wird von den Kommentar-Roundtrip-Tests (src/db/files.rs) direkt
+      # aufgerufen; exiftool/ffmpeg decken die Lese- und Stream-Pfade ab.
+      - name: Install media tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flac ffmpeg libimage-exiftool-perl
+      - name: cargo build
+        run: cargo build --locked
+      - name: cargo test
+        run: cargo test --locked
+
+  fmt:
+    name: cargo fmt (informativ)
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy (informativ)
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          key: ci-pr
+      - run: cargo clippy --locked --all-targets
