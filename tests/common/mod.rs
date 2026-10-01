@@ -287,6 +287,17 @@ pub async fn seed_dynamic_bundles_data(pool: &Pool<Sqlite>) {
     momos_music_manager::db::testing::seed_dynamic_bundles_scenario(pool).await;
 }
 
+/// Seed data for the liked/generated scenario (Issue #58).
+///
+/// Extends seed_basic_data with playlists 5 (`liked`), 6 (`Today's Selection`,
+/// generated) and 7 (`Likes`), plus the contract track links so that
+/// `v_track_forgotten_facts` yields Track 1 `playlist_count=1`/liked,
+/// Track 2 `0`/liked and Track 3 `2`/not liked. Idempotent.
+/// Delegates to the shared `db::testing::seed_liked_songs_scenario` function.
+pub async fn seed_liked_songs_data(pool: &Pool<Sqlite>) {
+    momos_music_manager::db::testing::seed_liked_songs_scenario(pool).await;
+}
+
 /// Seed data for laboratory analysis testing.
 ///
 /// Extends seed_basic_data with:

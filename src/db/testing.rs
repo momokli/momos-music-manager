@@ -593,6 +593,72 @@ pub async fn seed_dynamic_bundles_scenario(pool: &Pool<Sqlite>) -> HashMap<Strin
     counts
 }
 
+/// Seed data for the `liked_songs` testing scenario (Issue #58).
+///
+/// Extends `seed_basic_scenario` with the playlists and track links needed to
+/// exercise the liked/generated semantics of migration 032:
+/// - Playlist 5 `liked` (`playlist_kind='liked'`, `playlist_id='spotify:liked'`)
+/// - Playlist 6 `Today's Selection` (`playlist_kind='generated'`) — never counts/tags
+/// - Playlist 7 `Likes` (`playlist_kind='liked'`) — name-variant mirror
+///
+/// Track links are reconciled against the two rows `seed_basic_scenario` creates:
+/// Track 1 in Playlist 5 (`added_at=1500000000`) and Playlist 1 (`added_at=1600000000`),
+/// Track 2 only in Playlist 5 (`added_at=1400000000`), Track 3 in Playlists 1+2
+/// (`added_at=1700000000`). So against `v_track_forgotten_facts`: Track 1 →
+/// `playlist_count=1`/`last_touched_at=1600000000`/liked, Track 2 → `0`/`1400000000`/liked,
+/// Track 3 → `2`/`1700000000`/not liked. All INSERTs are `OR IGNORE` (idempotent).
+pub async fn seed_liked_songs_scenario(pool: &Pool<Sqlite>) -> HashMap<String, usize> {
+    let mut counts = seed_basic_scenario(pool).await;
+
+    // ── Playlists 5-7: likes mirror, generated daily, name-variant mirror
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_playlists (id, service, playlist_id, name, playlist_kind)
+           VALUES
+             (5, 'spotify', 'spotify:liked',            'liked',              'liked'),
+             (6, 'spotify', 'spotify:playlist:today',   'Today''s Selection', 'generated'),
+             (7, 'spotify', 'spotify:playlist:likes',   'Likes',              'liked')"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // ── Reconcile the two rows seed_basic_scenario created:
+    //    (1,1) becomes an old like (added_at=1600000000) and (2,2) must go away so
+    //    Track 2 ends up in no curated playlist (playlist_count=0).
+    sqlx::query(
+        "UPDATE service_playlist_tracks SET added_at = 1600000000 WHERE playlist_id = 1 AND track_id = 1",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM service_playlist_tracks WHERE playlist_id = 2 AND track_id = 2")
+        .execute(pool)
+        .await
+        .unwrap();
+
+    // ── Contract track links
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_playlist_tracks (playlist_id, track_id, position, added_at)
+           VALUES
+             (5, 1, 0, 1500000000),
+             (5, 2, 0, 1400000000),
+             (1, 3, 0, 1700000000),
+             (2, 3, 0, 1700000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Populate file_resolved_tags like seed_lab_scenario does.
+    crate::db::refresh_file_resolved_tags(pool).await.unwrap();
+
+    // service_playlists: 2 → 5 (+3); service_playlist_tracks: 2 → 5
+    // (2 − 1 deleted + 4 inserted = 5, i.e. +3).
+    *counts.get_mut("service_playlists").unwrap() += 3;
+    *counts.get_mut("service_playlist_tracks").unwrap() += 3;
+    counts
+}
+
 /// Seed a subscribed playlist for archive/subscription testing.
 pub async fn seed_subscribed_playlist(pool: &Pool<Sqlite>) {
     sqlx::query("UPDATE service_playlists SET archive_deleted = 1 WHERE id = 1")

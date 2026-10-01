@@ -6,6 +6,128 @@
 mod common;
 
 use serde_json::Value;
+use sqlx::{Pool, Sqlite};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Testing seed endpoint — liked_songs (Issue #58)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Read `(playlist_count, last_touched_at, liked)` for a track from the view.
+async fn forgotten_facts(pool: &Pool<Sqlite>, track_id: i64) -> (i64, i64, i64) {
+    sqlx::query_as::<_, (i64, i64, i64)>(
+        "SELECT playlist_count, last_touched_at, liked \
+         FROM v_track_forgotten_facts WHERE track_id = ?",
+    )
+    .bind(track_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// POST /api/testing/seed {"scenario":"liked_songs"} → 200 with the contract rows.
+#[tokio::test]
+async fn testing_seed_liked_songs_scenario() {
+    let (client, base, pool) = common::spawn_test_app().await;
+
+    let resp = client
+        .post(format!("{}/api/testing/seed", base))
+        .json(&serde_json::json!({ "scenario": "liked_songs" }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    eprintln!("liked_songs seed: {body}");
+
+    assert_eq!(status, 200, "liked_songs seed should return 200, got {status}");
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["scenario"], "liked_songs");
+    assert_eq!(body["rows"]["service_playlists"], 5);
+    assert_eq!(body["rows"]["service_playlist_tracks"], 5);
+
+    // Playlists 5-7 exist with their kinds (PL6 generated).
+    let kinds: Vec<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
+        "SELECT id, playlist_kind FROM service_playlists WHERE id IN (5, 6, 7) ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        kinds,
+        vec![
+            (5, "liked".to_string()),
+            (6, "generated".to_string()),
+            (7, "liked".to_string()),
+        ]
+    );
+
+    // Track 1: playlist_count=1, last_touched_at=1600000000, liked.
+    assert_eq!(forgotten_facts(&pool, 1).await, (1, 1600000000, 1));
+    // Track 2: playlist_count=0, last_touched_at=1400000000, liked.
+    assert_eq!(forgotten_facts(&pool, 2).await, (0, 1400000000, 1));
+    // Track 3: playlist_count=2, last_touched_at=1700000000, not liked.
+    assert_eq!(forgotten_facts(&pool, 3).await, (2, 1700000000, 0));
+
+    // The generated playlist must never contribute a row to the view.
+    let pl6_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM v_track_forgotten_facts f \
+         JOIN service_playlist_tracks spt ON spt.track_id = f.track_id \
+         WHERE spt.playlist_id = 6",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pl6_rows, 0, "generated playlist 6 must not appear in the view");
+}
+
+/// Unknown scenario still returns 400 (and the error lists liked_songs).
+#[tokio::test]
+async fn testing_seed_unknown_scenario_returns_400() {
+    let (client, base, _pool) = common::spawn_test_app().await;
+
+    let resp = client
+        .post(format!("{}/api/testing/seed", base))
+        .json(&serde_json::json!({ "scenario": "nope_not_a_scenario" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 400, "unknown scenario should be 400");
+    let body: Value = resp.json().await.unwrap();
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(err.contains("liked_songs"), "error should list liked_songs: {err}");
+}
+
+/// `clear_all_tables()` removes the liked_songs rows — no leak into later tests.
+#[tokio::test]
+async fn liked_songs_seed_cleared_without_leak() {
+    let (_client, _base, pool) = common::spawn_test_app().await;
+    common::seed_liked_songs_data(&pool).await;
+
+    // Double-seeding must be idempotent.
+    common::seed_liked_songs_data(&pool).await;
+    let playlists_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM service_playlists")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(playlists_after, 5, "double seed must stay idempotent at 5 playlists");
+
+    momos_music_manager::db::testing::clear_all_tables(&pool).await;
+
+    let leftover_playlists: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM service_playlists WHERE id IN (5, 6, 7)")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(leftover_playlists, 0, "liked/generated playlists must be cleared");
+    let leftover_tracks: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM service_playlist_tracks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(leftover_tracks, 0, "playlist track rows must be cleared");
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tag similarities
