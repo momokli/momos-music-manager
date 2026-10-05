@@ -6,6 +6,15 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+### Added
+
+- **Test-Seed-Szenario `rediscovery` (#80)**: `db::testing::seed_rediscovery_scenario` erweitert
+  `seed_liked_songs_scenario` um Tracks/Dateien 10–18, den Backpack-Tag + die kuratierte Playlist 60
+  und 2 `rediscovery_pushes`-Zeilen — deterministisch über den festen Anker
+  `REDISCOVERY_SEED_EPOCH` (kein `unixepoch()`/`now()`), idempotent (`OR IGNORE`). Registriert am
+  `POST /api/testing/seed`-Endpoint (`{"scenario":"rediscovery"}`); `clear_all_tables` räumt
+  `rediscovery_pushes` FK-sicher mit ab. Test-Helper `tests/common::seed_rediscovery_data`.
+
 ## [1.14.0] — 2026-10-02
 
 ### Added
