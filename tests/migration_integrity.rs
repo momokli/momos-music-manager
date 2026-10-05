@@ -29,6 +29,7 @@ async fn all_migrations_run_cleanly() {
         "files",
         "folders",
         "playlist_subscriptions",
+        "rediscovery_pushes",
         "service_config",
         "service_playlist_tracks",
         "service_playlists",
