@@ -15,6 +15,25 @@ use anyhow::Result;
 use sqlx::{FromRow, Pool, QueryBuilder, Sqlite};
 use std::collections::{HashMap, HashSet};
 
+// ── BPM bucket definition (single source) ───────────────────────────────
+//
+// The rediscovery stats endpoint (and the future `bpmBuckets` preset) group
+// analysed tracks into fixed-width BPM ranges. This is the *only* place that
+// defines the bucket width and label format — nothing else may re-derive it.
+
+/// Width of a BPM bucket in beats per minute.
+pub const BPM_BUCKET_WIDTH: f64 = 5.0;
+
+/// Label of the BPM bucket a value falls into, e.g. `120.0 -> "120-124"`.
+///
+/// Floor to the bucket start (`start..=start + width - 1`), integers only.
+pub fn bpm_bucket_label(bpm: f64) -> String {
+    let start = (bpm / BPM_BUCKET_WIDTH).floor() * BPM_BUCKET_WIDTH;
+    let start = start as i64;
+    let end = start + (BPM_BUCKET_WIDTH as i64) - 1;
+    format!("{start}-{end}")
+}
+
 /// Facts about a single track for the rediscovery ranking.
 ///
 /// View-derived fields (`track_id`..`liked`) are always present; file-derived
@@ -470,6 +489,15 @@ mod tests {
 
         let t1 = get_track_facts(&pool, 1).await.unwrap().unwrap();
         assert_eq!(t1.in_backpack, Some(false));
+    }
+
+    #[test]
+    fn bpm_bucket_label_boundaries() {
+        assert_eq!(bpm_bucket_label(120.0), "120-124");
+        assert_eq!(bpm_bucket_label(124.9), "120-124");
+        assert_eq!(bpm_bucket_label(125.0), "125-129");
+        assert_eq!(bpm_bucket_label(128.0), "125-129");
+        assert_eq!(bpm_bucket_label(155.0), "155-159");
     }
 
     #[tokio::test]
