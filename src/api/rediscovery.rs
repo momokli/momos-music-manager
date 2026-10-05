@@ -79,10 +79,12 @@ pub struct RediscoveryCandidatesQuery {
     pub bpm_min: Option<f64>,
     #[serde(default)]
     pub bpm_max: Option<f64>,
+    /// Comma-separated key set, e.g. `keys=8m,4m` (OR within the facet).
     #[serde(default)]
-    pub keys: Vec<String>,
+    pub keys: Option<String>,
+    /// Comma-separated genre set, e.g. `genres=House,Techno`.
     #[serde(default)]
-    pub genres: Vec<String>,
+    pub genres: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default = "default_offset")]
@@ -178,13 +180,15 @@ async fn candidates_handler(
         None => HashSet::new(),
     };
 
+    let keys = split_list(&q.keys);
+    let genres = split_list(&q.genres);
     let audio_filter = AudioFilter {
         bpm_min: q.bpm_min,
         bpm_max: q.bpm_max,
         require_bpm: q.require_bpm,
         require_key: q.require_key,
-        keys: q.keys.clone(),
-        genres: q.genres.clone(),
+        keys: keys.clone(),
+        genres: genres.clone(),
         play_count_max: q.play_count_max,
         not_played_before: q.not_played_since_days.map(|d| now - d * 86_400),
     };
@@ -359,12 +363,12 @@ fn build_row(
     }
 
     // 8. key / genre set matches (report the actual matched value).
-    if !q.keys.is_empty() {
+    if !split_list(&q.keys).is_empty() {
         if let Some(key) = files.and_then(|f| f.musical_key.as_deref()) {
             reasons.push(format!("key-match:{key}"));
         }
     }
-    if !q.genres.is_empty() {
+    if !split_list(&q.genres).is_empty() {
         if let Some(genre) = files.and_then(|f| f.genre.as_deref()) {
             reasons.push(format!("genre-match:{genre}"));
         }
@@ -444,6 +448,20 @@ fn sort_rows(rows: &mut [CandidateRow], sort: &str, seed: Option<u64>) {
                 .then(a.track_id.cmp(&b.track_id))
         }),
     }
+}
+
+/// Split a comma-separated query value into a trimmed, non-empty set.
+fn split_list(value: &Option<String>) -> Vec<String> {
+    value
+        .as_deref()
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn bad_request(message: String) -> Response {
