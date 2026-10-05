@@ -12,7 +12,8 @@
 //! including `in_backpack`.
 
 use anyhow::Result;
-use sqlx::{FromRow, Pool, Sqlite};
+use sqlx::{FromRow, Pool, QueryBuilder, Sqlite};
+use std::collections::{HashMap, HashSet};
 
 /// Facts about a single track for the rediscovery ranking.
 ///
@@ -116,6 +117,284 @@ pub async fn count_touched_before(pool: &Pool<Sqlite>, days: i64) -> Result<i64>
     .await?;
 
     Ok(count)
+}
+
+// ── Batched loaders for the rediscovery candidates endpoint ───────────────
+//
+// Every loader here is batched: one query for the whole candidate set, never a
+// per-track loop. The `track_id` direction of `v_file_track_link` is NOT usable
+// in a correlated pro-row subquery (see `src/backpack.rs`), so file-side access
+// always goes through the fast `file_id` direction or through
+// [`crate::backpack::get_file_ids_for_track_ids`].
+
+/// File-side facts of a candidate track, taken from its deterministically
+/// chosen linked file (lowest `files.id`, same pick as [`get_track_facts`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileFacts {
+    pub file_id: i64,
+    pub bpm: Option<f64>,
+    pub musical_key: Option<String>,
+    pub genre: Option<String>,
+    pub play_count: Option<i64>,
+    pub last_played: Option<i64>,
+}
+
+/// File-side `files` filter for [`tracks_matching_audio`].
+#[derive(Debug, Clone, Default)]
+pub struct AudioFilter {
+    pub bpm_min: Option<f64>,
+    pub bpm_max: Option<f64>,
+    pub require_bpm: bool,
+    pub require_key: bool,
+    pub keys: Vec<String>,
+    pub genres: Vec<String>,
+    pub play_count_max: Option<i64>,
+    /// Match when `last_played IS NULL OR last_played < this` (unix seconds).
+    pub not_played_before: Option<i64>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct RowFileFacts {
+    track_id: i64,
+    file_id: i64,
+    bpm: Option<f64>,
+    musical_key: Option<String>,
+    genre: Option<String>,
+    play_count: Option<i64>,
+    last_played: Option<i64>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct TrackMetaRow {
+    id: i64,
+    service_id: Option<String>,
+    title: String,
+    artist: String,
+}
+
+fn placeholders(n: usize) -> String {
+    std::iter::repeat("?").take(n).collect::<Vec<_>>().join(",")
+}
+
+/// One row per forgotten track (view facts only; file-side fields stay `None`).
+///
+/// This is the full candidate universe for a request — a single indexed scan of
+/// `v_track_forgotten_facts`, never one query per track.
+pub async fn list_forgotten_facts(pool: &Pool<Sqlite>) -> Result<Vec<TrackFacts>> {
+    let rows = sqlx::query_as::<_, TrackFacts>(
+        r#"SELECT track_id, playlist_count, last_touched_at, liked_at, liked
+           FROM v_track_forgotten_facts"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Load the file-side facts for many tracks in one batch.
+///
+/// Semantics match [`get_track_facts`]: the linked file with the lowest
+/// `files.id` wins. A track with no linked file is simply absent from the map.
+pub async fn load_file_facts(
+    pool: &Pool<Sqlite>,
+    track_ids: &[i64],
+) -> Result<HashMap<i64, FileFacts>> {
+    let mut map = HashMap::new();
+    if track_ids.is_empty() {
+        return Ok(map);
+    }
+    let file_ids = crate::backpack::get_file_ids_for_track_ids(pool, track_ids).await?;
+    if file_ids.is_empty() {
+        return Ok(map);
+    }
+
+    let wanted: HashSet<i64> = track_ids.iter().copied().collect();
+    let sql = format!(
+        r#"SELECT v.track_id AS track_id, f.id AS file_id, f.bpm, f.musical_key,
+                  f.genre, f.play_count, f.last_played
+           FROM v_file_track_link v
+           JOIN files f ON f.id = v.file_id
+           WHERE v.file_id IN ({})
+           ORDER BY v.track_id, f.id"#,
+        placeholders(file_ids.len())
+    );
+    let mut query = sqlx::query_as::<_, RowFileFacts>(&sql);
+    for id in &file_ids {
+        query = query.bind(id);
+    }
+    for row in query.fetch_all(pool).await? {
+        if !wanted.contains(&row.track_id) {
+            continue;
+        }
+        // `ORDER BY v.track_id, f.id` — first insert is the lowest file id.
+        map.entry(row.track_id).or_insert(FileFacts {
+            file_id: row.file_id,
+            bpm: row.bpm,
+            musical_key: row.musical_key,
+            genre: row.genre,
+            play_count: row.play_count,
+            last_played: row.last_played,
+        });
+    }
+    Ok(map)
+}
+
+/// Track ids that have at least one local file location, in one batch.
+///
+/// `owned` = a local `file_locations` row exists for any file linked to the
+/// track (ADR: local copy present).
+pub async fn owned_track_ids(
+    pool: &Pool<Sqlite>,
+    track_ids: &[i64],
+) -> Result<HashSet<i64>> {
+    let mut owned = HashSet::new();
+    if track_ids.is_empty() {
+        return Ok(owned);
+    }
+    let wanted: HashSet<i64> = track_ids.iter().copied().collect();
+    let file_ids = crate::backpack::get_file_ids_for_track_ids(pool, track_ids).await?;
+    if file_ids.is_empty() {
+        return Ok(owned);
+    }
+
+    let sql = format!(
+        r#"SELECT DISTINCT v.track_id
+           FROM v_file_track_link v
+           WHERE v.file_id IN ({})
+             AND v.file_id IN (
+                 SELECT file_id FROM file_locations WHERE location_type = 'local'
+             )"#,
+        placeholders(file_ids.len())
+    );
+    let mut query = sqlx::query_scalar::<_, i64>(&sql);
+    for id in &file_ids {
+        query = query.bind(id);
+    }
+    for id in query.fetch_all(pool).await? {
+        if wanted.contains(&id) {
+            owned.insert(id);
+        }
+    }
+    Ok(owned)
+}
+
+/// Track ids whose linked `files` satisfy the audio facets.
+///
+/// Built as `SELECT DISTINCT track_id FROM v_file_track_link WHERE file_id IN
+/// (SELECT id FROM files WHERE <facets>)` — the fast `file_id` direction, never
+/// the slow `track_id` direction.
+pub async fn tracks_matching_audio(
+    pool: &Pool<Sqlite>,
+    filter: &AudioFilter,
+) -> Result<HashSet<i64>> {
+    let mut qb = QueryBuilder::new(
+        "SELECT DISTINCT v.track_id FROM v_file_track_link v \
+         WHERE v.file_id IN (SELECT f.id FROM files f WHERE 1 = 1",
+    );
+    if let Some(min) = filter.bpm_min {
+        qb.push(" AND f.bpm >= ").push_bind(min);
+    }
+    if let Some(max) = filter.bpm_max {
+        qb.push(" AND f.bpm <= ").push_bind(max);
+    }
+    if filter.require_bpm {
+        qb.push(" AND f.bpm IS NOT NULL");
+    }
+    if filter.require_key {
+        qb.push(" AND f.musical_key IS NOT NULL");
+    }
+    if !filter.keys.is_empty() {
+        qb.push(" AND f.musical_key IN (");
+        let mut sep = qb.separated(", ");
+        for key in &filter.keys {
+            sep.push_bind(key);
+        }
+        sep.push_unseparated(")");
+    }
+    if !filter.genres.is_empty() {
+        qb.push(" AND f.genre IN (");
+        let mut sep = qb.separated(", ");
+        for genre in &filter.genres {
+            sep.push_bind(genre);
+        }
+        sep.push_unseparated(")");
+    }
+    if let Some(max) = filter.play_count_max {
+        qb.push(" AND f.play_count IS NOT NULL AND f.play_count <= ")
+            .push_bind(max);
+    }
+    if let Some(cutoff) = filter.not_played_before {
+        qb.push(" AND (f.last_played IS NULL OR f.last_played < ")
+            .push_bind(cutoff)
+            .push(")");
+    }
+    qb.push(")");
+
+    let ids: Vec<i64> = qb.build_query_scalar().fetch_all(pool).await?;
+    Ok(ids.into_iter().collect())
+}
+
+/// Track ids pushed within the last `days` (relative to `now`), from the
+/// migration-033 ledger. Used to exclude freshly re-pushed tracks.
+pub async fn pushed_track_ids_since(
+    pool: &Pool<Sqlite>,
+    days: i64,
+    now: i64,
+) -> Result<HashSet<i64>> {
+    let cutoff = now - days * 86_400;
+    let ids: Vec<i64> = sqlx::query_scalar(
+        r#"SELECT DISTINCT track_id FROM rediscovery_pushes WHERE pushed_at >= ?"#,
+    )
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await?;
+    Ok(ids.into_iter().collect())
+}
+
+/// Latest `pushed_at` per track, for the `pushed-<date>` / `never-pushed`
+/// reason on candidates that passed the `excludePushedSinceDays` facet.
+pub async fn last_push_dates(
+    pool: &Pool<Sqlite>,
+    track_ids: &[i64],
+) -> Result<HashMap<i64, i64>> {
+    if track_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let sql = format!(
+        r#"SELECT track_id, MAX(pushed_at) FROM rediscovery_pushes
+           WHERE track_id IN ({}) GROUP BY track_id"#,
+        placeholders(track_ids.len())
+    );
+    let mut query = sqlx::query_as::<_, (i64, i64)>(&sql);
+    for id in track_ids {
+        query = query.bind(id);
+    }
+    Ok(query.fetch_all(pool).await?.into_iter().collect())
+}
+
+/// Service-track metadata (`spotifyId`, `title`, `artist`) for a page of
+/// candidates, resolved in one batch query.
+pub async fn track_metadata(
+    pool: &Pool<Sqlite>,
+    track_ids: &[i64],
+) -> Result<HashMap<i64, (Option<String>, String, String)>> {
+    if track_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let sql = format!(
+        r#"SELECT id, service_id, title, artist FROM service_tracks
+           WHERE id IN ({})"#,
+        placeholders(track_ids.len())
+    );
+    let mut query = sqlx::query_as::<_, TrackMetaRow>(&sql);
+    for id in track_ids {
+        query = query.bind(id);
+    }
+    Ok(query
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|r| (r.id, (r.service_id, r.title, r.artist)))
+        .collect())
 }
 
 #[cfg(test)]
