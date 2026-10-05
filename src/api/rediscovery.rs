@@ -272,21 +272,16 @@ async fn candidates_handler(
         })
         .collect();
 
-    sort_rows(&mut rows, &q.sort, q.seed);
-
-    let total = rows.len() as i64;
-    let start = (offset as usize).min(rows.len());
-    let end = (start + limit as usize).min(rows.len());
-    let mut page: Vec<CandidateRow> = rows[start..end].to_vec();
-
-    // ── Attach service-track metadata for the page only ─────────────────
-    if !page.is_empty() {
-        let page_ids: Vec<i64> = page.iter().map(|r| r.track_id).collect();
-        let meta = match rediscovery::track_metadata(&state.db, &page_ids).await {
+    // ── Attach service-track metadata before sorting ────────────────────
+    // `build_row` leaves `spotify_id`/`title`/`artist` empty; `sort=artist`
+    // (and the `title` tiebreaker) must therefore run on the real values, so
+    // load metadata for *all* survivors first, then sort, then slice the page.
+    if !rows.is_empty() {
+        let meta = match rediscovery::track_metadata(&state.db, &ids).await {
             Ok(v) => v,
             Err(e) => return internal_error(e).into_response(),
         };
-        for row in page.iter_mut() {
+        for row in rows.iter_mut() {
             if let Some((service_id, title, artist)) = meta.get(&row.track_id) {
                 row.spotify_id = service_id.clone();
                 row.title = title.clone();
@@ -294,6 +289,13 @@ async fn candidates_handler(
             }
         }
     }
+
+    sort_rows(&mut rows, &q.sort, q.seed);
+
+    let total = rows.len() as i64;
+    let start = (offset as usize).min(rows.len());
+    let end = (start + limit as usize).min(rows.len());
+    let page: Vec<CandidateRow> = rows[start..end].to_vec();
 
     (
         StatusCode::OK,

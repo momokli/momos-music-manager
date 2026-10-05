@@ -27,6 +27,48 @@ async fn app() -> (reqwest::Client, String) {
     (client, base)
 }
 
+/// Rediscovery scenario plus one extra aged House track (id 19, artist
+/// `Artist R1`). Its artist sorts lexicographically *before* `Artist R10..R18`
+/// while its `track_id` is the largest — so `sort=artist` must pull it to the
+/// front, whereas a plain `track_id` ordering (the pre-fix behaviour) puts it
+/// last. This is what makes the artist-sort assertion below able to fail.
+async fn app_with_late_id_early_artist() -> (reqwest::Client, String) {
+    let (client, base, pool) = common::spawn_test_app().await;
+    common::seed_rediscovery_data(&pool).await;
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_tracks (id, service, service_id, title, artist, isrc, imported_at)
+           VALUES (19, 'spotify', 'spotify:track:rdis19', 'Rediscovery Nineteen', 'Artist R1', 'RDIS019', 1790000000)"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO files (id, file_path, file_type, file_size, last_modified, title, artist,
+             bpm, musical_key, genre, isrc, play_count, last_played, duration_ms, file_hash)
+           VALUES (19, '/test/stems/R19.flac', 'flac', 5000000, 1790000000, 'Rediscovery Nineteen', 'Artist R1',
+                   123.0, '5m', 'House', 'RDIS019', 0, NULL, 300000, 'rdish19')"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO file_locations (file_id, location_type, path, file_size, last_verified)
+           VALUES (19, 'local', '/test/stems/R19.flac', 5000000, 1790000000)"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Liked playlist 5 → appears in `v_track_forgotten_facts` (last_touched_at).
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_playlist_tracks (playlist_id, track_id, position, added_at)
+           VALUES (5, 19, 0, 1632320000)"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    (client, base)
+}
+
 /// GET the candidates endpoint and return the inner `data` object (asserts 200).
 async fn candidates(client: &reqwest::Client, base: &str, query: &str) -> Value {
     let url = if query.is_empty() {
@@ -358,7 +400,30 @@ async fn unknown_sort_returns_400() {
     assert_eq!(resp.status(), 400);
 }
 
-// ── 13. response field contract ──────────────────────────────────────────
+// ── 13. sort=artist orders by metadata, not by track_id ──────────────────
+
+#[tokio::test]
+async fn sort_artist_orders_by_metadata_not_track_id() {
+    let (client, base) = app_with_late_id_early_artist().await;
+    let q = "genres=House&excludeBackpack=false&excludePushedSinceDays=0&touchedBeforeDays=365&sort=artist&limit=200";
+    let data = candidates(&client, &base, q).await;
+
+    // Aged House survivors: 12, 14, 16, 18 (artist R12/R14/R16/R18) + 19 (R1).
+    // Artist ascending: R1 (19) · R10? (not in scope) · R12 · R14 · R16 · R18.
+    assert_eq!(
+        ids(&data),
+        vec![19, 12, 14, 16, 18],
+        "sort=artist must order by artist, not by track_id: {:?}",
+        ids(&data)
+    );
+
+    // The metadata really reaches the rows (guards against empty placeholders).
+    let row = row_for(&data, 19).expect("track 19 present");
+    assert_eq!(row["artist"], "Artist R1");
+    assert_eq!(row["title"], "Rediscovery Nineteen");
+}
+
+// ── 14. response field contract ──────────────────────────────────────────
 
 #[tokio::test]
 async fn response_rows_carry_all_fields() {
