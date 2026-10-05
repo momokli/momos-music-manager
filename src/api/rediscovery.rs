@@ -19,12 +19,13 @@ use axum::{
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::AppState;
 use crate::api::types::{ApiResponse, ErrorResponse, internal_error};
 use crate::db::rediscovery::{self, AudioFilter, FileFacts, TrackFacts};
+use crate::db::rediscovery::bpm_bucket_label;
 
 const SORTS: &[&str] = &["oldest-touched", "forgotten", "random", "bpm", "artist"];
 const MAX_LIMIT: i64 = 200;
@@ -50,10 +51,13 @@ fn default_sort() -> String {
     "oldest-touched".to_string()
 }
 
-/// Query parameters. All fields optional; defaults follow Issue #81.
+/// Shared rediscovery facet parameters. All fields optional; defaults follow
+/// Issue #81. Used by **both** `candidates` and `stats` so the two endpoints
+/// deserialise an identical facet set; `stats` simply ignores the pagination
+/// fields (`limit`/`offset`/`sort`/`seed`).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RediscoveryCandidatesQuery {
+pub struct RediscoveryFacetsQuery {
     /// PRIMARY: `last_touched_at` older than `now - N` days.
     #[serde(default = "default_touched_before_days")]
     pub touched_before_days: i64,
@@ -127,58 +131,81 @@ pub struct CandidatesResponse {
     pub offset: i64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct LikedSplit {
+    pub liked: i64,
+    pub unliked: i64,
+}
+
+/// Aggregate counters for the current facet preset. No pagination — every
+/// number spans the *whole* matching set.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RediscoveryStatsResponse {
+    /// Facet matches (== `candidates.total` for the same query).
+    pub matching: i64,
+    /// Matches with a linked file that has both `bpm` and `musical_key`.
+    pub with_bpm_and_key: i64,
+    /// Matches with a linked file missing `bpm` or `musical_key` (work queue).
+    pub needs_analysis: i64,
+    /// Matches with no local `file_locations` row.
+    pub not_owned: i64,
+    /// Tracks dropped only by the push cooldown; `0` when that facet is off.
+    pub pushed_recently: i64,
+    /// `withBpmAndKey` distributed over the shared bucket definition (only
+    /// populated buckets are emitted; values sum to `withBpmAndKey`).
+    pub by_bpm_bucket: BTreeMap<String, i64>,
+    /// liked/unliked split of the matches (sums to `matching`).
+    pub by_liked: LikedSplit,
+}
+
 // ── Router ───────────────────────────────────────────────────────────────
 
 pub(super) fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/api/rediscovery/candidates", get(candidates_handler))
+    Router::new()
+        .route("/api/rediscovery/candidates", get(candidates_handler))
+        .route("/api/rediscovery/stats", get(stats_handler))
 }
 
 // ── Handler ──────────────────────────────────────────────────────────────
 
-async fn candidates_handler(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<RediscoveryCandidatesQuery>,
-) -> Response {
-    // ── Validation ──────────────────────────────────────────────────────
-    if !SORTS.contains(&q.sort.as_str()) {
-        return bad_request(format!(
-            "Unknown sort '{}'. Valid: {}",
-            q.sort,
-            SORTS.join(", ")
-        ));
-    }
-    if let (Some(min), Some(max)) = (q.bpm_min, q.bpm_max) {
-        if min > max {
-            return bad_request(format!(
-                "bpmMin ({min}) must not be greater than bpmMax ({max})"
-            ));
-        }
-    }
-    let limit = q.limit.clamp(1, MAX_LIMIT);
-    let offset = q.offset.max(0);
-    let now = chrono::Utc::now().timestamp();
+/// Survivors of the shared rediscovery facet filtering, plus the counts the
+/// stats endpoint needs that fall out of the exact same pass.
+struct FacetSurvivors {
+    /// Tracks passing every facet (view order; pagination-free).
+    survivors: Vec<TrackFacts>,
+    /// Backpack membership of the loaded universe (reused by the candidates
+    /// row builder; stats does not need it).
+    backpack: HashSet<i64>,
+    /// Tracks that pass every *other* facet but fall out on the push cooldown.
+    /// `0` when `excludePushedSinceDays` is disabled (`null` or `0`).
+    pushed_recently: i64,
+}
 
-    // ── Batched loads (no N+1, no pro-row view access) ──────────────────
-    let all = match rediscovery::list_forgotten_facts(&state.db).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!("Failed to load forgotten facts: {}", e);
-            return internal_error(e).into_response();
-        }
-    };
+/// Apply the shared facet pipeline to the batched candidate universe:
+/// `last_touched` → `max_playlists` → `liked_only` → `exclude_backpack` →
+/// `audio` → `exclude_pushed`. Batched loads only (no per-row access, no N+1).
+///
+/// `candidates` and `stats` call this so the two endpoints filter structurally
+/// identically. Pagination/sorting stay candidates-specific.
+async fn facet_survivors(
+    state: &AppState,
+    q: &RediscoveryFacetsQuery,
+    now: i64,
+) -> anyhow::Result<FacetSurvivors> {
+    let all = rediscovery::list_forgotten_facts(&state.db).await?;
 
-    let backpack: HashSet<i64> = match crate::backpack::get_backpack_track_ids(&state.db).await {
-        Ok(v) => v.into_iter().collect(),
-        Err(e) => return internal_error(e).into_response(),
-    };
+    let backpack: HashSet<i64> = crate::backpack::get_backpack_track_ids(&state.db)
+        .await?
+        .into_iter()
+        .collect();
 
     let pushed: HashSet<i64> = match q.exclude_pushed_since_days {
-        Some(days) => match rediscovery::pushed_track_ids_since(&state.db, days, now).await {
-            Ok(v) => v,
-            Err(e) => return internal_error(e).into_response(),
-        },
+        Some(days) => rediscovery::pushed_track_ids_since(&state.db, days, now).await?,
         None => HashSet::new(),
     };
+    // `0` (and `null`) disable the facet, so nothing falls out on it.
+    let push_facet_active = matches!(q.exclude_pushed_since_days, Some(d) if d > 0);
 
     let keys = split_list(&q.keys);
     let genres = split_list(&q.genres);
@@ -201,18 +228,15 @@ async fn candidates_handler(
         || audio_filter.play_count_max.is_some()
         || audio_filter.not_played_before.is_some();
     let audio: Option<HashSet<i64>> = if audio_active {
-        match rediscovery::tracks_matching_audio(&state.db, &audio_filter).await {
-            Ok(set) => Some(set),
-            Err(e) => return internal_error(e).into_response(),
-        }
+        Some(rediscovery::tracks_matching_audio(&state.db, &audio_filter).await?)
     } else {
         None
     };
 
-    // ── Server-side facet filtering ─────────────────────────────────────
     let touched_cutoff = now - q.touched_before_days * 86_400;
-    let mut survivors: Vec<&TrackFacts> = Vec::new();
-    for fact in &all {
+    let mut survivors: Vec<TrackFacts> = Vec::new();
+    let mut pushed_recently: i64 = 0;
+    for fact in all {
         // PRIMARY facet: last_touched_at is required and must be older.
         let Some(last_touched) = fact.last_touched_at else {
             continue;
@@ -231,16 +255,63 @@ async fn candidates_handler(
         if q.exclude_backpack && backpack.contains(&fact.track_id) {
             continue;
         }
-        if q.exclude_pushed_since_days.is_some() && pushed.contains(&fact.track_id) {
-            continue;
-        }
         if let Some(set) = &audio {
             if !set.contains(&fact.track_id) {
                 continue;
             }
         }
+        // Push cooldown is the last facet: tracks dropped *only* here are the
+        // `pushedRecently` count (not a subset of `matching`).
+        if q.exclude_pushed_since_days.is_some() && pushed.contains(&fact.track_id) {
+            if push_facet_active {
+                pushed_recently += 1;
+            }
+            continue;
+        }
         survivors.push(fact);
     }
+
+    Ok(FacetSurvivors {
+        survivors,
+        backpack,
+        pushed_recently,
+    })
+}
+
+async fn candidates_handler(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RediscoveryFacetsQuery>,
+) -> Response {
+    // ── Validation ──────────────────────────────────────────────────────
+    if !SORTS.contains(&q.sort.as_str()) {
+        return bad_request(format!(
+            "Unknown sort '{}'. Valid: {}",
+            q.sort,
+            SORTS.join(", ")
+        ));
+    }
+    if let (Some(min), Some(max)) = (q.bpm_min, q.bpm_max) {
+        if min > max {
+            return bad_request(format!(
+                "bpmMin ({min}) must not be greater than bpmMax ({max})"
+            ));
+        }
+    }
+    let limit = q.limit.clamp(1, MAX_LIMIT);
+    let offset = q.offset.max(0);
+    let now = chrono::Utc::now().timestamp();
+
+    // ── Shared facet filtering (see `facet_survivors`) ──────────────────
+    let outcome = match facet_survivors(&state, &q, now).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("Failed to compute rediscovery survivors: {}", e);
+            return internal_error(e).into_response();
+        }
+    };
+    let FacetSurvivors {
+        survivors, backpack, ..
+    } = outcome;
 
     // ── Build, sort, paginate ───────────────────────────────────────────
     let ids: Vec<i64> = survivors.iter().map(|f| f.track_id).collect();
@@ -311,6 +382,99 @@ async fn candidates_handler(
         .into_response()
 }
 
+// ── Stats ───────────────────────────────────────────────────────────────
+
+/// `GET /api/rediscovery/stats` — aggregate counters over the shared facet
+/// survivor set. Pure aggregation: one batched candidate load, one batched
+/// file-facts load, one batched ownership load; no per-row query, no
+/// migration.
+async fn stats_handler(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RediscoveryFacetsQuery>,
+) -> Response {
+    if let (Some(min), Some(max)) = (q.bpm_min, q.bpm_max) {
+        if min > max {
+            return bad_request(format!(
+                "bpmMin ({min}) must not be greater than bpmMax ({max})"
+            ));
+        }
+    }
+    let now = chrono::Utc::now().timestamp();
+
+    let outcome = match facet_survivors(&state, &q, now).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("Failed to compute rediscovery survivors: {}", e);
+            return internal_error(e).into_response();
+        }
+    };
+    let FacetSurvivors {
+        survivors,
+        pushed_recently,
+        ..
+    } = outcome;
+
+    let matching = survivors.len() as i64;
+    let ids: Vec<i64> = survivors.iter().map(|f| f.track_id).collect();
+    let files = match rediscovery::load_file_facts(&state.db, &ids).await {
+        Ok(v) => v,
+        Err(e) => return internal_error(e).into_response(),
+    };
+    let owned = match rediscovery::owned_track_ids(&state.db, &ids).await {
+        Ok(v) => v,
+        Err(e) => return internal_error(e).into_response(),
+    };
+
+    let mut with_bpm_and_key: i64 = 0;
+    let mut needs_analysis: i64 = 0;
+    let mut not_owned: i64 = 0;
+    let mut by_liked = LikedSplit {
+        liked: 0,
+        unliked: 0,
+    };
+    let mut by_bpm_bucket: BTreeMap<String, i64> = BTreeMap::new();
+
+    for fact in &survivors {
+        if !owned.contains(&fact.track_id) {
+            not_owned += 1;
+        }
+        if fact.liked {
+            by_liked.liked += 1;
+        } else {
+            by_liked.unliked += 1;
+        }
+        match files.get(&fact.track_id) {
+            // Linked file with both audio features → analysed.
+            Some(file) => match (file.bpm, file.musical_key.as_deref()) {
+                (Some(bpm), Some(_)) => {
+                    with_bpm_and_key += 1;
+                    *by_bpm_bucket.entry(bpm_bucket_label(bpm)).or_insert(0) += 1;
+                }
+                // Linked file missing bpm or key → analysis work queue.
+                _ => needs_analysis += 1,
+            },
+            // No linked file at all: counts only towards `matching`.
+            None => {}
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse {
+            data: RediscoveryStatsResponse {
+                matching,
+                with_bpm_and_key,
+                needs_analysis,
+                not_owned,
+                pushed_recently,
+                by_bpm_bucket,
+                by_liked,
+            },
+        }),
+    )
+        .into_response()
+}
+
 // ── Row assembly ─────────────────────────────────────────────────────────
 
 fn build_row(
@@ -318,7 +482,7 @@ fn build_row(
     files: Option<&FileFacts>,
     owned: bool,
     backpack: &HashSet<i64>,
-    q: &RediscoveryCandidatesQuery,
+    q: &RediscoveryFacetsQuery,
     now: i64,
     push_dates: &HashMap<i64, i64>,
 ) -> CandidateRow {

@@ -8,6 +8,18 @@ All notable changes to Momo's Music Manager.
 
 ### Added
 
+- **`GET /api/rediscovery/stats` (#82)**: neuer Aggregat-Endpunkt über **dieselben
+  Facetten-Parameter** wie `candidates` (geteilte `RediscoveryFacetsQuery`). Liefert
+  `matching`, `withBpmAndKey`, `needsAnalysis`, `notOwned`, `pushedRecently`,
+  `byBpmBucket` und `byLiked` — berechnet rein aggregierend über den einen batched
+  geladenen Survivor-Set (kein Pro-Row-Laden, keine Migration). `byBpmBucket` nutzt die
+  neue Single-Source-Bucket-Definition `db::rediscovery::BPM_BUCKET_WIDTH` +
+  `bpm_bucket_label` (Breite 5, Label `"120-124"`; nur belegte Buckets).
+  `pushedRecently` zählt Tracks, die alle übrigen Facetten erfüllen, aber am
+  Push-Cooldown herausfallen (`0` bei deaktiviertem Facet). Die gemeinsame
+  Survivor-Berechnung wurde in `facet_survivors` gezogen; `candidates` nutzt sie
+  unverändert.
+
 - **Test-Seed-Szenario `rediscovery` (#80)**: `db::testing::seed_rediscovery_scenario` erweitert
   `seed_liked_songs_scenario` um Tracks/Dateien 10–18, den Backpack-Tag + die kuratierte Playlist 60
   und 2 `rediscovery_pushes`-Zeilen — deterministisch über den festen Anker
