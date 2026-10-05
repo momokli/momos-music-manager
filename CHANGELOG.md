@@ -27,6 +27,16 @@ All notable changes to Momo's Music Manager.
   `POST /api/testing/seed`-Endpoint (`{"scenario":"rediscovery"}`); `clear_all_tables` räumt
   `rediscovery_pushes` FK-sicher mit ab. Test-Helper `tests/common::seed_rediscovery_data`.
 
+- **SPA-Seite `#rediscovery` (#83)**: neue Frontend-Seite `frontend/pages/rediscovery.js`
+  (Route `#rediscovery`, Eintrag im Tools-Menü) mit Facetten-Formular links, einer
+  server-seitigen Live-Preview-Tabelle (Reason-Chips **verbatim** aus dem API-Feld
+  `reasons`) und einer Kennzahlen-Leiste aus `GET /api/rediscovery/stats`. Facetten-
+  Änderungen lösen (300 ms debounced) ein Neu-Laden ohne Page-Reload aus; Sortierung,
+  `total` und Pagination laufen strikt server-seitig über `limit`/`offset`
+  (`GET /api/rediscovery/candidates`), kein Client-Side-Filtern nach Pagination.
+  Der „Generate Playlist"-Button ist bewusst noch ein Platzhalter (1.16.0/1.18.0).
+  Playwright-Abdeckung via Seed-Szenario `rediscovery` (`frontend/tests/rediscovery.spec.js`).
+
 ## [1.14.0] — 2026-10-02
 
 ### Added

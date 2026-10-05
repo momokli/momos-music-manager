@@ -53,6 +53,7 @@ const state = {
   loading: false,
   rows: [],
   stats: null,
+  error: null,
   sort: "oldest-touched",
   seed: "",
 };
@@ -108,6 +109,10 @@ function render() {
       </div>
 
       <div class="rediscovery-stats card" id="rd-stats"></div>
+
+      <div id="rd-loading" class="rd-loading" hidden>
+        <i class="fa-solid fa-spinner fa-spin"></i> Loading…
+      </div>
 
       <div id="rd-preview"></div>
 
@@ -399,10 +404,17 @@ function buildCandidatesParams() {
 /*  Data loading                                                       */
 /* ------------------------------------------------------------------ */
 
+function setBusy(busy) {
+  if (_pagination) _pagination.setLoading(busy);
+  const el = _container && _container.querySelector("#rd-loading");
+  if (el) el.hidden = !busy;
+}
+
 async function loadPreview({ includeStats = true } = {}) {
   if (_inflight) _inflight.abort();
   _inflight = new AbortController();
   const signal = _inflight.signal;
+  setBusy(true);
 
   const candParams = buildCandidatesParams();
   const statsParams = buildFacetParams();
@@ -433,6 +445,8 @@ async function loadPreview({ includeStats = true } = {}) {
     state.error = e && e.message ? e.message : "Unknown error";
     state.rows = [];
     renderPreview();
+  } finally {
+    if (!signal.aborted) setBusy(false);
   }
 }
 
@@ -481,8 +495,9 @@ function wireEvents() {
         loadPreview({ includeStats: true });
       }, 300);
     };
+    // A single delegated `input` listener covers text fields, selects and
+    // checkboxes (all of which emit `input` in Chromium); no `change` dup.
     form.addEventListener("input", onFacetChange);
-    form.addEventListener("change", onFacetChange);
   }
 
   const generate = _container.querySelector("#rd-generate");
@@ -492,11 +507,3 @@ function wireEvents() {
     });
   }
 }
-
-/* ------------------------------------------------------------------ */
-/*  Placeholder safety                                                 */
-/* ------------------------------------------------------------------ */
-
-// `state.error` is used by renderPreview but declared lazily on state.
-// Assigning here keeps the shape explicit without a separate field above.
-state.error = null;
