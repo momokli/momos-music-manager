@@ -103,8 +103,7 @@ pub async fn spawn_test_app() -> (reqwest::Client, String, Pool<Sqlite>) {
 
 /// Like [`spawn_test_app`], but also hands back the [`AppState`] so a test can
 /// inspect or pre-seed in-memory state (e.g. register a task on the `TaskManager`).
-pub async fn spawn_test_app_with_state()
-    -> (reqwest::Client, String, Pool<Sqlite>, Arc<AppState>) {
+pub async fn spawn_test_app_with_state() -> (reqwest::Client, String, Pool<Sqlite>, Arc<AppState>) {
     use std::time::Duration;
 
     let pool = create_test_db().await;
@@ -296,6 +295,16 @@ pub async fn seed_dynamic_bundles_data(pool: &Pool<Sqlite>) {
 /// Delegates to the shared `db::testing::seed_liked_songs_scenario` function.
 pub async fn seed_liked_songs_data(pool: &Pool<Sqlite>) {
     momos_music_manager::db::testing::seed_liked_songs_scenario(pool).await;
+}
+
+/// Seed data for the rediscovery scenario (Issue #80).
+///
+/// Extends `seed_liked_songs_data` with tracks/files 10–18, the Backpack tag +
+/// curated playlist 60 and 2 `rediscovery_pushes` rows, all on fixed timestamps
+/// anchored at `REDISCOVERY_SEED_EPOCH` (no `unixepoch()`). Idempotent.
+/// Delegates to the shared `db::testing::seed_rediscovery_scenario` function.
+pub async fn seed_rediscovery_data(pool: &Pool<Sqlite>) {
+    momos_music_manager::db::testing::seed_rediscovery_scenario(pool).await;
 }
 
 /// Seed data for laboratory analysis testing.

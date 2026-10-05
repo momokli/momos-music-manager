@@ -40,7 +40,10 @@ async fn testing_seed_liked_songs_scenario() {
     let body: Value = resp.json().await.unwrap();
     eprintln!("liked_songs seed: {body}");
 
-    assert_eq!(status, 200, "liked_songs seed should return 200, got {status}");
+    assert_eq!(
+        status, 200,
+        "liked_songs seed should return 200, got {status}"
+    );
     assert_eq!(body["ok"], true);
     assert_eq!(body["scenario"], "liked_songs");
     assert_eq!(body["rows"]["service_playlists"], 5);
@@ -78,7 +81,10 @@ async fn testing_seed_liked_songs_scenario() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(pl6_rows, 0, "generated playlist 6 must not appear in the view");
+    assert_eq!(
+        pl6_rows, 0,
+        "generated playlist 6 must not appear in the view"
+    );
 }
 
 /// Unknown scenario still returns 400 (and the error lists liked_songs).
@@ -96,7 +102,10 @@ async fn testing_seed_unknown_scenario_returns_400() {
     assert_eq!(resp.status(), 400, "unknown scenario should be 400");
     let body: Value = resp.json().await.unwrap();
     let err = body["error"].as_str().unwrap_or_default();
-    assert!(err.contains("liked_songs"), "error should list liked_songs: {err}");
+    assert!(
+        err.contains("liked_songs"),
+        "error should list liked_songs: {err}"
+    );
 }
 
 /// `clear_all_tables()` removes the liked_songs rows — no leak into later tests.
@@ -111,7 +120,10 @@ async fn liked_songs_seed_cleared_without_leak() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(playlists_after, 5, "double seed must stay idempotent at 5 playlists");
+    assert_eq!(
+        playlists_after, 5,
+        "double seed must stay idempotent at 5 playlists"
+    );
 
     momos_music_manager::db::testing::clear_all_tables(&pool).await;
 
@@ -120,13 +132,117 @@ async fn liked_songs_seed_cleared_without_leak() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(leftover_playlists, 0, "liked/generated playlists must be cleared");
-    let leftover_tracks: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM service_playlist_tracks")
+    assert_eq!(
+        leftover_playlists, 0,
+        "liked/generated playlists must be cleared"
+    );
+    let leftover_tracks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM service_playlist_tracks")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(leftover_tracks, 0, "playlist track rows must be cleared");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Testing seed endpoint — rediscovery (Issue #80)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// POST /api/testing/seed {"scenario":"rediscovery"} → 200 with the contract counts.
+#[tokio::test]
+async fn testing_seed_rediscovery_scenario() {
+    let (client, base, pool) = common::spawn_test_app().await;
+
+    let resp = client
+        .post(format!("{}/api/testing/seed", base))
+        .json(&serde_json::json!({ "scenario": "rediscovery" }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    eprintln!("rediscovery seed: {body}");
+
+    assert_eq!(
+        status, 200,
+        "rediscovery seed should return 200, got {status}"
+    );
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["scenario"], "rediscovery");
+
+    // Contract counts (see seed_rediscovery_scenario's doc table).
+    assert_eq!(body["rows"]["rediscovery_pushes"], 2);
+    assert_eq!(body["rows"]["tags"], 4);
+    assert_eq!(body["rows"]["files"], 13);
+    assert_eq!(body["rows"]["file_locations"], 15);
+    assert_eq!(body["rows"]["service_tracks"], 12);
+    assert_eq!(body["rows"]["service_playlists"], 6);
+    assert_eq!(body["rows"]["service_playlist_tracks"], 15);
+    assert_eq!(body["rows"]["folders"], 1);
+
+    // The two push rows carry the fixed anchor timestamps (no unixepoch).
+    let pushes: Vec<(i64, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT track_id, pushed_at, slot FROM rediscovery_pushes ORDER BY track_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        pushes,
+        vec![(17, 1787408000, Some(0)), (18, 1632320000, Some(1))]
+    );
+
+    // Track 16 is in the Backpack (tag 60), so it is a curated playlist too.
+    assert_eq!(forgotten_facts(&pool, 16).await, (1, 1632320000, 1));
+}
+
+/// Double-seeding the rediscovery scenario is idempotent, and
+/// `clear_all_tables()` clears `rediscovery_pushes` — no leak into later tests.
+#[tokio::test]
+async fn rediscovery_seed_cleared_without_leak() {
+    let (_client, _base, pool) = common::spawn_test_app().await;
+    common::seed_rediscovery_data(&pool).await;
+
+    // Double-seeding must not change any count.
+    common::seed_rediscovery_data(&pool).await;
+    let pushes_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rediscovery_pushes")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        pushes_after, 2,
+        "double seed must stay idempotent at 2 pushes"
+    );
+    let playlists_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM service_playlists")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        playlists_after, 6,
+        "double seed must stay idempotent at 6 playlists"
+    );
+    let files_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        files_after, 13,
+        "double seed must stay idempotent at 13 files"
+    );
+
+    momos_music_manager::db::testing::clear_all_tables(&pool).await;
+
+    let leftover_pushes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rediscovery_pushes")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(leftover_pushes, 0, "rediscovery_pushes must be cleared");
+    let leftover_files: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE id BETWEEN 10 AND 18")
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(leftover_tracks, 0, "playlist track rows must be cleared");
+    assert_eq!(leftover_files, 0, "rediscovery files must be cleared");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
