@@ -48,6 +48,7 @@ const TOOLS_ITEMS = [
   { id: "storage", label: "Storage", icon: "fa-hdd" },
   { id: "backpack", label: "Backpack", icon: "fa-bag-shopping" },
   { id: "daily", label: "Daily", icon: "fa-calendar-day" },
+  { id: "rediscovery", label: "Rediscovery", icon: "fa-rotate-left" },
   { id: "tag-bundles", label: "Tag Bundles", icon: "fa-layer-group" },
   { id: "dynamic-bundles", label: "Dynamic Bundles", icon: "fa-filter-list" },
 ];
