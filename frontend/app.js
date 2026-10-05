@@ -36,6 +36,7 @@ const PAGE_MAP = {
   storage: "storage",
   backpack: "backpack",
   daily: "daily",
+  rediscovery: "rediscovery",
   "tag-bundles": "tag-bundles",
   "dynamic-bundles": "dynamic-bundles",
   settings: "settings",
