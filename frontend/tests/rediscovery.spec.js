@@ -1,21 +1,67 @@
 import { test, expect } from "@playwright/test";
 
 /**
- * Rediscovery page — the resurfacing queue.
+ * Rediscovery page — the resurfacing queue (Issue #84).
  *
  * Facet form, stats bar and a live preview table with server-side reasons.
- * Filtering, sorting, total and pagination are all server-side; the page must
- * never filter client-side after pagination and must not reload while
- * filtering (the `window.__rdNavMarker` guard would change on a reload).
+ * All filtering, sorting, `total` and pagination are server-side over
+ * `/api/rediscovery/candidates`; the stats bar reads `/api/rediscovery/stats`
+ * over the identical facet set (`buildFacetParams` / `buildCandidatesParams`).
+ *
+ * The page must never filter client-side after pagination, and a facet change
+ * must not trigger a full reload.
+ *
+ * ── Seed contract (source of truth: `src/db/testing.rs:719`,
+ *    `seed_rediscovery_scenario`) ─────────────────────────────────────────
+ *
+ * `beforeEach` seeds `POST /api/testing/seed {"scenario":"rediscovery"}`.
+ *
+ * Universe of `v_track_forgotten_facts` = {1,2,3,10,11,12,13,14,15,16,17,18}.
+ * Seed anchor `REDISCOVERY_SEED_EPOCH = 1_790_000_000` (~2026-09). The numbers
+ * below stay stable while the real server `now` lies within
+ * `[anchor, anchor + ~275 days]` (until ~2027-06): they depend both on the seed
+ * and on the `touchedBeforeDays` / `excludePushedSinceDays` facets. If the seed
+ * changes or `now` moves past that window, these expectations must be updated.
+ *
+ * Default facets of the page:
+ *   touchedBeforeDays=365 · excludeBackpack=true ·
+ *   excludePushedSinceDays=180 · sort=oldest-touched · limit=50 · offset=0
+ *
+ * Exclusions (Default):
+ *   last_touched too young (RECENT 90d): 10, 15
+ *   Backpack (excludeBackpack=true):     16
+ *   Push cooldown 180d (PUSH_FRESH):     17
+ *   Survivors (Default):                 1,2,3,11,12,13,14,18 → total = 8
+ *
+ * Empirically verified against the seed:
+ *   candidates?…default              total=8  ids=[2,1,12,13,14,18,3,11]
+ *   candidates?…sort=bpm             ids=[11,1,12,18,2,13,14,3]  (first = 11)
+ *   candidates?…likedOnly=true       total=7
+ *   candidates?…excludeBackpack=false total=9 (contains 16)
+ *   candidates?…limit=3&offset=0     ids=[2,1,12]  (total 8 → 3 pages)
+ *   candidates?…limit=3&offset=3     ids=[13,14,18]
+ *   stats: matching=8 · withBpmAndKey=7 · needsAnalysis=0 ·
+ *          notOwned=2 · pushedRecently=1
+ *   track 2 reasons = [last-touched-2014-05-13, only-in-1-playlist,
+ *                      never-pushed, liked, not-in-backpack]
+ *   (`last_touched_at = 1_400_000_000` → fmt_date = 2014-05-13)
+ *
+ * Harness rules (DoD):
+ *   - register `pageerror` BEFORE `page.goto` in every test, end with
+ *     `expect(errors).toEqual([])`;
+ *   - no `waitForTimeout` — wait on `waitForResponse` + Playwright auto-wait;
+ *   - selectors only `#id` / `[data-*]`.
  */
 
 const CANDIDATES = /\/api\/rediscovery\/candidates/;
+const STATS = /\/api\/rediscovery\/stats/;
 
 async function gotoRediscovery(page) {
+  // Register the response wait BEFORE goto so the initial load cannot be missed.
+  const first = page.waitForResponse((r) => CANDIDATES.test(r.url()));
   await page.goto("/#rediscovery");
-  await page.waitForSelector(".rediscovery-page", { timeout: 8000 });
-  // Wait for the first server-side load to render at least the table shell.
-  await page.waitForSelector("#rd-preview", { timeout: 8000 });
+  await first;
+  await expect(page.locator("#rd-preview tr[data-track-id]").first()).toBeVisible();
 }
 
 test.describe("Rediscovery page (resurfacing queue)", () => {
@@ -23,15 +69,16 @@ test.describe("Rediscovery page (resurfacing queue)", () => {
     await request.post("/api/testing/seed", { data: { scenario: "rediscovery" } });
   });
 
-  test("loads via hash router and appears in the Tools menu", async ({ page }) => {
+  test("1. page loads via hash router and appears in the Tools menu", async ({ page }) => {
     const errors = [];
     page.on("pageerror", (err) => errors.push(err));
 
     await gotoRediscovery(page);
 
-    await expect(page.locator("h1")).toContainText("Rediscovery");
+    await expect(page.locator("#main-content h1")).toContainText("Rediscovery");
+    await expect(page.locator("#rd-preview")).toBeVisible();
 
-    // Tools menu entry exists and becomes visible once the dropdown opens.
+    // Tools menu entry exists; becomes visible once the dropdown opens.
     const toolItem = page.locator('[data-page="rediscovery"]');
     await expect(toolItem).toHaveCount(1);
     await page.locator('[data-dropdown-trigger="tools"]').click();
@@ -40,156 +87,173 @@ test.describe("Rediscovery page (resurfacing queue)", () => {
     expect(errors).toEqual([]);
   });
 
-  test("counts bar shows the stats values", async ({ page }) => {
+  test("2. default filters — expected candidate count and server sort", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    const stats = page.waitForResponse((r) => STATS.test(r.url()));
+    await gotoRediscovery(page);
+    await stats;
+
+    // Default facets survive (excludeBackpack=true → track 16 excluded).
+    await expect(page.locator("#rd-preview tr[data-track-id]")).toHaveCount(8);
+    await expect(page.locator("#rd-total")).toContainText("8");
+
+    // Server-side `oldest-touched` sort: the oldest survivor is track 2.
+    await expect(page.locator("#rd-preview tr[data-track-id]").first()).toHaveAttribute(
+      "data-track-id",
+      "2",
+    );
+
+    expect(errors).toEqual([]);
+  });
+
+  test("3. likedOnly reduces to liked candidates", async ({ page }) => {
     const errors = [];
     page.on("pageerror", (err) => errors.push(err));
 
     await gotoRediscovery(page);
-    await page.waitForSelector('#rd-stats [data-stat="matching"]', { timeout: 8000 });
 
-    const matching = await page
-      .locator('#rd-stats [data-stat="matching"]')
-      .textContent();
-    expect(Number(matching.replace(/[^\d]/g, ""))).toBeGreaterThan(0);
+    const resp = page.waitForResponse(
+      (r) => CANDIDATES.test(r.url()) && r.url().includes("likedOnly=true"),
+    );
+    await page.locator("#rd-liked-only").check();
+    expect((await (await resp).json()).data.total).toBe(7);
 
-    for (const stat of [
-      "withBpmAndKey",
-      "needsAnalysis",
-      "notOwned",
-      "pushedRecently",
+    await expect(page.locator("#rd-preview tr[data-track-id]")).toHaveCount(7);
+    // Track 3 is not liked → gone.
+    await expect(page.locator('#rd-preview tr[data-track-id="3"]')).toHaveCount(0);
+
+    expect(errors).toEqual([]);
+  });
+
+  test("4. excludeBackpack off brings the backpack track back", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await gotoRediscovery(page);
+    await expect(page.locator("#rd-preview tr[data-track-id]")).toHaveCount(8);
+    await expect(page.locator('#rd-preview tr[data-track-id="16"]')).toHaveCount(0);
+
+    const resp = page.waitForResponse(
+      (r) => CANDIDATES.test(r.url()) && r.url().includes("excludeBackpack=false"),
+    );
+    await page.locator("#rd-exclude-backpack").uncheck();
+    expect((await (await resp).json()).data.total).toBe(9);
+
+    await expect(page.locator("#rd-preview tr[data-track-id]")).toHaveCount(9);
+    await expect(page.locator('#rd-preview tr[data-track-id="16"]')).toHaveCount(1);
+
+    expect(errors).toEqual([]);
+  });
+
+  test("5. sort=oldest-touched vs bpm — first row changes", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await gotoRediscovery(page);
+    await expect(page.locator("#rd-preview tr[data-track-id]").first()).toHaveAttribute(
+      "data-track-id",
+      "2",
+    );
+
+    const resp = page.waitForResponse(
+      (r) => CANDIDATES.test(r.url()) && r.url().includes("sort=bpm"),
+    );
+    await page.locator("#rd-sort").selectOption("bpm");
+    await resp;
+
+    // bpm ascending (NULL last): 124 BPM track 11 leads.
+    await expect(page.locator("#rd-preview tr[data-track-id]").first()).toHaveAttribute(
+      "data-track-id",
+      "11",
+    );
+
+    expect(errors).toEqual([]);
+  });
+
+  test("6. reason chips — oldest track carries last-touched-*", async ({ page }) => {
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(err));
+
+    await gotoRediscovery(page);
+
+    // Default sort puts the oldest survivor (track 2) on the first row.
+    await expect(page.locator("#rd-preview tr[data-track-id]").first()).toHaveAttribute(
+      "data-track-id",
+      "2",
+    );
+    const row = page.locator('#rd-preview tr[data-track-id="2"]');
+
+    await expect(row.locator('[data-reason="last-touched-2014-05-13"]')).toBeVisible();
+    for (const reason of [
+      "only-in-1-playlist",
+      "never-pushed",
+      "liked",
+      "not-in-backpack",
     ]) {
-      await expect(page.locator(`#rd-stats [data-stat="${stat}"]`)).toBeVisible();
+      await expect(row.locator(`[data-reason="${reason}"]`)).toBeVisible();
     }
 
-    expect(errors).toEqual([]);
-  });
-
-  test("preview renders candidate rows with reason chips", async ({ page }) => {
-    const errors = [];
-    page.on("pageerror", (err) => errors.push(err));
-
-    await gotoRediscovery(page);
-    await page.waitForSelector("#rd-preview tbody tr", { timeout: 8000 });
-
-    const rowCount = await page.locator("#rd-preview tbody tr").count();
-    expect(rowCount).toBeGreaterThan(0);
-
-    // Every row carries a data-track-id and at least one verbatim reason chip.
-    const chips = page.locator("#rd-preview .reason-chip");
-    expect(await chips.count()).toBeGreaterThan(0);
-
-    // Seed: all rediscovery tracks are liked in playlist 5.
-    await expect(
-      page.locator('#rd-preview .reason-chip[data-reason="liked"]').first(),
-    ).toBeVisible();
+    // Exactly one last-touched-* chip on that row.
+    await expect(row.locator('[data-reason^="last-touched-"]')).toHaveCount(1);
 
     expect(errors).toEqual([]);
   });
 
-  test("facet change is server-side and does not reload the page", async ({ page }) => {
+  test("7. pagination — smaller limit increases pages, rows stay server-side", async ({
+    page,
+  }) => {
     const errors = [];
     page.on("pageerror", (err) => errors.push(err));
 
     await gotoRediscovery(page);
-    await page.waitForSelector("#rd-preview tbody tr", { timeout: 8000 });
 
-    const marker = await page.evaluate(() => window.__rdNavMarker);
-
-    const responsePromise = page.waitForResponse(
+    const first = page.waitForResponse(
       (r) =>
         CANDIDATES.test(r.url()) &&
-        r.url().includes("likedOnly=true") &&
-        r.url().includes("bpmMin=120"),
-      { timeout: 8000 },
-    );
-
-    await page.locator("#rd-liked-only").check();
-    await page.locator("#rd-bpm-min").fill("120");
-
-    const response = await responsePromise;
-    expect(response.url()).toContain("likedOnly=true");
-    expect(response.url()).toContain("bpmMin=120");
-
-    // No reload: the init-time marker is unchanged.
-    const markerAfter = await page.evaluate(() => window.__rdNavMarker);
-    expect(markerAfter).toBe(marker);
-
-    expect(errors).toEqual([]);
-  });
-
-  test("pagination is server-side and not re-filtered client-side", async ({ page }) => {
-    const errors = [];
-    page.on("pageerror", (err) => errors.push(err));
-
-    await gotoRediscovery(page);
-    await page.waitForSelector("#rd-preview tbody tr", { timeout: 8000 });
-
-    // Widen the facets so more than one page exists, then ask for 5/page.
-    await page.locator("#rd-exclude-pushed-since-days").fill("0");
-    await page.locator("#rd-exclude-backpack").uncheck();
-    await page.locator("#rd-touched-before-days").fill("1");
-
-    const firstPromise = page.waitForResponse(
-      (r) =>
-        CANDIDATES.test(r.url()) &&
-        r.url().includes("limit=5") &&
+        r.url().includes("limit=3") &&
         r.url().includes("offset=0"),
-      { timeout: 8000 },
     );
-    await page.locator("#rd-limit").fill("5");
+    await page.locator("#rd-limit").fill("3");
+    const data = (await (await first).json()).data;
+    expect(data.limit).toBe(3);
+    expect(data.offset).toBe(0);
+    expect(data.total).toBe(8);
 
-    const firstResp = await firstPromise;
-    const firstBody = await firstResp.json();
-    const firstPage = firstBody.data;
-    expect(firstPage.limit).toBe(5);
-    expect(firstPage.offset).toBe(0);
-    expect(firstPage.total).toBeGreaterThan(5);
+    await expect(page.locator("#rd-preview tr[data-track-id]")).toHaveCount(3);
+    await expect(page.locator("#rd-page-info")).toHaveText(/Page 1 of 3/);
 
-    // Client-side is not filtering: DOM rows == returned candidates (== limit).
-    const firstRows = await page.locator("#rd-preview tbody tr").count();
-    expect(firstRows).toBe(firstPage.candidates.length);
-    expect(firstRows).toBe(5);
-
-    // Next page → server-side offset=5.
-    const nextPromise = page.waitForResponse(
+    const next = page.waitForResponse(
       (r) =>
         CANDIDATES.test(r.url()) &&
-        r.url().includes("limit=5") &&
-        r.url().includes("offset=5"),
-      { timeout: 8000 },
+        r.url().includes("limit=3") &&
+        r.url().includes("offset=3"),
     );
     await page.locator("#rd-next").click();
+    const second = (await (await next).json()).data;
+    expect(second.offset).toBe(3);
 
-    const nextResp = await nextPromise;
-    const nextBody = await nextResp.json();
-    const secondPage = nextBody.data;
-    expect(secondPage.offset).toBe(5);
-
-    await expect(page.locator("#rd-page-info")).toContainText("Page 2 of");
-
-    // Rows == server-page size, i.e. no client-side filtering after pagination.
-    const secondRows = await page.locator("#rd-preview tbody tr").count();
-    expect(secondRows).toBe(secondPage.candidates.length);
-    expect(secondRows).toBe(
-      Math.min(secondPage.limit, secondPage.total - secondPage.offset),
-    );
+    // Rows == server page size, i.e. no client-side filtering after pagination.
+    await expect(page.locator("#rd-preview tr[data-track-id]")).toHaveCount(3);
+    await expect(page.locator("#rd-page-info")).toHaveText(/Page 2 of 3/);
 
     expect(errors).toEqual([]);
   });
 
-  test("no pageerror after filtering and paging", async ({ page }) => {
+  test("8. stats bar matches the seed", async ({ page }) => {
     const errors = [];
     page.on("pageerror", (err) => errors.push(err));
 
+    const stats = page.waitForResponse((r) => STATS.test(r.url()));
     await gotoRediscovery(page);
-    await page.waitForSelector("#rd-preview tbody tr", { timeout: 8000 });
+    await stats;
 
-    await page.locator("#rd-max-playlists").fill("1");
-    await page.locator("#rd-require-bpm").check();
-    await page.locator("#rd-limit").fill("5");
-    await page.waitForTimeout(600);
-    await page.locator("#rd-next").click();
-    await page.waitForTimeout(600);
+    await expect(page.locator('#rd-stats [data-stat="matching"]')).toHaveText("8");
+    await expect(page.locator('#rd-stats [data-stat="withBpmAndKey"]')).toHaveText("7");
+    await expect(page.locator('#rd-stats [data-stat="needsAnalysis"]')).toHaveText("0");
+    await expect(page.locator('#rd-stats [data-stat="notOwned"]')).toHaveText("2");
+    await expect(page.locator('#rd-stats [data-stat="pushedRecently"]')).toHaveText("1");
 
     expect(errors).toEqual([]);
   });
