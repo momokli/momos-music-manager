@@ -25,6 +25,7 @@ pub async fn clear_all_tables(pool: &Pool<Sqlite>) {
         "tag_embeddings",
         "tag_bundles",
         "deemix_downloads",
+        "rediscovery_pushes",
         "service_tracks",
         "service_playlists",
         "files",
@@ -656,6 +657,185 @@ pub async fn seed_liked_songs_scenario(pool: &Pool<Sqlite>) -> HashMap<String, u
     // (2 − 1 deleted + 4 inserted = 5, i.e. +3).
     *counts.get_mut("service_playlists").unwrap() += 3;
     *counts.get_mut("service_playlist_tracks").unwrap() += 3;
+    counts
+}
+
+// ── Rediscovery seed contract (Issue #80) ────────────────────────────────
+//
+// Fixed anchor, NO `unixepoch()`/`now()` anywhere — every timestamp below is a
+// literal so tests can assert absolute values across runs.
+//
+//   REDISCOVERY_SEED_EPOCH = 1_790_000_000  (fixed "seed now", ≈ 2026-09-21 UTC)
+//   DAY                    = 86_400
+//   RECENT   = EPOCH -   90*DAY = 1_782_224_000  (≈ 3 months)
+//   AGED_2Y  = EPOCH -  730*DAY = 1_726_928_000  (≈ 2 years)
+//   AGED_5Y  = EPOCH - 1825*DAY = 1_632_320_000  (≈ 5 years)
+//   PUSH_FRESH = EPOCH -  30*DAY = 1_787_408_000 (≈ 30 days, inside the 180d window)
+//   PUSH_OLD   = AGED_5Y         = 1_632_320_000 (far outside the 180d window)
+
+/// Fixed "seed now" anchor for the rediscovery scenario (≈ 2026-09-21 UTC).
+pub const REDISCOVERY_SEED_EPOCH: i64 = 1_790_000_000;
+const DAY: i64 = 86_400;
+const RECENT: i64 = REDISCOVERY_SEED_EPOCH - 90 * DAY; // 1_782_224_000
+const AGED_2Y: i64 = REDISCOVERY_SEED_EPOCH - 730 * DAY; // 1_726_928_000
+const AGED_5Y: i64 = REDISCOVERY_SEED_EPOCH - 1825 * DAY; // 1_632_320_000
+const PUSH_FRESH: i64 = REDISCOVERY_SEED_EPOCH - 30 * DAY; // 1_787_408_000
+const PUSH_OLD: i64 = AGED_5Y; // 1_632_320_000
+
+/// Seed the rediscovery scenario (Issue #80): extends [`seed_liked_songs_scenario`]
+/// with tracks/files 10–18, Backpack tag+playlist 60 and 2 `rediscovery_pushes` rows.
+///
+/// # Contract (exact values — do not drift)
+///
+/// Anchor `REDISCOVERY_SEED_EPOCH = 1_790_000_000`, `DAY = 86_400`. Derived:
+/// `RECENT = 1_782_224_000`, `AGED_2Y = 1_726_928_000`, `AGED_5Y = 1_632_320_000`,
+/// `PUSH_FRESH = 1_787_408_000`, `PUSH_OLD = 1_632_320_000`.
+///
+/// Each new track N (10–18) is linked 1:1 to file N (same `isrc`) and lives in
+/// playlist 5 `liked` with `added_at = last_touched_at`:
+///
+/// | Trk | File | bpm   | key  | genre  | last_touched_at | liked | pcount | backpack | pushed_at         |
+/// |-----|------|-------|------|--------|-----------------|-------|--------|----------|-------------------|
+/// | 10  | 10   | 120.0 | 1a   | House  | 1782224000      | ja    | 0      | nein     | —                 |
+/// | 11  | 11   | 124.0 | 4m   | Techno | 1726928000      | ja    | 0      | nein     | —                 |
+/// | 12  | 12   | 128.0 | 8m   | House  | 1632320000      | ja    | 0      | nein     | —                 |
+/// | 13  | 13   | 140.0 | 12a  | Techno | 1632320000      | ja    | 0      | nein     | —                 |
+/// | 14  | 14   | 155.0 | 1a   | House  | 1632320000      | ja    | 0      | nein     | —                 |
+/// | 15  | 15   | NULL  | NULL | Techno | 1782224000      | ja    | 0      | nein     | —                 |
+/// | 16  | 16   | 120.0 | 4m   | House  | 1632320000      | ja    | 1      | JA       | —                 |
+/// | 17  | 17   | 124.0 | 8m   | Techno | 1632320000      | ja    | 0      | nein     | 1787408000 frisch |
+/// | 18  | 18   | 128.0 | 12a  | House  | 1632320000      | ja    | 0      | nein     | 1632320000 alt    |
+///
+/// Track 16's backpack: tag 60 `Backpack` (category 5 Merkmal, `backpack=1`) +
+/// curated playlist 60 `Backpack` with `service_playlist_tracks (60,16,0,1632320000)`;
+/// `v_track_tags` then yields `backpack=1` for track 16. `rediscovery_pushes`: 2 rows —
+/// track 17 `pushed_at=PUSH_FRESH` (slot 0), track 18 `pushed_at=PUSH_OLD` (slot 1).
+///
+/// # Expected return counts (base + this scenario)
+///
+/// `tags=4`, `files=13`, `file_locations=15`, `service_tracks=12`,
+/// `service_playlists=6`, `service_playlist_tracks=15`, `folders=1`,
+/// `rediscovery_pushes=2`. All INSERTs are idempotent (`OR IGNORE`, explicit ids).
+pub async fn seed_rediscovery_scenario(pool: &Pool<Sqlite>) -> HashMap<String, usize> {
+    let mut counts = seed_liked_songs_scenario(pool).await;
+    // base counts: tags 3 · files 4 · file_locations 6 · service_tracks 3 ·
+    // service_playlists 5 · service_playlist_tracks 5 · folders 1
+
+    // ── Backpack tag (id 60, category 5 Merkmal) so playlist 60's name matches.
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO tags (id, name, category_id, backpack)
+           VALUES (60, 'Backpack', 5, 1)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // ── Service tracks 10-18 (spotify; linked to files by the matching isrc).
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_tracks (id, service, service_id, title, artist, isrc, imported_at)
+           VALUES
+             (10, 'spotify', 'spotify:track:rdis10', 'Rediscovery Ten',    'Artist R10', 'RDIS010', 1790000000),
+             (11, 'spotify', 'spotify:track:rdis11', 'Rediscovery Eleven', 'Artist R11', 'RDIS011', 1790000000),
+             (12, 'spotify', 'spotify:track:rdis12', 'Rediscovery Twelve', 'Artist R12', 'RDIS012', 1790000000),
+             (13, 'spotify', 'spotify:track:rdis13', 'Rediscovery Thirteen','Artist R13', 'RDIS013', 1790000000),
+             (14, 'spotify', 'spotify:track:rdis14', 'Rediscovery Fourteen','Artist R14', 'RDIS014', 1790000000),
+             (15, 'spotify', 'spotify:track:rdis15', 'Rediscovery Fifteen','Artist R15', 'RDIS015', 1790000000),
+             (16, 'spotify', 'spotify:track:rdis16', 'Rediscovery Sixteen','Artist R16', 'RDIS016', 1790000000),
+             (17, 'spotify', 'spotify:track:rdis17', 'Rediscovery Seventeen','Artist R17', 'RDIS017', 1790000000),
+             (18, 'spotify', 'spotify:track:rdis18', 'Rediscovery Eighteen','Artist R18', 'RDIS018', 1790000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // ── Files 10-18 (bpm/key/genre per contract; track 15 unanalysed: NULL bpm/key).
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO files (id, file_path, file_type, file_size, last_modified, title, artist,
+             bpm, musical_key, genre, isrc, play_count, last_played, duration_ms, file_hash)
+           VALUES
+             (10, '/test/stems/R10.flac', 'flac', 5000000, 1790000000, 'Rediscovery Ten',     'Artist R10', 120.0, '1a',  'House',  'RDIS010', 0, NULL, 300000, 'rdish10'),
+             (11, '/test/stems/R11.flac', 'flac', 5000000, 1790000000, 'Rediscovery Eleven',  'Artist R11', 124.0, '4m',  'Techno', 'RDIS011', 0, NULL, 300000, 'rdish11'),
+             (12, '/test/stems/R12.flac', 'flac', 5000000, 1790000000, 'Rediscovery Twelve',  'Artist R12', 128.0, '8m',  'House',  'RDIS012', 0, NULL, 300000, 'rdish12'),
+             (13, '/test/stems/R13.flac', 'flac', 5000000, 1790000000, 'Rediscovery Thirteen','Artist R13', 140.0, '12a', 'Techno', 'RDIS013', 0, NULL, 300000, 'rdish13'),
+             (14, '/test/stems/R14.flac', 'flac', 5000000, 1790000000, 'Rediscovery Fourteen','Artist R14', 155.0, '1a',  'House',  'RDIS014', 0, NULL, 300000, 'rdish14'),
+             (15, '/test/stems/R15.flac', 'flac', 5000000, 1790000000, 'Rediscovery Fifteen', 'Artist R15', NULL,  NULL,  'Techno', 'RDIS015', 0, NULL, 300000, 'rdish15'),
+             (16, '/test/stems/R16.flac', 'flac', 5000000, 1790000000, 'Rediscovery Sixteen', 'Artist R16', 120.0, '4m',  'House',  'RDIS016', 1, NULL, 300000, 'rdish16'),
+             (17, '/test/stems/R17.flac', 'flac', 5000000, 1790000000, 'Rediscovery Seventeen','Artist R17',124.0, '8m',  'Techno', 'RDIS017', 0, NULL, 300000, 'rdish17'),
+             (18, '/test/stems/R18.flac', 'flac', 5000000, 1790000000, 'Rediscovery Eighteen','Artist R18', 128.0, '12a', 'House',  'RDIS018', 0, NULL, 300000, 'rdish18')"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // ── One local file_location per new file (owned=True; +9 → 15).
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO file_locations (file_id, location_type, path, file_size, last_verified)
+           VALUES
+             (10, 'local', '/test/stems/R10.flac', 5000000, 1790000000),
+             (11, 'local', '/test/stems/R11.flac', 5000000, 1790000000),
+             (12, 'local', '/test/stems/R12.flac', 5000000, 1790000000),
+             (13, 'local', '/test/stems/R13.flac', 5000000, 1790000000),
+             (14, 'local', '/test/stems/R14.flac', 5000000, 1790000000),
+             (15, 'local', '/test/stems/R15.flac', 5000000, 1790000000),
+             (16, 'local', '/test/stems/R16.flac', 5000000, 1790000000),
+             (17, 'local', '/test/stems/R17.flac', 5000000, 1790000000),
+             (18, 'local', '/test/stems/R18.flac', 5000000, 1790000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // ── Curated playlist 60 `Backpack` (+1 → 6) matching tag 60.
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_playlists (id, service, playlist_id, name, playlist_kind)
+           VALUES (60, 'spotify', 'spotify:playlist:backpack', 'Backpack', 'curated')"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // ── Track links: all 9 new tracks liked in playlist 5 (added_at=last_touched_at);
+    //    track 16 additionally in curated playlist 60 (playlist_count=1).
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_playlist_tracks (playlist_id, track_id, position, added_at)
+           VALUES
+             (5, 10, 0, 1782224000),
+             (5, 11, 0, 1726928000),
+             (5, 12, 0, 1632320000),
+             (5, 13, 0, 1632320000),
+             (5, 14, 0, 1632320000),
+             (5, 15, 0, 1782224000),
+             (5, 16, 0, 1632320000),
+             (5, 17, 0, 1632320000),
+             (5, 18, 0, 1632320000),
+             (60, 16, 0, 1632320000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // ── rediscovery_pushes: 2 rows (explicit ids for idempotency).
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO rediscovery_pushes (id, track_id, playlist_id, pushed_at, facet_json, slot)
+           VALUES
+             (1, 17, NULL, 1787408000, NULL, 0),
+             (2, 18, NULL, 1632320000, NULL, 1)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Keep the resolved-tag caches consistent with the new playlist/tag (as
+    // seed_liked_songs_scenario does); the backpack check uses the live view.
+    crate::db::refresh_file_resolved_tags(pool).await.unwrap();
+
+    *counts.get_mut("tags").unwrap() += 1; // 3 → 4
+    *counts.get_mut("files").unwrap() += 9; // 4 → 13
+    *counts.get_mut("file_locations").unwrap() += 9; // 6 → 15
+    *counts.get_mut("service_tracks").unwrap() += 9; // 3 → 12
+    *counts.get_mut("service_playlists").unwrap() += 1; // 5 → 6
+    *counts.get_mut("service_playlist_tracks").unwrap() += 10; // 5 → 15
+    counts.insert("rediscovery_pushes".into(), 2);
     counts
 }
 

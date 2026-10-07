@@ -556,6 +556,7 @@ Open Traktor → run "Consistency Check" over all tracks → Comments visible �
 | `#data`            | `pages/data.js`            | Import/Export database                                 |
 | `#tag-curation`    | `pages/tag-curation.js`    | Tag parent curation workflow                           |
 | `#backpack`        | `pages/backpack.js`        | Backpack tags + Spotify transport playlist             |
+| `#rediscovery`     | `pages/rediscovery.js`     | Resurfacing queue — facets, live preview, reason chips |
 
 ---
 

@@ -15,4 +15,4 @@ ALTER TABLE service_playlists ADD COLUMN system_key TEXT;
 CREATE UNIQUE INDEX idx_service_playlists_system_key
     ON service_playlists(service, system_key) WHERE system_key IS NOT NULL;
 
-SELECT 'Migration 033 applied: service_playlists.system_key' as status;
+SELECT 'Migration 034 applied: service_playlists.system_key' as status;

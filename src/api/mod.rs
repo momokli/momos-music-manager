@@ -17,6 +17,7 @@ pub mod files;
 pub mod folders;
 pub mod infrastructure;
 pub mod playlists;
+pub mod rediscovery;
 pub mod services;
 pub mod spotify_sync;
 pub mod storage;
@@ -44,6 +45,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(spotify_sync::router())
         .merge(websocket::router())
         .merge(playlists::router())
+        .merge(rediscovery::router())
         .merge(storage::router())
         .merge(folders::router())
         .merge(tags::router())

@@ -6,6 +6,37 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /api/rediscovery/stats` (#82)**: neuer Aggregat-Endpunkt über **dieselben
+  Facetten-Parameter** wie `candidates` (geteilte `RediscoveryFacetsQuery`). Liefert
+  `matching`, `withBpmAndKey`, `needsAnalysis`, `notOwned`, `pushedRecently`,
+  `byBpmBucket` und `byLiked` — berechnet rein aggregierend über den einen batched
+  geladenen Survivor-Set (kein Pro-Row-Laden, keine Migration). `byBpmBucket` nutzt die
+  neue Single-Source-Bucket-Definition `db::rediscovery::BPM_BUCKET_WIDTH` +
+  `bpm_bucket_label` (Breite 5, Label `"120-124"`; nur belegte Buckets).
+  `pushedRecently` zählt Tracks, die alle übrigen Facetten erfüllen, aber am
+  Push-Cooldown herausfallen (`0` bei deaktiviertem Facet). Die gemeinsame
+  Survivor-Berechnung wurde in `facet_survivors` gezogen; `candidates` nutzt sie
+  unverändert.
+
+- **Test-Seed-Szenario `rediscovery` (#80)**: `db::testing::seed_rediscovery_scenario` erweitert
+  `seed_liked_songs_scenario` um Tracks/Dateien 10–18, den Backpack-Tag + die kuratierte Playlist 60
+  und 2 `rediscovery_pushes`-Zeilen — deterministisch über den festen Anker
+  `REDISCOVERY_SEED_EPOCH` (kein `unixepoch()`/`now()`), idempotent (`OR IGNORE`). Registriert am
+  `POST /api/testing/seed`-Endpoint (`{"scenario":"rediscovery"}`); `clear_all_tables` räumt
+  `rediscovery_pushes` FK-sicher mit ab. Test-Helper `tests/common::seed_rediscovery_data`.
+
+- **SPA-Seite `#rediscovery` (#83)**: neue Frontend-Seite `frontend/pages/rediscovery.js`
+  (Route `#rediscovery`, Eintrag im Tools-Menü) mit Facetten-Formular links, einer
+  server-seitigen Live-Preview-Tabelle (Reason-Chips **verbatim** aus dem API-Feld
+  `reasons`) und einer Kennzahlen-Leiste aus `GET /api/rediscovery/stats`. Facetten-
+  Änderungen lösen (300 ms debounced) ein Neu-Laden ohne Page-Reload aus; Sortierung,
+  `total` und Pagination laufen strikt server-seitig über `limit`/`offset`
+  (`GET /api/rediscovery/candidates`), kein Client-Side-Filtern nach Pagination.
+  Der „Generate Playlist"-Button ist bewusst noch ein Platzhalter (1.16.0/1.18.0).
+  Playwright-Abdeckung via Seed-Szenario `rediscovery` (`frontend/tests/rediscovery.spec.js`).
+
 ## [1.14.0] — 2026-10-02
 
 ### Added
