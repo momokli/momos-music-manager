@@ -1140,7 +1140,7 @@ rustls) with an embedded web frontend — no Tauri/Electron, so no ready-made
 self-update framework. CI publishes a rolling `latest-main` release with stable
 artifact names (`momos-music-manager-latest-<os>-<arch>.<ext>`) and an
 aggregated `SHA256SUMS` (M1, PR #13). M6 (Issue #11) requires the app to check
-for and install updates with signature/checksum verification *before* any swap,
+for and install updates with signature/checksum verification _before_ any swap,
 opt-out, rollback, and docs. The original DoD said verification "nutzt M3/M4"
 (OS code-signing/notarization) — that would block the updater on paid accounts.
 
@@ -1239,7 +1239,7 @@ und wird deshalb **vollständig ersetzt**, nie ergänzt:
 (5 s) erneut versucht (2081 Versuche an einem Tag, 0 Erfolge), und sowohl der
 Coordinator als auch Subscription- und Global-Poller verwarfen Spotifys
 `Retry-After` (auf 300 s geklemmt bzw. gar nicht gelesen). Spotifys Limit ist ein
-gleitendes Fenster — Retries *im* Penalty-Fenster halten es gesättigt, die App
+gleitendes Fenster — Retries _im_ Penalty-Fenster halten es gesättigt, die App
 sperrt sich selbst aus (beobachtet: ein Tag lang 0 von 58 Subscription-Polls
 erfolgreich, obwohl der Token-Refresh durchgehend funktionierte).
 
@@ -1275,7 +1275,7 @@ Fehler im Zusammenspiel mit rspotify 0.15 und Spotifys Marktverhalten.
 
 **Decision**:
 
-1. **rspotify-IDs**: `Id::to_string()`/`Display` liefern die *URI*
+1. **rspotify-IDs**: `Id::to_string()`/`Display` liefern die _URI_
    (`spotify:user:<id>`), `Id::id()` die blanke Id. Alle Stellen, die eine Id
    brauchen (`get_current_user_id`, `create_playlist`-Rückgabe), nutzen `.id()`;
    Track-URIs werden nie aus `Display` zusammengesetzt. Ein Regressionstest
@@ -1284,7 +1284,7 @@ Fehler im Zusammenspiel mit rspotify 0.15 und Spotifys Marktverhalten.
    markt-nicht-verfügbare Tracks `null`, wodurch eine korrekte Playlist
    unvollständig aussah.
 3. **Tolerante Verifikation**: Spotify verwirft markt-nicht-verfügbare Tracks beim
-   Schreiben still, ein exakter Set-Match ist nicht erreichbar. Nur eine *grobe*
+   Schreiben still, ein exakter Set-Match ist nicht erreichbar. Nur eine _grobe_
    Abweichung gilt als Fehler (>1 %, min 5 Tracks); ein Read-Fehler ist „unklar“
    (Signatur wird fortgeschrieben), kein Mismatch.
 4. **Materialisierungen sind serialisiert** (prozessweiter Lock), damit Coordinator
@@ -1329,7 +1329,7 @@ verwaltet beide Quellen (Playlist- und Tag-Quellen) direkt.
 **Status**: Accepted (implemented)
 
 **Context**: Der Backpack-Transport ist seit ADR-060/062 vereinheitlicht: das Backpack
-*Set* (subscribte Playlists ∪ Backpack-Tags) wird in EINE Spotify-Playlist
+_Set_ (subscribte Playlists ∪ Backpack-Tags) wird in EINE Spotify-Playlist
 materialisiert und genau diese eine URL an deemix übergeben. Trotzdem existierten
 weiterhin mehrere Pfade, die Einzel-Playlists an deemix schickten: der
 `DownloadGuarantor` re-queuede Zombie-Einträge pro Playlist-URL (alle 10 min), und
@@ -1404,7 +1404,7 @@ und liefert die Dateien per ISRC zurück. MMM importiert und verlinkt sie.
 
 **Context**: Der Remote-Object-Store (ADR folgt den Store-Uploads, `[store]`,
 `files.content_hash`) machte die rsync/SSH-Backups auf die NAS überflüssig,
-aber die *Lese*-Wege hingen noch am NAS: `BackpackSync` zog fehlende Dateien per
+aber die _Lese_-Wege hingen noch am NAS: `BackpackSync` zog fehlende Dateien per
 `rsync`, `POST /api/files/{id}/pull-from-backup` rsyncte, der Maintainer prüfte
 und entdeckte Backups per SSH, und ein `auto_backup`-Poller sowie ein
 Auto-Reconcile beim Start versuchten regelmäßig SSH-Verbindungen. Der NAS-Pfad
@@ -1464,6 +1464,7 @@ Menge (`get_backpack_file_ids`). Der `tags.backpack`-Schalter auf der Tags-Seite
 das Steuerelement dafür.
 
 Entfernt:
+
 - Endpunkte `GET /api/backpack`, `POST /api/backpack/push`, `POST /api/backpack/pull`,
   `POST /api/backpack/sync-enabled` sowie die **Spotify-Transport-Karten** der
   Backpack-Seite (Playlist-Status, Push, music-api-Pull).
@@ -1476,6 +1477,7 @@ Entfernt:
 - Die `settings`-Keys `backpack.{playlist_id,playlist_url,signature,dirty_at,last_push_*}`.
 
 Geblieben (Keep/Datei-Pflege):
+
 - Die **Backpack-Seite** — sie ist die Steuerung für „das will ich auf dem Mac
   haben": Quellen (backpack-Tags ∪ aktive Subscriptions), Belegung, File-Sync-Schalter
   und Sync All. Der Transport ist raus, die Keep-/Format-Pflege bleibt.
@@ -1487,13 +1489,13 @@ Geblieben (Keep/Datei-Pflege):
   z. B. FLAC löschen, wenn `stem.m4a` da ist — Format-Priorität ist konfigurierbar).
 
 **Consequences**:
+
 - Keine Spotify-Playlist mehr; die bestehende Playlist muss **manuell** in Spotify gelöscht
   werden (der Transport-Code, der das könnte, ist weg).
 - Der File-Sync-Schalter ist wieder in der UI (Backpack-Seite), jetzt über
   `PUT /api/storage/settings/backpack-sync`.
 - Der music-api-Order-Fortschritt (`demand/ordered/imported`) hatte nur auf der Backpack-Seite
   eine Anzeige; aktuell ohne UI (Follow-up: kleiner Status-Endpunkt / Karte auf der Services-Seite).
-
 
 ## ADR-068: music-api demand covers the whole library, Backpack first
 
@@ -1514,13 +1516,13 @@ dann den Rest, jeweils gedeckelt durch `batch_size`). Der Nutzer wartet so nie
 hinter dem Backlog.
 
 **Consequences**:
+
 - Die Demand ist groß (Stand 2026-09-24: ~46k ISRCs, davon ~3.4k Backpack).
   Der Store/`.200` braucht entsprechend Platz; `batch_size` und das
   Consumer-Intervall bestimmen das Tempo („nach und nach").
 - `demand_count` zählt jetzt Priority + Backlog zusammen.
 - Kein neues Schema, keine neuen Endpunkte — nur die Auswahl in
   `src/db/music_api.rs` (`demand_isrcs`, neue `missing_track_isrcs`).
-
 
 ## ADR-069: Backpack-Stem-Staging als eigene, filter-lose Aktion
 
@@ -1534,6 +1536,7 @@ die lokal vorhanden sind, aber noch keinen Stem haben. Es fehlte sowohl die Hand
 (ein Klick, ohne Filter) als auch die Sichtbarkeit („wie viele sind es noch?").
 
 **Decision**: Eine eigene, filter-lose Aktion:
+
 - `GET /api/files/backpack-conversion` → `{ needsConversion, directory }`.
 - `POST /api/files/backpack-conversion` → baut `~/Music/backpack_conversion` neu auf und
   legt **Symlinks** (eine pro Track) auf die beste lokale Quelle (WAVs ausgenommen — das
@@ -1545,12 +1548,12 @@ die lokal vorhanden sind, aber noch keinen Stem haben. Es fehlte sowohl die Hand
   Download-Kandidat (`music-api`), kein Konvertierungs-Kandidat.
 
 **Consequences**:
+
 - Kein neues Schema, keine Migration.
 - Symlink statt Hardlink (Nutzerwunsch): die Konvertierung liest nur, und ein Symlink
   überlebt ein Löschen der Quelle nicht stillschweigend.
 - Die `stem.m4a`-Formatpräferenz bleibt die Quelle der Wahrheit dafür, was als
   „konvertiert" gilt.
-
 
 ## ADR-070: Backpack-Filter serverseitig, mit der autoritativen Definition
 
@@ -1576,13 +1579,13 @@ Verwendet in `get_files`, `get_files_count` und `build_files_filter_sql` (letzte
 alle POST-„select all"-Pfade) — damit stimmen Liste, Count und POST-Filter überein.
 
 **Consequences**:
+
 - Kein neues Schema, keine Migration.
 - Der Filter ist konsistent mit der Prune-Schutzmenge (getestet: `in + not-in == total`,
   und der POST-Zähler matcht den GET-Count).
 - Kosten: ~135 ms Korrelations-Subquery über ~17k Dateien — akzeptabel, kein Index nötig.
 - `file_resolved_tags` bleibt die Grundlage der Comment-/Tag-Anzeige, ist aber für
-  Backpack-Zugehörigkeit *nicht* die Wahrheit.
-
+  Backpack-Zugehörigkeit _nicht_ die Wahrheit.
 
 ## ADR-071: Refresh der abgeleiteten Tag-Tabellen gehört an die Mutation
 
@@ -1601,6 +1604,7 @@ konnte ein neu geschriebener Comment den **gerade gelöschten Tag** enthalten.
 
 **Decision**: Der Refresh hängt an den Mutationen bzw. am Comment-Pfad, nicht am Zufall
 des nächsten Hintergrund-Zyklus:
+
 - Neuer Helfer `db::refresh_resolved_tags(pool)` (file + track, best-effort mit Warn-Log).
 - Aufruf nach Tag-Mutationen: create/update/delete Tag, Kategorie create/update/delete,
   Reorder-Batch, Categorize (einzeln + bulk) — und nach `delete_playlist`.
@@ -1609,6 +1613,7 @@ des nächsten Hintergrund-Zyklus:
   alle Aufrufer ab, inkl. Tracks-/Digging-Pfade).
 
 **Consequences**:
+
 - Nach Löschen/Ändern ist die Filter- und Comment-Sicht **sofort** korrekt; der
   Hintergrund-Refresh bleibt als Sicherheitsnetz.
 - Mutationen kosten jetzt einen Refresh (DELETE + INSERT über die View, auf der
@@ -1617,7 +1622,6 @@ des nächsten Hintergrund-Zyklus:
 - Kein Schema, keine Migration.
 - Test `deleting_a_tag_refreshes_resolved_tags_immediately` beweist es: ohne den
   Refresh im Delete-Handler fällt der Filter-Treffer von 4 nicht auf 0 (verifiziert).
-
 
 ## ADR-072: Grabsteine in `service_playlist_tracks` nur für archivierende Playlists
 
@@ -1628,8 +1632,8 @@ des nächsten Hintergrund-Zyklus:
 **Context**: Der Playlist-Sync markiert vor dem Wieder-Einfügen **alle** Einträge als
 gelöscht (`mark_playlist_tracks_deleted`) und reaktiviert danach die noch vorhandenen.
 Entfernte Tracks bleiben so als `deleted_at`-Grabstein liegen. Die Design-Regel steht
-seit Migration 008 in `set_playlist_archive_deleted`: *„When true: deleted tracks remain
-active for tag resolution. When false: deleted tracks are excluded."*
+seit Migration 008 in `set_playlist_archive_deleted`: _„When true: deleted tracks remain
+active for tag resolution. When false: deleted tracks are excluded."_
 
 Umgesetzt war sie nur in `v_file_resolved_tags` / `v_file_tags`
 (`WHERE sp.archive_deleted = 1 OR spt.deleted_at IS NULL`). `v_track_tags` (Migration 014)
@@ -1639,6 +1643,7 @@ gleichnamigen `backpack = 1`-Tag im Backpack — prune-geschützt, aber ohne Com
 (weil die Comment-Seite den Guard hat). Widersprüchliche Sichten auf dieselbe Zeile.
 
 **Decision**: Die Regel gilt für **alle** Konsumenten, durchgesetzt an der Quelle:
+
 - **Invariante**: `deleted_at IS NOT NULL ⇒ archive_deleted = 1`. Der Sync purgt die
   Grabsteine nicht-archivierender Playlists direkt nach dem Sync
   (`purge_deleted_tracks_for_playlist`); das Ausschalten von Archiving purgt ebenfalls.
@@ -1649,6 +1654,7 @@ gleichnamigen `backpack = 1`-Tag im Backpack — prune-geschützt, aber ohne Com
   behalten.
 
 **Consequences**:
+
 - Nach dem Sync sind Grabsteine nur dort, wo sie gewollt sind. Jede Query — auch eine
   künftige, die den Guard vergisst — liefert damit das dokumentierte Verhalten.
 - Archivieren aus → die bis dahin gehaltenen Grabsteine werden gelöscht (kein Zurückholen
@@ -1656,3 +1662,60 @@ gleichnamigen `backpack = 1`-Tag im Backpack — prune-geschützt, aber ohne Com
 - Entfernte Tracks verlassen Backpack und Prune-Schutz; bei `auto_prune` werden ihre
   store-gesicherten Dateien lokal gelöscht.
 - Kein neues Tabellen-Schema; Migration 031 ist Daten-Cleanup + View-Rebuild.
+
+## ADR-073: BPM//key system playlists reuse `playlist_kind = 'generated'`
+
+**Date**: 2026-10-07
+**Status**: Accepted (implemented)
+**Relates**: Migration 032 (`playlist_kind`), ADR-008 (playlist archive), ADR-052 (global playlist polling), ADR-061 (Spotify rate-limit cooldown)
+
+**Context**: We want every track whose BPM and musical key are known to be browsable in
+Spotify, grouped by `(BPM, key)` — one real playlist per combination (e.g.
+`124bpm // 12m`). These are a **presentation/system** feature: they must never influence
+the comment write-out, tag matching, or the "how well-used is this track" signals, and
+they must not be polled like user playlists. They also need a stable identity independent
+of the (configurable) display name, so renames don't create duplicates.
+
+**Decision**:
+
+- **Reuse `playlist_kind = 'generated'`** (migration 032) instead of inventing an
+  `is_system` flag. That kind is _already_ excluded from exactly the surfaces we care
+  about: usage/`last_touched_at` (`v_track_forgotten_facts`), tag creation
+  (`get_playlists_without_tags`, `create_tags_from_playlists`, `refresh_track_tags`),
+  the comment pipeline (unreachable — no tag can originate from a `generated` playlist),
+  and the global poller's staleness/deletion snapshots (`get_spotify_playlist_snapshots`,
+  `playlist_kind = 'curated'`).
+- **`system_key`** — a new nullable column on `service_playlists` holding the stable combo
+  id (e.g. `bpm_key:124:12A`, canonical Camelot) plus a partial unique index on
+  `(service, system_key) WHERE system_key IS NOT NULL`. It is independent of the naming
+  template.
+- **One real Spotify playlist per combo** — the DB row _is_ the playlist
+  (`service = 'spotify'`, `playlist_kind = 'generated'`, `system_key = …`,
+  `playlist_id =` the Spotify id). Desired membership is derived from `files` on every
+  sync; we deliberately do **not** persist `service_playlist_tracks` for these rows, so
+  there is no poller/tombstone interaction at all. Empty/vanished combos are kept by
+  default (no destructive delete; `strict` is opt-in).
+- **API + UI** — `GET /api/bpm-key-playlists/preview`, `POST /api/bpm-key-playlists/sync`
+  (a `SyncBpmKeyPlaylists` task, conflict key `bpm_key_sync`), `GET /api/bpm-key-playlists`,
+  and `GET`/`PUT /api/bpm-key-playlists/settings`. The Playlists list gains a `system`
+  query param (`exclude` default | `include` | `only`) and exposes `playlist_kind`; the
+  frontend hides `generated` rows by default and badges non-`curated` rows.
+- **Poller fix** — the global poller's discovery step skips playlists whose known DB row is
+  non-`curated`, so a `generated` row already in our DB is no longer re-fetched every cycle.
+
+**Consequences**:
+
+- No change to existing schema consumers: `ServicePlaylist` (`FromRow`) ignores extra
+  columns, so the addition is source-safe. The handful of hand-rolled
+  `CREATE TABLE service_playlists` test fixtures must gain the `system_key` column.
+- `generated` system playlists never create tags, never count towards usage, never appear
+  in `v_track_forgotten_facts`, and are never polled/archived — the feature cannot leak
+  into the comment/tag/backpack pipeline.
+- They are hidden from the default Playlists view; users opt in with `?system=include`
+  (all) or `?system=only` (system only).
+- Spotify-only: a combo requires a linked Spotify track (`v_file_track_link`); local-only
+  tracks are ignored until a Spotify track is linked.
+- Sync is a rate-limit-aware sequential task (ADR-061): a 429 aborts the run and leaves the
+  remainder for the next idempotent run. When `enabled`, a sync is auto-enqueued after
+  folder scans / Traktor imports and coalesced via the conflict key; the optional schedule
+  is off by default (`public = false` → private playlists).

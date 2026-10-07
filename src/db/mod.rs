@@ -5,6 +5,7 @@
 //! — callers still write `crate::db::get_files` regardless of
 //! which sub-module it lives in.
 
+pub mod bpm_key;
 pub mod connection;
 pub mod dynamic_bundles;
 pub mod files;
@@ -21,6 +22,7 @@ pub mod tracks;
 pub mod types;
 
 // Re-export everything so crate::db::* remains backward compatible.
+pub use bpm_key::*;
 pub use connection::*;
 pub use dynamic_bundles::*;
 pub use files::*;

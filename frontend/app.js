@@ -30,6 +30,7 @@ const PAGE_MAP = {
   data: "data",
   "tag-curation": "tag-curation",
   "key-comparison": "key-comparison",
+  "bpm-key-playlists": "bpm-key-playlists",
   "track-detail": "track-detail",
   "file-detail": "file-detail",
   "folder-detail": "folder-detail",

@@ -547,6 +547,7 @@ mod tests {
                 archive_deleted INTEGER NOT NULL DEFAULT 0,
                 playlist_kind TEXT NOT NULL DEFAULT 'curated',
                 snapshot_id TEXT,
+                system_key TEXT,
                 UNIQUE(service, playlist_id)
             )",
         )

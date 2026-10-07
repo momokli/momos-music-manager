@@ -36,6 +36,30 @@ pub const KEY_AUTOUPDATE_AUTO_APPLY_STATE: &str = "autoupdate.auto_apply_state";
 /// format cleanup). Unset = enabled, for backward compatibility.
 pub const KEY_BACKPACK_SYNC_ENABLED: &str = "backpack.sync_enabled";
 
+/// `settings`-KV keys for the BPM//key system-playlist feature (namespace
+/// `bpmkey.`). See [`crate::bpm_key::BpmKeySettings`] and
+/// [`crate::db::bpm_key::load_bpm_key_settings`].
+/// Whether auto-enqueue (post-scan / post-import) and the schedule are on.
+pub const KEY_BPMKEY_ENABLED: &str = "bpmkey.enabled";
+/// Display template, default `{bpm}bpm // {key}`.
+pub const KEY_BPMKEY_NAME_TEMPLATE: &str = "bpmkey.name_template";
+/// Optional verbatim name prefix (default empty).
+pub const KEY_BPMKEY_NAME_PREFIX: &str = "bpmkey.name_prefix";
+/// Minimum track count for a bucket to get a playlist (default 1).
+pub const KEY_BPMKEY_MIN_TRACKS: &str = "bpmkey.min_tracks";
+/// Whether created Spotify playlists are public (default false → private).
+pub const KEY_BPMKEY_PUBLIC: &str = "bpmkey.public";
+/// Key rendering style: `md` (Traktor, default) or `camelot`.
+pub const KEY_BPMKEY_KEY_STYLE: &str = "bpmkey.key_style";
+/// Strict mode: delete system playlists for vanished buckets (default false).
+pub const KEY_BPMKEY_STRICT: &str = "bpmkey.strict";
+/// Whether the periodic schedule is enabled (default false).
+pub const KEY_BPMKEY_SCHEDULE_ENABLED: &str = "bpmkey.schedule_enabled";
+/// Schedule interval in seconds (default 3600).
+pub const KEY_BPMKEY_SCHEDULE_INTERVAL_SECS: &str = "bpmkey.schedule_interval_secs";
+/// Unix seconds of the last sync enqueue (schedule bookkeeping).
+pub const KEY_BPMKEY_LAST_SYNC_AT: &str = "bpmkey.last_sync_at";
+
 /// `settings`-KV keys of the telemetry push status (namespace
 /// `telemetry.`): last one-shot push outcome, recorded by the CLI push, the
 /// periodic loop and the Settings "Push now" button.

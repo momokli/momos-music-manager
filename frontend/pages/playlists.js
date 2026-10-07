@@ -19,7 +19,11 @@ import {
   renderErrorBlock,
   showToast,
 } from "../shared/components.js";
-import { renderSearchInput, wireSearchFilter } from "../shared/search-filter.js";
+import {
+  renderSearchInput,
+  renderFilterGroup,
+  wireSearchFilter,
+} from "../shared/search-filter.js";
 import {
   getPageSize,
   renderPageSizeSelector,
@@ -66,6 +70,14 @@ const SERVICE_OPTIONS = [
   { value: "deemix", label: "Deemix" },
 ];
 
+// System playlists (playlist_kind != 'curated' — liked mirror + generated packs).
+// Server-side param `system`: exclude (default) | include | only.
+const SYSTEM_OPTIONS = [
+  { value: "exclude", label: "Hide system" },
+  { value: "include", label: "Show all" },
+  { value: "only", label: "System only" },
+];
+
 const HASH_DEFAULTS = {
   sort: "",
   order: "asc",
@@ -78,6 +90,7 @@ const HASH_DEFAULTS = {
   categories: [],
   subscribed: false,
   archive: "all",
+  system: "exclude",
 };
 
 const HASH_SCHEMA = {
@@ -92,6 +105,7 @@ const HASH_SCHEMA = {
   categories: { type: "array", default: [] },
   subscribed: { type: "boolean", default: false },
   archive: { type: "string", default: "all" },
+  system: { type: "string", default: "exclude" },
 };
 
 /* ------------------------------------------------------------------ */
@@ -142,6 +156,27 @@ const PLAYLISTS_COLUMNS = [
 
 function sBadge(s) {
   return `<span class="${SVC_CLS[s] || "service-badge"}"><i class="${(SVC[s] || ["", ""])[0]}"></i> ${(SVC[s] || [s, s])[1]}</span>`;
+}
+
+// Badge for non-curated rows (the liked mirror and our generated pack playlists).
+// `curated` rows get no badge.
+const KIND_BADGES = {
+  liked: {
+    label: "Liked",
+    icon: "fa-heart",
+    style: "background:rgba(239,68,68,0.12);color:var(--red)",
+  },
+  generated: {
+    label: "System",
+    icon: "fa-robot",
+    style: "background:rgba(99,102,241,0.12);color:var(--accent)",
+  },
+};
+
+function kindBadge(kind) {
+  const info = KIND_BADGES[kind];
+  if (!info) return "";
+  return ` <span class="status-badge playlist-kind-badge" data-kind="${escapeHtml(kind)}" style="${info.style};margin-left:6px;vertical-align:middle" title="${escapeHtml(info.label)} playlist"><i class="fas ${info.icon}"></i> ${escapeHtml(info.label)}</span>`;
 }
 
 function tagCell(t) {
@@ -222,7 +257,7 @@ function actions(r) {
 
 const PLAYLISTS_CELL_RENDERERS = {
   name: (r) =>
-    `<a href="#tracks?playlistId=${r.id}&playlistName=${encodeURIComponent(r.name)}" class="track-title-link">${escapeHtml(r.name)}</a>`,
+    `<a href="#tracks?playlistId=${r.id}&playlistName=${encodeURIComponent(r.name)}" class="track-title-link">${escapeHtml(r.name)}</a>${kindBadge(r.kind)}`,
   service: (r) => sBadge(r.svc),
   tracks: (r) => {
     if (r.archiveDeleted && r.totalTrackCount != null && r.totalTrackCount !== r.l) {
@@ -325,6 +360,10 @@ function renderToolbar(state) {
               <button class="filter-btn${state.archive === "active" ? " active" : ""}" data-value="active"><i class="fas fa-box-open"></i> Active</button>
               <button class="filter-btn${state.archive === "all" ? " active" : ""}" data-value="all">All</button>
             </div>
+          </div>
+          <div class="filter-row">
+            <span class="filter-row-label toggleable" data-filter="system">System</span>
+            ${renderFilterGroup("system", SYSTEM_OPTIONS, state.system)}
           </div>
         </div>
       </div>
@@ -430,6 +469,7 @@ function buildParams(state) {
   }
   if (state.subscribed) params.set("subscribed", "true");
   if (state.archive && state.archive !== "all") params.set("archive", state.archive);
+  params.set("system", state.system || "exclude");
   return params;
 }
 
@@ -497,6 +537,7 @@ async function fetchAndRender(container, signal, state) {
         archiveDeleted: p.archiveDeleted ?? false,
         totalTrackCount: p.totalTrackCount ?? p.trackCount ?? 0,
         services: p.services || p.service || "",
+        kind: p.playlistKind ?? p.playlist_kind ?? "curated",
       };
     });
 
@@ -1071,12 +1112,14 @@ export async function init(container, signal, hashParams) {
     categoriesAll: [],
     subscribed: parsed.subscribed || false,
     archive: parsed.archive || "all",
+    system: parsed.system || "exclude",
     serviceEnabled: localStorage.getItem("filterRowState_playlists_service") !== "false",
     categoryEnabled:
       localStorage.getItem("filterRowState_playlists_category") !== "false",
     subEnabled: localStorage.getItem("filterRowState_playlists_sub") !== "false",
     staleEnabled: localStorage.getItem("filterRowState_playlists_stale") !== "false",
     archiveEnabled: localStorage.getItem("filterRowState_playlists_archive") !== "false",
+    systemEnabled: localStorage.getItem("filterRowState_playlists_system") !== "false",
     untaggedEnabled:
       localStorage.getItem("filterRowState_playlists_untagged") !== "false",
     layoutMode: false,

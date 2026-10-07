@@ -721,6 +721,22 @@ pub async fn get_spotify_playlist_snapshots(
     Ok(rows)
 }
 
+/// All known Spotify playlist ids with their `playlist_kind`.
+///
+/// The global poller's snapshot map is curated-only, so a known `generated`
+/// (or `liked`) Spotify row has no snapshot and would otherwise be misread as a
+/// brand-new playlist and re-fetched every cycle. This exposes the full set so
+/// the poller can skip known non-curated rows while still discovering genuinely
+/// unknown ones.
+pub async fn get_spotify_playlist_kinds(pool: &Pool<Sqlite>) -> Result<Vec<(String, String)>> {
+    let rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT playlist_id, playlist_kind FROM service_playlists WHERE service = 'spotify'",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// Update the snapshot_id for a playlist identified by its service and playlist_id.
 pub async fn update_playlist_snapshot(
     pool: &Pool<Sqlite>,
@@ -1969,6 +1985,34 @@ mod tests {
         assert_eq!(snapshots[0].2.as_deref(), Some("c1"));
         assert!(!snapshots.iter().any(|(_, pid, _)| pid == "spotify:liked"));
         assert!(!snapshots.iter().any(|(_, pid, _)| pid == "gen-1"));
+    }
+
+    #[tokio::test]
+    async fn test_get_spotify_playlist_kinds_returns_all_spotify_rows() {
+        let pool = test_db().await;
+
+        sqlx::query(
+            "INSERT INTO service_playlists (service, playlist_id, name, playlist_kind, imported_at, updated_at)
+             VALUES ('spotify', 'pl-c', 'C', 'curated', 0, 0),
+                    ('spotify', 'gen-1', 'Daily-1', 'generated', 0, 0),
+                    ('spotify', 'spotify:liked', 'liked', 'liked', 0, 0),
+                    ('soundcloud', 'sc-1', 'SC', 'curated', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut kinds = get_spotify_playlist_kinds(&pool).await.unwrap();
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            vec![
+                ("gen-1".to_string(), "generated".to_string()),
+                ("pl-c".to_string(), "curated".to_string()),
+                ("spotify:liked".to_string(), "liked".to_string()),
+            ],
+            "only spotify rows, with their kind",
+        );
     }
 
     #[tokio::test]

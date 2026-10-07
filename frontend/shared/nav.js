@@ -45,6 +45,7 @@ const TOOLS_ITEMS = [
   { id: "digging", label: "Digging Curator", icon: "fa-bullseye" },
   { id: "data", label: "Import/Export", icon: "fa-database" },
   { id: "key-comparison", label: "Key Comparison", icon: "fa-scale-balanced" },
+  { id: "bpm-key-playlists", label: "BPM//Key Playlists", icon: "fa-sliders" },
   { id: "storage", label: "Storage", icon: "fa-hdd" },
   { id: "backpack", label: "Backpack", icon: "fa-bag-shopping" },
   { id: "daily", label: "Daily", icon: "fa-calendar-day" },

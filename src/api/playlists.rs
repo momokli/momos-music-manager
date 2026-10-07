@@ -97,6 +97,8 @@ pub struct Playlist {
     pub metadata_json: Option<String>,
     pub tag_name: Option<String>,
     pub archive_deleted: bool,
+    #[sqlx(default)]
+    pub playlist_kind: String,
     pub total_track_count: i64,
     #[sqlx(default)]
     pub services: Option<String>,
@@ -117,6 +119,7 @@ pub struct PlaylistsQuery {
     pub stale: Option<bool>,        // true = only playlists where local < remote_unique
     pub archive: Option<String>,    // archived/active/all
     pub untagged: Option<bool>,     // true = only playlists without matching tags
+    pub system: Option<String>, // exclude (default) | include | only ("generated" system playlists)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -453,6 +456,7 @@ async fn playlists_handler(
         let stale_sub = "(SELECT COUNT(*) FROM service_playlist_tracks spt2 WHERE spt2.playlist_id = sp.id) < sp.remote_unique_count";
         main_builder.push(format!("{}{}", stale_clause, stale_sub));
         count_builder.push(format!("{}{}", stale_clause, stale_sub));
+        has_where = true;
     }
 
     // Archive filter: archived (archive_deleted = true), active (archive_deleted = false), all
@@ -462,10 +466,12 @@ async fn playlists_handler(
             "archived" => {
                 main_builder.push(format!("{}sp.archive_deleted = 1", clause));
                 count_builder.push(format!("{}sp.archive_deleted = 1", clause));
+                has_where = true;
             }
             "active" => {
                 main_builder.push(format!("{}sp.archive_deleted = 0", clause));
                 count_builder.push(format!("{}sp.archive_deleted = 0", clause));
+                has_where = true;
             }
             _ => {} // "all" — no filter
         }
@@ -477,6 +483,24 @@ async fn playlists_handler(
         let sub = "NOT EXISTS (SELECT 1 FROM v_tag_playlist vtp WHERE vtp.playlist_id = sp.id)";
         main_builder.push(format!("{}{}", clause, sub));
         count_builder.push(format!("{}{}", clause, sub));
+        has_where = true;
+    }
+
+    // System filter: `exclude` (default) hides `playlist_kind = 'generated'`
+    // system playlists (BPM//key packs, dailies); `include` shows everything;
+    // `only` shows just the generated ones.
+    match query.system.as_deref().unwrap_or("exclude") {
+        "include" => {}
+        "only" => {
+            let clause = if has_where { " AND " } else { " WHERE " };
+            main_builder.push(format!("{}sp.playlist_kind = 'generated'", clause));
+            count_builder.push(format!("{}sp.playlist_kind = 'generated'", clause));
+        }
+        _ => {
+            let clause = if has_where { " AND " } else { " WHERE " };
+            main_builder.push(format!("{}sp.playlist_kind != 'generated'", clause));
+            count_builder.push(format!("{}sp.playlist_kind != 'generated'", clause));
+        }
     }
 
     main_builder.push(" GROUP BY sp.id");
@@ -546,6 +570,7 @@ async fn playlists_handler(
                 "metadataJson": p.metadata_json,
                 "tagName": p.tag_name,
                 "archiveDeleted": p.archive_deleted,
+                "playlistKind": p.playlist_kind,
                 "services": p.services,
             })
         })
@@ -897,8 +922,9 @@ pub(super) async fn push_playlist_to_spotify(
             .await
             .ok();
     }
-    sqlx::query("INSERT INTO service_playlists (service, playlist_id, canonical_playlist_id, name, imported_at, updated_at) VALUES ('spotify', ?, ?, ?, unixepoch(), unixepoch())")
-        .bind(&spotify_id).bind(&canonical_id).bind(name).execute(&state.db).await.ok();
+    sqlx::query("INSERT INTO service_playlists (service, playlist_id, canonical_playlist_id, name, playlist_kind, imported_at, updated_at) \
+                 SELECT 'spotify', ?, ?, ?, playlist_kind, unixepoch(), unixepoch() FROM service_playlists WHERE id = ?")
+        .bind(&spotify_id).bind(&canonical_id).bind(name).bind(local_playlist_id).execute(&state.db).await.ok();
 
     Ok(PushToSpotifyResult {
         spotify_playlist_id: spotify_id,

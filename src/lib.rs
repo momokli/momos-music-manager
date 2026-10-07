@@ -24,6 +24,7 @@ pub mod api;
 pub mod audio_extensions;
 pub mod autoupdate;
 pub mod backpack;
+pub mod bpm_key;
 pub mod cli_link;
 pub mod comment;
 pub mod config;
@@ -144,6 +145,9 @@ async fn static_handler(Path(path): Path<String>) -> Response {
 /// Build the Axum router from AppState. Extracted for testability.
 /// Does NOT spawn background tasks (pollers, watchers, maintainer).
 pub fn build_router(state: Arc<AppState>) -> Router {
+    // Publish the live config so auto-triggered BPM//key syncs (fired from
+    // background scan/import workers) can build a Spotify client.
+    crate::bpm_key::install_config(state.config.clone());
     Router::new()
         .without_v07_checks()
         .merge(api::router())

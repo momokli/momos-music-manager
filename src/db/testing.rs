@@ -659,6 +659,104 @@ pub async fn seed_liked_songs_scenario(pool: &Pool<Sqlite>) -> HashMap<String, u
     counts
 }
 
+/// Seed data for the BPM//key system-playlists testing scenario.
+///
+/// Extends `seed_basic_scenario` with Spotify-linked files that derive
+/// deterministic `(BPM, key)` buckets, plus one persisted `generated` system
+/// playlist (so the playlists `system` filter has a system row to reveal).
+///
+/// Derivation is per Spotify track (representative file: prefer non-stem, then
+/// lowest id). `seed_basic_scenario` already contributes tracks `aaa`
+/// (128.0 flac + 128.5 stem → collapse) and `bbb`, so the full derived set
+/// under the default `keyStyle = md` is exactly:
+/// - `124bpm // 12m` (`bpm_key:124:12A`) — seed files 70+71, tracks
+///   `seed124a`/`seed124b` → `fileCount = 2`, `trackCount = 2`
+/// - `128bpm // 4m`  (`bpm_key:128:4A`)  — basic files 1+2 (track `aaa`) and
+///   seed files 72+73 (track `seed128a`) → `fileCount = 4`, `trackCount = 2`
+/// - `140bpm // 8m`  (`bpm_key:140:8A`)  — basic file 3 (track `bbb`) and seed
+///   file 74 (track `seed140a`) → `fileCount = 2`, `trackCount = 2`
+///
+/// Deliberately excluded from derivation:
+/// - file 75: `bpm`/`musical_key` both NULL (Spotify link present)
+/// - file 76: blank `musical_key`
+/// - file 77: valid BPM/key but **no** Spotify link
+///
+/// All INSERTs are `OR IGNORE` (idempotent).
+pub async fn seed_bpm_key_playlists_scenario(pool: &Pool<Sqlite>) -> HashMap<String, usize> {
+    let mut counts = seed_basic_scenario(pool).await;
+
+    // ── Files: three derivable buckets + three excluded rows ───────────────
+    // flacs leave `stem_type` NULL; the 128bpm bucket has a `stem_type='drums'`
+    // variant sharing the same Spotify track (must not split the bucket).
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO files (id, file_path, file_type, file_size, last_modified, title, artist,
+             bpm, musical_key, stem_type, isrc, file_hash, spotify_id)
+           VALUES
+             (70, '/test/stems/BPM124 - A.flac',     'flac',     5000000, 1700000000, 'BPM124 A', 'Seed', 124.0, '12m', NULL,    NULL, 'hash70', 'spotify:track:seed124a'),
+             (71, '/test/stems/BPM124 - B.flac',     'flac',     5000000, 1700000000, 'BPM124 B', 'Seed', 124.0, '12A', NULL,    NULL, 'hash71', 'spotify:track:seed124b'),
+             (72, '/test/stems/BPM128 - A.flac',     'flac',     5000000, 1700000000, 'BPM128 A', 'Seed', 128.0, '4m',  NULL,    NULL, 'hash72', 'spotify:track:seed128a'),
+             (73, '/test/stems/BPM128 - A.stem.m4a', 'stem.m4a', 8000000, 1700000000, 'BPM128 A', 'Seed', 128.5, '4m',  'drums', NULL, 'hash73', 'spotify:track:seed128a'),
+             (74, '/test/stems/BPM140 - A.flac',     'flac',     5000000, 1700000000, 'BPM140 A', 'Seed', 140.0, '8m',  NULL,    NULL, 'hash74', 'spotify:track:seed140a'),
+             (75, '/test/stems/NoBpm - A.flac',      'flac',     5000000, 1700000000, 'No BPM',   'Seed', NULL,  NULL,  NULL,    NULL, 'hash75', 'spotify:track:seednull'),
+             (76, '/test/stems/NoKey - A.flac',      'flac',     5000000, 1700000000, 'No Key',   'Seed', 150.0, '',    NULL,    NULL, 'hash76', 'spotify:track:seednokey'),
+             (77, '/test/stems/NoLink - A.flac',     'flac',     5000000, 1700000000, 'No Link',  'Seed', 160.0, '9m',  NULL,    NULL, 'hash77', NULL)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // ── Local + backup locations ───────────────────────────────────────────
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO file_locations (file_id, location_type, path, file_size, last_verified)
+           VALUES
+             (70, 'local',  '/test/stems/BPM124 - A.flac',     5000000, 1700000000),
+             (70, 'backup', '/backup/stems/BPM124 - A.flac',   5000000, 1700000000),
+             (71, 'local',  '/test/stems/BPM124 - B.flac',     5000000, 1700000000),
+             (72, 'local',  '/test/stems/BPM128 - A.flac',     5000000, 1700000000),
+             (73, 'local',  '/test/stems/BPM128 - A.stem.m4a', 8000000, 1700000000),
+             (74, 'local',  '/test/stems/BPM140 - A.flac',     5000000, 1700000000),
+             (77, 'local',  '/test/stems/NoLink - A.flac',     5000000, 1700000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // ── Spotify service tracks (one row per distinct service_id) ───────────
+    // `isrc` stays NULL so links resolve purely via `files.spotify_id`.
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_tracks (id, service, service_id, title, artist, isrc, imported_at)
+           VALUES
+             (70, 'spotify', 'spotify:track:seed124a',  'BPM124 A', 'Seed', NULL, 1700000000),
+             (71, 'spotify', 'spotify:track:seed124b',  'BPM124 B', 'Seed', NULL, 1700000000),
+             (72, 'spotify', 'spotify:track:seed128a',  'BPM128 A', 'Seed', NULL, 1700000000),
+             (74, 'spotify', 'spotify:track:seed140a',  'BPM140 A', 'Seed', NULL, 1700000000),
+             (75, 'spotify', 'spotify:track:seednull',  'No BPM',   'Seed', NULL, 1700000000),
+             (76, 'spotify', 'spotify:track:seednokey', 'No Key',   'Seed', NULL, 1700000000)"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // ── One persisted generated system playlist for the 124/12A bucket ─────
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO service_playlists
+             (id, service, playlist_id, name, playlist_kind, system_key)
+           VALUES
+             (40, 'spotify', 'spotify:playlist:seedbpmkey124', '124bpm // 12m', 'generated', 'bpm_key:124:12A')"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    crate::db::refresh_file_resolved_tags(pool).await.unwrap();
+
+    *counts.get_mut("files").unwrap() += 8;
+    *counts.get_mut("file_locations").unwrap() += 7;
+    *counts.get_mut("service_tracks").unwrap() += 6;
+    *counts.get_mut("service_playlists").unwrap() += 1;
+    counts
+}
+
 /// Seed a subscribed playlist for archive/subscription testing.
 pub async fn seed_subscribed_playlist(pool: &Pool<Sqlite>) {
     sqlx::query("UPDATE service_playlists SET archive_deleted = 1 WHERE id = 1")
