@@ -6,7 +6,29 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+---
+
+## [1.15.0] — 2026-10-08
+
 ### Added
+
+- **Migration 033 — `rediscovery_pushes`-Ledger (#79)**: neues explizites Push-Ledger
+  `rediscovery_pushes` (`track_id`, `playlist_id` nullable/`ON DELETE SET NULL`, `pushed_at`,
+  `facet_json`, `slot`) mit den Indizes `idx_rediscovery_pushes_track(track_id, pushed_at)` und
+  `idx_rediscovery_pushes_slot(slot, pushed_at)`. Es trägt die Rediscovery-Historie über
+  `keepLast`-Pruning hinweg: `pushed_at` treibt `excludePushedSinceDays`, `slot` ist die
+  idempotente, neustartfeste Quelle der Tages-Umbenennung. Migration ist additiv
+  (`CREATE TABLE IF NOT EXISTS`); Canary in `tests/migration_integrity.rs` erwartet die Tabelle,
+  4 Integrationstests in `tests/migration_rediscovery_pushes.rs` (frische DB 001→033,
+  Playlist-Delete ⇒ `playlist_id NULL` + Zeile bleibt, Track-Delete ⇒ CASCADE, Index-Nutzung).
+
+- **`GET /api/rediscovery/candidates` — Facetten + Reasons (#81)**: neuer Endpoint
+  (`src/api/rediscovery.rs`) mit allen Facetten, server-seitigem Filter/Sort/Pagination und
+  erklärenden `reasons[]` je Trefferzeile (`touchedBeforeDays` auf Basis von `last_touched_at`,
+  `likedOnly`, `excludeBackpack`, `requireBpm`/`requireKey`, `bpmMin`/`bpmMax`, `keys`, `genres`,
+  `excludePushedSinceDays` über das Ledger 033). Gebatchte Fact-/Facetten-/Ledger-Loader in
+  `src/db/rediscovery.rs` (kein N+1, keine Pro-Row-View-Zugriffe); `bpmMin > bpmMax` ⇒ 400.
+  14 Integrationstests in `tests/api_rediscovery.rs`.
 
 - **`GET /api/rediscovery/stats` (#82)**: neuer Aggregat-Endpunkt über **dieselben
   Facetten-Parameter** wie `candidates` (geteilte `RediscoveryFacetsQuery`). Liefert
@@ -36,6 +58,27 @@ All notable changes to Momo's Music Manager.
   (`GET /api/rediscovery/candidates`), kein Client-Side-Filtern nach Pagination.
   Der „Generate Playlist"-Button ist bewusst noch ein Platzhalter (1.16.0/1.18.0).
   Playwright-Abdeckung via Seed-Szenario `rediscovery` (`frontend/tests/rediscovery.spec.js`).
+
+- **Playwright-Spec `rediscovery.spec.js` (#84)**: deterministische Playwright-Spec für die
+  Rediscovery-Seite (Filter, Reason-Chips, Pagination, Stats-Bar) — 8 Testfälle statt der alten
+  `waitForTimeout`-basierten Fassung; kein Produktivcode geändert (1 Testdatei).
+
+- **BPM//key-System-Playlists (#145, PR #146)**: pro `(BPM, Key)`-Kombination der Bibliothek eine
+  echte Spotify-Playlist (Name `124bpm // 12m` in Traktor-Notation, `keyStyle` umstellbar auf
+  Camelot). Die Zeilen nutzen `playlist_kind='generated'` (Migration 032) und bleiben damit aus
+  Tag-Matching, Kommentar-Write-out, Usage-/„last touched"-Scoring und dem Playlist-Poller heraus.
+  **Migration 034** ergänzt `service_playlists.system_key` (+ partieller Unique-Index
+  `idx_service_playlists_system_key`) als stabilen Kombi-Schlüssel (`bpm_key:124:12A`). Neue
+  Endpunkte `GET /api/bpm-key-playlists/preview`, `POST /api/bpm-key-playlists/sync`,
+  `GET /api/bpm-key-playlists` und `GET|PUT /api/bpm-key-playlists/settings`; Task
+  `SyncBpmKeyPlaylists` (Conflict-Key `bpm_key_sync`) mit Auto-Enqueue nach Ordner-Scan/Traktor-Import
+  (optionaler Schedule, Default aus). Der globale Poller überspringt bekannte
+  Nicht-`curated`-Playlists (kein Re-Fetch pro Zyklus). SPA-Seite `#bpm-key-playlists` (Tools) plus
+  `system`-Filter auf der Playlists-Seite. BPM wird auf Ganzzahl gerundet, Keys kanonisch über den
+  Camelot-Parser gruppiert (`12m`/`12A` kollabieren), Variant-Dateien über eine Repräsentant-Datei
+  pro Spotify-Track entdoppelt. Abdeckung: 18 Integrationstests (`tests/api_bpm_key_playlists.rs`),
+  Unit-Tests, Playwright-Spec. ADR-073. Default aus (`enabled=false`), Playlists privat,
+  `min_tracks=1`.
 
 ## [1.14.0] — 2026-10-02
 
@@ -97,7 +140,7 @@ All notable changes to Momo's Music Manager.
 
 - **Aus Playlists entfernte Tracks sind jetzt wirklich weg** (außer bei Archiving):
   `service_playlist_tracks.deleted_at` ist ein Grabstein, der nur für archivierende
-  Playlists (`archive_deleted = 1`) gedacht ist. Der Sync hat ihn aber bei *jeder*
+  Playlists (`archive_deleted = 1`) gedacht ist. Der Sync hat ihn aber bei _jeder_
   Playlist hinterlassen, und diese Zeilen leckten in Tag-Auflösung, Backpack-Zugehörigkeit
   und Comment-Ziele — z. B. blieb ein aus einer Beatport-Playlist entfernter Track im
   Backpack (und damit prune-geschützt). Migration 031 räumt die Altlasten auf (5960 Zeilen)
@@ -240,7 +283,6 @@ All notable changes to Momo's Music Manager.
   Dienst `music-api` übernimmt den Download per ISRC-Order.
 
 ### Fixed
-
 
 - **Backpack-File-Sync-Schalter galt nicht im Maintainer**: Der Maintainer startete
   den Backpack-File-Sync stündlich, auch wenn `backpack.sync_enabled = 0` gesetzt war
@@ -622,7 +664,7 @@ enabled` > Default aus). Der eigentliche Download-/Ersetzungsschritt folgt als
     (`Restart=always`), sonst startet ein detachter Relauncher das neue Binary
     nach 2 s neu (macOS `.app`: `open` des ersetzten Bundles, nur wenn das
     laufende Bundle im Installations-Verzeichnis liegt). **macOS DMG-Handling**:  
-    verifizierter DMG wird gemountet (`hdiutil attach`), das `.app`-Bundle
+     verifizierter DMG wird gemountet (`hdiutil attach`), das `.app`-Bundle
     atomar ersetzt (`ditto` → Staging → Swap, alte Version als
     `<App>.app.updater-bak` für manuelle Wiederherstellung, Restore bei
     Fehlern), wieder unmountet, DMG aufgeräumt; Installations-Ziel
