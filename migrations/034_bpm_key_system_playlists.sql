@@ -1,4 +1,4 @@
--- Migration 033: BPM//key system playlists.
+-- Migration 034: BPM//key system playlists.
 --
 -- For every (BPM, key) combination present in the library we materialise a real
 -- Spotify playlist on the user's account. These rows reuse the existing
