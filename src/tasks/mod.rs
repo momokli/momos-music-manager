@@ -69,6 +69,9 @@ pub enum TaskType {
     FolderWatch,
     /// Telemetry: push a DB snapshot + metadata to the collector
     TelemetryPush,
+    /// Sync the BPM//key system playlists to Spotify (one reconcile pass).
+    /// `strict` also removes playlists for buckets that vanished.
+    SyncBpmKeyPlaylists { strict: bool },
 }
 
 /// What to sync for a service
@@ -441,6 +444,7 @@ pub fn task_type_conflict_key(task_type: &TaskType) -> Option<String> {
         TaskType::MaintainerCycle => None,
         TaskType::FolderWatch => None,
         TaskType::TelemetryPush => None,
+        TaskType::SyncBpmKeyPlaylists { .. } => Some("bpm_key_sync".to_string()),
     }
 }
 
@@ -616,6 +620,7 @@ impl Task {
             TaskType::MaintainerCycle => "maintainer_cycle".to_string(),
             TaskType::FolderWatch => "folder_watch".to_string(),
             TaskType::TelemetryPush => "telemetry_push".to_string(),
+            TaskType::SyncBpmKeyPlaylists { .. } => "sync_bpm_key_playlists".to_string(),
         };
         (task_type_str, task_details)
     }
@@ -1253,6 +1258,7 @@ pub fn task_type_label(task_type: &TaskType) -> String {
         TaskType::MaintainerCycle => "Maintainer cycle".to_string(),
         TaskType::FolderWatch => "Folder watch".to_string(),
         TaskType::TelemetryPush => "Telemetry push".to_string(),
+        TaskType::SyncBpmKeyPlaylists { .. } => "Sync BPM//key playlists".to_string(),
     }
 }
 
@@ -1828,6 +1834,113 @@ pub async fn start_recompute_embeddings_task(
 }
 
 // ============================================================
+// SyncBpmKeyPlaylists worker
+// ============================================================
+
+/// Start a background task that reconciles the BPM//key system playlists with
+/// Spotify. Uses `start_task_unique` (conflict key `bpm_key_sync`) so bursts of
+/// scan/import events coalesce into a single run.
+///
+/// Returns the task id, or an empty string when a sync is already running.
+pub async fn start_sync_bpm_key_playlists_task(
+    task_manager: &TaskManager,
+    db: &sqlx::Pool<sqlx::Sqlite>,
+    creds: &ServiceCredentials,
+    strict: bool,
+) -> String {
+    let task = Task::new(TaskType::SyncBpmKeyPlaylists { strict }, None);
+    let task_id = task.id.clone();
+    let worker_task_id = task_id.clone();
+    let cancel_token = task.cancel_token.clone();
+
+    match task_manager.start_task_unique(task).await {
+        Ok(_) => {}
+        Err(TaskConflictError::AlreadyRunning { .. }) => {
+            info!("BPM//key sync already running, skipping");
+            return String::new();
+        }
+    }
+
+    let tm = task_manager.clone();
+    let db_clone = db.clone();
+    let creds = creds.clone();
+
+    let join_handle = tokio::spawn(async move {
+        tm.update_task_status(&worker_task_id, TaskStatus::Running)
+            .await;
+        tm.update_progress_text(&worker_task_id, "Deriving BPM//key buckets...".to_string())
+            .await;
+        tm.update_progress(&worker_task_id, |p| {
+            p.status = TaskStatus::Running;
+            p.message = "Deriving BPM//key buckets...".to_string();
+        })
+        .await;
+
+        match crate::bpm_key::sync::run_sync(
+            &tm,
+            &db_clone,
+            &creds,
+            &worker_task_id,
+            &cancel_token,
+            strict,
+        )
+        .await
+        {
+            Ok(_outcome) => Ok(()),
+            Err(e) => {
+                let msg = format!("BPM//key sync failed: {e}");
+                error!("{}", msg);
+                tm.add_log(&worker_task_id, msg.clone()).await;
+                tm.update_progress_text(&worker_task_id, format!("Failed: {e}"))
+                    .await;
+                tm.update_task_status(&worker_task_id, TaskStatus::Failed)
+                    .await;
+                tm.update_progress(&worker_task_id, |p| {
+                    p.status = TaskStatus::Failed;
+                    p.message = msg.clone();
+                })
+                .await;
+                Err(anyhow::anyhow!(msg))
+            }
+        }
+    });
+
+    task_manager.set_join_handle(&task_id, join_handle).await;
+    task_id
+}
+
+/// Enqueue a BPM//key sync when the feature is enabled. Best-effort — called
+/// after folder scans / Traktor imports and by the optional schedule. The task's
+/// unique conflict key (`bpm_key_sync`) coalesces bursts into one run.
+pub async fn maybe_auto_enqueue_bpm_key_sync(
+    task_manager: &TaskManager,
+    db: &sqlx::Pool<sqlx::Sqlite>,
+) {
+    match crate::db::bpm_key::bpm_key_sync_enabled(db).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(e) => {
+            warn!(
+                "BPM//key auto-sync: reading enabled setting failed: {:#}",
+                e
+            );
+            return;
+        }
+    }
+    let settings = match crate::db::bpm_key::load_bpm_key_settings(db).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("BPM//key auto-sync: reading settings failed: {:#}", e);
+            return;
+        }
+    };
+    let config =
+        crate::bpm_key::installed_config().unwrap_or_else(ServiceCredentials::defaults_for_test);
+    let _ = start_sync_bpm_key_playlists_task(task_manager, db, &config, settings.strict).await;
+    let _ = crate::db::bpm_key::set_last_sync_enqueued_at(db, chrono::Utc::now().timestamp()).await;
+}
+
+// ============================================================
 // ScanFolder worker
 // ============================================================
 
@@ -1990,6 +2103,9 @@ pub async fn start_scan_folder_task(
                     p.message = msg;
                 })
                 .await;
+
+                // Auto-trigger: BPM/key metadata may now be available.
+                maybe_auto_enqueue_bpm_key_sync(&tm, &db_clone).await;
             }
             Err(e) => {
                 let msg = format!("Scan failed for folder #{}: {}", folder_id, e);
@@ -2128,6 +2244,9 @@ pub async fn start_traktor_import_task(
                 .await;
                 tm.update_task_status(&worker_task_id, TaskStatus::Completed)
                     .await;
+
+                // Auto-trigger: Traktor import may have populated BPM/key.
+                maybe_auto_enqueue_bpm_key_sync(&tm, &db_clone).await;
             }
             Err(e) => {
                 let msg = format!("Traktor import failed: {}", e);
@@ -3067,7 +3186,10 @@ mod tests {
                 Some("scan_wavs".to_string()),
             ))
             .await;
-        assert!(other.is_ok(), "another folder must not be blocked: {other:?}");
+        assert!(
+            other.is_ok(),
+            "another folder must not be blocked: {other:?}"
+        );
     }
 
     #[test]

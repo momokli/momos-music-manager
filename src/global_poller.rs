@@ -104,6 +104,11 @@ async fn run_poll_cycle(
         return Ok(());
     }
 
+    // Optional schedule: enqueue a BPM//key sync when due (no Spotify traffic).
+    if let Err(e) = maybe_run_scheduled_bpm_key_sync(task_manager, db).await {
+        warn!("Global poller: BPM//key schedule check failed: {:#}", e);
+    }
+
     let task_id = task_manager
         .start_task(Task::new(TaskType::GlobalPollCycle, Some("spotify".into())))
         .await;
@@ -148,6 +153,23 @@ async fn run_poll_cycle(
         };
 
     let mut spotify_playlists: Vec<SimplifiedPlaylistData> = Vec::new();
+
+    // Known playlist kinds for ALL spotify rows (not just curated). The snapshot
+    // map above is curated-only, so a known `generated`/`liked` row has no
+    // snapshot and would otherwise be treated as a brand-new playlist and
+    // re-fetched every cycle. This lets us skip those while still discovering
+    // genuinely unknown playlists.
+    let known_kinds: std::collections::HashMap<String, String> =
+        match db::get_spotify_playlist_kinds(db).await {
+            Ok(rows) => rows.into_iter().collect(),
+            Err(e) => {
+                error!(
+                    "Global poller: failed to query known playlist kinds: {:#}",
+                    e
+                );
+                return Err(e);
+            }
+        };
 
     // ── Step 2: Fetch all playlists from Spotify ─────────────────────────
     let stream = match spotify_client.get_user_playlists().await {
@@ -222,6 +244,17 @@ async fn run_poll_cycle(
         }
 
         let stored_info = db_snapshots.get(&sp.id);
+
+        // Known non-curated rows are managed elsewhere (BPM//key packs, dailies,
+        // the likes mirror) and must never be re-fetched by the poller.
+        if is_known_non_curated(&known_kinds, &sp.id) {
+            skipped_playlists += 1;
+            debug!(
+                "Global poller: skipping known non-curated playlist '{}'",
+                sp.name
+            );
+            continue;
+        }
 
         match stored_info {
             None => {
@@ -623,6 +656,48 @@ async fn fetch_and_store_playlist_tracks(
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Enqueue a BPM//key sync when the optional schedule is due.
+///
+/// Piggybacks on the poll cycle (no dedicated scheduler loop) and issues no
+/// Spotify traffic itself — the enqueued task's conflict key coalesces bursts.
+async fn maybe_run_scheduled_bpm_key_sync(
+    task_manager: &TaskManager,
+    db: &Pool<Sqlite>,
+) -> Result<()> {
+    let settings = db::bpm_key::load_bpm_key_settings(db).await?;
+    if !settings.enabled || !settings.schedule_enabled {
+        return Ok(());
+    }
+    let interval = settings.schedule_interval_secs.max(60);
+    let last = db::bpm_key::last_sync_enqueued_at(db).await?;
+    let now = chrono::Utc::now().timestamp();
+    if last > 0 && now - last < interval {
+        return Ok(());
+    }
+    let config =
+        crate::bpm_key::installed_config().unwrap_or_else(ServiceCredentials::defaults_for_test);
+    let _ =
+        crate::tasks::start_sync_bpm_key_playlists_task(task_manager, db, &config, settings.strict)
+            .await;
+    db::bpm_key::set_last_sync_enqueued_at(db, now).await?;
+    Ok(())
+}
+
+/// Whether `playlist_id` is a known Spotify row that is **not** `curated`
+/// (`generated` / `liked`). Such rows are deliberately absent from the
+/// curated-only snapshot map; the poller must skip them rather than treat them
+/// as new. Genuinely unknown ids return `false` (still discoverable).
+fn is_known_non_curated(
+    known_kinds: &std::collections::HashMap<String, String>,
+    playlist_id: &str,
+) -> bool {
+    matches!(known_kinds.get(playlist_id).map(String::as_str), Some(kind) if kind != "curated")
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -648,5 +723,27 @@ mod tests {
         assert!(!liked_sync_allowed());
         spotify_cooldown().clear();
         assert!(liked_sync_allowed());
+    }
+
+    #[test]
+    fn known_non_curated_playlists_are_skipped_but_unknown_ones_are_not() {
+        let mut kinds = std::collections::HashMap::new();
+        kinds.insert("gen-1".to_string(), "generated".to_string());
+        kinds.insert("spotify:liked".to_string(), "liked".to_string());
+        kinds.insert("pl-c".to_string(), "curated".to_string());
+
+        assert!(is_known_non_curated(&kinds, "gen-1"), "generated → skip");
+        assert!(
+            is_known_non_curated(&kinds, "spotify:liked"),
+            "liked → skip"
+        );
+        assert!(
+            !is_known_non_curated(&kinds, "pl-c"),
+            "curated → normal snapshot flow"
+        );
+        assert!(
+            !is_known_non_curated(&kinds, "never-seen"),
+            "unknown → discoverable"
+        );
     }
 }
