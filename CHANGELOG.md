@@ -8,6 +8,22 @@ All notable changes to Momo's Music Manager.
 
 ---
 
+## [1.15.2] — 2026-10-08
+
+### Fixed
+
+- **Subscription poll cadence (#151, PR #152)**: subscribed playlists were polled every
+  300 s. At ~50 subscriptions that is ~15k `GET /playlists/{id}` calls/day — the dominant
+  Spotify API load and the source of the chronic app-level 429s (multi-hour `Retry-After`).
+  The default is now 21600 s (6 h) and migration 035 raises existing rows to 6 h.
+  On-demand freshness is unchanged (per-playlist sync action).
+
+### Changed
+
+- Playlists page shows the poll interval in hours instead of raw seconds.
+
+---
+
 ## [1.15.1] — 2026-10-08
 
 ### Fixed
