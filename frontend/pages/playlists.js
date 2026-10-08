@@ -203,7 +203,7 @@ function syncCell(v) {
 /** Backpack membership of a playlist: a bag = in, a muted bag = not in. */
 function subCell(sub) {
   if (sub) {
-    return `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)" title="In your Backpack \u2014 polls every ${sub.pollIntervalSecs}s; files are kept on your Mac"><i class="fas fa-bag-shopping"></i></span>`;
+    return `<span class="status-badge" style="background:rgba(34,197,94,0.1);color:var(--green)" title="In your Backpack \u2014 polls every ${sub.pollIntervalSecs >= 3600 ? sub.pollIntervalSecs / 3600 + "h" : sub.pollIntervalSecs + "s"}; files are kept on your Mac"><i class="fas fa-bag-shopping"></i></span>`;
   }
   return `<span style="color:var(--text-muted)" title="Not in your Backpack"><i class="fas fa-bag-shopping"></i></span>`;
 }

@@ -6,6 +6,15 @@ use tracing::{debug, info};
 
 use super::types::*;
 
+/// Default cadence for polling a subscribed playlist (seconds).
+///
+/// 6 h: frequent enough to keep Backpack membership fresh, and ~72× lighter
+/// than the old 300 s default — which, across ~50 subscriptions, was the
+/// dominant Spotify API load (~15k calls/day) and the source of the chronic
+/// app-level 429s. On-demand freshness is available per playlist via
+/// `POST /api/services/spotify/sync/playlists/{id}/tracks`.
+pub const DEFAULT_SUBSCRIPTION_POLL_INTERVAL_SECS: i64 = 21600;
+
 // ── Playlist Queries ────────────────────────────────────────────────────
 
 /// Get all playlists that don't have corresponding tags
@@ -841,13 +850,14 @@ pub async fn subscribe_to_playlist(
 ) -> Result<i64> {
     let _result = sqlx::query(
         r#"
-        INSERT OR IGNORE INTO playlist_subscriptions (service, playlist_id, service_playlist_id)
-        VALUES (?, ?, ?)
+        INSERT OR IGNORE INTO playlist_subscriptions (service, playlist_id, service_playlist_id, poll_interval_secs)
+        VALUES (?, ?, ?, ?)
         "#,
     )
     .bind(service)
     .bind(playlist_id)
     .bind(db_playlist_id)
+    .bind(DEFAULT_SUBSCRIPTION_POLL_INTERVAL_SECS)
     .execute(pool)
     .await?;
 
@@ -1174,6 +1184,24 @@ mod tests {
         assert_eq!(subs[0].service, "spotify");
         assert_eq!(subs[0].playlist_id, "pl-123");
         assert!(subs[0].is_active);
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_uses_6h_default_interval() {
+        let pool = test_db().await;
+
+        subscribe_to_playlist(&pool, "spotify", "pl-cadence", None)
+            .await
+            .unwrap();
+
+        let interval: i64 = sqlx::query_scalar(
+            "SELECT poll_interval_secs FROM playlist_subscriptions WHERE playlist_id = 'pl-cadence'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(interval, DEFAULT_SUBSCRIPTION_POLL_INTERVAL_SECS);
+        assert_eq!(interval, 21600, "6 h");
     }
 
     #[tokio::test]
