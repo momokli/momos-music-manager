@@ -35,6 +35,7 @@ use crate::spotify::client::SpotifyClient;
 use crate::spotify::cooldown::cooldown as spotify_cooldown;
 use crate::spotify::models::TrackInfo;
 use crate::spotify::retry::{extract_retry_after_secs, format_duration};
+use crate::spotify::metrics::{self, Source};
 use crate::tasks::{Task, TaskManager, TaskStatus, TaskType};
 
 use std::time::Duration;
@@ -202,6 +203,7 @@ async fn poll_subscribed_playlist(
     subscription: &db::PlaylistSubscription,
     task_manager: &TaskManager,
 ) -> Result<bool> {
+    metrics::record(Source::Subscriptions);
     let playlist_name_for_task = subscription
         .playlist_name
         .clone()

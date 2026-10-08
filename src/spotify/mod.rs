@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod cooldown;
+pub mod metrics;
 pub mod models;
 pub mod replay;
 pub mod retry;

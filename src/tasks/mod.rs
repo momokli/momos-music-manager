@@ -1886,7 +1886,25 @@ pub async fn start_sync_bpm_key_playlists_task(
         )
         .await
         {
-            Ok(_outcome) => Ok(()),
+            Ok(_outcome) => {
+                // Defense in depth: `run_sync` finalizes on every `Ok` path, but
+                // if it ever returns `Ok` without doing so, the task must still
+                // not stick at `Running` — its `bpm_key_sync` conflict key would
+                // then reject every later sync as "already running".
+                tm.update_task_status(&worker_task_id, TaskStatus::Completed)
+                    .await;
+                tm.update_progress(&worker_task_id, |p| {
+                    p.status = TaskStatus::Completed;
+                    if p.percent.is_none() {
+                        p.percent = Some(100.0);
+                    }
+                    if p.message.trim().is_empty() {
+                        p.message = "BPM//key sync complete".to_string();
+                    }
+                })
+                .await;
+                Ok(())
+            }
             Err(e) => {
                 let msg = format!("BPM//key sync failed: {e}");
                 error!("{}", msg);
@@ -3290,5 +3308,88 @@ mod tests {
 
         let task_id = start_scan_wav_sources_task(&tm, &pool, 1).await;
         assert!(task_id.is_empty(), "Should return empty string on conflict");
+    }
+
+    /// Minimal schema so `run_sync` gets past settings/derivation and fails
+    /// specifically at Spotify client construction (Spotify unconfigured).
+    async fn bpm_key_worker_pool() -> sqlx::Pool<sqlx::Sqlite> {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        for stmt in [
+            r#"CREATE TABLE settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )"#,
+            r#"CREATE TABLE files (
+                id INTEGER PRIMARY KEY,
+                bpm REAL,
+                musical_key TEXT,
+                stem_type TEXT,
+                isrc TEXT,
+                spotify_id TEXT
+            )"#,
+            r#"CREATE TABLE service_tracks (
+                id INTEGER PRIMARY KEY,
+                service TEXT NOT NULL,
+                service_id TEXT NOT NULL,
+                isrc TEXT,
+                UNIQUE(service, service_id)
+            )"#,
+            r#"CREATE VIEW v_file_track_link AS
+               SELECT f.id AS file_id, st.id AS track_id
+               FROM files f
+               JOIN service_tracks st ON (
+                   st.isrc = f.isrc
+                   OR (st.service = 'spotify' AND st.service_id = f.spotify_id)
+               )"#,
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    /// Poll until the task reaches a terminal status (or panic after ~2 s).
+    async fn wait_for_terminal(tm: &TaskManager, task_id: &str) -> TaskStatus {
+        for _ in 0..200 {
+            if let Some(p) = tm.get_task(task_id).await {
+                if matches!(
+                    p.status,
+                    TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+                ) {
+                    return p.status;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("task {task_id} never reached a terminal state");
+    }
+
+    /// The stuck-`Running` bug: an early-abort/cancel run returned before the
+    /// finalization block, so the task never left `Running` and its
+    /// `bpm_key_sync` conflict key rejected every later sync as "already
+    /// running". The worker must always finalize (nothing stays `Running`).
+    #[tokio::test]
+    async fn bpm_key_worker_finalizes_and_does_not_wedge_the_conflict_key() {
+        let tm = TaskManager::new();
+        let pool = bpm_key_worker_pool().await;
+
+        // No Spotify credentials: `run_sync` fails fast. The worker must still
+        // drive the task to a terminal status.
+        let creds = crate::config::ServiceCredentials::defaults_for_test();
+        let task_id = start_sync_bpm_key_playlists_task(&tm, &pool, &creds, false).await;
+        assert!(!task_id.is_empty(), "a fresh sync must be accepted");
+
+        let status = wait_for_terminal(&tm, &task_id).await;
+        assert!(
+            matches!(status, TaskStatus::Completed | TaskStatus::Failed),
+            "task must reach a terminal state, never Running, got {status:?}"
+        );
+
+        // The finished task must not block the next sync via the conflict key.
+        let second = start_sync_bpm_key_playlists_task(&tm, &pool, &creds, false).await;
+        assert!(
+            !second.is_empty(),
+            "a terminal task must not wedge the bpm_key_sync conflict key"
+        );
     }
 }

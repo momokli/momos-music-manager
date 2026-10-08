@@ -36,6 +36,11 @@ pub const KEY_AUTOUPDATE_AUTO_APPLY_STATE: &str = "autoupdate.auto_apply_state";
 /// format cleanup). Unset = enabled, for backward compatibility.
 pub const KEY_BACKPACK_SYNC_ENABLED: &str = "backpack.sync_enabled";
 
+/// Interval between liked-songs sync passes, in seconds (default 3600).
+pub const KEY_LIKED_SYNC_INTERVAL_SECS: &str = "spotify.liked_sync_interval_secs";
+/// Unix seconds of the last successful liked-songs sync (cadence bookkeeping).
+pub const KEY_LIKED_SYNC_LAST_AT: &str = "spotify.liked_sync_last_at";
+
 /// `settings`-KV keys for the BPM//key system-playlist feature (namespace
 /// `bpmkey.`). See [`crate::bpm_key::BpmKeySettings`] and
 /// [`crate::db::bpm_key::load_bpm_key_settings`].

@@ -8,6 +8,30 @@ mod common;
 
 use serde_json::Value;
 
+/// GET /api/services/spotify/metrics — always available, returns per-source counters.
+#[tokio::test]
+async fn spotify_metrics_endpoint_returns_counters() {
+    let (client, base, _pool) = common::spawn_test_app().await;
+
+    let resp = client
+        .get(format!("{}/api/services/spotify/metrics", base))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let counters = body["data"]["counters"]
+        .as_array()
+        .expect("counters should be an array");
+    assert!(
+        counters.iter().any(|c| c["name"] == "liked_sync"),
+        "expected a liked_sync counter, got: {body}"
+    );
+    assert!(body["data"]["total"].as_u64().is_some());
+    assert_eq!(counters.len(), 7, "one entry per source");
+}
+
 /// POST /api/services/spotify/sync/playlists — error (Spotify not configured).
 #[tokio::test]
 async fn spotify_sync_playlists_error() {
