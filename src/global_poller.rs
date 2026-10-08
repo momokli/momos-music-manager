@@ -38,6 +38,7 @@ use crate::spotify::cooldown::cooldown as spotify_cooldown;
 use crate::spotify::models::TrackInfo;
 use crate::spotify::retry::extract_retry_after_secs;
 use crate::spotify::retry::format_duration;
+use crate::spotify::metrics::{self, Source};
 use crate::tasks::{Task, TaskManager, TaskStatus, TaskType};
 
 // ---------------------------------------------------------------------------
@@ -221,6 +222,8 @@ async fn run_poll_cycle(
         "Global poller: fetched {} playlists from Spotify",
         spotify_count
     );
+    // Listing is paged 50/page — attribute the pages to the metrics.
+    metrics::add(Source::PlaylistList, spotify_playlists.len().div_ceil(50) as u64);
 
     // ── Step 3: Process each playlist ────────────────────────────────────
     let mut new_playlists = 0;
@@ -395,10 +398,26 @@ async fn run_poll_cycle(
         }
     }
 
-    // ── Step 4b: Sync Liked Songs (exactly once per cycle) ────────────
+    // ── Step 4b: Sync Liked Songs (interval-gated) ────────────────
     // Best-effort: respects cancellation + the process-wide cooldown and never
     // aborts the cycle on failure (a 429 reports itself into the cooldown).
-    let liked_stats = run_liked_sync_step(db, &spotify_client, cancel_token).await;
+    // Runs on its OWN interval (`spotify.liked_sync_interval_secs`, default 1 h)
+    // — not on every 15-min poll cycle. The sync itself is incremental.
+    let liked_stats = if liked_sync_due(db).await {
+        let stats = run_liked_sync_step(db, &spotify_client, cancel_token).await;
+        if stats.is_some() {
+            let now = now_unix();
+            if let Err(e) =
+                db::set_setting(db, db::KEY_LIKED_SYNC_LAST_AT, &now.to_string()).await
+            {
+                warn!("Global poller: failed to stamp liked-sync time: {e:#}");
+            }
+        }
+        stats
+    } else {
+        debug!("Global poller: liked-sync not due yet (interval gate)");
+        None
+    };
     let liked_linked = liked_stats.as_ref().map(|s| s.linked).unwrap_or(0);
 
     let liked_summary = match &liked_stats {
@@ -407,7 +426,7 @@ async fn run_poll_cycle(
     };
     // ── Step 5: Summary ──────────────────────────────────────────────────
     let summary = format!(
-        "{} playlists: {} new, {} changed, {} skipped, {} deleted, {} new track(s); liked sync: {}",
+        "{} playlists: {} new, {} changed, {} skipped, {} deleted, {} new track(s); liked sync: {}; api: {}",
         spotify_count,
         new_playlists,
         changed_playlists,
@@ -415,6 +434,7 @@ async fn run_poll_cycle(
         deleted_count,
         new_tracks_total,
         liked_summary,
+        metrics::summary(),
     );
     task_manager.add_log(&task_id, summary.clone()).await;
     info!("Global poller: cycle complete — {}", summary);
@@ -443,6 +463,33 @@ async fn run_poll_cycle(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Unix seconds now.
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Whether the liked-songs sync is due under its own interval gate
+/// (`spotify.liked_sync_interval_secs`, default 1 h, floor 60 s).
+async fn liked_sync_due(db: &Pool<Sqlite>) -> bool {
+    let interval = db::get_setting(db, db::KEY_LIKED_SYNC_INTERVAL_SECS)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(3600)
+        .max(60);
+    let last = db::get_setting(db, db::KEY_LIKED_SYNC_LAST_AT)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    now_unix() - last >= interval
+}
 
 /// Gate for the liked-sync step: allowed only without an active process-wide
 /// Spotify cooldown. Free function so the gate is testable without network.
@@ -496,7 +543,12 @@ async fn fetch_and_store_playlist_tracks(
     playlist: &SimplifiedPlaylistData,
     cancel_token: &CancellationToken,
 ) -> Result<i64> {
-    // ── Upsert the playlist record ───────────────────────────────────────
+    // Approximate requests: the playlist details + N pages of tracks (100/page).
+    metrics::add(
+        Source::PlaylistTracks,
+        1 + (playlist.track_count.max(0) as u64).div_ceil(100),
+    );
+    // ── Upsert the playlist record ──────────────────────────────
     let db_playlist_id = {
         let mut tx = db.begin().await?;
         let sp = db::upsert_service_playlist(

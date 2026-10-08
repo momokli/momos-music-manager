@@ -1,6 +1,6 @@
 # Active Plans
 
-**56 done** · **0 in progress** · **20 proposed**
+**56 done** · **0 in progress** · **21 proposed**
 
 ## Proposed
 
@@ -25,6 +25,7 @@
 - [laboratory-analysis-pipeline](proposed/laboratory-analysis-pipeline.md) — `feat/laboratory-analysis`
 - [fix-deemix-auto-download-retry](proposed/fix-deemix-auto-download-retry.md) — `fix/deemix-auto-download-retry`
 - [bpm-key-playlists](proposed/bpm-key-playlists.md) — `feat/bpm-key-playlists`
+- [spotify-api-diet](proposed/spotify-api-diet.md) — `feat/spotify-api-diet`
 
 ## Done
 

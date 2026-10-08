@@ -567,9 +567,25 @@ async fn spotify_sync_playlists_batch_handler(
 }
 
 // ── Router ────────────────────────────────────────────────────────────────
+// ── Router ────────────────────────────────────────────────
+
+/// GET /api/services/spotify/metrics — process-wide Spotify request counters.
+async fn spotify_metrics_handler() -> impl IntoResponse {
+    let counters: Vec<serde_json::Value> = crate::spotify::metrics::snapshot()
+        .into_iter()
+        .map(|(name, count)| serde_json::json!({ "name": name, "count": count }))
+        .collect();
+    Json(ApiResponse {
+        data: serde_json::json!({
+            "counters": counters,
+            "total": crate::spotify::metrics::total(),
+        }),
+    })
+}
 
 pub(super) fn router() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/services/spotify/metrics", get(spotify_metrics_handler))
         .route(
             "/api/services/spotify/sync",
             post(spotify_sync_direct_handler),
