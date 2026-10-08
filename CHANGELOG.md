@@ -8,6 +8,34 @@ All notable changes to Momo's Music Manager.
 
 ---
 
+## [1.15.1] — 2026-10-08
+
+### Fixed
+
+- **Liked-songs sync API load (#147, PR #148)**: the sync re-fetched every `/me/tracks`
+  page on every 15-minute poll cycle (~1,048 requests/cycle, ~100k/day at ~52k likes) —
+  the dominant cause of the app-level rate-limit exhaustion and the chronic multi-hour
+  `Retry-After` 429s. It is now incremental: page newest-first and stop once a full page
+  is unchanged, upsert only new/changed memberships, and retire only when the like total
+  shrank (rare full scan). Steady state drops to ~1–3 requests per pass.
+- **`sync_bpm_key_playlists` stuck in `Running` (#148)**: the early-abort/cancel paths
+  skipped finalization, leaving the task at `Running` — whose `bpm_key_sync` conflict key
+  then rejected every later sync. Every exit path now finalizes the task.
+
+### Changed
+
+- Liked-songs sync runs on its own interval (`spotify.liked_sync_interval_secs`, default
+  3600 s) instead of on every poll cycle.
+
+### Added
+
+- **Spotify request metrics**: process-wide per-source counters (`liked_sync`,
+  `playlist_list`, `playlist_tracks`, `subscriptions`, `bpm_key_sync`, `auth`, `other`)
+  exposed at `GET /api/services/spotify/metrics` and in the poll-cycle summary log.
+- bpm-key reconcile stages its Spotify calls with a 250 ms inter-call delay.
+
+---
+
 ## [1.15.0] — 2026-10-08
 
 ### Added
