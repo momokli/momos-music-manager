@@ -26,9 +26,17 @@ content %}
 <p class="hub-muted">
     Seed: <a href="/track/{{ seed_id }}">{{ seed_artists }} — {{ seed_title }}</a> {% if
     seed_bpm != "" %}· {{ seed_bpm }} BPM{% endif %} {% if seed_key != "" %}· {{ seed_key
-    }}{% endif %} · Quellen: Hub-intern, ReccoBeats{% if lastfm_enabled %}, Last.fm{%
-    endif %}
+    }}{% endif %} · Quellen: Hub-intern, ReccoBeats, cosine.club{% if lastfm_enabled %},
+    Last.fm{% endif %}
 </p>
+
+{% if freqblog_enabled %}
+<form method="post" action="/digging/enrich?seed={{ seed_id }}" class="hub-actions">
+    <button type="submit" class="secondary outline">
+        BPM/Key für Seed + Kandidaten nachladen (FreqBlog, {{ freqblog_remaining }} übrig)
+    </button>
+</form>
+{% endif %}
 
 <nav class="hub-filter" aria-label="Filter">
     <ul>

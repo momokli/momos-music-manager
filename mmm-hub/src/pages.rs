@@ -10,7 +10,7 @@ use askama::Template;
 use axum::extract::{Form, Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
 use sqlx::{QueryBuilder, Row};
@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .route("/playlists/similar", get(similar_page))
         .route("/tags", get(tags_page))
         .route("/digging", get(digging_page))
+        .route("/digging/enrich", post(digging_enrich))
         .route("/admin", get(admin_page).post(admin_save))
         .route("/settings", get(settings_page))
         .route("/user/{slug}", get(user_page))
@@ -858,6 +859,8 @@ struct DiggingPage {
     seed_artists: String,
     rows: Vec<DigRow>,
     lastfm_enabled: bool,
+    freqblog_enabled: bool,
+    freqblog_remaining: i64,
     seed_bpm: String,
     seed_key: String,
     filters: Vec<ScopeLink>,
@@ -940,6 +943,12 @@ async fn digging_page(
         return Redirect::to("/login").into_response();
     };
     let lastfm_enabled = st.cfg.lastfm_api_key.is_some();
+    let freqblog_enabled = crate::freqblog::enabled(&st.cfg);
+    let freqblog_remaining = if freqblog_enabled {
+        crate::freqblog::remaining(&st.pool, &st.cfg).await
+    } else {
+        0
+    };
 
     let mut has_seed = false;
     let (mut seed_id, mut seed_title, mut seed_artists) = (0i64, String::new(), String::new());
@@ -1170,10 +1179,39 @@ async fn digging_page(
         seed_artists,
         rows,
         lastfm_enabled,
+        freqblog_enabled,
+        freqblog_remaining,
         seed_bpm: seed_bpm.map(|b| format!("{b:.0}")).unwrap_or_default(),
         seed_key: seed_camelot,
         filters,
     })
+}
+
+/// Manual FreqBlog enrichment for the active digging session: the seed plus its
+/// hub-internal candidates (the tracks BPM/key filters care about). Bounded by a
+/// per-click cap and the remaining monthly budget.
+async fn digging_enrich(
+    State(st): State<AppState>,
+    Query(q): Query<DiggingQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(_nav) = crate::ui::nav(&st, &headers, "digging").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(sid) = q.seed else {
+        return Redirect::to("/digging").into_response();
+    };
+    if crate::freqblog::enabled(&st.cfg) {
+        let mut ids = vec![sid];
+        for s in crate::digging::internal_suggestions(&st.pool, sid, 100)
+            .await
+            .unwrap_or_default()
+        {
+            ids.push(s.id);
+        }
+        let _ = crate::freqblog::enrich_tracks(&st.pool, &st.cfg, &ids, 40).await;
+    }
+    Redirect::to(&format!("/digging?seed={sid}")).into_response()
 }
 
 // ── admin (settings) ────────────────────────────────────────────────────────

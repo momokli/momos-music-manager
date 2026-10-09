@@ -217,8 +217,80 @@ pub async fn lookup(
     }
 }
 
-/// One backfill batch: resolve up to `limit` tracks that still lack features,
-/// bounded by the remaining monthly budget. Returns `(processed, exhausted)`.
+/// Enrich one track by id if it still lacks features. Returns `None` when the
+/// track doesn't exist or already has features (`found = 1`) — those cost
+/// nothing. Otherwise performs the lookup, records quota and stores the result.
+async fn enrich_one(pool: &SqlitePool, cfg: &Config, track_id: i64) -> Result<Option<Lookup>> {
+    let row = sqlx::query(
+        "SELECT t.isrc AS isrc, t.title AS title, t.artists AS artists,
+                (f.track_id IS NOT NULL AND f.found = 1) AS have
+           FROM hub_tracks t
+           LEFT JOIN hub_track_features f ON f.track_id = t.id
+          WHERE t.id = ?1",
+    )
+    .bind(track_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    let Some(r) = row else {
+        return Ok(None);
+    };
+    if r.get::<i64, _>("have") == 1 {
+        return Ok(None);
+    }
+    let isrc = r.get::<Option<String>, _>("isrc").unwrap_or_default();
+    let title = r.get::<Option<String>, _>("title").unwrap_or_default();
+    let artists = r.get::<Option<String>, _>("artists").unwrap_or_default();
+    let isrc = isrc.trim();
+
+    let outcome = lookup(cfg, (!isrc.is_empty()).then_some(isrc), &artists, &title).await?;
+    add_usage(pool, PROVIDER, outcome.charged).await?;
+    if let Some(f) = &outcome.feature {
+        store_found(pool, track_id, f).await?;
+    } else if !outcome.stop {
+        // 404 (no match anywhere) — record as tried so we don't spend budget again.
+        store_missing(pool, track_id).await?;
+    }
+    Ok(Some(outcome))
+}
+
+/// Enrich an explicit set of tracks (manual digging), bounded by `limit` and the
+/// remaining monthly budget. Tracks that already have features are skipped free
+/// of charge. Returns `(billed_tracks, stopped)`.
+pub async fn enrich_tracks(
+    pool: &SqlitePool,
+    cfg: &Config,
+    ids: &[i64],
+    limit: usize,
+) -> Result<(usize, bool)> {
+    if !enabled(cfg) {
+        return Ok((0, true));
+    }
+    let mut processed = 0usize;
+    for &id in ids {
+        if processed >= limit {
+            break;
+        }
+        if remaining(pool, cfg).await <= 0 {
+            return Ok((processed, true));
+        }
+        match enrich_one(pool, cfg, id).await? {
+            None => continue,
+            Some(o) => {
+                processed += 1;
+                if o.stop {
+                    return Ok((processed, true));
+                }
+            }
+        }
+    }
+    Ok((processed, false))
+}
+
+/// Automatic backfill batch over the library, bounded by the monthly budget.
+/// Kept for one-off/manual use — the app does **not** schedule it; FreqBlog is
+/// reserved for manual digging sessions. Returns `(processed, exhausted)`.
 pub async fn backfill(pool: &SqlitePool, cfg: &Config, limit: usize) -> Result<(usize, bool)> {
     if !enabled(cfg) {
         return Ok((0, true));
@@ -227,12 +299,12 @@ pub async fn backfill(pool: &SqlitePool, cfg: &Config, limit: usize) -> Result<(
     if budget <= 0 {
         return Ok((0, true));
     }
-    let take = (limit as i64).min(budget) as i64;
+    let take = (limit as i64).min(budget);
 
     // Tracks with an ISRC and no usable features yet: either never tried, or
     // tried by ReccoBeats and missed (`found = 0`).
     let rows = sqlx::query(
-        "SELECT t.id AS tid, t.isrc AS isrc, t.title AS title, t.artists AS artists
+        "SELECT t.id AS tid
            FROM hub_tracks t
            LEFT JOIN hub_track_features f ON f.track_id = t.id
           WHERE t.isrc IS NOT NULL AND trim(t.isrc) <> ''
@@ -244,34 +316,11 @@ pub async fn backfill(pool: &SqlitePool, cfg: &Config, limit: usize) -> Result<(
     .fetch_all(pool)
     .await
     .unwrap_or_default();
-
-    let mut processed = 0usize;
-    let mut stopped = false;
-    for r in &rows {
-        if remaining(pool, cfg).await <= 0 {
-            stopped = true;
-            break;
-        }
-        let tid = r.get::<i64, _>("tid");
-        let isrc = r.get::<Option<String>, _>("isrc").unwrap_or_default();
-        let title = r.get::<Option<String>, _>("title").unwrap_or_default();
-        let artists = r.get::<Option<String>, _>("artists").unwrap_or_default();
-
-        let outcome = lookup(cfg, Some(&isrc), &artists, &title).await?;
-        add_usage(pool, PROVIDER, outcome.charged).await?;
-        processed += 1;
-
-        if let Some(f) = &outcome.feature {
-            store_found(pool, tid, f).await?;
-        } else if !outcome.stop {
-            // 404 (no match) — record as tried so we don't spend budget again.
-            store_missing(pool, tid).await?;
-        }
-        if outcome.stop {
-            stopped = true;
-            break;
-        }
+    let ids: Vec<i64> = rows.iter().map(|r| r.get::<i64, _>("tid")).collect();
+    if ids.is_empty() {
+        return Ok((0, true));
     }
+    let (processed, stopped) = enrich_tracks(pool, cfg, &ids, take as usize).await?;
     Ok((processed, stopped || processed == 0))
 }
 
@@ -362,5 +411,23 @@ mod tests {
         let cfg = Config::for_test("sqlite::memory:");
         assert!(!enabled(&cfg));
         assert_eq!(cfg.freqblog_monthly_cap, 950);
+    }
+
+    #[tokio::test]
+    async fn quota_counter_and_remaining() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite:{}", dir.path().join("t.db").display());
+        let pool = crate::db::connect(&url).await.unwrap();
+        let mut cfg = Config::for_test(&url);
+        cfg.freqblog_api_key = Some("k".into());
+
+        assert_eq!(remaining(&pool, &cfg).await, 950);
+        add_usage(&pool, PROVIDER, 3).await.unwrap();
+        assert_eq!(used(&pool, PROVIDER).await, 3);
+        assert_eq!(remaining(&pool, &cfg).await, 947);
+
+        // Cap is configurable; remaining floors at 0.
+        cfg.freqblog_monthly_cap = 2;
+        assert_eq!(remaining(&pool, &cfg).await, 0);
     }
 }
