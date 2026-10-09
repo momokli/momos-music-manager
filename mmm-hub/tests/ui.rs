@@ -378,6 +378,41 @@ async fn similar_scope_contributed_keeps_only_collaborative() {
 }
 
 #[tokio::test]
+async fn tag_categories_are_per_user_and_adoptable() {
+    let app = common::spawn().await;
+
+    let cat_a = mmm_hub::tags::create_category(&app.pool, app.seed.alice, "Mood", "💜")
+        .await
+        .unwrap();
+    let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
+        .await
+        .unwrap();
+    mmm_hub::tags::set_tag_category(&app.pool, app.seed.alice, tag, Some(cat_a))
+        .await
+        .unwrap();
+    assert_eq!(
+        mmm_hub::tags::tag_detail(&app.pool, tag)
+            .await
+            .unwrap()
+            .category,
+        "Mood"
+    );
+
+    // Bob sees alice's category and adopts (copies) it.
+    let others = mmm_hub::tags::list_other_categories(&app.pool, app.seed.bob).await;
+    assert!(others.iter().any(|(_, name, _, owner)| name == "Mood" && owner == "alice"));
+    let cat_b = mmm_hub::tags::adopt_category(&app.pool, app.seed.bob, others[0].0)
+        .await
+        .unwrap();
+    assert!(
+        mmm_hub::tags::list_categories(&app.pool, app.seed.bob)
+            .await
+            .iter()
+            .any(|c| c.id == cat_b && c.name == "Mood")
+    );
+}
+
+#[tokio::test]
 async fn tags_are_explicit_and_per_user() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;

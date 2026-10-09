@@ -23,6 +23,11 @@ pub fn router(state: AppState) -> Router {
         .route("/overlap", get(overlap_page))
         .route("/playlists/similar", get(similar_page))
         .route("/tags", get(tags_page))
+        .route("/tag/{id}", get(tag_detail_page))
+        .route("/tag/{id}/category", post(tag_set_category))
+        .route("/tag-categories", post(category_create))
+        .route("/tag-categories/adopt", post(category_adopt))
+        .route("/tag-categories/{id}/delete", post(category_delete))
         .route("/digging", get(digging_page))
         .route("/digging/enrich", post(digging_enrich))
         .route("/admin", get(admin_page).post(admin_save))
@@ -1431,6 +1436,8 @@ async fn admin_save(
 #[derive(Deserialize, Default)]
 struct TagFilter {
     q: Option<String>,
+    /// "1" = only my tags.
+    mine: Option<String>,
 }
 
 #[derive(Template)]
@@ -1439,12 +1446,25 @@ struct TagsPage {
     nav: crate::ui::Nav,
     flash: String,
     q: String,
+    mine: bool,
+    categories: Vec<crate::tags::Category>,
+    other_categories: Vec<OtherCategory>,
+    icons: &'static [&'static str],
     tags: Vec<TagRow>,
 }
 
+struct OtherCategory {
+    id: i64,
+    name: String,
+    icon: String,
+    owner: String,
+}
+
 struct TagRow {
+    id: i64,
     name: String,
     owner: String,
+    category: String,
     track_count: i64,
     user_count: i64,
     source_count: i64,
@@ -1460,9 +1480,11 @@ async fn tags_page(
         return Redirect::to("/login").into_response();
     };
     let q = f.q.unwrap_or_default().trim().to_string();
+    let mine = f.mine.as_deref() == Some("1");
+    let me = nav.id;
 
     let rows = sqlx::query(
-        "SELECT t.id, t.name, u.slug AS owner,
+        "SELECT t.id, t.name, u.slug AS owner, COALESCE(c.name,'') AS category,
                 (SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id) AS track_count,
                 (SELECT COUNT(DISTINCT user_id) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS user_count,
                 (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count,
@@ -1470,11 +1492,15 @@ async fn tags_page(
                    JOIN hub_users u2 ON u2.id = s.user_id WHERE s.tag_id = t.id) AS users
            FROM hub_tags t
            JOIN hub_users u ON u.id = t.owner_user_id
+           LEFT JOIN hub_tag_categories c ON c.id = t.category_id
           WHERE (?1 = '' OR lower(t.name) LIKE '%' || lower(?1) || '%')
-          ORDER BY u.slug, track_count DESC, t.name
+            AND (?2 = 0 OR t.owner_user_id = ?3)
+          ORDER BY u.slug, COALESCE(c.name,'zz'), t.name
           LIMIT 1000",
     )
     .bind(&q)
+    .bind(mine as i64)
+    .bind(me)
     .fetch_all(&st.pool)
     .await
     .unwrap_or_default();
@@ -1482,8 +1508,10 @@ async fn tags_page(
     let tags: Vec<TagRow> = rows
         .iter()
         .map(|r| TagRow {
+            id: r.get::<i64, _>("id"),
             name: r.get::<Option<String>, _>("name").unwrap_or_default(),
             owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
+            category: r.get::<Option<String>, _>("category").unwrap_or_default(),
             track_count: r.get::<Option<i64>, _>("track_count").unwrap_or(0),
             user_count: r.get::<Option<i64>, _>("user_count").unwrap_or(0),
             source_count: r.get::<Option<i64>, _>("source_count").unwrap_or(0),
@@ -1491,12 +1519,156 @@ async fn tags_page(
         })
         .collect();
 
+    let categories = crate::tags::list_categories(&st.pool, me).await;
+    let other_categories: Vec<OtherCategory> = crate::tags::list_other_categories(&st.pool, me)
+        .await
+        .into_iter()
+        .map(|(id, name, icon, owner)| OtherCategory {
+            id,
+            name,
+            icon,
+            owner,
+        })
+        .collect();
+
     render(&TagsPage {
         nav,
         flash: String::new(),
         q,
+        mine,
+        categories,
+        other_categories,
+        icons: crate::tags::ICONS,
         tags,
     })
+}
+
+// ── tag detail + categories ──────────────────────────────────────────────────
+
+struct TagTrack {
+    id: i64,
+    title: String,
+    artists: String,
+}
+
+#[derive(Template)]
+#[template(path = "tag.html")]
+struct TagDetailPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    id: i64,
+    name: String,
+    owner: String,
+    category: String,
+    /// 0 = no category.
+    category_id: i64,
+    source_count: i64,
+    mine: bool,
+    categories: Vec<crate::tags::Category>,
+    tracks: Vec<TagTrack>,
+}
+
+async fn tag_detail_page(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(d) = crate::tags::tag_detail(&st.pool, id).await else {
+        return not_found("Tag nicht gefunden.");
+    };
+    let categories = crate::tags::list_categories(&st.pool, nav.id).await;
+    let mine = d.owner == nav.slug;
+    let tracks = d
+        .tracks
+        .into_iter()
+        .map(|(id, title, artists)| TagTrack {
+            id,
+            title,
+            artists,
+        })
+        .collect();
+    render(&TagDetailPage {
+        nav,
+        flash: String::new(),
+        id: d.id,
+        name: d.name,
+        owner: d.owner,
+        category: d.category,
+        category_id: d.category_id.unwrap_or(0),
+        source_count: d.source_count,
+        mine,
+        categories,
+        tracks,
+    })
+}
+
+#[derive(Deserialize)]
+struct SetCatForm {
+    category_id: String,
+}
+
+async fn tag_set_category(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<SetCatForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let cat = f.category_id.trim().parse::<i64>().ok();
+    let _ = crate::tags::set_tag_category(&st.pool, uid, id, cat).await;
+    Redirect::to(&format!("/tag/{id}")).into_response()
+}
+
+#[derive(Deserialize)]
+struct CategoryForm {
+    name: String,
+    icon: Option<String>,
+}
+
+async fn category_create(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<CategoryForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::create_category(&st.pool, uid, &f.name, f.icon.as_deref().unwrap_or("")).await;
+    Redirect::to("/tags").into_response()
+}
+
+#[derive(Deserialize)]
+struct IdForm {
+    id: i64,
+}
+
+async fn category_adopt(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<IdForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::adopt_category(&st.pool, uid, f.id).await;
+    Redirect::to("/tags").into_response()
+}
+
+async fn category_delete(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::delete_category(&st.pool, uid, id).await;
+    Redirect::to("/tags").into_response()
 }
 
 // ── settings ────────────────────────────────────────────────────────────────

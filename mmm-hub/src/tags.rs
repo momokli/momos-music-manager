@@ -269,6 +269,197 @@ pub async fn tags_feeding_playlist(
     .unwrap_or_default()
 }
 
+// ── categories (per user) ────────────────────────────────────────────────────
+
+/// Pickable icons (emoji — no FontAwesome dependency in the hub).
+pub const ICONS: &[&str] = &[
+    "🎧", "🎵", "🔥", "💜", "✨", "#️⃣", "🌙", "⚡", "🌊", "🕺", "🎚️", "🚀", "🧊", "🌶️", "🪩", "🎯",
+];
+
+#[derive(Debug, Clone)]
+pub struct Category {
+    pub id: i64,
+    pub name: String,
+    pub icon: String,
+    pub slug: String,
+    pub tag_count: i64,
+}
+
+/// Create a category for a user (idempotent on the slug).
+pub async fn create_category(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    name: &str,
+    icon: &str,
+) -> Result<i64> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("category name required");
+    }
+    let slug = normalize_name(name);
+    let now = chrono::Utc::now().to_rfc3339();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_tag_categories (owner_user_id, name, slug, icon, sort_order, created_at)
+         VALUES (?1, ?2, ?3, ?4, 0, ?5)
+         ON CONFLICT(owner_user_id, slug) DO UPDATE SET icon = excluded.icon
+         RETURNING id",
+    )
+    .bind(owner_user_id)
+    .bind(name)
+    .bind(&slug)
+    .bind(icon)
+    .bind(&now)
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
+}
+
+pub async fn delete_category(pool: &SqlitePool, owner_user_id: i64, id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM hub_tag_categories WHERE id = ?1 AND owner_user_id = ?2")
+        .bind(id)
+        .bind(owner_user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// A user's own categories, with their tag counts.
+pub async fn list_categories(pool: &SqlitePool, owner_user_id: i64) -> Vec<Category> {
+    sqlx::query_as::<_, (i64, String, String, String, i64)>(
+        "SELECT c.id, c.name, c.icon, c.slug,
+                (SELECT COUNT(*) FROM hub_tags t WHERE t.category_id = c.id) AS tag_count
+           FROM hub_tag_categories c
+          WHERE c.owner_user_id = ?1
+          ORDER BY c.sort_order, c.name",
+    )
+    .bind(owner_user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(id, name, icon, slug, tag_count)| Category {
+        id,
+        name,
+        icon,
+        slug,
+        tag_count,
+    })
+    .collect()
+}
+
+/// Category suggestions from other users: `(id, name, icon, owner slug)`.
+pub async fn list_other_categories(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+) -> Vec<(i64, String, String, String)> {
+    sqlx::query_as::<_, (i64, String, String, String)>(
+        "SELECT c.id, c.name, c.icon, u.slug FROM hub_tag_categories c
+           JOIN hub_users u ON u.id = c.owner_user_id
+          WHERE c.owner_user_id <> ?1
+          ORDER BY u.slug, c.name",
+    )
+    .bind(owner_user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
+/// Adopt (copy) another user's category into the caller's own. Returns the id.
+pub async fn adopt_category(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    source_id: i64,
+) -> Result<i64> {
+    let row = sqlx::query("SELECT name, icon, slug FROM hub_tag_categories WHERE id = ?1")
+        .bind(source_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+    let Some(r) = row else {
+        bail!("category {source_id} not found");
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_tag_categories (owner_user_id, name, slug, icon, sort_order, created_at)
+         VALUES (?1, ?2, ?3, ?4, 0, ?5)
+         ON CONFLICT(owner_user_id, slug) DO UPDATE SET name = excluded.name
+         RETURNING id",
+    )
+    .bind(owner_user_id)
+    .bind(r.get::<String, _>("name"))
+    .bind(r.get::<String, _>("slug"))
+    .bind(r.get::<String, _>("icon"))
+    .bind(&now)
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
+}
+
+/// Assign a tag (owned by the user) to one of their categories (or none).
+pub async fn set_tag_category(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    tag_id: i64,
+    category_id: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE hub_tags SET category_id = ?1
+          WHERE id = ?2 AND owner_user_id = ?3",
+    )
+    .bind(category_id)
+    .bind(tag_id)
+    .bind(owner_user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// One tag with its owner, category and tracks (for the detail page).
+pub struct TagDetail {
+    pub id: i64,
+    pub name: String,
+    pub owner: String,
+    pub category_id: Option<i64>,
+    pub category: String,
+    pub source_count: i64,
+    pub tracks: Vec<(i64, String, String)>,
+}
+
+pub async fn tag_detail(pool: &SqlitePool, tag_id: i64) -> Option<TagDetail> {
+    let row = sqlx::query(
+        "SELECT t.id, t.name, t.category_id, u.slug AS owner, COALESCE(c.name,'') AS category,
+                (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count
+           FROM hub_tags t
+           JOIN hub_users u ON u.id = t.owner_user_id
+           LEFT JOIN hub_tag_categories c ON c.id = t.category_id
+          WHERE t.id = ?1",
+    )
+    .bind(tag_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    let tracks = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT tr.id, COALESCE(tr.title,''), COALESCE(tr.artists,'')
+           FROM hub_track_resolved_tags r JOIN hub_tracks tr ON tr.id = r.track_id
+          WHERE r.tag_id = ?1 ORDER BY tr.artists, tr.title LIMIT 1000",
+    )
+    .bind(tag_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    Some(TagDetail {
+        id: row.get("id"),
+        name: row.get("name"),
+        owner: row.get("owner"),
+        category_id: row.get("category_id"),
+        category: row.get("category"),
+        source_count: row.get("source_count"),
+        tracks,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{is_meta_playlist, normalize_name};

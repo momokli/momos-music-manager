@@ -1,0 +1,60 @@
+{% extends "base.html" %} {% block title %}{{ name }} — MMM Hub{% endblock %} {% block content %}
+<nav class="hub-crumbs" aria-label="Brotkrumen">
+    <ol>
+        <li><a href="/">Übersicht</a></li>
+        <li><a href="/tags">Tags</a></li>
+        <li>{{ name }}</li>
+    </ol>
+</nav>
+<hgroup>
+    <h1>{% if category != "" %}{{ category }} · {% endif %}{{ name }}</h1>
+    <p class="hub-muted">
+        Tag von <a href="/user/{{ owner }}">@{{ owner }}</a> · {{ source_count }} Quellen ·
+        {{ tracks.len() }} Tracks
+    </p>
+</hgroup>
+
+{% if mine %}
+<form
+    method="post"
+    action="/tag/{{ id }}/category"
+    style="display:flex;gap:.4rem;align-items:center;flex-wrap:wrap"
+>
+    <label>
+        Kategorie:
+        <select name="category_id">
+            <option value="">— keine —</option>
+            {% for c in categories %}
+            <option value="{{ c.id }}" {% if category_id == c.id %}selected{% endif %}>
+                {{ c.icon }} {{ c.name }}
+            </option>
+            {% endfor %}
+        </select>
+    </label>
+    <button type="submit">Speichern</button>
+</form>
+{% endif %} {% if tracks.is_empty() %}
+<p class="hub-muted">Keine Tracks (Quell-Playlist leer oder noch nicht gefetcht).</p>
+{% else %}
+<div class="overflow-auto hub-scroll-y">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Tracks dieses Tags
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">#</th>
+                <th scope="col">Track</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in tracks %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td><a href="/track/{{ t.id }}">{{ t.artists }} — {{ t.title }}</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %} {% endblock %}

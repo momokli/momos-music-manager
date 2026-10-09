@@ -3,13 +3,28 @@
 <hgroup>
     <h1>Tags</h1>
     <p class="hub-muted">
-        Tags sind <strong>pro User</strong> und entstehen erst, wenn ihr sie anlegt — z.
-        B. auf einer Playlist „als Tag anlegen". Die Playlist ist dann die Quelle des
-        Tags.
+        Tags sind <strong>pro User</strong> und entstehen, wenn ihr sie anlegt — z. B. auf
+        einer Playlist „als Tag anlegen". Eine Playlist ist dann eine Quelle des Tags; ein
+        Tag kann aus <strong>mehreren</strong> Playlists (eigenen oder gefolgten)
+        bestehen.
     </p>
 </hgroup>
 
+<nav aria-label="Filter">
+    <ul>
+        <li>
+            <a href="/tags?mine=1" {% if mine %}aria-current="page" {% endif %}
+                >Meine Tags</a
+            >
+        </li>
+        <li>
+            <a href="/tags" {% if !mine %}aria-current="page" {% endif %}>Alle Tags</a>
+        </li>
+    </ul>
+</nav>
+
 <form method="get" action="/tags" role="search">
+    {% if mine %}<input type="hidden" name="mine" value="1" />{% endif %}
     <input
         type="search"
         name="q"
@@ -20,33 +35,87 @@
     <button type="submit">Filtern</button>
 </form>
 
+<details>
+    <summary>Meine Kategorien ({{ categories.len() }})</summary>
+    <form
+        method="post"
+        action="/tag-categories"
+        style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center"
+    >
+        <input
+            type="text"
+            name="name"
+            placeholder="Kategoriename"
+            aria-label="Kategoriename"
+            required
+        />
+        <select name="icon" aria-label="Icon">
+            {% for i in icons %}
+            <option value="{{ i }}">{{ i }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit">Kategorie anlegen</button>
+    </form>
+
+    {% if !categories.is_empty() %}
+    <ul>
+        {% for c in categories %}
+        <li>
+            {{ c.icon }} <strong>{{ c.name }}</strong>
+            <span class="hub-muted">({{ c.tag_count }} Tags)</span>
+            <form
+                method="post"
+                action="/tag-categories/{{ c.id }}/delete"
+                style="display: inline"
+            >
+                <button type="submit" title="Kategorie löschen">×</button>
+            </form>
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %} {% if !other_categories.is_empty() %}
+    <p class="hub-muted">Von anderen übernehmen:</p>
+    <ul>
+        {% for c in other_categories %}
+        <li>
+            {{ c.icon }} {{ c.name }} <span class="hub-muted">@{{ c.owner }}</span>
+            <form method="post" action="/tag-categories/adopt" style="display: inline">
+                <input type="hidden" name="id" value="{{ c.id }}" />
+                <button type="submit" class="secondary">übernehmen</button>
+            </form>
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+</details>
+
 {% if tags.is_empty() %}
 <p class="hub-muted">
-    Noch keine Tags — öffne eine <a href="/me/playlists">Playlist</a> und klicke „als Tag
+    Keine Tags. Öffne eine <a href="/me/playlists">Playlist</a> und klicke „als Tag
     anlegen".
 </p>
 {% else %}
 <div class="overflow-auto hub-scroll-y">
     <table class="hub-dense-table">
         <caption class="hub-visually-hidden">
-            Tags mit Track- und Quellen-Anzahl
+            Tags mit Kategorie, Besitzer und Anzahl
         </caption>
         <thead>
             <tr>
                 <th scope="col">Tag</th>
+                <th scope="col">Kategorie</th>
                 <th scope="col">Besitzer</th>
                 <th scope="col">Tracks</th>
-                <th scope="col">User</th>
                 <th scope="col">Quellen</th>
             </tr>
         </thead>
         <tbody>
             {% for t in tags %}
             <tr>
-                <td>{{ t.name }}</td>
+                <td><a href="/tag/{{ t.id }}">{{ t.name }}</a></td>
+                <td>{% if t.category != "" %}{{ t.category }}{% else %}—{% endif %}</td>
                 <td><a href="/user/{{ t.owner }}">@{{ t.owner }}</a></td>
                 <td>{{ t.track_count }}</td>
-                <td>{{ t.users }} <span class="hub-muted">({{ t.user_count }})</span></td>
                 <td>{{ t.source_count }}</td>
             </tr>
             {% endfor %}
