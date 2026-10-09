@@ -323,6 +323,50 @@
         background: #123c22;
         color: #7fe0a0;
       }
+      /* Overlap: allow long content to wrap so horizontal scrolling is never needed */
+      .hub-cell-track {
+        overflow-wrap: anywhere;
+      }
+      .hub-cell-pl {
+        overflow-wrap: anywhere;
+        white-space: normal;
+      }
+      .hub-cell-pl .hub-tag {
+        display: block;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        margin: 0 0 0.1rem;
+      }
+      /* Sortable column headers */
+      .hub-sort {
+        text-decoration: none;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .hub-sort-on {
+        color: var(--pico-primary);
+      }
+      /* Playlist include picker */
+      details.hub-plpicker {
+        flex-basis: 100%;
+      }
+      .hub-plpick {
+        max-height: 18rem;
+        overflow-y: auto;
+        border: 1px solid var(--pico-muted-border-color);
+        border-radius: 0.35rem;
+        padding: 0.3rem 0.55rem;
+        margin-top: 0.35rem;
+        columns: 2 20rem;
+      }
+      .hub-plpick-item {
+        display: flex;
+        gap: 0.35rem;
+        align-items: baseline;
+        font-size: 0.8rem;
+        margin: 0;
+        break-inside: avoid;
+      }
       .hub-nowrap {
         white-space: nowrap;
       }

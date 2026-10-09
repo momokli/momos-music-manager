@@ -412,6 +412,64 @@ async fn overlap_bpm_survives_large_track_set() {
 }
 
 #[tokio::test]
+async fn overlap_sort_and_playlist_filter() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    async fn fetch(app: &common::TestApp, cookie: &str, path: &str) -> String {
+        let resp = app
+            .client()
+            .get(app.url(path))
+            .header("Cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        body(resp).await
+    }
+
+    for (tid, bpm, key, energy) in [
+        (app.seed.t_all, 128.0, "8A", 0.9),
+        (app.seed.t_two, 140.0, "9A", 0.5),
+        (app.seed.t_pl, 120.0, "3B", 0.1),
+    ] {
+        sqlx::query(
+            "INSERT INTO hub_track_features (track_id, found, bpm, camelot, energy)
+             VALUES (?1, 1, ?2, ?3, ?4)",
+        )
+        .bind(tid)
+        .bind(bpm)
+        .bind(key)
+        .bind(energy)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+
+    // BPM ascending: Playlist Only (120) < Shared Anthem (128) < Two Users (140).
+    let asc = fetch(&app, &cookie, "/overlap?sort=bpm&dir=asc").await;
+    let i_pl = asc.find("Playlist Only").unwrap();
+    let i_all = asc.find("Shared Anthem").unwrap();
+    let i_two = asc.find("Two Users").unwrap();
+    assert!(i_pl < i_all && i_all < i_two, "bpm asc ordering");
+
+    // BPM descending: the 140 track comes before the 128 one.
+    let desc = fetch(&app, &cookie, "/overlap?sort=bpm&dir=desc").await;
+    assert!(desc.find("Two Users").unwrap() < desc.find("Shared Anthem").unwrap());
+
+    // Energy ascending: the 0.1 track before the 0.9 one.
+    let e = fetch(&app, &cookie, "/overlap?sort=energy&dir=asc").await;
+    assert!(e.find("Playlist Only").unwrap() < e.find("Shared Anthem").unwrap());
+
+    // Playlist filter: with only carol's playlist, the playlist-only track
+    // (present via alice's/bob's playlists) drops out, likes stay.
+    let carol = fetch(&app, &cookie, &format!("/overlap?pl={}", app.seed.pl_carol)).await;
+    assert!(!carol.contains("Playlist Only"));
+    assert!(carol.contains("Shared Anthem"));
+    assert!(carol.contains("gefiltert"), "picker marks active filter");
+}
+
+#[tokio::test]
 async fn toggle_returns_row_fragment_for_htmx() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;

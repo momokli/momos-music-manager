@@ -430,10 +430,14 @@ struct CompareQuery {
     key: Option<String>,
     /// `1`/`on` = include harmonically compatible keys, not just the exact key.
     key_harmonic: Option<String>,
+    /// Sort field: `present` (default) | `bpm` | `key` | `energy`.
+    sort: Option<String>,
+    /// `asc` | `desc` (default `desc` for `present`, `asc` otherwise).
+    dir: Option<String>,
 }
 
 /// The overlap filters that must be carried across the picker/scope links,
-/// so toggling a user or scope keeps the BPM/key selection.
+/// so toggling a user or scope keeps the BPM/key/sort/playlist selection.
 #[derive(Clone, Default)]
 struct OverlapFilters {
     scope: String,
@@ -441,6 +445,9 @@ struct OverlapFilters {
     bpm_max: String,
     key: String,
     key_harmonic: bool,
+    sort: String,
+    dir: String,
+    pl: Vec<i64>,
 }
 
 impl OverlapFilters {
@@ -466,8 +473,24 @@ impl OverlapFilters {
         if self.key_harmonic {
             url.push_str("&key_harmonic=1");
         }
+        if self.sort != "present" {
+            url.push_str(&format!("&sort={}", self.sort));
+        }
+        if self.dir != "desc" {
+            url.push_str(&format!("&dir={}", self.dir));
+        }
+        for id in &self.pl {
+            url.push_str(&format!("&pl={id}"));
+        }
         url
     }
+}
+
+/// A clickable column-header sort link.
+struct SortLink {
+    href: String,
+    active: bool,
+    arrow: String,
 }
 
 /// All 24 Camelot keys for the key picker.
@@ -478,6 +501,33 @@ fn camelot_values() -> Vec<String> {
         v.push(format!("{n}B"));
     }
     v
+}
+
+/// Compare two optional numeric values, always sorting `None` last.
+fn opt_cmp(a: Option<f64>, b: Option<f64>, desc: bool) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Some(x), Some(y)) => {
+            let o = x.partial_cmp(&y).unwrap_or(Ordering::Equal);
+            if desc {
+                o.reverse()
+            } else {
+                o
+            }
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// Sort rank for a Camelot key (`"8A"` -> `(8, 'A')`); `None` for "—"/invalid.
+fn camelot_rank(k: &str) -> Option<(i32, char)> {
+    if k.len() < 2 {
+        return None;
+    }
+    let (num, letter) = k.split_at(k.len() - 1);
+    Some((num.parse().ok()?, letter.chars().next()?))
 }
 
 #[derive(Template)]
@@ -499,6 +549,24 @@ struct OverlapPage {
     key_harmonic: bool,
     key_options: Vec<KeyOption>,
     has_audio: bool,
+    /// Sort headers for the table columns.
+    sort_present: SortLink,
+    sort_bpm: SortLink,
+    sort_key: SortLink,
+    sort_energy: SortLink,
+    /// Playlist include picker (`?pl=`).
+    playlists: Vec<PlaylistOpt>,
+    pl_active: bool,
+    sort_value: String,
+    dir_value: String,
+}
+
+struct PlaylistOpt {
+    id: i64,
+    name: String,
+    user: String,
+    owned: bool,
+    checked: bool,
 }
 
 struct KeyOption {
@@ -535,6 +603,9 @@ struct CompareRow {
     isrc: String,
     bpm: String,
     key: String,
+    energy: String,
+    bpm_num: Option<f64>,
+    energy_num: Option<f64>,
     present_count: i64,
     cells: Vec<CompareCell>,
 }
@@ -595,12 +666,49 @@ async fn overlap_page(
     let key_harmonic = matches!(q.key_harmonic.as_deref(), Some("1") | Some("on") | Some("true"));
     let bpm_min = bpm_min_raw.parse::<f64>().ok();
     let bpm_max = bpm_max_raw.parse::<f64>().ok();
+
+    // Sort field + direction.
+    let sort = match q.sort.as_deref() {
+        Some("bpm") => "bpm",
+        Some("key") => "key",
+        Some("energy") => "energy",
+        _ => "present",
+    };
+    let dir = match q.dir.as_deref() {
+        Some("asc") => "asc",
+        Some("desc") => "desc",
+        _ if sort == "present" => "desc",
+        _ => "asc",
+    };
+
+    // Optional per-playlist include list (?pl=1&pl=2). Absent = include all.
+    let mut pl_ids: Vec<i64> = raw
+        .as_deref()
+        .map(|raw| {
+            raw.split('&')
+                .filter_map(|kv| kv.split_once('='))
+                .filter(|(k, _)| *k == "pl")
+                .filter_map(|(_, v)| v.parse::<i64>().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    pl_ids.sort_unstable();
+    pl_ids.dedup();
+    let pl_filter: Option<HashSet<i64>> = if pl_ids.is_empty() {
+        None
+    } else {
+        Some(pl_ids.iter().copied().collect())
+    };
+
     let filters = OverlapFilters {
         scope: scope.to_string(),
         bpm_min: bpm_min_raw.clone(),
         bpm_max: bpm_max_raw.clone(),
         key: key.clone(),
         key_harmonic,
+        sort: sort.to_string(),
+        dir: dir.to_string(),
+        pl: pl_ids.clone(),
     };
 
     // Selected users: default all; otherwise the csv (existing ids only).
@@ -617,17 +725,6 @@ async fn overlap_page(
         .cloned()
         .collect();
     let current_ids: Vec<i64> = selected.iter().map(|(id, _)| *id).collect();
-
-    // Optional per-playlist include list (?pl=1&pl=2). Absent = include all.
-    let pl_filter: Option<HashSet<i64>> = raw.as_deref().and_then(|raw| {
-        let ids: HashSet<i64> = raw
-            .split('&')
-            .filter_map(|kv| kv.split_once('='))
-            .filter(|(k, _)| *k == "pl")
-            .filter_map(|(_, v)| v.parse::<i64>().ok())
-            .collect();
-        if ids.is_empty() { None } else { Some(ids) }
-    });
 
     let mut acc: HashMap<i64, TrackAcc> = HashMap::new();
 
@@ -698,14 +795,14 @@ async fn overlap_page(
         }
     }
 
-    // Per-track audio (BPM / key) for filtering + display. Chunked because the
-    // id list can hold tens of thousands of tracks (SQLite bind-variable limit).
-    let mut audio: HashMap<i64, (Option<f64>, String)> = HashMap::new();
+    // Per-track audio (BPM / key / energy) for filtering + display. Chunked because
+    // the id list can hold tens of thousands of tracks (SQLite bind-variable limit).
+    let mut audio: HashMap<i64, (Option<f64>, String, Option<f64>)> = HashMap::new();
     if !acc.is_empty() {
         let ids: Vec<i64> = acc.keys().copied().collect();
         for chunk in ids.chunks(900) {
             let mut qb = QueryBuilder::new(
-                "SELECT track_id, bpm, camelot FROM v_track_audio WHERE track_id IN (",
+                "SELECT v.track_id AS track_id, v.bpm AS bpm, v.camelot AS camelot, f.energy AS energy\n                   FROM v_track_audio v\n                   LEFT JOIN hub_track_features f ON f.track_id = v.track_id\n                  WHERE v.track_id IN (",
             );
             let mut sep = qb.separated(", ");
             for id in chunk {
@@ -718,6 +815,7 @@ async fn overlap_page(
                     (
                         r.get::<Option<f64>, _>("bpm"),
                         r.get::<Option<String>, _>("camelot").unwrap_or_default(),
+                        r.get::<Option<f64>, _>("energy"),
                     ),
                 );
             }
@@ -728,7 +826,10 @@ async fn overlap_page(
     let mut rows: Vec<CompareRow> = Vec::new();
     let mut pair_counts: HashMap<(i64, i64), i64> = HashMap::new();
     for (tid, t) in acc {
-        let (bpm_opt, camelot) = audio.get(&tid).cloned().unwrap_or((None, String::new()));
+        let (bpm_opt, camelot, energy_opt) = audio
+            .get(&tid)
+            .cloned()
+            .unwrap_or((None, String::new(), None));
         // BPM range filter: a set range excludes tracks without BPM data.
         if bpm_min.is_some() || bpm_max.is_some() {
             match bpm_opt {
@@ -802,14 +903,45 @@ async fn overlap_page(
             } else {
                 camelot
             },
+            energy: energy_opt
+                .map(|e| format!("{e:.2}"))
+                .unwrap_or_else(|| "—".into()),
+            bpm_num: bpm_opt,
+            energy_num: energy_opt,
             present_count: present.len() as i64,
             cells,
         });
     }
+
+    // Sort by the chosen field; tracks without the value always go last.
+    let desc = dir == "desc";
     rows.sort_by(|a, b| {
-        b.present_count
-            .cmp(&a.present_count)
-            .then_with(|| a.artists.cmp(&b.artists))
+        let ord = match sort {
+            "bpm" => opt_cmp(a.bpm_num, b.bpm_num, desc),
+            "energy" => opt_cmp(a.energy_num, b.energy_num, desc),
+            "key" => match (camelot_rank(&a.key), camelot_rank(&b.key)) {
+                (Some(x), Some(y)) => {
+                    let o = x.cmp(&y);
+                    if desc {
+                        o.reverse()
+                    } else {
+                        o
+                    }
+                }
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            },
+            _ => {
+                let o = a.present_count.cmp(&b.present_count);
+                if desc {
+                    o.reverse()
+                } else {
+                    o
+                }
+            },
+        };
+        ord.then_with(|| a.artists.cmp(&b.artists))
             .then_with(|| a.title.cmp(&b.title))
     });
     rows.truncate(1000);
@@ -869,7 +1001,59 @@ async fn overlap_page(
         .collect();
     let has_audio = audio
         .values()
-        .any(|(b, c)| b.is_some() || !c.is_empty());
+        .any(|(b, c, e)| b.is_some() || !c.is_empty() || e.is_some());
+
+    // Playlist include picker across the selected users (respecting scope).
+    let mut playlists: Vec<PlaylistOpt> = Vec::new();
+    if !current_ids.is_empty() {
+        let mut qb = QueryBuilder::new(
+            "SELECT hp.id AS id, hp.name AS name, hp.is_owned AS owned,
+                    hp.collaborative AS collab, u.slug AS slug
+               FROM hub_playlists hp JOIN hub_users u ON u.id = hp.user_id
+              WHERE hp.user_id IN (",
+        );
+        let mut sep = qb.separated(", ");
+        for id in &current_ids {
+            sep.push_bind(*id);
+        }
+        qb.push(") ORDER BY hp.is_owned DESC, u.slug, hp.name COLLATE NOCASE");
+        for r in qb.build().fetch_all(&st.pool).await.unwrap_or_default() {
+            let owned = r.get::<i64, _>("owned") == 1;
+            let collab = r.get::<i64, _>("collab") == 1;
+            if !scope_match(scope, owned, collab) {
+                continue;
+            }
+            let id: i64 = r.get("id");
+            playlists.push(PlaylistOpt {
+                checked: pl_filter.as_ref().map_or(true, |f| f.contains(&id)),
+                id,
+                name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+                user: r.get::<Option<String>, _>("slug").unwrap_or_default(),
+                owned,
+            });
+        }
+    }
+
+    let sort_link = |field: &str| -> SortLink {
+        let active = sort == field;
+        let next_dir = if active && dir == "asc" { "desc" } else { "asc" };
+        let mut f = filters.clone();
+        f.sort = field.to_string();
+        f.dir = next_dir.to_string();
+        SortLink {
+            href: f.href(&current_ids),
+            active,
+            arrow: if active {
+                if dir == "asc" {
+                    "↑".into()
+                } else {
+                    "↓".into()
+                }
+            } else {
+                String::new()
+            },
+        }
+    };
 
     let columns: Vec<ColumnUser> = selected
         .iter()
@@ -896,6 +1080,14 @@ async fn overlap_page(
         key_harmonic,
         key_options,
         has_audio,
+        sort_present: sort_link("present"),
+        sort_bpm: sort_link("bpm"),
+        sort_key: sort_link("key"),
+        sort_energy: sort_link("energy"),
+        playlists,
+        pl_active: !pl_ids.is_empty(),
+        sort_value: sort.to_string(),
+        dir_value: dir.to_string(),
     })
 }
 

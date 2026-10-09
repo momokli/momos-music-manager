@@ -44,6 +44,8 @@ content %}
 <form method="get" action="/overlap" class="hub-actions" role="search">
     <input type="hidden" name="users" value="{{ users_csv }}" />
     <input type="hidden" name="scope" value="{{ scope }}" />
+    <input type="hidden" name="sort" value="{{ sort_value }}" />
+    <input type="hidden" name="dir" value="{{ dir_value }}" />
     <input
         type="number"
         name="bpm_min"
@@ -93,6 +95,38 @@ content %}
         class="secondary outline"
         >Reset</a
     >
+    {% if !playlists.is_empty() %}
+    <details class="hub-plpicker">
+        <summary>
+            Playlists ({{ playlists.len() }}){% if pl_active %} · gefiltert{% endif %}
+        </summary>
+        <div class="hub-plpick">
+            <p class="hub-muted">
+                Nur markierte Playlists zählen. Alle markiert = alle Playlists.
+            </p>
+            {% for p in playlists %}
+            <label class="hub-plpick-item">
+                <input
+                    type="checkbox"
+                    name="pl"
+                    value="{{ p.id }}"
+                    {%
+                    if
+                    p.checked
+                    %}checked{%
+                    endif
+                    %}
+                />
+                <span
+                    class="{% if p.owned %}hub-tag-own{% else %}hub-tag-follow{% endif %}"
+                    >{{ p.name }}</span
+                >
+                <span class="hub-muted">@{{ p.user }}</span>
+            </label>
+            {% endfor %}
+        </div>
+    </details>
+    {% endif %}
 </form>
 
 {% if !has_audio %}
@@ -111,8 +145,37 @@ content %}
         <thead>
             <tr>
                 <th scope="col">Track</th>
-                <th scope="col">BPM</th>
-                <th scope="col">Key</th>
+                <th scope="col">
+                    <a
+                        href="{{ sort_present.href }}"
+                        class="hub-sort{% if sort_present.active %} hub-sort-on{% endif %}"
+                        title="Nach Übereinstimmung sortieren"
+                        >∩{% if sort_present.active %} {{ sort_present.arrow }}{% endif
+                        %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ sort_bpm.href }}"
+                        class="hub-sort{% if sort_bpm.active %} hub-sort-on{% endif %}"
+                        >BPM{% if sort_bpm.active %} {{ sort_bpm.arrow }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ sort_key.href }}"
+                        class="hub-sort{% if sort_key.active %} hub-sort-on{% endif %}"
+                        >Key{% if sort_key.active %} {{ sort_key.arrow }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ sort_energy.href }}"
+                        class="hub-sort{% if sort_energy.active %} hub-sort-on{% endif %}"
+                        >Energy{% if sort_energy.active %} {{ sort_energy.arrow }}{% endif
+                        %}</a
+                    >
+                </th>
                 {% for c in columns %}
                 <th scope="col">@{{ c.slug }}</th>
                 {% endfor %}
@@ -121,17 +184,19 @@ content %}
         <tbody>
             {% for r in rows %}
             <tr>
-                <td class="hub-nowrap">
+                <td class="hub-cell-track">
                     <a href="/track/{{ r.id }}">{{ r.artists }} — {{ r.title }}</a>
                     · <a href="/digging?seed={{ r.id }}">dig</a> {% if r.isrc != "" %}<br /><code
                         class="hub-muted"
                         >{{ r.isrc }}</code
                     >{% endif %}
                 </td>
+                <td class="hub-nowrap">{{ r.present_count }}</td>
                 <td class="hub-nowrap">{{ r.bpm }}</td>
                 <td class="hub-nowrap">{{ r.key }}</td>
+                <td class="hub-nowrap">{{ r.energy }}</td>
                 {% for cell in r.cells %}
-                <td>
+                <td class="hub-cell-pl">
                     {% if cell.liked %}<span title="geliked">♥</span>{% endif %} {% for p
                     in cell.playlists %}<span
                         class="hub-tag {% if p.owned %}hub-tag-own{% else %}hub-tag-follow{% endif %}"
