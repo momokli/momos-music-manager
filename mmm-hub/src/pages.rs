@@ -1845,25 +1845,20 @@ async fn digging_page(
             for s in internal {
                 merge_candidate(&mut cand, Some(s.id), &s.title, &s.artists, "Hub-intern").await;
             }
+            // Resolve external candidates against a preloaded matcher instead of
+            // one full-table scan each.
+            let recco_ids: Vec<String> = recco.iter().map(|r| r.spotify_id.clone()).collect();
+            let matcher = crate::digging::Matcher::load(&st.pool, &recco_ids).await;
             for r in recco {
-                let tid = crate::digging::match_track(
-                    &st.pool,
-                    Some(&r.spotify_id),
-                    None,
-                    &r.artists,
-                    &r.title,
-                )
-                .await;
+                let tid = matcher.by_spotify(&r.spotify_id);
                 merge_candidate(&mut cand, tid, &r.title, &r.artists, "ReccoBeats").await;
             }
             for s in lastfm_list {
-                let tid =
-                    crate::digging::match_track(&st.pool, None, None, &s.artist, &s.name).await;
+                let tid = matcher.by_name(&s.artist, &s.name);
                 merge_candidate(&mut cand, tid, &s.name, &s.artist, "Last.fm").await;
             }
             for s in cosine_list {
-                let tid =
-                    crate::digging::match_track(&st.pool, None, None, &s.artist, &s.track).await;
+                let tid = matcher.by_name(&s.artist, &s.track);
                 merge_candidate(&mut cand, tid, &s.track, &s.artist, "cosine.club").await;
             }
             // Audio neighbours (EffNet): titles fetched in one batched query.

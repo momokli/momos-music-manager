@@ -166,6 +166,80 @@ pub async fn presence_many(pool: &SqlitePool, ids: &[i64]) -> HashMap<i64, Prese
     out
 }
 
+/// A preloaded matcher: external candidates are resolved against in-memory maps
+/// instead of one full-table scan per candidate (the old N×scan cost).
+pub struct Matcher {
+    by_spotify: HashMap<String, i64>,
+    /// lower(trim(title)) -> [(track_id, lower(artists))]
+    by_title: HashMap<String, Vec<(i64, String)>>,
+}
+
+impl Matcher {
+    /// Load the matcher, pre-resolving the given Spotify ids in one query and the
+    /// track titles/artists in a single pass.
+    pub async fn load(pool: &SqlitePool, spotify_ids: &[String]) -> Matcher {
+        let mut by_spotify: HashMap<String, i64> = HashMap::new();
+        for chunk in spotify_ids.chunks(900) {
+            let mut qb = QueryBuilder::new(
+                "SELECT external_id, track_id FROM hub_track_external_ids
+                  WHERE service = 'spotify' AND external_id IN (",
+            );
+            let mut sep = qb.separated(", ");
+            for id in chunk {
+                sep.push_bind(id.clone());
+            }
+            qb.push(")");
+            for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+                let sid: String = r.get("external_id");
+                by_spotify.insert(sid, r.get("track_id"));
+            }
+        }
+
+        let mut by_title: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+        for r in sqlx::query("SELECT id, title, artists FROM hub_tracks")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+        {
+            let title = r
+                .get::<Option<String>, _>("title")
+                .unwrap_or_default()
+                .trim()
+                .to_lowercase();
+            if title.is_empty() {
+                continue;
+            }
+            let artists = r
+                .get::<Option<String>, _>("artists")
+                .unwrap_or_default()
+                .to_lowercase();
+            by_title.entry(title).or_default().push((r.get("id"), artists));
+        }
+
+        Matcher {
+            by_spotify,
+            by_title,
+        }
+    }
+
+    pub fn by_spotify(&self, sid: &str) -> Option<i64> {
+        self.by_spotify.get(sid).copied()
+    }
+
+    /// Match by normalised title + first-artist substring (mirrors `match_track`).
+    pub fn by_name(&self, artists: &str, title: &str) -> Option<i64> {
+        let key = title.trim().to_lowercase();
+        let list = self.by_title.get(&key)?;
+        let first = artists.split(',').next().unwrap_or("").trim().to_lowercase();
+        if first.is_empty() {
+            return list.first().map(|(id, _)| *id);
+        }
+        list.iter()
+            .find(|(_, a)| a.contains(&first))
+            .map(|(id, _)| *id)
+    }
+}
+
 /// Resolve an external candidate (external suggestion) to a hub track id, by
 /// Spotify id, then ISRC, then normalised title + artist.
 pub async fn match_track(
