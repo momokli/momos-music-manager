@@ -10,6 +10,7 @@ pub mod cosine;
 pub mod db;
 pub mod digging;
 pub mod features;
+pub mod freqblog;
 pub mod genres;
 pub mod ingest;
 pub mod lastfm;

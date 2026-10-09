@@ -13,6 +13,9 @@ pub struct Config {
     pub reccobeats_base: String,
     pub cosine_base: String,
     pub cosine_api_key: Option<String>,
+    pub freqblog_base: String,
+    pub freqblog_api_key: Option<String>,
+    pub freqblog_monthly_cap: i64,
     pub lastfm_api_key: Option<String>,
     pub soundcloud_client_id: Option<String>,
     pub soundcloud_client_secret: Option<String>,
@@ -41,6 +44,13 @@ impl Config {
             cosine_base: env("COSINE_BASE")
                 .unwrap_or_else(|| "https://cosine.club/api/v1".to_string()),
             cosine_api_key: env("COSINECLUB_API"),
+            freqblog_base: env("FREQBlog_BASE")
+                .unwrap_or_else(|| "https://api.freqblog.com".to_string()),
+            freqblog_api_key: env("FREQBlog_API_KEY"),
+            // Stay safely under the 1,000/month free tier.
+            freqblog_monthly_cap: env("FREQBlog_MONTHLY_CAP")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(950),
             lastfm_api_key: env("LASTFM_API_KEY"),
             soundcloud_client_id: env("SOUNDCLOUD_CLIENT_ID"),
             soundcloud_client_secret: env("SOUNDCLOUD_CLIENT_SECRET"),
@@ -65,6 +75,9 @@ impl Config {
             reccobeats_base: "https://api.reccobeats.com/v1".to_string(),
             cosine_base: "https://cosine.club/api/v1".to_string(),
             cosine_api_key: None,
+            freqblog_base: "https://api.freqblog.com".to_string(),
+            freqblog_api_key: None,
+            freqblog_monthly_cap: 950,
             lastfm_api_key: None,
             soundcloud_client_id: None,
             soundcloud_client_secret: None,
@@ -86,6 +99,13 @@ impl Config {
             crate::settings::RECCOBEATS_BASE => self.reccobeats_base = value.into(),
             crate::settings::COSINE_BASE => self.cosine_base = value.into(),
             crate::settings::COSINE_API_KEY => self.cosine_api_key = Some(value.into()),
+            crate::settings::FREQBLOG_BASE => self.freqblog_base = value.into(),
+            crate::settings::FREQBLOG_API_KEY => self.freqblog_api_key = Some(value.into()),
+            crate::settings::FREQBLOG_MONTHLY_CAP => {
+                if let Ok(n) = value.trim().parse() {
+                    self.freqblog_monthly_cap = n;
+                }
+            }
             crate::settings::MUSIC_API_BASE => self.music_api_base = value.into(),
             crate::settings::MUSIC_API_TOKEN => self.music_api_token = Some(value.into()),
             crate::settings::SPOTIFY_CLIENT_ID => self.spotify_client_id = Some(value.into()),

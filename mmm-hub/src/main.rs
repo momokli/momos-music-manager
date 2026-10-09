@@ -16,7 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use mmm_hub::config::Config;
-use mmm_hub::{api, db, features, genres, ingest, pages, settings, spotify, tags, web, worker};
+use mmm_hub::{api, db, features, freqblog, genres, ingest, pages, settings, spotify, tags, web, worker};
 
 #[derive(Parser)]
 #[command(
@@ -69,6 +69,11 @@ enum Command {
         #[arg(long, default_value_t = 2000)]
         limit: usize,
     },
+    /// Backfill missing audio features via FreqBlog (respects the monthly budget).
+    Freqblog {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
     /// Rebuild the tag layer (playlists resolve to tags).
     ResolveTags,
     /// Backfill track genres via Last.fm (needs LASTFM_API_KEY).
@@ -110,6 +115,7 @@ async fn main() -> Result<()> {
         Command::SetPassword { user, password } => cmd_set_password(cfg, &user, &password).await,
         Command::Backfill => cmd_backfill(cfg).await,
         Command::Features { limit } => cmd_features(cfg, limit).await,
+        Command::Freqblog { limit } => cmd_freqblog(cfg, limit).await,
         Command::ResolveTags => cmd_resolve_tags(cfg).await,
         Command::Genres { limit } => cmd_genres(cfg, limit).await,
         Command::MakeAdmin { user } => cmd_make_admin(cfg, &user).await,
@@ -291,6 +297,26 @@ async fn cmd_features(cfg: Config, limit: usize) -> Result<()> {
     println!(
         "✓ {processed} Tracks abgeglichen{}",
         if exhausted { " (alle erledigt)" } else { "" }
+    );
+    Ok(())
+}
+
+async fn cmd_freqblog(cfg: Config, limit: usize) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    let cfg = settings::overlay_config(&pool, cfg).await;
+    if !freqblog::enabled(&cfg) {
+        bail!("FREQBlog_API_KEY nicht gesetzt (env oder /admin).");
+    }
+    let remaining = freqblog::remaining(&pool, &cfg).await;
+    println!(
+        "FreqBlog: {remaining} von {} Requests im Monat {} übrig",
+        cfg.freqblog_monthly_cap,
+        freqblog::period_utc()
+    );
+    let (processed, exhausted) = freqblog::backfill(&pool, &cfg, limit).await?;
+    println!(
+        "✓ {processed} Tracks verarbeitet{}",
+        if exhausted { " (Budget erreicht oder nichts mehr offen)" } else { "" }
     );
     Ok(())
 }

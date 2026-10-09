@@ -12,6 +12,9 @@ pub const LASTFM_API_KEY: &str = "lastfm_api_key";
 pub const RECCOBEATS_BASE: &str = "reccobeats_base";
 pub const COSINE_API_KEY: &str = "cosine_api_key";
 pub const COSINE_BASE: &str = "cosine_base";
+pub const FREQBLOG_API_KEY: &str = "freqblog_api_key";
+pub const FREQBLOG_BASE: &str = "freqblog_base";
+pub const FREQBLOG_MONTHLY_CAP: &str = "freqblog_monthly_cap";
 pub const MUSIC_API_BASE: &str = "music_api_base";
 pub const MUSIC_API_TOKEN: &str = "music_api_token";
 pub const SPOTIFY_CLIENT_ID: &str = "spotify_client_id";
@@ -36,6 +39,9 @@ pub const ADMIN_FIELDS: &[(&str, &str, bool)] = &[
     (RECCOBEATS_BASE, "ReccoBeats Base-URL", false),
     (COSINE_API_KEY, "cosine.club API-Key", true),
     (COSINE_BASE, "cosine.club Base-URL", false),
+    (FREQBLOG_API_KEY, "FreqBlog API-Key", true),
+    (FREQBLOG_BASE, "FreqBlog Base-URL", false),
+    (FREQBLOG_MONTHLY_CAP, "FreqBlog Monats-Budget (Requests)", false),
 ];
 
 pub async fn load_all(pool: &SqlitePool) -> HashMap<String, String> {
