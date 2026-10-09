@@ -1,9 +1,10 @@
 # Active Plans
 
-**56 done** · **0 in progress** · **19 proposed**
+**56 done** · **0 in progress** · **20 proposed**
 
 ## Proposed
 
+- [mmm-hub](proposed/mmm-hub.md) — `feat/mmm-hub` (M1–M4)
 - [rediscovery-engine](proposed/rediscovery-engine.md) — `feat/rediscovery-engine` (M1–M5)
 - [liked-songs-sync](proposed/liked-songs-sync.md) — `feat/liked-songs-sync` (Rediscovery M1)
 

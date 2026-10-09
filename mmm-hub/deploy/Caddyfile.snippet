@@ -1,0 +1,17 @@
+# Add this block to ~/caddy/Caddyfile on the `lan` host (~192.168.178.149),
+# then validate + reload (no container restart, no downtime):
+#
+#   docker exec caddy-caddy-1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+#   docker exec caddy-caddy-1 caddy reload   --config /etc/caddy/Caddyfile --adapter caddyfile
+#
+# basicauth is REQUIRED for the skeleton: /api/hub/query runs arbitrary
+# read-only SQL and would otherwise be an open database.
+# Reuse the same htpasswd hash as music.klimk.es (the `momo` entry).
+
+hub.zukkafabrik.de {
+	basicauth {
+		momo <bcrypt-hash>
+	}
+	reverse_proxy 192.168.178.200:8080
+	encode gzip
+}

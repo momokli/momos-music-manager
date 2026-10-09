@@ -1,0 +1,264 @@
+//! Read-only HTTP surface over the overlap views + a guarded SQL console.
+//!
+//! Walking skeleton: no auth (LAN-only). Session/OIDC comes in M2.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use sqlx::{Column, Row, SqlitePool};
+
+#[derive(Clone)]
+pub struct AppState {
+    pub pool: SqlitePool,
+    pub ro_pool: SqlitePool,
+    pub cfg: Arc<crate::config::Config>,
+    /// In-flight Spotify OAuth flows: state token → (user_id, PKCE verifier).
+    pub oauth_states: Arc<Mutex<HashMap<String, (i64, String)>>>,
+}
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/api/hub/health", get(health))
+        .route("/api/hub/users", get(users))
+        .route("/api/hub/tracks/{id}", get(track))
+        .route("/api/hub/overlap", get(overlap))
+        .route("/api/hub/playlists", get(playlists))
+        .route("/api/hub/query", post(query))
+        .with_state(state)
+}
+
+type ApiError = (StatusCode, Json<Value>);
+
+fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
+    (code, Json(json!({ "error": msg.into() })))
+}
+
+async fn health() -> Json<Value> {
+    Json(json!({ "data": { "status": "ok", "version": env!("CARGO_PKG_VERSION") } }))
+}
+
+async fn users(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let rows = sqlx::query("SELECT id, slug, display_name FROM hub_users ORDER BY id")
+        .fetch_all(&st.pool)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let users: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<i64, _>("id"),
+                "slug": r.get::<Option<String>, _>("slug"),
+                "displayName": r.get::<Option<String>, _>("display_name"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "data": users })))
+}
+
+async fn track(State(st): State<AppState>, Path(id): Path<i64>) -> Result<Json<Value>, ApiError> {
+    let row = sqlx::query(
+        "SELECT id, service, service_track_id, title, artists, album, duration_ms, isrc
+           FROM hub_tracks WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(&st.pool)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some(row) = row else {
+        return Err(err(StatusCode::NOT_FOUND, "track not found"));
+    };
+
+    let presence = sqlx::query(
+        "SELECT p.user_id, u.slug, u.display_name, p.source, p.playlist_name
+           FROM hub_v_track_presence p
+           JOIN hub_users u ON u.id = p.user_id
+          WHERE p.track_id = ?1
+          ORDER BY u.slug",
+    )
+    .bind(id)
+    .fetch_all(&st.pool)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let presence: Vec<Value> = presence
+        .iter()
+        .map(|r| {
+            json!({
+                "userId": r.get::<i64, _>("user_id"),
+                "user": r.get::<Option<String>, _>("slug"),
+                "displayName": r.get::<Option<String>, _>("display_name"),
+                "source": r.get::<Option<String>, _>("source"),
+                "playlistName": r.get::<Option<String>, _>("playlist_name"),
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "data": {
+            "track": {
+                "id": row.get::<i64, _>("id"),
+                "service": row.get::<String, _>("service"),
+                "serviceTrackId": row.get::<String, _>("service_track_id"),
+                "title": row.get::<Option<String>, _>("title"),
+                "artists": row.get::<Option<String>, _>("artists"),
+                "album": row.get::<Option<String>, _>("album"),
+                "durationMs": row.get::<Option<i64>, _>("duration_ms"),
+                "isrc": row.get::<Option<String>, _>("isrc"),
+            },
+            "presence": presence,
+        }
+    })))
+}
+
+async fn overlap(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let shared = sqlx::query(
+        "SELECT s.track_id, t.title, t.artists, s.user_count, s.user_ids
+           FROM hub_v_shared_tracks s
+           JOIN hub_tracks t ON t.id = s.track_id
+          ORDER BY s.user_count DESC, t.artists, t.title",
+    )
+    .fetch_all(&st.pool)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let shared: Vec<Value> = shared
+        .iter()
+        .map(|r| {
+            json!({
+                "trackId": r.get::<i64, _>("track_id"),
+                "title": r.get::<Option<String>, _>("title"),
+                "artists": r.get::<Option<String>, _>("artists"),
+                "userCount": r.get::<i64, _>("user_count"),
+                "userIds": r.get::<Option<String>, _>("user_ids"),
+            })
+        })
+        .collect();
+
+    let pairs = sqlx::query(
+        "SELECT o.user_a_id, ua.slug AS a, o.user_b_id, ub.slug AS b, o.shared_tracks
+           FROM hub_v_user_overlap o
+           JOIN hub_users ua ON ua.id = o.user_a_id
+           JOIN hub_users ub ON ub.id = o.user_b_id
+          ORDER BY o.shared_tracks DESC",
+    )
+    .fetch_all(&st.pool)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let pairs: Vec<Value> = pairs
+        .iter()
+        .map(|r| {
+            json!({
+                "userA": r.get::<Option<String>, _>("a"),
+                "userB": r.get::<Option<String>, _>("b"),
+                "sharedTracks": r.get::<i64, _>("shared_tracks"),
+            })
+        })
+        .collect();
+
+    Ok(Json(
+        json!({ "data": { "shared": shared, "pairs": pairs } }),
+    ))
+}
+
+async fn playlists(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT p.id, u.slug AS user, p.name, p.track_count, p.items_available, p.is_liked
+           FROM hub_playlists p JOIN hub_users u ON u.id = p.user_id
+          ORDER BY u.slug, p.name",
+    )
+    .fetch_all(&st.pool)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<i64, _>("id"),
+                "user": r.get::<Option<String>, _>("user"),
+                "name": r.get::<Option<String>, _>("name"),
+                "trackCount": r.get::<Option<i64>, _>("track_count"),
+                "itemsAvailable": r.get::<i64, _>("items_available") != 0,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "data": items })))
+}
+
+#[derive(Deserialize)]
+struct QueryRequest {
+    sql: String,
+}
+
+async fn query(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<QueryRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if crate::web::current_user(&st, &headers).await.is_none() {
+        return Err(err(StatusCode::UNAUTHORIZED, "login required"));
+    }
+    match run_readonly_query(&st.ro_pool, &req.sql).await {
+        Ok((columns, rows)) => Ok(Json(
+            json!({ "data": { "columns": columns, "rows": rows } }),
+        )),
+        Err(e) => Err(err(StatusCode::BAD_REQUEST, e.to_string())),
+    }
+}
+
+/// Execute a read-only `SELECT`/`WITH` statement, returning column names + rows.
+pub async fn run_readonly_query(
+    pool: &SqlitePool,
+    sql: &str,
+) -> anyhow::Result<(Vec<String>, Vec<Value>)> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let head = trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    if head != "SELECT" && head != "WITH" {
+        anyhow::bail!("only SELECT/WITH statements are allowed");
+    }
+
+    let rows = sqlx::query(trimmed).fetch_all(pool).await?;
+    let columns: Vec<String> = rows
+        .first()
+        .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
+        .unwrap_or_default();
+
+    let json_rows: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let mut obj = serde_json::Map::new();
+            for (i, col) in r.columns().iter().enumerate() {
+                obj.insert(col.name().to_string(), cell_to_json(r, i));
+            }
+            Value::Object(obj)
+        })
+        .collect();
+
+    Ok((columns, json_rows))
+}
+
+/// Best-effort SQLite cell → JSON (try TEXT, then INTEGER, then REAL).
+fn cell_to_json(row: &sqlx::sqlite::SqliteRow, i: usize) -> Value {
+    if let Ok(v) = row.try_get::<Option<String>, _>(i) {
+        return v.map(Value::String).unwrap_or(Value::Null);
+    }
+    if let Ok(v) = row.try_get::<Option<i64>, _>(i) {
+        return v.map(Value::from).unwrap_or(Value::Null);
+    }
+    if let Ok(v) = row.try_get::<Option<f64>, _>(i) {
+        return v.map(Value::from).unwrap_or(Value::Null);
+    }
+    Value::Null
+}
