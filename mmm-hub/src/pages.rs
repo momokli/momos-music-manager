@@ -435,6 +435,10 @@ struct CompareQuery {
     sort: Option<String>,
     /// `asc` | `desc` (default `desc` for `present`, `asc` otherwise).
     dir: Option<String>,
+    /// Full-text over track title + artists.
+    q: Option<String>,
+    /// Substring match on a resolved tag name (any user).
+    tag: Option<String>,
     /// Flash message (success/error) shown after a redirect.
     msg: Option<String>,
 }
@@ -451,6 +455,8 @@ struct OverlapFilters {
     sort: String,
     dir: String,
     pl: Vec<i64>,
+    q: String,
+    tag: String,
 }
 
 impl OverlapFilters {
@@ -484,6 +490,12 @@ impl OverlapFilters {
         }
         for id in &self.pl {
             url.push_str(&format!("&pl={id}"));
+        }
+        if !self.q.is_empty() {
+            url.push_str(&format!("&q={}", urlencoding::encode(&self.q)));
+        }
+        if !self.tag.is_empty() {
+            url.push_str(&format!("&tag={}", urlencoding::encode(&self.tag)));
         }
         url
     }
@@ -562,6 +574,10 @@ struct OverlapPage {
     pl_active: bool,
     sort_value: String,
     dir_value: String,
+    /// Full-text + tag filter state.
+    q: String,
+    tag: String,
+    tag_options: Vec<String>,
 }
 
 struct PlaylistOpt {
@@ -732,6 +748,42 @@ fn shared_ids(acc: &HashMap<i64, TrackAcc>) -> Vec<i64> {
         .collect()
 }
 
+/// Case-insensitive full-text match over title + artists.
+fn text_matches(title: &str, artists: &str, q: &str) -> bool {
+    let q = q.to_lowercase();
+    title.to_lowercase().contains(&q) || artists.to_lowercase().contains(&q)
+}
+
+/// Ids from `candidate_ids` that resolve to a tag whose name contains `needle`
+/// (case-insensitive, any owner). Chunked for the bind-variable limit.
+async fn tagged_track_ids(
+    pool: &sqlx::SqlitePool,
+    candidate_ids: &[i64],
+    needle: &str,
+) -> HashSet<i64> {
+    let mut set = HashSet::new();
+    let like = format!("%{}%", needle.to_lowercase());
+    for chunk in candidate_ids.chunks(900) {
+        let mut qb = QueryBuilder::new(
+            "SELECT DISTINCT rt.track_id AS tid
+               FROM hub_track_resolved_tags rt
+               JOIN hub_tags t ON t.id = rt.tag_id
+              WHERE lower(t.name) LIKE ",
+        );
+        qb.push_bind(&like);
+        qb.push(" AND rt.track_id IN (");
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(*id);
+        }
+        qb.push(")");
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            set.insert(r.get::<i64, _>("tid"));
+        }
+    }
+    set
+}
+
 async fn overlap_page(
     State(st): State<AppState>,
     Query(q): Query<CompareQuery>,
@@ -764,6 +816,8 @@ async fn overlap_page(
     let key_harmonic = matches!(q.key_harmonic.as_deref(), Some("1") | Some("on") | Some("true"));
     let bpm_min = bpm_min_raw.parse::<f64>().ok();
     let bpm_max = bpm_max_raw.parse::<f64>().ok();
+    let q_text = q.q.clone().unwrap_or_default().trim().to_string();
+    let tag = q.tag.clone().unwrap_or_default().trim().to_string();
 
     // Sort field + direction.
     let sort = match q.sort.as_deref() {
@@ -807,6 +861,8 @@ async fn overlap_page(
         sort: sort.to_string(),
         dir: dir.to_string(),
         pl: pl_ids.clone(),
+        q: q_text.clone(),
+        tag: tag.clone(),
     };
 
     // Selected users: default all; otherwise the csv (existing ids only).
@@ -825,6 +881,14 @@ async fn overlap_page(
     let current_ids: Vec<i64> = selected.iter().map(|(id, _)| *id).collect();
 
     let acc = overlap_acc(&st.pool, &selected, scope, pl_filter.as_ref()).await;
+
+    // Tag filter: track ids of the candidates that resolve to a matching tag.
+    let tagged: HashSet<i64> = if tag.is_empty() {
+        HashSet::new()
+    } else {
+        let ids: Vec<i64> = acc.keys().copied().collect();
+        tagged_track_ids(&st.pool, &ids, &tag).await
+    };
 
     // Per-track audio (BPM / key / energy) for filtering + display. Chunked because
     // the id list can hold tens of thousands of tracks (SQLite bind-variable limit).
@@ -885,6 +949,13 @@ async fn overlap_page(
             if !ok {
                 continue;
             }
+        }
+        // Full-text (title + artists) and tag filters.
+        if !q_text.is_empty() && !text_matches(&t.title, &t.artists, &q_text) {
+            continue;
+        }
+        if !tag.is_empty() && !tagged.contains(&tid) {
+            continue;
         }
         let present: Vec<i64> = t
             .per_user
@@ -1034,6 +1105,13 @@ async fn overlap_page(
         .values()
         .any(|(b, c, e)| b.is_some() || !c.is_empty() || e.is_some());
 
+    let tag_options: Vec<String> = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT name FROM hub_tags ORDER BY name COLLATE NOCASE",
+    )
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
     // Playlist include picker across the selected users (respecting scope).
     let mut playlists: Vec<PlaylistOpt> = Vec::new();
     if !current_ids.is_empty() {
@@ -1119,6 +1197,9 @@ async fn overlap_page(
         pl_active: !pl_ids.is_empty(),
         sort_value: sort.to_string(),
         dir_value: dir.to_string(),
+        q: q_text,
+        tag,
+        tag_options,
     })
 }
 
@@ -1215,6 +1296,8 @@ async fn overlap_enrich(State(st): State<AppState>, headers: HeaderMap, body: St
         sort: sort.to_string(),
         dir: dir.to_string(),
         pl: pl_ids,
+        q: get("q"),
+        tag: get("tag"),
     };
     let back = filters.href(&selected_ids);
     flash_redirect(

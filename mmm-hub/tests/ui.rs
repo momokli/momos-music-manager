@@ -535,6 +535,56 @@ async fn overlap_enrich_enqueues_missing_features() {
 }
 
 #[tokio::test]
+async fn overlap_text_and_tag_filters() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    async fn fetch(app: &common::TestApp, cookie: &str, path: &str) -> String {
+        let resp = app
+            .client()
+            .get(app.url(path))
+            .header("Cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        body(resp).await
+    }
+
+    // Full-text over title.
+    let by_title = fetch(&app, &cookie, "/overlap?q=Anthem").await;
+    assert!(by_title.contains("Shared Anthem"));
+    assert!(!by_title.contains("Two Users"));
+    assert!(!by_title.contains("Playlist Only"));
+
+    // Full-text over artists (case-insensitive).
+    let by_artist = fetch(&app, &cookie, "/overlap?q=bbb").await;
+    assert!(by_artist.contains("Two Users"));
+    assert!(!by_artist.contains("Shared Anthem"));
+
+    // Tag filter: alice's playlist (t_all + t_pl) becomes a tag, renamed.
+    let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
+        .await
+        .unwrap();
+    mmm_hub::tags::rename_tag(&app.pool, app.seed.alice, tag, "Housey")
+        .await
+        .unwrap();
+    let by_tag = fetch(&app, &cookie, "/overlap?tag=Housey").await;
+    assert!(by_tag.contains("Shared Anthem"));
+    assert!(by_tag.contains("Playlist Only"));
+    assert!(!by_tag.contains("Two Users"));
+
+    // Combined text + tag.
+    let combined = fetch(&app, &cookie, "/overlap?q=Shared&tag=Housey").await;
+    assert!(combined.contains("Shared Anthem"));
+    assert!(!combined.contains("Playlist Only"));
+
+    // The tag datalist is rendered with the tag option.
+    assert!(by_title.contains("hub-tag-options"));
+    assert!(by_tag.contains("Housey"));
+}
+
+#[tokio::test]
 async fn toggle_returns_row_fragment_for_htmx() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;

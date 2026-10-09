@@ -66,6 +66,27 @@ content %}
         aria-label="BPM max"
         style="width: 6.5rem"
     />
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Titel / Artists …"
+        aria-label="Volltext (Titel, Artists)"
+    />
+    <input
+        type="text"
+        name="tag"
+        value="{{ tag }}"
+        list="hub-tag-options"
+        placeholder="Tag …"
+        aria-label="Tag"
+        style="width: 9rem"
+    />
+    <datalist id="hub-tag-options">
+        {% for t in tag_options %}
+        <option value="{{ t }}"></option>
+        {% endfor %}
+    </datalist>
     <select name="key" aria-label="Key (Camelot)">
         <option value="">Key: alle</option>
         {% for k in key_options %}
