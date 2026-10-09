@@ -995,6 +995,61 @@ async fn digging_shows_playlists_and_tags_per_track() {
 }
 
 #[tokio::test]
+async fn digging_filters_by_tag_owner_group_and_playlist_owner() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    async fn fetch(app: &common::TestApp, cookie: &str, path: &str) -> String {
+        let resp = app
+            .client()
+            .get(app.url(path))
+            .header("Cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        body(resp).await
+    }
+
+    // alice's playlist (has t_all) becomes a tag in a group.
+    let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
+        .await
+        .unwrap();
+    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Mood", "💜")
+        .await
+        .unwrap();
+    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, tag, g)
+        .await
+        .unwrap();
+
+    let seed = app.seed.t_pl;
+    // Tag owner filter.
+    assert!(fetch(&app, &cookie, &format!("/digging?seed={seed}&towner=alice"))
+        .await
+        .contains("Shared Anthem"));
+    assert!(!fetch(&app, &cookie, &format!("/digging?seed={seed}&towner=nobody"))
+        .await
+        .contains("Shared Anthem"));
+    // Tag group filter.
+    assert!(fetch(&app, &cookie, &format!("/digging?seed={seed}&tgroup={g}"))
+        .await
+        .contains("Shared Anthem"));
+    // Playlist owner filter: t_all is in alice's playlist, not bob's.
+    assert!(fetch(&app, &cookie, &format!("/digging?seed={seed}&powner=alice"))
+        .await
+        .contains("Shared Anthem"));
+    assert!(!fetch(&app, &cookie, &format!("/digging?seed={seed}&powner=bob"))
+        .await
+        .contains("Shared Anthem"));
+
+    // The filter selects are rendered.
+    let html = fetch(&app, &cookie, &format!("/digging?seed={seed}")).await;
+    assert!(html.contains("name=\"towner\""));
+    assert!(html.contains("name=\"tgroup\""));
+    assert!(html.contains("name=\"powner\""));
+}
+
+#[tokio::test]
 async fn registration_closed_by_default() {
     let app = common::spawn().await;
 

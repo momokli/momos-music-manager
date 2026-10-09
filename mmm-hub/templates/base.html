@@ -381,6 +381,9 @@
         margin-left: 0.15rem;
       }
       /* Digging: per-track detail cells */
+      .hub-dig-track {
+        overflow-wrap: anywhere;
+      }
       .hub-dig-users,
       .hub-dig-tags {
         overflow-wrap: anywhere;
@@ -390,9 +393,12 @@
         margin: 0 0 0.1rem;
         line-height: 1.3;
       }
-      .hub-dig-user .hub-tag,
-      .hub-dig-tag .hub-tag,
+      /* Never force horizontal scroll: let the playlist/tag chips wrap. */
+      .hub-dig-users .hub-tag,
+      .hub-dig-tags .hub-tag,
       .hub-dig-tag .hub-chip {
+        white-space: normal;
+        overflow-wrap: anywhere;
         margin-left: 0.1rem;
       }
       .hub-nowrap {

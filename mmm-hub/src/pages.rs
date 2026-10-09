@@ -1516,6 +1516,19 @@ struct DiggingQuery {
     bpm: Option<String>,
     harm: Option<String>,
     tol: Option<f64>,
+    /// Filter: tag owner slug.
+    towner: Option<String>,
+    /// Filter: tag group id.
+    tgroup: Option<i64>,
+    /// Filter: playlist owner (hub user) slug.
+    powner: Option<String>,
+}
+
+/// A `<select>` option with a precomputed `selected` flag.
+struct SelOpt {
+    value: String,
+    label: String,
+    selected: bool,
 }
 
 #[derive(Template)]
@@ -1535,6 +1548,14 @@ struct DiggingPage {
     seed_key: String,
     filters: Vec<ScopeLink>,
     bpm_opts: Vec<ScopeLink>,
+    tag_owner_opts: Vec<SelOpt>,
+    tag_group_opts: Vec<SelOpt>,
+    pl_owner_opts: Vec<SelOpt>,
+    mine: bool,
+    bpm: bool,
+    harm: bool,
+    tol: i64,
+    reset_href: String,
 }
 
 struct DigRow {
@@ -1897,15 +1918,24 @@ async fn digging_page(
         .map(|r| r.track_id)
         .collect();
     if !matched_ids.is_empty() {
-        let presence = crate::digging::presence_many(&st.pool, &matched_ids).await;
+        let (presence_map, tags_map) = dig_details(&st.pool, &matched_ids).await;
         for r in cand.values_mut() {
-            if r.matched {
-                if let Some(p) = presence.get(&r.track_id) {
-                    r.users = p.users;
-                    r.playlists = p.playlists;
-                    r.likes = p.likes;
-                }
+            if !r.matched {
+                continue;
             }
+            r.presence = presence_map.get(&r.track_id).cloned().unwrap_or_default();
+            r.tags = tags_map.get(&r.track_id).cloned().unwrap_or_default();
+            r.users = r
+                .presence
+                .iter()
+                .filter(|u| !u.owned.is_empty() || !u.followed.is_empty())
+                .count() as i64;
+            r.playlists = r
+                .presence
+                .iter()
+                .map(|u| (u.owned.len() + u.followed.len()) as i64)
+                .sum();
+            r.likes = r.presence.iter().filter(|u| u.liked).count() as i64;
         }
     }
 
@@ -1968,6 +1998,9 @@ async fn digging_page(
     let mine_only = q.mine.as_deref() == Some("1");
     let bpm_only = q.bpm.as_deref() == Some("1");
     let harm_only = q.harm.as_deref() == Some("1");
+    let towner = q.towner.clone().unwrap_or_default().trim().to_string();
+    let tgroup = q.tgroup.filter(|t| *t > 0).unwrap_or(0);
+    let powner = q.powner.clone().unwrap_or_default().trim().to_string();
     // Absolute BPM tolerance in whole BPM (0 = rounded-equal).
     let tol = q
         .tol
@@ -1993,6 +2026,21 @@ async fn digging_page(
         if harm_only && !crate::features::camelot_compatible(&seed_camelot, &r.camelot) {
             return false;
         }
+        // Tag owner, tag group, playlist owner.
+        if !towner.is_empty() && !r.tags.iter().any(|t| t.owner.eq_ignore_ascii_case(&towner)) {
+            return false;
+        }
+        if tgroup != 0 && !r.tags.iter().any(|t| t.groups.iter().any(|g| g.id == tgroup)) {
+            return false;
+        }
+        if !powner.is_empty()
+            && !r.presence.iter().any(|u| {
+                u.slug.eq_ignore_ascii_case(&powner)
+                    && (!u.owned.is_empty() || !u.followed.is_empty())
+            })
+        {
+            return false;
+        }
         true
     });
 
@@ -2012,16 +2060,6 @@ async fn digging_page(
     let with_hub = rows.iter().filter(|r| r.users > 0 || r.likes > 0).count();
     rows.truncate(500);
 
-    // Attach per-user playlists + tags (track-detail style) for the shown rows.
-    let matched_ids: Vec<i64> = rows.iter().filter(|r| r.matched).map(|r| r.track_id).collect();
-    let (presence_map, tags_map) = dig_details(&st.pool, &matched_ids).await;
-    for r in rows.iter_mut() {
-        if r.matched {
-            r.presence = presence_map.get(&r.track_id).cloned().unwrap_or_default();
-            r.tags = tags_map.get(&r.track_id).cloned().unwrap_or_default();
-        }
-    }
-
     // Filter toggle links, preserving the other flags.
     let link = |mine: bool, bpm: bool, harm: bool, tol: i64| -> String {
         let mut s = format!("/digging?seed={seed_id}");
@@ -2033,6 +2071,15 @@ async fn digging_page(
         }
         if harm {
             s.push_str("&harm=1");
+        }
+        if !towner.is_empty() {
+            s.push_str(&format!("&towner={}", urlencoding::encode(&towner)));
+        }
+        if tgroup != 0 {
+            s.push_str(&format!("&tgroup={tgroup}"));
+        }
+        if !powner.is_empty() {
+            s.push_str(&format!("&powner={}", urlencoding::encode(&powner)));
         }
         s
     };
@@ -2076,6 +2123,69 @@ async fn digging_page(
         })
         .collect();
 
+    // Option lists for the tag-owner / tag-group / playlist-owner selects.
+    let tag_owner_opts: Vec<SelOpt> = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT u.slug FROM hub_tags t JOIN hub_users u ON u.id = t.owner_user_id
+          ORDER BY u.slug",
+    )
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|slug| SelOpt {
+        selected: slug.eq_ignore_ascii_case(&towner),
+        label: format!("@{slug}"),
+        value: slug,
+    })
+    .collect();
+    let tag_group_opts: Vec<SelOpt> = sqlx::query(
+        "SELECT id, COALESCE(icon, '') AS icon, name FROM hub_tag_groups ORDER BY name COLLATE NOCASE",
+    )
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| {
+        let id: i64 = r.get("id");
+        SelOpt {
+            value: id.to_string(),
+            label: format!(
+                "{} {}",
+                r.get::<Option<String>, _>("icon").unwrap_or_default(),
+                r.get::<Option<String>, _>("name").unwrap_or_default()
+            )
+            .trim()
+            .to_string(),
+            selected: id == tgroup,
+        }
+    })
+    .collect();
+    let pl_owner_opts: Vec<SelOpt> = sqlx::query_scalar::<_, String>("SELECT slug FROM hub_users ORDER BY slug")
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|slug| SelOpt {
+            selected: slug.eq_ignore_ascii_case(&powner),
+            label: format!("@{slug}"),
+            value: slug,
+        })
+        .collect();
+
+    let reset_href = {
+        let mut s = format!("/digging?seed={seed_id}");
+        if mine_only {
+            s.push_str("&mine=1");
+        }
+        if bpm_only {
+            s.push_str(&format!("&bpm=1&tol={tol}"));
+        }
+        if harm_only {
+            s.push_str("&harm=1");
+        }
+        s
+    };
+
     render(&DiggingPage {
         nav,
         flash: String::new(),
@@ -2091,6 +2201,14 @@ async fn digging_page(
         seed_key: seed_camelot,
         filters,
         bpm_opts,
+        tag_owner_opts,
+        tag_group_opts,
+        pl_owner_opts,
+        mine: mine_only,
+        bpm: bpm_only,
+        harm: harm_only,
+        tol,
+        reset_href,
     })
 }
 

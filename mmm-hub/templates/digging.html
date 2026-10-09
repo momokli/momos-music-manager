@@ -61,6 +61,44 @@ content %}
     </ul>
 </nav>
 
+<form method="get" action="/digging" class="hub-actions" role="search">
+    <input type="hidden" name="seed" value="{{ seed_id }}" />
+    {% if mine %}<input type="hidden" name="mine" value="1" />{% endif %} {% if bpm
+    %}<input type="hidden" name="bpm" value="1" /><input
+        type="hidden"
+        name="tol"
+        value="{{ tol }}"
+    />{% endif %} {% if harm %}<input type="hidden" name="harm" value="1" />{% endif %}
+    <select name="towner" aria-label="Tag-Owner">
+        <option value="">Tag-Owner: alle</option>
+        {% for o in tag_owner_opts %}
+        <option value="{{ o.value }}" {% if o.selected %}selected{% endif %}>
+            {{ o.label }}
+        </option>
+        {% endfor %}
+    </select>
+    <select name="tgroup" aria-label="Tag-Gruppe">
+        <option value="0">Tag-Gruppe: alle</option>
+        {% for o in tag_group_opts %}
+        <option value="{{ o.value }}" {% if o.selected %}selected{% endif %}>
+            {{ o.label }}
+        </option>
+        {% endfor %}
+    </select>
+    <select name="powner" aria-label="Playlist-Owner">
+        <option value="">Playlist-Owner: alle</option>
+        {% for o in pl_owner_opts %}
+        <option value="{{ o.value }}" {% if o.selected %}selected{% endif %}>
+            {{ o.label }}
+        </option>
+        {% endfor %}
+    </select>
+    <button type="submit">Filtern</button>
+    <a href="{{ reset_href }}" role="button" class="secondary outline"
+        >Filter zurücksetzen</a
+    >
+</form>
+
 {% if rows.is_empty() %}
 <p class="hub-muted">Keine Vorschläge für diese Auswahl.</p>
 {% else %}
@@ -83,7 +121,7 @@ content %}
         <tbody>
             {% for r in rows %}
             <tr>
-                <td class="hub-nowrap">
+                <td class="hub-dig-track">
                     {% if r.matched %}<a href="/track/{{ r.track_id }}"
                         >{{ r.artists }} — {{ r.title }}</a
                     >{% else %}{{ r.artists }} — {{ r.title }}
