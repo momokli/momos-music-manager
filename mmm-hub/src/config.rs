@@ -11,6 +11,8 @@ pub struct Config {
     pub spotify_redirect_uri: String,
     pub spotify_api_base: String,
     pub reccobeats_base: String,
+    pub cosine_base: String,
+    pub cosine_api_key: Option<String>,
     pub lastfm_api_key: Option<String>,
     pub soundcloud_client_id: Option<String>,
     pub soundcloud_client_secret: Option<String>,
@@ -36,6 +38,9 @@ impl Config {
                 .unwrap_or_else(|| crate::spotify::DEFAULT_API_BASE.to_string()),
             reccobeats_base: env("RECCOBEATS_BASE")
                 .unwrap_or_else(|| "https://api.reccobeats.com/v1".to_string()),
+            cosine_base: env("COSINE_BASE")
+                .unwrap_or_else(|| "https://cosine.club/api/v1".to_string()),
+            cosine_api_key: env("COSINECLUB_API"),
             lastfm_api_key: env("LASTFM_API_KEY"),
             soundcloud_client_id: env("SOUNDCLOUD_CLIENT_ID"),
             soundcloud_client_secret: env("SOUNDCLOUD_CLIENT_SECRET"),
@@ -58,6 +63,8 @@ impl Config {
             spotify_redirect_uri: "http://127.0.0.1:8888/callback".to_string(),
             spotify_api_base: crate::spotify::DEFAULT_API_BASE.to_string(),
             reccobeats_base: "https://api.reccobeats.com/v1".to_string(),
+            cosine_base: "https://cosine.club/api/v1".to_string(),
+            cosine_api_key: None,
             lastfm_api_key: None,
             soundcloud_client_id: None,
             soundcloud_client_secret: None,
@@ -77,6 +84,8 @@ impl Config {
         match key {
             crate::settings::LASTFM_API_KEY => self.lastfm_api_key = Some(value.into()),
             crate::settings::RECCOBEATS_BASE => self.reccobeats_base = value.into(),
+            crate::settings::COSINE_BASE => self.cosine_base = value.into(),
+            crate::settings::COSINE_API_KEY => self.cosine_api_key = Some(value.into()),
             crate::settings::MUSIC_API_BASE => self.music_api_base = value.into(),
             crate::settings::MUSIC_API_TOKEN => self.music_api_token = Some(value.into()),
             crate::settings::SPOTIFY_CLIENT_ID => self.spotify_client_id = Some(value.into()),

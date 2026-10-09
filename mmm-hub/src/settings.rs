@@ -10,6 +10,8 @@ use sqlx::SqlitePool;
 /// Known setting keys (all optional except the toggles).
 pub const LASTFM_API_KEY: &str = "lastfm_api_key";
 pub const RECCOBEATS_BASE: &str = "reccobeats_base";
+pub const COSINE_API_KEY: &str = "cosine_api_key";
+pub const COSINE_BASE: &str = "cosine_base";
 pub const MUSIC_API_BASE: &str = "music_api_base";
 pub const MUSIC_API_TOKEN: &str = "music_api_token";
 pub const SPOTIFY_CLIENT_ID: &str = "spotify_client_id";
@@ -32,6 +34,8 @@ pub const ADMIN_FIELDS: &[(&str, &str, bool)] = &[
     (MUSIC_API_BASE, "music-api Base-URL", false),
     (MUSIC_API_TOKEN, "music-api Token", true),
     (RECCOBEATS_BASE, "ReccoBeats Base-URL", false),
+    (COSINE_API_KEY, "cosine.club API-Key", true),
+    (COSINE_BASE, "cosine.club Base-URL", false),
 ];
 
 pub async fn load_all(pool: &SqlitePool) -> HashMap<String, String> {

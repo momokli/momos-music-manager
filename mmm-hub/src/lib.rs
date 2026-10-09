@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod config;
+pub mod cosine;
 pub mod db;
 pub mod digging;
 pub mod features;

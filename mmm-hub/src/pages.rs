@@ -1008,6 +1008,21 @@ async fn digging_page(
                     merge_candidate(&mut cand, &st.pool, tid, &s.name, &s.artist, "Last.fm").await;
                 }
             }
+
+            // 4. cosine.club similar (free API key): audio-similarity over 2M+
+            //    underground tracks — the breadth our own catalog lacks.
+            if crate::cosine::enabled(&st.cfg) {
+                let seed_artist = seed.artists.split(',').next().unwrap_or("").trim();
+                for s in crate::cosine::similar_tracks(&st.cfg, seed_artist, &seed.title, 60)
+                    .await
+                    .unwrap_or_default()
+                {
+                    let tid =
+                        crate::digging::match_track(&st.pool, None, None, &s.artist, &s.track).await;
+                    merge_candidate(&mut cand, &st.pool, tid, &s.track, &s.artist, "cosine.club")
+                        .await;
+                }
+            }
         }
     }
 
