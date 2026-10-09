@@ -1,0 +1,26 @@
+{% extends "base.html" %} {% block title %}{{ name }} — MMM Hub{% endblock %} {% block content %}
+<hgroup>
+    <h1>{{ name }}</h1>
+    <p>von <a href="/user/{{ owner }}">{{ owner }}</a></p>
+</hgroup>
+
+{% if tracks.is_empty() %}
+<p>Keine Tracks in dieser Playlist.</p>
+{% else %}
+<table>
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>Track</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for t in tracks %}
+        <tr>
+            <td>{{ t.position }}</td>
+            <td><a href="/track/{{ t.id }}">{{ t.artists }} - {{ t.title }}</a></td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %} {% endblock %}

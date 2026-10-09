@@ -27,6 +27,7 @@ pub fn router(state: AppState) -> Router {
         .route("/logout", post(logout))
         .route("/sql", get(sql_page).post(sql_run))
         .route("/track/{id}", get(track_page))
+        .route("/track/{id}/fetch", post(track_fetch))
         .route("/api/hub/services/{service}/connect", get(connect))
         .route("/api/hub/services/{service}/fetch-playlists", post(fetch_playlists_handler))
         .route("/api/hub/playlists/{id}/toggle", post(toggle_playlist))
@@ -573,6 +574,7 @@ fn render_table(columns: &[String], rows: &[Value]) -> String {
 #[derive(Template)]
 #[template(path = "track.html")]
 struct TrackPage {
+    id: i64,
     title: String,
     artists: String,
     album: String,
@@ -582,6 +584,11 @@ struct TrackPage {
     image_url: String,
     explicit: bool,
     users: Vec<UserGroup>,
+    avail_text: String,
+    deezer_id: String,
+    fetchable: bool,
+    external_ids: Vec<ExternalId>,
+    msg: String,
 }
 
 struct UserGroup {
@@ -590,9 +597,16 @@ struct UserGroup {
     playlists: Vec<String>,
 }
 
+struct ExternalId {
+    service: String,
+    external_id: String,
+    url: String,
+}
+
 async fn track_page(
     State(st): State<AppState>,
     Path(id): Path<i64>,
+    Query(flash): Query<Flash>,
     headers: HeaderMap,
 ) -> Response {
     if current_user(&st, &headers).await.is_none() {
@@ -673,16 +687,71 @@ async fn track_page(
         String::new()
     };
 
+    let isrc: String = row.get::<Option<String>, _>("isrc").unwrap_or_default();
+
+    // External service IDs for this track.
+    let external_ids: Vec<ExternalId> = sqlx::query(
+        "SELECT service, external_id, url FROM hub_track_external_ids
+          WHERE track_id = ?1 ORDER BY service, external_id",
+    )
+    .bind(id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| {
+        let service: String = r.get("service");
+        let external_id: String = r.get("external_id");
+        let mut url: String = r.get::<Option<String>, _>("url").unwrap_or_default();
+        if url.is_empty() && service == "spotify" {
+            url = format!("https://open.spotify.com/track/{external_id}");
+        }
+        ExternalId {
+            service,
+            external_id,
+            url,
+        }
+    })
+    .collect();
+
+    let mut avail_text = String::from("—");
+    let mut deezer_id = String::new();
+    let mut fetchable = false;
+    if !isrc.is_empty() {
+        match crate::music_api::status(&st.cfg, &isrc).await {
+            Ok(s) if s.known() => {
+                avail_text = s.state.clone().unwrap_or_default();
+                let f = s.formats_str();
+                if !f.is_empty() {
+                    avail_text.push_str(&format!(" (Formate: {f})"));
+                }
+                deezer_id = s.deezer_id.clone().unwrap_or_default();
+                fetchable = !s.ready();
+            }
+            Ok(_) => {
+                avail_text = "noch nicht im music-api-Ledger".to_string();
+                fetchable = true;
+            }
+            Err(_) => avail_text = "music-api nicht erreichbar".to_string(),
+        }
+    }
+
     let page = TrackPage {
+        id,
         title: row.get::<Option<String>, _>("title").unwrap_or_default(),
         artists: row.get::<Option<String>, _>("artists").unwrap_or_default(),
         album: row.get::<Option<String>, _>("album").unwrap_or_default(),
         duration,
-        isrc: row.get::<Option<String>, _>("isrc").unwrap_or_default(),
+        isrc,
         spotify_id,
         image_url: row.get::<Option<String>, _>("image_url").unwrap_or_default(),
         explicit: row.get::<Option<i64>, _>("explicit").unwrap_or(0) != 0,
         users,
+        avail_text,
+        deezer_id,
+        fetchable,
+        external_ids,
+        msg: flash.msg.unwrap_or_default(),
     };
 
     match page.render() {
@@ -713,6 +782,34 @@ async fn recent_tracks(st: &AppState) -> String {
     }
     s.push_str("</ul>");
     s
+}
+
+async fn track_fetch(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    if current_user(&st, &headers).await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    let isrc: Option<String> = sqlx::query_scalar("SELECT isrc FROM hub_tracks WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(&st.pool)
+        .await
+        .ok()
+        .flatten();
+    let Some(isrc) = isrc.filter(|s| !s.is_empty()) else {
+        return Redirect::to(&format!(
+            "/track/{id}?msg={}",
+            urlencoding::encode("kein ISRC vorhanden")
+        ))
+        .into_response();
+    };
+    let msg = match crate::music_api::order(&st.cfg, std::slice::from_ref(&isrc)).await {
+        Ok(order) => format!("Bestellt ({order}) — music-api lädt"),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    Redirect::to(&format!("/track/{id}?msg={}", urlencoding::encode(&msg))).into_response()
 }
 
 /// `Some((connected, display_name))` when the user has a linked account.

@@ -9,6 +9,8 @@ pub struct Config {
     pub spotify_client_id: Option<String>,
     pub spotify_client_secret: Option<String>,
     pub spotify_redirect_uri: String,
+    pub music_api_base: String,
+    pub music_api_token: Option<String>,
 }
 
 impl Config {
@@ -23,6 +25,9 @@ impl Config {
             // for a one-time local token grab without any public HTTPS.
             spotify_redirect_uri: env("SPOTIFY_REDIRECT_URI")
                 .unwrap_or_else(|| "http://127.0.0.1:8888/callback".to_string()),
+            music_api_base: env("MUSIC_API_BASE")
+                .unwrap_or_else(|| "http://127.0.0.1:8710".to_string()),
+            music_api_token: env("MUSIC_API_TOKEN"),
         }
     }
 

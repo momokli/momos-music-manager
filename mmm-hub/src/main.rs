@@ -10,6 +10,8 @@ mod api;
 mod config;
 mod db;
 mod ingest;
+mod music_api;
+mod pages;
 mod spotify;
 mod web;
 mod worker;
@@ -116,7 +118,9 @@ async fn cmd_serve(cfg: Config, host: Option<String>, port: Option<u16>) -> Resu
         cfg: Arc::new(cfg.clone()),
         oauth_states: Arc::new(Mutex::new(HashMap::new())),
     };
-    let app = api::router(state.clone()).merge(web::router(state.clone()));
+    let app = api::router(state.clone())
+        .merge(web::router(state.clone()))
+        .merge(pages::router(state.clone()));
     worker::spawn(state.pool.clone(), state.cfg.clone());
 
     let listener = TcpListener::bind((host.as_str(), port)).await?;
