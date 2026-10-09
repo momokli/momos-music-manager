@@ -238,12 +238,21 @@ cosine.club liefert die Breite.**
 
 ### Schicht 1 — Features (BPM, Key, Genre, Mood)
 
-1. **LOKAL (unser Kern): EffNet-Discogs ONNX in Rust** — BPM, Key + **Camelot**, **Genre (400
+Prioritaet (wer zuerst gefragt wird): **Traktor (lokal) → ReccoBeats (frei) → FreqBlog (paid)**.
+
+0. **LOKAL-MASSE: Traktor (Wine/headless) auf .200** — analysiert die eigenen Dateien (via
+   music-api/FLAC) zu BPM/Key, gratis und in Bibliotheksgroesse. Ergebnis als `collection.nml`
+   exportieren, in `hub_track_features` (`source='traktor'`) importieren (#200; Main-Repo-Epic #53).
+   **Das ist der einzige Weg, die ganze ~78k-Bibliothek ohne Per-Track-Kosten zu versorgen.**
+1. **LOKAL (Detail): EffNet-Discogs ONNX in Rust** — BPM, Key + **Camelot**, **Genre (400
    Discogs-Styles)**, Mood/Energy **und** das 1280-d-Embedding. Laeuft auf FLAC (music-api) **und**
-   auf Deezer-30-s-Previews → deckt auch Tracks ab, die wir _nicht_ besitzen. **Kostenlos, offline,
-   robust fuer Underground/White-Label.**
+   auf Deezer-30-s-Previews → deckt auch Tracks ab, die wir _nicht_ besitzen. **Kostenlos, offline.**
 2. **ReccoBeats (frei)** — Katalog-Features per Spotify-ID (~46 % Treffer).
-3. **Bezahlt nur bei `found=0`** — FreqBlog/MeloData per ISRC (BPM/Key/Camelot/Mood/Genre).
+3. **FreqBlog (paid) — nur bei `found=0`** und **hart budgetiert**: per ISRC
+   (`GET /lookup?isrc=…&wait=20`, `X-Api-Key`). Free-Tier = **1.000/Monat** → Cap im Code
+   **950** (`freqblog_monthly_cap`), gezaehlt in `hub_api_usage` (Provider, `YYYY-MM`, used).
+   Billing-bewusst: `200`/`202` = 1 Request, `404` frei, `429`/Auth stoppt. CLI `mmm-hub freqblog
+--limit N`. Query-Reserve: nur fuer Tracks ohne Datei (kein Traktor/Embedding).
 
 ### Schicht 2 — Aehnlichkeit / Discovery
 
@@ -286,3 +295,4 @@ Kandidaten anreichern (`haben wir? wer? welche Playlist?`) → fuer Kandidaten o
 - cosine.club API (frei, Discogs-EffNet): https://cosine.club/about · API-Key: https://cosine.club/account/api
 - Deezer API (keyless 30-s-Previews + ISRC): https://developers.deezer.com/
 - Spotify preview_url deprecated 2024-11-27: https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api
+- FreqBlog API (X-Api-Key, /lookup, /v1/audio-features): https://freqblog.com/ · Docs: https://api.freqblog.com/docs
