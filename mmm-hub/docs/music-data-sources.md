@@ -19,13 +19,13 @@ für Genre/Tags, **eigene On-Disk-Analyse** (Essentia) als Fallback — und für
 
 ## 1. Audio-Features (BPM, Key, Energy, Danceability, …) — Spotify-Ersatz
 
-| Anbieter | Daten | Auth | Kosten | Coverage | Bewertung |
-| --- | --- | --- | --- | --- | --- |
-| **ReccoBeats** | acousticness, danceability, energy, instrumentalness, key, liveness, loudness, speechiness, **tempo/BPM**, valence (+ Recommendation) | **keine** (public) | **frei** | Spotify-ID-keyed, groß | Primaerwahl — Schema spiegelt das alte Spotify-Endpoint, quasi drop-in |
-| **FreqBlog** | BPM, Key, Camelot, Mood, 44 Felder **per Track-Name** (kein Spotify-ID nötig) | API-Key | Free-Tier, sonst guenstig | gut, name-matching | Guter Fallback, wenn kein Spotify-ID/ISRC vorhanden |
-| **Musicae / "Spotify Extended Audio Features"** | Audio-Features + DJ-Scores, drop-in | API-Key (RapidAPI) | **paid** | >250 Mio | Wenn man DJ-Scores/Beatgrids braucht |
-| **AcousticBrainz** | BPM, Key, Mood-Modelle | keine | frei | nur Bestand (Sammlung **2022 eingestellt**) | read-only, lueckenhaft — nur als Alt-Daten |
-| **Essentia / librosa (self-hosted)** | alles, aus der Audiodatei | — | nur Compute | eigene Library | Fallback/Offline; braucht die Dateien (teils via `music-api`) |
+| Anbieter                                        | Daten                                                                                                                                 | Auth               | Kosten                    | Coverage                                    | Bewertung                                                              |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------ | ------------------------- | ------------------------------------------- | ---------------------------------------------------------------------- |
+| **ReccoBeats**                                  | acousticness, danceability, energy, instrumentalness, key, liveness, loudness, speechiness, **tempo/BPM**, valence (+ Recommendation) | **keine** (public) | **frei**                  | Spotify-ID-keyed, groß                      | Primaerwahl — Schema spiegelt das alte Spotify-Endpoint, quasi drop-in |
+| **FreqBlog**                                    | BPM, Key, Camelot, Mood, 44 Felder **per Track-Name** (kein Spotify-ID nötig)                                                         | API-Key            | Free-Tier, sonst guenstig | gut, name-matching                          | Guter Fallback, wenn kein Spotify-ID/ISRC vorhanden                    |
+| **Musicae / "Spotify Extended Audio Features"** | Audio-Features + DJ-Scores, drop-in                                                                                                   | API-Key (RapidAPI) | **paid**                  | >250 Mio                                    | Wenn man DJ-Scores/Beatgrids braucht                                   |
+| **AcousticBrainz**                              | BPM, Key, Mood-Modelle                                                                                                                | keine              | frei                      | nur Bestand (Sammlung **2022 eingestellt**) | read-only, lueckenhaft — nur als Alt-Daten                             |
+| **Essentia / librosa (self-hosted)**            | alles, aus der Audiodatei                                                                                                             | —                  | nur Compute               | eigene Library                              | Fallback/Offline; braucht die Dateien (teils via `music-api`)          |
 
 **Fazit:** ReccoBeats zuerst (kostenlos, kein Auth!), FreqBlog als Name-Fallback. Fuer Tracks ohne
 Match -> self-hosted Essentia ODER als "unbekannt" markieren.
@@ -34,12 +34,12 @@ Match -> self-hosted Essentia ODER als "unbekannt" markieren.
 
 Spotify liefert kein verlaessliches Genre pro Track mehr. Optionen:
 
-| Quelle | Was | Auth | Kosten |
-| --- | --- | --- | --- |
-| **MusicBrainz** | Genres/Tags pro Recording (community), + ISRC<->MBID | keine (User-Agent Pflicht) | frei |
-| **Last.fm** | crowd tags, `track.getTopTags` | API-Key | frei |
-| **Discogs** | Genre/Style (Vinyl/Release-Ebene) | API-Key/OAuth | frei (rate-limited) |
-| **Beatport** | sehr genaue elektronische Genres, BPM, Key — aber **offiziell keine offene API** | — | Scraping/Partner |
+| Quelle          | Was                                                                              | Auth                       | Kosten              |
+| --------------- | -------------------------------------------------------------------------------- | -------------------------- | ------------------- |
+| **MusicBrainz** | Genres/Tags pro Recording (community), + ISRC<->MBID                             | keine (User-Agent Pflicht) | frei                |
+| **Last.fm**     | crowd tags, `track.getTopTags`                                                   | API-Key                    | frei                |
+| **Discogs**     | Genre/Style (Vinyl/Release-Ebene)                                                | API-Key/OAuth              | frei (rate-limited) |
+| **Beatport**    | sehr genaue elektronische Genres, BPM, Key — aber **offiziell keine offene API** | —                          | Scraping/Partner    |
 
 **Fazit fuer "Techno-Filter":** MusicBrainz-Tags + Last.fm-Tags kombinieren; Beatport ist fuer
 elektronische Musik am praezisesten, aber nicht offiziell angebunden (rechtlich heikel).
@@ -49,11 +49,11 @@ elektronische Musik am praezisesten, aber nicht offiziell angebunden (rechtlich 
 Ziel: ein Track kann **mehrere Playlist-Quellen** haben (Spotify / SoundCloud / YouTube), die
 denselben **Tag** fuellen.
 
-| Dienst | Endpoints | Auth | Huerden |
-| --- | --- | --- | --- |
-| **Spotify** | `/me/playlists`, `/me/tracks`, `/playlists/{id}/items` | OAuth (haben wir) | dev-mode Quota |
-| **SoundCloud** | `/users/{urn}/likes/tracks`, `/users/{urn}/likes/playlists`, `/me/...` | **OAuth 2.1 + PKCE** | Neuregistrierung oeffentlich **stark eingeschraenkt**; client_id oft nur "intern" (api-v2) |
-| **YouTube (Music)** | `playlistItems.list`, `playlists.list`, liked videos | OAuth (Data API v3) | **10.000 Quota-Einheiten/Tag** (`playlistItems` = 1, `search` = 100) |
+| Dienst              | Endpoints                                                              | Auth                 | Huerden                                                                                    |
+| ------------------- | ---------------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------ |
+| **Spotify**         | `/me/playlists`, `/me/tracks`, `/playlists/{id}/items`                 | OAuth (haben wir)    | dev-mode Quota                                                                             |
+| **SoundCloud**      | `/users/{urn}/likes/tracks`, `/users/{urn}/likes/playlists`, `/me/...` | **OAuth 2.1 + PKCE** | Neuregistrierung oeffentlich **stark eingeschraenkt**; client_id oft nur "intern" (api-v2) |
+| **YouTube (Music)** | `playlistItems.list`, `playlists.list`, liked videos                   | OAuth (Data API v3)  | **10.000 Quota-Einheiten/Tag** (`playlistItems` = 1, `search` = 100)                       |
 
 **Fazit:** Spotify haben wir. SoundCloud ist machbar, aber die Developer-Registrierung ist
 zickig -> ggf. bestehender/interner client_id. YouTube ist sauber dokumentiert, Quota beachten
@@ -87,6 +87,25 @@ service_playlist  --(resolve)-->  tag  <--(resolve)-- service_playlist (andere Q
 4. **SoundCloud + YouTube** Ingest pro User (OAuth), gleiche Playlist/Track-Tabellen.
 5. **Filter-Framework**: jedes Panel = Filter-Bar (Top) -> SQL -> Tabelle; Sortierung/Filter
    serverseitig, gecacht wo teuer.
+
+## 6. Discovery / Similarity-Quellen (fuer das Hub-Digging)
+
+Ziel: wie das MMM-Digging (`#digging`) — aus einem Seed (Track/Playlist/Tag) aehnliche Tracks
+vorschlagen — aber im Hub, auf der geteilten DB, und mit **mehreren externen Quellen**.
+
+| Quelle                                               | Was                                                                                               | Auth                       | Kosten        | Integrierbar?                                   |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------- | -------------------------- | ------------- | ----------------------------------------------- |
+| **Hub-intern**                                       | Co-Occurrence: Tracks, die mit dem Seed dieselben Playlists/Tags teilen; "wer hat das sonst noch" | —                          | —             | ✅ selber rechnen (SQL)                         |
+| **Last.fm `track.getSimilar` / `artist.getSimilar`** | aehnliche Tracks/Artists aus Hoer-Daten                                                           | API-Key (frei)             | frei          | ✅ sauber                                       |
+| **ListenBrainz**                                     | Similar/Labs + Last.fm-kompatibel                                                                 | User-Token (frei)          | frei          | ✅                                              |
+| **ReccoBeats**                                       | Track-Recommendations (kein Auth)                                                                 | keine                      | frei          | ✅                                              |
+| **DigDeeper.fm**                                     | Audio-Aehnlichkeit (Referenz-Track -> 100 aehnliche), elektronisch                                | **keine oeffentliche API** | Pro 5,49€/Mon | ⚠️ nur **Deep-Link** (Handoff), kein Auto-Query |
+| **Spotify Recommendations**                          | —                                                                                                 | —                          | —             | ❌ am 27.11.2024 abgeschaltet                   |
+
+**Fazit:** Das Digging-View aggregiert **Last.fm + ListenBrainz + ReccoBeats + hub-interne
+Co-Occurrence** automatisch; **DigDeeper.fm** wird als Deep-Link/Handoff pro Track angeboten
+("auf digdeeper.fm oeffnen"). Ergebnisdarstellung: Zeilen = Vorschlaege, **eine Spalte je
+Quelle** + Score — konsistent zum Overlap-/Similar-Layout.
 
 ## Quellen (Auswahl)
 
