@@ -1,0 +1,18 @@
+[package]
+name = "effnet-spike"
+version = "0.1.0"
+edition = "2021"
+description = "Feasibility spike: Discogs-EffNet ONNX inference in Rust (mel + ort)"
+
+# Standalone crate: not a member of any enclosing workspace.
+[workspace]
+
+[dependencies]
+ort = "2.0.0-rc.13"
+rustfft = "6"
+hound = "3"
+libc = "0.2"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3

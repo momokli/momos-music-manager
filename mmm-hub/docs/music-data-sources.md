@@ -204,10 +204,19 @@ Fertige Projekte als Vorlage:
 
 ### Unser Plan (im Hub)
 
+> ⚠️ **Korrektur (Spike #189, verifiziert):** Discogs-EffNet liefert **nur Embedding (1280-d) +
+> Genre (Discogs400)** — **kein BPM, kein Key**. BPM/Key brauchen eine **eigene** Stufe
+> (Essentia `RhythmExtractor2013`/`KeyExtractor`, madmom, OpenKeyScan oder Traktor). Frühere
+> Aussagen hier, EffNet liefere BPM/Key, waren falsch.
+
 1. **FLAC sichern** (music-api: `POST /orders` + `GET /isrc/{isrc}/flac`), nur für Kandidaten/Seeds.
-2. **Analyse**: zwei Wege, gleiche Schnittstelle `{bpm, key, camelot, embedding[1280]}`:
-   - **(A) ONNX in Rust** — `discogs-effnet-onnx` via `ort`-Crate direkt im Hub-Binary. Lean, kein
-     Extra-Container, kein Python. **Bevorzugt** (passt zur Rust-Architektur).
+2. **Analyse**: zwei getrennte Stufen:
+   - **(A) Embedding/Genre: `discogs-effnet-onnx` via `ort`-Crate** direkt im Hub-Binary. **Validiert
+     (#189):** ~400-500× Echtzeit CPU, 174 MB RSS, 1 statisches Binary, kein Python. Rezept:
+     mono 16 kHz → 512/256-Frames → Hann → Power-FFT → **96-Band** Slaney-Mel (nicht 128!) →
+     `log10(1+10000·E)` → Patches **128×96** → Mean-Pool → 1280-d.
+   - **(B) BPM/Key: eigene Stufe** — Essentia `RhythmExtractor2013` + `KeyExtractor` (AGPL) auf .200,
+     oder madmom/OpenKeyScan. Native, offline, ganze Library. (Traktor-Wine als Alternative — siehe #200.)
    - **(B) Python-Microservice** (Essentia, AGPL) — mehr Modelle/Features, dafür zweiter Container.
    - Fallback für Tracks ohne FLAC: **Replicate `mtg/effnet-discogs`** (hosted, pay-per-call).
      → löst **gleichzeitig** die BPM/Key-Lücke.
@@ -240,13 +249,15 @@ cosine.club liefert die Breite.**
 
 Prioritaet (wer zuerst gefragt wird): **Traktor (lokal) → ReccoBeats (frei) → FreqBlog (paid)**.
 
-0. **LOKAL-MASSE: Traktor (Wine/headless) auf .200** — analysiert die eigenen Dateien (via
-   music-api/FLAC) zu BPM/Key, gratis und in Bibliotheksgroesse. Ergebnis als `collection.nml`
-   exportieren, in `hub_track_features` (`source='traktor'`) importieren (#200; Main-Repo-Epic #53).
-   **Das ist der einzige Weg, die ganze ~78k-Bibliothek ohne Per-Track-Kosten zu versorgen.**
-1. **LOKAL (Detail): EffNet-Discogs ONNX in Rust** — BPM, Key + **Camelot**, **Genre (400
-   Discogs-Styles)**, Mood/Energy **und** das 1280-d-Embedding. Laeuft auf FLAC (music-api) **und**
-   auf Deezer-30-s-Previews → deckt auch Tracks ab, die wir _nicht_ besitzen. **Kostenlos, offline.**
+0. **LOKAL-MASSE (BPM/Key): native Essentia/Madmom auf .200** — `RhythmExtractor2013` + `KeyExtractor`
+   direkt auf den FLACs (music-api), offline, gratis, ganze Library. **Empfohlen** (Recon #200:
+   Traktor-in-Wine hat harte Blocker: Native-Access-Aktivierung/Lizenz, Pflicht-GUI ohne GPU,
+   0 Swap + kleine Root-Partition). Traktor (Wine **oder** MacBook) bleibt **nur** als
+   Konsistenz-Referenz zu den bereits Traktor-analysierten Dateien (#200 / Main-Repo-Epic #53).
+1. **LOKAL (Detail): EffNet-Discogs ONNX in Rust** — **Genre (400 Discogs-Styles)** + das 1280-d-
+   **Embedding** (fuer Similarity). **Kein BPM/Key** (siehe Warnung oben). Laeuft auf FLAC (music-api)
+   **und** auf Deezer-30-s-Previews → deckt auch Tracks ab, die wir _nicht_ besitzen. Kostenlos, offline.
+   **BPM/Key** kommen aus einer eigenen Stufe (Essentia `RhythmExtractor`/`KeyExtractor` native auf .200).
 2. **ReccoBeats (frei)** — Katalog-Features per Spotify-ID (~46 % Treffer).
 3. **FreqBlog (paid) — nur bei `found=0`** und **hart budgetiert**: per ISRC
    (`GET /lookup?isrc=…&wait=20`, `X-Api-Key`). Free-Tier = **1.000/Monat** → Cap im Code

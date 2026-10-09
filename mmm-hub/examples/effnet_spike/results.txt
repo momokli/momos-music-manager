@@ -1,0 +1,146 @@
+### ENVIRONMENT
+python 3.12.13
+onnxruntime 1.31.0
+numpy 2.5.3
+soundfile 0.14.0
+essentia 2.1-beta6-dev
+cpu: Apple M4 Pro / 12 cores / arm64
+
+### python/inspect_model.py
+=== ONNX Runtime ===
+ort version: 1.31.0
+providers: ['CPUExecutionProvider']
+
+=== Inputs ===
+  name='melspectrogram' shape=['batch_size', 128, 96] type=tensor(float)
+=== Outputs ===
+  name='activations' shape=['batch_size', 400] type=tensor(float)
+  name='embeddings' shape=['batch_size', 1280] type=tensor(float)
+
+=== Model metadata ===
+producer: pytorch
+domain: 
+description: 
+custom_metadata_map: {}
+
+### python/validate_mel.py
+audio audio/test_clip_44k_stereo.wav: 480001 samples @16k
+essentia frames: (1877, 512), mel: (1877, 96)
+numpy   frames: (1877, 512)
+frame max abs diff (first 1877): 0.000000e+00
+mel max abs diff : 5.543232e-05
+mel mean abs diff: 1.465595e-06
+mel ref range    : [0.0000, 6.2287]
+relative max err : 8.900e-06
+full-pipeline mel max abs diff (first 1877): 5.543232e-05
+
+RESULT: PASS (numpy mel matches Essentia)
+
+### python/effnet_embed.py (30s, Essentia mel)
+audio: audio/test_clip_44k_stereo.wav  30.00s @16k mono (480001 samples), load+resample 16 ms
+mel: (1877, 96) (frames x 96 bands) in 10 ms  (190110 frames/s)
+patches: (29, 128, 96) (patchHop=62, lastPatchMode=discard)
+onnx: embeddings (29, 1280), activations (29, 400) in 39 ms (747 patches/s, batch=29)
+embedding: dim=1280, norm=2.9151
+TOTAL wall (load+mel+onnx): 65 ms for 30.0s audio => 463.5x realtime
+peak RSS: 320.6 MB
+
+top-10 Discogs400 styles (mean over patches):
+   0.269  Electronic---Experimental
+   0.260  Electronic---Minimal
+   0.234  Electronic---Techno
+   0.230  Electronic---Glitch
+   0.212  Electronic---House
+   0.187  Electronic---Minimal Techno
+   0.133  Electronic---Deep House
+   0.122  Electronic---Chiptune
+   0.108  Electronic---Ambient
+   0.089  Electronic---Abstract
+
+saved audio/embedding.npy
+
+### python/effnet_embed_numpy.py (30s, pure numpy mel)
+numpy mel: (1877, 96) in 21 ms (90433 frames/s)
+patches: (29, 128, 96)
+onnx: (29, 1280) / (29, 400) in 39 ms
+TOTAL numpy-pipeline: 76 ms (396.4x realtime), peak RSS 327.0 MB
+cosine(numpy-embed, essentia-embed) = 1.000000
+top-10 styles:
+   0.269  Electronic---Experimental
+   0.260  Electronic---Minimal
+   0.234  Electronic---Techno
+   0.230  Electronic---Glitch
+   0.212  Electronic---House
+   0.187  Electronic---Minimal Techno
+   0.133  Electronic---Deep House
+   0.122  Electronic---Chiptune
+   0.108  Electronic---Ambient
+   0.089  Electronic---Abstract
+
+### python/effnet_embed.py (180s)
+audio: audio/test_clip_180s_44k_stereo.wav  180.00s @16k mono (2880001 samples), load+resample 59 ms
+mel: (11252, 96) (frames x 96 bands) in 55 ms  (203446 frames/s)
+patches: (180, 128, 96) (patchHop=62, lastPatchMode=discard)
+onnx: embeddings (180, 1280), activations (180, 400) in 221 ms (816 patches/s, batch=180)
+embedding: dim=1280, norm=2.9044
+TOTAL wall (load+mel+onnx): 335 ms for 180.0s audio => 537.1x realtime
+peak RSS: 870.8 MB
+
+top-10 Discogs400 styles (mean over patches):
+   0.269  Electronic---Minimal
+   0.263  Electronic---Experimental
+   0.236  Electronic---Techno
+   0.233  Electronic---Glitch
+   0.209  Electronic---House
+   0.196  Electronic---Minimal Techno
+   0.132  Electronic---Deep House
+   0.117  Electronic---Chiptune
+   0.107  Electronic---Ambient
+   0.087  Electronic---Abstract
+
+saved audio/embedding.npy
+
+### rust 180s
+wav: ../audio/test_clip_180s_16k_mono.wav  16000 Hz, 1 ch, Int, 2880001 samples  (decode 13.6 ms)
+mel: 11252 frames x 96 bands  (105.7 ms, 106473 frames/s)
+patches: [180, 128, 96]
+onnx: model init 23 ms | embeddings [64, 1280] activations [64, 400]
+onnx: inference 218.6 ms for 180 patches in 3 batches (batch<= 64) => 823 patches/s
+embedding: dim=1280  mean-norm=2.9044
+top-5 styles:
+  0.269  Electronic---Minimal
+  0.263  Electronic---Experimental
+  0.236  Electronic---Techno
+  0.233  Electronic---Glitch
+  0.209  Electronic---House
+peak RSS: 371.4 MB
+TOTAL (decode+mel+infer, excl. model init): 338 ms for 180.0s audio => 532.7x realtime
+
+### rust 30s
+wav: ../audio/test_clip_16k_mono.wav  16000 Hz, 1 ch, Int, 480001 samples  (decode 2.9 ms)
+mel: 1877 frames x 96 bands  (18.0 ms, 104059 frames/s)
+patches: [29, 128, 96]
+onnx: model init 23 ms | embeddings [29, 1280] activations [29, 400]
+onnx: inference 40.0 ms for 29 patches in 1 batches (batch<= 64) => 726 patches/s
+embedding: dim=1280  mean-norm=2.9152
+top-5 styles:
+  0.269  Electronic---Experimental
+  0.260  Electronic---Minimal
+  0.234  Electronic---Techno
+  0.230  Electronic---Glitch
+  0.212  Electronic---House
+peak RSS: 174.2 MB
+TOTAL (decode+mel+infer, excl. model init): 61 ms for 30.0s audio => 493.1x realtime
+
+### python/compare_rust.py
+audio: 480001 samples @16k
+mel py=(1877, 96)  rust=(1877, 96)
+mel max abs diff : 2.431870e-05
+mel mean abs diff: 8.073505e-07
+mel relative max : 3.904e-06
+
+embedding py norm=2.9152  rust norm=2.9152
+cosine(python, rust) = 1.000000
+embedding max abs diff = 7.748604e-07
+
+RESULT: PASS

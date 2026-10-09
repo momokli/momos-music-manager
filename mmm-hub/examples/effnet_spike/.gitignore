@@ -1,0 +1,8 @@
+# Spike artifacts — do not commit large binaries / venvs.
+models/
+audio/
+.venv/
+__pycache__/
+rust/target/
+*.f32
+*.npy
