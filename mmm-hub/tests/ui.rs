@@ -351,6 +351,29 @@ async fn similar_playlists_view() {
     assert!(html.contains("deep house"));
     assert!(html.contains("<th scope=\"col\">@alice"));
     assert!(html.contains("<th scope=\"col\">@bob"));
+    // Scope filter + shared (collaborative) detection.
+    assert!(html.contains("Collaborativ"));
+    assert!(html.contains("shared collab"));
+    assert!(html.contains("geteilt"), "shared badge missing");
+}
+
+#[tokio::test]
+async fn similar_scope_contributed_keeps_only_collaborative() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let resp = app
+        .client()
+        .get(app.url("/playlists/similar?scope=contributed"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    assert!(html.contains("shared collab"));
+    // "Deep House" is owned (alice) / followed (bob), not collaborative.
+    assert!(!html.contains("deep house"));
 }
 
 #[tokio::test]

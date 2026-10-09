@@ -85,17 +85,19 @@ async fn playlist(
     name: &str,
     owned: bool,
     owner: &str,
+    collaborative: bool,
 ) -> Result<i64> {
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO hub_playlists (user_id, service, playlist_id, name, is_liked, items_available, is_owned, owner_name, fetched_at)
-         VALUES (?1, 'spotify', ?2, ?3, 0, 1, ?4, ?5, ?6)
-         ON CONFLICT(user_id, service, playlist_id) DO UPDATE SET name = excluded.name, is_owned = excluded.is_owned, owner_name = excluded.owner_name RETURNING id",
+        "INSERT INTO hub_playlists (user_id, service, playlist_id, name, is_liked, items_available, is_owned, owner_name, collaborative, fetched_at)
+         VALUES (?1, 'spotify', ?2, ?3, 0, 1, ?4, ?5, ?6, ?7)
+         ON CONFLICT(user_id, service, playlist_id) DO UPDATE SET name = excluded.name, is_owned = excluded.is_owned, owner_name = excluded.owner_name, collaborative = excluded.collaborative RETURNING id",
     )
     .bind(user_id)
     .bind(pid)
     .bind(name)
     .bind(owned as i64)
     .bind(owner)
+    .bind(collaborative as i64)
     .bind(LOADED_AT)
     .fetch_one(pool)
     .await?;
@@ -142,9 +144,13 @@ pub async fn seed(pool: &SqlitePool) -> Result<Seed> {
 
     // Playlists: alice owns "Deep House", bob follows a "Deep House", carol owns "Techno".
     // alice + bob share t_pl, so a track page shows both an own and a followed playlist.
-    let pl_alice = playlist(pool, alice, "pl-alice", "Deep House", true, "Alice").await?;
-    let pl_bob = playlist(pool, bob, "pl-bob", "Deep House", false, "Bob").await?;
-    let pl_carol = playlist(pool, carol, "pl-carol", "Techno", true, "Carol").await?;
+    let pl_alice = playlist(pool, alice, "pl-alice", "Deep House", true, "Alice", false).await?;
+    let pl_bob = playlist(pool, bob, "pl-bob", "Deep House", false, "Bob", false).await?;
+    let pl_carol = playlist(pool, carol, "pl-carol", "Techno", true, "Carol", false).await?;
+
+    // A collaborative playlist shared by alice + bob (same Spotify id across users).
+    playlist(pool, alice, "pl-shared", "Shared Collab", true, "Alice", true).await?;
+    playlist(pool, bob, "pl-shared", "Shared Collab", true, "Alice", true).await?;
 
     membership(pool, pl_alice, t_all, 0).await?;
     membership(pool, pl_alice, t_pl, 1).await?;

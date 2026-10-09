@@ -433,7 +433,7 @@ async fn overlap_page(
 
     if !selected.is_empty() {
         let mut qb = QueryBuilder::new(
-            "SELECT hp.user_id AS uid, hp.id AS pl_id, hp.name AS pl_name, hp.is_owned AS owned,\n                    t.id AS tid, t.title AS title, t.artists AS artists, t.isrc AS isrc\n               FROM hub_playlist_tracks hpt\n               JOIN hub_playlists hp ON hp.id = hpt.playlist_id\n               JOIN hub_tracks t ON t.id = hpt.track_id\n              WHERE hp.user_id IN (",
+            "SELECT hp.user_id AS uid, hp.id AS pl_id, hp.name AS pl_name, hp.is_owned AS owned,\n                    hp.collaborative AS collab,\n                    t.id AS tid, t.title AS title, t.artists AS artists, t.isrc AS isrc\n               FROM hub_playlist_tracks hpt\n               JOIN hub_playlists hp ON hp.id = hpt.playlist_id\n               JOIN hub_tracks t ON t.id = hpt.track_id\n              WHERE hp.user_id IN (",
         );
         let mut sep = qb.separated(", ");
         for (id, _) in &selected {
@@ -445,10 +445,8 @@ async fn overlap_page(
             let uid: i64 = r.get("uid");
             let pl_id: i64 = r.get("pl_id");
             let owned: i64 = r.get("owned");
-            if scope == "owned" && owned != 1 {
-                continue;
-            }
-            if scope == "followed" && owned == 1 {
+            let collab: i64 = r.get("collab");
+            if !scope_match(scope, owned == 1, collab == 1) {
                 continue;
             }
             if let Some(f) = &pl_filter {
@@ -606,6 +604,11 @@ async fn overlap_page(
             active: scope == "owned",
         },
         ScopeLink {
+            label: "Collaborativ".to_string(),
+            href: scope_href(&current_ids, "contributed"),
+            active: scope == "contributed",
+        },
+        ScopeLink {
             label: "Gefolgt".to_string(),
             href: scope_href(&current_ids, "followed"),
             active: scope == "followed",
@@ -631,6 +634,12 @@ async fn overlap_page(
 
 // ── similar playlists (playlists as tags) ────────────────────────────────────
 
+#[derive(Deserialize, Default)]
+struct SimilarQuery {
+    /// `all` | `owned` | `contributed` | `followed`.
+    scope: Option<String>,
+}
+
 #[derive(Template)]
 #[template(path = "similar.html")]
 struct SimilarPage {
@@ -638,11 +647,13 @@ struct SimilarPage {
     flash: String,
     users: Vec<ColumnUser>,
     rows: Vec<SimilarRow>,
+    scopes: Vec<ScopeLink>,
 }
 
 struct SimilarRow {
     label: String,
     user_count: i64,
+    shared: bool,
     cells: Vec<SimilarCell>,
 }
 
@@ -651,6 +662,20 @@ struct SimilarCell {
     id: i64,
     name: String,
     owned: bool,
+    collaborative: bool,
+    /// This exact Spotify playlist (same playlist id) is present for >= 2 users.
+    shared: bool,
+}
+
+/// Classify a playlist row for the scope filter.
+/// `owned` = your own; `contributed` = collaborative; `followed` = subscribed.
+fn scope_match(scope: &str, owned: bool, collaborative: bool) -> bool {
+    match scope {
+        "owned" => owned && !collaborative,
+        "contributed" => collaborative,
+        "followed" => !owned && !collaborative,
+        _ => true,
+    }
 }
 
 /// Lowercase, keep alphanumerics, collapse everything else to single spaces.
@@ -671,9 +696,28 @@ fn normalize_name(s: &str) -> String {
     out.trim().to_string()
 }
 
-async fn similar_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+struct SimilarEntry {
+    uid: i64,
+    id: i64,
+    name: String,
+    owned: bool,
+    collaborative: bool,
+    spotify_id: String,
+}
+
+async fn similar_page(
+    State(st): State<AppState>,
+    Query(q): Query<SimilarQuery>,
+    headers: HeaderMap,
+) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "similar").await else {
         return Redirect::to("/login").into_response();
+    };
+    let scope = match q.scope.as_deref() {
+        Some("owned") => "owned",
+        Some("contributed") => "contributed",
+        Some("followed") => "followed",
+        _ => "all",
     };
 
     let users = sqlx::query_as::<_, (i64, String)>("SELECT id, slug FROM hub_users ORDER BY slug")
@@ -682,63 +726,115 @@ async fn similar_page(State(st): State<AppState>, headers: HeaderMap) -> Respons
         .unwrap_or_default();
 
     let rows = sqlx::query(
-        "SELECT p.user_id AS uid, p.id AS id, p.name AS name, p.is_owned AS owned
+        "SELECT p.user_id AS uid, p.id AS id, p.name AS name, p.is_owned AS owned,
+                p.collaborative AS collab, p.playlist_id AS spotify
            FROM hub_playlists p",
     )
     .fetch_all(&st.pool)
     .await
     .unwrap_or_default();
 
-    let mut groups: HashMap<String, HashMap<i64, SimilarCell>> = HashMap::new();
+    let mut groups: HashMap<String, Vec<SimilarEntry>> = HashMap::new();
     for r in &rows {
+        let owned = r.get::<i64, _>("owned") == 1;
+        let collab = r.get::<i64, _>("collab") == 1;
+        if !scope_match(scope, owned, collab) {
+            continue;
+        }
         let name: String = r.get::<Option<String>, _>("name").unwrap_or_default();
         let key = normalize_name(&name);
         if key.is_empty() {
             continue;
         }
-        let uid: i64 = r.get("uid");
-        groups.entry(key).or_default().entry(uid).or_insert(SimilarCell {
-            present: true,
+        groups.entry(key).or_default().push(SimilarEntry {
+            uid: r.get("uid"),
             id: r.get("id"),
             name,
-            owned: r.get::<i64, _>("owned") == 1,
+            owned,
+            collaborative: collab,
+            spotify_id: r.get::<Option<String>, _>("spotify").unwrap_or_default(),
         });
     }
 
     let mut out: Vec<SimilarRow> = Vec::new();
-    for (key, by_user) in groups {
-        if by_user.len() < 2 {
+    for (key, entries) in groups {
+        let distinct: HashSet<i64> = entries.iter().map(|e| e.uid).collect();
+        if distinct.len() < 2 {
             continue;
         }
+
+        // Same Spotify playlist across users? → "contributed"/shared.
+        let mut by_spotify: HashMap<&str, HashSet<i64>> = HashMap::new();
+        for e in &entries {
+            if !e.spotify_id.is_empty() {
+                by_spotify.entry(e.spotify_id.as_str()).or_default().insert(e.uid);
+            }
+        }
+        let shared_ids: HashSet<&str> = by_spotify
+            .iter()
+            .filter(|(_, us)| us.len() >= 2)
+            .map(|(k, _)| *k)
+            .collect();
+        let row_shared = !shared_ids.is_empty();
+
         let cells = users
             .iter()
-            .map(|(uid, _)| match by_user.get(uid) {
-                Some(c) => SimilarCell {
+            .map(|(uid, _)| match entries.iter().find(|e| e.uid == *uid) {
+                Some(e) => SimilarCell {
                     present: true,
-                    id: c.id,
-                    name: c.name.clone(),
-                    owned: c.owned,
+                    id: e.id,
+                    name: e.name.clone(),
+                    owned: e.owned,
+                    collaborative: e.collaborative,
+                    shared: shared_ids.contains(e.spotify_id.as_str()),
                 },
                 None => SimilarCell {
                     present: false,
                     id: 0,
                     name: String::new(),
                     owned: false,
+                    collaborative: false,
+                    shared: false,
                 },
             })
             .collect();
         out.push(SimilarRow {
             label: key,
-            user_count: by_user.len() as i64,
+            user_count: distinct.len() as i64,
+            shared: row_shared,
             cells,
         });
     }
     out.sort_by(|a, b| {
-        b.user_count
-            .cmp(&a.user_count)
+        b.shared
+            .cmp(&a.shared)
+            .then_with(|| b.user_count.cmp(&a.user_count))
             .then_with(|| a.label.cmp(&b.label))
     });
     out.truncate(500);
+
+    let scopes = vec![
+        ScopeLink {
+            label: "Alle".to_string(),
+            href: "/playlists/similar".to_string(),
+            active: scope == "all",
+        },
+        ScopeLink {
+            label: "Eigene".to_string(),
+            href: "/playlists/similar?scope=owned".to_string(),
+            active: scope == "owned",
+        },
+        ScopeLink {
+            label: "Collaborativ".to_string(),
+            href: "/playlists/similar?scope=contributed".to_string(),
+            active: scope == "contributed",
+        },
+        ScopeLink {
+            label: "Gefolgt".to_string(),
+            href: "/playlists/similar?scope=followed".to_string(),
+            active: scope == "followed",
+        },
+    ];
 
     render(&SimilarPage {
         nav,
@@ -748,6 +844,7 @@ async fn similar_page(State(st): State<AppState>, headers: HeaderMap) -> Respons
             .map(|(_, slug)| ColumnUser { slug: slug.clone() })
             .collect(),
         rows: out,
+        scopes,
     })
 }
 
