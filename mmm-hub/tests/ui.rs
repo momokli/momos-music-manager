@@ -357,6 +357,61 @@ async fn overlap_bpm_and_key_filters() {
 }
 
 #[tokio::test]
+async fn overlap_bpm_survives_large_track_set() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    sqlx::query(
+        "INSERT INTO hub_track_features (track_id, found, bpm, camelot) VALUES (?1, 1, 128, ?2)",
+    )
+    .bind(app.seed.t_all)
+    .bind("8A")
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    // Put >900 filler tracks in alice's playlist so the audio lookup must chunk
+    // (a single `IN (...)` would exceed SQLite's bind-variable limit and silently
+    // drop all BPM/key data).
+    for i in 0..950 {
+        let sid = format!("filler-{i}");
+        let tid: i64 = sqlx::query_scalar(
+            "INSERT INTO hub_tracks (service, service_track_id, title, artists, first_seen_at)
+             VALUES ('spotify', ?1, ?2, 'F', '2026-01-01T00:00:00+00:00') RETURNING id",
+        )
+        .bind(&sid)
+        .bind(&sid)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position, added_at)
+             VALUES (?1, ?2, 0, '2026-01-01T00:00:00+00:00')",
+        )
+        .bind(app.seed.pl_alice)
+        .bind(tid)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+
+    let resp = app
+        .client()
+        .get(app.url("/overlap"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    assert!(
+        html.contains(">128<"),
+        "BPM must survive a >900-track id set (chunked lookup)"
+    );
+    assert!(html.contains(">8A<"));
+}
+
+#[tokio::test]
 async fn toggle_returns_row_fragment_for_htmx() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;

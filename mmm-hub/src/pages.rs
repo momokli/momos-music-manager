@@ -698,26 +698,29 @@ async fn overlap_page(
         }
     }
 
-    // Per-track audio (BPM / key) for filtering + display.
+    // Per-track audio (BPM / key) for filtering + display. Chunked because the
+    // id list can hold tens of thousands of tracks (SQLite bind-variable limit).
     let mut audio: HashMap<i64, (Option<f64>, String)> = HashMap::new();
     if !acc.is_empty() {
         let ids: Vec<i64> = acc.keys().copied().collect();
-        let mut qb = QueryBuilder::new(
-            "SELECT track_id, bpm, camelot FROM v_track_audio WHERE track_id IN (",
-        );
-        let mut sep = qb.separated(", ");
-        for id in &ids {
-            sep.push_bind(*id);
-        }
-        qb.push(")");
-        for r in qb.build().fetch_all(&st.pool).await.unwrap_or_default() {
-            audio.insert(
-                r.get("track_id"),
-                (
-                    r.get::<Option<f64>, _>("bpm"),
-                    r.get::<Option<String>, _>("camelot").unwrap_or_default(),
-                ),
+        for chunk in ids.chunks(900) {
+            let mut qb = QueryBuilder::new(
+                "SELECT track_id, bpm, camelot FROM v_track_audio WHERE track_id IN (",
             );
+            let mut sep = qb.separated(", ");
+            for id in chunk {
+                sep.push_bind(*id);
+            }
+            qb.push(")");
+            for r in qb.build().fetch_all(&st.pool).await.unwrap_or_default() {
+                audio.insert(
+                    r.get("track_id"),
+                    (
+                        r.get::<Option<f64>, _>("bpm"),
+                        r.get::<Option<String>, _>("camelot").unwrap_or_default(),
+                    ),
+                );
+            }
         }
     }
 
