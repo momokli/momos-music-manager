@@ -88,8 +88,8 @@ content %}
 <article>
     <header>
         <strong><a href="/user/{{ u.slug }}">@{{ u.slug }}</a></strong>
-        {% if u.liked %} · <span class="hub-badge">geliked</span>{% endif %} ·
-        {u.owned.len()} eigene · {{ u.followed.len() }} gefolgt
+        {% if u.liked %} · <span class="hub-badge">geliked</span>{% endif %} · {{
+        u.owned.len() }} eigene · {{ u.followed.len() }} gefolgt
     </header>
     {% if u.liked && u.owned.is_empty() && u.followed.is_empty() %}
     <p><small class="hub-muted">nur geliked</small></p>

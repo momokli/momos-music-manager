@@ -254,6 +254,8 @@ async fn track_page_distinguishes_owned_and_followed_playlists() {
     assert!(html.contains("Gefolgte Playlists"), "followed section missing");
     assert!(html.contains("hub-badge-ok"), "own badge missing");
     assert!(html.contains("hub-badge-no"), "followed badge missing");
+    // Guard against unrendered askama placeholders leaking as literal text.
+    assert!(!html.contains("{u."), "unrendered askama placeholder leaked");
 }
 
 #[tokio::test]
