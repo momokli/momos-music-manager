@@ -270,19 +270,31 @@ pub async fn priority_once(pool: &SqlitePool, cfg: &Config, batch: i64) -> Resul
     let found: std::collections::HashMap<String, &Feature> =
         feats.iter().map(|f| (f.spotify_id.clone(), f)).collect();
 
+    // ReccoBeats hits first; the misses go to the paid FreqBlog fallback (if
+    // configured and within budget), else are marked tried cheaply.
+    let mut missed: Vec<i64> = Vec::new();
+    let fb_ok = crate::freqblog::enabled(cfg) && crate::freqblog::remaining(pool, cfg).await > 0;
     for (tid, sid) in &pairs {
-        store(pool, *tid, found.get(sid).copied()).await?;
+        match found.get(sid) {
+            Some(f) => store(pool, *tid, Some(f)).await?,
+            None if fb_ok => missed.push(*tid),
+            None => store(pool, *tid, None).await?,
+        }
         sqlx::query("DELETE FROM hub_feature_requests WHERE track_id = ?1")
             .bind(tid)
             .execute(pool)
             .await?;
     }
+    if !missed.is_empty() {
+        let _ = crate::freqblog::enrich_tracks(pool, cfg, &missed, missed.len()).await;
+    }
     Ok(pairs.len())
 }
 
 /// Enqueue a set of candidate tracks for on-demand feature lookup: only those
-/// that actually have a Spotify id and no features row yet. Returns how many
-/// were newly queued.
+/// that actually have a Spotify id and no *usable* features yet (`found = 1`),
+/// so tracks ReccoBeats already missed can still be retried via FreqBlog.
+/// Returns how many were newly queued.
 pub async fn enqueue_missing(pool: &SqlitePool, candidate_ids: &[i64]) -> Result<usize> {
     if candidate_ids.is_empty() {
         return Ok(0);
@@ -307,7 +319,7 @@ pub async fn enqueue_missing(pool: &SqlitePool, candidate_ids: &[i64]) -> Result
         }
         qb.push(")");
         qb.push(
-            " AND NOT EXISTS (SELECT 1 FROM hub_track_features f WHERE f.track_id = t.id)",
+            " AND NOT EXISTS (SELECT 1 FROM hub_track_features f\n                             WHERE f.track_id = t.id AND f.found = 1)",
         );
         let res = qb.build().execute(pool).await?;
         queued += res.rows_affected() as usize;

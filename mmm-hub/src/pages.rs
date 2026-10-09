@@ -2150,7 +2150,8 @@ struct UpdateNameForm {
 }
 
 fn flash_redirect(to: &str, msg: String) -> Response {
-    Redirect::to(&format!("{to}?msg={}", urlencoding::encode(&msg))).into_response()
+    let sep = if to.contains('?') { '&' } else { '?' };
+    Redirect::to(&format!("{to}{sep}msg={}", urlencoding::encode(&msg))).into_response()
 }
 
 async fn tag_rename(

@@ -508,9 +508,9 @@ async fn overlap_enrich_enqueues_missing_features() {
         .unwrap();
     assert_eq!(queued, 3);
 
-    // Tracks that already have a features row are not queued.
+    // Tracks that already have usable features (`found = 1`) are not queued.
     sqlx::query(
-        "INSERT INTO hub_track_features (track_id, found, source) VALUES (?1, 0, 'reccobeats')",
+        "INSERT INTO hub_track_features (track_id, found, source) VALUES (?1, 1, 'reccobeats')",
     )
     .bind(app.seed.t_all)
     .execute(&app.pool)
