@@ -109,10 +109,13 @@ Quelle** + Score — konsistent zum Overlap-/Similar-Layout.
 
 ## 7. Paid / kommerzielle Datenquellen (Recherche-Update)
 
-**Last.fm: nicht verlassen.** Die API-Doku sagt zwar „available to anyone“, aber die
-**Key-Anlage ist seit Jahren faktisch kaputt/geschlossen** (zahlreiche „can't create Last.fm API
-key“-Threads; `/api/account/create` liefert je nach Bot/Account nichts). Wer einen **alten** Key hat:
-nutzen — nur nicht darauf planen.
+**Last.fm: nicht verlassen (Stand 2026-10 verifiziert).** Die API-Doku sagt „available to anyone“.
+`/api/account/create` **leitet aber auf die Login-Seite** — man braucht also ein (eingeloggtes)
+Last.fm-Konto, um einen Key anzulegen; ein offener Für-sich-Signup existiert nicht. In der
+Vergangenheit war die Key-Anlage zeitweise ganz abgeschaltet (SO-Thread 2015, diverse „can’t create
+key“-Berichte). Read-only braucht nur den Key, kommerzielle Nutzung braucht extra Vertrag.
+**Fazit:** Wer ein Last.fm-Konto + Key hat: nutzen (Top-Tags als Genre-Fallback, ähnliche Tracks).
+Nicht als tragende Säule planen — der Adapter ist im Hub bereits key-gated und optional.
 
 Spotify `audio-features` ist tot (Nov 2024). Kommerzielle Ersatzquellen (Preise verifiziert ~2026-09;
 Quelle: freqblog.com/compare — **Vendor-Seite, entsprechend parteiisch**):
@@ -128,6 +131,8 @@ Quelle: freqblog.com/compare — **Vendor-Seite, entsprechend parteiisch**):
 | **AudD**                      | Recognition, Basis-Meta                                                                                             | Fingerprint                                                             | $5/1k (Entry), $3.60/1k (500k)                                      |
 | **MusicAPI.com**              | Streaming-Aggregator (User-Libraries)                                                                               | OAuth                                                                   | €0.60/1k, **€500/mo Minimum**                                       |
 | **Describe Music / TrackTag** | AI-Tagging (Genre/Mood/BPM/Key)                                                                                     | upload/API                                                              | Credits bzw. günstiger als Cyanite                                  |
+| **SonoVault** (sonovault.now) | **ISRC/ISWC**, Genre, Label, Cross-Platform-IDs (90M+ Tracks, aus Discogs/MusicBrainz/… aggregiert)                 | **ISRC + Reverse-ISRC**                                                 | Free-Tier; **€0–249/mo** (offene Beta)                              |
+| **audiometa.io**              | BPM, Key, Play-Counts (Spotify/YT/SC), Social-Follower                                                              | Name                                                                    | **frei**                                                            |
 
 **Fallback-Coverage:** FreqBlog nutzt als 2. Stufe **MusicBrainz → AcousticBrainz** (offener CC0-Datensatz,
 7.5M Zeilen) und sonst On-Demand-Analyse. Cyanite/Musiio-artige Modelle analysieren die **Audiodatei**
@@ -145,6 +150,66 @@ Quelle: freqblog.com/compare — **Vendor-Seite, entsprechend parteiisch**):
 Umsetzung im Hub: Adapter generisch halten (ISRC → features), Reihenfolge **ReccoBeats → bezahlter Fallback
 nur bei `found=0`**; Key über `/admin` pflegbar.
 
+## 8. Audio-Ähnlichkeit (DigDeeper-Ersatz) — selbst bauen?
+
+**Kurz: ja.** Wir haben ISRC **und** (via music-api) die **FLAC-Datei** — genau das, was Audio-Similarity
+braucht. Es ist ein gut abgetretener Weg, kein Hexenwerk.
+
+### Kommerzielle Alternativen zu DigDeeper
+
+- **cosine.club** — Similarity-Search-Engine (2M+ Tracks, Input per YT/Bandcamp/SoundCloud-Link).
+  **Wichtig:** nutzt laut eigener Angabe genau **`discogs-effnet` von Essentia** — bestätigt unseren Bauplan.
+- **diggercamp.com** — akustische Ähnlichkeit (techno/house/disco/…), „Scan a record“, findet auf Bandcamp/Revibed/YouTube.
+- **Cyanite** — hat Sonic-Similarity-Search (upload-basiert, teuer).
+- Chosic (Audio-Feature-Matching), bijou.fm, Sonoteller/Describe Music (Tagging).
+- **DigDeeper.fm selbst** bleibt Deep-Link-Only (keine öffentliche API) → nicht integrierbar, nur verlinken.
+
+### Open-Source-Bausteine (GitHub/HF)
+
+| Baustein                                               | Rolle                                                                       |
+| ------------------------------------------------------ | --------------------------------------------------------------------------- |
+| **Essentia** (MTG-UPF, AGPL)                           | Features: **BPM, Key**(+Camelot), Loudness, Danceability **und** Embeddings |
+| **Discogs-EffNet** (Essentia-Model)                    | 1280-dim **Music-Embeddings** — genau das, was cosine.club nutzt            |
+| **CLAP** (LAION) / **MuQ-MuLan**                       | audio/Text-Embeddings, sehr gute Perceptual-Alignment (arxiv 2601.19109)    |
+| **MERT** (m-a-p/MERT)                                  | Self-supervised Music-Embeddings                                            |
+| **OpenL3 / VGGish**                                    | ältere Audio-Embeddings                                                     |
+| **Faiss / Qdrant / pgvector / sqlite-vec**             | Vektor-Index (ANN)                                                          |
+| **discogs-effnet-onnx** (`Heyian/discogs-effnet-onnx`) | ONNX-Mirror → in **Rust via `ort`** lauffähig, **kein Python nötig**        |
+| **Replicate `mtg/effnet-discogs`**                     | Hosted-EffNet (pay-per-call) — Fallback ohne eigenes Hosting                |
+
+Fertige Projekte als Vorlage:
+
+- `andrewbasterfield/apple-music-similarity` — CLAP/MERT-Embeddings → Postgres **pgvector**.
+- `TaaroBravo/semantic-audio-search` — **CLAP + Qdrant** (+ FastAPI/Gradio), self-hosted.
+- `KonNik88/audio-similarity-tagging-hub` — Precomputed-Embeddings + **Qdrant**.
+- `CDrummond/music-similarity` — Essentia-Features + Similarity-API.
+- `DadumDeker/MusicAnalysis` — **EffNet-Discogs** + CLAP.
+- `msiric/spectune` — **3-Modell-Konsens** (EffNet + MusiCNN + CLAP), audio-first.
+- `backblaze-b2-samples/music-tagging-search` — self-hosted: Essentia (BPM/Key/Genre/Mood) + CLAP-Embeddings.
+- **DeepCuts** (rlupi.com, jetzt Open Source) — CLAP-**kNN** im Browser/Server, schöne Referenz-UI.
+- `rekordcloud/OpenKeyScan` — Offline-**Key-Detection** (AI-Spektrogramm), free/OSS, schreibt in Dateien.
+
+### Unser Plan (im Hub)
+
+1. **FLAC sichern** (music-api: `POST /orders` + `GET /isrc/{isrc}/flac`), nur für Kandidaten/Seeds.
+2. **Analyse**: zwei Wege, gleiche Schnittstelle `{bpm, key, camelot, embedding[1280]}`:
+   - **(A) ONNX in Rust** — `discogs-effnet-onnx` via `ort`-Crate direkt im Hub-Binary. Lean, kein
+     Extra-Container, kein Python. **Bevorzugt** (passt zur Rust-Architektur).
+   - **(B) Python-Microservice** (Essentia, AGPL) — mehr Modelle/Features, dafür zweiter Container.
+   - Fallback für Tracks ohne FLAC: **Replicate `mtg/effnet-discogs`** (hosted, pay-per-call).
+     → löst **gleichzeitig** die BPM/Key-Lücke.
+3. **Embeddings speichern** (SQLite-BLOB + Brute-Force-Cosine reicht für ~100k; sonst `sqlite-vec`
+   oder Qdrant-Container).
+4. **Digging-Source „Audio“**: Seed-Embedding → ANN → Top-N → mit unseren Daten anreichern (wer hat's)
+   — genau die bestehende Digging-Enrich-Logik.
+5. **Ergebnis:** unser eigenes DigDeeper, auf unserer DB, ohne Per-Track-API-Kosten.
+
+**Lizenz-Hinweis:** Essentia ist **AGPL-3.0** (oder kommerzielle Lizenz von MTG-UPF). Für ein privat
+self-hosted Hub unkritisch; bei öffentlichem Betrieb beachten.
+
+**Vorbehalt:** Audio-Analyse braucht die Dateien — für Tracks ohne FLAC keine Ähnlichkeit (oder erst
+downloaden). Für elektro/underground ist eigenes Analyisieren aber robuster als Katalog-APIs.
+
 ## Quellen (Auswahl)
 
 - Spotify changelog / community: audio-features deprecated 2024-11-27
@@ -154,3 +219,8 @@ nur bei `found=0`**; Key über `/admin` pflegbar.
 - SoundCloud API guide: https://developers.soundcloud.com/docs/api/guide
 - YouTube Data API v3 Quota (10k/day): Google docs / 2026 guides
 - MusicBrainz: https://musicbrainz.org/doc/Genre
+- cosine.club (nutzt Discogs-EffNet): https://cosine.club/
+- Essentia-Modelle (Discogs-EffNet): https://essentia.upf.edu/models.html
+- EffNet als ONNX: https://huggingface.co/Heyian/discogs-effnet-onnx
+- Rust-ONNX-Runtime: https://github.com/pykeio/ort
+- SonoVault: https://sonovault.now/ · Musicae: https://api.musicae.io/ · audiometa: https://audiometa.io/
