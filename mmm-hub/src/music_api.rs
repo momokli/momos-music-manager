@@ -54,6 +54,29 @@ pub async fn status(cfg: &Config, isrc: &str) -> Result<IsrcState> {
     Ok(body)
 }
 
+/// `GET /isrc/{isrc}/{format}` — fetch the actual audio bytes (e.g. `flac`).
+/// Errors if the service returns a non-success status (not yet downloaded etc.).
+pub async fn file_bytes(cfg: &Config, isrc: &str, format: &str) -> Result<Vec<u8>> {
+    let url = format!(
+        "{}/isrc/{}/{}",
+        cfg.music_api_base,
+        urlencoding::encode(isrc),
+        urlencoding::encode(format)
+    );
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(token(cfg)?)
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("music-api {url} -> {status}");
+    }
+    Ok(resp.bytes().await.context("read music-api body")?.to_vec())
+}
+
 /// `POST /orders` — order one or more ISRCs. Returns the order id.
 pub async fn order(cfg: &Config, isrcs: &[String]) -> Result<String> {
     let url = format!("{}/orders", cfg.music_api_base);

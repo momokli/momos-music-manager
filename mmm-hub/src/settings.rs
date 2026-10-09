@@ -15,6 +15,10 @@ pub const COSINE_BASE: &str = "cosine_base";
 pub const FREQBLOG_API_KEY: &str = "freqblog_api_key";
 pub const FREQBLOG_BASE: &str = "freqblog_base";
 pub const FREQBLOG_MONTHLY_CAP: &str = "freqblog_monthly_cap";
+pub const EFFNET_MODEL: &str = "effnet_model";
+pub const EFFNET_LABELS: &str = "effnet_labels";
+pub const ANALYZER_BASE: &str = "analyzer_base";
+pub const ANALYZE_TMP: &str = "analyze_tmp_dir";
 pub const MUSIC_API_BASE: &str = "music_api_base";
 pub const MUSIC_API_TOKEN: &str = "music_api_token";
 pub const SPOTIFY_CLIENT_ID: &str = "spotify_client_id";
@@ -42,6 +46,10 @@ pub const ADMIN_FIELDS: &[(&str, &str, bool)] = &[
     (FREQBLOG_API_KEY, "FreqBlog API-Key", true),
     (FREQBLOG_BASE, "FreqBlog Base-URL", false),
     (FREQBLOG_MONTHLY_CAP, "FreqBlog Monats-Budget (Requests)", false),
+    (EFFNET_MODEL, "EffNet ONNX-Modellpfad", false),
+    (EFFNET_LABELS, "EffNet Genre-Labels (JSON)", false),
+    (ANALYZER_BASE, "BPM/Key-Analyzer URL (z.B. http://127.0.0.1:8711)", false),
+    (ANALYZE_TMP, "Verzeichnis fuer Analyse-Temp-Dateien", false),
 ];
 
 pub async fn load_all(pool: &SqlitePool) -> HashMap<String, String> {

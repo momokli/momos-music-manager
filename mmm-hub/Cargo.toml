@@ -23,6 +23,15 @@ urlencoding = "2"
 dotenvy = "0.15"
 bcrypt = "0.15"
 askama = "0.14"
+libc = "0.2"
+
+# EffNet audio embeddings (Discogs-EffNet via ONNX Runtime). Optional so the
+# default/CI build stays light; enable with `--features effnet`.
+ort = { version = "2.0.0-rc.13", optional = true }
+rustfft = { version = "6", optional = true }
+
+[features]
+effnet = ["dep:ort", "dep:rustfft"]
 
 [dev-dependencies]
 tempfile = "3"

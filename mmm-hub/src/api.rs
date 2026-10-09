@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -28,6 +28,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hub/users", get(users))
         .route("/api/hub/tracks/{id}", get(track))
         .route("/api/hub/overlap", get(overlap))
+        .route("/api/hub/similar", get(similar))
         .route("/api/hub/playlists", get(playlists))
         .route("/api/hub/query", post(query))
         		.route("/api/hub/me", get(me))
@@ -43,6 +44,52 @@ fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
 
 async fn health() -> Json<Value> {
     Json(json!({ "data": { "status": "ok", "version": env!("CARGO_PKG_VERSION") } }))
+}
+
+#[derive(Deserialize)]
+struct SimilarQuery {
+    track: i64,
+    limit: Option<i64>,
+}
+
+/// `GET /api/hub/similar?track=ID&limit=50` — EffNet embedding neighbours.
+async fn similar(
+    State(st): State<AppState>,
+    Query(q): Query<SimilarQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    if crate::web::current_user(&st, &headers).await.is_none() {
+        return Err(err(StatusCode::UNAUTHORIZED, "login required"));
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let nb = crate::similar::neighbors(&st.pool, q.track, limit)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut data: Vec<Value> = Vec::with_capacity(nb.len());
+    for n in nb {
+        let row = sqlx::query("SELECT title, artists FROM hub_tracks WHERE id = ?1")
+            .bind(n.track_id)
+            .fetch_optional(&st.pool)
+            .await
+            .ok()
+            .flatten();
+        let (title, artists) = row
+            .map(|r| {
+                (
+                    r.get::<Option<String>, _>("title").unwrap_or_default(),
+                    r.get::<Option<String>, _>("artists").unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default();
+        data.push(json!({
+            "trackId": n.track_id,
+            "score": n.score,
+            "title": title,
+            "artists": artists,
+        }));
+    }
+    Ok(Json(json!({ "data": data })))
 }
 
 /// Current session user plus their linked service accounts (issue M2-6).

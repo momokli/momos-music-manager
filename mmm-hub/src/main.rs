@@ -16,7 +16,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use mmm_hub::config::Config;
-use mmm_hub::{api, db, features, freqblog, genres, ingest, pages, settings, spotify, tags, web, worker};
+use mmm_hub::{
+    analyze, analyzer, api, audio, db, features, freqblog, genres, ingest, pages, settings, spotify,
+    tags, web, worker,
+};
 
 #[derive(Parser)]
 #[command(
@@ -74,6 +77,11 @@ enum Command {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// Compute EffNet embeddings + local BPM/key for tracks that lack them.
+    Analyze {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
     /// Rebuild the tag layer (playlists resolve to tags).
     ResolveTags,
     /// Backfill track genres via Last.fm (needs LASTFM_API_KEY).
@@ -116,6 +124,7 @@ async fn main() -> Result<()> {
         Command::Backfill => cmd_backfill(cfg).await,
         Command::Features { limit } => cmd_features(cfg, limit).await,
         Command::Freqblog { limit } => cmd_freqblog(cfg, limit).await,
+        Command::Analyze { limit } => cmd_analyze(cfg, limit).await,
         Command::ResolveTags => cmd_resolve_tags(cfg).await,
         Command::Genres { limit } => cmd_genres(cfg, limit).await,
         Command::MakeAdmin { user } => cmd_make_admin(cfg, &user).await,
@@ -318,6 +327,51 @@ async fn cmd_freqblog(cfg: Config, limit: usize) -> Result<()> {
         "✓ {processed} Tracks verarbeitet{}",
         if exhausted { " (Budget erreicht oder nichts mehr offen)" } else { "" }
     );
+    Ok(())
+}
+
+async fn cmd_analyze(cfg: Config, limit: usize) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    let cfg = settings::overlay_config(&pool, cfg).await;
+    let (emb_pending, an_pending) = analyze::pending_counts(&pool).await;
+    println!(
+        "Analyse: {emb_pending} ohne Embedding, {an_pending} ohne BPM/Key"
+    );
+    let inproc = cfg.effnet_inprocess && audio::available() && cfg.effnet_model.is_some();
+    if inproc {
+        println!("Embeddings: in-process (Rust/ort).");
+    } else if analyzer::enabled(&cfg) {
+        println!("Embeddings + BPM/Key: Analyzer-Service (Essentia).");
+    } else {
+        println!("! Weder EFFNET_INPROCESS noch HUB_ANALYZER_URL — Analyse uebersprungen.");
+    }
+
+    let ids = sqlx::query_scalar::<_, i64>(
+        "SELECT t.id FROM hub_tracks t
+           LEFT JOIN hub_track_embeddings e ON e.track_id = t.id
+           LEFT JOIN hub_track_analysis a ON a.track_id = t.id
+          WHERE t.isrc IS NOT NULL AND trim(t.isrc) <> ''
+            AND (e.track_id IS NULL OR a.track_id IS NULL)
+          ORDER BY t.id LIMIT ?1",
+    )
+    .bind(limit as i64)
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let (mut ok, mut failed) = (0usize, 0usize);
+    for id in ids {
+        match analyze::analyze_track(&pool, &cfg, id).await {
+            Ok(_) => ok += 1,
+            Err(e) => {
+                failed += 1;
+                if failed <= 5 {
+                    println!("  ! track {id}: {e}");
+                }
+            }
+        }
+    }
+    println!("✓ {ok} analysiert, {failed} fehlgeschlagen/uebersprungen");
     Ok(())
 }
 

@@ -4,7 +4,10 @@
 //! the router against a temporary DB. The binary (`main.rs`) is a thin CLI on
 //! top of it.
 
+pub mod analyze;
+pub mod analyzer;
 pub mod api;
+pub mod audio;
 pub mod config;
 pub mod cosine;
 pub mod db;
@@ -17,6 +20,7 @@ pub mod lastfm;
 pub mod music_api;
 pub mod pages;
 pub mod settings;
+pub mod similar;
 pub mod spotify;
 pub mod tags;
 pub mod ui;

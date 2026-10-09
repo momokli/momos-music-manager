@@ -1032,6 +1032,23 @@ async fn digging_page(
                         .await;
                 }
             }
+
+            // 5. Audio-ähnlich: EffNet-Embedding-Nachbarn aus unserer eigenen DB.
+            for n in crate::similar::neighbors(&st.pool, sid, 60)
+                .await
+                .unwrap_or_default()
+            {
+                if let Ok(Some(r)) = sqlx::query("SELECT title, artists FROM hub_tracks WHERE id = ?1")
+                    .bind(n.track_id)
+                    .fetch_optional(&st.pool)
+                    .await
+                {
+                    let title = r.get::<Option<String>, _>("title").unwrap_or_default();
+                    let artists = r.get::<Option<String>, _>("artists").unwrap_or_default();
+                    merge_candidate(&mut cand, &st.pool, Some(n.track_id), &title, &artists, "Audio")
+                        .await;
+                }
+            }
         }
     }
 

@@ -258,6 +258,10 @@ Prioritaet (wer zuerst gefragt wird): **Traktor (lokal) → ReccoBeats (frei) �
    **Embedding** (fuer Similarity). **Kein BPM/Key** (siehe Warnung oben). Laeuft auf FLAC (music-api)
    **und** auf Deezer-30-s-Previews → deckt auch Tracks ab, die wir _nicht_ besitzen. Kostenlos, offline.
    **BPM/Key** kommen aus einer eigenen Stufe (Essentia `RhythmExtractor`/`KeyExtractor` native auf .200).
+   **Wichtig (.200):** Der CPU des Servers ist x86-64-**Baseline** (kein AVX) — das prebuilt ONNX Runtime
+   von `ort` **crasht dort (SIGILL)**. Deshalb rechnet auf .200 der **Essentia-Analyzer-Service**
+   (`deploy/analyzer/`, Port 8711) die Embeddings (`TensorflowPredictEffnetDiscogs`, mean-pooled, 1280-d)
+   **und** BPM/Key in einem Aufruf; der Rust-`ort`-Pfad bleibt für CPU-starke Hosts (`EFFNET_INPROCESS=1`).
 2. **ReccoBeats (frei)** — Katalog-Features per Spotify-ID (~46 % Treffer).
 3. **FreqBlog (paid) — nur bei `found=0`** und **hart budgetiert**: per ISRC
    (`GET /lookup?isrc=…&wait=20`, `X-Api-Key`). Free-Tier = **1.000/Monat** → Cap im Code

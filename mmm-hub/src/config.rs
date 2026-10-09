@@ -16,6 +16,13 @@ pub struct Config {
     pub freqblog_base: String,
     pub freqblog_api_key: Option<String>,
     pub freqblog_monthly_cap: i64,
+    pub effnet_model: Option<String>,
+    pub effnet_labels: Option<String>,
+    pub effnet_inprocess: bool,
+    pub analyzer_base: Option<String>,
+    /// Directory for temporary analysis audio files (shared with the analyzer
+    /// service; needed when the service uses systemd `PrivateTmp`).
+    pub analyze_tmp_dir: Option<String>,
     pub lastfm_api_key: Option<String>,
     pub soundcloud_client_id: Option<String>,
     pub soundcloud_client_secret: Option<String>,
@@ -51,6 +58,15 @@ impl Config {
             freqblog_monthly_cap: env("FREQBLOG_MONTHLY_CAP")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(950),
+            effnet_model: env("EFFNET_MODEL"),
+            effnet_labels: env("EFFNET_LABELS"),
+            // On CPUs without AVX the prebuilt ONNX Runtime SIGILLs; there the
+            // analyzer service (Essentia) computes embeddings instead.
+            effnet_inprocess: env("EFFNET_INPROCESS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            analyzer_base: env("HUB_ANALYZER_URL"),
+            analyze_tmp_dir: env("HUB_ANALYZE_TMP"),
             lastfm_api_key: env("LASTFM_API_KEY"),
             soundcloud_client_id: env("SOUNDCLOUD_CLIENT_ID"),
             soundcloud_client_secret: env("SOUNDCLOUD_CLIENT_SECRET"),
@@ -78,6 +94,11 @@ impl Config {
             freqblog_base: "https://api.freqblog.com".to_string(),
             freqblog_api_key: None,
             freqblog_monthly_cap: 950,
+            effnet_model: None,
+            effnet_labels: None,
+            effnet_inprocess: false,
+            analyzer_base: None,
+            analyze_tmp_dir: None,
             lastfm_api_key: None,
             soundcloud_client_id: None,
             soundcloud_client_secret: None,
@@ -106,6 +127,10 @@ impl Config {
                     self.freqblog_monthly_cap = n;
                 }
             }
+            crate::settings::EFFNET_MODEL => self.effnet_model = Some(value.into()),
+            crate::settings::EFFNET_LABELS => self.effnet_labels = Some(value.into()),
+            crate::settings::ANALYZER_BASE => self.analyzer_base = Some(value.into()),
+            crate::settings::ANALYZE_TMP => self.analyze_tmp_dir = Some(value.into()),
             crate::settings::MUSIC_API_BASE => self.music_api_base = value.into(),
             crate::settings::MUSIC_API_TOKEN => self.music_api_token = Some(value.into()),
             crate::settings::SPOTIFY_CLIENT_ID => self.spotify_client_id = Some(value.into()),
