@@ -11,44 +11,96 @@
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <style>
       :root {
-        --pico-spacing: 0.65rem;
-        --pico-typography-spacing-vertical: 0.6rem;
-        --pico-form-element-spacing-vertical: 0.4rem;
-        --pico-form-element-spacing-horizontal: 0.6rem;
+        --pico-spacing: 0.45rem;
+        --pico-typography-spacing-vertical: 0.35rem;
+        --pico-form-element-spacing-vertical: 0.3rem;
+        --pico-form-element-spacing-horizontal: 0.5rem;
+        --pico-border-radius: 0.35rem;
+        --pico-block-spacing-vertical: 0.6rem;
+        --pico-block-spacing-horizontal: 0.6rem;
       }
       body {
-        font-size: 0.95rem;
+        font-size: 0.9rem;
+        line-height: 1.4;
       }
       article {
-        padding: 0.8rem 1rem;
-        margin-bottom: 0.8rem;
-      }
-      hgroup {
+        padding: 0.6rem 0.75rem;
         margin-bottom: 0.6rem;
       }
+      hgroup {
+        margin-bottom: 0.45rem;
+      }
       h1 {
-        font-size: 1.5rem;
+        font-size: 1.35rem;
+        margin-bottom: 0.3rem;
       }
       h2 {
-        font-size: 1.1rem;
+        font-size: 1rem;
+        margin-bottom: 0.3rem;
       }
-      main.container-fluid {
-        padding-inline: 0.8rem;
+      h3 {
+        font-size: 0.92rem;
+        margin-bottom: 0.25rem;
+      }
+      p,
+      ul,
+      ol,
+      table,
+      form {
+        margin-bottom: 0.5rem;
+      }
+      /* Compact, sticky top nav */
+      nav.container-fluid {
+        padding-inline: 0.6rem;
       }
       nav.hub-nav {
         border-bottom: 1px solid var(--pico-muted-border-color);
+        position: sticky;
+        top: 0;
+        z-index: 50;
+        background: var(--pico-background-color);
+        padding-block: 0.15rem;
+      }
+      nav.hub-nav ul {
+        margin: 0;
+        gap: 0;
+      }
+      nav.hub-nav li > a {
+        display: inline-block;
+        padding: 0.25rem 0.5rem;
+        font-size: 0.85rem;
+        line-height: 1.2;
+        border-radius: 0.3rem;
+      }
+      nav.hub-nav li > a:hover {
+        background: var(--pico-secondary-background);
+        text-decoration: none;
       }
       nav.hub-nav a[aria-current="page"] {
         font-weight: 700;
-        text-decoration: underline;
-        text-underline-offset: 0.3rem;
+        color: var(--pico-primary);
+        background: var(--pico-secondary-background);
+      }
+      nav.hub-nav button {
+        padding: 0.2rem 0.5rem;
+        font-size: 0.8rem;
+        margin: 0;
+      }
+      nav.hub-nav form {
+        margin: 0;
+      }
+      main.container-fluid {
+        padding-inline: 0.6rem;
+        padding-block: 0.6rem;
       }
       .hub-badge {
         display: inline-block;
-        font-size: 0.72rem;
-        padding: 0.1rem 0.5rem;
+        font-size: 0.68rem;
+        padding: 0.05rem 0.4rem;
         border-radius: 1rem;
         vertical-align: middle;
+        line-height: 1.3;
+        white-space: nowrap;
       }
       .hub-badge-ok {
         background: #123c22;
@@ -59,9 +111,10 @@
         color: #ff9a9a;
       }
       .hub-flash {
-        padding: 0.6rem 0.8rem;
-        border-radius: 0.5rem;
-        margin-bottom: 1rem;
+        padding: 0.4rem 0.6rem;
+        border-radius: 0.4rem;
+        margin-bottom: 0.6rem;
+        font-size: 0.85rem;
       }
       .hub-flash-ok {
         background: #123c22;
@@ -77,16 +130,20 @@
       .hub-actions {
         display: flex;
         flex-wrap: wrap;
-        gap: 0.5rem;
+        gap: 0.35rem;
         align-items: center;
+      }
+      .hub-actions button,
+      .hub-actions a[role="button"] {
+        margin: 0;
       }
       .hub-actions form {
         margin: 0;
       }
       .hub-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
-        gap: 1rem;
+        grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+        gap: 0.6rem;
       }
       .hub-stat {
         margin: 0;
@@ -94,11 +151,11 @@
       }
       .hub-stat h2 {
         margin: 0;
-        font-size: 1.8rem;
+        font-size: 1.5rem;
       }
       .hub-stat p {
-        margin: 0.25rem 0 0;
-        font-size: 0.85rem;
+        margin: 0.15rem 0 0;
+        font-size: 0.78rem;
       }
       .hub-row-actions form {
         display: inline;
@@ -128,8 +185,8 @@
         border-radius: 0.5rem;
       }
       .hub-crumbs {
-        font-size: 0.9rem;
-        margin-bottom: 0.5rem;
+        font-size: 0.82rem;
+        margin-bottom: 0.35rem;
       }
       .hub-crumbs ol {
         list-style: none;
@@ -137,7 +194,7 @@
         margin: 0;
         display: flex;
         flex-wrap: wrap;
-        gap: 0.4rem;
+        gap: 0.3rem;
       }
       .hub-crumbs li + li::before {
         content: "›";
@@ -148,7 +205,7 @@
       .hub-cols {
         display: grid;
         grid-template-columns: minmax(15rem, 20rem) 1fr;
-        gap: 1.5rem;
+        gap: 0.8rem;
         align-items: start;
       }
       @media (max-width: 48rem) {
@@ -157,45 +214,63 @@
         }
       }
       .hub-dense table {
-        font-size: 0.85rem;
+        font-size: 0.8rem;
       }
       .hub-kv {
         width: 100%;
-        font-size: 0.85rem;
+        font-size: 0.8rem;
       }
       .hub-kv th {
         text-align: left;
         color: var(--pico-muted-color);
         font-weight: 600;
         white-space: nowrap;
-        padding: 0.2rem 0.6rem 0.2rem 0;
+        padding: 0.1rem 0.5rem 0.1rem 0;
         vertical-align: top;
       }
       .hub-kv td {
-        padding: 0.2rem 0;
+        padding: 0.1rem 0;
       }
       .hub-dense table th,
       .hub-dense table td {
-        padding: 0.25rem 0.45rem;
+        padding: 0.18rem 0.4rem;
       }
       main table {
         width: 100%;
+        font-size: 0.82rem;
+      }
+      main table th,
+      main table td {
+        padding: 0.22rem 0.45rem;
       }
       main table td {
         overflow-wrap: anywhere;
+      }
+      /* Head row: compact page title + subtree of actions */
+      .hub-page-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 0.3rem 0.6rem;
+        margin-bottom: 0.4rem;
+      }
+      .hub-page-head h1 {
+        margin: 0;
       }
       /* Filter bar: one consistent box on top of every table */
       nav.hub-filter {
         display: inline-block;
         border: 1px solid var(--pico-muted-border-color);
-        border-radius: 0.5rem;
-        padding: 0.15rem 0.6rem;
-        margin: 0 0.4rem 0.6rem 0;
+        border-radius: 0.4rem;
+        padding: 0.1rem 0.5rem;
+        margin: 0 0.3rem 0.4rem 0;
+        font-size: 0.82rem;
       }
       nav.hub-filter ul {
         display: flex;
         flex-wrap: wrap;
-        gap: 0.6rem;
+        gap: 0.5rem;
         list-style: none;
         padding: 0;
         margin: 0;
@@ -203,9 +278,9 @@
       /* Cell values: quiet inline text, not boxy chips */
       .hub-tag {
         display: inline;
-        font-size: 0.78rem;
+        font-size: 0.74rem;
         padding: 0;
-        margin: 0 0.5rem 0 0;
+        margin: 0 0.45rem 0 0;
         border: 0;
         background: none;
         white-space: nowrap;
@@ -223,11 +298,12 @@
       /* Filter picker chips (deliberately boxy) */
       .hub-chip {
         display: inline-block;
-        font-size: 0.78rem;
-        padding: 0.05rem 0.5rem;
+        font-size: 0.74rem;
+        padding: 0.02rem 0.45rem;
         border-radius: 1rem;
         border: 1px solid var(--pico-muted-border-color);
         text-decoration: none;
+        line-height: 1.3;
       }
       .hub-chip-on {
         border-color: #1e6b3a;
@@ -244,10 +320,25 @@
       .hub-filter ul {
         display: flex;
         flex-wrap: wrap;
-        gap: 0.75rem;
+        gap: 0.5rem;
         list-style: none;
         padding: 0;
-        margin: 0 0 1rem;
+        margin: 0 0 0.6rem;
+      }
+      /* Form controls: dense but still touch-friendly */
+      input:not([type="checkbox"]):not([type="radio"]),
+      select,
+      textarea {
+        padding-block: 0.3rem;
+        padding-inline: 0.5rem;
+      }
+      label {
+        font-size: 0.82rem;
+        margin-bottom: 0.2rem;
+      }
+      fieldset {
+        padding: 0.4rem 0.6rem;
+        margin-bottom: 0.5rem;
       }
     </style>
   </head>
@@ -295,10 +386,9 @@
           <a href="/api/hub/services/spotify/connect"><span class="hub-badge hub-badge-no">Spotify verbinden</span></a>
           {% endif %}
         </li>
-        <ul>
         <li><a href="/user/{{ nav.slug }}">@{{ nav.slug }}</a></li>
         {% if nav.is_admin %}<li><a href="/admin" {% if nav.active == "admin" %}aria-current="page"{% endif %}>Admin</a></li>{% endif %}
-        <li><a href="/settings">Einstellungen</a></li>
+        <li><a href="/settings" {% if nav.active == "settings" %}aria-current="page"{% endif %}>Einstellungen</a></li>
         <li>
           <form method="post" action="/logout">
             <button class="outline secondary" type="submit">Logout</button>
