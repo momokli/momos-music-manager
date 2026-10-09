@@ -1,0 +1,119 @@
+//! One-off importer: seed a hub user's tag library from a Momo's Music Manager
+//! (`library.db`) database — categories (with a mapped icon) and tags. Tags are
+//! also linked to a hub playlist of the same name when one exists, so they get
+//! their tracks.
+
+use std::collections::HashMap;
+
+use anyhow::{Context, Result, bail};
+use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+/// FontAwesome icon (MMM) → emoji (hub, no FA dependency).
+pub fn map_icon(fa: &str) -> String {
+    let f = fa.to_lowercase();
+    let pick = if f.contains("list-music") {
+        "🎼"
+    } else if f.contains("layers") {
+        "🗂️"
+    } else if f.contains("heart") {
+        "💜"
+    } else if f.contains("sparkles") {
+        "✨"
+    } else if f.contains("hashtag") {
+        "#️⃣"
+    } else {
+        ""
+    };
+    pick.to_string()
+}
+
+#[derive(Debug, Default)]
+pub struct Summary {
+    pub categories: usize,
+    pub tags: usize,
+    pub linked: usize,
+}
+
+/// Import categories + tags from `mmm_db` into the hub user `user_slug`.
+pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Result<Summary> {
+    let user_id: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM hub_users WHERE slug = ?1 COLLATE NOCASE LIMIT 1",
+    )
+    .bind(user_slug)
+    .fetch_optional(hub)
+    .await
+    .ok()
+    .flatten();
+    let Some(user_id) = user_id else {
+        bail!("hub user '{user_slug}' not found");
+    };
+
+    let url = if mmm_db.starts_with("sqlite:") {
+        mmm_db.to_string()
+    } else {
+        format!("sqlite:{mmm_db}")
+    };
+    let opts = SqliteConnectOptions::new()
+        .filename(url.trim_start_matches("sqlite:"))
+        .read_only(true);
+    let mmm = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .with_context(|| format!("open MMM db {mmm_db}"))?;
+
+    // Categories.
+    let cats = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT id, name, COALESCE(icon,'') FROM tag_categories ORDER BY sort_order, id",
+    )
+    .fetch_all(&mmm)
+    .await
+    .context("read tag_categories (is this a MMM db?)")?;
+
+    let mut cat_map: HashMap<i64, i64> = HashMap::new();
+    let mut summary = Summary::default();
+    for (mmm_cat_id, name, icon) in cats {
+        let hub_id = crate::tags::create_category(hub, user_id, &name, &map_icon(&icon)).await?;
+        cat_map.insert(mmm_cat_id, hub_id);
+        summary.categories += 1;
+    }
+
+    // Tags.
+    let tag_rows = sqlx::query_as::<_, (String, i64)>(
+        "SELECT name, category_id FROM tags ORDER BY name",
+    )
+    .fetch_all(&mmm)
+    .await
+    .context("read tags")?;
+
+    for (name, mmm_cat_id) in tag_rows {
+        let cat = cat_map.get(&mmm_cat_id).copied();
+        let tag_id = crate::tags::ensure_tag(hub, user_id, &name, cat).await?;
+        summary.tags += 1;
+
+        // Link a hub playlist owned by the user with the same name, if any.
+        let pid: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM hub_playlists
+              WHERE user_id = ?1 AND lower(trim(name)) = lower(trim(?2))
+              ORDER BY id LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(&name)
+        .fetch_optional(hub)
+        .await
+        .ok()
+        .flatten();
+        if let Some(pid) = pid {
+            if crate::tags::add_playlist_to_tag(hub, user_id, tag_id, pid)
+                .await
+                .is_ok()
+            {
+                summary.linked += 1;
+            }
+        }
+    }
+
+    crate::tags::rebuild(hub).await?;
+    Ok(summary)
+}

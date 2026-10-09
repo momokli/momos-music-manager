@@ -17,8 +17,8 @@ use tokio::net::TcpListener;
 
 use mmm_hub::config::Config;
 use mmm_hub::{
-    analyze, analyzer, api, audio, db, features, freqblog, genres, ingest, pages, settings, spotify,
-    tags, web, worker,
+    analyze, analyzer, api, audio, db, features, freqblog, genres, ingest, mmm_import, pages,
+    settings, spotify, tags, web, worker,
 };
 
 #[derive(Parser)]
@@ -77,6 +77,13 @@ enum Command {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// Import tag categories + tags from a MMM `library.db` into a hub user.
+    ImportMmmTags {
+        #[arg(long)]
+        db: String,
+        #[arg(long)]
+        user: String,
+    },
     /// Compute EffNet embeddings + local BPM/key for tracks that lack them.
     Analyze {
         #[arg(long, default_value_t = 50)]
@@ -124,6 +131,7 @@ async fn main() -> Result<()> {
         Command::Backfill => cmd_backfill(cfg).await,
         Command::Features { limit } => cmd_features(cfg, limit).await,
         Command::Freqblog { limit } => cmd_freqblog(cfg, limit).await,
+        Command::ImportMmmTags { db, user } => cmd_import_mmm_tags(cfg, &db, &user).await,
         Command::Analyze { limit } => cmd_analyze(cfg, limit).await,
         Command::ResolveTags => cmd_resolve_tags(cfg).await,
         Command::Genres { limit } => cmd_genres(cfg, limit).await,
@@ -372,6 +380,16 @@ async fn cmd_analyze(cfg: Config, limit: usize) -> Result<()> {
         }
     }
     println!("✓ {ok} analysiert, {failed} fehlgeschlagen/uebersprungen");
+    Ok(())
+}
+
+async fn cmd_import_mmm_tags(cfg: Config, db_path: &str, user: &str) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    let s = mmm_import::import_tags(&pool, db_path, user).await?;
+    println!(
+        "✓ importiert: {} Kategorien, {} Tags, {} mit Playlist verlinkt",
+        s.categories, s.tags, s.linked
+    );
     Ok(())
 }
 

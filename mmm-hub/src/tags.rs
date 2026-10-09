@@ -81,6 +81,40 @@ pub async fn rebuild(pool: &SqlitePool) -> Result<ResolveSummary> {
     })
 }
 
+/// Create (or update) a tag owned by a user, optionally in a category — without
+/// a source playlist. Used by the importer and the tag UI.
+pub async fn ensure_tag(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    name: &str,
+    category_id: Option<i64>,
+) -> Result<i64> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("tag name required");
+    }
+    let slug = normalize_name(name);
+    if slug.is_empty() {
+        bail!("tag name has no usable characters");
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_tags (owner_user_id, slug, name, category_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(owner_user_id, slug) DO UPDATE SET
+             name = excluded.name, category_id = excluded.category_id
+         RETURNING id",
+    )
+    .bind(owner_user_id)
+    .bind(&slug)
+    .bind(name)
+    .bind(category_id)
+    .bind(&now)
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
+}
+
 /// Create (or return) the tag for a playlist, owned by `owner_user_id`, linking
 /// tag ↔ playlist 1:1. Rebuilds the track mapping. Returns the tag id.
 pub async fn create_from_playlist(

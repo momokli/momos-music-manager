@@ -17,6 +17,7 @@ pub mod freqblog;
 pub mod genres;
 pub mod ingest;
 pub mod lastfm;
+pub mod mmm_import;
 pub mod music_api;
 pub mod pages;
 pub mod settings;
