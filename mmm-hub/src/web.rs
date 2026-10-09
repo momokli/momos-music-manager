@@ -3,8 +3,9 @@
 //! Uses the public HTTPS redirect (`https://…/api/hub/services/spotify/callback`)
 //! instead of a loopback listener, so it works for any logged-in user in a browser.
 
+use askama::Template;
 use axum::extract::{Form, Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -25,6 +26,7 @@ pub fn router(state: AppState) -> Router {
         .route("/signup", get(signup_form).post(signup_submit))
         .route("/logout", post(logout))
         .route("/sql", get(sql_page).post(sql_run))
+        .route("/track/{id}", get(track_page))
         .route("/api/hub/services/{service}/connect", get(connect))
         .route("/api/hub/services/{service}/fetch-playlists", post(fetch_playlists_handler))
         .route("/api/hub/playlists/{id}/toggle", post(toggle_playlist))
@@ -230,6 +232,7 @@ async fn index(
     } else {
         String::new()
     };
+    let tracks_html = recent_tracks(&st).await;
 
     Html(page(&format!(
         r#"{flash_html}<div class="row"><h1>Hallo, {}</h1>
@@ -238,6 +241,7 @@ async fn index(
 <div class="row"><div>Status: {badge}</div>{action}</div>
 {likes_html}
 {playlists_html}
+{tracks_html}
 <h2>Daten</h2>
 <p class="muted">JSON-API: <a href="/api/hub/users">users</a> ·
 <a href="/api/hub/playlists">playlists</a> ·
@@ -562,6 +566,153 @@ fn render_table(columns: &[String], rows: &[Value]) -> String {
     }
     out.push_str("</table>");
     out
+}
+
+// ── track detail ────────────────────────────────────────────────────────────
+
+#[derive(Template)]
+#[template(path = "track.html")]
+struct TrackPage {
+    title: String,
+    artists: String,
+    album: String,
+    duration: String,
+    isrc: String,
+    spotify_id: String,
+    image_url: String,
+    explicit: bool,
+    users: Vec<UserGroup>,
+}
+
+struct UserGroup {
+    slug: String,
+    liked: bool,
+    playlists: Vec<String>,
+}
+
+async fn track_page(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    if current_user(&st, &headers).await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+
+    let row = sqlx::query(
+        "SELECT id, title, artists, album, duration_ms, isrc, service, service_track_id,
+                image_url, explicit
+           FROM hub_tracks WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten();
+    let Some(row) = row else {
+        return (
+            StatusCode::NOT_FOUND,
+            Html(page("<h1>404</h1><p>Track nicht gefunden.</p><p><a href=\"/\">Zurück</a></p>")),
+        )
+            .into_response();
+    };
+
+    // Presence grouped by user.
+    let presence = sqlx::query(
+        "SELECT p.user_id, u.slug, p.source, p.playlist_name
+           FROM hub_v_track_presence p
+           JOIN hub_users u ON u.id = p.user_id
+          WHERE p.track_id = ?1
+          ORDER BY u.slug, p.playlist_name",
+    )
+    .bind(id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
+    let mut order: Vec<i64> = Vec::new();
+    let mut groups: std::collections::HashMap<i64, UserGroup> = std::collections::HashMap::new();
+    for r in &presence {
+        let uid: i64 = r.get("user_id");
+        let slug: Option<String> = r.get("slug");
+        let source: Option<String> = r.get("source");
+        let playlist_name: Option<String> = r.get("playlist_name");
+        let slug = slug.unwrap_or_default();
+        let g = groups.entry(uid).or_insert_with(|| {
+            order.push(uid);
+            UserGroup {
+                slug,
+                liked: false,
+                playlists: Vec::new(),
+            }
+        });
+        match source.as_deref() {
+            Some("liked") => g.liked = true,
+            Some("playlist") => {
+                if let Some(n) = playlist_name {
+                    g.playlists.push(n);
+                }
+            }
+            _ => {}
+        }
+    }
+    let users: Vec<UserGroup> = order
+        .into_iter()
+        .filter_map(|uid| groups.remove(&uid))
+        .collect();
+
+    let duration_ms: Option<i64> = row.get("duration_ms");
+    let duration = duration_ms
+        .map(|ms| format!("{}:{:02}", ms / 60000, (ms % 60000) / 1000))
+        .unwrap_or_else(|| "—".to_string());
+    let service: Option<String> = row.get("service");
+    let service_track_id: Option<String> = row.get("service_track_id");
+    let spotify_id = if service.as_deref() == Some("spotify") {
+        service_track_id.unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let page = TrackPage {
+        title: row.get::<Option<String>, _>("title").unwrap_or_default(),
+        artists: row.get::<Option<String>, _>("artists").unwrap_or_default(),
+        album: row.get::<Option<String>, _>("album").unwrap_or_default(),
+        duration,
+        isrc: row.get::<Option<String>, _>("isrc").unwrap_or_default(),
+        spotify_id,
+        image_url: row.get::<Option<String>, _>("image_url").unwrap_or_default(),
+        explicit: row.get::<Option<i64>, _>("explicit").unwrap_or(0) != 0,
+        users,
+    };
+
+    match page.render() {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => error_page(&format!("Template-Fehler: {e}")),
+    }
+}
+
+/// A few recently seen tracks, linking to their detail page.
+async fn recent_tracks(st: &AppState) -> String {
+    let rows = sqlx::query("SELECT id, artists, title FROM hub_tracks ORDER BY id DESC LIMIT 25")
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("<h2>Tracks</h2><ul>");
+    for r in &rows {
+        let id: i64 = r.get("id");
+        let artists: Option<String> = r.get("artists");
+        let title: Option<String> = r.get("title");
+        s.push_str(&format!(
+            "<li><a href=\"/track/{id}\">{}</a> <small>— {}</small></li>",
+            esc(&title.unwrap_or_default()),
+            esc(&artists.unwrap_or_default()),
+        ));
+    }
+    s.push_str("</ul>");
+    s
 }
 
 /// `Some((connected, display_name))` when the user has a linked account.

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — MMM Hub{% endblock %}
+{% block content %}
+<hgroup>
+  <h1>{{ title }}</h1>
+  <p>{{ artists }}</p>
+</hgroup>
+
+<div class="grid">
+  <div>
+    {% if image_url != "" %}<img src="{{ image_url }}" alt="" style="border-radius:8px">{% endif %}
+  </div>
+  <div>
+    <table>
+      <tr><th>Album</th><td>{{ album }}</td></tr>
+      <tr><th>Dauer</th><td>{{ duration }}</td></tr>
+      <tr><th>Explicit</th><td>{% if explicit %}ja{% else %}nein{% endif %}</td></tr>
+      <tr><th>ISRC</th><td>{% if isrc != "" %}<code>{{ isrc }}</code>{% else %}—{% endif %}</td></tr>
+      <tr><th>Spotify</th><td>{% if spotify_id != "" %}<a href="https://open.spotify.com/track/{{ spotify_id }}" target="_blank"><code>{{ spotify_id }}</code></a>{% else %}—{% endif %}</td></tr>
+    </table>
+  </div>
+</div>
+
+<h2>In Playlists</h2>
+{% if users.is_empty() %}
+  <p>Dieser Track ist in keiner Playlist und von niemandem geliked.</p>
+{% else %}
+  {% for u in users %}
+  <article>
+    <header>
+      <strong>{{ u.slug }}</strong>
+      {% if u.liked %} · <span class="badge">geliked</span>{% endif %}
+      · {{ u.playlists.len() }} Playlist(s)
+    </header>
+    {% if u.playlists.is_empty() %}
+      <p><small>nur geliked</small></p>
+    {% else %}
+      <ul>
+        {% for p in u.playlists %}<li>{{ p }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+  </article>
+  {% endfor %}
+{% endif %}
+{% endblock %}
