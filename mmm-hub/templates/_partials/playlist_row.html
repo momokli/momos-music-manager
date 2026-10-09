@@ -10,6 +10,10 @@
         {% if p.user != "" %}<a href="/user/{{ p.user }}">@{{ p.user }}</a>{% endif %}
     </td>
     <td>{{ p.owner }}</td>
+    <td>
+        {% if p.tags != "" %}<span class="hub-tag hub-tag-own">{{ p.tags }}</span>{% else
+        %}<span class="hub-muted">—</span>{% endif %}
+    </td>
     <td>{{ p.tracks }}</td>
     <td class="{{ p.status_class }}">{{ p.status }}</td>
     <td class="hub-row-actions">

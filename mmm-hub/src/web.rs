@@ -183,6 +183,7 @@ struct PlaylistsPage {
     flash: String,
     filter: String,
     q: String,
+    owner_options: Vec<OwnerOpt>,
     count: usize,
     playlists: Vec<PlaylistRow>,
     counts: PlaylistCounts,
@@ -195,6 +196,15 @@ struct PlaylistCounts {
     with_items: i64,
     not_fetched: i64,
     error: i64,
+    tagged: i64,
+    untagged: i64,
+}
+
+/// One selectable owner value with a precomputed `selected` flag (keeps the
+/// askama template free of `==` comparisons inside HTML tags).
+struct OwnerOpt {
+    name: String,
+    selected: bool,
 }
 
 struct PlaylistRow {
@@ -207,6 +217,8 @@ struct PlaylistRow {
     status: String,
     status_class: String,
     enabled: bool,
+    /// Names of the current user's tags fed by this playlist (comma-joined).
+    tags: String,
 }
 
 /// A single `<tr>` for the htmx out-of-band row swap (see `toggle_playlist`).
@@ -260,6 +272,7 @@ struct Flash {
 struct PlaylistFilterQuery {
     filter: Option<String>,
     q: Option<String>,
+    owner: Option<String>,
 }
 
 /// Whitelist the known filter keys; anything else means `all`.
@@ -269,17 +282,22 @@ fn normalise_filter(filter: Option<&str>) -> &'static str {
         Some("with_items") => "with_items",
         Some("not_fetched") => "not_fetched",
         Some("error") => "error",
+        Some("tagged") => "tagged",
+        Some("untagged") => "untagged",
         _ => "all",
     }
 }
 
-/// The `WHERE` fragment for a normalised filter. Control-flow only — never user input.
+/// The `WHERE` fragment for a normalised filter. Control-flow only — never user
+/// input. `?1` is the current user id, so the tag filters can key on it.
 fn filter_clause(filter: &str) -> &'static str {
     match filter {
         "owned" => " AND p.is_owned = 1",
         "with_items" => " AND p.items_available = 1",
         "not_fetched" => " AND p.items_available = 0 AND p.enabled_for_fetch = 1",
         "error" => " AND p.fetch_error IS NOT NULL",
+        "tagged" => " AND EXISTS (SELECT 1 FROM hub_tag_sources s JOIN hub_tags t ON t.id = s.tag_id WHERE s.playlist_id = p.id AND t.owner_user_id = ?1)",
+        "untagged" => " AND NOT EXISTS (SELECT 1 FROM hub_tag_sources s JOIN hub_tags t ON t.id = s.tag_id WHERE s.playlist_id = p.id AND t.owner_user_id = ?1)",
         _ => "",
     }
 }
@@ -337,13 +355,16 @@ async fn playlists_page(
     };
     let filter = normalise_filter(pf.filter.as_deref());
     let q = pf.q.unwrap_or_default().trim().to_string();
-    let playlists = playlist_rows(&st, nav.id, filter, &q).await;
+    let owner = pf.owner.unwrap_or_default().trim().to_string();
+    let playlists = playlist_rows(&st, nav.id, filter, &q, &owner).await;
     let counts = playlist_counts(&st, nav.id).await;
+    let owner_options = playlist_owners(&st, nav.id, &owner).await;
     render(&PlaylistsPage {
         nav,
         flash: flash.msg.unwrap_or_default(),
         filter: filter.to_string(),
         q,
+        owner_options,
         count: playlists.len(),
         playlists,
         counts,
@@ -417,6 +438,7 @@ fn map_playlist_row(r: &sqlx::sqlite::SqliteRow) -> PlaylistRow {
         status,
         status_class,
         enabled: enabled == 1,
+        tags: r.get::<Option<String>, _>("my_tags").unwrap_or_default(),
     }
 }
 
@@ -424,29 +446,61 @@ fn map_playlist_row(r: &sqlx::sqlite::SqliteRow) -> PlaylistRow {
 ///
 /// `filter` is one of the keys returned by [`normalise_filter`]; the matching
 /// `WHERE` fragment is appended before the stable ordering.
-async fn playlist_rows(st: &AppState, user_id: i64, filter: &str, q: &str) -> Vec<PlaylistRow> {
+async fn playlist_rows(
+    st: &AppState,
+    user_id: i64,
+    filter: &str,
+    q: &str,
+    owner: &str,
+) -> Vec<PlaylistRow> {
     let sql = format!(
         "SELECT p.id, p.name, p.is_owned, p.track_count, p.items_available,
                 p.enabled_for_fetch, p.fetch_error,
                 COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS owner_name,
                 u.slug AS user_slug,
-                (SELECT COUNT(*) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS fetched
+                (SELECT COUNT(*) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS fetched,
+                (SELECT GROUP_CONCAT(tg.name, ', ') FROM hub_tag_sources s
+                   JOIN hub_tags tg ON tg.id = s.tag_id
+                  WHERE s.playlist_id = p.id AND tg.owner_user_id = ?1) AS my_tags
            FROM hub_playlists p
            JOIN hub_users u ON u.id = p.user_id
            LEFT JOIN hub_service_accounts a ON a.user_id = p.user_id AND a.service = 'spotify'
           WHERE p.user_id = ?1
-            AND (?2 = '' OR lower(p.name) LIKE '%' || lower(?2) || '%'){}
+            AND (?2 = '' OR lower(p.name) LIKE '%' || lower(?2) || '%')
+            AND (?3 = '' OR COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) = ?3){}
           ORDER BY p.is_owned DESC, p.name COLLATE NOCASE",
         filter_clause(filter)
     );
     let rows = sqlx::query(&sql)
         .bind(user_id)
         .bind(q)
+        .bind(owner)
         .fetch_all(&st.pool)
         .await
         .unwrap_or_default();
 
     rows.iter().map(map_playlist_row).collect()
+}
+
+/// Distinct owner names across the user's playlists, for the owner filter.
+async fn playlist_owners(st: &AppState, user_id: i64, current: &str) -> Vec<OwnerOpt> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS oname
+           FROM hub_playlists p
+           LEFT JOIN hub_service_accounts a ON a.user_id = p.user_id AND a.service = 'spotify'
+          WHERE p.user_id = ?1 AND oname IS NOT NULL AND oname <> ''
+          ORDER BY oname COLLATE NOCASE",
+    )
+    .bind(user_id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+    rows.into_iter()
+        .map(|name| OwnerOpt {
+            selected: name == current,
+            name,
+        })
+        .collect()
 }
 
 /// One playlist row by id (for the htmx single-row swap). `None` if it doesn't
@@ -457,7 +511,10 @@ async fn playlist_row(st: &AppState, user_id: i64, id: i64) -> Option<PlaylistRo
                 p.enabled_for_fetch, p.fetch_error,
                 COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS owner_name,
                 u.slug AS user_slug,
-                (SELECT COUNT(*) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS fetched
+                (SELECT COUNT(*) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS fetched,
+                (SELECT GROUP_CONCAT(tg.name, ', ') FROM hub_tag_sources s
+                   JOIN hub_tags tg ON tg.id = s.tag_id
+                  WHERE s.playlist_id = p.id AND tg.owner_user_id = ?1) AS my_tags
            FROM hub_playlists p
            JOIN hub_users u ON u.id = p.user_id
            LEFT JOIN hub_service_accounts a ON a.user_id = p.user_id AND a.service = 'spotify'
@@ -480,7 +537,9 @@ async fn playlist_counts(st: &AppState, user_id: i64) -> PlaylistCounts {
             COALESCE(SUM(CASE WHEN is_owned = 1 THEN 1 ELSE 0 END), 0) AS owned_c,
             COALESCE(SUM(CASE WHEN items_available = 1 THEN 1 ELSE 0 END), 0) AS items_c,
             COALESCE(SUM(CASE WHEN items_available = 0 AND enabled_for_fetch = 1 THEN 1 ELSE 0 END), 0) AS not_fetched_c,
-            COALESCE(SUM(CASE WHEN fetch_error IS NOT NULL THEN 1 ELSE 0 END), 0) AS error_c
+                    COALESCE(SUM(CASE WHEN fetch_error IS NOT NULL THEN 1 ELSE 0 END), 0) AS error_c,
+            COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM hub_tag_sources s JOIN hub_tags t ON t.id = s.tag_id WHERE s.playlist_id = hub_playlists.id AND t.owner_user_id = ?1) THEN 1 ELSE 0 END), 0) AS tagged_c,
+            COALESCE(SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM hub_tag_sources s JOIN hub_tags t ON t.id = s.tag_id WHERE s.playlist_id = hub_playlists.id AND t.owner_user_id = ?1) THEN 1 ELSE 0 END), 0) AS untagged_c
            FROM hub_playlists
           WHERE user_id = ?1",
     )
@@ -496,6 +555,8 @@ async fn playlist_counts(st: &AppState, user_id: i64) -> PlaylistCounts {
             with_items: r.get("items_c"),
             not_fetched: r.get("not_fetched_c"),
             error: r.get("error_c"),
+            tagged: r.get("tagged_c"),
+            untagged: r.get("untagged_c"),
         },
         None => PlaylistCounts {
             all: 0,
@@ -503,6 +564,8 @@ async fn playlist_counts(st: &AppState, user_id: i64) -> PlaylistCounts {
             with_items: 0,
             not_fetched: 0,
             error: 0,
+            tagged: 0,
+            untagged: 0,
         },
     }
 }

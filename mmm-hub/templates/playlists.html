@@ -55,6 +55,24 @@ content %}
         </li>
         {% else %}
         <li><a href="/me/playlists?filter=error">Fehler ({{ counts.error }})</a></li>
+        {% endif %} {% if filter == "tagged" %}
+        <li>
+            <a href="/me/playlists?filter=tagged" aria-current="page"
+                >Getaggt ({{ counts.tagged }})</a
+            >
+        </li>
+        {% else %}
+        <li><a href="/me/playlists?filter=tagged">Getaggt ({{ counts.tagged }})</a></li>
+        {% endif %} {% if filter == "untagged" %}
+        <li>
+            <a href="/me/playlists?filter=untagged" aria-current="page"
+                >Ohne Tag ({{ counts.untagged }})</a
+            >
+        </li>
+        {% else %}
+        <li>
+            <a href="/me/playlists?filter=untagged">Ohne Tag ({{ counts.untagged }})</a>
+        </li>
         {% endif %}
     </ul>
 </nav>
@@ -68,6 +86,16 @@ content %}
         placeholder="Playlist filtern …"
         aria-label="Playlist filtern"
     />
+    {% if !owner_options.is_empty() %}
+    <select name="owner" aria-label="Besitzer">
+        <option value="">Besitzer: alle</option>
+        {% for o in owner_options %}
+        <option value="{{ o.name }}" {% if o.selected %}selected{% endif %}>
+            {{ o.name }}
+        </option>
+        {% endfor %}
+    </select>
+    {% endif %}
     <button type="submit">Filtern</button>
 </form>
 
@@ -97,6 +125,7 @@ content %}
                 <th scope="col">Typ</th>
                 <th scope="col">Nutzer</th>
                 <th scope="col">Besitzer</th>
+                <th scope="col">Tags</th>
                 <th scope="col">Tracks</th>
                 <th scope="col">Status</th>
                 <th scope="col">Aktionen</th>

@@ -232,6 +232,61 @@ async fn playlist_filter_is_server_side() {
 }
 
 #[tokio::test]
+async fn playlist_tag_and_owner_filters() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    async fn fetch(app: &common::TestApp, cookie: &str, path: &str) -> String {
+        let resp = app
+            .client()
+            .get(app.url(path))
+            .header("Cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        body(resp).await
+    }
+
+    // Before any tag: everything is untagged, nothing is tagged.
+    let untagged = fetch(&app, &cookie, "/me/playlists?filter=untagged").await;
+    assert!(untagged.contains("Deep House"));
+    assert!(untagged.contains("Shared Collab"));
+    let tagged = fetch(&app, &cookie, "/me/playlists?filter=tagged").await;
+    assert!(tagged.contains("Keine Playlists in dieser Ansicht"));
+
+    // Promote one playlist to a tag and give it a distinct name so the Tags
+    // column is unambiguous (the playlist itself stays "Deep House").
+    let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
+        .await
+        .unwrap();
+    mmm_hub::tags::rename_tag(&app.pool, app.seed.alice, tag, "Housey")
+        .await
+        .unwrap();
+
+    // The Tags column now shows the tag for that playlist only.
+    let all = fetch(&app, &cookie, "/me/playlists?filter=all").await;
+    assert!(all.contains("Housey"), "tag column must show the tag");
+
+    // tagged = only the tagged playlist; untagged = the other one.
+    let tagged = fetch(&app, &cookie, "/me/playlists?filter=tagged").await;
+    assert!(tagged.contains("Deep House"));
+    assert!(!tagged.contains("Shared Collab"));
+    let untagged = fetch(&app, &cookie, "/me/playlists?filter=untagged").await;
+    assert!(!untagged.contains(">Deep House</a>"));
+    assert!(untagged.contains("Shared Collab"));
+
+    // Owner filter: fixture playlists are owned by "Alice".
+    let alice = fetch(&app, &cookie, "/me/playlists?filter=all&owner=Alice").await;
+    assert!(alice.contains("Deep House"));
+    let nobody = fetch(&app, &cookie, "/me/playlists?filter=all&owner=Nobody").await;
+    assert!(nobody.contains("Keine Playlists in dieser Ansicht"));
+
+    // The owner picker is rendered.
+    assert!(all.contains("name=\"owner\""));
+}
+
+#[tokio::test]
 async fn toggle_returns_row_fragment_for_htmx() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
