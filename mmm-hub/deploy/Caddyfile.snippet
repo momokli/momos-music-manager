@@ -4,14 +4,29 @@
 #   docker exec caddy-caddy-1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 #   docker exec caddy-caddy-1 caddy reload   --config /etc/caddy/Caddyfile --adapter caddyfile
 #
-# basicauth is REQUIRED for the skeleton: /api/hub/query runs arbitrary
-# read-only SQL and would otherwise be an open database.
-# Reuse the same htpasswd hash as music.klimk.es (the `momo` entry).
+# The hub has its OWN login (own user store + server-side session cookie), so
+# there is NO basic auth in front of it. The read-only sibling sites
+# (data./schema.) DO use basic auth (same htpasswd entry as music.klimk.es).
 
 hub.zukkafabrik.de {
+	reverse_proxy 192.168.178.200:8080
+	encode gzip
+}
+
+# Read-only Datasette over the sanitized copy (hub-public.db).
+data.zukkafabrik.de {
 	basicauth {
 		momo <bcrypt-hash>
 	}
-	reverse_proxy 192.168.178.200:8080
+	reverse_proxy 192.168.178.200:8001
+	encode gzip
+}
+
+# Static SchemaSpy ER diagrams.
+schema.zukkafabrik.de {
+	basicauth {
+		momo <bcrypt-hash>
+	}
+	reverse_proxy 192.168.178.200:8002
 	encode gzip
 }
