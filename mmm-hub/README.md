@@ -73,16 +73,21 @@ cargo run -- seed-demo                                # deterministic demo data 
 
 ## Web UI
 
-Every page is session-gated; the dashboard is `/`.
+Every page is session-gated and rendered through one shell (`templates/base.html`:
+topbar nav + user menu). The dashboard is `/`.
 
-| Route            | What it shows                                                               |
-| ---------------- | --------------------------------------------------------------------------- |
-| `/`              | Dashboard: Spotify status, likes count, playlist fetch toggles, tracks      |
-| `/sql`           | Read-only SQL console with presets                                          |
-| `/track/{id}`    | Per-user playlist presence + per-ISRC availability via internal `music-api` |
-| `/search`        | Track search across the shared catalog                                      |
-| `/user/{slug}`   | A user's likes + playlists                                                  |
-| `/playlist/{id}` | One playlist's tracks                                                       |
+| Route               | What it shows                                                               |
+| ------------------- | --------------------------------------------------------------------------- |
+| `/`                 | Overview: Spotify status, quick actions, stats, recent tracks               |
+| `/me/playlists`     | Your playlists with fetch toggles + server-side filter (htmx row swap)      |
+| `/overlap`          | Entdecken: shared tracks + pairwise overlaps                                |
+| `/search`           | Track search across the shared catalog                                      |
+| `/track/{id}`       | Per-user playlist presence + per-ISRC availability via internal `music-api` |
+| `/user/{slug}`      | A user's likes + playlists                                                  |
+| `/playlist/{id}`    | One playlist's tracks                                                       |
+| `/settings`         | Account + Spotify connect/sync/disconnect                                   |
+| `/sql`              | Read-only SQL console with presets                                          |
+| `/login`, `/signup` | Minimal auth shell                                                          |
 
 ## JSON API
 
