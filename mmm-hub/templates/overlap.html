@@ -95,6 +95,15 @@ content %}
         class="secondary outline"
         >Reset</a
     >
+    <button
+        type="submit"
+        formaction="/overlap/enrich"
+        formmethod="post"
+        class="secondary"
+        title="Fehlende BPM/Key für genau diese Auswahl über die API holen (der Worker hat dann Vorrang)"
+    >
+        ⚡ BPM/Key für Auswahl holen
+    </button>
     {% if !playlists.is_empty() %}
     <details class="hub-plpicker">
         <summary>

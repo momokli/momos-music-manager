@@ -21,6 +21,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/search", get(search_page))
         .route("/overlap", get(overlap_page))
+        .route("/overlap/enrich", post(overlap_enrich))
         .route("/playlists/similar", get(similar_page))
         .route("/tags", get(tags_page))
         .route("/tag/{id}", get(tag_detail_page))
@@ -434,6 +435,8 @@ struct CompareQuery {
     sort: Option<String>,
     /// `asc` | `desc` (default `desc` for `present`, `asc` otherwise).
     dir: Option<String>,
+    /// Flash message (success/error) shown after a redirect.
+    msg: Option<String>,
 }
 
 /// The overlap filters that must be carried across the picker/scope links,
@@ -634,6 +637,101 @@ struct TrackAcc {
     per_user: HashMap<i64, CellAcc>,
 }
 
+/// Build the per-track accumulation for the selected users, applying the scope
+/// and optional per-playlist include filter. Shared by the page and the
+/// on-demand feature request.
+async fn overlap_acc(
+    pool: &sqlx::SqlitePool,
+    selected: &[(i64, String)],
+    scope: &str,
+    pl_filter: Option<&HashSet<i64>>,
+) -> HashMap<i64, TrackAcc> {
+    let mut acc: HashMap<i64, TrackAcc> = HashMap::new();
+    if selected.is_empty() {
+        return acc;
+    }
+
+    let mut qb = QueryBuilder::new(
+        "SELECT hp.user_id AS uid, hp.id AS pl_id, hp.name AS pl_name, hp.is_owned AS owned,\n                hp.collaborative AS collab,\n                t.id AS tid, t.title AS title, t.artists AS artists, t.isrc AS isrc\n           FROM hub_playlist_tracks hpt\n           JOIN hub_playlists hp ON hp.id = hpt.playlist_id\n           JOIN hub_tracks t ON t.id = hpt.track_id\n          WHERE hp.user_id IN (",
+    );
+    let mut sep = qb.separated(", ");
+    for (id, _) in selected {
+        sep.push_bind(*id);
+    }
+    qb.push(")");
+    for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+        let uid: i64 = r.get("uid");
+        let pl_id: i64 = r.get("pl_id");
+        let owned: i64 = r.get("owned");
+        let collab: i64 = r.get("collab");
+        if !scope_match(scope, owned == 1, collab == 1) {
+            continue;
+        }
+        if let Some(f) = pl_filter {
+            if !f.contains(&pl_id) {
+                continue;
+            }
+        }
+        let tid: i64 = r.get("tid");
+        let e = acc.entry(tid).or_insert_with(|| TrackAcc {
+            title: r.get::<Option<String>, _>("title").unwrap_or_default(),
+            artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
+            isrc: r.get::<Option<String>, _>("isrc").unwrap_or_default(),
+            per_user: HashMap::new(),
+        });
+        let cell = e.per_user.entry(uid).or_insert_with(|| CellAcc {
+            liked: false,
+            playlists: Vec::new(),
+        });
+        cell.playlists.push(CellPlaylist {
+            name: r.get::<Option<String>, _>("pl_name").unwrap_or_default(),
+            owned: owned == 1,
+        });
+    }
+
+    let mut qb = QueryBuilder::new(
+        "SELECT l.user_id AS uid, t.id AS tid, t.title AS title, t.artists AS artists, t.isrc AS isrc\n           FROM hub_liked_tracks l JOIN hub_tracks t ON t.id = l.track_id\n          WHERE l.user_id IN (",
+    );
+    let mut sep = qb.separated(", ");
+    for (id, _) in selected {
+        sep.push_bind(*id);
+    }
+    qb.push(")");
+    for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+        let uid: i64 = r.get("uid");
+        let tid: i64 = r.get("tid");
+        let e = acc.entry(tid).or_insert_with(|| TrackAcc {
+            title: r.get::<Option<String>, _>("title").unwrap_or_default(),
+            artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
+            isrc: r.get::<Option<String>, _>("isrc").unwrap_or_default(),
+            per_user: HashMap::new(),
+        });
+        e.per_user
+            .entry(uid)
+            .or_insert_with(|| CellAcc {
+                liked: false,
+                playlists: Vec::new(),
+            })
+            .liked = true;
+    }
+
+    acc
+}
+
+/// Track ids present for >= 2 of the selected users (the "shared" rows).
+fn shared_ids(acc: &HashMap<i64, TrackAcc>) -> Vec<i64> {
+    acc.iter()
+        .filter(|(_, t)| {
+            t.per_user
+                .values()
+                .filter(|c| c.liked || !c.playlists.is_empty())
+                .count()
+                >= 2
+        })
+        .map(|(id, _)| *id)
+        .collect()
+}
+
 async fn overlap_page(
     State(st): State<AppState>,
     Query(q): Query<CompareQuery>,
@@ -726,74 +824,7 @@ async fn overlap_page(
         .collect();
     let current_ids: Vec<i64> = selected.iter().map(|(id, _)| *id).collect();
 
-    let mut acc: HashMap<i64, TrackAcc> = HashMap::new();
-
-    if !selected.is_empty() {
-        let mut qb = QueryBuilder::new(
-            "SELECT hp.user_id AS uid, hp.id AS pl_id, hp.name AS pl_name, hp.is_owned AS owned,\n                    hp.collaborative AS collab,\n                    t.id AS tid, t.title AS title, t.artists AS artists, t.isrc AS isrc\n               FROM hub_playlist_tracks hpt\n               JOIN hub_playlists hp ON hp.id = hpt.playlist_id\n               JOIN hub_tracks t ON t.id = hpt.track_id\n              WHERE hp.user_id IN (",
-        );
-        let mut sep = qb.separated(", ");
-        for (id, _) in &selected {
-            sep.push_bind(*id);
-        }
-        qb.push(")");
-        let rows = qb.build().fetch_all(&st.pool).await.unwrap_or_default();
-        for r in rows {
-            let uid: i64 = r.get("uid");
-            let pl_id: i64 = r.get("pl_id");
-            let owned: i64 = r.get("owned");
-            let collab: i64 = r.get("collab");
-            if !scope_match(scope, owned == 1, collab == 1) {
-                continue;
-            }
-            if let Some(f) = &pl_filter {
-                if !f.contains(&pl_id) {
-                    continue;
-                }
-            }
-            let tid: i64 = r.get("tid");
-            let e = acc.entry(tid).or_insert_with(|| TrackAcc {
-                title: r.get::<Option<String>, _>("title").unwrap_or_default(),
-                artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
-                isrc: r.get::<Option<String>, _>("isrc").unwrap_or_default(),
-                per_user: HashMap::new(),
-            });
-            let cell = e.per_user.entry(uid).or_insert_with(|| CellAcc {
-                liked: false,
-                playlists: Vec::new(),
-            });
-            cell.playlists.push(CellPlaylist {
-                name: r.get::<Option<String>, _>("pl_name").unwrap_or_default(),
-                owned: owned == 1,
-            });
-        }
-
-        let mut qb = QueryBuilder::new(
-            "SELECT l.user_id AS uid, t.id AS tid, t.title AS title, t.artists AS artists, t.isrc AS isrc\n               FROM hub_liked_tracks l JOIN hub_tracks t ON t.id = l.track_id\n              WHERE l.user_id IN (",
-        );
-        let mut sep = qb.separated(", ");
-        for (id, _) in &selected {
-            sep.push_bind(*id);
-        }
-        qb.push(")");
-        for r in qb.build().fetch_all(&st.pool).await.unwrap_or_default() {
-            let uid: i64 = r.get("uid");
-            let tid: i64 = r.get("tid");
-            let e = acc.entry(tid).or_insert_with(|| TrackAcc {
-                title: r.get::<Option<String>, _>("title").unwrap_or_default(),
-                artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
-                isrc: r.get::<Option<String>, _>("isrc").unwrap_or_default(),
-                per_user: HashMap::new(),
-            });
-            e.per_user
-                .entry(uid)
-                .or_insert_with(|| CellAcc {
-                    liked: false,
-                    playlists: Vec::new(),
-                })
-                .liked = true;
-        }
-    }
+    let acc = overlap_acc(&st.pool, &selected, scope, pl_filter.as_ref()).await;
 
     // Per-track audio (BPM / key / energy) for filtering + display. Chunked because
     // the id list can hold tens of thousands of tracks (SQLite bind-variable limit).
@@ -1062,7 +1093,7 @@ async fn overlap_page(
 
     render(&OverlapPage {
         nav,
-        flash: String::new(),
+        flash: q.msg.clone().unwrap_or_default(),
         picker,
         scopes,
         columns,
@@ -1089,6 +1120,107 @@ async fn overlap_page(
         sort_value: sort.to_string(),
         dir_value: dir.to_string(),
     })
+}
+
+/// Parse `application/x-www-form-urlencoded` into a multimap (handles repeated
+/// keys, e.g. the `pl` playlist checkboxes).
+fn form_params(body: &str) -> HashMap<String, Vec<String>> {
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for pair in body.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        let dec = |s: &str| {
+            urlencoding::decode(s)
+                .map(|c| c.into_owned())
+                .unwrap_or_else(|_| s.to_string())
+        };
+        out.entry(dec(k)).or_default().push(dec(v));
+    }
+    out
+}
+
+/// On-demand: enqueue the shared tracks of the current selection for BPM/key
+/// lookup (the enrichment worker processes these before its backlog).
+async fn overlap_enrich(State(st): State<AppState>, headers: HeaderMap, body: String) -> Response {
+    if crate::ui::nav(&st, &headers, "overlap").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    let p = form_params(&body);
+    let get = |k: &str| p.get(k).and_then(|v| v.first()).cloned().unwrap_or_default();
+
+    let all_users = sqlx::query_as::<_, (i64, String)>("SELECT id, slug FROM hub_users ORDER BY slug")
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    let scope = match get("scope").as_str() {
+        "owned" => "owned",
+        "followed" => "followed",
+        "contributed" => "contributed",
+        _ => "all",
+    };
+    let users_csv = get("users");
+    let selected_set: HashSet<i64> = if users_csv.trim().is_empty() {
+        all_users.iter().map(|(id, _)| *id).collect()
+    } else {
+        users_csv
+            .split(',')
+            .filter_map(|s| s.trim().parse::<i64>().ok())
+            .collect()
+    };
+    let selected: Vec<(i64, String)> = all_users
+        .iter()
+        .filter(|(id, _)| selected_set.contains(id))
+        .cloned()
+        .collect();
+    let selected_ids: Vec<i64> = selected.iter().map(|(id, _)| *id).collect();
+
+    let mut pl_ids: Vec<i64> = p
+        .get("pl")
+        .map(|v| v.iter().filter_map(|s| s.parse::<i64>().ok()).collect())
+        .unwrap_or_default();
+    pl_ids.sort_unstable();
+    pl_ids.dedup();
+    let pl_filter: Option<HashSet<i64>> = if pl_ids.is_empty() {
+        None
+    } else {
+        Some(pl_ids.iter().copied().collect())
+    };
+
+    let acc = overlap_acc(&st.pool, &selected, scope, pl_filter.as_ref()).await;
+    let ids = shared_ids(&acc);
+    let queued = crate::features::enqueue_missing(&st.pool, &ids)
+        .await
+        .unwrap_or(0);
+
+    let sort = match get("sort").as_str() {
+        "bpm" => "bpm",
+        "key" => "key",
+        "energy" => "energy",
+        _ => "present",
+    };
+    let dir = match get("dir").as_str() {
+        "asc" => "asc",
+        "desc" => "desc",
+        _ if sort == "present" => "desc",
+        _ => "asc",
+    };
+    let filters = OverlapFilters {
+        scope: scope.to_string(),
+        bpm_min: get("bpm_min"),
+        bpm_max: get("bpm_max"),
+        key: get("key"),
+        key_harmonic: matches!(get("key_harmonic").as_str(), "1" | "on" | "true"),
+        sort: sort.to_string(),
+        dir: dir.to_string(),
+        pl: pl_ids,
+    };
+    let back = filters.href(&selected_ids);
+    flash_redirect(
+        &back,
+        format!("{queued} Tracks zur BPM/Key-Abfrage eingereiht — der Worker holt sie jetzt"),
+    )
 }
 
 // ── similar playlists (playlists as tags) ────────────────────────────────────

@@ -33,9 +33,14 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) {
         let cfg = cfg.clone();
         tokio::spawn(async move {
             loop {
+                // On-demand requests first, then the generic backlog.
+                let p = crate::features::priority_once(&pool, &cfg, 50)
+                    .await
+                    .unwrap_or(0)
+                    > 0;
                 let f = crate::features::sync_once(&pool, &cfg, 50).await.unwrap_or(0) > 0;
                 let g = crate::genres::sync_once(&pool, &cfg, 50).await.unwrap_or(0) > 0;
-                let worked = f || g;
+                let worked = p || f || g;
                 tokio::time::sleep(if worked { BUSY_WAIT } else { IDLE_WAIT }).await;
             }
         });

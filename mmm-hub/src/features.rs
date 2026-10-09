@@ -242,6 +242,79 @@ pub async fn sync_once(pool: &SqlitePool, cfg: &Config, batch: i64) -> Result<us
     Ok(pairs.len())
 }
 
+/// High-priority batch: process on-demand requests (see `enqueue_missing`) before
+/// the generic backlog. Each attempted track is removed from the request table.
+pub async fn priority_once(pool: &SqlitePool, cfg: &Config, batch: i64) -> Result<usize> {
+    let rows = sqlx::query(
+        "SELECT r.track_id AS tid, e.external_id AS sid
+           FROM hub_feature_requests r
+           JOIN hub_track_external_ids e ON e.track_id = r.track_id AND e.service = 'spotify'
+          WHERE e.external_id <> ''
+          LIMIT ?1",
+    )
+    .bind(batch)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let pairs: Vec<(i64, String)> = rows
+        .iter()
+        .map(|r| (r.get::<i64, _>("tid"), r.get::<String, _>("sid")))
+        .collect();
+    let ids: Vec<String> = pairs.iter().map(|(_, s)| s.clone()).collect();
+
+    let feats = fetch_batch(cfg, &ids).await?;
+    let found: std::collections::HashMap<String, &Feature> =
+        feats.iter().map(|f| (f.spotify_id.clone(), f)).collect();
+
+    for (tid, sid) in &pairs {
+        store(pool, *tid, found.get(sid).copied()).await?;
+        sqlx::query("DELETE FROM hub_feature_requests WHERE track_id = ?1")
+            .bind(tid)
+            .execute(pool)
+            .await?;
+    }
+    Ok(pairs.len())
+}
+
+/// Enqueue a set of candidate tracks for on-demand feature lookup: only those
+/// that actually have a Spotify id and no features row yet. Returns how many
+/// were newly queued.
+pub async fn enqueue_missing(pool: &SqlitePool, candidate_ids: &[i64]) -> Result<usize> {
+    if candidate_ids.is_empty() {
+        return Ok(0);
+    }
+    let now = now_iso();
+    let mut queued = 0usize;
+    for chunk in candidate_ids.chunks(900) {
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT OR IGNORE INTO hub_feature_requests (track_id, requested_at)
+             SELECT t.id, ",
+        );
+        qb.push_bind(&now);
+        qb.push(
+            " FROM hub_tracks t
+               JOIN hub_track_external_ids e ON e.track_id = t.id
+                    AND e.service = 'spotify' AND e.external_id <> ''
+              WHERE t.id IN (",
+        );
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(*id);
+        }
+        qb.push(")");
+        qb.push(
+            " AND NOT EXISTS (SELECT 1 FROM hub_track_features f WHERE f.track_id = t.id)",
+        );
+        let res = qb.build().execute(pool).await?;
+        queued += res.rows_affected() as usize;
+    }
+    Ok(queued)
+}
+
 #[derive(Debug, Clone)]
 pub struct Recommendation {
     pub title: String,

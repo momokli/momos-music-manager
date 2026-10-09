@@ -470,6 +470,71 @@ async fn overlap_sort_and_playlist_filter() {
 }
 
 #[tokio::test]
+async fn overlap_enrich_enqueues_missing_features() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // Give the shared tracks a Spotify id so they're eligible.
+    for (tid, sid) in [
+        (app.seed.t_all, "sp-all"),
+        (app.seed.t_two, "sp-two"),
+        (app.seed.t_pl, "sp-pl"),
+    ] {
+        sqlx::query(
+            "INSERT INTO hub_track_external_ids (track_id, service, external_id, url)
+             VALUES (?1, 'spotify', ?2, '')",
+        )
+        .bind(tid)
+        .bind(sid)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+
+    let resp = app
+        .client()
+        .post(app.url("/overlap/enrich"))
+        .header("Cookie", &cookie)
+        .form(&[("users", ""), ("scope", "all")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+
+    // Three shared tracks (present for >= 2 users) are queued.
+    let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_feature_requests")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(queued, 3);
+
+    // Tracks that already have a features row are not queued.
+    sqlx::query(
+        "INSERT INTO hub_track_features (track_id, found, source) VALUES (?1, 0, 'reccobeats')",
+    )
+    .bind(app.seed.t_all)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM hub_feature_requests")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    app.client()
+        .post(app.url("/overlap/enrich"))
+        .header("Cookie", &cookie)
+        .form(&[("users", ""), ("scope", "all")])
+        .send()
+        .await
+        .unwrap();
+    let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_feature_requests")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(queued, 2, "track with features must be skipped");
+}
+
+#[tokio::test]
 async fn toggle_returns_row_fragment_for_htmx() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
