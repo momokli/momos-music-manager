@@ -958,6 +958,43 @@ async fn digging_bpm_tolerance_is_absolute() {
 }
 
 #[tokio::test]
+async fn digging_shows_playlists_and_tags_per_track() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // Promote alice's playlist (contains t_all) to a tag and put it in a group.
+    let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
+        .await
+        .unwrap();
+    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Mood", "💜")
+        .await
+        .unwrap();
+    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, tag, g)
+        .await
+        .unwrap();
+
+    // Seed t_pl co-occurs with t_all in alice's playlist.
+    let resp = app
+        .client()
+        .get(app.url(&format!("/digging?seed={}", app.seed.t_pl)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    // Column headers exist.
+    assert!(html.contains("Bei uns"));
+    assert!(html.contains("Tags"));
+    // The candidate's owning playlist is linked, per user.
+    assert!(html.contains(&format!("/playlist/{}", app.seed.pl_alice)));
+    assert!(html.contains("@alice"));
+    // Tag with its group icon + name.
+    assert!(html.contains("💜 Mood"));
+    assert!(html.contains(&format!("/groups/{g}")));
+}
+
+#[tokio::test]
 async fn registration_closed_by_default() {
     let app = common::spawn().await;
 

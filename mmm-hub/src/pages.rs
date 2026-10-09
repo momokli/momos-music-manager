@@ -1546,11 +1546,42 @@ struct DigRow {
     users: i64,
     playlists: i64,
     likes: i64,
-    slugs: String,
     bpm: Option<f64>,
     bpm_disp: String,
     camelot: String,
     score: i64,
+    /// Per-user presence with playlist names (track-detail style).
+    presence: Vec<DigUserRow>,
+    /// Resolved tags with their groups.
+    tags: Vec<DigTag>,
+}
+
+#[derive(Clone)]
+struct DigUserRow {
+    slug: String,
+    liked: bool,
+    owned: Vec<DigPlaylist>,
+    followed: Vec<DigPlaylist>,
+}
+
+#[derive(Clone)]
+struct DigPlaylist {
+    id: i64,
+    name: String,
+}
+
+#[derive(Clone)]
+struct DigTag {
+    name: String,
+    owner: String,
+    groups: Vec<DigGroup>,
+}
+
+#[derive(Clone)]
+struct DigGroup {
+    id: i64,
+    icon: String,
+    name: String,
 }
 
 /// Merge a (possibly external) candidate into the session map: dedupe by hub
@@ -1596,13 +1627,143 @@ async fn merge_candidate(
             users: p.users,
             playlists: p.playlists,
             likes: p.likes,
-            slugs: p.slugs,
             bpm: None,
             bpm_disp: String::new(),
             camelot: String::new(),
             score: 0,
+            presence: Vec::new(),
+            tags: Vec::new(),
         },
     );
+}
+
+/// Batch-load per-user playlists (owned/followed) and resolved tags (with
+/// groups) for the given track ids — the track-detail view's data, in bulk.
+async fn dig_details(
+    pool: &sqlx::SqlitePool,
+    ids: &[i64],
+) -> (HashMap<i64, Vec<DigUserRow>>, HashMap<i64, Vec<DigTag>>) {
+    let mut presence: HashMap<i64, Vec<DigUserRow>> = HashMap::new();
+    let mut tags: HashMap<i64, Vec<DigTag>> = HashMap::new();
+    if ids.is_empty() {
+        return (presence, tags);
+    }
+
+    for chunk in ids.chunks(900) {
+        // Playlist memberships (per user).
+        let mut qb = QueryBuilder::new(
+            "SELECT hpt.track_id AS tid, u.slug AS slug, hp.id AS pl_id, hp.name AS pl_name,
+                    hp.is_owned AS owned
+               FROM hub_playlist_tracks hpt
+               JOIN hub_playlists hp ON hp.id = hpt.playlist_id
+               JOIN hub_users u ON u.id = hp.user_id
+              WHERE hpt.track_id IN (",
+        );
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(*id);
+        }
+        qb.push(") ORDER BY u.slug, hp.is_owned DESC, hp.name COLLATE NOCASE");
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            let tid: i64 = r.get("tid");
+            let slug: String = r.get("slug");
+            let pl = DigPlaylist {
+                id: r.get("pl_id"),
+                name: r.get::<Option<String>, _>("pl_name").unwrap_or_default(),
+            };
+            let owned = r.get::<i64, _>("owned") == 1;
+            let list = presence.entry(tid).or_default();
+            let u = match list.iter().position(|x| x.slug == slug) {
+                Some(i) => &mut list[i],
+                None => {
+                    list.push(DigUserRow {
+                        slug,
+                        liked: false,
+                        owned: Vec::new(),
+                        followed: Vec::new(),
+                    });
+                    list.last_mut().unwrap()
+                }
+            };
+            if owned {
+                u.owned.push(pl);
+            } else {
+                u.followed.push(pl);
+            }
+        }
+
+        // Likes (per user).
+        let mut qb = QueryBuilder::new(
+            "SELECT l.track_id AS tid, u.slug AS slug
+               FROM hub_liked_tracks l JOIN hub_users u ON u.id = l.user_id
+              WHERE l.track_id IN (",
+        );
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(*id);
+        }
+        qb.push(")");
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            let tid: i64 = r.get("tid");
+            let slug: String = r.get("slug");
+            let list = presence.entry(tid).or_default();
+            match list.iter().position(|x| x.slug == slug) {
+                Some(i) => list[i].liked = true,
+                None => list.push(DigUserRow {
+                    slug,
+                    liked: true,
+                    owned: Vec::new(),
+                    followed: Vec::new(),
+                }),
+            }
+        }
+
+        // Resolved tags + their groups (LEFT JOIN, so a tag can repeat per group).
+        let mut qb = QueryBuilder::new(
+            "SELECT rt.track_id AS tid, t.name AS tag, u.slug AS owner,
+                    g.id AS gid, g.name AS gname, COALESCE(g.icon, '') AS gicon
+               FROM hub_track_resolved_tags rt
+               JOIN hub_tags t ON t.id = rt.tag_id
+               JOIN hub_users u ON u.id = t.owner_user_id
+               LEFT JOIN hub_group_tags gt ON gt.tag_id = t.id
+               LEFT JOIN hub_tag_groups g ON g.id = gt.group_id
+              WHERE rt.track_id IN (",
+        );
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(*id);
+        }
+        qb.push(") ORDER BY u.slug, t.name COLLATE NOCASE, g.name COLLATE NOCASE");
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            let tid: i64 = r.get("tid");
+            let tag: String = r.get::<Option<String>, _>("tag").unwrap_or_default();
+            let owner: String = r.get::<Option<String>, _>("owner").unwrap_or_default();
+            let gid: Option<i64> = r.get("gid");
+            let gname: String = r.get::<Option<String>, _>("gname").unwrap_or_default();
+            let gicon: String = r.get::<Option<String>, _>("gicon").unwrap_or_default();
+            let list = tags.entry(tid).or_default();
+            let t = match list.iter().position(|x| x.name == tag && x.owner == owner) {
+                Some(i) => &mut list[i],
+                None => {
+                    list.push(DigTag {
+                        name: tag,
+                        owner,
+                        groups: Vec::new(),
+                    });
+                    list.last_mut().unwrap()
+                }
+            };
+            if gid.is_some() && !t.groups.iter().any(|g| g.name == gname) {
+                t.groups.push(DigGroup {
+                    id: gid.unwrap_or(0),
+                    icon: gicon,
+                    name: gname,
+                });
+            }
+        }
+    }
+
+    (presence, tags)
 }
 
 async fn digging_page(
@@ -1825,6 +1986,16 @@ async fn digging_page(
     });
     let with_hub = rows.iter().filter(|r| r.users > 0 || r.likes > 0).count();
     rows.truncate(500);
+
+    // Attach per-user playlists + tags (track-detail style) for the shown rows.
+    let matched_ids: Vec<i64> = rows.iter().filter(|r| r.matched).map(|r| r.track_id).collect();
+    let (presence_map, tags_map) = dig_details(&st.pool, &matched_ids).await;
+    for r in rows.iter_mut() {
+        if r.matched {
+            r.presence = presence_map.get(&r.track_id).cloned().unwrap_or_default();
+            r.tags = tags_map.get(&r.track_id).cloned().unwrap_or_default();
+        }
+    }
 
     // Filter toggle links, preserving the other flags.
     let link = |mine: bool, bpm: bool, harm: bool, tol: i64| -> String {

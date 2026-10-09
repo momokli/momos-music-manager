@@ -74,10 +74,9 @@ content %}
                 <th scope="col">Track</th>
                 <th scope="col">Quellen</th>
                 <th scope="col">Bei uns</th>
+                <th scope="col">Tags</th>
                 <th scope="col">BPM</th>
                 <th scope="col">Key</th>
-                <th scope="col">Playlists</th>
-                <th scope="col">♥</th>
                 <th scope="col">Score</th>
             </tr>
         </thead>
@@ -94,14 +93,41 @@ content %}
                     {% for s in r.sources %}<span class="hub-tag">{{ s }}</span>{% endfor
                     %}
                 </td>
-                <td>
-                    {% if r.users > 0 %}{{ r.slugs }}
-                    <span class="hub-muted">({{ r.users }})</span>{% else %}—{% endif %}
+                <td class="hub-dig-users">
+                    {% if r.presence.is_empty() %}<span class="hub-muted">—</span>{% else
+                    %} {% for u in r.presence %}
+                    <div class="hub-dig-user">
+                        <a href="/user/{{ u.slug }}">@{{ u.slug }}</a>{% if u.liked %}
+                        <span title="geliked">♥</span>{% endif %} {% for p in u.owned %}<a
+                            href="/playlist/{{ p.id }}"
+                            class="hub-tag hub-tag-own"
+                            title="eigen"
+                            >{{ p.name }}</a
+                        >{% endfor %} {% for p in u.followed %}<a
+                            href="/playlist/{{ p.id }}"
+                            class="hub-tag hub-tag-follow"
+                            title="gefolgt"
+                            >{{ p.name }}</a
+                        >{% endfor %}
+                    </div>
+                    {% endfor %} {% endif %}
+                </td>
+                <td class="hub-dig-tags">
+                    {% if r.tags.is_empty() %}<span class="hub-muted">—</span>{% else %}
+                    {% for t in r.tags %}
+                    <div class="hub-dig-tag">
+                        <a href="/user/{{ t.owner }}" class="hub-muted">@{{ t.owner }}</a>
+                        <span class="hub-tag hub-tag-own">{{ t.name }}</span>
+                        {% for g in t.groups %}<a
+                            href="/groups/{{ g.id }}"
+                            class="hub-chip"
+                            >{{ g.icon }} {{ g.name }}</a
+                        >{% endfor %}
+                    </div>
+                    {% endfor %} {% endif %}
                 </td>
                 <td>{{ r.bpm_disp }}</td>
                 <td>{% if r.camelot != "" %}{{ r.camelot }}{% else %}—{% endif %}</td>
-                <td>{{ r.playlists }}</td>
-                <td>{% if r.likes > 0 %}♥{% else %}—{% endif %}</td>
                 <td>{{ r.score }}</td>
             </tr>
             {% endfor %}
