@@ -24,10 +24,16 @@ pub fn router(state: AppState) -> Router {
         .route("/playlists/similar", get(similar_page))
         .route("/tags", get(tags_page))
         .route("/tag/{id}", get(tag_detail_page))
-        .route("/tag/{id}/category", post(tag_set_category))
-        .route("/tag-categories", post(category_create))
-        .route("/tag-categories/adopt", post(category_adopt))
-        .route("/tag-categories/{id}/delete", post(category_delete))
+        .route("/tag/{id}/group/add", post(tag_group_add))
+        .route("/tag/{id}/group/remove", post(tag_group_remove))
+        .route("/groups", get(groups_page))
+        .route("/groups/create", post(group_create))
+        .route("/groups/{id}", get(group_page))
+        .route("/groups/{id}/subscribe", post(group_subscribe))
+        .route("/groups/{id}/unsubscribe", post(group_unsubscribe))
+        .route("/groups/{id}/role", post(group_set_role))
+        .route("/groups/{id}/member/remove", post(group_remove_member))
+        .route("/groups/{id}/delete", post(group_delete))
         .route("/digging", get(digging_page))
         .route("/digging/enrich", post(digging_enrich))
         .route("/admin", get(admin_page).post(admin_save))
@@ -233,10 +239,8 @@ struct PlaylistPage {
     tracks: Vec<PlaylistTrackRow>,
     /// Tags this playlist currently feeds.
     feeds: Vec<TagFeed>,
-    /// The current user's tags, grouped by category, for the picker.
-    tag_groups: Vec<TagOptGroup>,
-    /// The current user's categories (icon legend).
-    categories: Vec<crate::tags::Category>,
+    /// The current user's tags, for the picker.
+    my_tags: Vec<TagOption>,
 }
 
 struct TagFeed {
@@ -248,11 +252,6 @@ struct TagFeed {
 struct TagOption {
     id: i64,
     name: String,
-}
-
-struct TagOptGroup {
-    label: String,
-    options: Vec<TagOption>,
 }
 
 struct PlaylistTrackRow {
@@ -294,39 +293,14 @@ async fn playlist_page(
         .into_iter()
         .map(|(id, name, owner)| TagFeed { id, name, owner })
         .collect();
-    let categories = match &me {
-        Some((uid, _)) => crate::tags::list_categories(&st.pool, *uid).await,
+    let my_tags: Vec<TagOption> = match &me {
+        Some((uid, _)) => crate::tags::list_user_tags(&st.pool, *uid)
+            .await
+            .into_iter()
+            .map(|(id, name)| TagOption { id, name })
+            .collect(),
         None => Vec::new(),
     };
-    // Group my tags by category (uncategorised first bucket, removed if empty).
-    let mut tag_groups: Vec<TagOptGroup> = vec![TagOptGroup {
-        label: "Ohne Kategorie".to_string(),
-        options: Vec::new(),
-    }];
-    let mut label_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    label_idx.insert("Ohne Kategorie".to_string(), 0);
-    for c in &categories {
-        let label = format!("{} {}", c.icon, c.name).trim().to_string();
-        label_idx.entry(label.clone()).or_insert_with(|| {
-            tag_groups.push(TagOptGroup {
-                label,
-                options: Vec::new(),
-            });
-            tag_groups.len() - 1
-        });
-    }
-    if let Some((uid, _)) = &me {
-        for (id, name, category, icon) in crate::tags::list_user_tags(&st.pool, *uid).await {
-            let label = if category.is_empty() {
-                "Ohne Kategorie".to_string()
-            } else {
-                format!("{} {}", icon, category).trim().to_string()
-            };
-            let gi = *label_idx.get(&label).unwrap_or(&0);
-            tag_groups[gi].options.push(TagOption { id, name });
-        }
-    }
-    tag_groups.retain(|g| !g.options.is_empty());
 
     let rows = sqlx::query(
         "SELECT t.id, hpt.position, t.title, t.artists
@@ -362,8 +336,7 @@ async fn playlist_page(
         owner_name: owner_name.filter(|s| !s.is_empty()).unwrap_or_default(),
         tracks,
         feeds,
-        tag_groups,
-        categories,
+        my_tags,
     })
 }
 
@@ -1471,6 +1444,8 @@ struct TagFilter {
     q: Option<String>,
     /// "1" = only my tags.
     mine: Option<String>,
+    /// Filter to tags in this group.
+    group: Option<i64>,
 }
 
 #[derive(Template)]
@@ -1480,35 +1455,25 @@ struct TagsPage {
     flash: String,
     q: String,
     mine: bool,
-    categories: Vec<crate::tags::Category>,
-    other_categories: Vec<OtherCategory>,
-    icons: &'static [&'static str],
-    groups: Vec<TagGroup>,
-    total: usize,
-}
-
-struct TagGroup {
-    label: String,
+    group_id: i64,
+    group_label: String,
     tags: Vec<TagRow>,
 }
 
-struct OtherCategory {
+/// A lightweight group reference for templates.
+struct GroupRef {
     id: i64,
     name: String,
     icon: String,
-    owner: String,
 }
 
 struct TagRow {
     id: i64,
     name: String,
     owner: String,
-    category: String,
-    category_icon: String,
+    groups: String,
     track_count: i64,
-    user_count: i64,
     source_count: i64,
-    users: String,
 }
 
 async fn tags_page(
@@ -1522,73 +1487,47 @@ async fn tags_page(
     let q = f.q.unwrap_or_default().trim().to_string();
     let mine = f.mine.as_deref() == Some("1");
     let me = nav.id;
+    let (group_id, group_label) = match f.group {
+        Some(gid) => match crate::tags::group_detail(&st.pool, me, gid).await {
+            Some(g) => (g.id, format!("{} {}", g.icon, g.name).trim().to_string()),
+            None => (0, String::new()),
+        },
+        None => (0, String::new()),
+    };
 
     let rows = sqlx::query(
-        "SELECT t.id, t.name, u.slug AS owner, COALESCE(c.name,'') AS category,
-                COALESCE(c.icon,'') AS category_icon,
+        "SELECT t.id, t.name, u.slug AS owner,
+                (SELECT GROUP_CONCAT(g.icon || ' ' || g.name, ' · ')
+                   FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
+                  WHERE gt.tag_id = t.id) AS groups,
                 (SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id) AS track_count,
-                (SELECT COUNT(DISTINCT user_id) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS user_count,
-                (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count,
-                (SELECT GROUP_CONCAT(DISTINCT u2.slug) FROM hub_tag_sources s
-                   JOIN hub_users u2 ON u2.id = s.user_id WHERE s.tag_id = t.id) AS users
+                (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count
            FROM hub_tags t
            JOIN hub_users u ON u.id = t.owner_user_id
-           LEFT JOIN hub_tag_categories c ON c.id = t.category_id
           WHERE (?1 = '' OR lower(t.name) LIKE '%' || lower(?1) || '%')
             AND (?2 = 0 OR t.owner_user_id = ?3)
-          ORDER BY u.slug, (c.name IS NULL), c.name, t.name
+            AND (?4 = 0 OR EXISTS (SELECT 1 FROM hub_group_tags gt2
+                                    WHERE gt2.tag_id = t.id AND gt2.group_id = ?4))
+          ORDER BY u.slug, t.name
           LIMIT 1000",
     )
     .bind(&q)
     .bind(mine as i64)
     .bind(me)
+    .bind(f.group.unwrap_or(0))
     .fetch_all(&st.pool)
     .await
     .unwrap_or_default();
 
-    let mut groups: Vec<TagGroup> = Vec::new();
-    let mut group_idx: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    let mut total = 0usize;
-    for r in &rows {
-        let row = TagRow {
+    let tags: Vec<TagRow> = rows
+        .iter()
+        .map(|r| TagRow {
             id: r.get::<i64, _>("id"),
             name: r.get::<Option<String>, _>("name").unwrap_or_default(),
             owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
-            category: r.get::<Option<String>, _>("category").unwrap_or_default(),
-            category_icon: r.get::<Option<String>, _>("category_icon").unwrap_or_default(),
+            groups: r.get::<Option<String>, _>("groups").unwrap_or_default(),
             track_count: r.get::<Option<i64>, _>("track_count").unwrap_or(0),
-            user_count: r.get::<Option<i64>, _>("user_count").unwrap_or(0),
             source_count: r.get::<Option<i64>, _>("source_count").unwrap_or(0),
-            users: r.get::<Option<String>, _>("users").unwrap_or_default(),
-        };
-        let label = if row.category.is_empty() {
-            "Ohne Kategorie".to_string()
-        } else {
-            format!("{} {}", row.category_icon, row.category)
-                .trim()
-                .to_string()
-        };
-        let gi = *group_idx.entry(label.clone()).or_insert_with(|| {
-            groups.push(TagGroup {
-                label,
-                tags: Vec::new(),
-            });
-            groups.len() - 1
-        });
-        groups[gi].tags.push(row);
-        total += 1;
-    }
-
-    let categories = crate::tags::list_categories(&st.pool, me).await;
-    let other_categories: Vec<OtherCategory> = crate::tags::list_other_categories(&st.pool, me)
-        .await
-        .into_iter()
-        .map(|(id, name, icon, owner)| OtherCategory {
-            id,
-            name,
-            icon,
-            owner,
         })
         .collect();
 
@@ -1597,15 +1536,13 @@ async fn tags_page(
         flash: String::new(),
         q,
         mine,
-        categories,
-        other_categories,
-        icons: crate::tags::ICONS,
-        groups,
-        total,
+        group_id,
+        group_label,
+        tags,
     })
 }
 
-// ── tag detail + categories ──────────────────────────────────────────────────
+// ── tag detail ───────────────────────────────────────────────────────────────
 
 struct TagTrack {
     id: i64,
@@ -1621,12 +1558,9 @@ struct TagDetailPage {
     id: i64,
     name: String,
     owner: String,
-    category: String,
-    /// 0 = no category.
-    category_id: i64,
+    groups: Vec<GroupRef>,
+    my_groups: Vec<GroupRef>,
     source_count: i64,
-    mine: bool,
-    categories: Vec<crate::tags::Category>,
     tracks: Vec<TagTrack>,
 }
 
@@ -1641,8 +1575,16 @@ async fn tag_detail_page(
     let Some(d) = crate::tags::tag_detail(&st.pool, id).await else {
         return not_found("Tag nicht gefunden.");
     };
-    let categories = crate::tags::list_categories(&st.pool, nav.id).await;
-    let mine = d.owner == nav.slug;
+    let groups: Vec<GroupRef> = d
+        .groups
+        .into_iter()
+        .map(|(id, name, icon)| GroupRef { id, name, icon })
+        .collect();
+    let my_groups: Vec<GroupRef> = crate::tags::groups_i_contribute(&st.pool, nav.id)
+        .await
+        .into_iter()
+        .map(|(id, name, icon)| GroupRef { id, name, icon })
+        .collect();
     let tracks = d
         .tracks
         .into_iter()
@@ -1658,70 +1600,120 @@ async fn tag_detail_page(
         id: d.id,
         name: d.name,
         owner: d.owner,
-        category: d.category,
-        category_id: d.category_id.unwrap_or(0),
+        groups,
+        my_groups,
         source_count: d.source_count,
-        mine,
-        categories,
         tracks,
     })
 }
 
 #[derive(Deserialize)]
-struct SetCatForm {
-    category_id: String,
+struct GroupIdForm {
+    group_id: i64,
 }
 
-async fn tag_set_category(
+async fn tag_group_add(
     State(st): State<AppState>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-    Form(f): Form<SetCatForm>,
+    Form(f): Form<GroupIdForm>,
 ) -> Response {
     let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
-    let cat = f.category_id.trim().parse::<i64>().ok();
-    let _ = crate::tags::set_tag_category(&st.pool, uid, id, cat).await;
+    let _ = crate::tags::add_tag_to_group(&st.pool, uid, id, f.group_id).await;
     Redirect::to(&format!("/tag/{id}")).into_response()
 }
 
+async fn tag_group_remove(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<GroupIdForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::remove_tag_from_group(&st.pool, uid, id, f.group_id).await;
+    Redirect::to(&format!("/tag/{id}")).into_response()
+}
+
+// ── groups ───────────────────────────────────────────────────────────────────
+
+struct GroupRow {
+    id: i64,
+    name: String,
+    icon: String,
+    owner: String,
+    role: String,
+    tag_count: i64,
+    members: i64,
+}
+
+fn group_row(g: crate::tags::Group) -> GroupRow {
+    GroupRow {
+        id: g.id,
+        name: g.name,
+        icon: g.icon,
+        owner: g.owner,
+        role: g.role,
+        tag_count: g.tag_count,
+        members: g.members,
+    }
+}
+
+#[derive(Template)]
+#[template(path = "groups.html")]
+struct GroupsPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    groups: Vec<GroupRow>,
+    discover: Vec<GroupRow>,
+    icons: &'static [&'static str],
+}
+
+async fn groups_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "groups").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let groups = crate::tags::list_groups_for(&st.pool, nav.id)
+        .await
+        .into_iter()
+        .map(group_row)
+        .collect();
+    let discover = crate::tags::list_discover_groups(&st.pool, nav.id)
+        .await
+        .into_iter()
+        .map(group_row)
+        .collect();
+    render(&GroupsPage {
+        nav,
+        flash: String::new(),
+        groups,
+        discover,
+        icons: crate::tags::ICONS,
+    })
+}
+
 #[derive(Deserialize)]
-struct CategoryForm {
+struct GroupForm {
     name: String,
     icon: Option<String>,
 }
 
-async fn category_create(
+async fn group_create(
     State(st): State<AppState>,
     headers: HeaderMap,
-    Form(f): Form<CategoryForm>,
+    Form(f): Form<GroupForm>,
 ) -> Response {
     let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
-    let _ = crate::tags::create_category(&st.pool, uid, &f.name, f.icon.as_deref().unwrap_or("")).await;
-    Redirect::to("/tags").into_response()
+    let _ = crate::tags::create_group(&st.pool, uid, &f.name, f.icon.as_deref().unwrap_or("")).await;
+    Redirect::to("/groups").into_response()
 }
 
-#[derive(Deserialize)]
-struct IdForm {
-    id: i64,
-}
-
-async fn category_adopt(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Form(f): Form<IdForm>,
-) -> Response {
-    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
-        return Redirect::to("/login").into_response();
-    };
-    let _ = crate::tags::adopt_category(&st.pool, uid, f.id).await;
-    Redirect::to("/tags").into_response()
-}
-
-async fn category_delete(
+async fn group_subscribe(
     State(st): State<AppState>,
     Path(id): Path<i64>,
     headers: HeaderMap,
@@ -1729,8 +1721,141 @@ async fn category_delete(
     let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
-    let _ = crate::tags::delete_category(&st.pool, uid, id).await;
-    Redirect::to("/tags").into_response()
+    let _ = crate::tags::subscribe(&st.pool, uid, id).await;
+    Redirect::to("/groups").into_response()
+}
+
+async fn group_unsubscribe(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::unsubscribe(&st.pool, uid, id).await;
+    Redirect::to("/groups").into_response()
+}
+
+#[derive(Deserialize)]
+struct RoleForm {
+    slug: String,
+    role: String,
+}
+
+async fn group_set_role(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<RoleForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::set_member_role(&st.pool, uid, id, &f.slug, &f.role).await;
+    Redirect::to(&format!("/groups/{id}")).into_response()
+}
+
+#[derive(Deserialize)]
+struct SlugForm {
+    slug: String,
+}
+
+async fn group_remove_member(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<SlugForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::remove_member(&st.pool, uid, id, &f.slug).await;
+    Redirect::to(&format!("/groups/{id}")).into_response()
+}
+
+async fn group_delete(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::delete_group(&st.pool, uid, id).await;
+    Redirect::to("/groups").into_response()
+}
+
+struct MemberRow {
+    slug: String,
+    role: String,
+}
+
+struct GroupTag {
+    id: i64,
+    name: String,
+    owner: String,
+}
+
+#[derive(Template)]
+#[template(path = "group.html")]
+struct GroupPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    id: i64,
+    name: String,
+    icon: String,
+    owner: String,
+    is_owner: bool,
+    can_edit: bool,
+    members: Vec<MemberRow>,
+    tags: Vec<GroupTag>,
+    users: Vec<String>,
+}
+
+async fn group_page(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "groups").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(d) = crate::tags::group_detail(&st.pool, nav.id, id).await else {
+        return not_found("Gruppe nicht gefunden.");
+    };
+    let is_owner = d.role == crate::tags::ROLE_OWNER;
+    let can_edit = matches!(
+        d.role.as_str(),
+        crate::tags::ROLE_OWNER | crate::tags::ROLE_CONTRIBUTOR
+    );
+    let members = d
+        .members
+        .into_iter()
+        .map(|(slug, role)| MemberRow { slug, role })
+        .collect();
+    let tags = d
+        .tags
+        .into_iter()
+        .map(|(id, name, owner)| GroupTag { id, name, owner })
+        .collect();
+    let users = sqlx::query_scalar::<_, String>("SELECT slug FROM hub_users ORDER BY slug")
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    render(&GroupPage {
+        nav,
+        flash: String::new(),
+        id: d.id,
+        name: d.name,
+        icon: d.icon,
+        owner: d.owner,
+        is_owner,
+        can_edit,
+        members,
+        tags,
+        users,
+    })
 }
 
 // ── settings ────────────────────────────────────────────────────────────────

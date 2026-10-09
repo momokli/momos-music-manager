@@ -51,28 +51,19 @@ content %}
         <button type="submit" class="secondary outline">+ neuen Tag anlegen</button>
     </form>
 
-    {% if !tag_groups.is_empty() %}
+    {% if !my_tags.is_empty() %}
     <form
         method="post"
         action="/playlist/{{ id }}/tag/add"
         style="display: inline-flex; gap: 0.25rem; align-items: center; margin: 0.15rem"
     >
         <select name="tag_id" aria-label="Bestehenden Tag wählen">
-            {% for g in tag_groups %}
-            <optgroup label="{{ g.label }}">
-                {% for t in g.options %}
-                <option value="{{ t.id }}">{{ t.name }}</option>
-                {% endfor %}
-            </optgroup>
+            {% for t in my_tags %}
+            <option value="{{ t.id }}">{{ t.name }}</option>
             {% endfor %}
         </select>
         <button type="submit" class="secondary">Zu Tag hinzufügen</button>
     </form>
-    {% endif %} {% if !categories.is_empty() %}
-    <span class="hub-muted"
-        >Kategorien: {% for c in categories %}{{ c.icon }} {{ c.name }}{% if !loop.last %}
-        · {% endif %}{% endfor %}</span
-    >
     {% endif %}
 </section>
 

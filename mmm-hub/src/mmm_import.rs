@@ -30,7 +30,7 @@ pub fn map_icon(fa: &str) -> String {
 
 #[derive(Debug, Default)]
 pub struct Summary {
-    pub categories: usize,
+    pub groups: usize,
     pub tags: usize,
     pub linked: usize,
     pub skipped: usize,
@@ -75,9 +75,9 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
     let mut cat_map: HashMap<i64, i64> = HashMap::new();
     let mut summary = Summary::default();
     for (mmm_cat_id, name, icon) in cats {
-        let hub_id = crate::tags::create_category(hub, user_id, &name, &map_icon(&icon)).await?;
+        let hub_id = crate::tags::create_group(hub, user_id, &name, &map_icon(&icon)).await?;
         cat_map.insert(mmm_cat_id, hub_id);
-        summary.categories += 1;
+        summary.groups += 1;
     }
 
     // Tags.
@@ -94,9 +94,12 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
             summary.skipped += 1;
             continue;
         }
-        let cat = cat_map.get(&mmm_cat_id).copied();
-        let tag_id = crate::tags::ensure_tag(hub, user_id, &name, cat).await?;
+        let tag_id = crate::tags::ensure_tag(hub, user_id, &name).await?;
         summary.tags += 1;
+        // The MMM category maps to a hub group (many-to-many).
+        if let Some(group_id) = cat_map.get(&mmm_cat_id).copied() {
+            let _ = crate::tags::add_tag_to_group(hub, user_id, tag_id, group_id).await;
+        }
 
         // Link a hub playlist owned by the user with the same name, if any.
         let pid: Option<i64> = sqlx::query_scalar(

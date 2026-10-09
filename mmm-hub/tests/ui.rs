@@ -378,38 +378,58 @@ async fn similar_scope_contributed_keeps_only_collaborative() {
 }
 
 #[tokio::test]
-async fn tag_categories_are_per_user_and_adoptable() {
+async fn groups_have_roles_and_hold_tags() {
     let app = common::spawn().await;
 
-    let cat_a = mmm_hub::tags::create_category(&app.pool, app.seed.alice, "Mood", "💜")
+    // Alice creates a group and puts a tag in it.
+    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Mood", "💜")
         .await
         .unwrap();
     let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
         .await
         .unwrap();
-    mmm_hub::tags::set_tag_category(&app.pool, app.seed.alice, tag, Some(cat_a))
-        .await
-        .unwrap();
-    assert_eq!(
-        mmm_hub::tags::tag_detail(&app.pool, tag)
-            .await
-            .unwrap()
-            .category,
-        "Mood"
-    );
-
-    // Bob sees alice's category and adopts (copies) it.
-    let others = mmm_hub::tags::list_other_categories(&app.pool, app.seed.bob).await;
-    assert!(others.iter().any(|(_, name, _, owner)| name == "Mood" && owner == "alice"));
-    let cat_b = mmm_hub::tags::adopt_category(&app.pool, app.seed.bob, others[0].0)
+    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, tag, g)
         .await
         .unwrap();
     assert!(
-        mmm_hub::tags::list_categories(&app.pool, app.seed.bob)
+        mmm_hub::tags::groups_for_tag(&app.pool, tag)
             .await
             .iter()
-            .any(|c| c.id == cat_b && c.name == "Mood")
+            .any(|(id, _, _)| *id == g)
     );
+
+    // Bob isn't a member -> it shows up in discover; he subscribes.
+    assert!(
+        mmm_hub::tags::list_discover_groups(&app.pool, app.seed.bob)
+            .await
+            .iter()
+            .any(|x| x.id == g)
+    );
+    mmm_hub::tags::subscribe(&app.pool, app.seed.bob, g)
+        .await
+        .unwrap();
+    assert!(
+        mmm_hub::tags::list_groups_for(&app.pool, app.seed.bob)
+            .await
+            .iter()
+            .any(|x| x.id == g && x.role == "subscriber")
+    );
+
+    // Subscribers can't contribute; the owner promotes him to contributor.
+    assert!(!mmm_hub::tags::can_contribute(&app.pool, app.seed.bob, g).await);
+    mmm_hub::tags::set_member_role(&app.pool, app.seed.alice, g, "bob", "contributor")
+        .await
+        .unwrap();
+    assert!(mmm_hub::tags::can_contribute(&app.pool, app.seed.bob, g).await);
+
+    // Many-to-many: the same tag can join a second group.
+    let g2 = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Vibe", "🌈")
+        .await
+        .unwrap();
+    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, tag, g2)
+        .await
+        .unwrap();
+    assert_eq!(mmm_hub::tags::groups_for_tag(&app.pool, tag).await.len(), 2);
 }
 
 #[tokio::test]

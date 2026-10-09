@@ -1,0 +1,136 @@
+{% extends "base.html" %} {% block title %}{{ name }} — MMM Hub{% endblock %} {% block content %}
+<nav class="hub-crumbs" aria-label="Brotkrumen">
+    <ol>
+        <li><a href="/">Übersicht</a></li>
+        <li><a href="/groups">Gruppen</a></li>
+        <li>{{ name }}</li>
+    </ol>
+</nav>
+<hgroup>
+    <h1>{{ icon }} {{ name }}</h1>
+    <p class="hub-muted">
+        Owner <a href="/user/{{ owner }}">@{{ owner }}</a> · {{ members.len() }} Mitglieder ·
+        {{ tags.len() }} Tags
+    </p>
+</hgroup>
+
+{% if is_owner %}
+<form method="post" action="/groups/{{ id }}/delete" style="display:inline">
+    <button type="submit" class="secondary outline">Gruppe löschen</button>
+</form>
+{% endif %}
+
+<h3>Mitglieder</h3>
+<div class="overflow-auto">
+    <table class="hub-dense-table">
+        <thead>
+            <tr>
+                <th scope="col">User</th>
+                <th scope="col">Rolle</th>
+                {% if is_owner %}<th scope="col"></th>{% endif %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for m in members %}
+            <tr>
+                <td><a href="/user/{{ m.slug }}">@{{ m.slug }}</a></td>
+                <td>{{ m.role }}</td>
+                {% if is_owner %}
+                <td>
+                    {% if m.role != "owner" %}
+                    <form
+                        method="post"
+                        action="/groups/{{ id }}/role"
+                        style="display: inline-flex; gap: 0.25rem; align-items: center"
+                    >
+                        <input type="hidden" name="slug" value="{{ m.slug }}" />
+                        <select name="role">
+                            <option
+                                value="contributor"
+                                {% if m.role == "contributor" %}selected{% endif %}
+                            >
+                                contributor
+                            </option>
+                            <option
+                                value="subscriber"
+                                {% if m.role == "subscriber" %}selected{% endif %}
+                            >
+                                subscriber
+                            </option>
+                        </select>
+                        <button type="submit" class="secondary">setzen</button>
+                    </form>
+                    <form
+                        method="post"
+                        action="/groups/{{ id }}/member/remove"
+                        style="display:inline"
+                    >
+                        <input type="hidden" name="slug" value="{{ m.slug }}" />
+                        <button type="submit" title="Entfernen">×</button>
+                    </form>
+                    {% endif %}
+                </td>
+                {% endif %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if is_owner %}
+<form
+    method="post"
+    action="/groups/{{ id }}/role"
+    style="display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap"
+>
+    <select name="slug" aria-label="User">
+        {% for u in users %}
+        <option value="{{ u }}">@{{ u }}</option>
+        {% endfor %}
+    </select>
+    <select name="role" aria-label="Rolle">
+        <option value="contributor">contributor</option>
+        <option value="subscriber">subscriber</option>
+    </select>
+    <button type="submit">Mitglied hinzufügen / setzen</button>
+</form>
+{% endif %}
+
+<h3>Tags in dieser Gruppe ({{ tags.len() }})</h3>
+{% if tags.is_empty() %}
+<p class="hub-muted">
+    Noch keine Tags — öffne einen <a href="/tags">Tag</a> und füge ihn hier hinzu.
+</p>
+{% else %}
+<div class="overflow-auto hub-scroll-y">
+    <table class="hub-dense-table">
+        <thead>
+            <tr>
+                <th scope="col">Tag</th>
+                <th scope="col">Besitzer</th>
+                {% if can_edit %}<th scope="col"></th>{% endif %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in tags %}
+            <tr>
+                <td><a href="/tag/{{ t.id }}">{{ t.name }}</a></td>
+                <td><a href="/user/{{ t.owner }}">@{{ t.owner }}</a></td>
+                {% if can_edit %}
+                <td>
+                    <form
+                        method="post"
+                        action="/tag/{{ t.id }}/group/remove"
+                        style="display:inline"
+                    >
+                        <input type="hidden" name="group_id" value="{{ id }}" />
+                        <button type="submit" title="Aus Gruppe entfernen">×</button>
+                    </form>
+                </td>
+                {% endif %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %} {% endblock %}

@@ -1,10 +1,14 @@
-//! Tag layer — an explicit, **per-user** layer above playlists and tracks.
+//! Tag layer + groups.
 //!
-//! Unlike before, a tag is **not** auto-derived from every playlist. It exists
-//! only once a user creates it, typically by promoting one of their playlists
-//! to a tag (1:1, same name, linked by playlist id). Tracks in a tag's source
-//! playlist are the tag's tracks; [`rebuild`] materializes that mapping into
-//! `hub_track_resolved_tags`.
+//! Tags are an explicit, **per-user** layer above playlists: a tag exists only
+//! once a user creates it (usually by promoting a playlist), and can aggregate
+//! several source playlists.
+//!
+//! **Groups** (formerly "categories") are per-user collections that any tag can
+//! be put into — a tag can be in several groups (many-to-many). Groups have
+//! membership **roles**: `owner` (created it), `contributor` (may add/remove
+//! its tags), `subscriber` (just follows it). Groups are for granular sorting
+//! and filtering.
 
 use anyhow::{Result, bail};
 use sqlx::{Row, SqlitePool};
@@ -47,7 +51,7 @@ pub struct ResolveSummary {
 }
 
 /// Rebuild the materialized `hub_track_resolved_tags` from the current tag
-/// sources. Idempotent; does **not** create tags. Returns current counts.
+/// sources. Idempotent; does **not** create tags.
 pub async fn rebuild(pool: &SqlitePool) -> Result<ResolveSummary> {
     sqlx::query("DELETE FROM hub_track_resolved_tags")
         .execute(pool)
@@ -61,7 +65,6 @@ pub async fn rebuild(pool: &SqlitePool) -> Result<ResolveSummary> {
     )
     .execute(pool)
     .await?;
-
     let tags: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_tags")
         .fetch_one(pool)
         .await
@@ -81,14 +84,8 @@ pub async fn rebuild(pool: &SqlitePool) -> Result<ResolveSummary> {
     })
 }
 
-/// Create (or update) a tag owned by a user, optionally in a category — without
-/// a source playlist. Used by the importer and the tag UI.
-pub async fn ensure_tag(
-    pool: &SqlitePool,
-    owner_user_id: i64,
-    name: &str,
-    category_id: Option<i64>,
-) -> Result<i64> {
+/// Create (or update) a tag owned by a user, without a source playlist.
+pub async fn ensure_tag(pool: &SqlitePool, owner_user_id: i64, name: &str) -> Result<i64> {
     let name = name.trim();
     if name.is_empty() {
         bail!("tag name required");
@@ -99,30 +96,37 @@ pub async fn ensure_tag(
     }
     let now = chrono::Utc::now().to_rfc3339();
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO hub_tags (owner_user_id, slug, name, category_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(owner_user_id, slug) DO UPDATE SET
-             name = excluded.name, category_id = excluded.category_id
+        "INSERT INTO hub_tags (owner_user_id, slug, name, created_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(owner_user_id, slug) DO UPDATE SET name = excluded.name
          RETURNING id",
     )
     .bind(owner_user_id)
     .bind(&slug)
     .bind(name)
-    .bind(category_id)
     .bind(&now)
     .fetch_one(pool)
     .await?;
     Ok(id)
 }
 
-/// Create (or return) the tag for a playlist, owned by `owner_user_id`, linking
-/// tag ↔ playlist 1:1. Rebuilds the track mapping. Returns the tag id.
+async fn playlist_meta(pool: &SqlitePool, playlist_id: i64) -> Result<Option<(i64, String)>> {
+    let row = sqlx::query("SELECT user_id, service FROM hub_playlists WHERE id = ?1")
+        .bind(playlist_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+    Ok(row.map(|r| (r.get::<i64, _>("user_id"), r.get::<String, _>("service"))))
+}
+
+/// Create (or return) the tag for a playlist, owned by `owner_user_id`.
 pub async fn create_from_playlist(
     pool: &SqlitePool,
     owner_user_id: i64,
     playlist_id: i64,
 ) -> Result<i64> {
-    let row = sqlx::query("SELECT name, user_id, service FROM hub_playlists WHERE id = ?1")
+    let row = sqlx::query("SELECT name FROM hub_playlists WHERE id = ?1")
         .bind(playlist_id)
         .fetch_optional(pool)
         .await
@@ -135,87 +139,12 @@ pub async fn create_from_playlist(
     if is_meta_playlist(&name) {
         bail!("meta-playlists can't become tags");
     }
-    let slug = normalize_name(&name);
-    if slug.is_empty() {
-        bail!("playlist has no usable name");
-    }
-    let pl_user = r.get::<i64, _>("user_id");
-    let service = r.get::<String, _>("service");
-    let now = chrono::Utc::now().to_rfc3339();
-
-    let tag_id: i64 = sqlx::query_scalar(
-        "INSERT INTO hub_tags (owner_user_id, slug, name, created_at)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(owner_user_id, slug) DO UPDATE SET name = excluded.name
-         RETURNING id",
-    )
-    .bind(owner_user_id)
-    .bind(&slug)
-    .bind(&name)
-    .bind(&now)
-    .fetch_one(pool)
-    .await?;
-
-    sqlx::query(
-        "INSERT INTO hub_tag_sources (tag_id, playlist_id, user_id, service, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(tag_id, playlist_id) DO NOTHING",
-    )
-    .bind(tag_id)
-    .bind(playlist_id)
-    .bind(pl_user)
-    .bind(&service)
-    .bind(&now)
-    .execute(pool)
-    .await?;
-
-    rebuild(pool).await?;
+    let tag_id = ensure_tag(pool, owner_user_id, &name).await?;
+    add_playlist_to_tag(pool, owner_user_id, tag_id, playlist_id).await?;
     Ok(tag_id)
 }
 
-/// Delete a tag owned by `owner_user_id` (and its source links). Rebuilds.
-pub async fn delete_tag(pool: &SqlitePool, owner_user_id: i64, tag_id: i64) -> Result<()> {
-    sqlx::query("DELETE FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2")
-        .bind(tag_id)
-        .bind(owner_user_id)
-        .execute(pool)
-        .await?;
-    rebuild(pool).await?;
-    Ok(())
-}
-
-/// The tag created for a playlist by a user, if any (for UI state).
-pub async fn tag_for_playlist(
-    pool: &SqlitePool,
-    owner_user_id: i64,
-    playlist_id: i64,
-) -> Option<i64> {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT t.id FROM hub_tags t
-           JOIN hub_tag_sources s ON s.tag_id = t.id
-          WHERE t.owner_user_id = ?1 AND s.playlist_id = ?2 LIMIT 1",
-    )
-    .bind(owner_user_id)
-    .bind(playlist_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-}
-
-/// Load `(playlist owner user_id, service)` for a playlist.
-async fn playlist_meta(pool: &SqlitePool, playlist_id: i64) -> Result<Option<(i64, String)>> {
-    let row = sqlx::query("SELECT user_id, service FROM hub_playlists WHERE id = ?1")
-        .bind(playlist_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
-    Ok(row.map(|r| (r.get::<i64, _>("user_id"), r.get::<String, _>("service"))))
-}
-
-/// Add a playlist as an additional source of an existing tag the user owns.
-/// This is how a tag is *curated* from several playlists (own and/or followed).
+/// Add a playlist as a source of a tag the user owns.
 pub async fn add_playlist_to_tag(
     pool: &SqlitePool,
     owner_user_id: i64,
@@ -275,13 +204,38 @@ pub async fn remove_playlist_from_tag(
     Ok(())
 }
 
-/// Tags owned by a user: `(id, name, category, category_icon)`, for pickers.
-pub async fn list_user_tags(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String, String, String)> {
-    sqlx::query_as::<_, (i64, String, String, String)>(
-        "SELECT t.id, t.name, COALESCE(c.name,''), COALESCE(c.icon,'')
-           FROM hub_tags t LEFT JOIN hub_tag_categories c ON c.id = t.category_id
-          WHERE t.owner_user_id = ?1
-          ORDER BY (c.name IS NULL), c.name, t.name",
+pub async fn delete_tag(pool: &SqlitePool, owner_user_id: i64, tag_id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2")
+        .bind(tag_id)
+        .bind(owner_user_id)
+        .execute(pool)
+        .await?;
+    rebuild(pool).await?;
+    Ok(())
+}
+
+pub async fn tag_for_playlist(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    playlist_id: i64,
+) -> Option<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT t.id FROM hub_tags t
+           JOIN hub_tag_sources s ON s.tag_id = t.id
+          WHERE t.owner_user_id = ?1 AND s.playlist_id = ?2 LIMIT 1",
+    )
+    .bind(owner_user_id)
+    .bind(playlist_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Tags owned by a user: `(id, name)` for pickers.
+pub async fn list_user_tags(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String)> {
+    sqlx::query_as::<_, (i64, String)>(
+        "SELECT id, name FROM hub_tags WHERE owner_user_id = ?1 ORDER BY name",
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -306,24 +260,45 @@ pub async fn tags_feeding_playlist(
     .unwrap_or_default()
 }
 
-// ── categories (per user) ────────────────────────────────────────────────────
+// ── groups ───────────────────────────────────────────────────────────────────
 
-/// Pickable icons (emoji — no FontAwesome dependency in the hub).
+pub const ROLE_OWNER: &str = "owner";
+pub const ROLE_CONTRIBUTOR: &str = "contributor";
+pub const ROLE_SUBSCRIBER: &str = "subscriber";
+
+/// Pickable group icons (emoji — no FontAwesome dependency).
 pub const ICONS: &[&str] = &[
     "🎧", "🎵", "🔥", "💜", "✨", "#️⃣", "🌙", "⚡", "🌊", "🕺", "🎚️", "🚀", "🧊", "🌶️", "🪩", "🎯",
+    "🌅", "🌈", "🧭", "🛸",
 ];
 
 #[derive(Debug, Clone)]
-pub struct Category {
+pub struct Group {
     pub id: i64,
     pub name: String,
     pub icon: String,
-    pub slug: String,
+    pub owner: String,
+    /// The caller's role in the group, or "" if not a member.
+    pub role: String,
     pub tag_count: i64,
+    pub members: i64,
 }
 
-/// Create a category for a user (idempotent on the slug).
-pub async fn create_category(
+#[derive(Debug)]
+pub struct GroupDetail {
+    pub id: i64,
+    pub name: String,
+    pub icon: String,
+    pub owner: String,
+    pub role: String,
+    pub members: Vec<(String, String)>,
+    /// `(tag_id, tag name, tag owner slug)`.
+    pub tags: Vec<(i64, String, String)>,
+}
+
+/// Create a group owned by `owner_user_id` (idempotent on the slug); the owner
+/// becomes its `owner` member.
+pub async fn create_group(
     pool: &SqlitePool,
     owner_user_id: i64,
     name: &str,
@@ -331,14 +306,17 @@ pub async fn create_category(
 ) -> Result<i64> {
     let name = name.trim();
     if name.is_empty() {
-        bail!("category name required");
+        bail!("group name required");
     }
     let slug = normalize_name(name);
+    if slug.is_empty() {
+        bail!("group name has no usable characters");
+    }
     let now = chrono::Utc::now().to_rfc3339();
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO hub_tag_categories (owner_user_id, name, slug, icon, sort_order, created_at)
+        "INSERT INTO hub_tag_groups (owner_user_id, name, slug, icon, sort_order, created_at)
          VALUES (?1, ?2, ?3, ?4, 0, ?5)
-         ON CONFLICT(owner_user_id, slug) DO UPDATE SET icon = excluded.icon
+         ON CONFLICT(owner_user_id, slug) DO UPDATE SET name = excluded.name, icon = excluded.icon
          RETURNING id",
     )
     .bind(owner_user_id)
@@ -348,128 +326,335 @@ pub async fn create_category(
     .bind(&now)
     .fetch_one(pool)
     .await?;
+    sqlx::query(
+        "INSERT INTO hub_group_members (group_id, user_id, role, created_at)
+         VALUES (?1, ?2, 'owner', ?3)
+         ON CONFLICT(group_id, user_id) DO UPDATE SET role = 'owner'",
+    )
+    .bind(id)
+    .bind(owner_user_id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
     Ok(id)
 }
 
-pub async fn delete_category(pool: &SqlitePool, owner_user_id: i64, id: i64) -> Result<()> {
-    sqlx::query("DELETE FROM hub_tag_categories WHERE id = ?1 AND owner_user_id = ?2")
-        .bind(id)
-        .bind(owner_user_id)
+pub async fn delete_group(pool: &SqlitePool, actor_user_id: i64, group_id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM hub_tag_groups WHERE id = ?1 AND owner_user_id = ?2")
+        .bind(group_id)
+        .bind(actor_user_id)
         .execute(pool)
         .await?;
     Ok(())
 }
 
-/// A user's own categories, with their tag counts.
-pub async fn list_categories(pool: &SqlitePool, owner_user_id: i64) -> Vec<Category> {
-    sqlx::query_as::<_, (i64, String, String, String, i64)>(
-        "SELECT c.id, c.name, c.icon, c.slug,
-                (SELECT COUNT(*) FROM hub_tags t WHERE t.category_id = c.id) AS tag_count
-           FROM hub_tag_categories c
-          WHERE c.owner_user_id = ?1
-          ORDER BY c.sort_order, c.name",
+async fn role_of(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT role FROM hub_group_members WHERE group_id = ?1 AND user_id = ?2",
     )
-    .bind(owner_user_id)
+    .bind(group_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+pub async fn can_contribute(pool: &SqlitePool, user_id: i64, group_id: i64) -> bool {
+    matches!(
+        role_of(pool, user_id, group_id).await.as_deref(),
+        Some(ROLE_OWNER) | Some(ROLE_CONTRIBUTOR)
+    )
+}
+
+/// Groups the user is a member of (any role).
+pub async fn list_groups_for(pool: &SqlitePool, user_id: i64) -> Vec<Group> {
+    let rows = sqlx::query(
+        "SELECT g.id, g.name, g.icon, u.slug AS owner, m.role,
+                (SELECT COUNT(*) FROM hub_group_tags gt WHERE gt.group_id = g.id) AS tag_count,
+                (SELECT COUNT(*) FROM hub_group_members mm WHERE mm.group_id = g.id) AS members
+           FROM hub_tag_groups g
+           JOIN hub_group_members m ON m.group_id = g.id AND m.user_id = ?1
+           JOIN hub_users u ON u.id = g.owner_user_id
+          ORDER BY g.name",
+    )
+    .bind(user_id)
     .fetch_all(pool)
     .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|(id, name, icon, slug, tag_count)| Category {
-        id,
-        name,
-        icon,
-        slug,
-        tag_count,
-    })
-    .collect()
+    .unwrap_or_default();
+    rows.iter()
+        .map(|r| Group {
+            id: r.get("id"),
+            name: r.get("name"),
+            icon: r.get::<Option<String>, _>("icon").unwrap_or_default(),
+            owner: r.get("owner"),
+            role: r.get("role"),
+            tag_count: r.get::<Option<i64>, _>("tag_count").unwrap_or(0),
+            members: r.get::<Option<i64>, _>("members").unwrap_or(0),
+        })
+        .collect()
 }
 
-/// Category suggestions from other users: `(id, name, icon, owner slug)`.
-pub async fn list_other_categories(
-    pool: &SqlitePool,
-    owner_user_id: i64,
-) -> Vec<(i64, String, String, String)> {
-    sqlx::query_as::<_, (i64, String, String, String)>(
-        "SELECT c.id, c.name, c.icon, u.slug FROM hub_tag_categories c
-           JOIN hub_users u ON u.id = c.owner_user_id
-          WHERE c.owner_user_id <> ?1
-          ORDER BY u.slug, c.name",
+/// Groups the user is *not* a member of (to discover / subscribe to).
+pub async fn list_discover_groups(pool: &SqlitePool, user_id: i64) -> Vec<Group> {
+    let rows = sqlx::query(
+        "SELECT g.id, g.name, g.icon, u.slug AS owner,
+                (SELECT COUNT(*) FROM hub_group_tags gt WHERE gt.group_id = g.id) AS tag_count,
+                (SELECT COUNT(*) FROM hub_group_members mm WHERE mm.group_id = g.id) AS members
+           FROM hub_tag_groups g
+           JOIN hub_users u ON u.id = g.owner_user_id
+          WHERE NOT EXISTS (SELECT 1 FROM hub_group_members m
+                             WHERE m.group_id = g.id AND m.user_id = ?1)
+          ORDER BY u.slug, g.name",
     )
-    .bind(owner_user_id)
+    .bind(user_id)
     .fetch_all(pool)
     .await
-    .unwrap_or_default()
+    .unwrap_or_default();
+    rows.iter()
+        .map(|r| Group {
+            id: r.get("id"),
+            name: r.get("name"),
+            icon: r.get::<Option<String>, _>("icon").unwrap_or_default(),
+            owner: r.get("owner"),
+            role: String::new(),
+            tag_count: r.get::<Option<i64>, _>("tag_count").unwrap_or(0),
+            members: r.get::<Option<i64>, _>("members").unwrap_or(0),
+        })
+        .collect()
 }
 
-/// Adopt (copy) another user's category into the caller's own. Returns the id.
-pub async fn adopt_category(
-    pool: &SqlitePool,
-    owner_user_id: i64,
-    source_id: i64,
-) -> Result<i64> {
-    let row = sqlx::query("SELECT name, icon, slug FROM hub_tag_categories WHERE id = ?1")
-        .bind(source_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
-    let Some(r) = row else {
-        bail!("category {source_id} not found");
-    };
-    let now = chrono::Utc::now().to_rfc3339();
-    let id: i64 = sqlx::query_scalar(
-        "INSERT INTO hub_tag_categories (owner_user_id, name, slug, icon, sort_order, created_at)
-         VALUES (?1, ?2, ?3, ?4, 0, ?5)
-         ON CONFLICT(owner_user_id, slug) DO UPDATE SET name = excluded.name
-         RETURNING id",
-    )
-    .bind(owner_user_id)
-    .bind(r.get::<String, _>("name"))
-    .bind(r.get::<String, _>("slug"))
-    .bind(r.get::<String, _>("icon"))
-    .bind(&now)
-    .fetch_one(pool)
-    .await?;
-    Ok(id)
-}
-
-/// Assign a tag (owned by the user) to one of their categories (or none).
-pub async fn set_tag_category(
-    pool: &SqlitePool,
-    owner_user_id: i64,
-    tag_id: i64,
-    category_id: Option<i64>,
-) -> Result<()> {
+/// Subscribe (join as `subscriber`). No-op if already a member.
+pub async fn subscribe(pool: &SqlitePool, user_id: i64, group_id: i64) -> Result<()> {
     sqlx::query(
-        "UPDATE hub_tags SET category_id = ?1
-          WHERE id = ?2 AND owner_user_id = ?3",
+        "INSERT INTO hub_group_members (group_id, user_id, role, created_at)
+         VALUES (?1, ?2, 'subscriber', ?3)
+         ON CONFLICT(group_id, user_id) DO NOTHING",
     )
-    .bind(category_id)
-    .bind(tag_id)
-    .bind(owner_user_id)
+    .bind(group_id)
+    .bind(user_id)
+    .bind(chrono::Utc::now().to_rfc3339())
     .execute(pool)
     .await?;
     Ok(())
 }
 
-/// One tag with its owner, category and tracks (for the detail page).
+/// Leave a group (only if a plain subscriber — owners/contributors can't drop out).
+pub async fn unsubscribe(pool: &SqlitePool, user_id: i64, group_id: i64) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM hub_group_members
+          WHERE group_id = ?1 AND user_id = ?2 AND role = 'subscriber'",
+    )
+    .bind(group_id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Owner adds/promotes/demotes a member (role = contributor|subscriber).
+pub async fn set_member_role(
+    pool: &SqlitePool,
+    actor_user_id: i64,
+    group_id: i64,
+    target_slug: &str,
+    role: &str,
+) -> Result<()> {
+    if role != ROLE_CONTRIBUTOR && role != ROLE_SUBSCRIBER {
+        bail!("invalid role");
+    }
+    let owner = sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM hub_tag_groups WHERE id = ?1 AND owner_user_id = ?2",
+    )
+    .bind(group_id)
+    .bind(actor_user_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    if owner.is_none() {
+        bail!("only the group owner can manage members");
+    }
+    let target: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM hub_users WHERE slug = ?1 COLLATE NOCASE LIMIT 1")
+            .bind(target_slug.trim())
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    let Some(target) = target else {
+        bail!("user '{target_slug}' not found");
+    };
+    sqlx::query(
+        "INSERT INTO hub_group_members (group_id, user_id, role, created_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(group_id, user_id) DO UPDATE SET role = excluded.role
+           WHERE hub_group_members.role <> 'owner'",
+    )
+    .bind(group_id)
+    .bind(target)
+    .bind(role)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Remove a member (owner only; can't remove the owner).
+pub async fn remove_member(
+    pool: &SqlitePool,
+    actor_user_id: i64,
+    group_id: i64,
+    target_slug: &str,
+) -> Result<()> {
+    let owner = sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM hub_tag_groups WHERE id = ?1 AND owner_user_id = ?2",
+    )
+    .bind(group_id)
+    .bind(actor_user_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    if owner.is_none() {
+        bail!("only the group owner can manage members");
+    }
+    sqlx::query(
+        "DELETE FROM hub_group_members
+          WHERE group_id = ?1 AND role <> 'owner'
+            AND user_id = (SELECT id FROM hub_users WHERE slug = ?2 COLLATE NOCASE LIMIT 1)",
+    )
+    .bind(group_id)
+    .bind(target_slug.trim())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Groups the user may add tags to (owner or contributor): `(id, name, icon)`.
+pub async fn groups_i_contribute(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String, String)> {
+    sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT g.id, g.name, COALESCE(g.icon,'')
+           FROM hub_tag_groups g
+           JOIN hub_group_members m ON m.group_id = g.id
+          WHERE m.user_id = ?1 AND m.role IN ('owner','contributor')
+          ORDER BY g.name",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
+/// Put a tag into a group (actor must be owner/contributor of the group).
+pub async fn add_tag_to_group(
+    pool: &SqlitePool,
+    actor_user_id: i64,
+    tag_id: i64,
+    group_id: i64,
+) -> Result<()> {
+    if !can_contribute(pool, actor_user_id, group_id).await {
+        bail!("you can't contribute to this group");
+    }
+    sqlx::query(
+        "INSERT INTO hub_group_tags (tag_id, group_id) VALUES (?1, ?2)
+         ON CONFLICT(tag_id, group_id) DO NOTHING",
+    )
+    .bind(tag_id)
+    .bind(group_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Remove a tag from a group (actor must be owner/contributor of the group).
+pub async fn remove_tag_from_group(
+    pool: &SqlitePool,
+    actor_user_id: i64,
+    tag_id: i64,
+    group_id: i64,
+) -> Result<()> {
+    if !can_contribute(pool, actor_user_id, group_id).await {
+        bail!("you can't contribute to this group");
+    }
+    sqlx::query("DELETE FROM hub_group_tags WHERE tag_id = ?1 AND group_id = ?2")
+        .bind(tag_id)
+        .bind(group_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Groups a tag belongs to: `(id, name, icon)`.
+pub async fn groups_for_tag(pool: &SqlitePool, tag_id: i64) -> Vec<(i64, String, String)> {
+    sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT g.id, g.name, COALESCE(g.icon,'')
+           FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
+          WHERE gt.tag_id = ?1 ORDER BY g.name",
+    )
+    .bind(tag_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
+pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<GroupDetail> {
+    let row = sqlx::query(
+        "SELECT g.id, g.name, COALESCE(g.icon,'') AS icon, u.slug AS owner
+           FROM hub_tag_groups g JOIN hub_users u ON u.id = g.owner_user_id
+          WHERE g.id = ?1",
+    )
+    .bind(group_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    let role = role_of(pool, user_id, group_id).await.unwrap_or_default();
+    let members = sqlx::query_as::<_, (String, String)>(
+        "SELECT u.slug, m.role FROM hub_group_members m JOIN hub_users u ON u.id = m.user_id
+          WHERE m.group_id = ?1 ORDER BY (m.role <> 'owner'), m.role, u.slug",
+    )
+    .bind(group_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let tags = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT t.id, t.name, u.slug FROM hub_group_tags gt
+           JOIN hub_tags t ON t.id = gt.tag_id
+           JOIN hub_users u ON u.id = t.owner_user_id
+          WHERE gt.group_id = ?1 ORDER BY t.name",
+    )
+    .bind(group_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    Some(GroupDetail {
+        id: row.get("id"),
+        name: row.get("name"),
+        icon: row.get("icon"),
+        owner: row.get("owner"),
+        role,
+        members,
+        tags,
+    })
+}
+
+// ── tag detail ───────────────────────────────────────────────────────────────
+
 pub struct TagDetail {
     pub id: i64,
     pub name: String,
     pub owner: String,
-    pub category_id: Option<i64>,
-    pub category: String,
+    pub groups: Vec<(i64, String, String)>,
     pub source_count: i64,
     pub tracks: Vec<(i64, String, String)>,
 }
 
 pub async fn tag_detail(pool: &SqlitePool, tag_id: i64) -> Option<TagDetail> {
     let row = sqlx::query(
-        "SELECT t.id, t.name, t.category_id, u.slug AS owner, COALESCE(c.name,'') AS category,
+        "SELECT t.id, t.name, u.slug AS owner,
                 (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count
-           FROM hub_tags t
-           JOIN hub_users u ON u.id = t.owner_user_id
-           LEFT JOIN hub_tag_categories c ON c.id = t.category_id
+           FROM hub_tags t JOIN hub_users u ON u.id = t.owner_user_id
           WHERE t.id = ?1",
     )
     .bind(tag_id)
@@ -490,8 +675,7 @@ pub async fn tag_detail(pool: &SqlitePool, tag_id: i64) -> Option<TagDetail> {
         id: row.get("id"),
         name: row.get("name"),
         owner: row.get("owner"),
-        category_id: row.get("category_id"),
-        category: row.get("category"),
+        groups: groups_for_tag(pool, tag_id).await,
         source_count: row.get("source_count"),
         tracks,
     })

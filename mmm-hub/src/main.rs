@@ -387,8 +387,8 @@ async fn cmd_import_mmm_tags(cfg: Config, db_path: &str, user: &str) -> Result<(
     let pool = db::connect(&cfg.database_url).await?;
     let s = mmm_import::import_tags(&pool, db_path, user).await?;
     println!(
-        "✓ importiert: {} Kategorien, {} Tags, {} mit Playlist verlinkt, {} übersprungen",
-        s.categories, s.tags, s.linked, s.skipped
+        "✓ importiert: {} Gruppen, {} Tags, {} mit Playlist verlinkt, {} übersprungen",
+        s.groups, s.tags, s.linked, s.skipped
     );
     Ok(())
 }
