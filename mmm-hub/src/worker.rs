@@ -74,7 +74,7 @@ async fn sync_likes_jobs(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
                 continue;
             }
         };
-        match paged(&token, &spotify::api_url("/me/tracks?limit=50")).await? {
+        match paged(&token, &spotify::api_url(&cfg.spotify_api_base, "/me/tracks?limit=50")).await? {
             Outcome::Ok(items) => {
                 let n = ingest::store_likes(pool, user_id, &items).await?;
                 sqlx::query(
@@ -156,7 +156,7 @@ async fn playlist_jobs(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
             }
         };
 
-        let url = spotify::api_url(&format!("/playlists/{playlist_id}/items?limit=50"));
+        let url = spotify::api_url(&cfg.spotify_api_base, &format!("/playlists/{playlist_id}/items?limit=50"));
         match paged(&token, &url).await? {
             Outcome::Ok(items) => {
                 let n = ingest::store_playlist_items(pool, local_id, &items).await?;

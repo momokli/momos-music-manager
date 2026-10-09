@@ -1,8 +1,9 @@
-//! MMM Hub — walking skeleton CLI.
+//! MMM Hub — CLI for the multi-user Spotify ingest + exploration service.
 //!
-//!   mmm-hub auth   --user <slug>   # one-time loopback Spotify link (no public HTTPS)
-//!   mmm-hub ingest --user <slug>   # pull likes + owned/collaborative playlists
-//!   mmm-hub serve                  # HTTP read surface + SQL console (LAN)
+//!   mmm-hub serve                  # web UI + JSON API + SQL console
+//!   mmm-hub auth   --user <slug>   # one-time loopback Spotify link
+//!   mmm-hub ingest --user <slug>   # pull likes + playlists right now
+//!   mmm-hub backfill               # queue a full initial load (worker does it)
 //!   mmm-hub query  "<sql>"         # run a read-only query from the terminal
 //!   mmm-hub users                  # list hub users
 
@@ -161,7 +162,7 @@ async fn cmd_auth(cfg: Config, slug: &str, port: u16) -> Result<()> {
     )
     .await?;
 
-    let (status, me) = spotify::api_get(&tokens.access_token, "/me").await?;
+    let (status, me) = spotify::api_get(&cfg.spotify_api_base, &tokens.access_token, "/me").await?;
     let (remote_id, display_name) = if status == 200 {
         (
             me["id"].as_str().map(str::to_string),

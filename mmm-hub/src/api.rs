@@ -1,6 +1,6 @@
 //! Read-only HTTP surface over the overlap views + a guarded SQL console.
 //!
-//! Walking skeleton: no auth (LAN-only). Session/OIDC comes in M2.
+//! All non-public routes require a web session (`hub_web_sessions`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

@@ -166,10 +166,11 @@ pub(crate) async fn access_token(pool: &SqlitePool, cfg: &Config, user_id: i64) 
 /// `GET /me`, persisting the remote id + display name.
 async fn remote_profile(
     pool: &SqlitePool,
+    base: &str,
     token: &str,
     user_id: i64,
 ) -> Result<(String, Option<String>)> {
-    let (status, me) = spotify::api_get(token, "/me").await?;
+    let (status, me) = spotify::api_get(base, token, "/me").await?;
     if status == 403 {
         bail!(
             "Spotify verweigert den Zugriff (403). Dieser Account ist nicht in der Allowlist \
@@ -287,9 +288,9 @@ pub struct PlaylistFetch {
 pub async fn fetch_playlists(pool: &SqlitePool, cfg: &Config, slug: &str) -> Result<PlaylistFetch> {
     let user_id = ensure_user(pool, slug).await?;
     let token = access_token(pool, cfg, user_id).await?;
-    let (remote_id, _) = remote_profile(pool, &token, user_id).await?;
+    let (remote_id, _) = remote_profile(pool, &cfg.spotify_api_base, &token, user_id).await?;
 
-    let playlists = spotify::get_all_items(&token, "/me/playlists?limit=50").await?;
+    let playlists = spotify::get_all_items(&cfg.spotify_api_base, &token, "/me/playlists?limit=50").await?;
     let mut out = PlaylistFetch::default();
     for pl in &playlists {
         let owned = is_owned(pl, &remote_id);
@@ -342,16 +343,16 @@ pub(crate) async fn store_likes(
 pub async fn ingest_user(pool: &SqlitePool, cfg: &Config, slug: &str) -> Result<Summary> {
     let user_id = ensure_user(pool, slug).await?;
     let token = access_token(pool, cfg, user_id).await?;
-    let (remote_id, _display_name) = remote_profile(pool, &token, user_id).await?;
+    let (remote_id, _display_name) = remote_profile(pool, &cfg.spotify_api_base, &token, user_id).await?;
 
     let mut summary = Summary::default();
 
     // ── Likes ────────────────────────────────────────────────────────────────
-    let likes = spotify::get_all_items(&token, "/me/tracks?limit=50").await?;
+    let likes = spotify::get_all_items(&cfg.spotify_api_base, &token, "/me/tracks?limit=50").await?;
     summary.liked_tracks = store_likes(pool, user_id, &likes).await?;
 
     // ── Playlists + their items ──────────────────────────────────────────────
-    let playlists = spotify::get_all_items(&token, "/me/playlists?limit=50").await?;
+    let playlists = spotify::get_all_items(&cfg.spotify_api_base, &token, "/me/playlists?limit=50").await?;
     summary.playlists = playlists.len();
 
     for pl in &playlists {
@@ -370,7 +371,7 @@ pub async fn ingest_user(pool: &SqlitePool, cfg: &Config, slug: &str) -> Result<
 
         // Owned/collaborative → fetch items. 403 (or absent items) → leave as metadata.
         let path = format!("/playlists/{playlist_id}/items?limit=50");
-        let (status, first) = spotify::api_get(&token, &path).await?;
+        let (status, first) = spotify::api_get(&cfg.spotify_api_base, &token, &path).await?;
         if status != 200 {
             tracing::warn!("playlist {playlist_id} items returned {status}; storing metadata only");
             continue;

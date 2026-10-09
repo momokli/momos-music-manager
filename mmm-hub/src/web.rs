@@ -983,7 +983,7 @@ async fn callback(
         Err(e) => return error_page(&format!("Token-Austausch fehlgeschlagen: {e}")),
     };
 
-    let (remote_id, display_name) = match spotify::api_get(&tokens.access_token, "/me").await {
+    let (remote_id, display_name) = match spotify::api_get(&st.cfg.spotify_api_base, &tokens.access_token, "/me").await {
         Ok((200, me)) => (
             me["id"].as_str().map(str::to_string),
             me["display_name"].as_str().map(str::to_string),

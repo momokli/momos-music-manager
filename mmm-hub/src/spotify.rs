@@ -16,7 +16,9 @@ pub const SCOPES: &str =
 
 const AUTHORIZE_URL: &str = "https://accounts.spotify.com/authorize";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
-const API_BASE: &str = "https://api.spotify.com/v1";
+/// Default Spotify Web API base; overridable per-config (`SPOTIFY_API_BASE`)
+/// so integration tests can point the client at a local mock server.
+pub const DEFAULT_API_BASE: &str = "https://api.spotify.com/v1";
 
 #[derive(Debug, Clone)]
 pub struct Tokens {
@@ -132,12 +134,12 @@ pub async fn get_json(access_token: &str, url: &str) -> Result<(u16, Value)> {
     Ok((status, body))
 }
 
-pub async fn api_get(access_token: &str, path: &str) -> Result<(u16, Value)> {
-    get_json(access_token, &format!("{API_BASE}{path}")).await
+pub async fn api_get(base: &str, access_token: &str, path: &str) -> Result<(u16, Value)> {
+    get_json(access_token, &api_url(base, path)).await
 }
 
-pub fn api_url(path: &str) -> String {
-    format!("{API_BASE}{path}")
+pub fn api_url(base: &str, path: &str) -> String {
+    format!("{base}{path}")
 }
 
 /// One response page with the bits the rate-limit handler needs.
@@ -173,8 +175,8 @@ pub async fn get_page(access_token: &str, url: &str) -> Result<Page> {
 }
 
 /// Follow Spotify's `next` links and collect all `items`.
-pub async fn get_all_items(access_token: &str, first_path: &str) -> Result<Vec<Value>> {
-    let mut url = format!("{API_BASE}{first_path}");
+pub async fn get_all_items(base: &str, access_token: &str, first_path: &str) -> Result<Vec<Value>> {
+    let mut url = api_url(base, first_path);
     let mut out = Vec::new();
     loop {
         let (status, body) = get_json(access_token, &url).await?;
