@@ -1534,6 +1534,7 @@ struct DiggingPage {
     seed_bpm: String,
     seed_key: String,
     filters: Vec<ScopeLink>,
+    bpm_opts: Vec<ScopeLink>,
 }
 
 struct DigRow {
@@ -1781,7 +1782,12 @@ async fn digging_page(
     let mine_only = q.mine.as_deref() == Some("1");
     let bpm_only = q.bpm.as_deref() == Some("1");
     let harm_only = q.harm.as_deref() == Some("1");
-    let tol = q.tol.filter(|t| *t > 0.0 && *t <= 50.0).unwrap_or(6.0);
+    // Absolute BPM tolerance in whole BPM (0 = rounded-equal).
+    let tol = q
+        .tol
+        .filter(|t| (0.0..=50.0).contains(t))
+        .map(|t| t.round() as i64)
+        .unwrap_or(1);
 
     let mut rows: Vec<DigRow> = cand.into_values().collect();
     rows.retain(|r| {
@@ -1790,8 +1796,8 @@ async fn digging_page(
         }
         if bpm_only {
             match (seed_bpm, r.bpm) {
-                (Some(sb), Some(b)) if sb > 0.0 => {
-                    if (b - sb).abs() / sb * 100.0 > tol {
+                (Some(sb), Some(b)) if sb > 0.0 && b > 0.0 => {
+                    if (b.round() as i64 - sb.round() as i64).abs() > tol {
                         return false;
                     }
                 }
@@ -1821,41 +1827,58 @@ async fn digging_page(
     rows.truncate(500);
 
     // Filter toggle links, preserving the other flags.
-    let link = |mine: bool, bpm: bool, harm: bool| -> String {
+    let link = |mine: bool, bpm: bool, harm: bool, tol: i64| -> String {
         let mut s = format!("/digging?seed={seed_id}");
         if mine {
             s.push_str("&mine=1");
         }
         if bpm {
-            s.push_str("&bpm=1");
+            s.push_str(&format!("&bpm=1&tol={tol}"));
         }
         if harm {
             s.push_str("&harm=1");
         }
         s
     };
+    let bpm_label = if tol == 0 {
+        "BPM exakt".to_string()
+    } else {
+        format!("BPM ±{tol}")
+    };
     let filters = vec![
         ScopeLink {
             label: "Alle".to_string(),
-            href: link(false, false, false),
+            href: link(false, false, false, tol),
             active: !(mine_only || bpm_only || harm_only),
         },
         ScopeLink {
             label: format!("Nur bei uns ({with_hub})"),
-            href: link(!mine_only, bpm_only, harm_only),
+            href: link(!mine_only, bpm_only, harm_only, tol),
             active: mine_only,
         },
         ScopeLink {
-            label: format!("BPM ±{tol:.0}%"),
-            href: link(mine_only, !bpm_only, harm_only),
+            label: bpm_label,
+            href: link(mine_only, !bpm_only, harm_only, tol),
             active: bpm_only,
         },
         ScopeLink {
             label: "Harmonisch".to_string(),
-            href: link(mine_only, bpm_only, !harm_only),
+            href: link(mine_only, bpm_only, !harm_only, tol),
             active: harm_only,
         },
     ];
+    let bpm_opts: Vec<ScopeLink> = [0i64, 1, 2, 3, 5]
+        .into_iter()
+        .map(|n| ScopeLink {
+            label: if n == 0 {
+                "Exakt".to_string()
+            } else {
+                format!("±{n}")
+            },
+            href: link(mine_only, true, harm_only, n),
+            active: bpm_only && tol == n,
+        })
+        .collect();
 
     render(&DiggingPage {
         nav,
@@ -1871,6 +1894,7 @@ async fn digging_page(
         seed_bpm: seed_bpm.map(|b| format!("{b:.0}")).unwrap_or_default(),
         seed_key: seed_camelot,
         filters,
+        bpm_opts,
     })
 }
 

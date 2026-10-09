@@ -49,6 +49,18 @@ content %}
     </ul>
 </nav>
 
+<nav class="hub-filter" aria-label="BPM-Toleranz (BPM)">
+    <ul>
+        <li><span class="hub-muted">BPM-Toleranz</span></li>
+        {% for f in bpm_opts %}
+        <li>
+            {% if f.active %}<a href="{{ f.href }}" aria-current="page">{{ f.label }}</a
+            >{% else %}<a href="{{ f.href }}">{{ f.label }}</a>{% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+</nav>
+
 {% if rows.is_empty() %}
 <p class="hub-muted">Keine Vorschläge für diese Auswahl.</p>
 {% else %}

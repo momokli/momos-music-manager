@@ -913,6 +913,51 @@ async fn digging_internal_suggestions() {
 }
 
 #[tokio::test]
+async fn digging_bpm_tolerance_is_absolute() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    async fn fetch(app: &common::TestApp, cookie: &str, path: &str) -> String {
+        let resp = app
+            .client()
+            .get(app.url(path))
+            .header("Cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        body(resp).await
+    }
+
+    // Seed t_pl = 130; its co-occurring candidate t_all = 133 (diff 3).
+    for (tid, bpm) in [(app.seed.t_pl, 130.0_f64), (app.seed.t_all, 133.0_f64)] {
+        sqlx::query(
+            "INSERT INTO hub_track_features (track_id, found, bpm, camelot)
+             VALUES (?1, 1, ?2, '8A')",
+        )
+        .bind(tid)
+        .bind(bpm)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+
+    let seed = app.seed.t_pl;
+    // tol=0 (exakt) and tol=2 -> the 3-BPM-away candidate is out.
+    assert!(!fetch(&app, &cookie, &format!("/digging?seed={seed}&bpm=1&tol=0"))
+        .await
+        .contains("Shared Anthem"));
+    assert!(!fetch(&app, &cookie, &format!("/digging?seed={seed}&bpm=1&tol=2"))
+        .await
+        .contains("Shared Anthem"));
+    // tol=3 -> included, and the tolerance selector is rendered.
+    let h3 = fetch(&app, &cookie, &format!("/digging?seed={seed}&bpm=1&tol=3")).await;
+    assert!(h3.contains("Shared Anthem"));
+    assert!(h3.contains("BPM-Toleranz"));
+    assert!(h3.contains("±3"));
+}
+
+#[tokio::test]
 async fn registration_closed_by_default() {
     let app = common::spawn().await;
 
