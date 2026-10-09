@@ -89,31 +89,30 @@
     {% endif %}
 </details>
 
-{% if tags.is_empty() %}
+{% if total == 0 %}
 <p class="hub-muted">
     Keine Tags. Öffne eine <a href="/me/playlists">Playlist</a> und klicke „als Tag
     anlegen".
 </p>
-{% else %}
+{% else %} {% for g in groups %}
+<h3 class="hub-group-title">{{ g.label }}</h3>
 <div class="overflow-auto hub-scroll-y">
     <table class="hub-dense-table">
         <caption class="hub-visually-hidden">
-            Tags mit Kategorie, Besitzer und Anzahl
+            Tags: {{ g.label }}
         </caption>
         <thead>
             <tr>
                 <th scope="col">Tag</th>
-                <th scope="col">Kategorie</th>
                 <th scope="col">Besitzer</th>
                 <th scope="col">Tracks</th>
                 <th scope="col">Quellen</th>
             </tr>
         </thead>
         <tbody>
-            {% for t in tags %}
+            {% for t in g.tags %}
             <tr>
                 <td><a href="/tag/{{ t.id }}">{{ t.name }}</a></td>
-                <td>{% if t.category != "" %}{{ t.category }}{% else %}—{% endif %}</td>
                 <td><a href="/user/{{ t.owner }}">@{{ t.owner }}</a></td>
                 <td>{{ t.track_count }}</td>
                 <td>{{ t.source_count }}</td>
@@ -122,4 +121,4 @@
         </tbody>
     </table>
 </div>
-{% endif %} {% endblock %}
+{% endfor %} {% endif %} {% endblock %}

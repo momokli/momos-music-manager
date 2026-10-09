@@ -241,10 +241,13 @@ pub async fn remove_playlist_from_tag(
     Ok(())
 }
 
-/// Tags owned by a user: `(id, name)`, for pickers.
-pub async fn list_user_tags(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String)> {
-    sqlx::query_as::<_, (i64, String)>(
-        "SELECT id, name FROM hub_tags WHERE owner_user_id = ?1 ORDER BY name",
+/// Tags owned by a user: `(id, name, category, category_icon)`, for pickers.
+pub async fn list_user_tags(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String, String, String)> {
+    sqlx::query_as::<_, (i64, String, String, String)>(
+        "SELECT t.id, t.name, COALESCE(c.name,''), COALESCE(c.icon,'')
+           FROM hub_tags t LEFT JOIN hub_tag_categories c ON c.id = t.category_id
+          WHERE t.owner_user_id = ?1
+          ORDER BY (c.name IS NULL), c.name, t.name",
     )
     .bind(user_id)
     .fetch_all(pool)

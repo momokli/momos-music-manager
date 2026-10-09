@@ -233,8 +233,10 @@ struct PlaylistPage {
     tracks: Vec<PlaylistTrackRow>,
     /// Tags this playlist currently feeds.
     feeds: Vec<TagFeed>,
-    /// The current user's tags, for the "add to tag" picker.
-    my_tags: Vec<TagOption>,
+    /// The current user's tags, grouped by category, for the picker.
+    tag_groups: Vec<TagOptGroup>,
+    /// The current user's categories (icon legend).
+    categories: Vec<crate::tags::Category>,
 }
 
 struct TagFeed {
@@ -246,6 +248,11 @@ struct TagFeed {
 struct TagOption {
     id: i64,
     name: String,
+}
+
+struct TagOptGroup {
+    label: String,
+    options: Vec<TagOption>,
 }
 
 struct PlaylistTrackRow {
@@ -287,14 +294,39 @@ async fn playlist_page(
         .into_iter()
         .map(|(id, name, owner)| TagFeed { id, name, owner })
         .collect();
-    let my_tags: Vec<TagOption> = match &me {
-        Some((uid, _)) => crate::tags::list_user_tags(&st.pool, *uid)
-            .await
-            .into_iter()
-            .map(|(id, name)| TagOption { id, name })
-            .collect(),
+    let categories = match &me {
+        Some((uid, _)) => crate::tags::list_categories(&st.pool, *uid).await,
         None => Vec::new(),
     };
+    // Group my tags by category (uncategorised first bucket, removed if empty).
+    let mut tag_groups: Vec<TagOptGroup> = vec![TagOptGroup {
+        label: "Ohne Kategorie".to_string(),
+        options: Vec::new(),
+    }];
+    let mut label_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    label_idx.insert("Ohne Kategorie".to_string(), 0);
+    for c in &categories {
+        let label = format!("{} {}", c.icon, c.name).trim().to_string();
+        label_idx.entry(label.clone()).or_insert_with(|| {
+            tag_groups.push(TagOptGroup {
+                label,
+                options: Vec::new(),
+            });
+            tag_groups.len() - 1
+        });
+    }
+    if let Some((uid, _)) = &me {
+        for (id, name, category, icon) in crate::tags::list_user_tags(&st.pool, *uid).await {
+            let label = if category.is_empty() {
+                "Ohne Kategorie".to_string()
+            } else {
+                format!("{} {}", icon, category).trim().to_string()
+            };
+            let gi = *label_idx.get(&label).unwrap_or(&0);
+            tag_groups[gi].options.push(TagOption { id, name });
+        }
+    }
+    tag_groups.retain(|g| !g.options.is_empty());
 
     let rows = sqlx::query(
         "SELECT t.id, hpt.position, t.title, t.artists
@@ -330,7 +362,8 @@ async fn playlist_page(
         owner_name: owner_name.filter(|s| !s.is_empty()).unwrap_or_default(),
         tracks,
         feeds,
-        my_tags,
+        tag_groups,
+        categories,
     })
 }
 
@@ -1450,6 +1483,12 @@ struct TagsPage {
     categories: Vec<crate::tags::Category>,
     other_categories: Vec<OtherCategory>,
     icons: &'static [&'static str],
+    groups: Vec<TagGroup>,
+    total: usize,
+}
+
+struct TagGroup {
+    label: String,
     tags: Vec<TagRow>,
 }
 
@@ -1465,6 +1504,7 @@ struct TagRow {
     name: String,
     owner: String,
     category: String,
+    category_icon: String,
     track_count: i64,
     user_count: i64,
     source_count: i64,
@@ -1485,6 +1525,7 @@ async fn tags_page(
 
     let rows = sqlx::query(
         "SELECT t.id, t.name, u.slug AS owner, COALESCE(c.name,'') AS category,
+                COALESCE(c.icon,'') AS category_icon,
                 (SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id) AS track_count,
                 (SELECT COUNT(DISTINCT user_id) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS user_count,
                 (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count,
@@ -1495,7 +1536,7 @@ async fn tags_page(
            LEFT JOIN hub_tag_categories c ON c.id = t.category_id
           WHERE (?1 = '' OR lower(t.name) LIKE '%' || lower(?1) || '%')
             AND (?2 = 0 OR t.owner_user_id = ?3)
-          ORDER BY u.slug, COALESCE(c.name,'zz'), t.name
+          ORDER BY u.slug, (c.name IS NULL), c.name, t.name
           LIMIT 1000",
     )
     .bind(&q)
@@ -1505,19 +1546,39 @@ async fn tags_page(
     .await
     .unwrap_or_default();
 
-    let tags: Vec<TagRow> = rows
-        .iter()
-        .map(|r| TagRow {
+    let mut groups: Vec<TagGroup> = Vec::new();
+    let mut group_idx: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut total = 0usize;
+    for r in &rows {
+        let row = TagRow {
             id: r.get::<i64, _>("id"),
             name: r.get::<Option<String>, _>("name").unwrap_or_default(),
             owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
             category: r.get::<Option<String>, _>("category").unwrap_or_default(),
+            category_icon: r.get::<Option<String>, _>("category_icon").unwrap_or_default(),
             track_count: r.get::<Option<i64>, _>("track_count").unwrap_or(0),
             user_count: r.get::<Option<i64>, _>("user_count").unwrap_or(0),
             source_count: r.get::<Option<i64>, _>("source_count").unwrap_or(0),
             users: r.get::<Option<String>, _>("users").unwrap_or_default(),
-        })
-        .collect();
+        };
+        let label = if row.category.is_empty() {
+            "Ohne Kategorie".to_string()
+        } else {
+            format!("{} {}", row.category_icon, row.category)
+                .trim()
+                .to_string()
+        };
+        let gi = *group_idx.entry(label.clone()).or_insert_with(|| {
+            groups.push(TagGroup {
+                label,
+                tags: Vec::new(),
+            });
+            groups.len() - 1
+        });
+        groups[gi].tags.push(row);
+        total += 1;
+    }
 
     let categories = crate::tags::list_categories(&st.pool, me).await;
     let other_categories: Vec<OtherCategory> = crate::tags::list_other_categories(&st.pool, me)
@@ -1539,7 +1600,8 @@ async fn tags_page(
         categories,
         other_categories,
         icons: crate::tags::ICONS,
-        tags,
+        groups,
+        total,
     })
 }
 
