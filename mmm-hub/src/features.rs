@@ -73,7 +73,36 @@ pub fn key_name(pitch: i64) -> &'static str {
     NAMES[pitch.rem_euclid(12) as usize]
 }
 
-/// Fetch features for up to `ids.len()` Spotify track ids (caller should batch).
+/// Parse Camelot notation like `8B` into `(number, letter)`.
+fn parse_camelot(s: &str) -> Option<(i32, char)> {
+    let s = s.trim();
+    if s.len() < 2 {
+        return None;
+    }
+    let letter = s.chars().last()?;
+    let num: i32 = s[..s.len() - 1].parse().ok()?;
+    if !(1..=12).contains(&num) {
+        return None;
+    }
+    Some((num, letter))
+}
+
+/// Harmonic compatibility on the Camelot wheel: same key, the relative
+/// major/minor (same number, other letter), or a neighbour (+/-1, same letter).
+pub fn camelot_compatible(a: &str, b: &str) -> bool {
+    let ((an, al), (bn, bl)) = match (parse_camelot(a), parse_camelot(b)) {
+        (Some(x), Some(y)) => (x, y),
+        _ => return false,
+    };
+    if an == bn && al != bl {
+        return true; // relative major/minor
+    }
+    let d = (an - bn).rem_euclid(12);
+    (d == 0 || d == 1 || d == 11) && al == bl
+}
+
+/// The bulk adapter for ReccoBeats audio features.
+#[allow(dead_code)]
 pub async fn fetch_batch(cfg: &Config, spotify_ids: &[String]) -> Result<Vec<Feature>> {
     if spotify_ids.is_empty() {
         return Ok(Vec::new());
@@ -291,7 +320,7 @@ pub async fn backfill(pool: &SqlitePool, cfg: &Config, max_tracks: usize) -> Res
 
 #[cfg(test)]
 mod tests {
-    use super::{camelot, key_name, spotify_id_from_href};
+    use super::{camelot, camelot_compatible, key_name, spotify_id_from_href};
 
     #[test]
     fn camelot_wheel_matches_reference() {
@@ -310,6 +339,17 @@ mod tests {
         assert_eq!(key_name(0), "C");
         assert_eq!(key_name(7), "G");
         assert_eq!(key_name(11), "B");
+    }
+
+    #[test]
+    fn camelot_compatibility() {
+        assert!(camelot_compatible("8B", "8B")); // same
+        assert!(camelot_compatible("8B", "8A")); // relative
+        assert!(camelot_compatible("8B", "9B")); // +1
+        assert!(camelot_compatible("1B", "12B")); // wrap
+        assert!(!camelot_compatible("8B", "10B")); // too far
+        assert!(!camelot_compatible("8B", "9A")); // +1 but other letter
+        assert!(!camelot_compatible("", "8B"));
     }
 
     #[test]

@@ -81,3 +81,91 @@ pub async fn load_seed(pool: &SqlitePool, id: i64) -> Result<Option<Seed>> {
         artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
     }))
 }
+
+/// How a track shows up in *our* data.
+#[derive(Debug, Default, Clone)]
+pub struct Presence {
+    pub users: i64,
+    pub playlists: i64,
+    pub likes: i64,
+    pub slugs: String,
+}
+
+/// Enrich a candidate: which users have it, in how many playlists, likes.
+pub async fn presence(pool: &SqlitePool, track_id: i64) -> Presence {
+    let row = sqlx::query(
+        "SELECT
+            (SELECT COUNT(DISTINCT user_id) FROM hub_v_track_playlists WHERE track_id = ?1) AS users,
+            (SELECT COUNT(DISTINCT playlist_id) FROM hub_v_track_playlists WHERE track_id = ?1) AS playlists,
+            (SELECT COUNT(*) FROM hub_liked_tracks WHERE track_id = ?1) AS likes,
+            (SELECT GROUP_CONCAT(DISTINCT u.slug) FROM hub_v_track_playlists p
+               JOIN hub_users u ON u.id = p.user_id WHERE p.track_id = ?1) AS slugs",
+    )
+    .bind(track_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    match row {
+        Some(r) => Presence {
+            users: r.get::<Option<i64>, _>("users").unwrap_or(0),
+            playlists: r.get::<Option<i64>, _>("playlists").unwrap_or(0),
+            likes: r.get::<Option<i64>, _>("likes").unwrap_or(0),
+            slugs: r.get::<Option<String>, _>("slugs").unwrap_or_default(),
+        },
+        None => Presence::default(),
+    }
+}
+
+/// Resolve an external candidate (external suggestion) to a hub track id, by
+/// Spotify id, then ISRC, then normalised title + artist.
+pub async fn match_track(
+    pool: &SqlitePool,
+    spotify_id: Option<&str>,
+    isrc: Option<&str>,
+    artists: &str,
+    title: &str,
+) -> Option<i64> {
+    if let Some(sid) = spotify_id.filter(|s| !s.is_empty()) {
+        if let Ok(Some(id)) = sqlx::query_scalar::<_, i64>(
+            "SELECT track_id FROM hub_track_external_ids
+              WHERE service = 'spotify' AND external_id = ?1 LIMIT 1",
+        )
+        .bind(sid)
+        .fetch_optional(pool)
+        .await
+        {
+            return Some(id);
+        }
+    }
+    if let Some(code) = isrc.filter(|s| !s.is_empty()) {
+        if let Ok(Some(id)) =
+            sqlx::query_scalar::<_, i64>("SELECT id FROM hub_tracks WHERE isrc = ?1 LIMIT 1")
+                .bind(code)
+                .fetch_optional(pool)
+                .await
+        {
+            return Some(id);
+        }
+    }
+    let nt = crate::tags::normalize_name(title);
+    if !nt.is_empty() {
+        let first_artist = artists.split(',').next().unwrap_or("").trim();
+        if !first_artist.is_empty() {
+            if let Ok(Some(id)) = sqlx::query_scalar::<_, i64>(
+                "SELECT id FROM hub_tracks
+                  WHERE lower(trim(title)) = lower(trim(?1))
+                    AND lower(artists) LIKE '%' || lower(?2) || '%'
+                  LIMIT 1",
+            )
+            .bind(title)
+            .bind(first_artist)
+            .fetch_optional(pool)
+            .await
+            {
+                return Some(id);
+            }
+        }
+    }
+    None
+}

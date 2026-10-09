@@ -3,14 +3,15 @@ content %}
 <hgroup>
     <h1>Digging</h1>
     <p class="hub-muted">
-        Aus einem Seed-Track verwandte Tracks finden — hub-intern (gemeinsame Playlists)
-        und optional extern (Last.fm).
+        Seed → ähnliche Tracks aus allen Quellen, angereichert mit unseren Daten (wer
+        hat's), sortiert nach Interessanz; filterbar nach BPM/Harmonik.
     </p>
 </hgroup>
 
 {% if !has_seed %}
 <p class="hub-muted">
-    Kein Seed gewählt. Öffne einen <a href="/search">Track</a> und klicke dort „Digging".
+    Kein Seed gewählt. Öffne einen <a href="/search">Track</a> oder
+    <a href="/overlap">Entdecken</a> und klicke dort „Digging".
 </p>
 <form method="get" action="/search" role="search">
     <input
@@ -23,62 +24,68 @@ content %}
 </form>
 {% else %}
 <p class="hub-muted">
-    Seed: <a href="/track/{{ seed_id }}">{{ seed_artists }} — {{ seed_title }}</a>
+    Seed: <a href="/track/{{ seed_id }}">{{ seed_artists }} — {{ seed_title }}</a> {% if
+    seed_bpm != "" %}· {{ seed_bpm }} BPM{% endif %} {% if seed_key != "" %}· {{ seed_key
+    }}{% endif %} · Quellen: Hub-intern, ReccoBeats{% if lastfm_enabled %}, Last.fm{%
+    endif %}
 </p>
 
-<h2>Hub-intern (gemeinsame Playlists)</h2>
-{% if suggestions.is_empty() %}
-<p class="hub-muted">Keine gemeinsam vorkommenden Tracks.</p>
+<nav class="hub-filter" aria-label="Filter">
+    <ul>
+        {% for f in filters %}
+        <li>
+            {% if f.active %}<a href="{{ f.href }}" aria-current="page">{{ f.label }}</a
+            >{% else %}<a href="{{ f.href }}">{{ f.label }}</a>{% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+</nav>
+
+{% if rows.is_empty() %}
+<p class="hub-muted">Keine Vorschläge für diese Auswahl.</p>
 {% else %}
 <div class="overflow-auto hub-scroll-y">
     <table class="hub-dense-table">
         <caption class="hub-visually-hidden">
-            Verwandte Tracks über gemeinsame Playlists
+            Digging-Session: angereicherte Vorschläge
         </caption>
         <thead>
             <tr>
                 <th scope="col">Track</th>
-                <th scope="col">Gemeinsame Playlists</th>
-                <th scope="col">User</th>
+                <th scope="col">Quellen</th>
+                <th scope="col">Bei uns</th>
+                <th scope="col">BPM</th>
+                <th scope="col">Key</th>
+                <th scope="col">Playlists</th>
+                <th scope="col">♥</th>
+                <th scope="col">Score</th>
             </tr>
         </thead>
         <tbody>
-            {% for s in suggestions %}
+            {% for r in rows %}
             <tr>
                 <td class="hub-nowrap">
-                    <a href="/track/{{ s.id }}">{{ s.artists }} — {{ s.title }}</a>
+                    {% if r.matched %}<a href="/track/{{ r.track_id }}"
+                        >{{ r.artists }} — {{ r.title }}</a
+                    >{% else %}{{ r.artists }} — {{ r.title }}
+                    <span class="hub-muted">(nicht im Hub)</span>{% endif %}
                 </td>
-                <td>{{ s.shared_playlists }}</td>
-                <td>{{ s.user_slugs }} <span class="hub-muted">({{ s.users }})</span></td>
+                <td>
+                    {% for s in r.sources %}<span class="hub-tag">{{ s }}</span>{% endfor
+                    %}
+                </td>
+                <td>
+                    {% if r.users > 0 %}{{ r.slugs }}
+                    <span class="hub-muted">({{ r.users }})</span>{% else %}—{% endif %}
+                </td>
+                <td>{{ r.bpm_disp }}</td>
+                <td>{% if r.camelot != "" %}{{ r.camelot }}{% else %}—{% endif %}</td>
+                <td>{{ r.playlists }}</td>
+                <td>{% if r.likes > 0 %}♥{% else %}—{% endif %}</td>
+                <td>{{ r.score }}</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
-{% endif %}
-
-<h2>ReccoBeats</h2>
-{% if reccobeats.is_empty() %}
-<p class="hub-muted">Keine Empfehlungen.</p>
-{% else %}
-<ol>
-    {% for r in reccobeats %}
-    <li>{{ r.artist }} — {{ r.name }}</li>
-    {% endfor %}
-</ol>
-{% endif %}
-
-<h2>Last.fm</h2>
-{% if !lastfm_enabled %}
-<p class="hub-muted">
-    Nicht konfiguriert (Umgebungsvariable <code>LASTFM_API_KEY</code> setzen).
-</p>
-{% else %} {% if lastfm.is_empty() %}
-<p class="hub-muted">Keine Last.fm-Treffer.</p>
-{% else %}
-<ol>
-    {% for l in lastfm %}
-    <li>{{ l.artist }} — {{ l.name }} <span class="hub-muted">{{ l.score }}</span></li>
-    {% endfor %}
-</ol>
-{% endif %} {% endif %} {% endif %} {% endblock %}
+{% endif %} {% endif %} {% endblock %}

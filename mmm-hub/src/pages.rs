@@ -840,6 +840,10 @@ async fn similar_page(
 #[derive(Deserialize, Default)]
 struct DiggingQuery {
     seed: Option<i64>,
+    mine: Option<String>,
+    bpm: Option<String>,
+    harm: Option<String>,
+    tol: Option<f64>,
 }
 
 #[derive(Template)]
@@ -851,25 +855,79 @@ struct DiggingPage {
     seed_id: i64,
     seed_title: String,
     seed_artists: String,
-    suggestions: Vec<SuggRow>,
-    lastfm: Vec<LfmRow>,
-    reccobeats: Vec<LfmRow>,
+    rows: Vec<DigRow>,
     lastfm_enabled: bool,
+    seed_bpm: String,
+    seed_key: String,
+    filters: Vec<ScopeLink>,
 }
 
-struct SuggRow {
-    id: i64,
+struct DigRow {
+    track_id: i64,
+    matched: bool,
     title: String,
     artists: String,
-    shared_playlists: i64,
+    sources: Vec<String>,
     users: i64,
-    user_slugs: String,
+    playlists: i64,
+    likes: i64,
+    slugs: String,
+    bpm: Option<f64>,
+    bpm_disp: String,
+    camelot: String,
+    score: i64,
 }
 
-struct LfmRow {
-    name: String,
-    artist: String,
-    score: String,
+/// Merge a (possibly external) candidate into the session map: dedupe by hub
+/// track id when matched, else by normalised artist|title.
+async fn merge_candidate(
+    cand: &mut HashMap<String, DigRow>,
+    pool: &sqlx::SqlitePool,
+    tid: Option<i64>,
+    title: &str,
+    artists: &str,
+    source: &str,
+) {
+    let key = match tid {
+        Some(id) => format!("t{id}"),
+        None => format!(
+            "x:{}|{}",
+            crate::tags::normalize_name(artists),
+            crate::tags::normalize_name(title)
+        ),
+    };
+    if let Some(existing) = cand.get_mut(&key) {
+        if !existing.sources.iter().any(|s| s == source) {
+            existing.sources.push(source.to_string());
+            if !existing.matched {
+                existing.title = title.to_string();
+                existing.artists = artists.to_string();
+            }
+        }
+        return;
+    }
+    let (matched, p) = match tid {
+        Some(id) => (true, crate::digging::presence(pool, id).await),
+        None => (false, crate::digging::Presence::default()),
+    };
+    cand.insert(
+        key,
+        DigRow {
+            track_id: tid.unwrap_or(0),
+            matched,
+            title: title.to_string(),
+            artists: artists.to_string(),
+            sources: vec![source.to_string()],
+            users: p.users,
+            playlists: p.playlists,
+            likes: p.likes,
+            slugs: p.slugs,
+            bpm: None,
+            bpm_disp: String::new(),
+            camelot: String::new(),
+            score: 0,
+        },
+    );
 }
 
 async fn digging_page(
@@ -884,9 +942,7 @@ async fn digging_page(
 
     let mut has_seed = false;
     let (mut seed_id, mut seed_title, mut seed_artists) = (0i64, String::new(), String::new());
-    let mut suggestions: Vec<SuggRow> = Vec::new();
-    let mut lastfm: Vec<LfmRow> = Vec::new();
-    let mut reccobeats: Vec<LfmRow> = Vec::new();
+    let mut cand: HashMap<String, DigRow> = HashMap::new();
 
     if let Some(sid) = q.seed {
         if let Ok(Some(seed)) = crate::digging::load_seed(&st.pool, sid).await {
@@ -895,55 +951,199 @@ async fn digging_page(
             seed_title = seed.title.clone();
             seed_artists = seed.artists.clone();
 
-            suggestions = crate::digging::internal_suggestions(&st.pool, sid, 200)
+            // 1. Hub-intern: tracks sharing the seed's playlists (capped so the
+            //    external discoveries below still fit the table).
+            for s in crate::digging::internal_suggestions(&st.pool, sid, 100)
                 .await
                 .unwrap_or_default()
-                .into_iter()
-                .map(|s| SuggRow {
-                    id: s.id,
-                    title: s.title,
-                    artists: s.artists,
-                    shared_playlists: s.shared_playlists,
-                    users: s.users,
-                    user_slugs: s.user_slugs,
-                })
-                .collect();
-
-            if lastfm_enabled {
-                if let Ok(l) = crate::lastfm::similar_tracks(&st.cfg, &seed.artists, &seed.title).await {
-                    lastfm = l
-                        .into_iter()
-                        .map(|s| LfmRow {
-                            name: s.name,
-                            artist: s.artist,
-                            score: format!("{:.0}%", s.match_score * 100.0),
-                        })
-                        .collect();
-                }
+            {
+                merge_candidate(
+                    &mut cand,
+                    &st.pool,
+                    Some(s.id),
+                    &s.title,
+                    &s.artists,
+                    "Hub-intern",
+                )
+                .await;
             }
 
-            // ReccoBeats recommendations (free, no auth) when we have a Spotify id.
-            if let Ok(Some(sid)) = sqlx::query_scalar::<_, String>(
+            // 2. ReccoBeats recommendations (free, no auth).
+            let seed_spotify = sqlx::query_scalar::<_, String>(
                 "SELECT external_id FROM hub_track_external_ids
                   WHERE track_id = ?1 AND service = 'spotify' LIMIT 1",
             )
             .bind(sid)
             .fetch_optional(&st.pool)
             .await
-            {
-                if let Ok(recs) = crate::features::recommendations(&st.cfg, &sid, 30).await {
-                    reccobeats = recs
-                        .into_iter()
-                        .map(|r| LfmRow {
-                            name: r.title,
-                            artist: r.artists,
-                            score: String::new(),
-                        })
-                        .collect();
+            .ok()
+            .flatten();
+            if let Some(sp) = &seed_spotify {
+                for r in crate::features::recommendations(&st.cfg, sp, 50)
+                    .await
+                    .unwrap_or_default()
+                {
+                    let tid = crate::digging::match_track(
+                        &st.pool,
+                        Some(&r.spotify_id),
+                        None,
+                        &r.artists,
+                        &r.title,
+                    )
+                    .await;
+                    merge_candidate(&mut cand, &st.pool, tid, &r.title, &r.artists, "ReccoBeats")
+                        .await;
+                }
+            }
+
+            // 3. Last.fm similar (needs LASTFM_API_KEY).
+            if lastfm_enabled {
+                for s in crate::lastfm::similar_tracks(&st.cfg, &seed.artists, &seed.title)
+                    .await
+                    .unwrap_or_default()
+                {
+                    let tid =
+                        crate::digging::match_track(&st.pool, None, None, &s.artist, &s.name).await;
+                    merge_candidate(&mut cand, &st.pool, tid, &s.name, &s.artist, "Last.fm").await;
                 }
             }
         }
     }
+
+    // Load BPM/key for matched candidates (for the similarity filters).
+    let ids: Vec<i64> = cand
+        .values()
+        .filter(|r| r.matched)
+        .map(|r| r.track_id)
+        .collect();
+    if !ids.is_empty() {
+        let mut qb = QueryBuilder::new(
+            "SELECT track_id, bpm, camelot FROM hub_track_features WHERE found = 1 AND track_id IN (",
+        );
+        let mut sep = qb.separated(", ");
+        for id in &ids {
+            sep.push_bind(*id);
+        }
+        qb.push(")");
+        if let Ok(frows) = qb.build().fetch_all(&st.pool).await {
+            let feat: HashMap<i64, (Option<f64>, String)> = frows
+                .iter()
+                .map(|r| {
+                    (
+                        r.get::<i64, _>("track_id"),
+                        (
+                            r.get::<Option<f64>, _>("bpm"),
+                            r.get::<Option<String>, _>("camelot").unwrap_or_default(),
+                        ),
+                    )
+                })
+                .collect();
+            for r in cand.values_mut() {
+                if r.matched {
+                    if let Some((bpm, c)) = feat.get(&r.track_id) {
+                        r.bpm = *bpm;
+                        r.camelot = c.clone();
+                    }
+                }
+            }
+        }
+    }
+
+    // Seed features for the BPM/key filters.
+    let (seed_bpm, seed_camelot) = sqlx::query(
+        "SELECT bpm, camelot FROM hub_track_features WHERE track_id = ?1 AND found = 1",
+    )
+    .bind(seed_id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten()
+    .map(|r| {
+        (
+            r.get::<Option<f64>, _>("bpm"),
+            r.get::<Option<String>, _>("camelot").unwrap_or_default(),
+        )
+    })
+    .unwrap_or((None, String::new()));
+
+    let mine_only = q.mine.as_deref() == Some("1");
+    let bpm_only = q.bpm.as_deref() == Some("1");
+    let harm_only = q.harm.as_deref() == Some("1");
+    let tol = q.tol.filter(|t| *t > 0.0 && *t <= 50.0).unwrap_or(6.0);
+
+    let mut rows: Vec<DigRow> = cand.into_values().collect();
+    rows.retain(|r| {
+        if mine_only && !(r.users > 0 || r.likes > 0) {
+            return false;
+        }
+        if bpm_only {
+            match (seed_bpm, r.bpm) {
+                (Some(sb), Some(b)) if sb > 0.0 => {
+                    if (b - sb).abs() / sb * 100.0 > tol {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        if harm_only && !crate::features::camelot_compatible(&seed_camelot, &r.camelot) {
+            return false;
+        }
+        true
+    });
+
+    for r in rows.iter_mut() {
+        r.score = r.users * 10 + r.playlists * 3 + r.likes * 2 + r.sources.len() as i64;
+        r.bpm_disp = r
+            .bpm
+            .map(|b| format!("{b:.0}"))
+            .unwrap_or_else(|| "—".to_string());
+    }
+    rows.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.artists.cmp(&b.artists))
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    let with_hub = rows.iter().filter(|r| r.users > 0 || r.likes > 0).count();
+    rows.truncate(500);
+
+    // Filter toggle links, preserving the other flags.
+    let link = |mine: bool, bpm: bool, harm: bool| -> String {
+        let mut s = format!("/digging?seed={seed_id}");
+        if mine {
+            s.push_str("&mine=1");
+        }
+        if bpm {
+            s.push_str("&bpm=1");
+        }
+        if harm {
+            s.push_str("&harm=1");
+        }
+        s
+    };
+    let filters = vec![
+        ScopeLink {
+            label: "Alle".to_string(),
+            href: link(false, false, false),
+            active: !(mine_only || bpm_only || harm_only),
+        },
+        ScopeLink {
+            label: format!("Nur bei uns ({with_hub})"),
+            href: link(!mine_only, bpm_only, harm_only),
+            active: mine_only,
+        },
+        ScopeLink {
+            label: format!("BPM ±{tol:.0}%"),
+            href: link(mine_only, !bpm_only, harm_only),
+            active: bpm_only,
+        },
+        ScopeLink {
+            label: "Harmonisch".to_string(),
+            href: link(mine_only, bpm_only, !harm_only),
+            active: harm_only,
+        },
+    ];
 
     render(&DiggingPage {
         nav,
@@ -952,10 +1152,11 @@ async fn digging_page(
         seed_id,
         seed_title,
         seed_artists,
-        suggestions,
-        lastfm,
-        reccobeats,
+        rows,
         lastfm_enabled,
+        seed_bpm: seed_bpm.map(|b| format!("{b:.0}")).unwrap_or_default(),
+        seed_key: seed_camelot,
+        filters,
     })
 }
 

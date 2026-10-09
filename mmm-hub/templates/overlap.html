@@ -62,7 +62,9 @@ content %}
             <tr>
                 <td class="hub-nowrap">
                     <a href="/track/{{ r.id }}">{{ r.artists }} — {{ r.title }}</a>
-                    {% if r.isrc != "" %}<br /><code class="hub-muted">{{ r.isrc }}</code
+                    · <a href="/digging?seed={{ r.id }}">dig</a> {% if r.isrc != "" %}<br /><code
+                        class="hub-muted"
+                        >{{ r.isrc }}</code
                     >{% endif %}
                 </td>
                 {% for cell in r.cells %}
