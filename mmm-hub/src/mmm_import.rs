@@ -12,16 +12,16 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 /// FontAwesome icon (MMM) → emoji (hub, no FA dependency).
 pub fn map_icon(fa: &str) -> String {
     let f = fa.to_lowercase();
-    let pick = if f.contains("list-music") {
-        "🎼"
-    } else if f.contains("layers") {
-        "🗂️"
+    let pick = if f.contains("list") {
+        "🎼" // Setlist (fa-list / fa-list-music)
+    } else if f.contains("layers") || f.contains("bolt") {
+        "⚡" // Phase
     } else if f.contains("heart") {
-        "💜"
-    } else if f.contains("sparkles") {
-        "✨"
+        "💜" // Mood
+    } else if f.contains("rainbow") || f.contains("sparkles") {
+        "🌈" // Vibe
     } else if f.contains("hashtag") {
-        "#️⃣"
+        "#️⃣" // Merkmal
     } else {
         ""
     };
@@ -33,6 +33,7 @@ pub struct Summary {
     pub categories: usize,
     pub tags: usize,
     pub linked: usize,
+    pub skipped: usize,
 }
 
 /// Import categories + tags from `mmm_db` into the hub user `user_slug`.
@@ -88,6 +89,11 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
     .context("read tags")?;
 
     for (name, mmm_cat_id) in tag_rows {
+        // Skip names with no alphanumerics (e.g. pure-emoji) — they have no slug.
+        if crate::tags::normalize_name(&name).is_empty() {
+            summary.skipped += 1;
+            continue;
+        }
         let cat = cat_map.get(&mmm_cat_id).copied();
         let tag_id = crate::tags::ensure_tag(hub, user_id, &name, cat).await?;
         summary.tags += 1;
