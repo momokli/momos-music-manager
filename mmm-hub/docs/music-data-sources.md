@@ -93,19 +93,32 @@ service_playlist  --(resolve)-->  tag  <--(resolve)-- service_playlist (andere Q
 Ziel: wie das MMM-Digging (`#digging`) — aus einem Seed (Track/Playlist/Tag) aehnliche Tracks
 vorschlagen — aber im Hub, auf der geteilten DB, und mit **mehreren externen Quellen**.
 
-| Quelle                                               | Was                                                                                               | Auth                       | Kosten        | Integrierbar?                                   |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------- | -------------------------- | ------------- | ----------------------------------------------- |
-| **Hub-intern**                                       | Co-Occurrence: Tracks, die mit dem Seed dieselben Playlists/Tags teilen; "wer hat das sonst noch" | —                          | —             | ✅ selber rechnen (SQL)                         |
-| **Last.fm `track.getSimilar` / `artist.getSimilar`** | aehnliche Tracks/Artists aus Hoer-Daten                                                           | API-Key (frei)             | frei          | ✅ sauber                                       |
-| **ListenBrainz**                                     | Similar/Labs + Last.fm-kompatibel                                                                 | User-Token (frei)          | frei          | ✅                                              |
-| **ReccoBeats**                                       | Track-Recommendations (kein Auth)                                                                 | keine                      | frei          | ✅                                              |
-| **DigDeeper.fm**                                     | Audio-Aehnlichkeit (Referenz-Track -> 100 aehnliche), elektronisch                                | **keine oeffentliche API** | Pro 5,49€/Mon | ⚠️ nur **Deep-Link** (Handoff), kein Auto-Query |
-| **Spotify Recommendations**                          | —                                                                                                 | —                          | —             | ❌ am 27.11.2024 abgeschaltet                   |
+| Quelle                                               | Was                                                                                                  | Auth                       | Kosten        | Integrierbar?                                   |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | -------------------------- | ------------- | ----------------------------------------------- |
+| **Hub-intern**                                       | Co-Occurrence: Tracks, die mit dem Seed dieselben Playlists/Tags teilen; "wer hat das sonst noch"    | —                          | —             | ✅ selber rechnen (SQL)                         |
+| **Last.fm `track.getSimilar` / `artist.getSimilar`** | aehnliche Tracks/Artists aus Hoer-Daten                                                              | API-Key (frei)             | frei          | ✅ sauber                                       |
+| **ListenBrainz**                                     | Similar/Labs + Last.fm-kompatibel                                                                    | User-Token (frei)          | frei          | ✅                                              |
+| **ReccoBeats**                                       | Track-Recommendations (kein Auth)                                                                    | keine                      | frei          | ✅                                              |
+| **cosine.club API**                                  | **Audio-Aehnlichkeit** (Discogs-EffNet, 2M+ underground), Filter: Jahr, Discogs-Collector/Want/Preis | API-Key (frei)             | **frei**      | ✅ **volle JSON-API** (120 req/min)             |
+| **Deezer**                                           | 30-s-**Preview** (→ eigenes Embedding), ISRC, BPM                                                    | keine                      | frei          | ✅ keyless (schon via music-api)                |
+| **DigDeeper.fm**                                     | Audio-Aehnlichkeit (Referenz-Track -> 100 aehnliche), elektronisch                                   | **keine oeffentliche API** | Pro 5,49€/Mon | ⚠️ nur **Deep-Link** (Handoff), kein Auto-Query |
+| **Spotify Recommendations**                          | —                                                                                                    | —                          | —             | ❌ am 27.11.2024 abgeschaltet                   |
 
-**Fazit:** Das Digging-View aggregiert **Last.fm + ListenBrainz + ReccoBeats + hub-interne
-Co-Occurrence** automatisch; **DigDeeper.fm** wird als Deep-Link/Handoff pro Track angeboten
-("auf digdeeper.fm oeffnen"). Ergebnisdarstellung: Zeilen = Vorschlaege, **eine Spalte je
-Quelle** + Score — konsistent zum Overlap-/Similar-Layout.
+**Fazit:** Das Digging-View aggregiert **cosine.club + Last.fm + ListenBrainz + ReccoBeats +
+hub-interne Co-Occurrence** automatisch; **DigDeeper.fm** wird zusaetzlich als Deep-Link/Handoff
+pro Track angeboten ("auf digdeeper.fm oeffnen"). Ergebnisdarstellung: Zeilen = Vorschlaege,
+**eine Spalte je Quelle** + Score — konsistent zum Overlap-/Similar-Layout.
+
+**cosine.club-API (verifiziert 2026-10, `https://cosine.club/api/v1`, Bearer):**
+
+- `GET /tracks/{id}/similar?limit=&start_year=&end_year=&min_have=&min_want=&min_price=` — Top-N
+  aehnliche Tracks (Audio-Embedding), **mit Discogs-Collector/Want/Preis-Filtern** — ideal fuer
+  "underground, wenig gehoert".
+- `POST /search/bulk` (bis 50 `"Artist - Track"`) — Batch-Lookups inkl. Similar.
+- `GET /search?q=`, `GET /tracks/lookup?url=` (YouTube/Discogs/SoundCloud/Bandcamp/Spotify/Beatport/Apple/Vocaroo),
+  `GET /tracks/{id}`.
+- Liefert `video_id`/`video_uri` (YouTube) + `external_link` (Discogs) → Anknuepfpunkt an #178 (YouTube).
+- **Kein paid tier**, 120 req/min, API-Key unter `cosine.club/account/api`.
 
 ## 7. Paid / kommerzielle Datenquellen (Recherche-Update)
 
@@ -210,6 +223,52 @@ self-hosted Hub unkritisch; bei öffentlichem Betrieb beachten.
 **Vorbehalt:** Audio-Analyse braucht die Dateien — für Tracks ohne FLAC keine Ähnlichkeit (oder erst
 downloaden). Für elektro/underground ist eigenes Analyisieren aber robuster als Katalog-APIs.
 
+## 9. Beste Kombination: lokal + bezahlt (die Pipeline)
+
+**Prinzip: lokal macht die Arbeit (frei, genau, underground-tauglich), bezahlt füllt nur die Lücken,
+cosine.club liefert die Breite.**
+
+### Schicht 0 — Identität / Brücke
+
+| Quelle                              | Rolle                                                         | Kosten    |
+| ----------------------------------- | ------------------------------------------------------------- | --------- |
+| **Deezer** (keyless, via music-api) | ISRC ↔ Track-ID ↔ **30-s-Preview** ↔ BPM, Album, Cover        | frei      |
+| **Spotify** (per User OAuth)        | Playlists, Likes, IDs                                         | frei      |
+| **SonoVault** (paid)                | Cross-Platform-IDs / Reverse-ISRC, wenn Deezer/Spotify fehlen | €0–249/mo |
+
+### Schicht 1 — Features (BPM, Key, Genre, Mood)
+
+1. **LOKAL (unser Kern): EffNet-Discogs ONNX in Rust** — BPM, Key + **Camelot**, **Genre (400
+   Discogs-Styles)**, Mood/Energy **und** das 1280-d-Embedding. Laeuft auf FLAC (music-api) **und**
+   auf Deezer-30-s-Previews → deckt auch Tracks ab, die wir _nicht_ besitzen. **Kostenlos, offline,
+   robust fuer Underground/White-Label.**
+2. **ReccoBeats (frei)** — Katalog-Features per Spotify-ID (~46 % Treffer).
+3. **Bezahlt nur bei `found=0`** — FreqBlog/MeloData per ISRC (BPM/Key/Camelot/Mood/Genre).
+
+### Schicht 2 — Aehnlichkeit / Discovery
+
+- **LOKAL**: unser EffNet-Embedding-Index ueber eigene Bibliothek **+ alle eingebetteten Previews**
+  → eigenes DigDeeper, gleicher Vektorraum fuer „eigene" _und_ „neue" Musik.
+- **cosine.club (frei)**: 2M+ Underground-Katalog, Similar-by-Audio mit Collector/Jahr/Preis-Filtern
+  → die Langschwanz-Records, die kein Katalog-API kennt.
+- **ReccoBeats-Recs (frei)** + **Last.fm/ListenBrainz** (optional) als weitere externe Quellen.
+- Alle Quellen laufen durch die **bestehende Anreicherung** (wer hat's: users/playlists/likes) +
+  Ranking → eine Liste, Spalten je Quelle.
+
+### Warum genau diese Kombi
+
+- **Lokal** traegt den Load: gratis, exakt, funktioniert fuer Whitelabel/Bootlegs ohne Katalog.
+- **Bezahlt** nur fuer Luecken → winzige Rechnung (ISRC, cent-genau).
+- **cosine.club** gibt die Breite/Neuheit, die wir nicht selbst crawlen koennen — und **kostet nichts**.
+- **Preview-Bruecke** (Deezer 30 s → EffNet) vereinheitlicht eigene und fremde Tracks in _einem_
+  Aehnlichkeitsraum — der Schluessel fuer „loads of data, auch fuer neue Musik".
+
+### Reihenfolge (Vorschlag)
+
+`Seed → lokal Embedding` → parallel: `cosine.club similar` + `ReccoBeats` (+ `Last.fm`) →
+Kandidaten anreichern (`haben wir? wer? welche Playlist?`) → fuer Kandidaten ohne lokalen Vector:
+`Deezer-Preview → EffNet` (optional, warm-halten) → nach Score sortieren (Overlap + Quellen).
+
 ## Quellen (Auswahl)
 
 - Spotify changelog / community: audio-features deprecated 2024-11-27
@@ -224,3 +283,6 @@ downloaden). Für elektro/underground ist eigenes Analyisieren aber robuster als
 - EffNet als ONNX: https://huggingface.co/Heyian/discogs-effnet-onnx
 - Rust-ONNX-Runtime: https://github.com/pykeio/ort
 - SonoVault: https://sonovault.now/ · Musicae: https://api.musicae.io/ · audiometa: https://audiometa.io/
+- cosine.club API (frei, Discogs-EffNet): https://cosine.club/about · API-Key: https://cosine.club/account/api
+- Deezer API (keyless 30-s-Previews + ISRC): https://developers.deezer.com/
+- Spotify preview_url deprecated 2024-11-27: https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api
