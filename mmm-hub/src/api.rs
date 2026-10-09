@@ -30,8 +30,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hub/overlap", get(overlap))
         .route("/api/hub/playlists", get(playlists))
         .route("/api/hub/query", post(query))
-        .route("/api/hub/me", get(me))
-        .with_state(state)
+        		.route("/api/hub/me", get(me))
+        		.route("/api/hub/services/{service}/sync", post(sync))
+        		.with_state(state)
 }
 
 type ApiError = (StatusCode, Json<Value>);
@@ -82,6 +83,49 @@ async fn me(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<Value
         "slug": slug,
         "services": services,
     } })))
+}
+
+/// Queue a fresh Spotify sync for the current user (issues M3-7 #144, M3-8 #138).
+///
+/// The background worker in `src/worker.rs` does the actual Spotify calls; it
+/// picks up accounts with `likes_status = 'queued'` and playlists with
+/// `enabled_for_fetch = 1 AND items_available = 0`. We only reset those flags
+/// here so the next worker pass re-fetches everything for THIS user.
+async fn sync(
+    State(st): State<AppState>,
+    Path(service): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let Some((user_id, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Err(err(StatusCode::UNAUTHORIZED, "login required"));
+    };
+
+    if service != "spotify" {
+        return Err(err(StatusCode::BAD_REQUEST, "unsupported service"));
+    }
+
+    sqlx::query(
+        "UPDATE hub_service_accounts
+            SET likes_status = 'queued', likes_synced_at = NULL, likes_error = NULL
+          WHERE user_id = ?1 AND service = 'spotify'",
+    )
+    .bind(user_id)
+    .execute(&st.pool)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    sqlx::query(
+        "UPDATE hub_playlists
+            SET enabled_for_fetch = 1, fetch_status = 'queued',
+                items_available = 0, fetch_error = NULL
+          WHERE user_id = ?1 AND service = 'spotify'",
+    )
+    .bind(user_id)
+    .execute(&st.pool)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(json!({ "data": { "started": true } })))
 }
 
 /// A linked account needs re-auth when its refresh token is gone or the
