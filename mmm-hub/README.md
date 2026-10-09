@@ -1,88 +1,129 @@
-# mmm-hub (walking skeleton)
+# mmm-hub
 
-A separate, multi-user **Spotify ingest + exploration** service. Each user authorizes
-Spotify once (via a **loopback** redirect — no public HTTPS needed), the hub pulls their
-**liked songs** and **owned/collaborative playlists** into **one shared SQLite DB**, and
-you query overlaps with SQL or a few read endpoints.
+A separate, multi-user **Spotify ingest + exploration** service. Each DJ gets a
+local account (username + password, no OIDC), links their own Spotify, and the hub
+pulls their **liked songs** and **owned/collaborative playlists** into **one shared
+SQLite DB** — so you can ask "who has this track, who liked it, and in which
+playlists does it sit".
 
-> **Skeleton scope.** No auth yet (LAN-only, no OIDC), no deploy/TLS. This is the
-> walking-skeleton slice of the plan in `../plans/proposed/mmm-hub.md` (issues #119–#144).
-> Table/view names already match the contract so it converges with M1–M4.
+It is the multi-tenant little brother of the single-user Momo's Music Manager:
+same tech stack (axum + sqlx + SQLite), but its own crate, its own schema, its own DB.
 
 ## What it does
 
-- `auth` – one-time Spotify OAuth on `http://127.0.0.1:8888/callback` (the **only**
-  `http://` Spotify still allows), stores the refresh token per user.
+- `auth` – one-time Spotify OAuth via a **loopback** redirect
+  (`http://127.0.0.1:8888/callback`) for a single user; stores the refresh token
+  per user in `hub_service_accounts`.
 - `ingest` – pulls likes (`/me/tracks`) and, for **owned/collaborative** playlists,
-  their items (`/playlists/{id}/items`). **Followed** playlists are stored as metadata
-  only (the post-Feb-2026 API returns no `items` for them).
-- `serve` – HTTP read surface + a read-only SQL console.
-- `query` – run a read-only SQL against the hub DB from the terminal.
+  their items (`/playlists/{id}/items`). **Followed** playlists are stored as
+  metadata only (the post-Feb-2026 API returns no `items` for them).
+- `serve` – web UI + JSON API + read-only SQL console, and spawns the background
+  sync worker.
+- `query` – run read-only SQL against the hub DB from the terminal.
+
+## Accounts & sessions
+
+Local accounts, **not OIDC/Pocket ID**. Users sign up with a username + password;
+the password is bcrypt-hashed into `hub_users.password_hash` and usernames are
+case-insensitive (`COLLATE NOCASE`). Login creates a server-side session row in
+`hub_web_sessions` and sets the `hub_session` cookie (HttpOnly, `SameSite=Lax`,
+30-day TTL).
+
+## Spotify link (per user)
+
+Each user links their own Spotify account; tokens live per user in
+`hub_service_accounts`. The **web** flow uses the public HTTPS redirect
+`https://hub.zukkafabrik.de/api/hub/services/spotify/callback` (register that exact
+URI in the Spotify app), so no port-forwarding is needed. `auth` uses the loopback
+redirect instead, for a one-time local token grab.
+
+## Background sync worker
+
+`src/worker.rs` runs continuously while there is work:
+
+- **likes** for connected accounts whose `likes_status` is `queued`/null, and
+- **playlist items** for playlists with `enabled_for_fetch = 1 AND items_available = 0`.
+
+It processes one request stream at a time, is **staggered** (a small per-page
+delay, a capped number of playlists/accounts per pass) and **429/QUOTA_EXCEEDED
+aware** (hard backoff, quota backoff). It is triggered by the UI toggles
+(Fetch / enable-all), `mmm-hub backfill`, or `POST /api/hub/services/{service}/sync`.
 
 ## Setup
 
 ```bash
 cd mmm-hub
-cp .env.example .env      # fill in SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET
-# Register the redirect URI you use in the Spotify dashboard, e.g. local dev:
-#   http://127.0.0.1:8080/api/hub/services/spotify/callback
+cp .env.example .env      # SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET, ...
 cargo build
 ```
-
-`SPOTIFY_*` come from your existing (grandfathered) Spotify app.
-
-## Web UI
-
-Open the hub in a browser (default `http://127.0.0.1:8080`, or `https://…` behind Caddy):
-
-1. **Sign up** with a username + password (own user store in SQLite; no OIDC yet).
-2. Click **Spotify verbinden** — it redirects to Spotify and back.
-3. The dashboard shows whether Spotify is **verbunden** (and the Spotify display name).
-
-Each user links their own Spotify account; the tokens live per user in
-`hub_service_accounts`. The web OAuth uses the **redirect URI from the config**
-(HTTPS in production, loopback for local dev) — no port-forwarding needed.
 
 ## Usage
 
 ```bash
-cargo run -- serve                 # web UI + JSON API + SQL console
-cargo run -- ingest --user <slug>  # pull likes + owned/collaborative playlists
+cargo run -- serve                                    # web UI + JSON API + SQL console + worker
+cargo run -- auth --user <slug>                       # one-time loopback Spotify link
+cargo run -- ingest --user <slug>                     # pull likes + owned/collaborative playlists
+cargo run -- fetch-playlists --user <slug>            # refresh playlist metadata (owned + followed)
+cargo run -- set-password --user <slug> --password X  # set/reset a local account password
+cargo run -- backfill                                 # queue a full initial load for all users
 cargo run -- query "SELECT * FROM hub_v_user_overlap"
 cargo run -- users
-cargo run -- seed-demo             # deterministic demo data (no Spotify)
+cargo run -- seed-demo                                # deterministic demo data (no Spotify)
 ```
 
-After connecting Spotify in the browser, run `ingest` (CLI for now) to pull the
-data, then refresh the web page or hit the JSON endpoints.
+## Web UI
 
-HTTP endpoints (no auth, LAN-only):
+Every page is session-gated; the dashboard is `/`.
+
+| Route            | What it shows                                                               |
+| ---------------- | --------------------------------------------------------------------------- |
+| `/`              | Dashboard: Spotify status, likes count, playlist fetch toggles, tracks      |
+| `/sql`           | Read-only SQL console with presets                                          |
+| `/track/{id}`    | Per-user playlist presence + per-ISRC availability via internal `music-api` |
+| `/search`        | Track search across the shared catalog                                      |
+| `/user/{slug}`   | A user's likes + playlists                                                  |
+| `/playlist/{id}` | One playlist's tracks                                                       |
+
+## JSON API
 
 ```
 GET  /api/hub/health
 GET  /api/hub/users
-GET  /api/hub/playlists
-GET  /api/hub/overlap
+GET  /api/hub/me                       # session user + linked services (incl. needsReconnect)
 GET  /api/hub/tracks/{id}
-POST /api/hub/query     {"sql":"SELECT ..."}
+GET  /api/hub/overlap
+GET  /api/hub/playlists
+POST /api/hub/query                    {"sql":"SELECT ..."}   # session-gated
+POST /api/hub/services/{service}/sync  # queue a fresh sync for the current user
 ```
 
 ## Data model
 
-- `hub_tracks` – global track identity, unique on `(service, service_track_id)` (ISRC is
-  a nullable attribute, never a key).
+Migrations `001`–`006`:
+
+- `hub_users` (handle `slug`, bcrypt `password_hash`), `hub_service_accounts`
+  (per-user tokens), `hub_web_sessions` (server-side sessions).
+- `hub_tracks` – global track identity, unique on `(service, service_track_id)`
+  (ISRC is a nullable attribute, never a key); `hub_track_external_ids` for
+  per-service IDs/URLs.
 - `hub_playlists` / `hub_playlist_tracks` – per-user playlists + membership
-  (`items_available = 0` marks a followed, metadata-only playlist).
-- `hub_liked_tracks` – likes as their own relation.
+  (`items_available = 0` marks a followed, metadata-only playlist);
+  `hub_liked_tracks` – likes as their own relation.
 - Views: `hub_v_track_presence`, `hub_v_track_playlists`, `hub_v_shared_tracks`,
   `hub_v_user_overlap`.
 
+## Deployment
+
+Runs on the LAN host **`music-catalog` / `192.168.178.200`**, behind Caddy on `lan`
+at **`https://hub.zukkafabrik.de`**. Sibling read-only tools serve the same data
+from a **sanitized copy** `hub-public.db`: Datasette at `data.zukkafabrik.de` and
+SchemaSpy at `schema.zukkafabrik.de`. See `deploy/`.
+
 ## Notes / known limits
 
-- **Refresh tokens expire after 6 months** (Spotify, from the original authorization).
-  If ingest fails with `invalid_grant`, re-run `auth`.
+- **Refresh tokens expire after 6 months** (Spotify, from the original
+  authorization). `/api/hub/me` surfaces `needsReconnect`; re-run `auth` (or
+  reconnect in the UI).
 - **No follow-playlist tracks** – a Spotify API restriction, not a hub limitation.
-- Skeleton deviations from the contract: `hub_users.slug` (OIDC subject comes in M2),
-  `hub_playlists.items_available`, `hub_service_accounts.authorized_at`.
 - `GET /me/items`-style batch endpoints are gone; ingest relies on the track objects
   embedded in playlist-items responses.

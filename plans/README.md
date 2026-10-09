@@ -4,7 +4,7 @@
 
 ## Proposed
 
-- [mmm-hub](proposed/mmm-hub.md) — `feat/mmm-hub` (M1–M4)
+- [mmm-hub](proposed/mmm-hub.md) — `feat/mmm-hub` (M1–M4 largely done: schema, local accounts/sessions, per-user Spotify ingest, background worker and exploration UI/API implemented; tests/docs in progress)
 - [rediscovery-engine](proposed/rediscovery-engine.md) — `feat/rediscovery-engine` (M1–M5)
 - [liked-songs-sync](proposed/liked-songs-sync.md) — `feat/liked-songs-sync` (Rediscovery M1)
 
