@@ -152,6 +152,19 @@ pub async fn add_playlist_to_tag(
     tag_id: i64,
     playlist_id: i64,
 ) -> Result<()> {
+    link_playlist_to_tag(pool, owner_user_id, tag_id, playlist_id).await?;
+    rebuild(pool).await?;
+    Ok(())
+}
+
+/// Link a playlist to a tag **without** rebuilding the materialized resolved
+/// tags — for bulk callers (e.g. the MMM import) that rebuild once at the end.
+pub async fn link_playlist_to_tag(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    tag_id: i64,
+    playlist_id: i64,
+) -> Result<()> {
     let owned = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2",
     )
@@ -180,7 +193,6 @@ pub async fn add_playlist_to_tag(
     .bind(&now)
     .execute(pool)
     .await?;
-    rebuild(pool).await?;
     Ok(())
 }
 

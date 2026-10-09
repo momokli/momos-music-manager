@@ -117,7 +117,7 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
         .ok()
         .flatten();
         if let Some(pid) = pid {
-            if crate::tags::add_playlist_to_tag(hub, user_id, tag_id, pid)
+            if crate::tags::link_playlist_to_tag(hub, user_id, tag_id, pid)
                 .await
                 .is_ok()
             {
