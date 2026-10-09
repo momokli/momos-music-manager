@@ -129,6 +129,58 @@ async fn overlap_page_renders_shared_data() {
     // Fixture track shared by all three users.
     assert!(html.contains("Shared Anthem"));
     assert!(html.contains("@alice") && html.contains("@bob"));
+    // One column per user + scope controls.
+    assert!(html.contains("<th scope=\"col\">@alice"));
+    assert!(html.contains("Eigene") && html.contains("Gefolgt"));
+}
+
+#[tokio::test]
+async fn compare_view_columns_follow_user_selection() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+    let url = format!("/overlap?users={},{}", app.seed.alice, app.seed.bob);
+
+    let resp = app
+        .client()
+        .get(app.url(&url))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    assert!(html.contains("<th scope=\"col\">@alice"));
+    assert!(html.contains("<th scope=\"col\">@bob"));
+    assert!(
+        !html.contains("<th scope=\"col\">@carol"),
+        "carol should not be a column when deselected"
+    );
+    assert!(html.contains("Shared Anthem"));
+}
+
+#[tokio::test]
+async fn compare_scope_owned_drops_followed_only_tracks() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let resp = app
+        .client()
+        .get(app.url("/overlap?scope=owned"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    // t_all + t_two are shared via likes and stay.
+    assert!(html.contains("Shared Anthem"));
+    assert!(html.contains("Two Users"));
+    // t_pl is shared only through alice's OWN + bob's FOLLOWED playlist;
+    // with scope=owned bob's contribution drops, so the track is gone.
+    assert!(
+        !html.contains("Playlist Only"),
+        "followed-only overlap should be filtered out"
+    );
 }
 
 #[tokio::test]
@@ -253,10 +305,11 @@ async fn track_page_distinguishes_owned_and_followed_playlists() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let html = body(resp).await;
-    assert!(html.contains("Eigene Playlists"), "own section missing");
-    assert!(html.contains("Gefolgte Playlists"), "followed section missing");
-    assert!(html.contains("hub-badge-ok"), "own badge missing");
-    assert!(html.contains("hub-badge-no"), "followed badge missing");
+    // Compact view: owned/followed playlists appear as tagged chips.
+    assert!(html.contains("Deep House"));
+    assert!(html.contains("hub-tag-own"), "own tag missing");
+    assert!(html.contains("hub-tag-follow"), "followed tag missing");
+    assert!(html.contains("@alice") && html.contains("@bob"), "user rows missing");
     // Guard against unrendered askama placeholders leaking as literal text.
     assert!(!html.contains("{u."), "unrendered askama placeholder leaked");
 }
@@ -277,6 +330,27 @@ async fn playlist_detail_shows_both_owners() {
     let html = body(resp).await;
     assert!(html.contains("@alice"), "hub user missing");
     assert!(html.contains("Spotify-Besitzer: Alice"), "spotify owner missing");
+}
+
+#[tokio::test]
+async fn similar_playlists_view() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let resp = app
+        .client()
+        .get(app.url("/playlists/similar"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    assert!(html.contains("Ähnliche Playlists"));
+    // alice and bob both have "Deep House" -> normalised key "deep house".
+    assert!(html.contains("deep house"));
+    assert!(html.contains("<th scope=\"col\">@alice"));
+    assert!(html.contains("<th scope=\"col\">@bob"));
 }
 
 #[tokio::test]

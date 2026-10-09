@@ -750,8 +750,6 @@ struct TrackPage {
     album: String,
     duration: String,
     isrc: String,
-    spotify_id: String,
-    image_url: String,
     explicit: bool,
     users: Vec<UserGroup>,
     avail_text: String,
@@ -874,14 +872,6 @@ async fn track_page(
     let duration = duration_ms
         .map(|ms| format!("{}:{:02}", ms / 60000, (ms % 60000) / 1000))
         .unwrap_or_else(|| "—".to_string());
-    let service: Option<String> = row.get("service");
-    let service_track_id: Option<String> = row.get("service_track_id");
-    let spotify_id = if service.as_deref() == Some("spotify") {
-        service_track_id.unwrap_or_default()
-    } else {
-        String::new()
-    };
-
     let isrc: String = row.get::<Option<String>, _>("isrc").unwrap_or_default();
 
     // External service IDs for this track.
@@ -939,8 +929,6 @@ async fn track_page(
         album: row.get::<Option<String>, _>("album").unwrap_or_default(),
         duration,
         isrc,
-        spotify_id,
-        image_url: row.get::<Option<String>, _>("image_url").unwrap_or_default(),
         explicit: row.get::<Option<i64>, _>("explicit").unwrap_or(0) != 0,
         users,
         avail_text,

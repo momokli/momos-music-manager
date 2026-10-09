@@ -2,60 +2,78 @@
 content %}
 <hgroup>
     <h1>Entdecken</h1>
-    <p>Was die Nutzer des Hubs gemeinsam hören — Überschneidungen und geteilte Tracks.</p>
+    <p class="hub-muted">
+        Vergleiche die Nutzer — jede Zeile ein gemeinsamer Track, je Nutzer eine Spalte.
+    </p>
 </hgroup>
 
-<h2>Wer teilt wie viel</h2>
-{% if pairs.is_empty() %}
-<p class="hub-muted">Noch keine gemeinsamen Tracks zwischen Nutzern.</p>
-{% else %}
-<div class="overflow-auto">
-    <table>
-        <caption class="hub-visually-hidden">
-            Geteilte Tracks pro Nutzerpaar
-        </caption>
-        <thead>
-            <tr>
-                <th scope="col">Nutzer</th>
-                <th scope="col">Nutzer</th>
-                <th scope="col">Geteilte Tracks</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for p in pairs %}
-            <tr>
-                <td><a href="/user/{{ p.a }}">@{{ p.a }}</a></td>
-                <td><a href="/user/{{ p.b }}">@{{ p.b }}</a></td>
-                <td>{{ p.shared_tracks }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</div>
-{% endif %}
+<nav class="hub-filter" aria-label="Nutzer wählen">
+    <ul>
+        {% for u in picker %}
+        <li>
+            {% if u.selected %}<a
+                href="{{ u.href }}"
+                aria-current="true"
+                class="hub-tag hub-tag-own"
+                >@{{ u.slug }} ✓</a
+            >{% else %}<a href="{{ u.href }}" class="hub-tag">@{{ u.slug }}</a>{% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+</nav>
 
-<h2>Geteilte Tracks</h2>
-{% if shared.is_empty() %}
-<p class="hub-muted">Noch keine Tracks, die von mehreren Nutzern gehört werden.</p>
+<nav class="hub-filter" aria-label="Umfang">
+    <ul>
+        {% for s in scopes %}
+        <li>
+            {% if s.active %}<a href="{{ s.href }}" aria-current="page">{{ s.label }}</a
+            >{% else %}<a href="{{ s.href }}">{{ s.label }}</a>{% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+</nav>
+
+<p class="hub-muted">
+    {{ columns.len() }} Nutzer · {{ track_total }} gemeinsame Tracks {% if
+    !pairs.is_empty() %}· {% for p in pairs %}<span class="hub-tag"
+        >@{{ p.a }} ∩ @{{ p.b }}: {{ p.shared_tracks }}</span
+    >{% endfor %}{% endif %}
+</p>
+
+{% if rows.is_empty() %}
+<p class="hub-muted">Keine gemeinsamen Tracks für diese Auswahl.</p>
 {% else %}
-<div class="overflow-auto">
-    <table>
+<div class="overflow-auto hub-scroll-y">
+    <table class="hub-dense-table">
         <caption class="hub-visually-hidden">
-            Tracks, die von mehreren Nutzern gehört werden
+            Gemeinsame Tracks je ausgewähltem Nutzer
         </caption>
         <thead>
             <tr>
                 <th scope="col">Track</th>
-                <th scope="col">Artists</th>
-                <th scope="col">Hörer</th>
+                {% for c in columns %}
+                <th scope="col">@{{ c.slug }}</th>
+                {% endfor %}
             </tr>
         </thead>
         <tbody>
-            {% for t in shared %}
+            {% for r in rows %}
             <tr>
-                <td><a href="/track/{{ t.id }}">{{ t.title }}</a></td>
-                <td>{{ t.artists }}</td>
-                <td>von {{ t.user_count }} Nutzern</td>
+                <td class="hub-nowrap">
+                    <a href="/track/{{ r.id }}">{{ r.artists }} — {{ r.title }}</a>
+                    {% if r.isrc != "" %}<br /><code class="hub-muted">{{ r.isrc }}</code
+                    >{% endif %}
+                </td>
+                {% for cell in r.cells %}
+                <td>
+                    {% if cell.liked %}<span title="geliked">♥</span>{% endif %} {% for p
+                    in cell.playlists %}<span
+                        class="hub-tag {% if p.owned %}hub-tag-own{% else %}hub-tag-follow{% endif %}"
+                        >{{ p.name }}</span
+                    >{% endfor %} {% if !cell.present %}<span class="hub-muted">—</span>{%
+                    endif %}
+                </td>
+                {% endfor %}
             </tr>
             {% endfor %}
         </tbody>

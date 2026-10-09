@@ -1,0 +1,45 @@
+{% extends "base.html" %} {% block title %}Ähnliche Playlists — MMM Hub{% endblock %} {% block
+content %}
+<hgroup>
+    <h1>Ähnliche Playlists</h1>
+    <p class="hub-muted">
+        Playlists wie Tags: Namen, die bei mehreren Nutzern vorkommen (normalisiert), je Nutzer eine
+        Spalte.
+    </p>
+</hgroup>
+
+{% if rows.is_empty() %}
+<p class="hub-muted">Keine gemeinsamen Playlist-Namen gefunden.</p>
+{% else %}
+<div class="overflow-auto hub-scroll-y">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Gemeinsame Playlist-Namen je Nutzer
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Playlist-Name</th>
+                {% for u in users %}<th scope="col">@{{ u.slug }}</th>{% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in rows %}
+            <tr>
+                <td class="hub-nowrap">
+                    {{ r.label }} <span class="hub-muted">· {{ r.user_count }}</span>
+                </td>
+                {% for c in r.cells %}
+                <td>
+                    {% if c.present %}<a
+                        href="/playlist/{{ c.id }}"
+                        class="hub-tag {% if c.owned %}hub-tag-own{% else %}hub-tag-follow{% endif %}"
+                        >{{ c.name }}</a
+                    >{% else %}<span class="hub-muted">—</span>{% endif %}
+                </td>
+                {% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %} {% endblock %}

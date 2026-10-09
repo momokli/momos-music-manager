@@ -4,119 +4,123 @@ content %}
     <ol>
         <li><a href="/">Übersicht</a></li>
         <li><a href="/search">Suche</a></li>
-        <li>Track</li>
+        <li><a href="/overlap">Entdecken</a></li>
+        <li>Track #{{ id }}</li>
     </ol>
 </nav>
-<hgroup>
-    <h1>{{ title }}</h1>
-    <p>{{ artists }}</p>
-</hgroup>
 
-<div class="grid">
-    <div>
-        {% if image_url != "" %}<img
-            src="{{ image_url }}"
-            alt="Album-Cover"
-            loading="lazy"
-            style="border-radius: 8px"
-        />{% endif %}
-    </div>
-    <div>
-        <table>
-            <tr>
-                <th>Album</th>
-                <td>{{ album }}</td>
-            </tr>
-            <tr>
-                <th>Dauer</th>
-                <td>{{ duration }}</td>
-            </tr>
-            <tr>
-                <th>Explicit</th>
-                <td>{% if explicit %}ja{% else %}nein{% endif %}</td>
-            </tr>
-            <tr>
-                <th>ISRC</th>
-                <td>{% if isrc != "" %}<code>{{ isrc }}</code>{% else %}—{% endif %}</td>
-            </tr>
-            <tr>
-                <th>Spotify</th>
-                <td>
-                    {% if spotify_id != "" %}<a
-                        href="https://open.spotify.com/track/{{ spotify_id }}"
-                        target="_blank"
-                        ><code>{{ spotify_id }}</code></a
-                    >{% else %}—{% endif %}
-                </td>
-            </tr>
+<div class="hub-dense hub-cols">
+    <section>
+        <table class="hub-kv">
+            <caption class="hub-visually-hidden">
+                Track-Fakten
+            </caption>
+            <tbody>
+                <tr>
+                    <th scope="row">Titel</th>
+                    <td><strong>{{ title }}</strong></td>
+                </tr>
+                <tr>
+                    <th scope="row">Artists</th>
+                    <td>{{ artists }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">Album</th>
+                    <td>{{ album }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">Dauer</th>
+                    <td>{{ duration }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">Explicit</th>
+                    <td>{% if explicit %}ja{% else %}nein{% endif %}</td>
+                </tr>
+                <tr>
+                    <th scope="row">ISRC</th>
+                    <td>
+                        {% if isrc != "" %}<code>{{ isrc }}</code>{% else %}—{% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">IDs</th>
+                    <td>
+                        {% if external_ids.is_empty() %}—{% else %} {% for e in
+                        external_ids %}
+                        <a href="{{ e.url }}" target="_blank" rel="noreferrer"
+                            ><code>{{ e.service }}:{{ e.external_id }}</code></a
+                        >
+                        {% endfor %} {% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">music-api</th>
+                    <td>
+                        {{ avail_text }}{% if deezer_id != "" %} ·
+                        <a
+                            href="https://www.deezer.com/track/{{ deezer_id }}"
+                            target="_blank"
+                            rel="noreferrer"
+                            ><code>deezer:{{ deezer_id }}</code></a
+                        >{% endif %} {% if fetchable %}
+                        <form method="post" action="/track/{{ id }}/fetch">
+                            <button class="outline" type="submit">holen</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">BPM/Key</th>
+                    <td class="hub-muted">keine Daten (Spotify API liefert das nicht)</td>
+                </tr>
+            </tbody>
         </table>
-    </div>
+    </section>
+
+    <section>
+        <h2>In Playlists</h2>
+        {% if users.is_empty() %}
+        <p class="hub-muted">
+            Niemand hat diesen Track (weder geliked noch in einer Playlist).
+        </p>
+        {% else %}
+        <table class="hub-dense-table">
+            <caption class="hub-visually-hidden">
+                Nutzer mit diesem Track
+            </caption>
+            <thead>
+                <tr>
+                    <th scope="col">User</th>
+                    <th scope="col">♥</th>
+                    <th scope="col">Playlists (eigen / gefolgt)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for u in users %}
+                <tr>
+                    <td class="hub-nowrap">
+                        <a href="/user/{{ u.slug }}">@{{ u.slug }}</a>
+                    </td>
+                    <td>{% if u.liked %}♥{% else %}—{% endif %}</td>
+                    <td>
+                        {% for p in u.owned %}<a
+                            href="/playlist/{{ p.id }}"
+                            class="hub-tag hub-tag-own"
+                            title="{{ p.owner }}"
+                            >{{ p.name }}</a
+                        >{% endfor %} {% for p in u.followed %}<a
+                            href="/playlist/{{ p.id }}"
+                            class="hub-tag hub-tag-follow"
+                            title="{{ p.owner }}"
+                            >{{ p.name }}</a
+                        >{% endfor %} {% if u.owned.is_empty() && u.followed.is_empty()
+                        %}<span class="hub-muted">nur geliked</span>{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </section>
 </div>
-
-<h2>Service-IDs</h2>
-{% if external_ids.is_empty() %}
-<p>—</p>
-{% else %}
-<ul>
-    {% for e in external_ids %}
-    <li>
-        {{ e.service }}: {% if e.url != "" %}<a href="{{ e.url }}" target="_blank"
-            ><code>{{ e.external_id }}</code></a
-        >{% else %}<code>{{ e.external_id }}</code>{% endif %}
-    </li>
-    {% endfor %}
-</ul>
-{% endif %}
-
-<h2>Verfügbarkeit (music-api)</h2>
-<p>
-    Status: <strong>{{ avail_text }}</strong>{% if deezer_id != "" %} · Deezer
-    <a href="https://www.deezer.com/track/{{ deezer_id }}" target="_blank"
-        ><code>{{ deezer_id }}</code></a
-    >{% endif %}
-</p>
-{% if fetchable %}
-<form method="post" action="/track/{{ id }}/fetch">
-    <button type="submit">Track holen (per ISRC)</button>
-</form>
-{% endif %}
-
-<h2>In Playlists</h2>
-{% if users.is_empty() %}
-<p>Dieser Track ist in keiner Playlist und von niemandem geliked.</p>
-{% else %} {% for u in users %}
-<article>
-    <header>
-        <strong><a href="/user/{{ u.slug }}">@{{ u.slug }}</a></strong>
-        {% if u.liked %} · <span class="hub-badge">geliked</span>{% endif %} · {{
-        u.owned.len() }} eigene · {{ u.followed.len() }} gefolgt
-    </header>
-    {% if u.liked && u.owned.is_empty() && u.followed.is_empty() %}
-    <p><small class="hub-muted">nur geliked</small></p>
-    {% endif %} {% if !u.owned.is_empty() %}
-    <p class="hub-muted"><strong>Eigene Playlists</strong></p>
-    <ul>
-        {% for p in u.owned %}
-        <li>
-            <a href="/playlist/{{ p.id }}">{{ p.name }}</a>
-            <span class="hub-badge hub-badge-ok">eigen</span>
-            {% if p.owner != "" %}<small class="hub-muted">· {{ p.owner }}</small>{% endif
-            %}
-        </li>
-        {% endfor %}
-    </ul>
-    {% endif %} {% if !u.followed.is_empty() %}
-    <p class="hub-muted"><strong>Gefolgte Playlists</strong></p>
-    <ul>
-        {% for p in u.followed %}
-        <li>
-            <a href="/playlist/{{ p.id }}">{{ p.name }}</a>
-            <span class="hub-badge hub-badge-no">gefolgt</span>
-            {% if p.owner != "" %}<small class="hub-muted">· {{ p.owner }}</small>{% endif
-            %}
-        </li>
-        {% endfor %}
-    </ul>
-    {% endif %}
-</article>
-{% endfor %} {% endif %} {% endblock %}
+{% endblock %}

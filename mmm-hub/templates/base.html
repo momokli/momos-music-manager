@@ -119,6 +119,63 @@
         margin-right: 0.4rem;
         color: var(--pico-muted-color);
       }
+      /* Compact / technical tables */
+      .hub-cols {
+        display: grid;
+        grid-template-columns: minmax(15rem, 20rem) 1fr;
+        gap: 1.5rem;
+        align-items: start;
+      }
+      @media (max-width: 48rem) {
+        .hub-cols {
+          grid-template-columns: 1fr;
+        }
+      }
+      .hub-dense table {
+        font-size: 0.85rem;
+      }
+      .hub-kv {
+        width: 100%;
+        font-size: 0.85rem;
+      }
+      .hub-kv th {
+        text-align: left;
+        color: var(--pico-muted-color);
+        font-weight: 600;
+        white-space: nowrap;
+        padding: 0.2rem 0.6rem 0.2rem 0;
+        vertical-align: top;
+      }
+      .hub-kv td {
+        padding: 0.2rem 0;
+      }
+      .hub-dense table th,
+      .hub-dense table td {
+        padding: 0.3rem 0.5rem;
+      }
+      .hub-tag {
+        display: inline-block;
+        font-size: 0.72rem;
+        padding: 0.05rem 0.4rem;
+        margin: 0.08rem;
+        border-radius: 0.35rem;
+        background: var(--pico-code-background-color);
+        border: 1px solid var(--pico-muted-border-color);
+        white-space: nowrap;
+      }
+      .hub-tag-own {
+        border-color: #1e6b3a;
+      }
+      .hub-tag-follow {
+        color: var(--pico-muted-color);
+      }
+      .hub-nowrap {
+        white-space: nowrap;
+      }
+      .hub-scroll-y {
+        max-height: 78vh;
+        overflow-y: auto;
+      }
       .hub-filter ul {
         display: flex;
         flex-wrap: wrap;
@@ -145,6 +202,9 @@
         </li>
         <li>
           <a href="/overlap" {% if nav.active == "overlap" %}aria-current="page"{% endif %}>Entdecken</a>
+        </li>
+        <li>
+          <a href="/playlists/similar" {% if nav.active == "similar" %}aria-current="page"{% endif %}>Ähnlich</a>
         </li>
         <li>
           <a href="/sql" {% if nav.active == "sql" %}aria-current="page"{% endif %}>SQL</a>
