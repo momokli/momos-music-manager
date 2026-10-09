@@ -377,6 +377,28 @@ async fn similar_scope_contributed_keeps_only_collaborative() {
 }
 
 #[tokio::test]
+async fn tags_layer_resolves_playlists() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let summary = mmm_hub::tags::resolve(&app.pool).await.expect("resolve tags");
+    // Fixture playlists: Deep House, Techno, Shared Collab (meta none).
+    assert!(summary.tags >= 3, "expected tag rows, got {}", summary.tags);
+
+    let resp = app
+        .client()
+        .get(app.url("/tags"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    assert!(html.contains("Deep House"));
+    assert!(html.contains("Shared Collab"));
+}
+
+#[tokio::test]
 async fn no_shell_page_returns_500() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;

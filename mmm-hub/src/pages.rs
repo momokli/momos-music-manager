@@ -22,6 +22,7 @@ pub fn router(state: AppState) -> Router {
         .route("/search", get(search_page))
         .route("/overlap", get(overlap_page))
         .route("/playlists/similar", get(similar_page))
+        .route("/tags", get(tags_page))
         .route("/settings", get(settings_page))
         .route("/user/{slug}", get(user_page))
         .route("/playlist/{id}", get(playlist_page))
@@ -679,22 +680,7 @@ fn scope_match(scope: &str, owned: bool, collaborative: bool) -> bool {
 }
 
 /// Lowercase, keep alphanumerics, collapse everything else to single spaces.
-fn normalize_name(s: &str) -> String {
-    let mut out = String::new();
-    let mut prev_space = false;
-    for ch in s.chars() {
-        if ch.is_alphanumeric() {
-            for lc in ch.to_lowercase() {
-                out.push(lc);
-            }
-            prev_space = false;
-        } else if !prev_space {
-            out.push(' ');
-            prev_space = true;
-        }
-    }
-    out.trim().to_string()
-}
+pub(crate) use crate::tags::normalize_name;
 
 struct SimilarEntry {
     uid: i64,
@@ -845,6 +831,62 @@ async fn similar_page(
             .collect(),
         rows: out,
         scopes,
+    })
+}
+
+// ── tags (resolved playlist layer) ──────────────────────────────────────────
+
+#[derive(Template)]
+#[template(path = "tags.html")]
+struct TagsPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    tags: Vec<TagRow>,
+}
+
+struct TagRow {
+    name: String,
+    track_count: i64,
+    user_count: i64,
+    source_count: i64,
+    users: String,
+}
+
+async fn tags_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+
+    let rows = sqlx::query(
+        "SELECT t.id, t.name,
+                (SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id) AS track_count,
+                (SELECT COUNT(DISTINCT user_id) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS user_count,
+                (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count,
+                (SELECT GROUP_CONCAT(DISTINCT u.slug) FROM hub_tag_sources s
+                   JOIN hub_users u ON u.id = s.user_id WHERE s.tag_id = t.id) AS users
+           FROM hub_tags t
+          ORDER BY track_count DESC, t.name
+          LIMIT 1000",
+    )
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
+    let tags: Vec<TagRow> = rows
+        .iter()
+        .map(|r| TagRow {
+            name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+            track_count: r.get::<Option<i64>, _>("track_count").unwrap_or(0),
+            user_count: r.get::<Option<i64>, _>("user_count").unwrap_or(0),
+            source_count: r.get::<Option<i64>, _>("source_count").unwrap_or(0),
+            users: r.get::<Option<String>, _>("users").unwrap_or_default(),
+        })
+        .collect();
+
+    render(&TagsPage {
+        nav,
+        flash: String::new(),
+        tags,
     })
 }
 

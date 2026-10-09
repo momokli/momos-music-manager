@@ -81,6 +81,15 @@ content %}
                     <th scope="row">Energy</th>
                     <td>{{ energy }}</td>
                 </tr>
+                <tr>
+                    <th scope="row">Tags</th>
+                    <td>
+                        {% if tags.is_empty() %}—{% else %} {% for t in tags %}<span
+                            class="hub-tag"
+                            >{{ t }}</span
+                        >{% endfor %} {% endif %}
+                    </td>
+                </tr>
             </tbody>
         </table>
     </section>

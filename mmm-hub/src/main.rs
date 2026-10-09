@@ -16,7 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use mmm_hub::config::Config;
-use mmm_hub::{api, db, features, ingest, pages, spotify, web, worker};
+use mmm_hub::{api, db, features, ingest, pages, spotify, tags, web, worker};
 
 #[derive(Parser)]
 #[command(
@@ -69,6 +69,8 @@ enum Command {
         #[arg(long, default_value_t = 2000)]
         limit: usize,
     },
+    /// Rebuild the tag layer (playlists resolve to tags).
+    ResolveTags,
     /// Run a read-only SQL query against the hub DB.
     Query { sql: String },
     /// List hub users.
@@ -98,6 +100,7 @@ async fn main() -> Result<()> {
         Command::SetPassword { user, password } => cmd_set_password(cfg, &user, &password).await,
         Command::Backfill => cmd_backfill(cfg).await,
         Command::Features { limit } => cmd_features(cfg, limit).await,
+        Command::ResolveTags => cmd_resolve_tags(cfg).await,
         Command::Query { sql } => cmd_query(cfg, &sql).await,
         Command::Users => cmd_users(cfg).await,
         Command::SeedDemo => cmd_seed_demo(cfg).await,
@@ -261,6 +264,16 @@ async fn cmd_features(cfg: Config, limit: usize) -> Result<()> {
     println!(
         "✓ {processed} Tracks abgeglichen{}",
         if exhausted { " (alle erledigt)" } else { "" }
+    );
+    Ok(())
+}
+
+async fn cmd_resolve_tags(cfg: Config) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    let s = tags::resolve(&pool).await?;
+    println!(
+        "✓ Tag-Layer neu gebaut: {} Tags, {} Quellen, {} Track-Tag-Zuordnungen",
+        s.tags, s.sources, s.resolved
     );
     Ok(())
 }

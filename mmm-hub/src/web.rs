@@ -759,6 +759,7 @@ struct TrackPage {
     deezer_id: String,
     fetchable: bool,
     external_ids: Vec<ExternalId>,
+    tags: Vec<String>,
     flash: String,
 }
 
@@ -935,6 +936,15 @@ async fn track_page(
     })
     .collect();
 
+    // Resolved tags (playlist -> tag layer) for this track.
+    let tags: Vec<String> = sqlx::query_scalar::<_, String>(
+        "SELECT tag FROM hub_v_track_tags WHERE track_id = ?1 ORDER BY tag",
+    )
+    .bind(id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
     let mut avail_text = String::from("—");
     let mut deezer_id = String::new();
     let mut fetchable = false;
@@ -974,6 +984,7 @@ async fn track_page(
         deezer_id,
         fetchable,
         external_ids,
+        tags,
         flash: flash.msg.unwrap_or_default(),
     };
 

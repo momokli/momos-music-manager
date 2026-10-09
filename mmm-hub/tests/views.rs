@@ -31,7 +31,7 @@ async fn migrations_run_cleanly_on_fresh_db() {
     .fetch_one(&app.pool)
     .await
     .unwrap();
-    assert_eq!(views, 4, "expected the four overlap views");
+    assert_eq!(views, 5, "expected the overlap views + track-tags view");
 }
 
 /// `hub_v_shared_tracks` should return exactly the tracks present for >= 2
