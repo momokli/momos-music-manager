@@ -1,0 +1,45 @@
+name: Hub CI
+
+# CI for the standalone `mmm-hub` crate (issue M1-1). It is a separate crate,
+# not a member of the root workspace, so it builds from its own directory.
+
+on:
+  pull_request:
+    paths:
+      - 'mmm-hub/**'
+      - '.github/workflows/hub-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'mmm-hub/**'
+      - '.github/workflows/hub-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hub-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: mmm-hub
+
+jobs:
+  build-test:
+    name: Build + Test (hub)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mmm-hub -> target
+          key: hub-ci
+      - name: cargo build
+        run: cargo build --locked
+      - name: cargo test
+        run: cargo test --locked
