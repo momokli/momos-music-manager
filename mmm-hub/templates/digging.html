@@ -93,6 +93,14 @@ content %}
         </option>
         {% endfor %}
     </select>
+    <input
+        type="text"
+        name="tag"
+        value="{{ tag }}"
+        placeholder="Tag (inkl. Kind-Tags) …"
+        aria-label="Tag"
+        style="width: 12rem"
+    />
     <button type="submit">Filtern</button>
     <a href="{{ reset_href }}" role="button" class="secondary outline"
         >Filter zurücksetzen</a

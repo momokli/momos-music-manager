@@ -34,6 +34,7 @@ pub struct Summary {
     pub tags: usize,
     pub linked: usize,
     pub skipped: usize,
+    pub parents: usize,
 }
 
 /// Import categories + tags from `mmm_db` into the hub user `user_slug`.
@@ -73,6 +74,7 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
     .context("read tag_categories (is this a MMM db?)")?;
 
     let mut cat_map: HashMap<i64, i64> = HashMap::new();
+    let mut name_to_hub: HashMap<String, i64> = HashMap::new();
     let mut summary = Summary::default();
     for (mmm_cat_id, name, icon) in cats {
         let hub_id = crate::tags::create_group(hub, user_id, &name, &map_icon(&icon)).await?;
@@ -95,6 +97,7 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
             continue;
         }
         let tag_id = crate::tags::ensure_tag(hub, user_id, &name).await?;
+        name_to_hub.insert(name.trim().to_lowercase(), tag_id);
         summary.tags += 1;
         // The MMM category maps to a hub group (many-to-many).
         if let Some(group_id) = cat_map.get(&mmm_cat_id).copied() {
@@ -119,6 +122,25 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
                 .is_ok()
             {
                 summary.linked += 1;
+            }
+        }
+    }
+
+    // Parent / alias tags (`tag_parents`): child tag -> parent tag, by name.
+    let parent_rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT c.name, p.name FROM tag_parents tp
+           JOIN tags c ON c.id = tp.tag_id
+           JOIN tags p ON p.id = tp.parent_tag_id",
+    )
+    .fetch_all(&mmm)
+    .await
+    .unwrap_or_default();
+    for (child, parent) in parent_rows {
+        let child_id = name_to_hub.get(&child.trim().to_lowercase()).copied();
+        let parent_id = name_to_hub.get(&parent.trim().to_lowercase()).copied();
+        if let (Some(c), Some(p)) = (child_id, parent_id) {
+            if crate::tags::add_tag_parent(hub, c, p).await.is_ok() {
+                summary.parents += 1;
             }
         }
     }

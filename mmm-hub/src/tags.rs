@@ -11,7 +11,8 @@
 //! and filtering.
 
 use anyhow::{Result, bail};
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, SqlitePool};
+use std::collections::HashSet;
 
 /// Lowercase, keep alphanumerics, collapse everything else to single spaces.
 pub fn normalize_name(s: &str) -> String {
@@ -285,6 +286,79 @@ pub async fn list_user_tags(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String
     .fetch_all(pool)
     .await
     .unwrap_or_default()
+}
+
+/// Ids of tags (any owner) whose name contains `needle`, **plus all of their
+/// descendant tags** (transitively), so filtering by a broad/parent tag also
+/// matches its children (e.g. "house" -> "Beatport Top 100 - Progressive House").
+pub async fn matching_tag_ids(pool: &SqlitePool, needle: &str) -> HashSet<i64> {
+    let like = format!("%{}%", needle.to_lowercase());
+    let roots: Vec<i64> = sqlx::query_scalar("SELECT id FROM hub_tags WHERE lower(name) LIKE ?1")
+        .bind(&like)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+    let mut seen: HashSet<i64> = roots.iter().copied().collect();
+    let mut frontier = roots;
+    while !frontier.is_empty() {
+        let mut qb =
+            QueryBuilder::new("SELECT tag_id FROM hub_tag_parents WHERE parent_tag_id IN (");
+        let mut sep = qb.separated(", ");
+        for id in &frontier {
+            sep.push_bind(*id);
+        }
+        qb.push(")");
+        let mut next: Vec<i64> = Vec::new();
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            let id: i64 = r.get("tag_id");
+            if seen.insert(id) {
+                next.push(id);
+            }
+        }
+        frontier = next;
+    }
+    seen
+}
+
+/// Direct parent tags of a tag: `(id, name)`.
+pub async fn tag_parents_of(pool: &SqlitePool, tag_id: i64) -> Vec<(i64, String)> {
+    sqlx::query_as::<_, (i64, String)>(
+        "SELECT p.id, p.name FROM hub_tag_parents tp JOIN hub_tags p ON p.id = tp.parent_tag_id
+          WHERE tp.tag_id = ?1 ORDER BY p.name COLLATE NOCASE",
+    )
+    .bind(tag_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
+/// Direct child tags of a tag: `(id, name)`.
+pub async fn tag_children_of(pool: &SqlitePool, tag_id: i64) -> Vec<(i64, String)> {
+    sqlx::query_as::<_, (i64, String)>(
+        "SELECT c.id, c.name FROM hub_tag_parents tp JOIN hub_tags c ON c.id = tp.tag_id
+          WHERE tp.parent_tag_id = ?1 ORDER BY c.name COLLATE NOCASE",
+    )
+    .bind(tag_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
+/// Add a parent relationship (both tags must exist). Idempotent.
+pub async fn add_tag_parent(pool: &SqlitePool, tag_id: i64, parent_tag_id: i64) -> Result<()> {
+    if tag_id == parent_tag_id {
+        bail!("a tag cannot be its own parent");
+    }
+    sqlx::query(
+        "INSERT OR IGNORE INTO hub_tag_parents (tag_id, parent_tag_id, created_at)
+         VALUES (?1, ?2, ?3)",
+    )
+    .bind(tag_id)
+    .bind(parent_tag_id)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Distinct tag owners (user slugs) — for the filter picker.

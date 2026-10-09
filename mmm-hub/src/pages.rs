@@ -754,31 +754,34 @@ fn text_matches(title: &str, artists: &str, q: &str) -> bool {
     title.to_lowercase().contains(&q) || artists.to_lowercase().contains(&q)
 }
 
-/// Ids from `candidate_ids` that resolve to a tag whose name contains `needle`
-/// (case-insensitive, any owner). Chunked for the bind-variable limit.
+/// Ids from `candidate_ids` that resolve to a tag matching `needle` — either a
+/// tag whose name contains it or one of its descendants (hierarchy-aware).
 async fn tagged_track_ids(
     pool: &sqlx::SqlitePool,
     candidate_ids: &[i64],
     needle: &str,
 ) -> HashSet<i64> {
     let mut set = HashSet::new();
-    let like = format!("%{}%", needle.to_lowercase());
-    for chunk in candidate_ids.chunks(900) {
+    let tag_ids: Vec<i64> = crate::tags::matching_tag_ids(pool, needle).await.into_iter().collect();
+    if tag_ids.is_empty() {
+        return set;
+    }
+    for chunk in candidate_ids.chunks(300) {
         let mut qb = QueryBuilder::new(
-            "SELECT DISTINCT rt.track_id AS tid
-               FROM hub_track_resolved_tags rt
-               JOIN hub_tags t ON t.id = rt.tag_id
-              WHERE lower(t.name) LIKE ",
+            "SELECT DISTINCT track_id FROM hub_track_resolved_tags WHERE track_id IN (",
         );
-        qb.push_bind(&like);
-        qb.push(" AND rt.track_id IN (");
         let mut sep = qb.separated(", ");
         for id in chunk {
             sep.push_bind(*id);
         }
+        qb.push(") AND tag_id IN (");
+        let mut sep = qb.separated(", ");
+        for id in &tag_ids {
+            sep.push_bind(*id);
+        }
         qb.push(")");
         for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
-            set.insert(r.get::<i64, _>("tid"));
+            set.insert(r.get::<i64, _>("track_id"));
         }
     }
     set
@@ -1522,6 +1525,8 @@ struct DiggingQuery {
     tgroup: Option<i64>,
     /// Filter: playlist owner (hub user) slug.
     powner: Option<String>,
+    /// Filter: tag name (hierarchy-aware: also matches child tags).
+    tag: Option<String>,
 }
 
 /// A `<select>` option with a precomputed `selected` flag.
@@ -1551,6 +1556,7 @@ struct DiggingPage {
     tag_owner_opts: Vec<SelOpt>,
     tag_group_opts: Vec<SelOpt>,
     pl_owner_opts: Vec<SelOpt>,
+    tag: String,
     mine: bool,
     bpm: bool,
     harm: bool,
@@ -1593,6 +1599,7 @@ struct DigPlaylist {
 
 #[derive(Clone)]
 struct DigTag {
+    id: i64,
     name: String,
     owner: String,
     groups: Vec<DigGroup>,
@@ -1736,7 +1743,7 @@ async fn dig_details(
 
         // Resolved tags + their groups (LEFT JOIN, so a tag can repeat per group).
         let mut qb = QueryBuilder::new(
-            "SELECT rt.track_id AS tid, t.name AS tag, u.slug AS owner,
+            "SELECT rt.track_id AS tid, t.id AS tag_id, t.name AS tag, u.slug AS owner,
                     g.id AS gid, g.name AS gname, COALESCE(g.icon, '') AS gicon
                FROM hub_track_resolved_tags rt
                JOIN hub_tags t ON t.id = rt.tag_id
@@ -1752,16 +1759,18 @@ async fn dig_details(
         qb.push(") ORDER BY u.slug, t.name COLLATE NOCASE, g.name COLLATE NOCASE");
         for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
             let tid: i64 = r.get("tid");
+            let tag_id: i64 = r.get("tag_id");
             let tag: String = r.get::<Option<String>, _>("tag").unwrap_or_default();
             let owner: String = r.get::<Option<String>, _>("owner").unwrap_or_default();
             let gid: Option<i64> = r.get("gid");
             let gname: String = r.get::<Option<String>, _>("gname").unwrap_or_default();
             let gicon: String = r.get::<Option<String>, _>("gicon").unwrap_or_default();
             let list = tags.entry(tid).or_default();
-            let t = match list.iter().position(|x| x.name == tag && x.owner == owner) {
+            let t = match list.iter().position(|x| x.id == tag_id) {
                 Some(i) => &mut list[i],
                 None => {
                     list.push(DigTag {
+                        id: tag_id,
                         name: tag,
                         owner,
                         groups: Vec::new(),
@@ -2001,6 +2010,12 @@ async fn digging_page(
     let towner = q.towner.clone().unwrap_or_default().trim().to_string();
     let tgroup = q.tgroup.filter(|t| *t > 0).unwrap_or(0);
     let powner = q.powner.clone().unwrap_or_default().trim().to_string();
+    let tag = q.tag.clone().unwrap_or_default().trim().to_string();
+    let tag_ids: HashSet<i64> = if tag.is_empty() {
+        HashSet::new()
+    } else {
+        crate::tags::matching_tag_ids(&st.pool, &tag).await
+    };
     // Absolute BPM tolerance in whole BPM (0 = rounded-equal).
     let tol = q
         .tol
@@ -2039,6 +2054,9 @@ async fn digging_page(
                     && (!u.owned.is_empty() || !u.followed.is_empty())
             })
         {
+            return false;
+        }
+        if !tag.is_empty() && !r.tags.iter().any(|t| tag_ids.contains(&t.id)) {
             return false;
         }
         true
@@ -2080,6 +2098,9 @@ async fn digging_page(
         }
         if !powner.is_empty() {
             s.push_str(&format!("&powner={}", urlencoding::encode(&powner)));
+        }
+        if !tag.is_empty() {
+            s.push_str(&format!("&tag={}", urlencoding::encode(&tag)));
         }
         s
     };
@@ -2204,6 +2225,7 @@ async fn digging_page(
         tag_owner_opts,
         tag_group_opts,
         pl_owner_opts,
+        tag,
         mine: mine_only,
         bpm: bpm_only,
         harm: harm_only,
@@ -2513,6 +2535,8 @@ struct TagDetailPage {
     is_owner: bool,
     groups: Vec<GroupRef>,
     my_groups: Vec<GroupRef>,
+    parents: Vec<GroupRef>,
+    children: Vec<GroupRef>,
     source_count: i64,
     tracks: Vec<TagTrack>,
 }
@@ -2549,6 +2573,24 @@ async fn tag_detail_page(
         })
         .collect();
     let is_owner = d.owner.eq_ignore_ascii_case(&nav.slug);
+    let parents: Vec<GroupRef> = crate::tags::tag_parents_of(&st.pool, id)
+        .await
+        .into_iter()
+        .map(|(id, name)| GroupRef {
+            id,
+            name,
+            icon: String::new(),
+        })
+        .collect();
+    let children: Vec<GroupRef> = crate::tags::tag_children_of(&st.pool, id)
+        .await
+        .into_iter()
+        .map(|(id, name)| GroupRef {
+            id,
+            name,
+            icon: String::new(),
+        })
+        .collect();
     render(&TagDetailPage {
         nav,
         flash: msg.msg.unwrap_or_default(),
@@ -2558,6 +2600,8 @@ async fn tag_detail_page(
         is_owner,
         groups,
         my_groups,
+        parents,
+        children,
         source_count: d.source_count,
         tracks,
     })

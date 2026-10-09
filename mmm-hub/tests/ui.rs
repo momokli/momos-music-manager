@@ -585,6 +585,46 @@ async fn overlap_text_and_tag_filters() {
 }
 
 #[tokio::test]
+async fn tag_hierarchy_is_used_in_filters() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    async fn fetch(app: &common::TestApp, cookie: &str, path: &str) -> String {
+        let resp = app
+            .client()
+            .get(app.url(path))
+            .header("Cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        body(resp).await
+    }
+
+    // Child tag (from alice's playlist, has t_all) with parent "house".
+    let child = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
+        .await
+        .unwrap();
+    let parent = mmm_hub::tags::ensure_tag(&app.pool, app.seed.alice, "house")
+        .await
+        .unwrap();
+    mmm_hub::tags::add_tag_parent(&app.pool, child, parent)
+        .await
+        .unwrap();
+
+    // Filtering by the PARENT name also matches the child's tracks.
+    let by_parent = fetch(&app, &cookie, "/overlap?tag=house").await;
+    assert!(by_parent.contains("Shared Anthem"));
+    let none = fetch(&app, &cookie, "/overlap?tag=zzzzzz").await;
+    assert!(none.contains("Keine gemeinsamen Tracks"));
+
+    // The tag page shows the parent + child relationships.
+    let tp = fetch(&app, &cookie, &format!("/tag/{child}")).await;
+    assert!(tp.contains("Parent-Tags"));
+    assert!(tp.contains("house"));
+}
+
+#[tokio::test]
 async fn toggle_returns_row_fragment_for_htmx() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
