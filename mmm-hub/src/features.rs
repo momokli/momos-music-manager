@@ -213,6 +213,68 @@ pub async fn sync_once(pool: &SqlitePool, cfg: &Config, batch: i64) -> Result<us
     Ok(pairs.len())
 }
 
+#[derive(Debug, Clone)]
+pub struct Recommendation {
+    pub title: String,
+    pub artists: String,
+    pub spotify_id: String,
+}
+
+#[derive(Deserialize)]
+struct RecResp {
+    #[serde(default)]
+    content: Vec<RecItem>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecItem {
+    track_title: Option<String>,
+    #[serde(default)]
+    artists: Vec<RecArtist>,
+    href: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RecArtist {
+    name: Option<String>,
+}
+
+/// ReccoBeats track recommendations from one or more seed Spotify ids (no auth).
+pub async fn recommendations(
+    cfg: &Config,
+    seed_spotify_id: &str,
+    size: usize,
+) -> Result<Vec<Recommendation>> {
+    if seed_spotify_id.is_empty() {
+        return Ok(Vec::new());
+    }
+    let url = format!(
+        "{}/track/recommendation?seeds={}&size={}",
+        cfg.reccobeats_base, seed_spotify_id, size
+    );
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let body: RecResp = resp.json().await.unwrap_or(RecResp { content: vec![] });
+    Ok(body
+        .content
+        .into_iter()
+        .map(|i| Recommendation {
+            title: i.track_title.unwrap_or_default(),
+            artists: i
+                .artists
+                .iter()
+                .filter_map(|a| a.name.clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+            spotify_id: i.href.as_deref().and_then(spotify_id_from_href).unwrap_or_default(),
+        })
+        .collect())
+}
+
 /// Backfill loop for the CLI: run batches until `max_tracks` reached or done.
 /// Returns `(processed, exhausted)`.
 pub async fn backfill(pool: &SqlitePool, cfg: &Config, max_tracks: usize) -> Result<(usize, bool)> {

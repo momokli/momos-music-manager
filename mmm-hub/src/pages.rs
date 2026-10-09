@@ -853,6 +853,7 @@ struct DiggingPage {
     seed_artists: String,
     suggestions: Vec<SuggRow>,
     lastfm: Vec<LfmRow>,
+    reccobeats: Vec<LfmRow>,
     lastfm_enabled: bool,
 }
 
@@ -885,6 +886,7 @@ async fn digging_page(
     let (mut seed_id, mut seed_title, mut seed_artists) = (0i64, String::new(), String::new());
     let mut suggestions: Vec<SuggRow> = Vec::new();
     let mut lastfm: Vec<LfmRow> = Vec::new();
+    let mut reccobeats: Vec<LfmRow> = Vec::new();
 
     if let Some(sid) = q.seed {
         if let Ok(Some(seed)) = crate::digging::load_seed(&st.pool, sid).await {
@@ -919,6 +921,27 @@ async fn digging_page(
                         .collect();
                 }
             }
+
+            // ReccoBeats recommendations (free, no auth) when we have a Spotify id.
+            if let Ok(Some(sid)) = sqlx::query_scalar::<_, String>(
+                "SELECT external_id FROM hub_track_external_ids
+                  WHERE track_id = ?1 AND service = 'spotify' LIMIT 1",
+            )
+            .bind(sid)
+            .fetch_optional(&st.pool)
+            .await
+            {
+                if let Ok(recs) = crate::features::recommendations(&st.cfg, &sid, 30).await {
+                    reccobeats = recs
+                        .into_iter()
+                        .map(|r| LfmRow {
+                            name: r.title,
+                            artist: r.artists,
+                            score: String::new(),
+                        })
+                        .collect();
+                }
+            }
         }
     }
 
@@ -931,6 +954,7 @@ async fn digging_page(
         seed_artists,
         suggestions,
         lastfm,
+        reccobeats,
         lastfm_enabled,
     })
 }
