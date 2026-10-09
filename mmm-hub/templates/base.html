@@ -10,6 +10,31 @@
     />
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
     <style>
+      :root {
+        --pico-spacing: 0.65rem;
+        --pico-typography-spacing-vertical: 0.6rem;
+        --pico-form-element-spacing-vertical: 0.4rem;
+        --pico-form-element-spacing-horizontal: 0.6rem;
+      }
+      body {
+        font-size: 0.95rem;
+      }
+      article {
+        padding: 0.8rem 1rem;
+        margin-bottom: 0.8rem;
+      }
+      hgroup {
+        margin-bottom: 0.6rem;
+      }
+      h1 {
+        font-size: 1.5rem;
+      }
+      h2 {
+        font-size: 1.1rem;
+      }
+      main.container-fluid {
+        padding-inline: 0.8rem;
+      }
       nav.hub-nav {
         border-bottom: 1px solid var(--pico-muted-border-color);
       }
@@ -151,27 +176,63 @@
       }
       .hub-dense table th,
       .hub-dense table td {
-        padding: 0.3rem 0.5rem;
+        padding: 0.25rem 0.45rem;
       }
-      .hub-tag {
+      main table {
+        width: 100%;
+      }
+      main table td {
+        overflow-wrap: anywhere;
+      }
+      /* Filter bar: one consistent box on top of every table */
+      nav.hub-filter {
         display: inline-block;
-        font-size: 0.72rem;
-        padding: 0.05rem 0.4rem;
-        margin: 0.08rem;
-        border-radius: 0.35rem;
-        background: var(--pico-code-background-color);
         border: 1px solid var(--pico-muted-border-color);
+        border-radius: 0.5rem;
+        padding: 0.15rem 0.6rem;
+        margin: 0 0.4rem 0.6rem 0;
+      }
+      nav.hub-filter ul {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      /* Cell values: quiet inline text, not boxy chips */
+      .hub-tag {
+        display: inline;
+        font-size: 0.78rem;
+        padding: 0;
+        margin: 0 0.5rem 0 0;
+        border: 0;
+        background: none;
         white-space: nowrap;
+        text-decoration: none;
       }
       .hub-tag-own {
-        border-color: #1e6b3a;
+        color: #7fe0a0;
       }
       .hub-tag-follow {
         color: var(--pico-muted-color);
       }
       .hub-tag-collab {
-        border-color: #6b5a1e;
-        background: #2a2410;
+        color: #e0c86a;
+      }
+      /* Filter picker chips (deliberately boxy) */
+      .hub-chip {
+        display: inline-block;
+        font-size: 0.78rem;
+        padding: 0.05rem 0.5rem;
+        border-radius: 1rem;
+        border: 1px solid var(--pico-muted-border-color);
+        text-decoration: none;
+      }
+      .hub-chip-on {
+        border-color: #1e6b3a;
+        background: #123c22;
+        color: #7fe0a0;
       }
       .hub-nowrap {
         white-space: nowrap;

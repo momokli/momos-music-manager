@@ -14,9 +14,10 @@ content %}
             {% if u.selected %}<a
                 href="{{ u.href }}"
                 aria-current="true"
-                class="hub-tag hub-tag-own"
+                class="hub-chip hub-chip-on"
                 >@{{ u.slug }} ✓</a
-            >{% else %}<a href="{{ u.href }}" class="hub-tag">@{{ u.slug }}</a>{% endif %}
+            >{% else %}<a href="{{ u.href }}" class="hub-chip">@{{ u.slug }}</a>{% endif
+            %}
         </li>
         {% endfor %}
     </ul>
