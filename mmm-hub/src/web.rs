@@ -751,6 +751,9 @@ struct TrackPage {
     duration: String,
     isrc: String,
     explicit: bool,
+    bpm: String,
+    music_key: String,
+    energy: String,
     users: Vec<UserGroup>,
     avail_text: String,
     deezer_id: String,
@@ -874,6 +877,39 @@ async fn track_page(
         .unwrap_or_else(|| "—".to_string());
     let isrc: String = row.get::<Option<String>, _>("isrc").unwrap_or_default();
 
+    // Audio features (ReccoBeats) for this track.
+    let feat = sqlx::query(
+        "SELECT bpm, camelot, key_pitch, key_mode, energy
+           FROM hub_track_features WHERE track_id = ?1 AND found = 1",
+    )
+    .bind(id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten();
+    let (bpm, music_key, energy) = match feat {
+        Some(r) => {
+            let bpm: Option<f64> = r.get("bpm");
+            let camelot: Option<String> = r.get("camelot");
+            let pitch: Option<i64> = r.get("key_pitch");
+            let mode: Option<i64> = r.get("key_mode");
+            let energy: Option<f64> = r.get("energy");
+            let bpm = bpm.map(|b| format!("{b:.0}")).unwrap_or_else(|| "—".into());
+            let music_key = match (pitch, mode, camelot) {
+                (Some(p), Some(m), Some(c)) => {
+                    let m = if m == 1 { "maj" } else { "min" };
+                    format!("{} {} · {c}", crate::features::key_name(p), m)
+                }
+                _ => "—".to_string(),
+            };
+            let energy = energy
+                .map(|e| format!("{:.2}", e))
+                .unwrap_or_else(|| "—".into());
+            (bpm, music_key, energy)
+        }
+        None => ("—".into(), "—".into(), "—".into()),
+    };
+
     // External service IDs for this track.
     let external_ids: Vec<ExternalId> = sqlx::query(
         "SELECT service, external_id, url FROM hub_track_external_ids
@@ -930,6 +966,9 @@ async fn track_page(
         duration,
         isrc,
         explicit: row.get::<Option<i64>, _>("explicit").unwrap_or(0) != 0,
+        bpm,
+        music_key,
+        energy,
         users,
         avail_text,
         deezer_id,

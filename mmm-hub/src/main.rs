@@ -16,7 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use mmm_hub::config::Config;
-use mmm_hub::{api, db, ingest, pages, spotify, web, worker};
+use mmm_hub::{api, db, features, ingest, pages, spotify, web, worker};
 
 #[derive(Parser)]
 #[command(
@@ -64,6 +64,11 @@ enum Command {
     },
     /// Queue a full initial load: enable all playlists + (re)fetch likes for all users.
     Backfill,
+    /// Backfill audio features (BPM/key/energy) via ReccoBeats.
+    Features {
+        #[arg(long, default_value_t = 2000)]
+        limit: usize,
+    },
     /// Run a read-only SQL query against the hub DB.
     Query { sql: String },
     /// List hub users.
@@ -92,6 +97,7 @@ async fn main() -> Result<()> {
         Command::FetchPlaylists { user } => cmd_fetch_playlists(cfg, &user).await,
         Command::SetPassword { user, password } => cmd_set_password(cfg, &user, &password).await,
         Command::Backfill => cmd_backfill(cfg).await,
+        Command::Features { limit } => cmd_features(cfg, limit).await,
         Command::Query { sql } => cmd_query(cfg, &sql).await,
         Command::Users => cmd_users(cfg).await,
         Command::SeedDemo => cmd_seed_demo(cfg).await,
@@ -245,6 +251,17 @@ async fn cmd_ingest(cfg: Config, slug: &str) -> Result<()> {
     println!("  davon mit Items:         {}", summary.owned_with_items);
     println!("  Liked-Tracks:            {}", summary.liked_tracks);
     println!("  Playlist-Memberships:    {}", summary.memberships);
+    Ok(())
+}
+
+async fn cmd_features(cfg: Config, limit: usize) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    println!("Hole Audio-Features (ReccoBeats) … max {limit}");
+    let (processed, exhausted) = features::backfill(&pool, &cfg, limit).await?;
+    println!(
+        "✓ {processed} Tracks abgeglichen{}",
+        if exhausted { " (alle erledigt)" } else { "" }
+    );
     Ok(())
 }
 

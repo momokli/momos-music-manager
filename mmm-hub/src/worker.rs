@@ -41,10 +41,11 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) {
 }
 
 async fn run_once(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
-    // Likes first (cheap, one endpoint), then playlist items.
+    // Likes first (cheap, one endpoint), then playlist items, then features.
     let likes = sync_likes_jobs(pool, cfg).await?;
     let playlists = playlist_jobs(pool, cfg).await?;
-    Ok(likes || playlists)
+    let features = crate::features::sync_once(pool, cfg, 40).await.unwrap_or(0) > 0;
+    Ok(likes || playlists || features)
 }
 
 // ── liked tracks ────────────────────────────────────────────────────────────

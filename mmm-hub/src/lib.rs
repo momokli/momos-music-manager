@@ -7,6 +7,7 @@
 pub mod api;
 pub mod config;
 pub mod db;
+pub mod features;
 pub mod ingest;
 pub mod music_api;
 pub mod pages;

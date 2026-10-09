@@ -10,6 +10,7 @@ pub struct Config {
     pub spotify_client_secret: Option<String>,
     pub spotify_redirect_uri: String,
     pub spotify_api_base: String,
+    pub reccobeats_base: String,
     pub music_api_base: String,
     pub music_api_token: Option<String>,
 }
@@ -28,6 +29,8 @@ impl Config {
                 .unwrap_or_else(|| "http://127.0.0.1:8888/callback".to_string()),
             spotify_api_base: env("SPOTIFY_API_BASE")
                 .unwrap_or_else(|| crate::spotify::DEFAULT_API_BASE.to_string()),
+            reccobeats_base: env("RECCOBEATS_BASE")
+                .unwrap_or_else(|| "https://api.reccobeats.com/v1".to_string()),
             music_api_base: env("MUSIC_API_BASE")
                 .unwrap_or_else(|| "http://127.0.0.1:8710".to_string()),
             music_api_token: env("MUSIC_API_TOKEN"),
@@ -44,6 +47,7 @@ impl Config {
             spotify_client_secret: None,
             spotify_redirect_uri: "http://127.0.0.1:8888/callback".to_string(),
             spotify_api_base: crate::spotify::DEFAULT_API_BASE.to_string(),
+            reccobeats_base: "https://api.reccobeats.com/v1".to_string(),
             music_api_base: "http://127.0.0.1:8710".to_string(),
             music_api_token: None,
         }
