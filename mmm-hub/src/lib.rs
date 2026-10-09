@@ -9,6 +9,7 @@ pub mod config;
 pub mod db;
 pub mod digging;
 pub mod features;
+pub mod genres;
 pub mod ingest;
 pub mod lastfm;
 pub mod music_api;

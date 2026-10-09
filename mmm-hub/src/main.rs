@@ -16,7 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use mmm_hub::config::Config;
-use mmm_hub::{api, db, features, ingest, pages, spotify, tags, web, worker};
+use mmm_hub::{api, db, features, genres, ingest, pages, spotify, tags, web, worker};
 
 #[derive(Parser)]
 #[command(
@@ -71,6 +71,11 @@ enum Command {
     },
     /// Rebuild the tag layer (playlists resolve to tags).
     ResolveTags,
+    /// Backfill track genres via Last.fm (needs LASTFM_API_KEY).
+    Genres {
+        #[arg(long, default_value_t = 2000)]
+        limit: usize,
+    },
     /// Run a read-only SQL query against the hub DB.
     Query { sql: String },
     /// List hub users.
@@ -101,6 +106,7 @@ async fn main() -> Result<()> {
         Command::Backfill => cmd_backfill(cfg).await,
         Command::Features { limit } => cmd_features(cfg, limit).await,
         Command::ResolveTags => cmd_resolve_tags(cfg).await,
+        Command::Genres { limit } => cmd_genres(cfg, limit).await,
         Command::Query { sql } => cmd_query(cfg, &sql).await,
         Command::Users => cmd_users(cfg).await,
         Command::SeedDemo => cmd_seed_demo(cfg).await,
@@ -274,6 +280,20 @@ async fn cmd_resolve_tags(cfg: Config) -> Result<()> {
     println!(
         "✓ Tag-Layer neu gebaut: {} Tags, {} Quellen, {} Track-Tag-Zuordnungen",
         s.tags, s.sources, s.resolved
+    );
+    Ok(())
+}
+
+async fn cmd_genres(cfg: Config, limit: usize) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    if cfg.lastfm_api_key.is_none() {
+        println!("! LASTFM_API_KEY nicht gesetzt — Genres übersprungen.");
+        return Ok(());
+    }
+    let (processed, exhausted) = genres::backfill(&pool, &cfg, limit).await?;
+    println!(
+        "✓ {processed} Tracks mit Genres{}",
+        if exhausted { " (alle erledigt)" } else { "" }
     );
     Ok(())
 }

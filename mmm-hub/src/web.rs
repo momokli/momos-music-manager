@@ -760,6 +760,7 @@ struct TrackPage {
     fetchable: bool,
     external_ids: Vec<ExternalId>,
     tags: Vec<String>,
+    genres: Vec<String>,
     flash: String,
 }
 
@@ -945,6 +946,15 @@ async fn track_page(
     .await
     .unwrap_or_default();
 
+    // Community genres (Last.fm), if fetched.
+    let genres: Vec<String> = sqlx::query_scalar::<_, String>(
+        "SELECT genre FROM hub_track_genres WHERE track_id = ?1 AND genre <> '' ORDER BY genre",
+    )
+    .bind(id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
     let mut avail_text = String::from("—");
     let mut deezer_id = String::new();
     let mut fetchable = false;
@@ -985,6 +995,7 @@ async fn track_page(
         fetchable,
         external_ids,
         tags,
+        genres,
         flash: flash.msg.unwrap_or_default(),
     };
 

@@ -45,7 +45,8 @@ async fn run_once(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
     let likes = sync_likes_jobs(pool, cfg).await?;
     let playlists = playlist_jobs(pool, cfg).await?;
     let features = crate::features::sync_once(pool, cfg, 40).await.unwrap_or(0) > 0;
-    Ok(likes || playlists || features)
+    let genres = crate::genres::sync_once(pool, cfg, 40).await.unwrap_or(0) > 0;
+    Ok(likes || playlists || features || genres)
 }
 
 // ── liked tracks ────────────────────────────────────────────────────────────

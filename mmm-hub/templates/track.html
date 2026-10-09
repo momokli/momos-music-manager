@@ -96,6 +96,15 @@ content %}
                         >{% endfor %} {% endif %}
                     </td>
                 </tr>
+                <tr>
+                    <th scope="row">Genres</th>
+                    <td>
+                        {% if genres.is_empty() %}—{% else %} {% for g in genres %}<span
+                            class="hub-tag"
+                            >{{ g }}</span
+                        >{% endfor %} {% endif %}
+                    </td>
+                </tr>
             </tbody>
         </table>
     </section>
