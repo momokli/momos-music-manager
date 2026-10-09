@@ -107,6 +107,44 @@ Co-Occurrence** automatisch; **DigDeeper.fm** wird als Deep-Link/Handoff pro Tra
 ("auf digdeeper.fm oeffnen"). Ergebnisdarstellung: Zeilen = Vorschlaege, **eine Spalte je
 Quelle** + Score — konsistent zum Overlap-/Similar-Layout.
 
+## 7. Paid / kommerzielle Datenquellen (Recherche-Update)
+
+**Last.fm: nicht verlassen.** Die API-Doku sagt zwar „available to anyone“, aber die
+**Key-Anlage ist seit Jahren faktisch kaputt/geschlossen** (zahlreiche „can't create Last.fm API
+key“-Threads; `/api/account/create` liefert je nach Bot/Account nichts). Wer einen **alten** Key hat:
+nutzen — nur nicht darauf planen.
+
+Spotify `audio-features` ist tot (Nov 2024). Kommerzielle Ersatzquellen (Preise verifiziert ~2026-09;
+Quelle: freqblog.com/compare — **Vendor-Seite, entsprechend parteiisch**):
+
+| Anbieter                      | Felder                                                                                                              | Lookup                                                                  | Preis                                                               |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| **FreqBlog**                  | BPM, Key + **Camelot**, Energy, Danceability, Valence, Loudness, TimeSig, **Mood, Genre**, 44 Felder, `mood_vector` | **Name + ISRC** (kein Spotify-ID nötig), `POST /identify` (Fingerprint) | Free 1.000/mo; Hobbyist £9.99/mo; Pro £129/mo (750k) ≈ **£0.17/1k** |
+| **MeloData**                  | BPM + Key (gut), sonst wenig                                                                                        | match→ISRC                                                              | Free 1.000/mo; ab $19/mo; Scale $299/mo (1M) ≈ $0.30/1k             |
+| **Musicae** (api.musicae.io)  | BPM, Key, **Camelot**, 9 DJ-Scores                                                                                  | Spotify-ID oder ISRC                                                    | paid (RapidAPI) — DJ-fokussiert                                     |
+| **Cyanite**                   | sehr gutes **Mood/Genre**, BPM, Key                                                                                 | **upload-only**                                                         | ab **€290/mo + per track**                                          |
+| **Soundcharts**               | Audio-Features + Industry-Intel                                                                                     | —                                                                       | ab $50/mo (10k Queries) ≈ $5/1k                                     |
+| **GetSongBPM**                | **nur** BPM + Key                                                                                                   | Name                                                                    | frei (Backlink-Pflicht)                                             |
+| **AudD**                      | Recognition, Basis-Meta                                                                                             | Fingerprint                                                             | $5/1k (Entry), $3.60/1k (500k)                                      |
+| **MusicAPI.com**              | Streaming-Aggregator (User-Libraries)                                                                               | OAuth                                                                   | €0.60/1k, **€500/mo Minimum**                                       |
+| **Describe Music / TrackTag** | AI-Tagging (Genre/Mood/BPM/Key)                                                                                     | upload/API                                                              | Credits bzw. günstiger als Cyanite                                  |
+
+**Fallback-Coverage:** FreqBlog nutzt als 2. Stufe **MusicBrainz → AcousticBrainz** (offener CC0-Datensatz,
+7.5M Zeilen) und sonst On-Demand-Analyse. Cyanite/Musiio-artige Modelle analysieren die **Audiodatei**
+(am genauesten, teurer).
+
+### Empfehlung
+
+1. **ReccoBeats (frei)** als erster Durchlauf — deckt ~46 %.
+2. **FreqBlog** (paid) für den **Rest**: ISRC-Lookup, liefert BPM/Key/**Camelot/Genre/Mood** und passt zum
+   Hub (Filter „ist das Techno?“ + harmonisches Digging). Alternativ **MeloData** (billiger bei Volumen,
+   aber nur BPM+Key).
+3. Für maximale Genauigkeit bei Mood/Genre: **Cyanite** (upload) — nur wenn Genauigkeit > Preis.
+4. **Musicae** speziell, wenn DJ-Scores/Camelot im Fokus stehen.
+
+Umsetzung im Hub: Adapter generisch halten (ISRC → features), Reihenfolge **ReccoBeats → bezahlter Fallback
+nur bei `found=0`**; Key über `/admin` pflegbar.
+
 ## Quellen (Auswahl)
 
 - Spotify changelog / community: audio-features deprecated 2024-11-27
