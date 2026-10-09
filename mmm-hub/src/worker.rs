@@ -33,7 +33,7 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) {
         let cfg = cfg.clone();
         tokio::spawn(async move {
             loop {
-                // On-demand requests first, then the generic backlog.
+                // On-demand ReccoBeats requests first, then the generic backlog.
                 let p = crate::features::priority_once(&pool, &cfg, 50)
                     .await
                     .unwrap_or(0)
@@ -42,6 +42,22 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) {
                 let g = crate::genres::sync_once(&pool, &cfg, 50).await.unwrap_or(0) > 0;
                 let worked = p || f || g;
                 tokio::time::sleep(if worked { BUSY_WAIT } else { IDLE_WAIT }).await;
+            }
+        });
+    }
+
+    // FreqBlog fallback loop (slow, paid): only on-demand requests that
+    // ReccoBeats already missed. Separate so the ~20s lookups can't block the
+    // ReccoBeats/genre loops.
+    {
+        let pool = pool.clone();
+        let cfg = cfg.clone();
+        tokio::spawn(async move {
+            loop {
+                let n = crate::features::freqblog_priority_once(&pool, &cfg, 5)
+                    .await
+                    .unwrap_or(0);
+                tokio::time::sleep(if n > 0 { BUSY_WAIT } else { IDLE_WAIT }).await;
             }
         });
     }

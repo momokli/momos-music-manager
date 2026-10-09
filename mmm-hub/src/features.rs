@@ -242,14 +242,16 @@ pub async fn sync_once(pool: &SqlitePool, cfg: &Config, batch: i64) -> Result<us
     Ok(pairs.len())
 }
 
-/// High-priority batch: process on-demand requests (see `enqueue_missing`) before
-/// the generic backlog. Each attempted track is removed from the request table.
+/// High-priority ReccoBeats pass: process freshly requested tracks that have no
+/// features row yet. Hits are stored and the request removed; misses are marked
+/// `found = 0` but kept, so the (slow, paid) FreqBlog pass can pick them up.
 pub async fn priority_once(pool: &SqlitePool, cfg: &Config, batch: i64) -> Result<usize> {
     let rows = sqlx::query(
         "SELECT r.track_id AS tid, e.external_id AS sid
            FROM hub_feature_requests r
            JOIN hub_track_external_ids e ON e.track_id = r.track_id AND e.service = 'spotify'
           WHERE e.external_id <> ''
+            AND NOT EXISTS (SELECT 1 FROM hub_track_features f WHERE f.track_id = r.track_id)
           LIMIT ?1",
     )
     .bind(batch)
@@ -270,29 +272,58 @@ pub async fn priority_once(pool: &SqlitePool, cfg: &Config, batch: i64) -> Resul
     let found: std::collections::HashMap<String, &Feature> =
         feats.iter().map(|f| (f.spotify_id.clone(), f)).collect();
 
-    // ReccoBeats hits first; the misses go to the paid FreqBlog fallback (if
-    // configured and within budget), else are marked tried cheaply.
-    let mut missed: Vec<i64> = Vec::new();
-    let fb_ok = crate::freqblog::enabled(cfg) && crate::freqblog::remaining(pool, cfg).await > 0;
     for (tid, sid) in &pairs {
         match found.get(sid) {
-            Some(f) => store(pool, *tid, Some(f)).await?,
-            None if fb_ok => missed.push(*tid),
+            Some(f) => {
+                store(pool, *tid, Some(f)).await?;
+                sqlx::query("DELETE FROM hub_feature_requests WHERE track_id = ?1")
+                    .bind(tid)
+                    .execute(pool)
+                    .await?;
+            }
+            // ReccoBeats missed: mark tried, keep the request for FreqBlog.
             None => store(pool, *tid, None).await?,
         }
-        sqlx::query("DELETE FROM hub_feature_requests WHERE track_id = ?1")
-            .bind(tid)
-            .execute(pool)
-            .await?;
-    }
-    if !missed.is_empty() {
-        let _ = crate::freqblog::enrich_tracks(pool, cfg, &missed, missed.len()).await;
     }
     Ok(pairs.len())
 }
 
+/// Slow, paid FreqBlog pass for requests ReccoBeats already missed (`found = 0`).
+/// Runs in its own loop because each lookup can take ~20s. Bounded by `batch`
+/// and the monthly budget.
+pub async fn freqblog_priority_once(pool: &SqlitePool, cfg: &Config, batch: i64) -> Result<usize> {
+    if !crate::freqblog::enabled(cfg) {
+        return Ok(0);
+    }
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT r.track_id FROM hub_feature_requests r
+           JOIN hub_track_features f ON f.track_id = r.track_id AND f.found = 0
+          LIMIT ?1",
+    )
+    .bind(batch)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let (processed, stopped) =
+        crate::freqblog::enrich_tracks(pool, cfg, &ids, ids.len()).await?;
+    // Only clear requests we actually handled; on a quota wall keep them for later.
+    if !stopped {
+        for id in &ids {
+            sqlx::query("DELETE FROM hub_feature_requests WHERE track_id = ?1")
+                .bind(id)
+                .execute(pool)
+                .await?;
+        }
+    }
+    Ok(processed)
+}
+
 /// Enqueue a set of candidate tracks for on-demand feature lookup: only those
-/// that actually have a Spotify id and no *usable* features yet (`found = 1`),
+/// that actually have a Spotify id but no *usable* features yet (`found = 1`),
 /// so tracks ReccoBeats already missed can still be retried via FreqBlog.
 /// Returns how many were newly queued.
 pub async fn enqueue_missing(pool: &SqlitePool, candidate_ids: &[i64]) -> Result<usize> {
