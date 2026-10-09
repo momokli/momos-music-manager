@@ -7,8 +7,10 @@
 pub mod api;
 pub mod config;
 pub mod db;
+pub mod digging;
 pub mod features;
 pub mod ingest;
+pub mod lastfm;
 pub mod music_api;
 pub mod pages;
 pub mod spotify;

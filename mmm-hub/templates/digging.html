@@ -1,0 +1,65 @@
+{% extends "base.html" %} {% block title %}Digging — MMM Hub{% endblock %} {% block content %}
+<hgroup>
+    <h1>Digging</h1>
+    <p class="hub-muted">
+        Aus einem Seed-Track verwandte Tracks finden — hub-intern (gemeinsame Playlists) und optional
+        extern (Last.fm).
+    </p>
+</hgroup>
+
+{% if !has_seed %}
+<p class="hub-muted">
+    Kein Seed gewählt. Öffne einen <a href="/search">Track</a> und klicke dort „Digging".
+</p>
+<form method="get" action="/search" role="search">
+    <input type="search" name="q" placeholder="Track suchen …" aria-label="Track suchen" />
+    <button type="submit">Suchen</button>
+</form>
+{% else %}
+<p class="hub-muted">
+    Seed: <a href="/track/{{ seed_id }}">{{ seed_artists }} — {{ seed_title }}</a>
+</p>
+
+<h2>Hub-intern (gemeinsame Playlists)</h2>
+{% if suggestions.is_empty() %}
+<p class="hub-muted">Keine gemeinsam vorkommenden Tracks.</p>
+{% else %}
+<div class="overflow-auto hub-scroll-y">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Verwandte Tracks über gemeinsame Playlists
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Track</th>
+                <th scope="col">Gemeinsame Playlists</th>
+                <th scope="col">User</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in suggestions %}
+            <tr>
+                <td class="hub-nowrap">
+                    <a href="/track/{{ s.id }}">{{ s.artists }} — {{ s.title }}</a>
+                </td>
+                <td>{{ s.shared_playlists }}</td>
+                <td>{{ s.user_slugs }} <span class="hub-muted">({{ s.users }})</span></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<h2>Last.fm</h2>
+{% if !lastfm_enabled %}
+<p class="hub-muted">Nicht konfiguriert (Umgebungsvariable <code>LASTFM_API_KEY</code> setzen).</p>
+{% else %} {% if lastfm.is_empty() %}
+<p class="hub-muted">Keine Last.fm-Treffer.</p>
+{% else %}
+<ol>
+    {% for l in lastfm %}
+    <li>{{ l.artist }} — {{ l.name }} <span class="hub-muted">{{ l.score }}</span></li>
+    {% endfor %}
+</ol>
+{% endif %} {% endif %} {% endif %} {% endblock %}

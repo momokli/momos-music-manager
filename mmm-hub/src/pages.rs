@@ -23,6 +23,7 @@ pub fn router(state: AppState) -> Router {
         .route("/overlap", get(overlap_page))
         .route("/playlists/similar", get(similar_page))
         .route("/tags", get(tags_page))
+        .route("/digging", get(digging_page))
         .route("/settings", get(settings_page))
         .route("/user/{slug}", get(user_page))
         .route("/playlist/{id}", get(playlist_page))
@@ -831,6 +832,106 @@ async fn similar_page(
             .collect(),
         rows: out,
         scopes,
+    })
+}
+
+// ── digging ────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+struct DiggingQuery {
+    seed: Option<i64>,
+}
+
+#[derive(Template)]
+#[template(path = "digging.html")]
+struct DiggingPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    has_seed: bool,
+    seed_id: i64,
+    seed_title: String,
+    seed_artists: String,
+    suggestions: Vec<SuggRow>,
+    lastfm: Vec<LfmRow>,
+    lastfm_enabled: bool,
+}
+
+struct SuggRow {
+    id: i64,
+    title: String,
+    artists: String,
+    shared_playlists: i64,
+    users: i64,
+    user_slugs: String,
+}
+
+struct LfmRow {
+    name: String,
+    artist: String,
+    score: String,
+}
+
+async fn digging_page(
+    State(st): State<AppState>,
+    Query(q): Query<DiggingQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "digging").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let lastfm_enabled = st.cfg.lastfm_api_key.is_some();
+
+    let mut has_seed = false;
+    let (mut seed_id, mut seed_title, mut seed_artists) = (0i64, String::new(), String::new());
+    let mut suggestions: Vec<SuggRow> = Vec::new();
+    let mut lastfm: Vec<LfmRow> = Vec::new();
+
+    if let Some(sid) = q.seed {
+        if let Ok(Some(seed)) = crate::digging::load_seed(&st.pool, sid).await {
+            has_seed = true;
+            seed_id = seed.id;
+            seed_title = seed.title.clone();
+            seed_artists = seed.artists.clone();
+
+            suggestions = crate::digging::internal_suggestions(&st.pool, sid, 200)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| SuggRow {
+                    id: s.id,
+                    title: s.title,
+                    artists: s.artists,
+                    shared_playlists: s.shared_playlists,
+                    users: s.users,
+                    user_slugs: s.user_slugs,
+                })
+                .collect();
+
+            if lastfm_enabled {
+                if let Ok(l) = crate::lastfm::similar_tracks(&st.cfg, &seed.artists, &seed.title).await {
+                    lastfm = l
+                        .into_iter()
+                        .map(|s| LfmRow {
+                            name: s.name,
+                            artist: s.artist,
+                            score: format!("{:.0}%", s.match_score * 100.0),
+                        })
+                        .collect();
+                }
+            }
+        }
+    }
+
+    render(&DiggingPage {
+        nav,
+        flash: String::new(),
+        has_seed,
+        seed_id,
+        seed_title,
+        seed_artists,
+        suggestions,
+        lastfm,
+        lastfm_enabled,
     })
 }
 

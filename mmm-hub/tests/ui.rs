@@ -399,6 +399,35 @@ async fn tags_layer_resolves_playlists() {
 }
 
 #[tokio::test]
+async fn digging_internal_suggestions() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // Without a seed -> prompt.
+    let no_seed = app
+        .client()
+        .get(app.url("/digging"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert!(body(no_seed).await.contains("Kein Seed"));
+
+    // Seed t_pl: co-occurs with t_all in alice's "Deep House" playlist.
+    let resp = app
+        .client()
+        .get(app.url(&format!("/digging?seed={}", app.seed.t_pl)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    assert!(html.contains("Hub-intern"));
+    assert!(html.contains("Shared Anthem"));
+}
+
+#[tokio::test]
 async fn no_shell_page_returns_500() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
