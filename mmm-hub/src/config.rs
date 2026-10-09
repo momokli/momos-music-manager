@@ -44,11 +44,11 @@ impl Config {
             cosine_base: env("COSINE_BASE")
                 .unwrap_or_else(|| "https://cosine.club/api/v1".to_string()),
             cosine_api_key: env("COSINECLUB_API"),
-            freqblog_base: env("FREQBlog_BASE")
+            freqblog_base: env("FREQBLOG_BASE")
                 .unwrap_or_else(|| "https://api.freqblog.com".to_string()),
-            freqblog_api_key: env("FREQBlog_API_KEY"),
+            freqblog_api_key: env("FREQBLOG_API"),
             // Stay safely under the 1,000/month free tier.
-            freqblog_monthly_cap: env("FREQBlog_MONTHLY_CAP")
+            freqblog_monthly_cap: env("FREQBLOG_MONTHLY_CAP")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(950),
             lastfm_api_key: env("LASTFM_API_KEY"),
