@@ -11,5 +11,6 @@ pub mod ingest;
 pub mod music_api;
 pub mod pages;
 pub mod spotify;
+pub mod ui;
 pub mod web;
 pub mod worker;

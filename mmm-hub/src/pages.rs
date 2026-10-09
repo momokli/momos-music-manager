@@ -50,6 +50,8 @@ fn not_found(msg: &str) -> Response {
 #[derive(Template)]
 #[template(path = "search.html")]
 struct SearchPage {
+    nav: crate::ui::Nav,
+    flash: String,
     q: String,
     tracks: Vec<SearchRow>,
 }
@@ -71,9 +73,9 @@ async fn search_page(
     Query(params): Query<SearchQuery>,
     headers: HeaderMap,
 ) -> Response {
-    if crate::web::current_user(&st, &headers).await.is_none() {
+    let Some(nav) = crate::ui::nav(&st, &headers, "search").await else {
         return Redirect::to("/login").into_response();
-    }
+    };
 
     let q = params.q.unwrap_or_default().trim().to_string();
     let mut tracks = Vec::new();
@@ -101,7 +103,12 @@ async fn search_page(
         }
     }
 
-    render(&SearchPage { q, tracks })
+    render(&SearchPage {
+        nav,
+        flash: String::new(),
+        q,
+        tracks,
+    })
 }
 
 // ── user profile ────────────────────────────────────────────────────────────
@@ -109,6 +116,8 @@ async fn search_page(
 #[derive(Template)]
 #[template(path = "user.html")]
 struct UserPage {
+    nav: crate::ui::Nav,
+    flash: String,
     slug: String,
     liked_count: i64,
     playlist_count: i64,
@@ -127,9 +136,9 @@ async fn user_page(
     Path(slug): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if crate::web::current_user(&st, &headers).await.is_none() {
+    let Some(nav) = crate::ui::nav(&st, &headers, "user").await else {
         return Redirect::to("/login").into_response();
-    }
+    };
 
     let user = sqlx::query_as::<_, (i64, String)>(
         "SELECT id, slug FROM hub_users WHERE slug = ?1 COLLATE NOCASE",
@@ -176,6 +185,8 @@ async fn user_page(
     let playlist_count = playlists.len() as i64;
 
     render(&UserPage {
+        nav,
+        flash: String::new(),
         slug,
         liked_count,
         playlist_count,
@@ -188,6 +199,8 @@ async fn user_page(
 #[derive(Template)]
 #[template(path = "playlist.html")]
 struct PlaylistPage {
+    nav: crate::ui::Nav,
+    flash: String,
     name: String,
     owner: String,
     tracks: Vec<PlaylistTrackRow>,
@@ -205,9 +218,9 @@ async fn playlist_page(
     Path(id): Path<i64>,
     headers: HeaderMap,
 ) -> Response {
-    if crate::web::current_user(&st, &headers).await.is_none() {
+    let Some(nav) = crate::ui::nav(&st, &headers, "playlist").await else {
         return Redirect::to("/login").into_response();
-    }
+    };
 
     let playlist = sqlx::query_as::<_, (Option<String>, Option<String>)>(
         "SELECT p.name, u.slug
@@ -250,6 +263,8 @@ async fn playlist_page(
         .collect();
 
     render(&PlaylistPage {
+        nav,
+        flash: String::new(),
         name: name.unwrap_or_default(),
         owner: owner.unwrap_or_default(),
         tracks,
