@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hub/overlap", get(overlap))
         .route("/api/hub/playlists", get(playlists))
         .route("/api/hub/query", post(query))
+        .route("/api/hub/me", get(me))
         .with_state(state)
 }
 
@@ -41,6 +42,73 @@ fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
 
 async fn health() -> Json<Value> {
     Json(json!({ "data": { "status": "ok", "version": env!("CARGO_PKG_VERSION") } }))
+}
+
+/// Current session user plus their linked service accounts (issue M2-6).
+async fn me(State(st): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+    let Some((user_id, slug)) = crate::web::current_user(&st, &headers).await else {
+        return Err(err(StatusCode::UNAUTHORIZED, "login required"));
+    };
+
+    let rows = sqlx::query(
+        "SELECT service, remote_user_id, display_name, access_token, refresh_token, authorized_at, likes_status\n           FROM hub_service_accounts WHERE user_id = ?1 ORDER BY service",
+    )
+    .bind(user_id)
+    .fetch_all(&st.pool)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let services: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let access: Option<String> = r.get("access_token");
+            let refresh: Option<String> = r.get("refresh_token");
+            let authorized_at: Option<String> = r.get("authorized_at");
+            let likes_status: Option<String> = r.get("likes_status");
+            let connected = access.as_deref().map(|a| !a.is_empty()).unwrap_or(false);
+            json!({
+                "service": r.get::<String, _>("service"),
+                "remoteUserId": r.get::<Option<String>, _>("remote_user_id"),
+                "displayName": r.get::<Option<String>, _>("display_name"),
+                "connected": connected,
+                "needsReconnect": needs_reconnect(connected, refresh.as_deref(), authorized_at.as_deref(), likes_status.as_deref()),
+                "likesStatus": likes_status,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "data": {
+        "id": user_id,
+        "slug": slug,
+        "services": services,
+    } })))
+}
+
+/// A linked account needs re-auth when its refresh token is gone or the
+/// authorization is older than Spotify's ~6-month refresh-token lifetime
+/// (issue M3-8). A recorded likes error is treated as a soft signal too.
+fn needs_reconnect(
+    connected: bool,
+    refresh_token: Option<&str>,
+    authorized_at: Option<&str>,
+    likes_status: Option<&str>,
+) -> bool {
+    if !connected {
+        return false;
+    }
+    if refresh_token.map(|r| r.is_empty()).unwrap_or(true) {
+        return true;
+    }
+    if likes_status == Some("error") {
+        return true;
+    }
+    const SIX_MONTHS_SECS: i64 = 180 * 24 * 60 * 60;
+    if let Some(at) = authorized_at {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(at) {
+            return chrono::Utc::now().signed_duration_since(dt).num_seconds() > SIX_MONTHS_SECS;
+        }
+    }
+    false
 }
 
 async fn users(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
