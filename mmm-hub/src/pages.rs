@@ -421,8 +421,63 @@ async fn playlist_tag(
 struct CompareQuery {
     /// Comma-separated user ids; absent = all users.
     users: Option<String>,
-    /// `all` | `owned` | `followed`.
+    /// `all` | `owned` | `contributed` | `followed`.
     scope: Option<String>,
+    /// BPM range (inclusive); only tracks with BPM data survive when set.
+    bpm_min: Option<String>,
+    bpm_max: Option<String>,
+    /// Camelot key filter, e.g. `8A`.
+    key: Option<String>,
+    /// `1`/`on` = include harmonically compatible keys, not just the exact key.
+    key_harmonic: Option<String>,
+}
+
+/// The overlap filters that must be carried across the picker/scope links,
+/// so toggling a user or scope keeps the BPM/key selection.
+#[derive(Clone, Default)]
+struct OverlapFilters {
+    scope: String,
+    bpm_min: String,
+    bpm_max: String,
+    key: String,
+    key_harmonic: bool,
+}
+
+impl OverlapFilters {
+    fn href(&self, ids: &[i64]) -> String {
+        let csv = ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut url = format!("/overlap?users={csv}");
+        if self.scope != "all" {
+            url.push_str(&format!("&scope={}", self.scope));
+        }
+        if !self.bpm_min.is_empty() {
+            url.push_str(&format!("&bpm_min={}", urlencoding::encode(&self.bpm_min)));
+        }
+        if !self.bpm_max.is_empty() {
+            url.push_str(&format!("&bpm_max={}", urlencoding::encode(&self.bpm_max)));
+        }
+        if !self.key.is_empty() {
+            url.push_str(&format!("&key={}", urlencoding::encode(&self.key)));
+        }
+        if self.key_harmonic {
+            url.push_str("&key_harmonic=1");
+        }
+        url
+    }
+}
+
+/// All 24 Camelot keys for the key picker.
+fn camelot_values() -> Vec<String> {
+    let mut v = Vec::with_capacity(24);
+    for n in 1..=12 {
+        v.push(format!("{n}A"));
+        v.push(format!("{n}B"));
+    }
+    v
 }
 
 #[derive(Template)]
@@ -436,6 +491,19 @@ struct OverlapPage {
     rows: Vec<CompareRow>,
     track_total: i64,
     pairs: Vec<OverlapPair>,
+    /// Filter form state.
+    users_csv: String,
+    scope: String,
+    bpm_min: String,
+    bpm_max: String,
+    key_harmonic: bool,
+    key_options: Vec<KeyOption>,
+    has_audio: bool,
+}
+
+struct KeyOption {
+    value: String,
+    selected: bool,
 }
 
 struct PickerUser {
@@ -465,6 +533,8 @@ struct CompareRow {
     title: String,
     artists: String,
     isrc: String,
+    bpm: String,
+    key: String,
     present_count: i64,
     cells: Vec<CompareCell>,
 }
@@ -493,19 +563,6 @@ struct TrackAcc {
     per_user: HashMap<i64, CellAcc>,
 }
 
-fn scope_href(ids: &[i64], scope: &str) -> String {
-    let csv = ids
-        .iter()
-        .map(|i| i.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    if scope == "all" {
-        format!("/overlap?users={csv}")
-    } else {
-        format!("/overlap?users={csv}&scope={scope}")
-    }
-}
-
 async fn overlap_page(
     State(st): State<AppState>,
     Query(q): Query<CompareQuery>,
@@ -527,7 +584,23 @@ async fn overlap_page(
     let scope = match q.scope.as_deref() {
         Some("owned") => "owned",
         Some("followed") => "followed",
+        Some("contributed") => "contributed",
         _ => "all",
+    };
+
+    // BPM / key filters.
+    let bpm_min_raw = q.bpm_min.clone().unwrap_or_default().trim().to_string();
+    let bpm_max_raw = q.bpm_max.clone().unwrap_or_default().trim().to_string();
+    let key = q.key.clone().unwrap_or_default().trim().to_string();
+    let key_harmonic = matches!(q.key_harmonic.as_deref(), Some("1") | Some("on") | Some("true"));
+    let bpm_min = bpm_min_raw.parse::<f64>().ok();
+    let bpm_max = bpm_max_raw.parse::<f64>().ok();
+    let filters = OverlapFilters {
+        scope: scope.to_string(),
+        bpm_min: bpm_min_raw.clone(),
+        bpm_max: bpm_max_raw.clone(),
+        key: key.clone(),
+        key_harmonic,
     };
 
     // Selected users: default all; otherwise the csv (existing ids only).
@@ -625,10 +698,59 @@ async fn overlap_page(
         }
     }
 
+    // Per-track audio (BPM / key) for filtering + display.
+    let mut audio: HashMap<i64, (Option<f64>, String)> = HashMap::new();
+    if !acc.is_empty() {
+        let ids: Vec<i64> = acc.keys().copied().collect();
+        let mut qb = QueryBuilder::new(
+            "SELECT track_id, bpm, camelot FROM v_track_audio WHERE track_id IN (",
+        );
+        let mut sep = qb.separated(", ");
+        for id in &ids {
+            sep.push_bind(*id);
+        }
+        qb.push(")");
+        for r in qb.build().fetch_all(&st.pool).await.unwrap_or_default() {
+            audio.insert(
+                r.get("track_id"),
+                (
+                    r.get::<Option<f64>, _>("bpm"),
+                    r.get::<Option<String>, _>("camelot").unwrap_or_default(),
+                ),
+            );
+        }
+    }
+
     // Assemble rows: keep tracks present for >= 2 of the selected users.
     let mut rows: Vec<CompareRow> = Vec::new();
     let mut pair_counts: HashMap<(i64, i64), i64> = HashMap::new();
     for (tid, t) in acc {
+        let (bpm_opt, camelot) = audio.get(&tid).cloned().unwrap_or((None, String::new()));
+        // BPM range filter: a set range excludes tracks without BPM data.
+        if bpm_min.is_some() || bpm_max.is_some() {
+            match bpm_opt {
+                Some(b) => {
+                    if bpm_min.is_some_and(|min| b < min) {
+                        continue;
+                    }
+                    if bpm_max.is_some_and(|max| b > max) {
+                        continue;
+                    }
+                }
+                None => continue,
+            }
+        }
+        // Key filter: exact Camelot, or harmonically compatible when asked.
+        if !key.is_empty() {
+            let ok = if key_harmonic {
+                crate::features::camelot_compatible(&key, &camelot)
+            } else {
+                camelot.eq_ignore_ascii_case(&key)
+            };
+            if !ok {
+                continue;
+            }
+        }
         let present: Vec<i64> = t
             .per_user
             .iter()
@@ -669,6 +791,14 @@ async fn overlap_page(
             title: t.title,
             artists: t.artists,
             isrc: t.isrc,
+            bpm: bpm_opt
+                .map(|b| format!("{b:.0}"))
+                .unwrap_or_else(|| "—".into()),
+            key: if camelot.is_empty() {
+                "—".into()
+            } else {
+                camelot
+            },
             present_count: present.len() as i64,
             cells,
         });
@@ -703,44 +833,40 @@ async fn overlap_page(
                 ids.push(*id);
             }
             ids.sort_unstable();
-            let href = if scope == "all" {
-                format!(
-                    "/overlap?users={}",
-                    ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
-                )
-            } else {
-                scope_href(&ids, scope)
-            };
             PickerUser {
                 slug: slug.clone(),
                 selected: is_sel,
-                href,
+                href: filters.href(&ids),
             }
         })
         .collect();
 
+    let scope_link = |label: &str, sc: &str, active: bool| ScopeLink {
+        label: label.to_string(),
+        href: OverlapFilters {
+            scope: sc.to_string(),
+            ..filters.clone()
+        }
+        .href(&current_ids),
+        active,
+    };
     let scopes = vec![
-        ScopeLink {
-            label: "Alle".to_string(),
-            href: scope_href(&current_ids, "all"),
-            active: scope == "all",
-        },
-        ScopeLink {
-            label: "Eigene".to_string(),
-            href: scope_href(&current_ids, "owned"),
-            active: scope == "owned",
-        },
-        ScopeLink {
-            label: "Collaborativ".to_string(),
-            href: scope_href(&current_ids, "contributed"),
-            active: scope == "contributed",
-        },
-        ScopeLink {
-            label: "Gefolgt".to_string(),
-            href: scope_href(&current_ids, "followed"),
-            active: scope == "followed",
-        },
+        scope_link("Alle", "all", scope == "all"),
+        scope_link("Eigene", "owned", scope == "owned"),
+        scope_link("Collaborativ", "contributed", scope == "contributed"),
+        scope_link("Gefolgt", "followed", scope == "followed"),
     ];
+
+    let key_options: Vec<KeyOption> = camelot_values()
+        .into_iter()
+        .map(|v| KeyOption {
+            selected: v.eq_ignore_ascii_case(&key),
+            value: v,
+        })
+        .collect();
+    let has_audio = audio
+        .values()
+        .any(|(b, c)| b.is_some() || !c.is_empty());
 
     let columns: Vec<ColumnUser> = selected
         .iter()
@@ -756,6 +882,17 @@ async fn overlap_page(
         track_total: rows.len() as i64,
         rows,
         pairs,
+        users_csv: current_ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        scope: scope.to_string(),
+        bpm_min: bpm_min_raw,
+        bpm_max: bpm_max_raw,
+        key_harmonic,
+        key_options,
+        has_audio,
     })
 }
 

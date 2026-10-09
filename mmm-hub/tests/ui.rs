@@ -287,6 +287,76 @@ async fn playlist_tag_and_owner_filters() {
 }
 
 #[tokio::test]
+async fn overlap_bpm_and_key_filters() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    async fn fetch(app: &common::TestApp, cookie: &str, path: &str) -> String {
+        let resp = app
+            .client()
+            .get(app.url(path))
+            .header("Cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        body(resp).await
+    }
+
+    // Seed BPM/key for two of the three shared tracks; leave t_pl without data.
+    let feat = |tid: i64, bpm: f64, camelot: &str| {
+        let pool = app.pool.clone();
+        let camelot = camelot.to_string();
+        async move {
+            sqlx::query(
+                "INSERT INTO hub_track_features (track_id, found, bpm, camelot)
+                 VALUES (?1, 1, ?2, ?3)",
+            )
+            .bind(tid)
+            .bind(bpm)
+            .bind(&camelot)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    feat(app.seed.t_all, 128.0, "8A").await;
+    feat(app.seed.t_two, 140.0, "9A").await;
+
+    // No filter: all three shared tracks.
+    let all = fetch(&app, &cookie, "/overlap").await;
+    assert!(all.contains("Shared Anthem"));
+    assert!(all.contains("Two Users"));
+    assert!(all.contains("Playlist Only"));
+    // BPM/Key columns are rendered.
+    assert!(all.contains(">128<"), "bpm column must show 128");
+    assert!(all.contains(">8A<"), "key column must show 8A");
+
+    // BPM range 100..135: only the 128-BPM track (t_pl has no data -> excluded).
+    let bpm = fetch(&app, &cookie, "/overlap?bpm_min=100&bpm_max=135").await;
+    assert!(bpm.contains("Shared Anthem"));
+    assert!(!bpm.contains("Two Users"));
+    assert!(!bpm.contains("Playlist Only"));
+
+    // Exact key 8A: only t_all (t_two is 9A, t_pl has no key).
+    let key = fetch(&app, &cookie, "/overlap?key=8A").await;
+    assert!(key.contains("Shared Anthem"));
+    assert!(!key.contains("Two Users"));
+    assert!(!key.contains("Playlist Only"));
+
+    // Harmonic 8A also admits the adjacent 9A (t_two).
+    let harm = fetch(&app, &cookie, "/overlap?key=8A&key_harmonic=1").await;
+    assert!(harm.contains("Shared Anthem"));
+    assert!(harm.contains("Two Users"));
+    assert!(!harm.contains("Playlist Only"));
+
+    // The picker/scope links carry the active filters.
+    let withf = fetch(&app, &cookie, "/overlap?bpm_min=100&key=8A").await;
+    assert!(withf.contains("bpm_min=100"));
+    assert!(withf.contains("key=8A"));
+}
+
+#[tokio::test]
 async fn toggle_returns_row_fragment_for_htmx() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;

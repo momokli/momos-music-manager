@@ -41,7 +41,66 @@ content %}
     >{% endfor %}{% endif %}
 </p>
 
-{% if rows.is_empty() %}
+<form method="get" action="/overlap" class="hub-actions" role="search">
+    <input type="hidden" name="users" value="{{ users_csv }}" />
+    <input type="hidden" name="scope" value="{{ scope }}" />
+    <input
+        type="number"
+        name="bpm_min"
+        value="{{ bpm_min }}"
+        min="0"
+        step="1"
+        placeholder="BPM min"
+        aria-label="BPM min"
+        style="width: 6.5rem"
+    />
+    <input
+        type="number"
+        name="bpm_max"
+        value="{{ bpm_max }}"
+        min="0"
+        step="1"
+        placeholder="BPM max"
+        aria-label="BPM max"
+        style="width: 6.5rem"
+    />
+    <select name="key" aria-label="Key (Camelot)">
+        <option value="">Key: alle</option>
+        {% for k in key_options %}
+        <option value="{{ k.value }}" {% if k.selected %}selected{% endif %}>
+            {{ k.value }}
+        </option>
+        {% endfor %}
+    </select>
+    <label style="display: inline-flex; gap: 0.3rem; align-items: center; margin: 0">
+        <input
+            type="checkbox"
+            name="key_harmonic"
+            value="1"
+            {%
+            if
+            key_harmonic
+            %}checked{%
+            endif
+            %}
+        />
+        harmonisch
+    </label>
+    <button type="submit">Filtern</button>
+    <a
+        href="/overlap?users={{ users_csv }}&scope={{ scope }}"
+        role="button"
+        class="secondary outline"
+        >Reset</a
+    >
+</form>
+
+{% if !has_audio %}
+<p class="hub-muted">
+    Für diese Auswahl liegen noch keine BPM/Key-Daten vor — die Analyse läuft im
+    Hintergrund. BPM/Key-Filter wirken, sobald Daten da sind.
+</p>
+{% endif %} {% if rows.is_empty() %}
 <p class="hub-muted">Keine gemeinsamen Tracks für diese Auswahl.</p>
 {% else %}
 <div class="overflow-auto hub-scroll-y">
@@ -52,6 +111,8 @@ content %}
         <thead>
             <tr>
                 <th scope="col">Track</th>
+                <th scope="col">BPM</th>
+                <th scope="col">Key</th>
                 {% for c in columns %}
                 <th scope="col">@{{ c.slug }}</th>
                 {% endfor %}
@@ -67,6 +128,8 @@ content %}
                         >{{ r.isrc }}</code
                     >{% endif %}
                 </td>
+                <td class="hub-nowrap">{{ r.bpm }}</td>
+                <td class="hub-nowrap">{{ r.key }}</td>
                 {% for cell in r.cells %}
                 <td>
                     {% if cell.liked %}<span title="geliked">♥</span>{% endif %} {% for p
