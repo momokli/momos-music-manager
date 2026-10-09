@@ -6,16 +6,6 @@
 //!   mmm-hub query  "<sql>"         # run a read-only query from the terminal
 //!   mmm-hub users                  # list hub users
 
-mod api;
-mod config;
-mod db;
-mod ingest;
-mod music_api;
-mod pages;
-mod spotify;
-mod web;
-mod worker;
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -24,7 +14,8 @@ use clap::{Parser, Subcommand};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use crate::config::Config;
+use mmm_hub::config::Config;
+use mmm_hub::{api, db, ingest, pages, spotify, web, worker};
 
 #[derive(Parser)]
 #[command(

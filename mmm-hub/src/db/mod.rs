@@ -1,3 +1,5 @@
+pub mod testing;
+
 use std::str::FromStr;
 use std::time::Duration;
 

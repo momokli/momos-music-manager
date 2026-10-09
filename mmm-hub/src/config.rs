@@ -31,6 +31,20 @@ impl Config {
         }
     }
 
+    /// A self-contained config for integration tests: only the DB URL matters.
+    pub fn for_test(database_url: impl Into<String>) -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            database_url: database_url.into(),
+            spotify_client_id: None,
+            spotify_client_secret: None,
+            spotify_redirect_uri: "http://127.0.0.1:8888/callback".to_string(),
+            music_api_base: "http://127.0.0.1:8710".to_string(),
+            music_api_token: None,
+        }
+    }
+
     pub fn spotify_creds(&self) -> Result<(&str, &str)> {
         match (&self.spotify_client_id, &self.spotify_client_secret) {
             (Some(id), Some(secret)) => Ok((id.as_str(), secret.as_str())),
