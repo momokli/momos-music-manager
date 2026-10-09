@@ -210,17 +210,22 @@ async fn upsert_playlist_meta(
     let description = pl["description"].as_str();
     let track_count = pl["items"]["total"].as_i64();
     let snapshot = pl["snapshot_id"].as_str();
+    // The Spotify account that owns the playlist (≠ the hub user).
+    let owner_id = pl["owner"]["id"].as_str();
+    let owner_name = pl["owner"]["display_name"].as_str().or(owner_id);
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO hub_playlists
              (user_id, service, playlist_id, name, description, is_liked, track_count,
-              snapshot_id, items_available, fetched_at, is_owned)
-         VALUES (?1, 'spotify', ?2, ?3, ?4, 0, ?5, ?6, 0, NULL, ?7)
+              snapshot_id, items_available, fetched_at, is_owned, owner_id, owner_name)
+         VALUES (?1, 'spotify', ?2, ?3, ?4, 0, ?5, ?6, 0, NULL, ?7, ?8, ?9)
          ON CONFLICT(user_id, service, playlist_id) DO UPDATE SET
              name = excluded.name,
              description = excluded.description,
              track_count = excluded.track_count,
              snapshot_id = excluded.snapshot_id,
-             is_owned = excluded.is_owned
+             is_owned = excluded.is_owned,
+             owner_id = excluded.owner_id,
+             owner_name = excluded.owner_name
          RETURNING id",
     )
     .bind(user_id)
@@ -230,6 +235,8 @@ async fn upsert_playlist_meta(
     .bind(track_count)
     .bind(snapshot)
     .bind(owned as i64)
+    .bind(owner_id)
+    .bind(owner_name)
     .fetch_one(pool)
     .await?;
     Ok(Some(id))

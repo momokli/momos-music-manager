@@ -75,8 +75,11 @@ async fn playlists_page_renders() {
     let html = body(resp).await;
     assert!(html.contains("Meine Playlists"));
     assert!(html.contains("aria-current=\"page\""));
-    // The fixture playlist shows up.
+    // The fixture playlist shows up, with both owner columns.
     assert!(html.contains("Deep House"));
+    assert!(html.contains("Besitzer"));
+    assert!(html.contains("Alice"), "spotify owner missing from table");
+    assert!(html.contains("@alice"), "hub user column missing");
 }
 
 #[tokio::test]
@@ -256,6 +259,24 @@ async fn track_page_distinguishes_owned_and_followed_playlists() {
     assert!(html.contains("hub-badge-no"), "followed badge missing");
     // Guard against unrendered askama placeholders leaking as literal text.
     assert!(!html.contains("{u."), "unrendered askama placeholder leaked");
+}
+
+#[tokio::test]
+async fn playlist_detail_shows_both_owners() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let resp = app
+        .client()
+        .get(app.url(&format!("/playlist/{}", app.seed.pl_alice)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    assert!(html.contains("@alice"), "hub user missing");
+    assert!(html.contains("Spotify-Besitzer: Alice"), "spotify owner missing");
 }
 
 #[tokio::test]

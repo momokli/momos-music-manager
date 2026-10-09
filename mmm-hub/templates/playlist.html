@@ -9,7 +9,10 @@ content %}
 </nav>
 <hgroup>
     <h1>{{ name }}</h1>
-    <p>von <a href="/user/{{ owner }}">{{ owner }}</a></p>
+    <p>
+        im Hub von <a href="/user/{{ owner }}">@{{ owner }}</a>{% if owner_name != "" %} ·
+        Spotify-Besitzer: {{ owner_name }}{% endif %}
+    </p>
 </hgroup>
 
 {% if tracks.is_empty() %}

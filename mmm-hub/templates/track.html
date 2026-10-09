@@ -100,6 +100,8 @@ content %}
         <li>
             <a href="/playlist/{{ p.id }}">{{ p.name }}</a>
             <span class="hub-badge hub-badge-ok">eigen</span>
+            {% if p.owner != "" %}<small class="hub-muted">· {{ p.owner }}</small>{% endif
+            %}
         </li>
         {% endfor %}
     </ul>
@@ -110,6 +112,8 @@ content %}
         <li>
             <a href="/playlist/{{ p.id }}">{{ p.name }}</a>
             <span class="hub-badge hub-badge-no">gefolgt</span>
+            {% if p.owner != "" %}<small class="hub-muted">· {{ p.owner }}</small>{% endif
+            %}
         </li>
         {% endfor %}
     </ul>

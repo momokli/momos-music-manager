@@ -199,6 +199,8 @@ struct PlaylistCounts {
 struct PlaylistRow {
     id: i64,
     name: String,
+    user: String,
+    owner: String,
     owned: bool,
     tracks: String,
     status: String,
@@ -393,6 +395,11 @@ fn map_playlist_row(r: &sqlx::sqlite::SqliteRow) -> PlaylistRow {
     PlaylistRow {
         id: r.get("id"),
         name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+        user: r.get::<Option<String>, _>("user_slug").unwrap_or_default(),
+        owner: r
+            .get::<Option<String>, _>("owner_name")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "—".to_string()),
         owned: r.get::<i64, _>("is_owned") == 1,
         tracks: format!(
             "{} / {}",
@@ -415,8 +422,12 @@ async fn playlist_rows(st: &AppState, user_id: i64, filter: &str) -> Vec<Playlis
     let sql = format!(
         "SELECT p.id, p.name, p.is_owned, p.track_count, p.items_available,
                 p.enabled_for_fetch, p.fetch_error,
+                COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS owner_name,
+                u.slug AS user_slug,
                 (SELECT COUNT(*) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS fetched
            FROM hub_playlists p
+           JOIN hub_users u ON u.id = p.user_id
+           LEFT JOIN hub_service_accounts a ON a.user_id = p.user_id AND a.service = 'spotify'
           WHERE p.user_id = ?1{}
           ORDER BY p.is_owned DESC, p.name COLLATE NOCASE",
         filter_clause(filter)
@@ -436,8 +447,12 @@ async fn playlist_row(st: &AppState, user_id: i64, id: i64) -> Option<PlaylistRo
     let row = sqlx::query(
         "SELECT p.id, p.name, p.is_owned, p.track_count, p.items_available,
                 p.enabled_for_fetch, p.fetch_error,
+                COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS owner_name,
+                u.slug AS user_slug,
                 (SELECT COUNT(*) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS fetched
            FROM hub_playlists p
+           JOIN hub_users u ON u.id = p.user_id
+           LEFT JOIN hub_service_accounts a ON a.user_id = p.user_id AND a.service = 'spotify'
           WHERE p.user_id = ?1 AND p.id = ?2",
     )
     .bind(user_id)
@@ -756,6 +771,7 @@ struct UserGroup {
 struct PlaylistRef {
     id: i64,
     name: String,
+    owner: String,
 }
 
 struct ExternalId {
@@ -796,7 +812,14 @@ async fn track_page(
 
     // Presence grouped by user, split into own vs. followed playlists.
     let presence = sqlx::query(
-        "SELECT p.user_id, u.slug, p.source, p.playlist_id, p.playlist_name, hp.is_owned\n           FROM hub_v_track_presence p\n           JOIN hub_users u ON u.id = p.user_id\n           LEFT JOIN hub_playlists hp ON hp.id = p.playlist_id\n          WHERE p.track_id = ?1\n          ORDER BY u.slug, hp.is_owned DESC, p.playlist_name",
+        "SELECT p.user_id, u.slug, p.source, p.playlist_id, p.playlist_name, hp.is_owned,
+                COALESCE(NULLIF(hp.owner_name, ''), CASE WHEN hp.is_owned = 1 THEN a.display_name END) AS owner_name
+           FROM hub_v_track_presence p
+           JOIN hub_users u ON u.id = p.user_id
+           LEFT JOIN hub_playlists hp ON hp.id = p.playlist_id
+           LEFT JOIN hub_service_accounts a ON a.user_id = p.user_id AND a.service = 'spotify'
+          WHERE p.track_id = ?1
+          ORDER BY u.slug, hp.is_owned DESC, p.playlist_name",
     )
     .bind(id)
     .fetch_all(&st.pool)
@@ -812,6 +835,7 @@ async fn track_page(
         let playlist_id: Option<i64> = r.get("playlist_id");
         let playlist_name: Option<String> = r.get("playlist_name");
         let is_owned: Option<i64> = r.get("is_owned");
+        let owner_name: Option<String> = r.get("owner_name");
         let slug = slug.unwrap_or_default();
         let g = groups.entry(uid).or_insert_with(|| {
             order.push(uid);
@@ -826,7 +850,11 @@ async fn track_page(
             Some("liked") => g.liked = true,
             Some("playlist") => {
                 if let (Some(pid), Some(name)) = (playlist_id, playlist_name) {
-                    let pref = PlaylistRef { id: pid, name };
+                    let pref = PlaylistRef {
+                        id: pid,
+                        name,
+                        owner: owner_name.filter(|s| !s.is_empty()).unwrap_or_default(),
+                    };
                     if is_owned == Some(1) {
                         g.owned.push(pref);
                     } else {

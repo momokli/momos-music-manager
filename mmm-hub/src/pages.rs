@@ -129,6 +129,7 @@ struct UserPage {
 struct PlaylistRow {
     id: i64,
     name: String,
+    owner: String,
     track_count: String,
     items_available: bool,
 }
@@ -161,10 +162,13 @@ async fn user_page(
         .unwrap_or(0);
 
     let rows = sqlx::query(
-        "SELECT id, name, track_count, items_available
-           FROM hub_playlists
-          WHERE user_id = ?1
-          ORDER BY name",
+        "SELECT p.id, p.name,
+                COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS owner_name,
+                p.track_count, p.items_available
+           FROM hub_playlists p
+           LEFT JOIN hub_service_accounts a ON a.user_id = p.user_id AND a.service = 'spotify'
+          WHERE p.user_id = ?1
+          ORDER BY p.name",
     )
     .bind(user_id)
     .fetch_all(&st.pool)
@@ -176,6 +180,10 @@ async fn user_page(
         .map(|r| PlaylistRow {
             id: r.get("id"),
             name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+            owner: r
+                .get::<Option<String>, _>("owner_name")
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "—".to_string()),
             track_count: r
                 .get::<Option<i64>, _>("track_count")
                 .map(|c| c.to_string())
@@ -205,6 +213,7 @@ struct PlaylistPage {
     flash: String,
     name: String,
     owner: String,
+    owner_name: String,
     tracks: Vec<PlaylistTrackRow>,
 }
 
@@ -224,10 +233,12 @@ async fn playlist_page(
         return Redirect::to("/login").into_response();
     };
 
-    let playlist = sqlx::query_as::<_, (Option<String>, Option<String>)>(
-        "SELECT p.name, u.slug
+    let playlist = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
+        "SELECT p.name, u.slug,
+                COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS owner_name
            FROM hub_playlists p
            JOIN hub_users u ON u.id = p.user_id
+           LEFT JOIN hub_service_accounts a ON a.user_id = p.user_id AND a.service = 'spotify'
           WHERE p.id = ?1",
     )
     .bind(id)
@@ -235,7 +246,7 @@ async fn playlist_page(
     .await
     .ok()
     .flatten();
-    let Some((name, owner)) = playlist else {
+    let Some((name, owner, owner_name)) = playlist else {
         return not_found("Playlist nicht gefunden.");
     };
 
@@ -269,6 +280,7 @@ async fn playlist_page(
         flash: String::new(),
         name: name.unwrap_or_default(),
         owner: owner.unwrap_or_default(),
+        owner_name: owner_name.filter(|s| !s.is_empty()).unwrap_or_default(),
         tracks,
     })
 }

@@ -23,6 +23,7 @@ content %}
         <thead>
             <tr>
                 <th scope="col">Name</th>
+                <th scope="col">Besitzer</th>
                 <th scope="col">Tracks</th>
                 <th scope="col">Geholt</th>
             </tr>
@@ -31,6 +32,7 @@ content %}
             {% for p in playlists %}
             <tr>
                 <td><a href="/playlist/{{ p.id }}">{{ p.name }}</a></td>
+                <td>{{ p.owner }}</td>
                 <td>{{ p.track_count }}</td>
                 <td>{% if p.items_available %}ja{% else %}nein{% endif %}</td>
             </tr>

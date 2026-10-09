@@ -280,8 +280,12 @@ async fn overlap(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
 
 async fn playlists(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     let rows = sqlx::query(
-        "SELECT p.id, u.slug AS user, p.name, p.track_count, p.items_available, p.is_liked
-           FROM hub_playlists p JOIN hub_users u ON u.id = p.user_id
+        "SELECT p.id, u.slug AS user, p.name, p.track_count, p.items_available, p.is_liked,
+                p.owner_id,
+                COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS owner_name
+           FROM hub_playlists p
+           JOIN hub_users u ON u.id = p.user_id
+           LEFT JOIN hub_service_accounts a ON a.user_id = p.user_id AND a.service = 'spotify'
           ORDER BY u.slug, p.name",
     )
     .fetch_all(&st.pool)
@@ -297,6 +301,8 @@ async fn playlists(State(st): State<AppState>) -> Result<Json<Value>, ApiError> 
                 "name": r.get::<Option<String>, _>("name"),
                 "trackCount": r.get::<Option<i64>, _>("track_count"),
                 "itemsAvailable": r.get::<i64, _>("items_available") != 0,
+                "ownerId": r.get::<Option<String>, _>("owner_id"),
+                "ownerName": r.get::<Option<String>, _>("owner_name"),
             })
         })
         .collect();

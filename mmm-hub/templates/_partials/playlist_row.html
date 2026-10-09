@@ -1,26 +1,30 @@
 <tr>
-  <td><a href="/playlist/{{ p.id }}">{{ p.name }}</a></td>
-  <td>
-    {% if p.owned %}<span class="hub-badge hub-badge-ok">eigen</span>{% else %}<span
-      class="hub-badge hub-badge-no"
-      >gefolgt</span
-    >{% endif %}
-  </td>
-  <td>{{ p.tracks }}</td>
-  <td class="{{ p.status_class }}">{{ p.status }}</td>
-  <td class="hub-row-actions">
-    <form
-      method="post"
-      action="/api/hub/playlists/{{ p.id }}/toggle"
-      hx-post="/api/hub/playlists/{{ p.id }}/toggle"
-      hx-target="closest tr"
-      hx-swap="outerHTML"
-    >
-      {% if p.enabled %}
-      <button class="outline secondary" type="submit">Stop</button>
-      {% else %}
-      <button type="submit">Fetch</button>
-      {% endif %}
-    </form>
-  </td>
+    <td><a href="/playlist/{{ p.id }}">{{ p.name }}</a></td>
+    <td>
+        {% if p.owned %}<span class="hub-badge hub-badge-ok">eigen</span>{% else %}<span
+            class="hub-badge hub-badge-no"
+            >gefolgt</span
+        >{% endif %}
+    </td>
+    <td>
+        {% if p.user != "" %}<a href="/user/{{ p.user }}">@{{ p.user }}</a>{% endif %}
+    </td>
+    <td>{{ p.owner }}</td>
+    <td>{{ p.tracks }}</td>
+    <td class="{{ p.status_class }}">{{ p.status }}</td>
+    <td class="hub-row-actions">
+        <form
+            method="post"
+            action="/api/hub/playlists/{{ p.id }}/toggle"
+            hx-post="/api/hub/playlists/{{ p.id }}/toggle"
+            hx-target="closest tr"
+            hx-swap="outerHTML"
+        >
+            {% if p.enabled %}
+            <button class="outline secondary" type="submit">Stop</button>
+            {% else %}
+            <button type="submit">Fetch</button>
+            {% endif %}
+        </form>
+    </td>
 </tr>
