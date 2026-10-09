@@ -749,7 +749,13 @@ struct TrackPage {
 struct UserGroup {
     slug: String,
     liked: bool,
-    playlists: Vec<String>,
+    owned: Vec<PlaylistRef>,
+    followed: Vec<PlaylistRef>,
+}
+
+struct PlaylistRef {
+    id: i64,
+    name: String,
 }
 
 struct ExternalId {
@@ -788,13 +794,9 @@ async fn track_page(
             .into_response();
     };
 
-    // Presence grouped by user.
+    // Presence grouped by user, split into own vs. followed playlists.
     let presence = sqlx::query(
-        "SELECT p.user_id, u.slug, p.source, p.playlist_name
-           FROM hub_v_track_presence p
-           JOIN hub_users u ON u.id = p.user_id
-          WHERE p.track_id = ?1
-          ORDER BY u.slug, p.playlist_name",
+        "SELECT p.user_id, u.slug, p.source, p.playlist_id, p.playlist_name, hp.is_owned\n           FROM hub_v_track_presence p\n           JOIN hub_users u ON u.id = p.user_id\n           LEFT JOIN hub_playlists hp ON hp.id = p.playlist_id\n          WHERE p.track_id = ?1\n          ORDER BY u.slug, hp.is_owned DESC, p.playlist_name",
     )
     .bind(id)
     .fetch_all(&st.pool)
@@ -807,21 +809,29 @@ async fn track_page(
         let uid: i64 = r.get("user_id");
         let slug: Option<String> = r.get("slug");
         let source: Option<String> = r.get("source");
+        let playlist_id: Option<i64> = r.get("playlist_id");
         let playlist_name: Option<String> = r.get("playlist_name");
+        let is_owned: Option<i64> = r.get("is_owned");
         let slug = slug.unwrap_or_default();
         let g = groups.entry(uid).or_insert_with(|| {
             order.push(uid);
             UserGroup {
                 slug,
                 liked: false,
-                playlists: Vec::new(),
+                owned: Vec::new(),
+                followed: Vec::new(),
             }
         });
         match source.as_deref() {
             Some("liked") => g.liked = true,
             Some("playlist") => {
-                if let Some(n) = playlist_name {
-                    g.playlists.push(n);
+                if let (Some(pid), Some(name)) = (playlist_id, playlist_name) {
+                    let pref = PlaylistRef { id: pid, name };
+                    if is_owned == Some(1) {
+                        g.owned.push(pref);
+                    } else {
+                        g.followed.push(pref);
+                    }
                 }
             }
             _ => {}

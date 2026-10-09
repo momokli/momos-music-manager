@@ -87,16 +87,30 @@ content %}
 {% else %} {% for u in users %}
 <article>
     <header>
-        <strong>{{ u.slug }}</strong>
-        {% if u.liked %} · <span class="badge">geliked</span>{% endif %} · {{
-        u.playlists.len() }} Playlist(s)
+        <strong><a href="/user/{{ u.slug }}">@{{ u.slug }}</a></strong>
+        {% if u.liked %} · <span class="hub-badge">geliked</span>{% endif %} ·
+        {u.owned.len()} eigene · {{ u.followed.len() }} gefolgt
     </header>
-    {% if u.playlists.is_empty() %}
-    <p><small>nur geliked</small></p>
-    {% else %}
+    {% if u.liked && u.owned.is_empty() && u.followed.is_empty() %}
+    <p><small class="hub-muted">nur geliked</small></p>
+    {% endif %} {% if !u.owned.is_empty() %}
+    <p class="hub-muted"><strong>Eigene Playlists</strong></p>
     <ul>
-        {% for p in u.playlists %}
-        <li>{{ p }}</li>
+        {% for p in u.owned %}
+        <li>
+            <a href="/playlist/{{ p.id }}">{{ p.name }}</a>
+            <span class="hub-badge hub-badge-ok">eigen</span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %} {% if !u.followed.is_empty() %}
+    <p class="hub-muted"><strong>Gefolgte Playlists</strong></p>
+    <ul>
+        {% for p in u.followed %}
+        <li>
+            <a href="/playlist/{{ p.id }}">{{ p.name }}</a>
+            <span class="hub-badge hub-badge-no">gefolgt</span>
+        </li>
         {% endfor %}
     </ul>
     {% endif %}

@@ -236,6 +236,27 @@ async fn sync_html_swaps_for_htmx_and_redirects_otherwise() {
 }
 
 #[tokio::test]
+async fn track_page_distinguishes_owned_and_followed_playlists() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // t_pl is in alice's OWN "Deep House" and bob's FOLLOWED "Deep House".
+    let resp = app
+        .client()
+        .get(app.url(&format!("/track/{}", app.seed.t_pl)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    assert!(html.contains("Eigene Playlists"), "own section missing");
+    assert!(html.contains("Gefolgte Playlists"), "followed section missing");
+    assert!(html.contains("hub-badge-ok"), "own badge missing");
+    assert!(html.contains("hub-badge-no"), "followed badge missing");
+}
+
+#[tokio::test]
 async fn no_shell_page_returns_500() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;

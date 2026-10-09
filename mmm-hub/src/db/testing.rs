@@ -78,15 +78,22 @@ async fn like(pool: &SqlitePool, user_id: i64, track_id: i64) -> Result<()> {
     Ok(())
 }
 
-async fn playlist(pool: &SqlitePool, user_id: i64, pid: &str, name: &str) -> Result<i64> {
+async fn playlist(
+    pool: &SqlitePool,
+    user_id: i64,
+    pid: &str,
+    name: &str,
+    owned: bool,
+) -> Result<i64> {
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO hub_playlists (user_id, service, playlist_id, name, is_liked, items_available, fetched_at)
-         VALUES (?1, 'spotify', ?2, ?3, 0, 1, ?4)
-         ON CONFLICT(user_id, service, playlist_id) DO UPDATE SET name = excluded.name RETURNING id",
+        "INSERT INTO hub_playlists (user_id, service, playlist_id, name, is_liked, items_available, is_owned, fetched_at)
+         VALUES (?1, 'spotify', ?2, ?3, 0, 1, ?4, ?5)
+         ON CONFLICT(user_id, service, playlist_id) DO UPDATE SET name = excluded.name, is_owned = excluded.is_owned RETURNING id",
     )
     .bind(user_id)
     .bind(pid)
     .bind(name)
+    .bind(owned as i64)
     .bind(LOADED_AT)
     .fetch_one(pool)
     .await?;
@@ -131,10 +138,11 @@ pub async fn seed(pool: &SqlitePool) -> Result<Seed> {
     like(pool, bob, t_bob).await?;
     like(pool, carol, t_carol).await?;
 
-    // Playlists: alice + bob both have "Deep House" (sharing t_pl), carol has "Techno".
-    let pl_alice = playlist(pool, alice, "pl-alice", "Deep House").await?;
-    let pl_bob = playlist(pool, bob, "pl-bob", "Deep House").await?;
-    let pl_carol = playlist(pool, carol, "pl-carol", "Techno").await?;
+    // Playlists: alice owns "Deep House", bob follows a "Deep House", carol owns "Techno".
+    // alice + bob share t_pl, so a track page shows both an own and a followed playlist.
+    let pl_alice = playlist(pool, alice, "pl-alice", "Deep House", true).await?;
+    let pl_bob = playlist(pool, bob, "pl-bob", "Deep House", false).await?;
+    let pl_carol = playlist(pool, carol, "pl-carol", "Techno", true).await?;
 
     membership(pool, pl_alice, t_all, 0).await?;
     membership(pool, pl_alice, t_pl, 1).await?;

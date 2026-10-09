@@ -188,11 +188,7 @@ async fn track(State(st): State<AppState>, Path(id): Path<i64>) -> Result<Json<V
     };
 
     let presence = sqlx::query(
-        "SELECT p.user_id, u.slug, u.display_name, p.source, p.playlist_name
-           FROM hub_v_track_presence p
-           JOIN hub_users u ON u.id = p.user_id
-          WHERE p.track_id = ?1
-          ORDER BY u.slug",
+        "SELECT p.user_id, u.slug, u.display_name, p.source, p.playlist_id, p.playlist_name, hp.is_owned\n           FROM hub_v_track_presence p\n           JOIN hub_users u ON u.id = p.user_id\n           LEFT JOIN hub_playlists hp ON hp.id = p.playlist_id\n          WHERE p.track_id = ?1\n          ORDER BY u.slug, hp.is_owned DESC, p.playlist_name",
     )
     .bind(id)
     .fetch_all(&st.pool)
@@ -207,7 +203,9 @@ async fn track(State(st): State<AppState>, Path(id): Path<i64>) -> Result<Json<V
                 "user": r.get::<Option<String>, _>("slug"),
                 "displayName": r.get::<Option<String>, _>("display_name"),
                 "source": r.get::<Option<String>, _>("source"),
+                "playlistId": r.get::<Option<i64>, _>("playlist_id"),
                 "playlistName": r.get::<Option<String>, _>("playlist_name"),
+                "isOwned": r.get::<Option<i64>, _>("is_owned").map(|v| v == 1),
             })
         })
         .collect();
