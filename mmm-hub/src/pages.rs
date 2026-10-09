@@ -961,11 +961,17 @@ async fn digging_page(
 
 // ── tags (resolved playlist layer) ──────────────────────────────────────────
 
+#[derive(Deserialize, Default)]
+struct TagFilter {
+    q: Option<String>,
+}
+
 #[derive(Template)]
 #[template(path = "tags.html")]
 struct TagsPage {
     nav: crate::ui::Nav,
     flash: String,
+    q: String,
     tags: Vec<TagRow>,
 }
 
@@ -977,10 +983,15 @@ struct TagRow {
     users: String,
 }
 
-async fn tags_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+async fn tags_page(
+    State(st): State<AppState>,
+    Query(f): Query<TagFilter>,
+    headers: HeaderMap,
+) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
         return Redirect::to("/login").into_response();
     };
+    let q = f.q.unwrap_or_default().trim().to_string();
 
     let rows = sqlx::query(
         "SELECT t.id, t.name,
@@ -990,9 +1001,11 @@ async fn tags_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
                 (SELECT GROUP_CONCAT(DISTINCT u.slug) FROM hub_tag_sources s
                    JOIN hub_users u ON u.id = s.user_id WHERE s.tag_id = t.id) AS users
            FROM hub_tags t
+          WHERE (?1 = '' OR lower(t.name) LIKE '%' || lower(?1) || '%')
           ORDER BY track_count DESC, t.name
           LIMIT 1000",
     )
+    .bind(&q)
     .fetch_all(&st.pool)
     .await
     .unwrap_or_default();
@@ -1011,6 +1024,7 @@ async fn tags_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
     render(&TagsPage {
         nav,
         flash: String::new(),
+        q,
         tags,
     })
 }

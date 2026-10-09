@@ -59,6 +59,18 @@ content %}
     </ul>
 </nav>
 
+<form method="get" action="/me/playlists" role="search">
+    <input type="hidden" name="filter" value="{{ filter }}" />
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Playlist filtern …"
+        aria-label="Playlist filtern"
+    />
+    <button type="submit">Filtern</button>
+</form>
+
 <div class="hub-actions">
     <form method="post" action="/api/hub/playlists/enable-all">
         <button type="submit">Alle aktivieren</button>

@@ -179,9 +179,8 @@ struct RecentRow {
 struct PlaylistsPage {
     nav: crate::ui::Nav,
     flash: String,
-    /// Normalised filter key (`all` / `owned` / `with_items` / `not_fetched` / `error`).
     filter: String,
-    /// Rows shown after applying `filter`.
+    q: String,
     count: usize,
     playlists: Vec<PlaylistRow>,
     counts: PlaylistCounts,
@@ -256,6 +255,7 @@ struct Flash {
 #[derive(Deserialize)]
 struct PlaylistFilterQuery {
     filter: Option<String>,
+    q: Option<String>,
 }
 
 /// Whitelist the known filter keys; anything else means `all`.
@@ -326,18 +326,20 @@ async fn playlists_page(
     State(st): State<AppState>,
     headers: HeaderMap,
     Query(flash): Query<Flash>,
-    Query(filter): Query<PlaylistFilterQuery>,
+    Query(pf): Query<PlaylistFilterQuery>,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "playlists").await else {
         return Redirect::to("/login").into_response();
     };
-    let filter = normalise_filter(filter.filter.as_deref());
-    let playlists = playlist_rows(&st, nav.id, filter).await;
+    let filter = normalise_filter(pf.filter.as_deref());
+    let q = pf.q.unwrap_or_default().trim().to_string();
+    let playlists = playlist_rows(&st, nav.id, filter, &q).await;
     let counts = playlist_counts(&st, nav.id).await;
     render(&PlaylistsPage {
         nav,
         flash: flash.msg.unwrap_or_default(),
         filter: filter.to_string(),
+        q,
         count: playlists.len(),
         playlists,
         counts,
@@ -418,7 +420,7 @@ fn map_playlist_row(r: &sqlx::sqlite::SqliteRow) -> PlaylistRow {
 ///
 /// `filter` is one of the keys returned by [`normalise_filter`]; the matching
 /// `WHERE` fragment is appended before the stable ordering.
-async fn playlist_rows(st: &AppState, user_id: i64, filter: &str) -> Vec<PlaylistRow> {
+async fn playlist_rows(st: &AppState, user_id: i64, filter: &str, q: &str) -> Vec<PlaylistRow> {
     let sql = format!(
         "SELECT p.id, p.name, p.is_owned, p.track_count, p.items_available,
                 p.enabled_for_fetch, p.fetch_error,
@@ -428,12 +430,14 @@ async fn playlist_rows(st: &AppState, user_id: i64, filter: &str) -> Vec<Playlis
            FROM hub_playlists p
            JOIN hub_users u ON u.id = p.user_id
            LEFT JOIN hub_service_accounts a ON a.user_id = p.user_id AND a.service = 'spotify'
-          WHERE p.user_id = ?1{}
+          WHERE p.user_id = ?1
+            AND (?2 = '' OR lower(p.name) LIKE '%' || lower(?2) || '%'){}
           ORDER BY p.is_owned DESC, p.name COLLATE NOCASE",
         filter_clause(filter)
     );
     let rows = sqlx::query(&sql)
         .bind(user_id)
+        .bind(q)
         .fetch_all(&st.pool)
         .await
         .unwrap_or_default();
