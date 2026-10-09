@@ -26,6 +26,22 @@ const MAX_LIKES_ACCOUNTS_PER_PASS: usize = 2;
 const PAGE_DELAY: Duration = Duration::from_millis(150);
 
 pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) {
+    // Enrichment loop: audio features + genres. Local/external APIs that don't
+    // touch Spotify — kept separate so Spotify quota backoffs can't starve them.
+    {
+        let pool = pool.clone();
+        let cfg = cfg.clone();
+        tokio::spawn(async move {
+            loop {
+                let f = crate::features::sync_once(&pool, &cfg, 50).await.unwrap_or(0) > 0;
+                let g = crate::genres::sync_once(&pool, &cfg, 50).await.unwrap_or(0) > 0;
+                let worked = f || g;
+                tokio::time::sleep(if worked { BUSY_WAIT } else { IDLE_WAIT }).await;
+            }
+        });
+    }
+
+    // Spotify loop: likes + playlist items (may back off on quota).
     tokio::spawn(async move {
         loop {
             let worked = match run_once(&pool, &cfg).await {
@@ -41,12 +57,10 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) {
 }
 
 async fn run_once(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
-    // Likes first (cheap, one endpoint), then playlist items, then features.
+    // Likes first (cheap, one endpoint), then playlist items.
     let likes = sync_likes_jobs(pool, cfg).await?;
     let playlists = playlist_jobs(pool, cfg).await?;
-    let features = crate::features::sync_once(pool, cfg, 40).await.unwrap_or(0) > 0;
-    let genres = crate::genres::sync_once(pool, cfg, 40).await.unwrap_or(0) > 0;
-    Ok(likes || playlists || features || genres)
+    Ok(likes || playlists)
 }
 
 // ── liked tracks ────────────────────────────────────────────────────────────

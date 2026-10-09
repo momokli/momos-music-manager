@@ -762,6 +762,7 @@ struct TrackPage {
     bpm: String,
     music_key: String,
     energy: String,
+    feat_note: String,
     users: Vec<UserGroup>,
     avail_text: String,
     deezer_id: String,
@@ -889,16 +890,16 @@ async fn track_page(
 
     // Audio features (ReccoBeats) for this track.
     let feat = sqlx::query(
-        "SELECT bpm, camelot, key_pitch, key_mode, energy
-           FROM hub_track_features WHERE track_id = ?1 AND found = 1",
+        "SELECT bpm, camelot, key_pitch, key_mode, energy, found
+           FROM hub_track_features WHERE track_id = ?1",
     )
     .bind(id)
     .fetch_optional(&st.pool)
     .await
     .ok()
     .flatten();
-    let (bpm, music_key, energy) = match feat {
-        Some(r) => {
+    let (bpm, music_key, energy, feat_note) = match feat {
+        Some(r) if r.get::<i64, _>("found") == 1 => {
             let bpm: Option<f64> = r.get("bpm");
             let camelot: Option<String> = r.get("camelot");
             let pitch: Option<i64> = r.get("key_pitch");
@@ -915,9 +916,20 @@ async fn track_page(
             let energy = energy
                 .map(|e| format!("{:.2}", e))
                 .unwrap_or_else(|| "—".into());
-            (bpm, music_key, energy)
+            (bpm, music_key, energy, String::new())
         }
-        None => ("—".into(), "—".into(), "—".into()),
+        Some(_) => (
+            "—".into(),
+            "—".into(),
+            "—".into(),
+            "ReccoBeats hat für diesen Track keine Audio-Features.".to_string(),
+        ),
+        None => (
+            "—".into(),
+            "—".into(),
+            "—".into(),
+            "Audio-Features noch nicht abgeglichen (Worker läuft).".to_string(),
+        ),
     };
 
     // External service IDs for this track.
@@ -997,6 +1009,7 @@ async fn track_page(
         bpm,
         music_key,
         energy,
+        feat_note,
         users,
         avail_text,
         deezer_id,

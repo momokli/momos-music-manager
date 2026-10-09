@@ -87,6 +87,12 @@ content %}
                     <th scope="row">Energy</th>
                     <td>{{ energy }}</td>
                 </tr>
+                {% if feat_note != "" %}
+                <tr>
+                    <th scope="row"></th>
+                    <td class="hub-muted">{{ feat_note }}</td>
+                </tr>
+                {% endif %}
                 <tr>
                     <th scope="row">Tags</th>
                     <td>
