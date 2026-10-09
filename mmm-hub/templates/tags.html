@@ -29,16 +29,38 @@
 </p>
 {% endif %}
 
-<form method="get" action="/tags" role="search">
+<form
+    method="get"
+    action="/tags"
+    style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center"
+>
     {% if mine %}<input type="hidden" name="mine" value="1" />{% endif %} {% if group_id
     != 0 %}<input type="hidden" name="group" value="{{ group_id }}" />{% endif %}
     <input
         type="search"
         name="q"
         value="{{ q }}"
-        placeholder="Tag filtern …"
-        aria-label="Tag filtern"
+        placeholder="Tag suchen …"
+        aria-label="Tag suchen"
     />
+    <select name="owner" aria-label="Besitzer">
+        <option value="">Besitzer: alle</option>
+        {% for o in owner_options %}
+        <option value="{{ o.slug }}" {% if o.selected %}selected{% endif %}>
+            @{{ o.slug }}
+        </option>
+        {% endfor %}
+    </select>
+    {% if !collective_options.is_empty() %}
+    <select name="collective" aria-label="Collective">
+        <option value="">Collective: alle</option>
+        {% for c in collective_options %}
+        <option value="{{ c.id }}" {% if c.selected %}selected{% endif %}>
+            {{ c.icon }} {{ c.name }}
+        </option>
+        {% endfor %}
+    </select>
+    {% endif %}
     <button type="submit">Filtern</button>
 </form>
 

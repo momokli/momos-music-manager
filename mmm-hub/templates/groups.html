@@ -23,6 +23,14 @@ content %}
             <option value="{{ i }}">{{ i }}</option>
             {% endfor %}
         </select>
+        {% if !collective_options.is_empty() %}
+        <select name="collective_id" aria-label="Collective">
+            <option value="">— kein Collective —</option>
+            {% for c in collective_options %}
+            <option value="{{ c.id }}">{{ c.icon }} {{ c.name }}</option>
+            {% endfor %}
+        </select>
+        {% endif %}
         <button type="submit">Gruppe anlegen</button>
     </form>
 </details>

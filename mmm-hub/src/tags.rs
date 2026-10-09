@@ -243,6 +243,17 @@ pub async fn list_user_tags(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String
     .unwrap_or_default()
 }
 
+/// Distinct tag owners (user slugs) — for the filter picker.
+pub async fn tag_owners(pool: &SqlitePool) -> Vec<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT u.slug FROM hub_tags t JOIN hub_users u ON u.id = t.owner_user_id
+          ORDER BY u.slug",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
 /// Tags a playlist currently feeds: `(tag_id, tag name, owner slug)`.
 pub async fn tags_feeding_playlist(
     pool: &SqlitePool,

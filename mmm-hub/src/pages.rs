@@ -1455,6 +1455,10 @@ struct TagFilter {
     mine: Option<String>,
     /// Filter to tags in this group.
     group: Option<i64>,
+    /// Filter to tags in any group of this collective.
+    collective: Option<i64>,
+    /// Filter to tags owned by this user slug.
+    owner: Option<String>,
 }
 
 #[derive(Template)]
@@ -1466,6 +1470,10 @@ struct TagsPage {
     mine: bool,
     group_id: i64,
     group_label: String,
+    collective_id: i64,
+    owner: String,
+    owner_options: Vec<OwnerOption>,
+    collective_options: Vec<ParentOption>,
     tags: Vec<TagRow>,
 }
 
@@ -1503,6 +1511,8 @@ async fn tags_page(
         },
         None => (0, String::new()),
     };
+    let owner = f.owner.unwrap_or_default().trim().to_string();
+    let collective_id = f.collective.unwrap_or(0);
 
     let rows = sqlx::query(
         "SELECT t.id, t.name, u.slug AS owner,
@@ -1517,6 +1527,10 @@ async fn tags_page(
             AND (?2 = 0 OR t.owner_user_id = ?3)
             AND (?4 = 0 OR EXISTS (SELECT 1 FROM hub_group_tags gt2
                                     WHERE gt2.tag_id = t.id AND gt2.group_id = ?4))
+            AND (?5 = '' OR u.slug = ?5 COLLATE NOCASE)
+            AND (?6 = 0 OR EXISTS (SELECT 1 FROM hub_group_tags gt3
+                                    JOIN hub_tag_groups g3 ON g3.id = gt3.group_id
+                                   WHERE gt3.tag_id = t.id AND g3.collective_id = ?6))
           ORDER BY u.slug, t.name
           LIMIT 1000",
     )
@@ -1524,6 +1538,8 @@ async fn tags_page(
     .bind(mine as i64)
     .bind(me)
     .bind(f.group.unwrap_or(0))
+    .bind(&owner)
+    .bind(collective_id)
     .fetch_all(&st.pool)
     .await
     .unwrap_or_default();
@@ -1540,6 +1556,24 @@ async fn tags_page(
         })
         .collect();
 
+    let owner_options: Vec<OwnerOption> = crate::tags::tag_owners(&st.pool)
+        .await
+        .into_iter()
+        .map(|slug| OwnerOption {
+            selected: slug.eq_ignore_ascii_case(&owner),
+            slug,
+        })
+        .collect();
+    let collective_options: Vec<ParentOption> = crate::tags::collectives_i_belong(&st.pool, me)
+        .await
+        .into_iter()
+        .map(|(id, name, icon)| ParentOption {
+            selected: id == collective_id,
+            id,
+            name,
+            icon,
+        })
+        .collect();
     render(&TagsPage {
         nav,
         flash: String::new(),
@@ -1547,6 +1581,10 @@ async fn tags_page(
         mine,
         group_id,
         group_label,
+        collective_id,
+        owner,
+        owner_options,
+        collective_options,
         tags,
     })
 }
@@ -1681,6 +1719,7 @@ struct GroupsPage {
     groups: Vec<GroupRow>,
     discover: Vec<GroupRow>,
     icons: &'static [&'static str],
+    collective_options: Vec<GroupRef>,
 }
 
 async fn groups_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
@@ -1697,12 +1736,18 @@ async fn groups_page(State(st): State<AppState>, headers: HeaderMap) -> Response
         .into_iter()
         .map(group_row)
         .collect();
+    let collective_options: Vec<GroupRef> = crate::tags::collectives_i_belong(&st.pool, nav.id)
+        .await
+        .into_iter()
+        .map(|(id, name, icon)| GroupRef { id, name, icon })
+        .collect();
     render(&GroupsPage {
         nav,
         flash: String::new(),
         groups,
         discover,
         icons: crate::tags::ICONS,
+        collective_options,
     })
 }
 
@@ -1710,6 +1755,7 @@ async fn groups_page(State(st): State<AppState>, headers: HeaderMap) -> Response
 struct GroupForm {
     name: String,
     icon: Option<String>,
+    collective_id: Option<String>,
 }
 
 async fn group_create(
@@ -1720,7 +1766,19 @@ async fn group_create(
     let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
-    let _ = crate::tags::create_group(&st.pool, uid, &f.name, f.icon.as_deref().unwrap_or("")).await;
+    if let Ok(gid) =
+        crate::tags::create_group(&st.pool, uid, &f.name, f.icon.as_deref().unwrap_or("")).await
+    {
+        let cid = f
+            .collective_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse::<i64>().ok());
+        if let Some(cid) = cid {
+            let _ = crate::tags::set_group_collective(&st.pool, uid, gid, Some(cid)).await;
+        }
+    }
     Redirect::to("/groups").into_response()
 }
 
@@ -1801,6 +1859,11 @@ struct ParentOption {
     id: i64,
     name: String,
     icon: String,
+    selected: bool,
+}
+
+struct OwnerOption {
+    slug: String,
     selected: bool,
 }
 

@@ -100,6 +100,9 @@ content %}
 {% endif %}
 
 <h3>Gruppen ({{ groups.len() }})</h3>
+<p class="hub-muted">
+    <a href="/tags?collective={{ id }}">Alle Tags dieses Collectives ansehen →</a>
+</p>
 {% if groups.is_empty() %}
 <p class="hub-muted">Noch keine Gruppen in diesem Collective.</p>
 {% else %}
