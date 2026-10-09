@@ -18,6 +18,8 @@ use crate::api::AppState;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/search", get(search_page))
+        .route("/overlap", get(overlap_page))
+        .route("/settings", get(settings_page))
         .route("/user/{slug}", get(user_page))
         .route("/playlist/{id}", get(playlist_page))
         .with_state(state)
@@ -268,5 +270,103 @@ async fn playlist_page(
         name: name.unwrap_or_default(),
         owner: owner.unwrap_or_default(),
         tracks,
+    })
+}
+
+// ── overlap / discover ──────────────────────────────────────────────────────
+
+#[derive(Template)]
+#[template(path = "overlap.html")]
+struct OverlapPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    pairs: Vec<OverlapPair>,
+    shared: Vec<SharedTrack>,
+}
+
+struct OverlapPair {
+    a: String,
+    b: String,
+    shared_tracks: i64,
+}
+
+struct SharedTrack {
+    id: i64,
+    title: String,
+    artists: String,
+    user_count: i64,
+}
+
+async fn overlap_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "overlap").await else {
+        return Redirect::to("/login").into_response();
+    };
+
+    let pair_rows = sqlx::query(
+        "SELECT ua.slug AS a, ub.slug AS b, o.shared_tracks
+           FROM hub_v_user_overlap o
+           JOIN hub_users ua ON ua.id = o.user_a_id
+           JOIN hub_users ub ON ub.id = o.user_b_id
+          ORDER BY o.shared_tracks DESC",
+    )
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
+    let pairs: Vec<OverlapPair> = pair_rows
+        .iter()
+        .map(|r| OverlapPair {
+            a: r.get::<Option<String>, _>("a").unwrap_or_default(),
+            b: r.get::<Option<String>, _>("b").unwrap_or_default(),
+            shared_tracks: r.get("shared_tracks"),
+        })
+        .collect();
+
+    let shared_rows = sqlx::query(
+        "SELECT s.track_id, t.title, t.artists, s.user_count, s.user_ids
+           FROM hub_v_shared_tracks s
+           JOIN hub_tracks t ON t.id = s.track_id
+          ORDER BY s.user_count DESC, t.artists, t.title
+          LIMIT 200",
+    )
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
+    let shared: Vec<SharedTrack> = shared_rows
+        .iter()
+        .map(|r| SharedTrack {
+            id: r.get("track_id"),
+            title: r.get::<Option<String>, _>("title").unwrap_or_default(),
+            artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
+            user_count: r.get("user_count"),
+        })
+        .collect();
+
+    render(&OverlapPage {
+        nav,
+        flash: String::new(),
+        pairs,
+        shared,
+    })
+}
+
+// ── settings ────────────────────────────────────────────────────────────────
+
+#[derive(Template)]
+#[template(path = "settings.html")]
+struct SettingsPage {
+    nav: crate::ui::Nav,
+    flash: String,
+}
+
+async fn settings_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "settings").await else {
+        return Redirect::to("/login").into_response();
+    };
+
+    render(&SettingsPage {
+        nav,
+        flash: String::new(),
     })
 }

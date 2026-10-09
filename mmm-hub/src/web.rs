@@ -31,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/track/{id}/fetch", post(track_fetch))
         .route("/api/hub/services/{service}/connect", get(connect))
         .route("/api/hub/services/{service}/fetch-playlists", post(fetch_playlists_handler))
+        .route("/api/hub/services/{service}/sync-html", post(sync_html))
         .route("/api/hub/playlists/{id}/toggle", post(toggle_playlist))
         .route("/api/hub/playlists/enable-all", post(enable_all))
         .route("/api/hub/playlists/disable-all", post(disable_all))
@@ -178,8 +179,21 @@ struct RecentRow {
 struct PlaylistsPage {
     nav: crate::ui::Nav,
     flash: String,
+    /// Normalised filter key (`all` / `owned` / `with_items` / `not_fetched` / `error`).
+    filter: String,
+    /// Rows shown after applying `filter`.
     count: usize,
     playlists: Vec<PlaylistRow>,
+    counts: PlaylistCounts,
+}
+
+/// Per-filter playlist counts for the filter-bar labels.
+struct PlaylistCounts {
+    all: i64,
+    owned: i64,
+    with_items: i64,
+    not_fetched: i64,
+    error: i64,
 }
 
 struct PlaylistRow {
@@ -190,6 +204,13 @@ struct PlaylistRow {
     status: String,
     status_class: String,
     enabled: bool,
+}
+
+/// A single `<tr>` for the htmx out-of-band row swap (see `toggle_playlist`).
+#[derive(Template)]
+#[template(path = "_partials/playlist_row.html")]
+struct PlaylistRowPartial {
+    p: PlaylistRow,
 }
 
 #[derive(Template)]
@@ -227,6 +248,34 @@ struct Creds {
 #[derive(Deserialize)]
 struct Flash {
     msg: Option<String>,
+}
+
+/// Server-side playlist filter (issue #163). Unknown values fall back to `all`.
+#[derive(Deserialize)]
+struct PlaylistFilterQuery {
+    filter: Option<String>,
+}
+
+/// Whitelist the known filter keys; anything else means `all`.
+fn normalise_filter(filter: Option<&str>) -> &'static str {
+    match filter {
+        Some("owned") => "owned",
+        Some("with_items") => "with_items",
+        Some("not_fetched") => "not_fetched",
+        Some("error") => "error",
+        _ => "all",
+    }
+}
+
+/// The `WHERE` fragment for a normalised filter. Control-flow only — never user input.
+fn filter_clause(filter: &str) -> &'static str {
+    match filter {
+        "owned" => " AND p.is_owned = 1",
+        "with_items" => " AND p.items_available = 1",
+        "not_fetched" => " AND p.items_available = 0 AND p.enabled_for_fetch = 1",
+        "error" => " AND p.fetch_error IS NOT NULL",
+        _ => "",
+    }
 }
 
 async fn index(
@@ -275,16 +324,21 @@ async fn playlists_page(
     State(st): State<AppState>,
     headers: HeaderMap,
     Query(flash): Query<Flash>,
+    Query(filter): Query<PlaylistFilterQuery>,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "playlists").await else {
         return Redirect::to("/login").into_response();
     };
-    let playlists = playlist_rows(&st, nav.id).await;
+    let filter = normalise_filter(filter.filter.as_deref());
+    let playlists = playlist_rows(&st, nav.id, filter).await;
+    let counts = playlist_counts(&st, nav.id).await;
     render(&PlaylistsPage {
         nav,
         flash: flash.msg.unwrap_or_default(),
+        filter: filter.to_string(),
         count: playlists.len(),
         playlists,
+        counts,
     })
 }
 
@@ -318,56 +372,116 @@ async fn likes_status(st: &AppState, user_id: i64) -> (i64, String) {
     (count, error)
 }
 
+/// Map one DB row from the playlist query to a `PlaylistRow`.
+fn map_playlist_row(r: &sqlx::sqlite::SqliteRow) -> PlaylistRow {
+    let track_count: Option<i64> = r.get("track_count");
+    let items_available: i64 = r.get("items_available");
+    let enabled: i64 = r.get("enabled_for_fetch");
+    let err: Option<String> = r.get("fetch_error");
+    let fetched: i64 = r.get("fetched");
+
+    let (status, status_class) = if let Some(e) = err {
+        (format!("Fehler: {e}"), "hub-flash-err".to_string())
+    } else if items_available == 1 {
+        ("✓ geholt".to_string(), "".to_string())
+    } else if enabled == 1 {
+        ("wartet…".to_string(), "hub-muted".to_string())
+    } else {
+        ("—".to_string(), "hub-muted".to_string())
+    };
+
+    PlaylistRow {
+        id: r.get("id"),
+        name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+        owned: r.get::<i64, _>("is_owned") == 1,
+        tracks: format!(
+            "{} / {}",
+            fetched,
+            track_count
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".into())
+        ),
+        status,
+        status_class,
+        enabled: enabled == 1,
+    }
+}
+
 /// The user's playlists (no pagination) as rows for `playlists.html`.
-async fn playlist_rows(st: &AppState, user_id: i64) -> Vec<PlaylistRow> {
-    let rows = sqlx::query(
+///
+/// `filter` is one of the keys returned by [`normalise_filter`]; the matching
+/// `WHERE` fragment is appended before the stable ordering.
+async fn playlist_rows(st: &AppState, user_id: i64, filter: &str) -> Vec<PlaylistRow> {
+    let sql = format!(
         "SELECT p.id, p.name, p.is_owned, p.track_count, p.items_available,
                 p.enabled_for_fetch, p.fetch_error,
                 (SELECT COUNT(*) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS fetched
            FROM hub_playlists p
-          WHERE p.user_id = ?1
+          WHERE p.user_id = ?1{}
           ORDER BY p.is_owned DESC, p.name COLLATE NOCASE",
+        filter_clause(filter)
+    );
+    let rows = sqlx::query(&sql)
+        .bind(user_id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+
+    rows.iter().map(map_playlist_row).collect()
+}
+
+/// One playlist row by id (for the htmx single-row swap). `None` if it doesn't
+/// exist or doesn't belong to `user_id`.
+async fn playlist_row(st: &AppState, user_id: i64, id: i64) -> Option<PlaylistRow> {
+    let row = sqlx::query(
+        "SELECT p.id, p.name, p.is_owned, p.track_count, p.items_available,
+                p.enabled_for_fetch, p.fetch_error,
+                (SELECT COUNT(*) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS fetched
+           FROM hub_playlists p
+          WHERE p.user_id = ?1 AND p.id = ?2",
     )
     .bind(user_id)
-    .fetch_all(&st.pool)
+    .bind(id)
+    .fetch_optional(&st.pool)
     .await
-    .unwrap_or_default();
+    .ok()
+    .flatten()?;
+    Some(map_playlist_row(&row))
+}
 
-    rows.iter()
-        .map(|r| {
-            let track_count: Option<i64> = r.get("track_count");
-            let items_available: i64 = r.get("items_available");
-            let enabled: i64 = r.get("enabled_for_fetch");
-            let err: Option<String> = r.get("fetch_error");
-            let fetched: i64 = r.get("fetched");
+/// Counts per filter key for the filter-bar labels (single scan).
+async fn playlist_counts(st: &AppState, user_id: i64) -> PlaylistCounts {
+    let row = sqlx::query(
+        "SELECT
+            COUNT(*) AS all_c,
+            COALESCE(SUM(CASE WHEN is_owned = 1 THEN 1 ELSE 0 END), 0) AS owned_c,
+            COALESCE(SUM(CASE WHEN items_available = 1 THEN 1 ELSE 0 END), 0) AS items_c,
+            COALESCE(SUM(CASE WHEN items_available = 0 AND enabled_for_fetch = 1 THEN 1 ELSE 0 END), 0) AS not_fetched_c,
+            COALESCE(SUM(CASE WHEN fetch_error IS NOT NULL THEN 1 ELSE 0 END), 0) AS error_c
+           FROM hub_playlists
+          WHERE user_id = ?1",
+    )
+    .bind(user_id)
+    .fetch_one(&st.pool)
+    .await
+    .ok();
 
-            let (status, status_class) = if let Some(e) = err {
-                (format!("Fehler: {e}"), "hub-flash-err".to_string())
-            } else if items_available == 1 {
-                ("✓ geholt".to_string(), "".to_string())
-            } else if enabled == 1 {
-                ("wartet…".to_string(), "hub-muted".to_string())
-            } else {
-                ("—".to_string(), "hub-muted".to_string())
-            };
-
-            PlaylistRow {
-                id: r.get("id"),
-                name: r.get::<Option<String>, _>("name").unwrap_or_default(),
-                owned: r.get::<i64, _>("is_owned") == 1,
-                tracks: format!(
-                    "{} / {}",
-                    fetched,
-                    track_count
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| "?".into())
-                ),
-                status,
-                status_class,
-                enabled: enabled == 1,
-            }
-        })
-        .collect()
+    match row {
+        Some(r) => PlaylistCounts {
+            all: r.get("all_c"),
+            owned: r.get("owned_c"),
+            with_items: r.get("items_c"),
+            not_fetched: r.get("not_fetched_c"),
+            error: r.get("error_c"),
+        },
+        None => PlaylistCounts {
+            all: 0,
+            owned: 0,
+            with_items: 0,
+            not_fetched: 0,
+            error: 0,
+        },
+    }
 }
 
 async fn fetch_playlists_handler(
@@ -414,7 +528,61 @@ async fn toggle_playlist(
     .bind(uid)
     .execute(&st.pool)
     .await;
+
+    // htmx path: return just the refreshed <tr> for `hx-swap="outerHTML"`.
+    if headers.get("hx-request").is_some() {
+        return match playlist_row(&st, uid, id).await {
+            Some(p) => render(&PlaylistRowPartial { p }),
+            None => error_page("Playlist nicht gefunden."),
+        };
+    }
+
     Redirect::to("/me/playlists").into_response()
+}
+
+/// htmx-friendly twin of `POST /api/hub/services/{service}/sync`.
+///
+/// Runs the same DB queueing logic as [`crate::api::sync`], but returns a tiny
+/// HTML badge instead of JSON so a button can htmx-swap it in place (and it
+/// still degrades to a plain form post when JS is off).
+async fn sync_html(
+    State(st): State<AppState>,
+    Path(service): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((uid, _)) = current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if service != "spotify" {
+        return error_page("Diesen Dienst gibt es (noch) nicht.");
+    }
+
+    let _ = sqlx::query(
+        "UPDATE hub_service_accounts
+            SET likes_status = 'queued', likes_synced_at = NULL, likes_error = NULL
+          WHERE user_id = ?1 AND service = 'spotify'",
+    )
+    .bind(uid)
+    .execute(&st.pool)
+    .await;
+
+    let _ = sqlx::query(
+        "UPDATE hub_playlists
+            SET enabled_for_fetch = 1, fetch_status = 'queued',
+                items_available = 0, fetch_error = NULL
+          WHERE user_id = ?1 AND service = 'spotify'",
+    )
+    .bind(uid)
+    .execute(&st.pool)
+    .await;
+
+    // htmx swaps this in; a plain form post redirects somewhere sensible.
+    if headers.get("hx-request").is_some() {
+        Html("<span class=\"hub-badge hub-badge-ok\">synchronisiert ✓</span>").into_response()
+    } else {
+        Redirect::to("/me/playlists?msg=Synchronisation+eingericht+%E2%80%94+l%C3%A4uft+im+Hintergrund")
+            .into_response()
+    }
 }
 
 async fn enable_all(State(st): State<AppState>, headers: HeaderMap) -> Response {

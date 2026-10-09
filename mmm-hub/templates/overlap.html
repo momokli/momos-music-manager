@@ -1,0 +1,64 @@
+{% extends "base.html" %} {% block title %}Entdecken — MMM Hub{% endblock %} {% block
+content %}
+<hgroup>
+    <h1>Entdecken</h1>
+    <p>Was die Nutzer des Hubs gemeinsam hören — Überschneidungen und geteilte Tracks.</p>
+</hgroup>
+
+<h2>Wer teilt wie viel</h2>
+{% if pairs.is_empty() %}
+<p class="hub-muted">Noch keine gemeinsamen Tracks zwischen Nutzern.</p>
+{% else %}
+<div class="overflow-auto">
+    <table>
+        <caption class="hub-visually-hidden">
+            Geteilte Tracks pro Nutzerpaar
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Nutzer</th>
+                <th scope="col">Nutzer</th>
+                <th scope="col">Geteilte Tracks</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for p in pairs %}
+            <tr>
+                <td><a href="/user/{{ p.a }}">@{{ p.a }}</a></td>
+                <td><a href="/user/{{ p.b }}">@{{ p.b }}</a></td>
+                <td>{{ p.shared_tracks }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<h2>Geteilte Tracks</h2>
+{% if shared.is_empty() %}
+<p class="hub-muted">Noch keine Tracks, die von mehreren Nutzern gehört werden.</p>
+{% else %}
+<div class="overflow-auto">
+    <table>
+        <caption class="hub-visually-hidden">
+            Tracks, die von mehreren Nutzern gehört werden
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Track</th>
+                <th scope="col">Artists</th>
+                <th scope="col">Hörer</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in shared %}
+            <tr>
+                <td><a href="/track/{{ t.id }}">{{ t.title }}</a></td>
+                <td>{{ t.artists }}</td>
+                <td>von {{ t.user_count }} Nutzern</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %} {% endblock %}

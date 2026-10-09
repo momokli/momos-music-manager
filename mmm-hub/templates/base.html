@@ -79,10 +79,59 @@
         display: inline;
         margin: 0;
       }
+      .hub-visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      .hub-skip {
+        position: absolute;
+        left: -9999px;
+      }
+      .hub-skip:focus {
+        left: 1rem;
+        top: 1rem;
+        z-index: 100;
+        background: var(--pico-background-color);
+        padding: 0.5rem 1rem;
+        border-radius: 0.5rem;
+      }
+      .hub-crumbs {
+        font-size: 0.9rem;
+        margin-bottom: 0.5rem;
+      }
+      .hub-crumbs ol {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+      }
+      .hub-crumbs li + li::before {
+        content: "›";
+        margin-right: 0.4rem;
+        color: var(--pico-muted-color);
+      }
+      .hub-filter ul {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        list-style: none;
+        padding: 0;
+        margin: 0 0 1rem;
+      }
     </style>
   </head>
   <body>
-    <nav class="container-fluid hub-nav">
+    <a href="#main" class="hub-skip">Zum Inhalt springen</a>
+    <nav class="container-fluid hub-nav" aria-label="Hauptnavigation">
       <ul>
         <li><strong><a href="/">MMM Hub</a></strong></li>
         <li>
@@ -93,6 +142,9 @@
         </li>
         <li>
           <a href="/search" {% if nav.active == "search" %}aria-current="page"{% endif %}>Suche</a>
+        </li>
+        <li>
+          <a href="/overlap" {% if nav.active == "overlap" %}aria-current="page"{% endif %}>Entdecken</a>
         </li>
         <li>
           <a href="/sql" {% if nav.active == "sql" %}aria-current="page"{% endif %}>SQL</a>
@@ -106,7 +158,9 @@
           <a href="/api/hub/services/spotify/connect"><span class="hub-badge hub-badge-no">Spotify verbinden</span></a>
           {% endif %}
         </li>
+        <ul>
         <li><a href="/user/{{ nav.slug }}">@{{ nav.slug }}</a></li>
+        <li><a href="/settings">Einstellungen</a></li>
         <li>
           <form method="post" action="/logout">
             <button class="outline secondary" type="submit">Logout</button>
@@ -115,7 +169,7 @@
       </ul>
     </nav>
 
-    <main class="container">
+    <main class="container" id="main">
       {% block flash %} {% if flash != "" %}
       <article class="hub-flash hub-flash-ok" role="status">{{ flash }}</article>
       {% endif %} {% endblock %} {% block content %}{% endblock %}

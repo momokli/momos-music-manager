@@ -109,6 +109,133 @@ async fn login_page_renders_without_session() {
 }
 
 #[tokio::test]
+async fn overlap_page_renders_shared_data() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let resp = app
+        .client()
+        .get(app.url("/overlap"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    assert!(html.contains("Entdecken"));
+    // Fixture track shared by all three users.
+    assert!(html.contains("Shared Anthem"));
+    assert!(html.contains("@alice") && html.contains("@bob"));
+}
+
+#[tokio::test]
+async fn settings_page_renders() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let resp = app
+        .client()
+        .get(app.url("/settings"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    assert!(html.contains("Einstellungen"));
+    assert!(html.contains("Spotify"));
+    assert!(html.contains("/user/alice"));
+}
+
+#[tokio::test]
+async fn playlist_filter_is_server_side() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // All playlists include the fixture playlist.
+    let all = app
+        .client()
+        .get(app.url("/me/playlists?filter=all"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert!(body(all).await.contains("Deep House"));
+
+    // No fixture playlist has an error, so the error filter yields no rows.
+    let err = app
+        .client()
+        .get(app.url("/me/playlists?filter=error"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let html = body(err).await;
+    assert!(!html.contains("Deep House"));
+    assert!(html.contains("Keine Playlists in dieser Ansicht"));
+}
+
+#[tokio::test]
+async fn toggle_returns_row_fragment_for_htmx() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let resp = app
+        .client()
+        .post(app.url(&format!("/api/hub/playlists/{}/toggle", app.seed.pl_alice)))
+        .header("Cookie", &cookie)
+        .header("HX-Request", "true")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    assert!(html.trim_start().starts_with("<tr"), "expected a row fragment");
+    assert!(html.contains("Deep House"));
+}
+
+#[tokio::test]
+async fn toggle_without_htmx_redirects() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+    let resp = app
+        .client()
+        .post(app.url(&format!("/api/hub/playlists/{}/toggle", app.seed.pl_alice)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers()["location"], "/me/playlists");
+}
+
+#[tokio::test]
+async fn sync_html_swaps_for_htmx_and_redirects_otherwise() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let htmx = app
+        .client()
+        .post(app.url("/api/hub/services/spotify/sync-html"))
+        .header("Cookie", &cookie)
+        .header("HX-Request", "true")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(htmx.status(), reqwest::StatusCode::OK);
+    assert!(body(htmx).await.contains("synchronisiert"));
+
+    let plain = app
+        .client()
+        .post(app.url("/api/hub/services/spotify/sync-html"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(plain.status(), reqwest::StatusCode::SEE_OTHER);
+}
+
+#[tokio::test]
 async fn no_shell_page_returns_500() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;

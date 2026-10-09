@@ -1,4 +1,5 @@
-{% extends "base.html" %} {% block title %}Suche — MMM Hub{% endblock %} {% block content %}
+{% extends "base.html" %} {% block title %}Suche — MMM Hub{% endblock %} {% block content
+%}
 <hgroup>
     <h1>Suche</h1>
     <p>Tracks nach Titel, Artist oder Album durchsuchen</p>
@@ -20,22 +21,27 @@
 {% if tracks.is_empty() %}
 <p>Keine Treffer.</p>
 {% else %}
-<table>
-    <thead>
-        <tr>
-            <th>Titel</th>
-            <th>Artists</th>
-            <th>Album</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for t in tracks %}
-        <tr>
-            <td><a href="/track/{{ t.id }}">{{ t.title }}</a></td>
-            <td>{{ t.artists }}</td>
-            <td>{{ t.album }}</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
+<div class="overflow-auto">
+    <table>
+        <caption class="hub-visually-hidden">
+            Suchergebnisse
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Titel</th>
+                <th scope="col">Artists</th>
+                <th scope="col">Album</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in tracks %}
+            <tr>
+                <td><a href="/track/{{ t.id }}">{{ t.title }}</a></td>
+                <td>{{ t.artists }}</td>
+                <td>{{ t.album }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
 {% endif %} {% endif %} {% endblock %}

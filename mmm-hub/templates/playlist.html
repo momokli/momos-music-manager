@@ -1,4 +1,12 @@
-{% extends "base.html" %} {% block title %}{{ name }} — MMM Hub{% endblock %} {% block content %}
+{% extends "base.html" %} {% block title %}{{ name }} — MMM Hub{% endblock %} {% block
+content %}
+<nav class="hub-crumbs" aria-label="Brotkrumen">
+    <ol>
+        <li><a href="/">Übersicht</a></li>
+        <li><a href="/me/playlists">Playlists</a></li>
+        <li>{{ name }}</li>
+    </ol>
+</nav>
 <hgroup>
     <h1>{{ name }}</h1>
     <p>von <a href="/user/{{ owner }}">{{ owner }}</a></p>
@@ -7,20 +15,25 @@
 {% if tracks.is_empty() %}
 <p>Keine Tracks in dieser Playlist.</p>
 {% else %}
-<table>
-    <thead>
-        <tr>
-            <th>#</th>
-            <th>Track</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for t in tracks %}
-        <tr>
-            <td>{{ t.position }}</td>
-            <td><a href="/track/{{ t.id }}">{{ t.artists }} - {{ t.title }}</a></td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
+<div class="overflow-auto">
+    <table>
+        <caption class="hub-visually-hidden">
+            Tracks dieser Playlist in Reihenfolge
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">#</th>
+                <th scope="col">Track</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in tracks %}
+            <tr>
+                <td>{{ t.position }}</td>
+                <td><a href="/track/{{ t.id }}">{{ t.artists }} - {{ t.title }}</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
 {% endif %} {% endblock %}

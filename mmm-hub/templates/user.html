@@ -1,4 +1,11 @@
-{% extends "base.html" %} {% block title %}{{ slug }} — MMM Hub{% endblock %} {% block content %}
+{% extends "base.html" %} {% block title %}{{ slug }} — MMM Hub{% endblock %} {% block
+content %}
+<nav class="hub-crumbs" aria-label="Brotkrumen">
+    <ol>
+        <li><a href="/">Übersicht</a></li>
+        <li>@{{ slug }}</li>
+    </ol>
+</nav>
 <hgroup>
     <h1>{{ slug }}</h1>
     <p>{{ playlist_count }} Playlist(s) · {{ liked_count }} gelikte Tracks</p>
@@ -6,24 +13,29 @@
 
 <h2>Playlists</h2>
 {% if playlists.is_empty() %}
-<p>Keine Playlists.</p>
+<p class="hub-muted">Keine Playlists.</p>
 {% else %}
-<table>
-    <thead>
-        <tr>
-            <th>Name</th>
-            <th>Tracks</th>
-            <th>Items</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for p in playlists %}
-        <tr>
-            <td><a href="/playlist/{{ p.id }}">{{ p.name }}</a></td>
-            <td>{{ p.track_count }}</td>
-            <td>{% if p.items_available %}ja{% else %}nein{% endif %}</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
+<div class="overflow-auto">
+    <table>
+        <caption class="hub-visually-hidden">
+            Playlists von {{ slug }}
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Tracks</th>
+                <th scope="col">Geholt</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for p in playlists %}
+            <tr>
+                <td><a href="/playlist/{{ p.id }}">{{ p.name }}</a></td>
+                <td>{{ p.track_count }}</td>
+                <td>{% if p.items_available %}ja{% else %}nein{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
 {% endif %} {% endblock %}

@@ -1,56 +1,97 @@
-{% extends "base.html" %} {% block title %}Playlists — MMM Hub{% endblock %} {% block content %}
+{% extends "base.html" %} {% block title %}Playlists — MMM Hub{% endblock %} {% block
+content %}
 <hgroup>
-  <h1>Meine Playlists</h1>
-  <p class="hub-muted">{{ count }} Playlists · holen läuft im Hintergrund (429-schonend)</p>
+    <h1>Meine Playlists</h1>
+    <p class="hub-muted">
+        {{ count }} Playlists · holen läuft im Hintergrund (429-schonend)
+    </p>
 </hgroup>
 
+<nav class="hub-filter" aria-label="Playlist-Filter">
+    <ul>
+        {% if filter == "all" %}
+        <li>
+            <a href="/me/playlists?filter=all" aria-current="page"
+                >Alle ({{ counts.all }})</a
+            >
+        </li>
+        {% else %}
+        <li><a href="/me/playlists?filter=all">Alle ({{ counts.all }})</a></li>
+        {% endif %} {% if filter == "owned" %}
+        <li>
+            <a href="/me/playlists?filter=owned" aria-current="page"
+                >Eigene ({{ counts.owned }})</a
+            >
+        </li>
+        {% else %}
+        <li><a href="/me/playlists?filter=owned">Eigene ({{ counts.owned }})</a></li>
+        {% endif %} {% if filter == "with_items" %}
+        <li>
+            <a href="/me/playlists?filter=with_items" aria-current="page"
+                >Geholt ({{ counts.with_items }})</a
+            >
+        </li>
+        {% else %}
+        <li>
+            <a href="/me/playlists?filter=with_items">Geholt ({{ counts.with_items }})</a>
+        </li>
+        {% endif %} {% if filter == "not_fetched" %}
+        <li>
+            <a href="/me/playlists?filter=not_fetched" aria-current="page"
+                >Ausstehend ({{ counts.not_fetched }})</a
+            >
+        </li>
+        {% else %}
+        <li>
+            <a href="/me/playlists?filter=not_fetched"
+                >Ausstehend ({{ counts.not_fetched }})</a
+            >
+        </li>
+        {% endif %} {% if filter == "error" %}
+        <li>
+            <a href="/me/playlists?filter=error" aria-current="page"
+                >Fehler ({{ counts.error }})</a
+            >
+        </li>
+        {% else %}
+        <li><a href="/me/playlists?filter=error">Fehler ({{ counts.error }})</a></li>
+        {% endif %}
+    </ul>
+</nav>
+
 <div class="hub-actions">
-  <form method="post" action="/api/hub/playlists/enable-all">
-    <button type="submit">Alle aktivieren</button>
-  </form>
-  <form method="post" action="/api/hub/playlists/disable-all">
-    <button class="outline secondary" type="submit">Alle stoppen</button>
-  </form>
+    <form method="post" action="/api/hub/playlists/enable-all">
+        <button type="submit">Alle aktivieren</button>
+    </form>
+    <form method="post" action="/api/hub/playlists/disable-all">
+        <button class="outline secondary" type="submit">Alle stoppen</button>
+    </form>
 </div>
 
 {% if playlists.is_empty() %}
 <p class="hub-muted">
-  Noch keine Playlists — auf der <a href="/">Übersicht</a> „Playlists holen".
+    Keine Playlists in dieser Ansicht — auf der <a href="/">Übersicht</a> „Playlists
+    holen" oder <a href="/me/playlists?filter=all">alle anzeigen</a>.
 </p>
 {% else %}
-<table>
-  <thead>
-    <tr>
-      <th>Playlist</th>
-      <th>Typ</th>
-      <th>Tracks</th>
-      <th>Status</th>
-      <th></th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for p in playlists %}
-    <tr>
-      <td><a href="/playlist/{{ p.id }}">{{ p.name }}</a></td>
-      <td>
-        {% if p.owned %}<span class="hub-badge hub-badge-ok">eigen</span>{% else %}<span
-          class="hub-badge hub-badge-no"
-          >gefolgt</span
-        >{% endif %}
-      </td>
-      <td>{{ p.tracks }}</td>
-      <td class="{{ p.status_class }}">{{ p.status }}</td>
-      <td class="hub-row-actions">
-        <form method="post" action="/api/hub/playlists/{{ p.id }}/toggle">
-          {% if p.enabled %}
-          <button class="outline secondary" type="submit">Stop</button>
-          {% else %}
-          <button type="submit">Fetch</button>
-          {% endif %}
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+<div class="overflow-auto">
+    <table>
+        <caption>
+            Playlists ({{ count }})
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Playlist</th>
+                <th scope="col">Typ</th>
+                <th scope="col">Tracks</th>
+                <th scope="col">Status</th>
+                <th scope="col">Aktionen</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for p in playlists %} {% include "_partials/playlist_row.html" %} {% endfor
+            %}
+        </tbody>
+    </table>
+</div>
 {% endif %} {% endblock %}

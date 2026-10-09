@@ -1,0 +1,66 @@
+{% extends "base.html" %} {% block title %}Einstellungen — MMM Hub{% endblock %} {% block
+content %}
+<hgroup>
+    <h1>Einstellungen</h1>
+    <p>Konto, verknüpfte Dienste und Sync-Aktionen.</p>
+</hgroup>
+
+<h2>Konto</h2>
+<table>
+    <caption class="hub-visually-hidden">
+        Angemeldetes Konto
+    </caption>
+    <thead>
+        <tr>
+            <th scope="col">Feld</th>
+            <th scope="col">Wert</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <th scope="row">Benutzer</th>
+            <td><a href="/user/{{ nav.slug }}">@{{ nav.slug }}</a></td>
+        </tr>
+        <tr>
+            <th scope="row">Playlists</th>
+            <td><a href="/me/playlists">Meine Playlists</a></td>
+        </tr>
+    </tbody>
+</table>
+
+<h2>Spotify</h2>
+{% if nav.spotify_connected %}
+<p>
+    Status: <span class="hub-badge hub-badge-ok">Spotify verbunden</span> {% if
+    nav.spotify_label != "" %} als <strong>{{ nav.spotify_label }}</strong>{% endif %}
+</p>
+{% else %}
+<p>
+    Status: <span class="hub-badge hub-badge-no">Nicht verbunden</span>
+    — verbinde dein Spotify-Konto, um Likes und Playlists zu importieren.
+</p>
+{% endif %}
+
+<h2>Aktionen</h2>
+<div class="hub-actions">
+    {% if !nav.spotify_connected %}
+    <a href="/api/hub/services/spotify/connect" role="button" class="outline"
+        >Spotify verbinden</a
+    >
+    {% endif %}
+
+    <form method="post" action="/api/hub/services/spotify/sync-html">
+        <button type="submit" class="outline">Jetzt synchronisieren</button>
+    </form>
+
+    <form method="post" action="/api/hub/services/spotify/fetch-playlists">
+        <button type="submit" class="secondary outline">Playlists holen</button>
+    </form>
+
+    {% if nav.spotify_connected %}
+    <form method="post" action="/api/hub/services/spotify/disconnect">
+        <button type="submit" class="secondary outline">Trennen</button>
+    </form>
+    {% endif %}
+</div>
+{% endblock %}

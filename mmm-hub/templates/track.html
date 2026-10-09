@@ -1,5 +1,12 @@
 {% extends "base.html" %} {% block title %}{{ title }} — MMM Hub{% endblock %} {% block
 content %}
+<nav class="hub-crumbs" aria-label="Brotkrumen">
+    <ol>
+        <li><a href="/">Übersicht</a></li>
+        <li><a href="/search">Suche</a></li>
+        <li>Track</li>
+    </ol>
+</nav>
 <hgroup>
     <h1>{{ title }}</h1>
     <p>{{ artists }}</p>
@@ -9,7 +16,8 @@ content %}
     <div>
         {% if image_url != "" %}<img
             src="{{ image_url }}"
-            alt=""
+            alt="Album-Cover"
+            loading="lazy"
             style="border-radius: 8px"
         />{% endif %}
     </div>

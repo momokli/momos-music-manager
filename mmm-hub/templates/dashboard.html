@@ -1,49 +1,57 @@
-{% extends "base.html" %} {% block title %}Übersicht — MMM Hub{% endblock %} {% block content %}
+{% extends "base.html" %} {% block title %}Übersicht — MMM Hub{% endblock %} {% block
+content %}
 <hgroup>
-  <h1>Hallo, {{ nav.slug }}</h1>
-  <p class="hub-muted">Deine Musik, mit allen im Hub.</p>
+    <h1>Hallo, {{ nav.slug }}</h1>
+    <p class="hub-muted">Deine Musik, mit allen im Hub.</p>
 </hgroup>
 
 <h2>Spotify</h2>
 {% if connected %}
 <p>
-  Status:
-  <span class="hub-badge hub-badge-ok"
-    >verbunden{% if spotify_label != "" %} als {{ spotify_label }}{% endif %}</span
-  >
+    Status:
+    <span class="hub-badge hub-badge-ok"
+        >verbunden{% if spotify_label != "" %} als {{ spotify_label }}{% endif %}</span
+    >
 </p>
 <div class="hub-actions">
-  <form method="post" action="/api/hub/services/spotify/sync">
-    <button type="submit">Jetzt synchronisieren</button>
-  </form>
-  <form method="post" action="/api/hub/services/spotify/fetch-playlists">
-    <button class="secondary" type="submit">Playlists holen</button>
-  </form>
-  <form method="post" action="/api/hub/services/spotify/disconnect">
-    <button class="outline secondary" type="submit">Trennen</button>
-  </form>
+    <form
+        method="post"
+        action="/api/hub/services/spotify/sync-html"
+        hx-post="/api/hub/services/spotify/sync-html"
+        hx-target="#sync-status"
+        hx-swap="innerHTML"
+    >
+        <button type="submit">Jetzt synchronisieren</button>
+    </form>
+    <form method="post" action="/api/hub/services/spotify/fetch-playlists">
+        <button class="secondary" type="submit">Playlists holen</button>
+    </form>
+    <form method="post" action="/api/hub/services/spotify/disconnect">
+        <button class="outline secondary" type="submit">Trennen</button>
+    </form>
 </div>
+<p><span id="sync-status" role="status" aria-live="polite"></span></p>
 {% else %}
 <p>Status: <span class="hub-badge hub-badge-no">nicht verbunden</span></p>
 <form method="get" action="/api/hub/services/spotify/connect">
-  <button type="submit">Spotify verbinden</button>
+    <button type="submit">Spotify verbinden</button>
 </form>
 {% endif %}
 
 <h2>Überblick</h2>
 <div class="hub-grid">
-  <article class="hub-stat">
-    <h2>{{ playlists_count }}</h2>
-    <p class="hub-muted">Playlists</p>
-  </article>
-  <article class="hub-stat">
-    <h2>{{ fetched_count }}</h2>
-    <p class="hub-muted">davon geholt</p>
-  </article>
-  <article class="hub-stat">
-    <h2>{{ likes_count }}</h2>
-    <p class="hub-muted">Liked Tracks</p>
-  </article>
+    <article class="hub-stat">
+        <h2>{{ playlists_count }}</h2>
+        <p class="hub-muted">Playlists</p>
+    </article>
+    <article class="hub-stat">
+        <h2>{{ fetched_count }}</h2>
+        <p class="hub-muted">davon geholt</p>
+    </article>
+    <article class="hub-stat">
+        <h2>{{ likes_count }}</h2>
+        <p class="hub-muted">Liked Tracks</p>
+    </article>
 </div>
 {% if likes_error != "" %}
 <article class="hub-flash-err">Likes-Sync: {{ likes_error }}</article>
@@ -53,21 +61,26 @@
 {% if recent.is_empty() %}
 <p class="hub-muted">Noch keine Tracks — verbinde Spotify und synchronisiere.</p>
 {% else %}
-<table>
-  <thead>
-    <tr>
-      <th>Track</th>
-      <th>Artists</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for t in recent %}
-    <tr>
-      <td><a href="/track/{{ t.id }}">{{ t.title }}</a></td>
-      <td class="hub-muted">{{ t.artists }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+<div class="overflow-auto">
+    <table>
+        <caption class="hub-visually-hidden">
+            Zuletzt gesehene Tracks
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Track</th>
+                <th scope="col">Artists</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in recent %}
+            <tr>
+                <td><a href="/track/{{ t.id }}">{{ t.title }}</a></td>
+                <td class="hub-muted">{{ t.artists }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
 <p><a href="/me/playlists">Alle Playlists →</a> · <a href="/search">Suche →</a></p>
 {% endif %} {% endblock %}
