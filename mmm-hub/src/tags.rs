@@ -292,16 +292,40 @@ pub struct GroupDetail {
     pub name: String,
     pub icon: String,
     pub owner: String,
-    /// The caller's effective role (own or inherited).
+    /// The caller's effective role (own or via the collective).
     pub role: String,
-    /// True when `role` is inherited from a parent group.
+    /// True when `role` comes from a collective membership.
     pub role_inherited: bool,
-    pub parent_id: i64,
-    pub parent_name: String,
-    pub parent_icon: String,
+    pub collective_id: i64,
+    pub collective_name: String,
+    pub collective_icon: String,
     pub members: Vec<(String, String)>,
     /// `(tag_id, tag name, tag owner slug)`.
     pub tags: Vec<(i64, String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Collective {
+    pub id: i64,
+    pub name: String,
+    pub icon: String,
+    pub owner: String,
+    pub role: String,
+    pub groups: i64,
+    pub members: i64,
+}
+
+#[derive(Debug)]
+pub struct CollectiveDetail {
+    pub id: i64,
+    pub name: String,
+    pub icon: String,
+    pub owner: String,
+    pub role: String,
+    pub is_owner: bool,
+    pub members: Vec<(String, String)>,
+    /// `(group_id, group name, group icon, tag count)`.
+    pub groups: Vec<(i64, String, String, i64)>,
 }
 
 /// Create a group owned by `owner_user_id` (idempotent on the slug); the owner
@@ -347,18 +371,6 @@ pub async fn create_group(
     Ok(id)
 }
 
-/// Groups a user owns: `(id, name, icon)` — for parent pickers.
-pub async fn owned_groups(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String, String)> {
-    sqlx::query_as::<_, (i64, String, String)>(
-        "SELECT id, name, COALESCE(icon,'') FROM hub_tag_groups
-          WHERE owner_user_id = ?1 ORDER BY name",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default()
-}
-
 pub async fn delete_group(pool: &SqlitePool, actor_user_id: i64, group_id: i64) -> Result<()> {
     sqlx::query("DELETE FROM hub_tag_groups WHERE id = ?1 AND owner_user_id = ?2")
         .bind(group_id)
@@ -381,18 +393,22 @@ async fn own_role_of(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<S
     .flatten()
 }
 
-/// The user's **effective** role in a group: their strongest role on the group
-/// itself or on any ancestor (parent/contributor group). `None` if none.
+/// The user's **effective** role in a group: their own role on the group, or —
+/// if the group belongs to a collective the user is a member of — `contributor`.
 pub async fn effective_role_of(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<String> {
-    sqlx::query_scalar::<_, String>(
-        "WITH RECURSIVE anc(id) AS (\n             SELECT ?1\n             UNION\n             SELECT g.parent_group_id FROM hub_tag_groups g\n               JOIN anc ON g.id = anc.id WHERE g.parent_group_id IS NOT NULL\n         )\n         SELECT m.role FROM hub_group_members m JOIN anc ON anc.id = m.group_id\n          WHERE m.user_id = ?2\n          ORDER BY CASE m.role WHEN 'owner' THEN 3 WHEN 'contributor' THEN 2 ELSE 1 END DESC\n          LIMIT 1",
+    if let Some(r) = own_role_of(pool, user_id, group_id).await {
+        return Some(r);
+    }
+    let in_collective = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM hub_tag_groups g\n           JOIN hub_collective_members cm ON cm.collective_id = g.collective_id\n          WHERE g.id = ?1 AND cm.user_id = ?2 LIMIT 1",
     )
     .bind(group_id)
     .bind(user_id)
     .fetch_optional(pool)
     .await
     .ok()
-    .flatten()
+    .flatten();
+    in_collective.map(|_| ROLE_CONTRIBUTOR.to_string())
 }
 
 pub async fn can_contribute(pool: &SqlitePool, user_id: i64, group_id: i64) -> bool {
@@ -643,7 +659,7 @@ pub async fn groups_for_tag(pool: &SqlitePool, tag_id: i64) -> Vec<(i64, String,
 pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<GroupDetail> {
     let row = sqlx::query(
         "SELECT g.id, g.name, COALESCE(g.icon,'') AS icon, u.slug AS owner,
-                COALESCE(g.parent_group_id, 0) AS parent_id
+                COALESCE(g.collective_id, 0) AS collective_id
            FROM hub_tag_groups g JOIN hub_users u ON u.id = g.owner_user_id
           WHERE g.id = ?1",
     )
@@ -657,12 +673,12 @@ pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Opt
         .unwrap_or_default();
     let role_inherited =
         !role.is_empty() && own_role_of(pool, user_id, group_id).await.is_none();
-    let parent_id: i64 = row.get("parent_id");
-    let (parent_name, parent_icon) = if parent_id != 0 {
+    let collective_id: i64 = row.get("collective_id");
+    let (collective_name, collective_icon) = if collective_id != 0 {
         sqlx::query_as::<_, (String, String)>(
-            "SELECT name, COALESCE(icon,'') FROM hub_tag_groups WHERE id = ?1",
+            "SELECT name, COALESCE(icon,'') FROM hub_collectives WHERE id = ?1",
         )
-        .bind(parent_id)
+        .bind(collective_id)
         .fetch_optional(pool)
         .await
         .ok()
@@ -696,21 +712,21 @@ pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Opt
         owner: row.get("owner"),
         role,
         role_inherited,
-        parent_id,
-        parent_name,
-        parent_icon,
+        collective_id,
+        collective_name,
+        collective_icon,
         members,
         tags,
     })
 }
 
-/// Set (or clear) a group's parent — the contributor group it inherits from.
-/// Only the group's owner may do this; cycles are rejected.
-pub async fn set_parent(
+/// Set (or clear) the collective a group belongs to. The group's owner may do
+/// this, and must be a member of the chosen collective.
+pub async fn set_group_collective(
     pool: &SqlitePool,
     actor_user_id: i64,
     group_id: i64,
-    parent_group_id: Option<i64>,
+    collective_id: Option<i64>,
 ) -> Result<()> {
     let owner = sqlx::query_scalar::<_, i64>(
         "SELECT id FROM hub_tag_groups WHERE id = ?1 AND owner_user_id = ?2",
@@ -722,31 +738,288 @@ pub async fn set_parent(
     .ok()
     .flatten();
     if owner.is_none() {
-        bail!("only the group owner can set its parent");
+        bail!("only the group owner can set its collective");
     }
-    if let Some(pid) = parent_group_id {
-        if pid == group_id {
-            bail!("a group can't be its own parent");
-        }
-        // Reject cycles: the parent must not be a descendant of this group.
-        let is_descendant = sqlx::query_scalar::<_, i64>(
-            "WITH RECURSIVE d(id) AS (\n                 SELECT ?1\n                 UNION\n                 SELECT g.id FROM hub_tag_groups g JOIN d ON g.parent_group_id = d.id\n             )\n             SELECT COUNT(*) FROM d WHERE id = ?2",
+    if let Some(cid) = collective_id {
+        let member = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM hub_collective_members WHERE collective_id = ?1 AND user_id = ?2",
         )
-        .bind(group_id)
-        .bind(pid)
-        .fetch_one(pool)
+        .bind(cid)
+        .bind(actor_user_id)
+        .fetch_optional(pool)
         .await
-        .unwrap_or(0);
-        if is_descendant > 0 {
-            bail!("that would create a cycle");
+        .ok()
+        .flatten();
+        if member.is_none() {
+            bail!("you are not a member of that collective");
         }
     }
-    sqlx::query("UPDATE hub_tag_groups SET parent_group_id = ?1 WHERE id = ?2")
-        .bind(parent_group_id)
+    sqlx::query("UPDATE hub_tag_groups SET collective_id = ?1 WHERE id = ?2")
+        .bind(collective_id)
         .bind(group_id)
         .execute(pool)
         .await?;
     Ok(())
+}
+
+// ── collectives ──────────────────────────────────────────────────────────────
+
+pub const COLLECTIVE_OWNER: &str = "owner";
+pub const COLLECTIVE_MEMBER: &str = "member";
+
+/// Create a collective owned by `owner_user_id` (the owner is a member).
+pub async fn create_collective(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    name: &str,
+    icon: &str,
+) -> Result<i64> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("collective name required");
+    }
+    let slug = normalize_name(name);
+    if slug.is_empty() {
+        bail!("collective name has no usable characters");
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_collectives (slug, name, icon, owner_user_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(slug) DO UPDATE SET name = excluded.name, icon = excluded.icon
+         RETURNING id",
+    )
+    .bind(&slug)
+    .bind(name)
+    .bind(icon)
+    .bind(owner_user_id)
+    .bind(&now)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO hub_collective_members (collective_id, user_id, role, created_at)
+         VALUES (?1, ?2, 'owner', ?3)
+         ON CONFLICT(collective_id, user_id) DO UPDATE SET role = 'owner'",
+    )
+    .bind(id)
+    .bind(owner_user_id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(id)
+}
+
+async fn collective_role_of(pool: &SqlitePool, user_id: i64, id: i64) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT role FROM hub_collective_members WHERE collective_id = ?1 AND user_id = ?2",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+fn collective_from_row(r: &sqlx::sqlite::SqliteRow, role: String) -> Collective {
+    Collective {
+        id: r.get("id"),
+        name: r.get("name"),
+        icon: r.get::<Option<String>, _>("icon").unwrap_or_default(),
+        owner: r.get("owner"),
+        role,
+        groups: r.get::<Option<i64>, _>("groups").unwrap_or(0),
+        members: r.get::<Option<i64>, _>("members").unwrap_or(0),
+    }
+}
+
+pub async fn list_collectives_for(pool: &SqlitePool, user_id: i64) -> Vec<Collective> {
+    let rows = sqlx::query(
+        "SELECT c.id, c.name, c.icon, u.slug AS owner, m.role,
+                (SELECT COUNT(*) FROM hub_tag_groups g WHERE g.collective_id = c.id) AS groups,
+                (SELECT COUNT(*) FROM hub_collective_members mm WHERE mm.collective_id = c.id) AS members
+           FROM hub_collectives c
+           JOIN hub_collective_members m ON m.collective_id = c.id AND m.user_id = ?1
+           JOIN hub_users u ON u.id = c.owner_user_id
+          ORDER BY c.name",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    rows.iter()
+        .map(|r| collective_from_row(r, r.get::<String, _>("role")))
+        .collect()
+}
+
+pub async fn list_discover_collectives(pool: &SqlitePool, user_id: i64) -> Vec<Collective> {
+    let rows = sqlx::query(
+        "SELECT c.id, c.name, c.icon, u.slug AS owner,
+                (SELECT COUNT(*) FROM hub_tag_groups g WHERE g.collective_id = c.id) AS groups,
+                (SELECT COUNT(*) FROM hub_collective_members mm WHERE mm.collective_id = c.id) AS members
+           FROM hub_collectives c
+           JOIN hub_users u ON u.id = c.owner_user_id
+          WHERE NOT EXISTS (SELECT 1 FROM hub_collective_members m
+                             WHERE m.collective_id = c.id AND m.user_id = ?1)
+          ORDER BY u.slug, c.name",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    rows.iter().map(|r| collective_from_row(r, String::new())).collect()
+}
+
+pub async fn join_collective(pool: &SqlitePool, user_id: i64, id: i64) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO hub_collective_members (collective_id, user_id, role, created_at)
+         VALUES (?1, ?2, 'member', ?3)
+         ON CONFLICT(collective_id, user_id) DO NOTHING",
+    )
+    .bind(id)
+    .bind(user_id)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn leave_collective(pool: &SqlitePool, user_id: i64, id: i64) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM hub_collective_members
+          WHERE collective_id = ?1 AND user_id = ?2 AND role = 'member'",
+    )
+    .bind(id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Collective owner sets/removes a member (role = owner|member).
+pub async fn set_collective_member(
+    pool: &SqlitePool,
+    actor_user_id: i64,
+    id: i64,
+    target_slug: &str,
+    role: &str,
+) -> Result<()> {
+    if role != COLLECTIVE_OWNER && role != COLLECTIVE_MEMBER {
+        bail!("invalid role");
+    }
+    if collective_role_of(pool, actor_user_id, id).await.as_deref() != Some(COLLECTIVE_OWNER) {
+        bail!("only the collective owner can manage members");
+    }
+    let target: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM hub_users WHERE slug = ?1 COLLATE NOCASE LIMIT 1")
+            .bind(target_slug.trim())
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    let Some(target) = target else {
+        bail!("user '{target_slug}' not found");
+    };
+    sqlx::query(
+        "INSERT INTO hub_collective_members (collective_id, user_id, role, created_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(collective_id, user_id) DO UPDATE SET role = excluded.role
+           WHERE hub_collective_members.role <> 'owner'",
+    )
+    .bind(id)
+    .bind(target)
+    .bind(role)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn remove_collective_member(
+    pool: &SqlitePool,
+    actor_user_id: i64,
+    id: i64,
+    target_slug: &str,
+) -> Result<()> {
+    if collective_role_of(pool, actor_user_id, id).await.as_deref() != Some(COLLECTIVE_OWNER) {
+        bail!("only the collective owner can manage members");
+    }
+    sqlx::query(
+        "DELETE FROM hub_collective_members
+          WHERE collective_id = ?1 AND role <> 'owner'
+            AND user_id = (SELECT id FROM hub_users WHERE slug = ?2 COLLATE NOCASE LIMIT 1)",
+    )
+    .bind(id)
+    .bind(target_slug.trim())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_collective(pool: &SqlitePool, actor_user_id: i64, id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM hub_collectives WHERE id = ?1 AND owner_user_id = ?2")
+        .bind(id)
+        .bind(actor_user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Collectives the user is a member of: `(id, name, icon)` for pickers.
+pub async fn collectives_i_belong(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String, String)> {
+    sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT c.id, c.name, COALESCE(c.icon,'') FROM hub_collectives c
+           JOIN hub_collective_members m ON m.collective_id = c.id
+          WHERE m.user_id = ?1 ORDER BY c.name",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
+pub async fn collective_detail(pool: &SqlitePool, user_id: i64, id: i64) -> Option<CollectiveDetail> {
+    let row = sqlx::query(
+        "SELECT c.id, c.name, COALESCE(c.icon,'') AS icon, u.slug AS owner
+           FROM hub_collectives c JOIN hub_users u ON u.id = c.owner_user_id
+          WHERE c.id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    let role = collective_role_of(pool, user_id, id)
+        .await
+        .unwrap_or_default();
+    let is_owner = role == COLLECTIVE_OWNER;
+    let members = sqlx::query_as::<_, (String, String)>(
+        "SELECT u.slug, m.role FROM hub_collective_members m JOIN hub_users u ON u.id = m.user_id
+          WHERE m.collective_id = ?1 ORDER BY (m.role <> 'owner'), m.role, u.slug",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let groups = sqlx::query_as::<_, (i64, String, String, i64)>(
+        "SELECT g.id, g.name, COALESCE(g.icon,''),
+                (SELECT COUNT(*) FROM hub_group_tags gt WHERE gt.group_id = g.id)
+           FROM hub_tag_groups g WHERE g.collective_id = ?1 ORDER BY g.name",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    Some(CollectiveDetail {
+        id: row.get("id"),
+        name: row.get("name"),
+        icon: row.get("icon"),
+        owner: row.get("owner"),
+        role,
+        is_owner,
+        members,
+        groups,
+    })
 }
 
 // ── tag detail ───────────────────────────────────────────────────────────────

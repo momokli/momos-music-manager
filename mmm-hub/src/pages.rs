@@ -33,8 +33,16 @@ pub fn router(state: AppState) -> Router {
         .route("/groups/{id}/unsubscribe", post(group_unsubscribe))
         .route("/groups/{id}/role", post(group_set_role))
         .route("/groups/{id}/member/remove", post(group_remove_member))
-        .route("/groups/{id}/parent", post(group_set_parent))
+        .route("/groups/{id}/collective", post(group_set_collective))
         .route("/groups/{id}/delete", post(group_delete))
+        .route("/collectives", get(collectives_page))
+        .route("/collectives/create", post(collective_create))
+        .route("/collectives/{id}", get(collective_page))
+        .route("/collectives/{id}/join", post(collective_join))
+        .route("/collectives/{id}/leave", post(collective_leave))
+        .route("/collectives/{id}/member", post(collective_set_member))
+        .route("/collectives/{id}/member/remove", post(collective_remove_member))
+        .route("/collectives/{id}/delete", post(collective_delete))
         .route("/digging", get(digging_page))
         .route("/digging/enrich", post(digging_enrich))
         .route("/admin", get(admin_page).post(admin_save))
@@ -1819,9 +1827,9 @@ struct GroupPage {
     is_owner: bool,
     can_edit: bool,
     role_inherited: bool,
-    parent_id: i64,
-    parent_label: String,
-    parent_options: Vec<ParentOption>,
+    collective_id: i64,
+    collective_label: String,
+    collective_options: Vec<ParentOption>,
     members: Vec<MemberRow>,
     tags: Vec<GroupTag>,
     users: Vec<String>,
@@ -1857,17 +1865,18 @@ async fn group_page(
         .fetch_all(&st.pool)
         .await
         .unwrap_or_default();
-    let parent_label = if d.parent_id != 0 {
-        format!("{} {}", d.parent_icon, d.parent_name).trim().to_string()
+    let collective_label = if d.collective_id != 0 {
+        format!("{} {}", d.collective_icon, d.collective_name)
+            .trim()
+            .to_string()
     } else {
         String::new()
     };
-    let parent_options: Vec<ParentOption> = crate::tags::owned_groups(&st.pool, nav.id)
+    let collective_options: Vec<ParentOption> = crate::tags::collectives_i_belong(&st.pool, nav.id)
         .await
         .into_iter()
-        .filter(|(gid, _, _)| *gid != d.id)
         .map(|(id, name, icon)| ParentOption {
-            selected: id == d.parent_id,
+            selected: id == d.collective_id,
             id,
             name,
             icon,
@@ -1883,9 +1892,9 @@ async fn group_page(
         is_owner,
         can_edit,
         role_inherited: d.role_inherited,
-        parent_id: d.parent_id,
-        parent_label,
-        parent_options,
+        collective_id: d.collective_id,
+        collective_label,
+        collective_options,
         members,
         tags,
         users,
@@ -1893,22 +1902,248 @@ async fn group_page(
 }
 
 #[derive(Deserialize)]
-struct ParentForm {
-    parent_id: String,
+struct CollectiveIdForm {
+    collective_id: String,
 }
 
-async fn group_set_parent(
+async fn group_set_collective(
     State(st): State<AppState>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-    Form(f): Form<ParentForm>,
+    Form(f): Form<CollectiveIdForm>,
 ) -> Response {
     let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
-    let parent = f.parent_id.trim().parse::<i64>().ok().filter(|p| *p != 0);
-    let _ = crate::tags::set_parent(&st.pool, uid, id, parent).await;
+    let cid = f.collective_id.trim().parse::<i64>().ok().filter(|p| *p != 0);
+    let _ = crate::tags::set_group_collective(&st.pool, uid, id, cid).await;
     Redirect::to(&format!("/groups/{id}")).into_response()
+}
+
+// ── collectives ──────────────────────────────────────────────────────────────
+
+struct CollRow {
+    id: i64,
+    name: String,
+    icon: String,
+    owner: String,
+    role: String,
+    groups: i64,
+    members: i64,
+}
+
+fn coll_row(c: crate::tags::Collective) -> CollRow {
+    CollRow {
+        id: c.id,
+        name: c.name,
+        icon: c.icon,
+        owner: c.owner,
+        role: c.role,
+        groups: c.groups,
+        members: c.members,
+    }
+}
+
+#[derive(Template)]
+#[template(path = "collectives.html")]
+struct CollectivesPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    collectives: Vec<CollRow>,
+    discover: Vec<CollRow>,
+    icons: &'static [&'static str],
+}
+
+async fn collectives_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "collectives").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let collectives = crate::tags::list_collectives_for(&st.pool, nav.id)
+        .await
+        .into_iter()
+        .map(coll_row)
+        .collect();
+    let discover = crate::tags::list_discover_collectives(&st.pool, nav.id)
+        .await
+        .into_iter()
+        .map(coll_row)
+        .collect();
+    render(&CollectivesPage {
+        nav,
+        flash: String::new(),
+        collectives,
+        discover,
+        icons: crate::tags::ICONS,
+    })
+}
+
+async fn collective_create(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<GroupForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::create_collective(&st.pool, uid, &f.name, f.icon.as_deref().unwrap_or(""))
+        .await;
+    Redirect::to("/collectives").into_response()
+}
+
+async fn collective_join(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::join_collective(&st.pool, uid, id).await;
+    Redirect::to("/collectives").into_response()
+}
+
+async fn collective_leave(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::leave_collective(&st.pool, uid, id).await;
+    Redirect::to("/collectives").into_response()
+}
+
+async fn collective_set_member(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<RoleForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::set_collective_member(&st.pool, uid, id, &f.slug, &f.role).await;
+    Redirect::to(&format!("/collectives/{id}")).into_response()
+}
+
+async fn collective_remove_member(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<SlugForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::remove_collective_member(&st.pool, uid, id, &f.slug).await;
+    Redirect::to(&format!("/collectives/{id}")).into_response()
+}
+
+async fn collective_delete(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::delete_collective(&st.pool, uid, id).await;
+    Redirect::to("/collectives").into_response()
+}
+
+struct CollMember {
+    slug: String,
+    role: String,
+}
+
+struct CollGroup {
+    id: i64,
+    name: String,
+    icon: String,
+    tag_count: i64,
+}
+
+#[derive(Template)]
+#[template(path = "collective.html")]
+struct CollectivePage {
+    nav: crate::ui::Nav,
+    flash: String,
+    id: i64,
+    name: String,
+    icon: String,
+    owner: String,
+    is_owner: bool,
+    member: bool,
+    members: Vec<CollMember>,
+    groups: Vec<CollGroup>,
+    available_groups: Vec<GroupRef>,
+    users: Vec<String>,
+}
+
+async fn collective_page(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "collectives").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(d) = crate::tags::collective_detail(&st.pool, nav.id, id).await else {
+        return not_found("Collective nicht gefunden.");
+    };
+    let member = !d.role.is_empty();
+    let members = d
+        .members
+        .into_iter()
+        .map(|(slug, role)| CollMember { slug, role })
+        .collect();
+    let groups = d
+        .groups
+        .into_iter()
+        .map(|(id, name, icon, tag_count)| CollGroup {
+            id,
+            name,
+            icon,
+            tag_count,
+        })
+        .collect();
+    // The owner's own groups not yet in this collective.
+    let available_groups: Vec<GroupRef> = if d.is_owner {
+        sqlx::query_as::<_, (i64, String, String)>(
+            "SELECT id, name, COALESCE(icon,'') FROM hub_tag_groups
+              WHERE owner_user_id = ?1 AND (collective_id IS NULL OR collective_id <> ?2)
+              ORDER BY name",
+        )
+        .bind(nav.id)
+        .bind(id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, name, icon)| GroupRef { id, name, icon })
+        .collect()
+    } else {
+        Vec::new()
+    };
+    let users = sqlx::query_scalar::<_, String>("SELECT slug FROM hub_users ORDER BY slug")
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    render(&CollectivePage {
+        nav,
+        flash: String::new(),
+        id: d.id,
+        name: d.name,
+        icon: d.icon,
+        owner: d.owner,
+        is_owner: d.is_owner,
+        member,
+        members,
+        groups,
+        available_groups,
+        users,
+    })
 }
 
 // ── settings ────────────────────────────────────────────────────────────────
