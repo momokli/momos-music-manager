@@ -24,11 +24,13 @@ pub fn router(state: AppState) -> Router {
         .route("/playlists/similar", get(similar_page))
         .route("/tags", get(tags_page))
         .route("/tag/{id}", get(tag_detail_page))
+        .route("/tag/{id}/rename", post(tag_rename))
         .route("/tag/{id}/group/add", post(tag_group_add))
         .route("/tag/{id}/group/remove", post(tag_group_remove))
         .route("/groups", get(groups_page))
         .route("/groups/create", post(group_create))
         .route("/groups/{id}", get(group_page))
+        .route("/groups/{id}/update", post(group_update))
         .route("/groups/{id}/subscribe", post(group_subscribe))
         .route("/groups/{id}/unsubscribe", post(group_unsubscribe))
         .route("/groups/{id}/role", post(group_set_role))
@@ -38,6 +40,7 @@ pub fn router(state: AppState) -> Router {
         .route("/collectives", get(collectives_page))
         .route("/collectives/create", post(collective_create))
         .route("/collectives/{id}", get(collective_page))
+        .route("/collectives/{id}/update", post(collective_update))
         .route("/collectives/{id}/join", post(collective_join))
         .route("/collectives/{id}/leave", post(collective_leave))
         .route("/collectives/{id}/member", post(collective_set_member))
@@ -75,6 +78,23 @@ fn not_found(msg: &str) -> Response {
         )),
     )
         .into_response()
+}
+
+/// One pickable emoji icon with a precomputed `selected` flag — keeps the
+/// askama templates free of `==` comparisons inside HTML tags.
+struct IconOption {
+    value: &'static str,
+    selected: bool,
+}
+
+fn icon_options(current: &str) -> Vec<IconOption> {
+    crate::tags::ICONS
+        .iter()
+        .map(|i| IconOption {
+            value: i,
+            selected: *i == current,
+        })
+        .collect()
 }
 
 // ── search ──────────────────────────────────────────────────────────────────
@@ -1605,6 +1625,7 @@ struct TagDetailPage {
     id: i64,
     name: String,
     owner: String,
+    is_owner: bool,
     groups: Vec<GroupRef>,
     my_groups: Vec<GroupRef>,
     source_count: i64,
@@ -1614,6 +1635,7 @@ struct TagDetailPage {
 async fn tag_detail_page(
     State(st): State<AppState>,
     Path(id): Path<i64>,
+    Query(msg): Query<AdminMsg>,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
@@ -1641,17 +1663,46 @@ async fn tag_detail_page(
             artists,
         })
         .collect();
+    let is_owner = d.owner.eq_ignore_ascii_case(&nav.slug);
     render(&TagDetailPage {
         nav,
-        flash: String::new(),
+        flash: msg.msg.unwrap_or_default(),
         id: d.id,
         name: d.name,
         owner: d.owner,
+        is_owner,
         groups,
         my_groups,
         source_count: d.source_count,
         tracks,
     })
+}
+
+#[derive(Deserialize)]
+struct UpdateNameForm {
+    name: String,
+    #[serde(default)]
+    icon: Option<String>,
+}
+
+fn flash_redirect(to: &str, msg: String) -> Response {
+    Redirect::to(&format!("{to}?msg={}", urlencoding::encode(&msg))).into_response()
+}
+
+async fn tag_rename(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<UpdateNameForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let msg = match crate::tags::rename_tag(&st.pool, uid, id, &f.name).await {
+        Ok(()) => "Tag umbenannt".to_string(),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    flash_redirect(&format!("/tag/{id}"), msg)
 }
 
 #[derive(Deserialize)]
@@ -1855,6 +1906,23 @@ async fn group_delete(
     Redirect::to("/groups").into_response()
 }
 
+async fn group_update(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<UpdateNameForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let icon = f.icon.as_deref().unwrap_or("").trim().to_string();
+    let msg = match crate::tags::update_group(&st.pool, uid, id, &f.name, &icon).await {
+        Ok(()) => "Gruppe gespeichert".to_string(),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    flash_redirect(&format!("/groups/{id}"), msg)
+}
+
 struct ParentOption {
     id: i64,
     name: String,
@@ -1896,11 +1964,13 @@ struct GroupPage {
     members: Vec<MemberRow>,
     tags: Vec<GroupTag>,
     users: Vec<String>,
+    icons: Vec<IconOption>,
 }
 
 async fn group_page(
     State(st): State<AppState>,
     Path(id): Path<i64>,
+    Query(msg): Query<AdminMsg>,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "groups").await else {
@@ -1935,6 +2005,7 @@ async fn group_page(
     } else {
         String::new()
     };
+    let icons = icon_options(&d.icon);
     let collective_options: Vec<ParentOption> = crate::tags::collectives_i_belong(&st.pool, nav.id)
         .await
         .into_iter()
@@ -1947,7 +2018,7 @@ async fn group_page(
         .collect();
     render(&GroupPage {
         nav,
-        flash: String::new(),
+        flash: msg.msg.unwrap_or_default(),
         id: d.id,
         name: d.name,
         icon: d.icon,
@@ -1961,6 +2032,7 @@ async fn group_page(
         members,
         tags,
         users,
+        icons,
     })
 }
 
@@ -2115,6 +2187,23 @@ async fn collective_delete(
     Redirect::to("/collectives").into_response()
 }
 
+async fn collective_update(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<UpdateNameForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let icon = f.icon.as_deref().unwrap_or("").trim().to_string();
+    let msg = match crate::tags::update_collective(&st.pool, uid, id, &f.name, &icon).await {
+        Ok(()) => "Collective gespeichert".to_string(),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    flash_redirect(&format!("/collectives/{id}"), msg)
+}
+
 struct CollMember {
     slug: String,
     role: String,
@@ -2142,11 +2231,13 @@ struct CollectivePage {
     groups: Vec<CollGroup>,
     available_groups: Vec<GroupRef>,
     users: Vec<String>,
+    icons: Vec<IconOption>,
 }
 
 async fn collective_page(
     State(st): State<AppState>,
     Path(id): Path<i64>,
+    Query(msg): Query<AdminMsg>,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "collectives").await else {
@@ -2193,9 +2284,10 @@ async fn collective_page(
         .fetch_all(&st.pool)
         .await
         .unwrap_or_default();
+    let icons = icon_options(&d.icon);
     render(&CollectivePage {
         nav,
-        flash: String::new(),
+        flash: msg.msg.unwrap_or_default(),
         id: d.id,
         name: d.name,
         icon: d.icon,
@@ -2206,6 +2298,7 @@ async fn collective_page(
         groups,
         available_groups,
         users,
+        icons,
     })
 }
 

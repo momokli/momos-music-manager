@@ -15,6 +15,39 @@ content %}
     </p>
 </hgroup>
 
+{% if is_owner %}
+<details>
+    <summary>Bearbeiten (Name / Icon)</summary>
+    <form
+        method="post"
+        action="/collectives/{{ id }}/update"
+        style="
+            display: flex;
+            gap: 0.4rem;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-top: 0.4rem;
+        "
+    >
+        <input
+            type="text"
+            name="name"
+            value="{{ name }}"
+            aria-label="Collective-Name"
+            required
+        />
+        <select name="icon" aria-label="Icon">
+            {% for i in icons %}
+            <option value="{{ i.value }}" {% if i.selected %}selected{% endif %}>
+                {{ i.value }}
+            </option>
+            {% endfor %}
+        </select>
+        <button type="submit">Speichern</button>
+    </form>
+</details>
+{% endif %}
+
 <section style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center">
     {% if is_owner %}
     <form method="post" action="/collectives/{{ id }}/delete" style="display: inline">

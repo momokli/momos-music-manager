@@ -214,6 +214,50 @@ pub async fn delete_tag(pool: &SqlitePool, owner_user_id: i64, tag_id: i64) -> R
     Ok(())
 }
 
+/// Rename a tag (owner only). Sources are linked by id, so they stay intact.
+pub async fn rename_tag(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    tag_id: i64,
+    name: &str,
+) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("tag name required");
+    }
+    let slug = normalize_name(name);
+    if slug.is_empty() {
+        bail!("tag name has no usable characters");
+    }
+    let clash = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM hub_tags WHERE owner_user_id = ?1 AND slug = ?2 AND id <> ?3",
+    )
+    .bind(owner_user_id)
+    .bind(&slug)
+    .bind(tag_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    if clash.is_some() {
+        bail!("es gibt schon einen Tag mit diesem Namen");
+    }
+    let rows = sqlx::query(
+        "UPDATE hub_tags SET name = ?1, slug = ?2 WHERE id = ?3 AND owner_user_id = ?4",
+    )
+    .bind(name)
+    .bind(&slug)
+    .bind(tag_id)
+    .bind(owner_user_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if rows == 0 {
+        bail!("tag not found or not yours");
+    }
+    Ok(())
+}
+
 pub async fn tag_for_playlist(
     pool: &SqlitePool,
     owner_user_id: i64,
@@ -388,6 +432,52 @@ pub async fn delete_group(pool: &SqlitePool, actor_user_id: i64, group_id: i64) 
         .bind(actor_user_id)
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// Rename a group and/or set its icon (owner only).
+pub async fn update_group(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    group_id: i64,
+    name: &str,
+    icon: &str,
+) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("group name required");
+    }
+    let slug = normalize_name(name);
+    if slug.is_empty() {
+        bail!("group name has no usable characters");
+    }
+    let clash = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM hub_tag_groups WHERE owner_user_id = ?1 AND slug = ?2 AND id <> ?3",
+    )
+    .bind(owner_user_id)
+    .bind(&slug)
+    .bind(group_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    if clash.is_some() {
+        bail!("es gibt schon eine Gruppe mit diesem Namen");
+    }
+    let rows = sqlx::query(
+        "UPDATE hub_tag_groups SET name = ?1, slug = ?2, icon = ?3\n          WHERE id = ?4 AND owner_user_id = ?5",
+    )
+    .bind(name)
+    .bind(&slug)
+    .bind(icon)
+    .bind(group_id)
+    .bind(owner_user_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if rows == 0 {
+        bail!("group not found or not yours");
+    }
     Ok(())
 }
 
@@ -973,6 +1063,51 @@ pub async fn delete_collective(pool: &SqlitePool, actor_user_id: i64, id: i64) -
         .bind(actor_user_id)
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// Rename a collective and/or set its icon (owner only).
+pub async fn update_collective(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    id: i64,
+    name: &str,
+    icon: &str,
+) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("collective name required");
+    }
+    let slug = normalize_name(name);
+    if slug.is_empty() {
+        bail!("collective name has no usable characters");
+    }
+    let clash = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM hub_collectives WHERE slug = ?1 AND id <> ?2",
+    )
+    .bind(&slug)
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    if clash.is_some() {
+        bail!("es gibt schon ein Collective mit diesem Namen");
+    }
+    let rows = sqlx::query(
+        "UPDATE hub_collectives SET name = ?1, slug = ?2, icon = ?3\n          WHERE id = ?4 AND owner_user_id = ?5",
+    )
+    .bind(name)
+    .bind(&slug)
+    .bind(icon)
+    .bind(id)
+    .bind(owner_user_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if rows == 0 {
+        bail!("collective not found or not yours");
+    }
     Ok(())
 }
 

@@ -15,6 +15,32 @@ content %}
     </p>
 </hgroup>
 
+{% if is_owner %}
+<details>
+    <summary>Umbenennen</summary>
+    <form
+        method="post"
+        action="/tag/{{ id }}/rename"
+        style="
+            display: flex;
+            gap: 0.4rem;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-top: 0.4rem;
+        "
+    >
+        <input
+            type="text"
+            name="name"
+            value="{{ name }}"
+            aria-label="Tag-Name"
+            required
+        />
+        <button type="submit">Speichern</button>
+    </form>
+</details>
+{% endif %}
+
 <section
     aria-label="Gruppen"
     style="display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center"

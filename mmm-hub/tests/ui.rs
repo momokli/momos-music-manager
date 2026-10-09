@@ -608,6 +608,71 @@ async fn admin_can_save_settings() {
 }
 
 #[tokio::test]
+async fn tags_groups_collectives_are_renameable() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // Tag rename (owner) + ownership guard.
+    let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
+        .await
+        .unwrap();
+    mmm_hub::tags::rename_tag(&app.pool, app.seed.alice, tag, "Neuer Name")
+        .await
+        .unwrap();
+    let d = mmm_hub::tags::tag_detail(&app.pool, tag).await.unwrap();
+    assert_eq!(d.name, "Neuer Name");
+    assert!(
+        mmm_hub::tags::rename_tag(&app.pool, app.seed.bob, tag, "Hacked")
+            .await
+            .is_err(),
+        "a non-owner must not be able to rename"
+    );
+
+    // Group rename + icon over HTTP (owner).
+    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Mood", "💜")
+        .await
+        .unwrap();
+    let resp = app
+        .client()
+        .post(app.url(&format!("/groups/{g}/update")))
+        .header("Cookie", &cookie)
+        .form(&[("name", "Vibe"), ("icon", "🌈")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    let html = body(
+        app.client()
+            .get(app.url(&format!("/groups/{g}")))
+            .header("Cookie", &cookie)
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(html.contains("Vibe"), "renamed group must be shown");
+    assert!(html.contains("🌈"), "new icon must be shown");
+
+    // Collective rename + icon (owner) + ownership guard.
+    let col = mmm_hub::tags::create_collective(&app.pool, app.seed.alice, "Crew", "🤝")
+        .await
+        .unwrap();
+    mmm_hub::tags::update_collective(&app.pool, app.seed.alice, col, "Squad", "🚀")
+        .await
+        .unwrap();
+    let cd = mmm_hub::tags::collective_detail(&app.pool, app.seed.alice, col)
+        .await
+        .unwrap();
+    assert_eq!(cd.name, "Squad");
+    assert_eq!(cd.icon, "🚀");
+    assert!(
+        mmm_hub::tags::update_collective(&app.pool, app.seed.bob, col, "Nope", "")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn no_shell_page_returns_500() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
