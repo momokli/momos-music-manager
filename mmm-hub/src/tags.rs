@@ -169,6 +169,106 @@ pub async fn tag_for_playlist(
     .flatten()
 }
 
+/// Load `(playlist owner user_id, service)` for a playlist.
+async fn playlist_meta(pool: &SqlitePool, playlist_id: i64) -> Result<Option<(i64, String)>> {
+    let row = sqlx::query("SELECT user_id, service FROM hub_playlists WHERE id = ?1")
+        .bind(playlist_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+    Ok(row.map(|r| (r.get::<i64, _>("user_id"), r.get::<String, _>("service"))))
+}
+
+/// Add a playlist as an additional source of an existing tag the user owns.
+/// This is how a tag is *curated* from several playlists (own and/or followed).
+pub async fn add_playlist_to_tag(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    tag_id: i64,
+    playlist_id: i64,
+) -> Result<()> {
+    let owned = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2",
+    )
+    .bind(tag_id)
+    .bind(owner_user_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    if owned.is_none() {
+        bail!("tag {tag_id} does not belong to you");
+    }
+    let Some((pl_user, service)) = playlist_meta(pool, playlist_id).await? else {
+        bail!("playlist {playlist_id} not found");
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO hub_tag_sources (tag_id, playlist_id, user_id, service, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(tag_id, playlist_id) DO NOTHING",
+    )
+    .bind(tag_id)
+    .bind(playlist_id)
+    .bind(pl_user)
+    .bind(&service)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    rebuild(pool).await?;
+    Ok(())
+}
+
+/// Remove a playlist as a source of a tag the user owns.
+pub async fn remove_playlist_from_tag(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    tag_id: i64,
+    playlist_id: i64,
+) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM hub_tag_sources
+          WHERE tag_id = ?1 AND playlist_id = ?2
+            AND tag_id IN (SELECT id FROM hub_tags WHERE owner_user_id = ?3)",
+    )
+    .bind(tag_id)
+    .bind(playlist_id)
+    .bind(owner_user_id)
+    .execute(pool)
+    .await?;
+    rebuild(pool).await?;
+    Ok(())
+}
+
+/// Tags owned by a user: `(id, name)`, for pickers.
+pub async fn list_user_tags(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String)> {
+    sqlx::query_as::<_, (i64, String)>(
+        "SELECT id, name FROM hub_tags WHERE owner_user_id = ?1 ORDER BY name",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
+/// Tags a playlist currently feeds: `(tag_id, tag name, owner slug)`.
+pub async fn tags_feeding_playlist(
+    pool: &SqlitePool,
+    playlist_id: i64,
+) -> Vec<(i64, String, String)> {
+    sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT t.id, t.name, u.slug FROM hub_tag_sources s
+           JOIN hub_tags t ON t.id = s.tag_id
+           JOIN hub_users u ON u.id = t.owner_user_id
+          WHERE s.playlist_id = ?1 ORDER BY u.slug, t.name",
+    )
+    .bind(playlist_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{is_meta_playlist, normalize_name};

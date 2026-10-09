@@ -30,6 +30,8 @@ pub fn router(state: AppState) -> Router {
         .route("/user/{slug}", get(user_page))
         .route("/playlist/{id}", get(playlist_page))
         .route("/playlist/{id}/tag", post(playlist_tag))
+        .route("/playlist/{id}/tag/add", post(playlist_tag_add))
+        .route("/playlist/{id}/tag/remove", post(playlist_tag_remove))
         .with_state(state)
 }
 
@@ -224,6 +226,21 @@ struct PlaylistPage {
     owner: String,
     owner_name: String,
     tracks: Vec<PlaylistTrackRow>,
+    /// Tags this playlist currently feeds.
+    feeds: Vec<TagFeed>,
+    /// The current user's tags, for the "add to tag" picker.
+    my_tags: Vec<TagOption>,
+}
+
+struct TagFeed {
+    id: i64,
+    name: String,
+    owner: String,
+}
+
+struct TagOption {
+    id: i64,
+    name: String,
 }
 
 struct PlaylistTrackRow {
@@ -259,6 +276,21 @@ async fn playlist_page(
         return not_found("Playlist nicht gefunden.");
     };
 
+    let me = crate::web::current_user(&st, &headers).await;
+    let feeds: Vec<TagFeed> = crate::tags::tags_feeding_playlist(&st.pool, id)
+        .await
+        .into_iter()
+        .map(|(id, name, owner)| TagFeed { id, name, owner })
+        .collect();
+    let my_tags: Vec<TagOption> = match &me {
+        Some((uid, _)) => crate::tags::list_user_tags(&st.pool, *uid)
+            .await
+            .into_iter()
+            .map(|(id, name)| TagOption { id, name })
+            .collect(),
+        None => Vec::new(),
+    };
+
     let rows = sqlx::query(
         "SELECT t.id, hpt.position, t.title, t.artists
            FROM hub_playlist_tracks hpt
@@ -292,7 +324,42 @@ async fn playlist_page(
         owner: owner.unwrap_or_default(),
         owner_name: owner_name.filter(|s| !s.is_empty()).unwrap_or_default(),
         tracks,
+        feeds,
+        my_tags,
     })
+}
+
+#[derive(Deserialize)]
+struct TagForm {
+    tag_id: i64,
+}
+
+/// Add this playlist as an extra source of one of the current user's tags.
+async fn playlist_tag_add(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<TagForm>,
+) -> Response {
+    let Some((user_id, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::add_playlist_to_tag(&st.pool, user_id, f.tag_id, id).await;
+    Redirect::to(&format!("/playlist/{id}")).into_response()
+}
+
+/// Remove this playlist as a source of a tag the current user owns.
+async fn playlist_tag_remove(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<TagForm>,
+) -> Response {
+    let Some((user_id, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::remove_playlist_from_tag(&st.pool, user_id, f.tag_id, id).await;
+    Redirect::to(&format!("/playlist/{id}")).into_response()
 }
 
 /// Promote a playlist to a tag owned by the current user (1:1, same name).

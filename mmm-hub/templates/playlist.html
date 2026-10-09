@@ -15,11 +15,57 @@ content %}
     </p>
 </hgroup>
 
-<form method="post" action="/playlist/{{ id }}/tag" class="hub-actions">
-    <button type="submit" class="secondary outline">
-        Diese Playlist als Tag anlegen
-    </button>
-</form>
+<section
+    class="hub-actions"
+    aria-label="Tags"
+    style="display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center"
+>
+    {% if !feeds.is_empty() %}
+    <div>
+        <span class="hub-muted">Zählt als Tag:</span>
+        {% for f in feeds %}
+        <form
+            method="post"
+            action="/playlist/{{ id }}/tag/remove"
+            style="
+                display: inline-flex;
+                gap: 0.25rem;
+                align-items: center;
+                margin: 0.15rem;
+            "
+        >
+            <input type="hidden" name="tag_id" value="{{ f.id }}" />
+            <button type="submit" class="hub-tag" title="Von diesem Tag entfernen">
+                {{ f.name }} <span class="hub-muted">@{{ f.owner }} ×</span>
+            </button>
+        </form>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <form
+        method="post"
+        action="/playlist/{{ id }}/tag"
+        style="display: inline-flex; gap: 0.25rem; align-items: center; margin: 0.15rem"
+    >
+        <button type="submit" class="secondary outline">+ neuen Tag anlegen</button>
+    </form>
+
+    {% if !my_tags.is_empty() %}
+    <form
+        method="post"
+        action="/playlist/{{ id }}/tag/add"
+        style="display: inline-flex; gap: 0.25rem; align-items: center; margin: 0.15rem"
+    >
+        <select name="tag_id" aria-label="Bestehenden Tag wählen">
+            {% for t in my_tags %}
+            <option value="{{ t.id }}">{{ t.name }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit" class="secondary">Zu Tag hinzufügen</button>
+    </form>
+    {% endif %}
+</section>
 
 {% if tracks.is_empty() %}
 <p>Keine Tracks in dieser Playlist.</p>
