@@ -957,9 +957,12 @@ async fn track_page(
     })
     .collect();
 
-    // Resolved tags (playlist -> tag layer) for this track.
+    // Resolved tags for this track, per user (@owner · tag).
     let tags: Vec<String> = sqlx::query_scalar::<_, String>(
-        "SELECT tag FROM hub_v_track_tags WHERE track_id = ?1 ORDER BY tag",
+        "SELECT u.slug || ' · ' || v.tag FROM hub_v_track_tags v
+           JOIN hub_tags t ON t.id = v.tag_id
+           JOIN hub_users u ON u.id = t.owner_user_id
+          WHERE v.track_id = ?1 ORDER BY u.slug, v.tag",
     )
     .bind(id)
     .fetch_all(&st.pool)

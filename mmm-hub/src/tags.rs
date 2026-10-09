@@ -1,13 +1,12 @@
-//! Tag layer: playlists are *sources* that resolve to a normalized **tag**.
+//! Tag layer — an explicit, **per-user** layer above playlists and tracks.
 //!
-//! Like Momo's Music Manager, a playlist is not itself a tag — it *feeds* one.
-//! Several playlists (across users/services) can feed the same tag, and some
-//! playlists are **meta** (e.g. a "liked songs" bucket) and are excluded.
-//!
-//! [`resolve`] rebuilds the materialized `hub_tags` / `hub_tag_sources` /
-//! `hub_track_resolved_tags` from the current playlists. Idempotent.
+//! Unlike before, a tag is **not** auto-derived from every playlist. It exists
+//! only once a user creates it, typically by promoting one of their playlists
+//! to a tag (1:1, same name, linked by playlist id). Tracks in a tag's source
+//! playlist are the tag's tracks; [`rebuild`] materializes that mapping into
+//! `hub_track_resolved_tags`.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use sqlx::{Row, SqlitePool};
 
 /// Lowercase, keep alphanumerics, collapse everything else to single spaces.
@@ -28,7 +27,7 @@ pub fn normalize_name(s: &str) -> String {
     out.trim().to_string()
 }
 
-/// Meta-playlists are not tags: they describe the library itself, not a theme.
+/// Meta-playlists can't become tags: they describe the library itself.
 pub fn is_meta_playlist(name: &str) -> bool {
     let n = normalize_name(name);
     n.is_empty()
@@ -47,62 +46,12 @@ pub struct ResolveSummary {
     pub resolved: usize,
 }
 
-/// Rebuild the tag layer from the current playlists. Idempotent (full rebuild).
-pub async fn resolve(pool: &SqlitePool) -> Result<ResolveSummary> {
-    // Full rebuild — cheap at our sizes and always consistent.
-    sqlx::query("DELETE FROM hub_tag_sources").execute(pool).await?;
-    sqlx::query("DELETE FROM hub_track_resolved_tags").execute(pool).await?;
-    sqlx::query("DELETE FROM hub_tags").execute(pool).await?;
-
-    let playlists = sqlx::query(
-        "SELECT id, name, user_id, service FROM hub_playlists ORDER BY id",
-    )
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
-
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut tag_ids: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    let mut sources = 0usize;
-
-    for p in &playlists {
-        let name: String = p.get::<Option<String>, _>("name").unwrap_or_default();
-        if is_meta_playlist(&name) {
-            continue;
-        }
-        let slug = normalize_name(&name);
-        let tag_id = match tag_ids.get(&slug) {
-            Some(id) => *id,
-            None => {
-                let id: i64 = sqlx::query_scalar(
-                    "INSERT INTO hub_tags (slug, name, created_at) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(slug) DO UPDATE SET name = excluded.name RETURNING id",
-                )
-                .bind(&slug)
-                .bind(&name)
-                .bind(&now)
-                .fetch_one(pool)
-                .await?;
-                tag_ids.insert(slug, id);
-                id
-            }
-        };
-
-        sqlx::query(
-            "INSERT INTO hub_tag_sources (tag_id, playlist_id, user_id, service)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(tag_id, playlist_id) DO NOTHING",
-        )
-        .bind(tag_id)
-        .bind(p.get::<i64, _>("id"))
-        .bind(p.get::<i64, _>("user_id"))
-        .bind(p.get::<String, _>("service"))
+/// Rebuild the materialized `hub_track_resolved_tags` from the current tag
+/// sources. Idempotent; does **not** create tags. Returns current counts.
+pub async fn rebuild(pool: &SqlitePool) -> Result<ResolveSummary> {
+    sqlx::query("DELETE FROM hub_track_resolved_tags")
         .execute(pool)
         .await?;
-        sources += 1;
-    }
-
-    // tracks that are in a source playlist of a tag -> get that tag
     sqlx::query(
         "INSERT INTO hub_track_resolved_tags (track_id, tag_id)
          SELECT DISTINCT hpt.track_id, ts.tag_id
@@ -113,16 +62,111 @@ pub async fn resolve(pool: &SqlitePool) -> Result<ResolveSummary> {
     .execute(pool)
     .await?;
 
+    let tags: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_tags")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let sources: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_tag_sources")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
     let resolved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_track_resolved_tags")
         .fetch_one(pool)
         .await
         .unwrap_or(0);
-
     Ok(ResolveSummary {
-        tags: tag_ids.len(),
-        sources,
+        tags: tags as usize,
+        sources: sources as usize,
         resolved: resolved as usize,
     })
+}
+
+/// Create (or return) the tag for a playlist, owned by `owner_user_id`, linking
+/// tag ↔ playlist 1:1. Rebuilds the track mapping. Returns the tag id.
+pub async fn create_from_playlist(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    playlist_id: i64,
+) -> Result<i64> {
+    let row = sqlx::query("SELECT name, user_id, service FROM hub_playlists WHERE id = ?1")
+        .bind(playlist_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+    let Some(r) = row else {
+        bail!("playlist {playlist_id} not found");
+    };
+    let name = r.get::<Option<String>, _>("name").unwrap_or_default();
+    if is_meta_playlist(&name) {
+        bail!("meta-playlists can't become tags");
+    }
+    let slug = normalize_name(&name);
+    if slug.is_empty() {
+        bail!("playlist has no usable name");
+    }
+    let pl_user = r.get::<i64, _>("user_id");
+    let service = r.get::<String, _>("service");
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let tag_id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_tags (owner_user_id, slug, name, created_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(owner_user_id, slug) DO UPDATE SET name = excluded.name
+         RETURNING id",
+    )
+    .bind(owner_user_id)
+    .bind(&slug)
+    .bind(&name)
+    .bind(&now)
+    .fetch_one(pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO hub_tag_sources (tag_id, playlist_id, user_id, service, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(tag_id, playlist_id) DO NOTHING",
+    )
+    .bind(tag_id)
+    .bind(playlist_id)
+    .bind(pl_user)
+    .bind(&service)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+
+    rebuild(pool).await?;
+    Ok(tag_id)
+}
+
+/// Delete a tag owned by `owner_user_id` (and its source links). Rebuilds.
+pub async fn delete_tag(pool: &SqlitePool, owner_user_id: i64, tag_id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2")
+        .bind(tag_id)
+        .bind(owner_user_id)
+        .execute(pool)
+        .await?;
+    rebuild(pool).await?;
+    Ok(())
+}
+
+/// The tag created for a playlist by a user, if any (for UI state).
+pub async fn tag_for_playlist(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    playlist_id: i64,
+) -> Option<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT t.id FROM hub_tags t
+           JOIN hub_tag_sources s ON s.tag_id = t.id
+          WHERE t.owner_user_id = ?1 AND s.playlist_id = ?2 LIMIT 1",
+    )
+    .bind(owner_user_id)
+    .bind(playlist_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]

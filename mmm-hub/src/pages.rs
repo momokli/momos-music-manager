@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/settings", get(settings_page))
         .route("/user/{slug}", get(user_page))
         .route("/playlist/{id}", get(playlist_page))
+        .route("/playlist/{id}/tag", post(playlist_tag))
         .with_state(state)
 }
 
@@ -218,6 +219,7 @@ async fn user_page(
 struct PlaylistPage {
     nav: crate::ui::Nav,
     flash: String,
+    id: i64,
     name: String,
     owner: String,
     owner_name: String,
@@ -285,11 +287,25 @@ async fn playlist_page(
     render(&PlaylistPage {
         nav,
         flash: String::new(),
+        id,
         name: name.unwrap_or_default(),
         owner: owner.unwrap_or_default(),
         owner_name: owner_name.filter(|s| !s.is_empty()).unwrap_or_default(),
         tracks,
     })
+}
+
+/// Promote a playlist to a tag owned by the current user (1:1, same name).
+async fn playlist_tag(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((user_id, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::tags::create_from_playlist(&st.pool, user_id, id).await;
+    Redirect::to(&format!("/playlist/{id}")).into_response()
 }
 
 // ── overlap / discover ──────────────────────────────────────────────────────
@@ -1361,6 +1377,7 @@ struct TagsPage {
 
 struct TagRow {
     name: String,
+    owner: String,
     track_count: i64,
     user_count: i64,
     source_count: i64,
@@ -1378,15 +1395,16 @@ async fn tags_page(
     let q = f.q.unwrap_or_default().trim().to_string();
 
     let rows = sqlx::query(
-        "SELECT t.id, t.name,
+        "SELECT t.id, t.name, u.slug AS owner,
                 (SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id) AS track_count,
                 (SELECT COUNT(DISTINCT user_id) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS user_count,
                 (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count,
-                (SELECT GROUP_CONCAT(DISTINCT u.slug) FROM hub_tag_sources s
-                   JOIN hub_users u ON u.id = s.user_id WHERE s.tag_id = t.id) AS users
+                (SELECT GROUP_CONCAT(DISTINCT u2.slug) FROM hub_tag_sources s
+                   JOIN hub_users u2 ON u2.id = s.user_id WHERE s.tag_id = t.id) AS users
            FROM hub_tags t
+           JOIN hub_users u ON u.id = t.owner_user_id
           WHERE (?1 = '' OR lower(t.name) LIKE '%' || lower(?1) || '%')
-          ORDER BY track_count DESC, t.name
+          ORDER BY u.slug, track_count DESC, t.name
           LIMIT 1000",
     )
     .bind(&q)
@@ -1398,6 +1416,7 @@ async fn tags_page(
         .iter()
         .map(|r| TagRow {
             name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+            owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
             track_count: r.get::<Option<i64>, _>("track_count").unwrap_or(0),
             user_count: r.get::<Option<i64>, _>("user_count").unwrap_or(0),
             source_count: r.get::<Option<i64>, _>("source_count").unwrap_or(0),

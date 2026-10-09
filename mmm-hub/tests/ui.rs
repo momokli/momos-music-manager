@@ -378,13 +378,22 @@ async fn similar_scope_contributed_keeps_only_collaborative() {
 }
 
 #[tokio::test]
-async fn tags_layer_resolves_playlists() {
+async fn tags_are_explicit_and_per_user() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
 
-    let summary = mmm_hub::tags::resolve(&app.pool).await.expect("resolve tags");
-    // Fixture playlists: Deep House, Techno, Shared Collab (meta none).
-    assert!(summary.tags >= 3, "expected tag rows, got {}", summary.tags);
+    // No tags exist until a user creates one.
+    let before = mmm_hub::tags::rebuild(&app.pool).await.expect("rebuild");
+    assert_eq!(before.tags, 0, "tags must not be auto-derived");
+
+    // Promote alice's playlist to a tag (1:1).
+    let tag_id = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
+        .await
+        .expect("create tag");
+    assert!(tag_id > 0);
+
+    let after = mmm_hub::tags::rebuild(&app.pool).await.unwrap();
+    assert_eq!(after.tags, 1);
 
     let resp = app
         .client()
@@ -395,8 +404,7 @@ async fn tags_layer_resolves_playlists() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let html = body(resp).await;
-    assert!(html.contains("Deep House"));
-    assert!(html.contains("Shared Collab"));
+    assert!(html.contains("alice"), "owner column should be shown");
 }
 
 #[tokio::test]

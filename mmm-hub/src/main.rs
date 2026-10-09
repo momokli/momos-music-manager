@@ -377,9 +377,9 @@ async fn cmd_analyze(cfg: Config, limit: usize) -> Result<()> {
 
 async fn cmd_resolve_tags(cfg: Config) -> Result<()> {
     let pool = db::connect(&cfg.database_url).await?;
-    let s = tags::resolve(&pool).await?;
+    let s = tags::rebuild(&pool).await?;
     println!(
-        "✓ Tag-Layer neu gebaut: {} Tags, {} Quellen, {} Track-Tag-Zuordnungen",
+        "✓ Tag-Layer neu berechnet: {} Tags, {} Quellen, {} Track-Tag-Zuordnungen",
         s.tags, s.sources, s.resolved
     );
     Ok(())

@@ -3,8 +3,9 @@
 <hgroup>
     <h1>Tags</h1>
     <p class="hub-muted">
-        Playlists sind <strong>Quellen</strong>, zu Tags normalisiert. Meta-Playlists (z.
-        B. „Liked Songs") sind ausgeschlossen.
+        Tags sind <strong>pro User</strong> und entstehen erst, wenn ihr sie anlegt — z.
+        B. auf einer Playlist „als Tag anlegen". Die Playlist ist dann die Quelle des
+        Tags.
     </p>
 </hgroup>
 
@@ -21,8 +22,8 @@
 
 {% if tags.is_empty() %}
 <p class="hub-muted">
-    Noch keine Tags — erst Playlists fetchen, dann
-    <code>mmm-hub resolve-tags</code> laufen lassen.
+    Noch keine Tags — öffne eine <a href="/me/playlists">Playlist</a> und klicke „als Tag
+    anlegen".
 </p>
 {% else %}
 <div class="overflow-auto hub-scroll-y">
@@ -33,6 +34,7 @@
         <thead>
             <tr>
                 <th scope="col">Tag</th>
+                <th scope="col">Besitzer</th>
                 <th scope="col">Tracks</th>
                 <th scope="col">User</th>
                 <th scope="col">Quellen</th>
@@ -42,6 +44,7 @@
             {% for t in tags %}
             <tr>
                 <td>{{ t.name }}</td>
+                <td><a href="/user/{{ t.owner }}">@{{ t.owner }}</a></td>
                 <td>{{ t.track_count }}</td>
                 <td>{{ t.users }} <span class="hub-muted">({{ t.user_count }})</span></td>
                 <td>{{ t.source_count }}</td>

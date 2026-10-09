@@ -15,6 +15,12 @@ content %}
     </p>
 </hgroup>
 
+<form method="post" action="/playlist/{{ id }}/tag" class="hub-actions">
+    <button type="submit" class="secondary outline">
+        Diese Playlist als Tag anlegen
+    </button>
+</form>
+
 {% if tracks.is_empty() %}
 <p>Keine Tracks in dieser Playlist.</p>
 {% else %}
