@@ -1,4 +1,5 @@
-{% extends "base.html" %} {% block title %}{{ name }} — MMM Hub{% endblock %} {% block content %}
+{% extends "base.html" %} {% block title %}{{ name }} — MMM Hub{% endblock %} {% block
+content %}
 <nav class="hub-crumbs" aria-label="Brotkrumen">
     <ol>
         <li><a href="/">Übersicht</a></li>
@@ -9,14 +10,40 @@
 <hgroup>
     <h1>{{ icon }} {{ name }}</h1>
     <p class="hub-muted">
-        Owner <a href="/user/{{ owner }}">@{{ owner }}</a> · {{ members.len() }} Mitglieder ·
-        {{ tags.len() }} Tags
+        Owner <a href="/user/{{ owner }}">@{{ owner }}</a> · {{ members.len() }}
+        Mitglieder · {{ tags.len() }} Tags
     </p>
 </hgroup>
 
 {% if is_owner %}
-<form method="post" action="/groups/{{ id }}/delete" style="display:inline">
+<form method="post" action="/groups/{{ id }}/delete" style="display: inline">
     <button type="submit" class="secondary outline">Gruppe löschen</button>
+</form>
+{% endif %}
+
+<h3>Übergeordnete Gruppe</h3>
+{% if parent_id != 0 %}
+<p>
+    {{ parent_label }} · <a href="/groups/{{ parent_id }}">ansehen</a>{% if role_inherited
+    %} · <span class="hub-muted">deine Rolle hier ist geerbt</span>{% endif %}
+</p>
+{% else %}
+<p class="hub-muted">Keine — diese Gruppe erbt von keiner Contributor-Gruppe.</p>
+{% endif %} {% if is_owner %}
+<form
+    method="post"
+    action="/groups/{{ id }}/parent"
+    style="display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap"
+>
+    <select name="parent_id" aria-label="Übergeordnete Gruppe">
+        <option value="">— keine —</option>
+        {% for p in parent_options %}
+        <option value="{{ p.id }}" {% if p.selected %}selected{% endif %}>
+            {{ p.icon }} {{ p.name }}
+        </option>
+        {% endfor %}
+    </select>
+    <button type="submit">Übergeordnete Gruppe setzen</button>
 </form>
 {% endif %}
 
@@ -27,7 +54,9 @@
             <tr>
                 <th scope="col">User</th>
                 <th scope="col">Rolle</th>
-                {% if is_owner %}<th scope="col"></th>{% endif %}
+                {% if is_owner %}
+                <th scope="col"></th>
+                {% endif %}
             </tr>
         </thead>
         <tbody>
@@ -45,25 +74,15 @@
                     >
                         <input type="hidden" name="slug" value="{{ m.slug }}" />
                         <select name="role">
-                            <option
-                                value="contributor"
-                                {% if m.role == "contributor" %}selected{% endif %}
-                            >
-                                contributor
-                            </option>
-                            <option
-                                value="subscriber"
-                                {% if m.role == "subscriber" %}selected{% endif %}
-                            >
-                                subscriber
-                            </option>
+                            <option value="contributor">contributor</option>
+                            <option value="subscriber">subscriber</option>
                         </select>
                         <button type="submit" class="secondary">setzen</button>
                     </form>
                     <form
                         method="post"
                         action="/groups/{{ id }}/member/remove"
-                        style="display:inline"
+                        style="display: inline"
                     >
                         <input type="hidden" name="slug" value="{{ m.slug }}" />
                         <button type="submit" title="Entfernen">×</button>
@@ -108,7 +127,9 @@
             <tr>
                 <th scope="col">Tag</th>
                 <th scope="col">Besitzer</th>
-                {% if can_edit %}<th scope="col"></th>{% endif %}
+                {% if can_edit %}
+                <th scope="col"></th>
+                {% endif %}
             </tr>
         </thead>
         <tbody>
@@ -121,7 +142,7 @@
                     <form
                         method="post"
                         action="/tag/{{ t.id }}/group/remove"
-                        style="display:inline"
+                        style="display: inline"
                     >
                         <input type="hidden" name="group_id" value="{{ id }}" />
                         <button type="submit" title="Aus Gruppe entfernen">×</button>

@@ -378,6 +378,46 @@ async fn similar_scope_contributed_keeps_only_collaborative() {
 }
 
 #[tokio::test]
+async fn group_membership_inherits_from_parent() {
+    let app = common::spawn().await;
+    let root = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Contributors", "🤝")
+        .await
+        .unwrap();
+    let child = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Mood", "💜")
+        .await
+        .unwrap();
+    mmm_hub::tags::set_parent(&app.pool, app.seed.alice, child, Some(root))
+        .await
+        .unwrap();
+
+    // Bob has nothing yet.
+    assert!(mmm_hub::tags::effective_role_of(&app.pool, app.seed.bob, child)
+        .await
+        .is_none());
+
+    // Add him to the *parent* -> he can contribute to the child.
+    mmm_hub::tags::set_member_role(&app.pool, app.seed.alice, root, "bob", "contributor")
+        .await
+        .unwrap();
+    assert_eq!(
+        mmm_hub::tags::effective_role_of(&app.pool, app.seed.bob, child)
+            .await
+            .as_deref(),
+        Some("contributor")
+    );
+    assert!(mmm_hub::tags::can_contribute(&app.pool, app.seed.bob, child).await);
+    assert!(mmm_hub::tags::list_groups_for(&app.pool, app.seed.bob)
+        .await
+        .iter()
+        .any(|g| g.id == child && g.inherited));
+
+    // Cycle guard: the root can't become a child of its own child.
+    assert!(mmm_hub::tags::set_parent(&app.pool, app.seed.alice, root, Some(child))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
 async fn groups_have_roles_and_hold_tags() {
     let app = common::spawn().await;
 

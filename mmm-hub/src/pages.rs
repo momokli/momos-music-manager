@@ -33,6 +33,7 @@ pub fn router(state: AppState) -> Router {
         .route("/groups/{id}/unsubscribe", post(group_unsubscribe))
         .route("/groups/{id}/role", post(group_set_role))
         .route("/groups/{id}/member/remove", post(group_remove_member))
+        .route("/groups/{id}/parent", post(group_set_parent))
         .route("/groups/{id}/delete", post(group_delete))
         .route("/digging", get(digging_page))
         .route("/digging/enrich", post(digging_enrich))
@@ -1646,6 +1647,7 @@ struct GroupRow {
     icon: String,
     owner: String,
     role: String,
+    inherited: bool,
     tag_count: i64,
     members: i64,
 }
@@ -1657,6 +1659,7 @@ fn group_row(g: crate::tags::Group) -> GroupRow {
         icon: g.icon,
         owner: g.owner,
         role: g.role,
+        inherited: g.inherited,
         tag_count: g.tag_count,
         members: g.members,
     }
@@ -1786,6 +1789,13 @@ async fn group_delete(
     Redirect::to("/groups").into_response()
 }
 
+struct ParentOption {
+    id: i64,
+    name: String,
+    icon: String,
+    selected: bool,
+}
+
 struct MemberRow {
     slug: String,
     role: String,
@@ -1808,6 +1818,10 @@ struct GroupPage {
     owner: String,
     is_owner: bool,
     can_edit: bool,
+    role_inherited: bool,
+    parent_id: i64,
+    parent_label: String,
+    parent_options: Vec<ParentOption>,
     members: Vec<MemberRow>,
     tags: Vec<GroupTag>,
     users: Vec<String>,
@@ -1843,6 +1857,22 @@ async fn group_page(
         .fetch_all(&st.pool)
         .await
         .unwrap_or_default();
+    let parent_label = if d.parent_id != 0 {
+        format!("{} {}", d.parent_icon, d.parent_name).trim().to_string()
+    } else {
+        String::new()
+    };
+    let parent_options: Vec<ParentOption> = crate::tags::owned_groups(&st.pool, nav.id)
+        .await
+        .into_iter()
+        .filter(|(gid, _, _)| *gid != d.id)
+        .map(|(id, name, icon)| ParentOption {
+            selected: id == d.parent_id,
+            id,
+            name,
+            icon,
+        })
+        .collect();
     render(&GroupPage {
         nav,
         flash: String::new(),
@@ -1852,10 +1882,33 @@ async fn group_page(
         owner: d.owner,
         is_owner,
         can_edit,
+        role_inherited: d.role_inherited,
+        parent_id: d.parent_id,
+        parent_label,
+        parent_options,
         members,
         tags,
         users,
     })
+}
+
+#[derive(Deserialize)]
+struct ParentForm {
+    parent_id: String,
+}
+
+async fn group_set_parent(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<ParentForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let parent = f.parent_id.trim().parse::<i64>().ok().filter(|p| *p != 0);
+    let _ = crate::tags::set_parent(&st.pool, uid, id, parent).await;
+    Redirect::to(&format!("/groups/{id}")).into_response()
 }
 
 // ── settings ────────────────────────────────────────────────────────────────

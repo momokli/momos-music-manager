@@ -278,8 +278,10 @@ pub struct Group {
     pub name: String,
     pub icon: String,
     pub owner: String,
-    /// The caller's role in the group, or "" if not a member.
+    /// The caller's effective role in the group, or "" if none.
     pub role: String,
+    /// True when the role comes from a parent (contributor) group.
+    pub inherited: bool,
     pub tag_count: i64,
     pub members: i64,
 }
@@ -290,7 +292,13 @@ pub struct GroupDetail {
     pub name: String,
     pub icon: String,
     pub owner: String,
+    /// The caller's effective role (own or inherited).
     pub role: String,
+    /// True when `role` is inherited from a parent group.
+    pub role_inherited: bool,
+    pub parent_id: i64,
+    pub parent_name: String,
+    pub parent_icon: String,
     pub members: Vec<(String, String)>,
     /// `(tag_id, tag name, tag owner slug)`.
     pub tags: Vec<(i64, String, String)>,
@@ -339,6 +347,18 @@ pub async fn create_group(
     Ok(id)
 }
 
+/// Groups a user owns: `(id, name, icon)` — for parent pickers.
+pub async fn owned_groups(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String, String)> {
+    sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT id, name, COALESCE(icon,'') FROM hub_tag_groups
+          WHERE owner_user_id = ?1 ORDER BY name",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
 pub async fn delete_group(pool: &SqlitePool, actor_user_id: i64, group_id: i64) -> Result<()> {
     sqlx::query("DELETE FROM hub_tag_groups WHERE id = ?1 AND owner_user_id = ?2")
         .bind(group_id)
@@ -348,7 +368,8 @@ pub async fn delete_group(pool: &SqlitePool, actor_user_id: i64, group_id: i64) 
     Ok(())
 }
 
-async fn role_of(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<String> {
+/// The user's role *in this group only* (no inheritance).
+async fn own_role_of(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<String> {
     sqlx::query_scalar::<_, String>(
         "SELECT role FROM hub_group_members WHERE group_id = ?1 AND user_id = ?2",
     )
@@ -360,39 +381,59 @@ async fn role_of(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<Strin
     .flatten()
 }
 
+/// The user's **effective** role in a group: their strongest role on the group
+/// itself or on any ancestor (parent/contributor group). `None` if none.
+pub async fn effective_role_of(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "WITH RECURSIVE anc(id) AS (\n             SELECT ?1\n             UNION\n             SELECT g.parent_group_id FROM hub_tag_groups g\n               JOIN anc ON g.id = anc.id WHERE g.parent_group_id IS NOT NULL\n         )\n         SELECT m.role FROM hub_group_members m JOIN anc ON anc.id = m.group_id\n          WHERE m.user_id = ?2\n          ORDER BY CASE m.role WHEN 'owner' THEN 3 WHEN 'contributor' THEN 2 ELSE 1 END DESC\n          LIMIT 1",
+    )
+    .bind(group_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
 pub async fn can_contribute(pool: &SqlitePool, user_id: i64, group_id: i64) -> bool {
     matches!(
-        role_of(pool, user_id, group_id).await.as_deref(),
+        effective_role_of(pool, user_id, group_id).await.as_deref(),
         Some(ROLE_OWNER) | Some(ROLE_CONTRIBUTOR)
     )
 }
 
-/// Groups the user is a member of (any role).
+/// Groups the user can see as *theirs* — own membership plus everything
+/// inherited from a parent (contributor) group.
 pub async fn list_groups_for(pool: &SqlitePool, user_id: i64) -> Vec<Group> {
     let rows = sqlx::query(
-        "SELECT g.id, g.name, g.icon, u.slug AS owner, m.role,
+        "SELECT g.id, g.name, g.icon, u.slug AS owner,
                 (SELECT COUNT(*) FROM hub_group_tags gt WHERE gt.group_id = g.id) AS tag_count,
                 (SELECT COUNT(*) FROM hub_group_members mm WHERE mm.group_id = g.id) AS members
            FROM hub_tag_groups g
-           JOIN hub_group_members m ON m.group_id = g.id AND m.user_id = ?1
            JOIN hub_users u ON u.id = g.owner_user_id
           ORDER BY g.name",
     )
-    .bind(user_id)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
-    rows.iter()
-        .map(|r| Group {
-            id: r.get("id"),
-            name: r.get("name"),
-            icon: r.get::<Option<String>, _>("icon").unwrap_or_default(),
-            owner: r.get("owner"),
-            role: r.get("role"),
-            tag_count: r.get::<Option<i64>, _>("tag_count").unwrap_or(0),
-            members: r.get::<Option<i64>, _>("members").unwrap_or(0),
-        })
-        .collect()
+    let mut out = Vec::new();
+    for r in &rows {
+        let id: i64 = r.get("id");
+        if let Some(role) = effective_role_of(pool, user_id, id).await {
+            let inherited = own_role_of(pool, user_id, id).await.is_none();
+            out.push(Group {
+                id,
+                name: r.get("name"),
+                icon: r.get::<Option<String>, _>("icon").unwrap_or_default(),
+                owner: r.get("owner"),
+                role,
+                inherited,
+                tag_count: r.get::<Option<i64>, _>("tag_count").unwrap_or(0),
+                members: r.get::<Option<i64>, _>("members").unwrap_or(0),
+            });
+        }
+    }
+    out
 }
 
 /// Groups the user is *not* a member of (to discover / subscribe to).
@@ -418,6 +459,7 @@ pub async fn list_discover_groups(pool: &SqlitePool, user_id: i64) -> Vec<Group>
             icon: r.get::<Option<String>, _>("icon").unwrap_or_default(),
             owner: r.get("owner"),
             role: String::new(),
+            inherited: false,
             tag_count: r.get::<Option<i64>, _>("tag_count").unwrap_or(0),
             members: r.get::<Option<i64>, _>("members").unwrap_or(0),
         })
@@ -600,7 +642,8 @@ pub async fn groups_for_tag(pool: &SqlitePool, tag_id: i64) -> Vec<(i64, String,
 
 pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<GroupDetail> {
     let row = sqlx::query(
-        "SELECT g.id, g.name, COALESCE(g.icon,'') AS icon, u.slug AS owner
+        "SELECT g.id, g.name, COALESCE(g.icon,'') AS icon, u.slug AS owner,
+                COALESCE(g.parent_group_id, 0) AS parent_id
            FROM hub_tag_groups g JOIN hub_users u ON u.id = g.owner_user_id
           WHERE g.id = ?1",
     )
@@ -609,7 +652,25 @@ pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Opt
     .await
     .ok()
     .flatten()?;
-    let role = role_of(pool, user_id, group_id).await.unwrap_or_default();
+    let role = effective_role_of(pool, user_id, group_id)
+        .await
+        .unwrap_or_default();
+    let role_inherited =
+        !role.is_empty() && own_role_of(pool, user_id, group_id).await.is_none();
+    let parent_id: i64 = row.get("parent_id");
+    let (parent_name, parent_icon) = if parent_id != 0 {
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT name, COALESCE(icon,'') FROM hub_tag_groups WHERE id = ?1",
+        )
+        .bind(parent_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    } else {
+        (String::new(), String::new())
+    };
     let members = sqlx::query_as::<_, (String, String)>(
         "SELECT u.slug, m.role FROM hub_group_members m JOIN hub_users u ON u.id = m.user_id
           WHERE m.group_id = ?1 ORDER BY (m.role <> 'owner'), m.role, u.slug",
@@ -634,9 +695,58 @@ pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Opt
         icon: row.get("icon"),
         owner: row.get("owner"),
         role,
+        role_inherited,
+        parent_id,
+        parent_name,
+        parent_icon,
         members,
         tags,
     })
+}
+
+/// Set (or clear) a group's parent — the contributor group it inherits from.
+/// Only the group's owner may do this; cycles are rejected.
+pub async fn set_parent(
+    pool: &SqlitePool,
+    actor_user_id: i64,
+    group_id: i64,
+    parent_group_id: Option<i64>,
+) -> Result<()> {
+    let owner = sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM hub_tag_groups WHERE id = ?1 AND owner_user_id = ?2",
+    )
+    .bind(group_id)
+    .bind(actor_user_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    if owner.is_none() {
+        bail!("only the group owner can set its parent");
+    }
+    if let Some(pid) = parent_group_id {
+        if pid == group_id {
+            bail!("a group can't be its own parent");
+        }
+        // Reject cycles: the parent must not be a descendant of this group.
+        let is_descendant = sqlx::query_scalar::<_, i64>(
+            "WITH RECURSIVE d(id) AS (\n                 SELECT ?1\n                 UNION\n                 SELECT g.id FROM hub_tag_groups g JOIN d ON g.parent_group_id = d.id\n             )\n             SELECT COUNT(*) FROM d WHERE id = ?2",
+        )
+        .bind(group_id)
+        .bind(pid)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+        if is_descendant > 0 {
+            bail!("that would create a cycle");
+        }
+    }
+    sqlx::query("UPDATE hub_tag_groups SET parent_group_id = ?1 WHERE id = ?2")
+        .bind(parent_group_id)
+        .bind(group_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 // ── tag detail ───────────────────────────────────────────────────────────────
