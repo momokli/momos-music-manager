@@ -12,6 +12,7 @@ use axum::Router;
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::{Row, SqlitePool};
+use std::collections::HashMap;
 
 use crate::api::AppState;
 use crate::spotify;
@@ -831,7 +832,7 @@ struct TrackPage {
     deezer_id: String,
     fetchable: bool,
     external_ids: Vec<ExternalId>,
-    tags: Vec<String>,
+    tags: Vec<TrackTag>,
     genres: Vec<String>,
     flash: String,
 }
@@ -853,6 +854,20 @@ struct ExternalId {
     service: String,
     external_id: String,
     url: String,
+}
+
+/// A tag on the track's detail page: owner + the groups it lives in.
+struct TrackTag {
+    id: i64,
+    name: String,
+    owner: String,
+    groups: Vec<TrackTagGroup>,
+}
+
+struct TrackTagGroup {
+    id: i64,
+    name: String,
+    icon: String,
 }
 
 async fn track_page(
@@ -1020,17 +1035,57 @@ async fn track_page(
     })
     .collect();
 
-    // Resolved tags for this track, per user (@owner · tag).
-    let tags: Vec<String> = sqlx::query_scalar::<_, String>(
-        "SELECT u.slug || ' · ' || v.tag FROM hub_v_track_tags v
-           JOIN hub_tags t ON t.id = v.tag_id
+    // Resolved tags for this track, with owner and the groups each tag is in.
+    let tag_rows = sqlx::query(
+        "SELECT t.id AS id, t.name AS name, u.slug AS owner
+           FROM hub_track_resolved_tags rt
+           JOIN hub_tags t ON t.id = rt.tag_id
            JOIN hub_users u ON u.id = t.owner_user_id
-          WHERE v.track_id = ?1 ORDER BY u.slug, v.tag",
+          WHERE rt.track_id = ?1
+          ORDER BY u.slug, t.name",
     )
     .bind(id)
     .fetch_all(&st.pool)
     .await
     .unwrap_or_default();
+
+    let tag_ids: Vec<i64> = tag_rows.iter().map(|r| r.get::<i64, _>("id")).collect();
+    let mut groups_by_tag: HashMap<i64, Vec<TrackTagGroup>> = HashMap::new();
+    if !tag_ids.is_empty() {
+        let mut qb = sqlx::QueryBuilder::new(
+            "SELECT gt.tag_id AS tag_id, g.id AS gid, g.name AS gname,
+                    COALESCE(g.icon, '') AS gicon
+               FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
+              WHERE gt.tag_id IN (",
+        );
+        let mut sep = qb.separated(", ");
+        for tid in &tag_ids {
+            sep.push_bind(*tid);
+        }
+        qb.push(") ORDER BY g.name COLLATE NOCASE");
+        for r in qb.build().fetch_all(&st.pool).await.unwrap_or_default() {
+            groups_by_tag
+                .entry(r.get::<i64, _>("tag_id"))
+                .or_default()
+                .push(TrackTagGroup {
+                    id: r.get("gid"),
+                    name: r.get::<Option<String>, _>("gname").unwrap_or_default(),
+                    icon: r.get::<Option<String>, _>("gicon").unwrap_or_default(),
+                });
+        }
+    }
+    let tags: Vec<TrackTag> = tag_rows
+        .into_iter()
+        .map(|r| {
+            let id: i64 = r.get("id");
+            TrackTag {
+                groups: groups_by_tag.remove(&id).unwrap_or_default(),
+                id,
+                name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+                owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
+            }
+        })
+        .collect();
 
     // Community genres (Last.fm), if fetched.
     let genres: Vec<String> = sqlx::query_scalar::<_, String>(

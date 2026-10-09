@@ -736,6 +736,39 @@ async fn tags_are_explicit_and_per_user() {
 }
 
 #[tokio::test]
+async fn track_page_shows_tags_with_groups() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // Tag from alice's playlist (which contains t_all) + a group with an icon.
+    let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
+        .await
+        .unwrap();
+    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Mood", "💜")
+        .await
+        .unwrap();
+    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, tag, g)
+        .await
+        .unwrap();
+
+    let resp = app
+        .client()
+        .get(app.url(&format!("/track/{}", app.seed.t_all)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    // Tag name (== playlist name) links to the tag page.
+    assert!(html.contains(&format!("/tag/{tag}")));
+    assert!(html.contains("Deep House"));
+    // Group is shown with its icon and links to the group page.
+    assert!(html.contains("💜 Mood"), "group icon + name must be shown");
+    assert!(html.contains(&format!("/groups/{g}")));
+}
+
+#[tokio::test]
 async fn digging_internal_suggestions() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;

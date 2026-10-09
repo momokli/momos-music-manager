@@ -96,10 +96,26 @@ content %}
                 <tr>
                     <th scope="row">Tags</th>
                     <td>
-                        {% if tags.is_empty() %}—{% else %} {% for t in tags %}<span
-                            class="hub-tag"
-                            >{{ t }}</span
-                        >{% endfor %} {% endif %}
+                        {% if tags.is_empty() %}—{% else %}
+                        <ul class="hub-taglist">
+                            {% for t in tags %}
+                            <li>
+                                <a href="/user/{{ t.owner }}" class="hub-muted"
+                                    >@{{ t.owner }}</a
+                                >
+                                <a href="/tag/{{ t.id }}" class="hub-tag hub-tag-own"
+                                    >{{ t.name }}</a
+                                >
+                                {% for g in t.groups %}<a
+                                    href="/groups/{{ g.id }}"
+                                    class="hub-chip"
+                                    title="Gruppe"
+                                    >{{ g.icon }} {{ g.name }}</a
+                                >{% endfor %}
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
                     </td>
                 </tr>
                 <tr>
