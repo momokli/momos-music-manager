@@ -46,6 +46,10 @@ async fn dashboard_without_cookie_redirects_to_login() {
 #[tokio::test]
 async fn signup_sets_session_and_unlocks_dashboard_and_me() {
     let app = common::spawn().await;
+    // Registration is closed by default; open it for this test.
+    mmm_hub::settings::set(&app.pool, "registration_open", "1")
+        .await
+        .unwrap();
 
     let resp = app
         .client()
@@ -122,15 +126,9 @@ async fn login_with_wrong_password_rerenders_form() {
 #[tokio::test]
 async fn login_username_is_case_insensitive() {
     let app = common::spawn().await;
-
-    let resp = app
-        .client()
-        .post(app.url("/signup"))
-        .form(&[("username", "CarolTest"), ("password", "carolpass")])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let _ = app
+        .user_with_password("CarolTest", "carolpass")
+        .await;
 
     let resp = app
         .client()

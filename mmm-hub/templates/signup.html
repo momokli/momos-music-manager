@@ -1,14 +1,16 @@
-{% extends "auth.html" %} {% block title %}Registrieren — MMM Hub{% endblock %} {% block content
-%}
+{% extends "auth.html" %} {% block title %}Registrieren — MMM Hub{% endblock %} {% block
+content %}
 <h1>MMM Hub</h1>
 <p class="hub-muted">Account anlegen</p>
 {% if error != "" %}
 <p class="hub-flash-err">{{ error }}</p>
-{% endif %}
+{% endif %} {% if open %}
 <form method="post" action="/signup">
-  <input name="username" placeholder="Benutzername" autofocus required />
-  <input name="password" type="password" placeholder="Passwort" required />
-  <button type="submit">Registrieren</button>
+    <input name="username" placeholder="Benutzername" autofocus required />
+    <input name="password" type="password" placeholder="Passwort" required />
+    <button type="submit">Registrieren</button>
 </form>
 <p class="hub-muted">Schon dabei? <a href="/login">Einloggen</a></p>
-{% endblock %}
+{% else %}
+<p class="hub-muted">Die Registrierung ist geschlossen. <a href="/login">Zum Login</a></p>
+{% endif %} {% endblock %}

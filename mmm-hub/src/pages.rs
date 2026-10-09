@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use askama::Template;
-use axum::extract::{Path, Query, RawQuery, State};
+use axum::extract::{Form, Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .route("/playlists/similar", get(similar_page))
         .route("/tags", get(tags_page))
         .route("/digging", get(digging_page))
+        .route("/admin", get(admin_page).post(admin_save))
         .route("/settings", get(settings_page))
         .route("/user/{slug}", get(user_page))
         .route("/playlist/{id}", get(playlist_page))
@@ -1158,6 +1159,118 @@ async fn digging_page(
         seed_key: seed_camelot,
         filters,
     })
+}
+
+// ── admin (settings) ────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+struct AdminMsg {
+    msg: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "admin.html")]
+struct AdminPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    fields: Vec<AdminField>,
+    registration_open: bool,
+    users: Vec<AdminUser>,
+}
+
+struct AdminField {
+    key: String,
+    label: String,
+    secret: bool,
+    set: bool,
+    value: String,
+}
+
+struct AdminUser {
+    slug: String,
+    is_admin: bool,
+}
+
+async fn admin_page(
+    State(st): State<AppState>,
+    Query(msg): Query<AdminMsg>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "admin").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if !nav.is_admin {
+        return (StatusCode::FORBIDDEN, "Nur Admins.").into_response();
+    }
+
+    let s = crate::settings::load_all(&st.pool).await;
+    let fields = crate::settings::ADMIN_FIELDS
+        .iter()
+        .map(|(key, label, secret)| {
+            let v = s.get(*key).cloned().unwrap_or_default();
+            AdminField {
+                key: (*key).to_string(),
+                label: (*label).to_string(),
+                secret: *secret,
+                set: !v.is_empty(),
+                value: if *secret { String::new() } else { v },
+            }
+        })
+        .collect();
+    let registration_open = crate::settings::registration_open(&st.pool).await;
+    let users = sqlx::query_as::<_, (String, i64)>("SELECT slug, is_admin FROM hub_users ORDER BY slug")
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(slug, admin)| AdminUser {
+            slug,
+            is_admin: admin == 1,
+        })
+        .collect();
+
+    render(&AdminPage {
+        nav,
+        flash: msg.msg.unwrap_or_default(),
+        fields,
+        registration_open,
+        users,
+    })
+}
+
+async fn admin_save(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(map): Form<std::collections::HashMap<String, String>>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "admin").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if !nav.is_admin {
+        return (StatusCode::FORBIDDEN, "Nur Admins.").into_response();
+    }
+
+    // Non-empty values are stored; empty means "leave unchanged".
+    for (key, _label, _secret) in crate::settings::ADMIN_FIELDS {
+        if let Some(v) = map.get(*key) {
+            let v = v.trim();
+            if !v.is_empty() {
+                let _ = crate::settings::set(&st.pool, key, v).await;
+            }
+        }
+    }
+    let reg = map
+        .get(crate::settings::REGISTRATION_OPEN)
+        .map(|v| v == "on" || v == "1")
+        .unwrap_or(false);
+    let _ = crate::settings::set(
+        &st.pool,
+        crate::settings::REGISTRATION_OPEN,
+        if reg { "1" } else { "0" },
+    )
+    .await;
+
+    Redirect::to("/admin?msg=Gespeichert%20%E2%80%94%20Keys%20greifen%20nach%20Neustart").into_response()
 }
 
 // ── tags (resolved playlist layer) ──────────────────────────────────────────

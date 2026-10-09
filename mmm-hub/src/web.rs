@@ -146,12 +146,14 @@ struct ErrorPage {
 #[template(path = "login.html")]
 struct LoginPage {
     error: String,
+    registration_open: bool,
 }
 
 #[derive(Template)]
 #[template(path = "signup.html")]
 struct SignupPage {
     error: String,
+    open: bool,
 }
 
 #[derive(Template)]
@@ -226,15 +228,17 @@ struct SqlPage {
     table_html: String,
 }
 
-fn login_form_html(err: Option<&str>) -> Response {
+fn login_form_html(err: Option<&str>, registration_open: bool) -> Response {
     render(&LoginPage {
         error: err.unwrap_or("").to_string(),
+        registration_open,
     })
 }
 
-fn signup_form_html(err: Option<&str>) -> Response {
+fn signup_form_html(err: Option<&str>, registration_open: bool) -> Response {
     render(&SignupPage {
         error: err.unwrap_or("").to_string(),
+        open: registration_open,
     })
 }
 
@@ -1052,12 +1056,14 @@ async fn track_fetch(
     Redirect::to(&format!("/track/{id}?msg={}", urlencoding::encode(&msg))).into_response()
 }
 
-async fn login_form() -> Response {
-    login_form_html(None)
+async fn login_form(State(st): State<AppState>) -> Response {
+    let open = crate::settings::registration_open(&st.pool).await;
+    login_form_html(None, open)
 }
 
-async fn signup_form() -> Response {
-    signup_form_html(None)
+async fn signup_form(State(st): State<AppState>) -> Response {
+    let open = crate::settings::registration_open(&st.pool).await;
+    signup_form_html(None, open)
 }
 
 async fn login_submit(State(st): State<AppState>, Form(c): Form<Creds>) -> Response {
@@ -1078,7 +1084,8 @@ async fn login_submit(State(st): State<AppState>, Form(c): Form<Creds>) -> Respo
         None => false,
     };
     if !ok {
-        return login_form_html(Some("Benutzername oder Passwort falsch."));
+        let open = crate::settings::registration_open(&st.pool).await;
+        return login_form_html(Some("Benutzername oder Passwort falsch."), open);
     }
 
     let uid: i64 = row.unwrap().get("id");
@@ -1089,9 +1096,15 @@ async fn login_submit(State(st): State<AppState>, Form(c): Form<Creds>) -> Respo
 }
 
 async fn signup_submit(State(st): State<AppState>, Form(c): Form<Creds>) -> Response {
+    if !crate::settings::registration_open(&st.pool).await {
+        return signup_form_html(Some("Die Registrierung ist geschlossen."), false);
+    }
     let username = c.username.trim();
     if username.len() < 2 || c.password.len() < 4 {
-        return signup_form_html(Some("Benutzername (min. 2) und Passwort (min. 4) sind zu kurz."));
+        return signup_form_html(
+            Some("Benutzername (min. 2) und Passwort (min. 4) sind zu kurz."),
+            true,
+        );
     }
 
     let hash = match bcrypt::hash(&c.password, 10) {
@@ -1107,7 +1120,7 @@ async fn signup_submit(State(st): State<AppState>, Form(c): Form<Creds>) -> Resp
             .ok()
             .flatten();
     if exists.is_some() {
-        return signup_form_html(Some("Benutzername ist schon vergeben."));
+        return signup_form_html(Some("Benutzername ist schon vergeben."), true);
     }
 
     let uid: i64 = match sqlx::query_scalar(

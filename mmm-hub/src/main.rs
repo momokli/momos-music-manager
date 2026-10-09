@@ -16,7 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use mmm_hub::config::Config;
-use mmm_hub::{api, db, features, genres, ingest, pages, spotify, tags, web, worker};
+use mmm_hub::{api, db, features, genres, ingest, pages, settings, spotify, tags, web, worker};
 
 #[derive(Parser)]
 #[command(
@@ -76,6 +76,11 @@ enum Command {
         #[arg(long, default_value_t = 2000)]
         limit: usize,
     },
+    /// Grant admin to a user.
+    MakeAdmin {
+        #[arg(long)]
+        user: String,
+    },
     /// Run a read-only SQL query against the hub DB.
     Query { sql: String },
     /// List hub users.
@@ -107,6 +112,7 @@ async fn main() -> Result<()> {
         Command::Features { limit } => cmd_features(cfg, limit).await,
         Command::ResolveTags => cmd_resolve_tags(cfg).await,
         Command::Genres { limit } => cmd_genres(cfg, limit).await,
+        Command::MakeAdmin { user } => cmd_make_admin(cfg, &user).await,
         Command::Query { sql } => cmd_query(cfg, &sql).await,
         Command::Users => cmd_users(cfg).await,
         Command::SeedDemo => cmd_seed_demo(cfg).await,
@@ -119,6 +125,7 @@ async fn cmd_serve(cfg: Config, host: Option<String>, port: Option<u16>) -> Resu
 
     let pool = db::connect(&cfg.database_url).await?;
     let ro_pool = db::connect_readonly(&cfg.database_url).await?;
+    let cfg = settings::overlay_config(&pool, cfg).await;
     let state = api::AppState {
         pool,
         ro_pool,
@@ -263,8 +270,22 @@ async fn cmd_ingest(cfg: Config, slug: &str) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_make_admin(cfg: Config, slug: &str) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    let res = sqlx::query("UPDATE hub_users SET is_admin = 1 WHERE slug = ?1 COLLATE NOCASE")
+        .bind(slug)
+        .execute(&pool)
+        .await?;
+    if res.rows_affected() == 0 {
+        bail!("user '{slug}' not found");
+    }
+    println!("✓ '{slug}' ist jetzt Admin.");
+    Ok(())
+}
+
 async fn cmd_features(cfg: Config, limit: usize) -> Result<()> {
     let pool = db::connect(&cfg.database_url).await?;
+    let cfg = settings::overlay_config(&pool, cfg).await;
     println!("Hole Audio-Features (ReccoBeats) … max {limit}");
     let (processed, exhausted) = features::backfill(&pool, &cfg, limit).await?;
     println!(
@@ -286,6 +307,7 @@ async fn cmd_resolve_tags(cfg: Config) -> Result<()> {
 
 async fn cmd_genres(cfg: Config, limit: usize) -> Result<()> {
     let pool = db::connect(&cfg.database_url).await?;
+    let cfg = settings::overlay_config(&pool, cfg).await;
     if cfg.lastfm_api_key.is_none() {
         println!("! LASTFM_API_KEY nicht gesetzt — Genres übersprungen.");
         return Ok(());

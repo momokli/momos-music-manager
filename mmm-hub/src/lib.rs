@@ -14,6 +14,7 @@ pub mod ingest;
 pub mod lastfm;
 pub mod music_api;
 pub mod pages;
+pub mod settings;
 pub mod spotify;
 pub mod tags;
 pub mod ui;

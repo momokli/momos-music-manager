@@ -291,6 +291,7 @@
         </li>
         <ul>
         <li><a href="/user/{{ nav.slug }}">@{{ nav.slug }}</a></li>
+        {% if nav.is_admin %}<li><a href="/admin" {% if nav.active == "admin" %}aria-current="page"{% endif %}>Admin</a></li>{% endif %}
         <li><a href="/settings">Einstellungen</a></li>
         <li>
           <form method="post" action="/logout">

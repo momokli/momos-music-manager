@@ -108,7 +108,8 @@ async fn login_page_renders_without_session() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let html = body(resp).await;
     assert!(html.contains("action=\"/login\""));
-    assert!(html.contains("Registrieren"));
+    // Registration is closed by default -> no signup link.
+    assert!(!html.contains("Registrieren"));
 }
 
 #[tokio::test]
@@ -425,6 +426,87 @@ async fn digging_internal_suggestions() {
     let html = body(resp).await;
     assert!(html.contains("Hub-intern"));
     assert!(html.contains("Shared Anthem"));
+}
+
+#[tokio::test]
+async fn registration_closed_by_default() {
+    let app = common::spawn().await;
+
+    let login = app.client().get(app.url("/login")).send().await.unwrap();
+    assert!(!body(login).await.contains("Registrieren"));
+
+    let resp = app
+        .client()
+        .post(app.url("/signup"))
+        .form(&[("username", "newbie"), ("password", "pw1234")])
+        .send()
+        .await
+        .unwrap();
+    // Rendered "closed" page, not a 303 session redirect.
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_users WHERE slug = 'newbie'")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "no account should be created while closed");
+}
+
+#[tokio::test]
+async fn admin_page_is_admin_only() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let denied = app
+        .client()
+        .get(app.url("/admin"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+
+    sqlx::query("UPDATE hub_users SET is_admin = 1 WHERE id = ?1")
+        .bind(app.seed.alice)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let ok = app
+        .client()
+        .get(app.url("/admin"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), reqwest::StatusCode::OK);
+    let html = body(ok).await;
+    assert!(html.contains("Last.fm API-Key"));
+    assert!(html.contains("Registrierung offen"));
+}
+
+#[tokio::test]
+async fn admin_can_save_settings() {
+    let app = common::spawn().await;
+    sqlx::query("UPDATE hub_users SET is_admin = 1 WHERE id = ?1")
+        .bind(app.seed.alice)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let resp = app
+        .client()
+        .post(app.url("/admin"))
+        .header("Cookie", &cookie)
+        .form(&[("lastfm_api_key", "KEY123"), ("registration_open", "on")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    assert_eq!(
+        mmm_hub::settings::get(&app.pool, "lastfm_api_key").await.as_deref(),
+        Some("KEY123")
+    );
+    assert!(mmm_hub::settings::registration_open(&app.pool).await);
 }
 
 #[tokio::test]

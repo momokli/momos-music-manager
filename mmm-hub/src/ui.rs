@@ -19,6 +19,7 @@ pub struct Nav {
     pub active: String,
     pub spotify_connected: bool,
     pub spotify_label: String,
+    pub is_admin: bool,
 }
 
 impl Nav {
@@ -59,5 +60,6 @@ pub async fn nav(st: &AppState, headers: &HeaderMap, active: &str) -> Option<Nav
         active: active.to_string(),
         spotify_connected,
         spotify_label,
+        is_admin: crate::settings::is_admin(st, user_id).await,
     })
 }
