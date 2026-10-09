@@ -5,7 +5,8 @@
 //! External sources (Last.fm, …) hang off the same view.
 
 use anyhow::Result;
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, SqlitePool};
+use std::collections::HashMap;
 
 /// A suggested track related to the seed.
 pub struct Suggestion {
@@ -115,6 +116,54 @@ pub async fn presence(pool: &SqlitePool, track_id: i64) -> Presence {
         },
         None => Presence::default(),
     }
+}
+
+/// Batched `presence` for many tracks at once — avoids the N+1 of one query per
+/// candidate. Two chunked queries (playlists, likes) instead.
+pub async fn presence_many(pool: &SqlitePool, ids: &[i64]) -> HashMap<i64, Presence> {
+    let mut out: HashMap<i64, Presence> = HashMap::new();
+    for chunk in ids.chunks(900) {
+        let mut qb = QueryBuilder::new(
+            "SELECT p.track_id AS tid,
+                    COUNT(DISTINCT p.user_id) AS users,
+                    COUNT(DISTINCT p.playlist_id) AS playlists,
+                    GROUP_CONCAT(DISTINCT u.slug) AS slugs
+               FROM hub_v_track_playlists p
+               JOIN hub_users u ON u.id = p.user_id
+              WHERE p.track_id IN (",
+        );
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(*id);
+        }
+        qb.push(") GROUP BY p.track_id");
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            let tid: i64 = r.get("tid");
+            out.insert(
+                tid,
+                Presence {
+                    users: r.get::<Option<i64>, _>("users").unwrap_or(0),
+                    playlists: r.get::<Option<i64>, _>("playlists").unwrap_or(0),
+                    likes: 0,
+                    slugs: r.get::<Option<String>, _>("slugs").unwrap_or_default(),
+                },
+            );
+        }
+
+        let mut qb = QueryBuilder::new(
+            "SELECT track_id AS tid, COUNT(*) AS n FROM hub_liked_tracks WHERE track_id IN (",
+        );
+        let mut sep = qb.separated(", ");
+        for id in chunk {
+            sep.push_bind(*id);
+        }
+        qb.push(") GROUP BY track_id");
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            let tid: i64 = r.get("tid");
+            out.entry(tid).or_default().likes = r.get::<i64, _>("n");
+        }
+    }
+    out
 }
 
 /// Resolve an external candidate (external suggestion) to a hub track id, by

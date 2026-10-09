@@ -1588,7 +1588,6 @@ struct DigGroup {
 /// track id when matched, else by normalised artist|title.
 async fn merge_candidate(
     cand: &mut HashMap<String, DigRow>,
-    pool: &sqlx::SqlitePool,
     tid: Option<i64>,
     title: &str,
     artists: &str,
@@ -1612,21 +1611,17 @@ async fn merge_candidate(
         }
         return;
     }
-    let (matched, p) = match tid {
-        Some(id) => (true, crate::digging::presence(pool, id).await),
-        None => (false, crate::digging::Presence::default()),
-    };
     cand.insert(
         key,
         DigRow {
             track_id: tid.unwrap_or(0),
-            matched,
+            matched: tid.is_some(),
             title: title.to_string(),
             artists: artists.to_string(),
             sources: vec![source.to_string()],
-            users: p.users,
-            playlists: p.playlists,
-            likes: p.likes,
+            users: 0,
+            playlists: 0,
+            likes: 0,
             bpm: None,
             bpm_disp: String::new(),
             camelot: String::new(),
@@ -1795,22 +1790,6 @@ async fn digging_page(
 
             // 1. Hub-intern: tracks sharing the seed's playlists (capped so the
             //    external discoveries below still fit the table).
-            for s in crate::digging::internal_suggestions(&st.pool, sid, 100)
-                .await
-                .unwrap_or_default()
-            {
-                merge_candidate(
-                    &mut cand,
-                    &st.pool,
-                    Some(s.id),
-                    &s.title,
-                    &s.artists,
-                    "Hub-intern",
-                )
-                .await;
-            }
-
-            // 2. ReccoBeats recommendations (free, no auth).
             let seed_spotify = sqlx::query_scalar::<_, String>(
                 "SELECT external_id FROM hub_track_external_ids
                   WHERE track_id = ?1 AND service = 'spotify' LIMIT 1",
@@ -1820,65 +1799,116 @@ async fn digging_page(
             .await
             .ok()
             .flatten();
-            if let Some(sp) = &seed_spotify {
-                for r in crate::features::recommendations(&st.cfg, sp, 50)
+            let seed_artist = seed.artists.split(',').next().unwrap_or("").trim().to_string();
+
+            // Fetch every source concurrently. External HTTP calls overlap instead
+            // of chaining, so the page cost is the *max* latency, not the sum.
+            let internal_fut = async {
+                crate::digging::internal_suggestions(&st.pool, sid, 100)
                     .await
                     .unwrap_or_default()
-                {
-                    let tid = crate::digging::match_track(
-                        &st.pool,
-                        Some(&r.spotify_id),
-                        None,
-                        &r.artists,
-                        &r.title,
-                    )
-                    .await;
-                    merge_candidate(&mut cand, &st.pool, tid, &r.title, &r.artists, "ReccoBeats")
-                        .await;
+            };
+            let recco_fut = async {
+                match &seed_spotify {
+                    Some(sp) => crate::features::recommendations(&st.cfg, sp, 50)
+                        .await
+                        .unwrap_or_default(),
+                    None => Vec::new(),
                 }
-            }
-
-            // 3. Last.fm similar (needs LASTFM_API_KEY).
-            if lastfm_enabled {
-                for s in crate::lastfm::similar_tracks(&st.cfg, &seed.artists, &seed.title)
+            };
+            let lastfm_fut = async {
+                if lastfm_enabled {
+                    crate::lastfm::similar_tracks(&st.cfg, &seed.artists, &seed.title)
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            };
+            let cosine_fut = async {
+                if crate::cosine::enabled(&st.cfg) {
+                    crate::cosine::similar_tracks(&st.cfg, &seed_artist, &seed.title, 60)
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            };
+            let audio_fut = async {
+                crate::similar::neighbors(&st.pool, sid, 60)
                     .await
                     .unwrap_or_default()
-                {
-                    let tid =
-                        crate::digging::match_track(&st.pool, None, None, &s.artist, &s.name).await;
-                    merge_candidate(&mut cand, &st.pool, tid, &s.name, &s.artist, "Last.fm").await;
+            };
+            let (internal, recco, lastfm_list, cosine_list, audio_list) =
+                tokio::join!(internal_fut, recco_fut, lastfm_fut, cosine_fut, audio_fut);
+
+            for s in internal {
+                merge_candidate(&mut cand, Some(s.id), &s.title, &s.artists, "Hub-intern").await;
+            }
+            for r in recco {
+                let tid = crate::digging::match_track(
+                    &st.pool,
+                    Some(&r.spotify_id),
+                    None,
+                    &r.artists,
+                    &r.title,
+                )
+                .await;
+                merge_candidate(&mut cand, tid, &r.title, &r.artists, "ReccoBeats").await;
+            }
+            for s in lastfm_list {
+                let tid =
+                    crate::digging::match_track(&st.pool, None, None, &s.artist, &s.name).await;
+                merge_candidate(&mut cand, tid, &s.name, &s.artist, "Last.fm").await;
+            }
+            for s in cosine_list {
+                let tid =
+                    crate::digging::match_track(&st.pool, None, None, &s.artist, &s.track).await;
+                merge_candidate(&mut cand, tid, &s.track, &s.artist, "cosine.club").await;
+            }
+            // Audio neighbours (EffNet): titles fetched in one batched query.
+            let audio_ids: Vec<i64> = audio_list.iter().map(|n| n.track_id).collect();
+            let mut titles: HashMap<i64, (String, String)> = HashMap::new();
+            for chunk in audio_ids.chunks(900) {
+                let mut qb =
+                    QueryBuilder::new("SELECT id, title, artists FROM hub_tracks WHERE id IN (");
+                let mut sep = qb.separated(", ");
+                for id in chunk {
+                    sep.push_bind(*id);
+                }
+                qb.push(")");
+                for r in qb.build().fetch_all(&st.pool).await.unwrap_or_default() {
+                    titles.insert(
+                        r.get("id"),
+                        (
+                            r.get::<Option<String>, _>("title").unwrap_or_default(),
+                            r.get::<Option<String>, _>("artists").unwrap_or_default(),
+                        ),
+                    );
                 }
             }
-
-            // 4. cosine.club similar (free API key): audio-similarity over 2M+
-            //    underground tracks — the breadth our own catalog lacks.
-            if crate::cosine::enabled(&st.cfg) {
-                let seed_artist = seed.artists.split(',').next().unwrap_or("").trim();
-                for s in crate::cosine::similar_tracks(&st.cfg, seed_artist, &seed.title, 60)
-                    .await
-                    .unwrap_or_default()
-                {
-                    let tid =
-                        crate::digging::match_track(&st.pool, None, None, &s.artist, &s.track).await;
-                    merge_candidate(&mut cand, &st.pool, tid, &s.track, &s.artist, "cosine.club")
-                        .await;
+            for n in audio_list {
+                if let Some((title, artists)) = titles.get(&n.track_id) {
+                    merge_candidate(&mut cand, Some(n.track_id), title, artists, "Audio").await;
                 }
             }
+        }
+    }
 
-            // 5. Audio-ähnlich: EffNet-Embedding-Nachbarn aus unserer eigenen DB.
-            for n in crate::similar::neighbors(&st.pool, sid, 60)
-                .await
-                .unwrap_or_default()
-            {
-                if let Ok(Some(r)) = sqlx::query("SELECT title, artists FROM hub_tracks WHERE id = ?1")
-                    .bind(n.track_id)
-                    .fetch_optional(&st.pool)
-                    .await
-                {
-                    let title = r.get::<Option<String>, _>("title").unwrap_or_default();
-                    let artists = r.get::<Option<String>, _>("artists").unwrap_or_default();
-                    merge_candidate(&mut cand, &st.pool, Some(n.track_id), &title, &artists, "Audio")
-                        .await;
+    // Batched presence for the matched candidates (one query set, not N).
+    let matched_ids: Vec<i64> = cand
+        .values()
+        .filter(|r| r.matched)
+        .map(|r| r.track_id)
+        .collect();
+    if !matched_ids.is_empty() {
+        let presence = crate::digging::presence_many(&st.pool, &matched_ids).await;
+        for r in cand.values_mut() {
+            if r.matched {
+                if let Some(p) = presence.get(&r.track_id) {
+                    r.users = p.users;
+                    r.playlists = p.playlists;
+                    r.likes = p.likes;
                 }
             }
         }
