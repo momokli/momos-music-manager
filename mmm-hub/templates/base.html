@@ -105,6 +105,7 @@
         line-height: 1.55;
         border: 1px solid var(--pico-muted-border-color);
         background: transparent;
+        color: var(--hub-fg, #e6edf3) !important;
         text-transform: none;
         letter-spacing: 0;
         box-shadow: none;
@@ -112,17 +113,7 @@
       a.hub-tag:hover,
       button.hub-chip:hover {
         border-color: var(--pico-primary);
-        color: var(--pico-primary);
-      }
-      table.hub-dense-table tbody tr:hover {
-        background: rgba(126, 231, 135, 0.07);
-      }
-      /* tag clouds, grouped by category */
-      .hub-cloud {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.25rem;
-        margin: 0.1rem 0 0.4rem;
+        color: var(--pico-primary) !important;
       }
       /* recommended-tag chips: readable name + why */
       .hub-rec {
@@ -133,13 +124,13 @@
         padding: 0.12rem 0.5rem;
       }
       .hub-rec-name {
-        color: var(--pico-color);
+        color: var(--hub-fg, #e6edf3);
         font-weight: 600;
         text-transform: none;
         letter-spacing: 0;
       }
       .hub-rec-why {
-        color: var(--pico-muted-color);
+        color: #9aa4af;
         font-size: 0.68rem;
         letter-spacing: 0;
         text-transform: none;
