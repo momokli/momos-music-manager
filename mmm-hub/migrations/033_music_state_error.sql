@@ -4,4 +4,4 @@
 -- without a per-track status request.
 ALTER TABLE hub_music_state ADD COLUMN error TEXT;
 
-SELECT 'Migration 029 applied: hub_music_state error column added' as status;
+SELECT 'Migration 033 applied: hub_music_state error column added' as status;
