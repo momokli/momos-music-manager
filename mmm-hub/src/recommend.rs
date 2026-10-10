@@ -32,12 +32,13 @@ pub struct Recommendation {
     pub tag_id: i64,
     pub name: String,
     pub owner: String,
+    pub group: String,
     pub score: i64,
     pub reasons: Vec<Reason>,
 }
 
 impl Recommendation {
-    /// Compact explanation, e.g. `3× Tag · 2× Playlist · Artist`.
+    /// Compact explanation, e.g. `3× gleiches Album · gleicher Artist`.
     pub fn why(&self) -> String {
         self.reasons
             .iter()
@@ -65,10 +66,10 @@ fn weight(e: &Engine, kind: &str) -> f64 {
 
 fn label(kind: &str) -> &'static str {
     match kind {
-        "tag" => "Tag",
-        "playlist" => "Playlist",
-        "artist" => "Artist",
-        "album" => "Album",
+        "tag" => "gemeinsames Tag",
+        "playlist" => "gleiche Playlist",
+        "artist" => "gleicher Artist",
+        "album" => "gleiches Album",
         _ => "?",
     }
 }
@@ -111,6 +112,10 @@ pub async fn recommend_tags(pool: &SqlitePool, track_id: i64, limit: usize) -> V
            JOIN hub_tags t ON t.id = x.tag_id
            JOIN hub_users u ON u.id = t.owner_user_id
           WHERE x.tag_id NOT IN (SELECT tag_id FROM seed_tags)
+            AND x.tag_id NOT IN (
+                 SELECT gt.tag_id FROM hub_group_tags gt
+                   JOIN hub_tag_groups g ON g.id = gt.group_id
+                  WHERE g.role IN ('setlist', 'rumpelkiste') OR g.kind = 'sort')
           GROUP BY x.tag_id, t.name, u.slug, x.kind",
     )
     .bind(track_id)
@@ -124,6 +129,7 @@ pub async fn recommend_tags(pool: &SqlitePool, track_id: i64, limit: usize) -> V
             tag_id,
             name,
             owner,
+            group: String::new(),
             score: 0,
             reasons: Vec::new(),
         });
@@ -134,6 +140,32 @@ pub async fn recommend_tags(pool: &SqlitePool, track_id: i64, limit: usize) -> V
             count: cnt,
             weight: w,
         });
+    }
+
+    // Attach each tag's (first) group name, for context in the UI.
+    if !map.is_empty() {
+        let ids: Vec<i64> = map.keys().copied().collect();
+        let mut qb = sqlx::QueryBuilder::new(
+            "SELECT gt.tag_id, MIN(g.name) FROM hub_group_tags gt
+               JOIN hub_tag_groups g ON g.id = gt.group_id WHERE gt.tag_id IN (",
+        );
+        {
+            let mut sep = qb.separated(", ");
+            for id in &ids {
+                sep.push_bind(*id);
+            }
+        }
+        qb.push(") GROUP BY gt.tag_id");
+        if let Ok(grows) = qb.build().fetch_all(pool).await {
+            use sqlx::Row;
+            for r in grows {
+                let tid: i64 = r.get(0);
+                let gname: String = r.get::<Option<String>, _>(1).unwrap_or_default();
+                if let Some(rec) = map.get_mut(&tid) {
+                    rec.group = gname;
+                }
+            }
+        }
     }
 
     let mut out: Vec<Recommendation> = map.into_values().collect();
