@@ -35,6 +35,27 @@ All notable changes to Momo's Music Manager.
   - **Deployment**: LAN host `music-catalog` / `192.168.178.200`, behind Caddy on `lan` at
     `https://hub.zukkafabrik.de`; sibling read-only Datasette (`data.zukkafabrik.de`) and
     SchemaSpy (`schema.zukkafabrik.de`) over a sanitized copy `hub-public.db`.
+  - **Tagging & Spelunking layer** (see ADR-074): per-user **tags** created from playlists
+    (or by hand), bundled into **groups** (`kind` class/sort + roles setlist/rumpelkiste/
+    genre/phase/attribute) and **collectives** (users owning groups); tag insights on
+    `/tag/{id}` (top artists, co-occurrence within/across groups, jump to digging/overlap);
+    tag-queue, direct track tagging, grouped tag clouds, and a SoundCloud-style audio player.
+  - **Scoring & similarity engine** (see ADR-075): **ripeness** (tags > meta > traktor, with
+    per-meta weights and position-weighted tag points per group) and **similarity v2**
+    (shared tags + cross-group bonus, Rumpelkiste-aware) drive **digging** and **overlap**
+    ranking; a **typed settings registry** (`settings::SETTINGS`) makes every weight
+    configurable at `/admin` with defaults, ranges and validation — nothing hardcoded.
+  - **Unified table UX** (see ADR-076): every list table gets **server-side sortable
+    headers** (whitelisted, asc/desc, filters preserved) and **tokenised, order-independent,
+    typo-tolerant** full-text search across all visible fields (`src/table.rs`).
+  - **Digging & discovery**: seed-driven suggestions from hub-internal co-occurrence plus
+    last.fm, ReccoBeats, cosine.club, FreqBlog (BPM/key, quota-guarded) and local audio
+    embeddings; BPM/key/harmonic filters; artist explorer with profile insights.
+  - **Ingest**: Spotify (likes + owned/collaborative playlists), SoundCloud (api-v2 sets +
+    likes), YouTube, Traktor `collection.nml`, and the MMM tag library import; all sources
+    write an **import history** ledger and per-track **archive** (keep/drop on removal).
+  - **Downloads**: music-api integration — per-track format, whole-playlist and per-tag
+    **ZIP download**, order-only-missing, prioritize, and a `/downloads` status table.
 
 ## [1.14.0] — 2026-10-02
 
