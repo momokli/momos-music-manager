@@ -158,6 +158,84 @@ content %}
         >{{ ready }}/{{ total }} bereit</span
     >
 </section>
+{% endif %} {% if !top_artists.is_empty() %}
+<section aria-label="Top-Künstler" style="margin-bottom: 0.6rem">
+    <h2 style="font-size: 1rem; margin-bottom: 0.2rem">Top-Künstler</h2>
+    <div class="overflow-auto hub-scroll-y">
+        <table class="hub-dense-table">
+            <caption class="hub-visually-hidden">
+                Top-Künstler dieses Tags
+            </caption>
+            <thead>
+                <tr>
+                    <th scope="col">#</th>
+                    <th scope="col">Künstler</th>
+                    <th scope="col" title="Tracks mit diesem Tag">Tracks</th>
+                    <th scope="col" title="Anteil am Tag">% Tag</th>
+                    <th scope="col" title="Anteil am Künstler">% Künstler</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for a in top_artists %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ a.name }}</td>
+                    <td>{{ a.count }}</td>
+                    <td>{{ a.tag_pct }}</td>
+                    <td>{{ a.artist_pct }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %} {% if !cooccur.is_empty() %}
+<section aria-label="Co-Occurrence" style="margin-bottom: 0.6rem">
+    <h2 style="font-size: 1rem; margin-bottom: 0.2rem">Kommt oft mit</h2>
+    <div class="overflow-auto hub-scroll-y">
+        <table class="hub-dense-table">
+            <caption class="hub-visually-hidden">
+                Tags, die mit diesem Tag zusammen vorkommen
+            </caption>
+            <thead>
+                <tr>
+                    <th scope="col">Tag</th>
+                    <th scope="col">Gruppe</th>
+                    <th scope="col" title="Lift = P(A,B)/(P(A)·P(B))">Lift</th>
+                    <th scope="col" title="Tracks mit beiden Tags">Paar</th>
+                    <th scope="col" title="Tracks mit dem anderen Tag">Support</th>
+                    <th scope="col">Sprung</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for c in cooccur %}
+                <tr>
+                    <td><a href="{{ c.tag_href }}">{{ c.name }}</a></td>
+                    <td>
+                        {% if !c.group.is_empty() %}{{ c.group }}{% if c.same_group %}
+                        <span class="hub-badge">same</span>{% endif %}{% else %}<span
+                            class="hub-muted"
+                            >—</span
+                        >{% endif %}
+                    </td>
+                    <td>{{ c.lift }}</td>
+                    <td>{{ c.both }}</td>
+                    <td>{{ c.support }}</td>
+                    <td>
+                        <a href="{{ c.overlap_href }}" title="Überlappung">overlap</a>
+                        ·
+                        <a
+                            href="{{ c.digging_href }}"
+                            title="Digging mit gemeinsamem Track"
+                            >dig</a
+                        >
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
 {% endif %} {% if tracks.is_empty() %}
 <p class="hub-muted">Keine Tracks (Quell-Playlist leer oder noch nicht gefetcht).</p>
 {% else %}

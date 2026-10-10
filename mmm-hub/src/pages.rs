@@ -3134,6 +3134,29 @@ struct TagTrack {
     artists: String,
 }
 
+/// One row of the "top artists" insight table (pre-formatted percentages).
+struct TopArtist {
+    name: String,
+    count: i64,
+    /// Share of the tag: tagged tracks of this artist / all tracks with the tag.
+    tag_pct: String,
+    /// Share of the artist: tagged tracks of this artist / all tracks by them.
+    artist_pct: String,
+}
+
+/// One row of the tag co-occurrence table (pre-formatted metric + links).
+struct CooccurRow {
+    name: String,
+    group: String,
+    same_group: bool,
+    lift: String,
+    both: i64,
+    support: i64,
+    tag_href: String,
+    overlap_href: String,
+    digging_href: String,
+}
+
 #[derive(Template)]
 #[template(path = "tag.html")]
 struct TagDetailPage {
@@ -3151,6 +3174,8 @@ struct TagDetailPage {
     genre_mode: bool,
     source_count: i64,
     tracks: Vec<TagTrack>,
+    top_artists: Vec<TopArtist>,
+    cooccur: Vec<CooccurRow>,
     music_api: bool,
     ready: usize,
     total: usize,
@@ -3219,6 +3244,44 @@ async fn tag_detail_page(
             icon: String::new(),
         })
         .collect();
+    let top_artists: Vec<TopArtist> = crate::tags::tag_top_artists(&st.pool, id)
+        .await
+        .into_iter()
+        .map(|(artist, tagged, with_tag, by_artist)| {
+            let tag_pct = if with_tag > 0 {
+                tagged as f64 * 100.0 / with_tag as f64
+            } else {
+                0.0
+            };
+            let artist_pct = if by_artist > 0 {
+                tagged as f64 * 100.0 / by_artist as f64
+            } else {
+                0.0
+            };
+            TopArtist {
+                name: artist,
+                count: tagged,
+                tag_pct: format!("{tag_pct:.1}%"),
+                artist_pct: format!("{artist_pct:.1}%"),
+            }
+        })
+        .collect();
+    let cooccur: Vec<CooccurRow> = crate::tags::tag_cooccurrence(&st.pool, id, 5)
+        .await
+        .into_iter()
+        .take(20)
+        .map(|c| CooccurRow {
+            tag_href: format!("/tag/{}", c.tag_id),
+            overlap_href: format!("/overlap?tag={}", urlencoding::encode(&c.name)),
+            digging_href: format!("/digging?seed={}", c.sample_track_id),
+            name: c.name,
+            group: c.group,
+            same_group: c.same_group,
+            lift: format!("{:.2}", c.lift),
+            both: c.both,
+            support: c.support,
+        })
+        .collect();
     render(&TagDetailPage {
         nav,
         flash: msg.msg.unwrap_or_default(),
@@ -3233,6 +3296,8 @@ async fn tag_detail_page(
         genre_mode: crate::tags::tag_is_genre(&st.pool, id).await,
         source_count: d.source_count,
         tracks,
+        top_artists,
+        cooccur,
         music_api: st.cfg.music_api_token.is_some(),
         ready,
         total,

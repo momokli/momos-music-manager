@@ -1512,6 +1512,211 @@ pub async fn tag_detail(pool: &SqlitePool, tag_id: i64) -> Option<TagDetail> {
     })
 }
 
+/// One other tag that co-occurs with a seed tag on the same tracks.
+#[derive(Debug, Clone)]
+pub struct TagCooccurrence {
+    pub tag_id: i64,
+    pub name: String,
+    /// A group of the other tag (a group shared with the seed tag if one exists).
+    pub group: String,
+    /// True when the other tag shares at least one group with the seed tag.
+    pub same_group: bool,
+    /// Lift = P(A,B) / (P(A)·P(B)).
+    pub lift: f64,
+    /// Tracks carrying both tags.
+    pub both: i64,
+    /// Tracks carrying the other tag (its total support).
+    pub support: i64,
+    /// One shared track id (digging seed link); `0` when none.
+    pub sample_track_id: i64,
+}
+
+/// Top artists for a tag, by number of tracks tagged with it.
+///
+/// Returns `(artist, tagged_tracks_by_artist, tracks_with_tag, tracks_by_artist)`,
+/// descending by the artist's tagged-track count (max 10 rows). Artist identity
+/// is the raw `hub_tracks.artists` string (blank values collapse to `—`).
+pub async fn tag_top_artists(pool: &SqlitePool, tag_id: i64) -> Vec<(String, i64, i64, i64)> {
+    sqlx::query_as::<_, (String, i64, i64, i64)>(
+        "WITH tagged AS (
+             SELECT r.track_id AS track_id,
+                    COALESCE(NULLIF(TRIM(t.artists), ''), '—') AS artist
+               FROM hub_track_resolved_tags r
+               JOIN hub_tracks t ON t.id = r.track_id
+              WHERE r.tag_id = ?1
+         ),
+         per_artist AS (
+             SELECT artist, COUNT(DISTINCT track_id) AS c
+               FROM tagged GROUP BY artist
+         ),
+         artist_total AS (
+             SELECT COALESCE(NULLIF(TRIM(artists), ''), '—') AS artist, COUNT(*) AS c
+               FROM hub_tracks GROUP BY 1
+         ),
+         total AS (SELECT COUNT(DISTINCT track_id) AS c FROM tagged)
+         SELECT pa.artist,
+                pa.c,
+                (SELECT c FROM total) AS tracks_with_tag,
+                COALESCE(at.c, pa.c) AS tracks_by_artist
+           FROM per_artist pa
+           LEFT JOIN artist_total at ON at.artist = pa.artist
+          ORDER BY pa.c DESC, pa.artist ASC
+          LIMIT 10",
+    )
+    .bind(tag_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
+/// Tags that co-occur with `tag_id` on the same tracks, within and across
+/// groups. Lift = P(A,B) / (P(A)·P(B)); restricted to other tags carrying at
+/// least `min_support` tracks. Ordered by lift (then co-track count); at most 40
+/// rows are returned (the caller trims further).
+pub async fn tag_cooccurrence(
+    pool: &SqlitePool,
+    tag_id: i64,
+    min_support: i64,
+) -> Vec<TagCooccurrence> {
+    let with_tag: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM hub_track_resolved_tags WHERE tag_id = ?1")
+            .bind(tag_id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+    if with_tag == 0 {
+        return Vec::new();
+    }
+
+    let pairs = sqlx::query_as::<_, (i64, String, i64, i64, f64)>(
+        "WITH a AS (
+             SELECT track_id FROM hub_track_resolved_tags WHERE tag_id = ?1
+         ),
+         total AS (SELECT COUNT(*) AS n FROM hub_tracks),
+         sizes AS (
+             SELECT tag_id, COUNT(*) AS c FROM hub_track_resolved_tags GROUP BY tag_id
+         ),
+         pairs AS (
+             SELECT r.tag_id AS other_id, COUNT(DISTINCT r.track_id) AS both
+               FROM hub_track_resolved_tags r
+               JOIN a ON a.track_id = r.track_id
+              WHERE r.tag_id <> ?1
+              GROUP BY r.tag_id
+         )
+         SELECT p.other_id,
+                t.name,
+                p.both,
+                s.c AS support,
+                CAST(p.both AS REAL) * (SELECT n FROM total)
+                  / ((SELECT COUNT(*) FROM a) * s.c) AS lift
+           FROM pairs p
+           JOIN hub_tags t ON t.id = p.other_id
+           JOIN sizes s ON s.tag_id = p.other_id
+          WHERE s.c >= ?2
+          ORDER BY lift DESC, p.both DESC, t.name ASC
+          LIMIT 40",
+    )
+    .bind(tag_id)
+    .bind(min_support)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+
+    let ids: Vec<i64> = pairs.iter().map(|p| p.0).collect();
+
+    // Groups of the seed tag.
+    let seed_groups: std::collections::HashSet<i64> =
+        sqlx::query_scalar("SELECT group_id FROM hub_group_tags WHERE tag_id = ?1")
+            .bind(tag_id)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+    // Groups of the candidate tags (batched).
+    let mut qb = QueryBuilder::new("SELECT tag_id, group_id FROM hub_group_tags WHERE tag_id IN (");
+    {
+        let mut sep = qb.separated(", ");
+        for id in &ids {
+            sep.push_bind(*id);
+        }
+    }
+    qb.push(")");
+    let mut cand_groups: std::collections::HashMap<i64, Vec<i64>> =
+        std::collections::HashMap::new();
+    for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+        let tid: i64 = r.get("tag_id");
+        let gid: i64 = r.get("group_id");
+        cand_groups.entry(tid).or_default().push(gid);
+    }
+
+    // Group names.
+    let mut gnames: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+    for r in sqlx::query("SELECT id, name FROM hub_tag_groups")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+    {
+        gnames.insert(r.get("id"), r.get("name"));
+    }
+
+    // One shared track per candidate (batched).
+    let mut qb = QueryBuilder::new(
+        "SELECT r.tag_id AS other, MIN(r.track_id) AS sample
+           FROM hub_track_resolved_tags r
+           JOIN hub_track_resolved_tags a
+             ON a.track_id = r.track_id AND a.tag_id = ",
+    );
+    qb.push_bind(tag_id);
+    qb.push(" WHERE r.tag_id IN (");
+    {
+        let mut sep = qb.separated(", ");
+        for id in &ids {
+            sep.push_bind(*id);
+        }
+    }
+    qb.push(") GROUP BY r.tag_id");
+    let mut samples: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+        samples.insert(r.get("other"), r.get("sample"));
+    }
+
+    let empty: Vec<i64> = Vec::new();
+    pairs
+        .into_iter()
+        .map(|(other_id, name, both, support, lift)| {
+            let cgroups = cand_groups.get(&other_id).unwrap_or(&empty);
+            let shared: Vec<i64> = cgroups
+                .iter()
+                .copied()
+                .filter(|g| seed_groups.contains(g))
+                .collect();
+            let (same_group, group) = if let Some(&g) = shared.iter().min() {
+                (true, gnames.get(&g).cloned().unwrap_or_default())
+            } else if let Some(&g) = cgroups.iter().min() {
+                (false, gnames.get(&g).cloned().unwrap_or_default())
+            } else {
+                (false, String::new())
+            };
+            TagCooccurrence {
+                tag_id: other_id,
+                name,
+                group,
+                same_group,
+                lift,
+                both,
+                support,
+                sample_track_id: samples.get(&other_id).copied().unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{is_meta_playlist, normalize_name};
