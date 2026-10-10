@@ -74,6 +74,8 @@ pub fn router(state: AppState) -> Router {
         .route("/tag/{id}/download", get(tag_download))
         .route("/tag/{id}/progress", get(tag_progress))
         .route("/track/{id}/download", get(track_download))
+        .route("/downloads", get(downloads_page))
+        .route("/downloads/refresh", post(downloads_refresh))
         .with_state(state)
 }
 
@@ -781,6 +783,146 @@ fn audio_content_type(format: &str) -> &'static str {
         "ogg" => "audio/ogg",
         _ => "audio/flac",
     }
+}
+
+// ── downloads (music-api queue + cached state overview) ─────────────────────
+
+#[derive(Template)]
+#[template(path = "downloads.html")]
+struct DownloadsPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    /// Whether the music-api service is configured (live queue available).
+    music_api: bool,
+    // Cached state summary (`hub_music_state`).
+    total: usize,
+    ready: usize,
+    ready_flac: usize,
+    ready_320: usize,
+    ready_128: usize,
+    ready_other: usize,
+    pending: usize,
+    downloading: usize,
+    absent: usize,
+    failed: usize,
+    // Live music-api queue.
+    queue_ok: bool,
+    queue_error: String,
+    queue_items: Vec<QueueItem>,
+}
+
+struct QueueItem {
+    isrc: String,
+    title: String,
+    artist: String,
+    priority: String,
+    state: String,
+}
+
+/// `GET /downloads` — cached music-api state overview + live queue.
+async fn downloads_page(
+    State(st): State<AppState>,
+    Query(msg): Query<AdminMsg>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "downloads").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let s = crate::music_api::cache_summary(&st.pool).await;
+    let music_api = st.cfg.music_api_token.is_some();
+
+    let mut queue_ok = false;
+    let mut queue_error = String::new();
+    let mut queue_items: Vec<QueueItem> = Vec::new();
+    if music_api {
+        match crate::music_api::queue(&st.cfg).await {
+            Ok(v) => {
+                queue_ok = true;
+                queue_items = parse_queue(&v);
+            }
+            Err(e) => queue_error = format!("music-api nicht erreichbar: {e}"),
+        }
+    }
+
+    render(&DownloadsPage {
+        nav,
+        flash: msg.msg.unwrap_or_default(),
+        music_api,
+        total: s.total,
+        ready: s.ready,
+        ready_flac: s.ready_flac,
+        ready_320: s.ready_320,
+        ready_128: s.ready_128,
+        ready_other: s.ready_other,
+        pending: s.pending,
+        downloading: s.downloading,
+        absent: s.absent,
+        failed: s.failed,
+        queue_ok,
+        queue_error,
+        queue_items,
+    })
+}
+
+/// `POST /downloads/refresh` — refresh the cached music-api state for every
+/// ISRC currently in the cache.
+async fn downloads_refresh(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if crate::ui::nav(&st, &headers, "downloads").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    if st.cfg.music_api_token.is_none() {
+        return flash_redirect("/downloads", "music-api nicht konfiguriert".to_string());
+    }
+    let isrcs: Vec<String> = sqlx::query_scalar("SELECT isrc FROM hub_music_state")
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    if isrcs.is_empty() {
+        return flash_redirect("/downloads", "Keine ISRCs im Cache".to_string());
+    }
+    let (ready, total, _) = crate::music_api::refresh_states(&st.pool, &st.cfg, &isrcs, 1000).await;
+    flash_redirect("/downloads", format!("{ready}/{total} bereit"))
+}
+
+/// Best-effort parse of the music-api `/queue` payload. Accepts either a bare
+/// array or an object with an `items`/`queue` array; unknown fields are ignored.
+fn parse_queue(v: &serde_json::Value) -> Vec<QueueItem> {
+    let arr = v
+        .as_array()
+        .or_else(|| v.get("items").and_then(|x| x.as_array()))
+        .or_else(|| v.get("queue").and_then(|x| x.as_array()));
+    let Some(arr) = arr else {
+        return Vec::new();
+    };
+    let str_at = |it: &serde_json::Value, keys: &[&str]| -> String {
+        for k in keys {
+            if let Some(s) = it.get(*k).and_then(|x| x.as_str()) {
+                if !s.is_empty() {
+                    return s.to_string();
+                }
+            }
+        }
+        String::new()
+    };
+    arr.iter()
+        .map(|it| {
+            let priority = it
+                .get("priority")
+                .map(|p| match p {
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => String::new(),
+                })
+                .unwrap_or_default();
+            QueueItem {
+                isrc: str_at(it, &["isrc"]),
+                title: str_at(it, &["title", "name"]),
+                artist: str_at(it, &["artist", "artists"]),
+                priority,
+                state: str_at(it, &["state", "status"]),
+            }
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]

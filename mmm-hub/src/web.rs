@@ -1116,25 +1116,21 @@ async fn track_page(
     .await
     .unwrap_or_default();
 
+    // music-api status from the cache — no per-track network call (AGENT.md §10).
     let mut avail_text = String::from("—");
-    let mut deezer_id = String::new();
     let mut fetchable = false;
+    let mut deezer_id = String::new();
     if !isrc.is_empty() {
-        match crate::music_api::status(&st.cfg, &isrc).await {
-            Ok(s) if s.known() => {
-                avail_text = s.state.clone().unwrap_or_default();
-                let f = s.formats_str();
-                if !f.is_empty() {
-                    avail_text.push_str(&format!(" (Formate: {f})"));
-                }
-                deezer_id = s.deezer_id.clone().unwrap_or_default();
-                fetchable = !s.ready();
+        match crate::music_api::cached_state(&st.pool, &isrc).await {
+            Some(c) => {
+                avail_text = c.label();
+                fetchable = !c.ready();
+                deezer_id = c.deezer_id.unwrap_or_default();
             }
-            Ok(_) => {
-                avail_text = "noch nicht im music-api-Ledger".to_string();
+            None => {
+                avail_text = "noch nicht im music-api-Cache".to_string();
                 fetchable = true;
             }
-            Err(_) => avail_text = "music-api nicht erreichbar".to_string(),
         }
     }
 

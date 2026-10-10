@@ -1,0 +1,92 @@
+{% extends "base.html" %} {% block title %}Downloads — MMM Hub{% endblock %} {% block content %}
+<nav class="hub-crumbs" aria-label="Brotkrumen">
+    <ol>
+        <li><a href="/">Übersicht</a></li>
+        <li>Downloads</li>
+    </ol>
+</nav>
+<hgroup>
+    <h1>Downloads</h1>
+    <p class="hub-muted">music-api-Status (Cache) und Live-Queue</p>
+</hgroup>
+
+{% if music_api %}
+<section class="hub-actions" aria-label="Aktionen">
+    <form method="post" action="/downloads/refresh">
+        <button type="submit" class="secondary outline">Status aktualisieren</button>
+    </form>
+</section>
+{% else %}
+<p class="hub-muted">
+    music-api ist nicht konfiguriert (kein Token) — es wird nur der Cache angezeigt.
+</p>
+{% endif %}
+
+<section aria-label="Cache-Übersicht">
+    <h2>Cache-Übersicht ({{ total }} ISRCs)</h2>
+    <div class="hub-grid">
+        <article class="hub-stat">
+            <h2>{{ ready }}</h2>
+            <p>ready</p>
+        </article>
+        <article class="hub-stat">
+            <h2>{{ pending }}</h2>
+            <p>pending</p>
+        </article>
+        <article class="hub-stat">
+            <h2>{{ downloading }}</h2>
+            <p>downloading</p>
+        </article>
+        <article class="hub-stat">
+            <h2>{{ absent }}</h2>
+            <p>absent</p>
+        </article>
+        <article class="hub-stat">
+            <h2>{{ failed }}</h2>
+            <p>failed</p>
+        </article>
+    </div>
+    <p class="hub-muted">
+        ready-Formate: flac {{ ready_flac }} · mp3-320 {{ ready_320 }} · mp3-128 {{ ready_128 }}
+        {% if ready_other > 0 %}· sonstige {{ ready_other }}{% endif %}
+    </p>
+</section>
+
+{% if music_api %}
+<section aria-label="Live-Queue">
+    <h2>Live-Queue</h2>
+    {% if !queue_ok %}
+    <p class="hub-muted">{{ queue_error }}</p>
+    {% else %} {% if queue_items.is_empty() %}
+    <p class="hub-muted">Queue ist leer.</p>
+    {% else %}
+    <div class="overflow-auto hub-scroll-y">
+        <table class="hub-dense-table">
+            <caption class="hub-visually-hidden">
+                music-api Queue
+            </caption>
+            <thead>
+                <tr>
+                    <th scope="col">ISRC</th>
+                    <th scope="col">Titel</th>
+                    <th scope="col">Artist</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Priority</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for q in queue_items %}
+                <tr>
+                    <td><code>{{ q.isrc }}</code></td>
+                    <td>{{ q.title }}</td>
+                    <td>{{ q.artist }}</td>
+                    <td>{{ q.state }}</td>
+                    <td>{{ q.priority }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %} {% endif %}
+</section>
+{% endif %} {% endblock %}
