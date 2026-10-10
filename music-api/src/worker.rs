@@ -71,6 +71,147 @@ pub async fn run(state: Arc<AppState>) {
 async fn tick(state: &Arc<AppState>) -> Result<()> {
     resolve_pending(state).await?;
     advance_downloads(state).await?;
+    resolve_url_pending(state).await?;
+    Ok(())
+}
+
+/// Phase C: resolve + download pending URL tracks (YouTube / SoundCloud).
+///
+/// yt-dlp is synchronous, so this phase downloads inline. It is bounded per
+/// tick so a large playlist order cannot starve the ISRC pipeline.
+async fn resolve_url_pending(state: &Arc<AppState>) -> Result<()> {
+    let pending = db::pending_url_tracks(&state.pool, 5).await?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let format = std::env::var("YTDLP_FORMAT").unwrap_or_else(|_| "flac".to_string());
+    let out_dir = state.config.data_dir.join("ytdlp-incoming");
+
+    for track in pending {
+        // Resolve metadata first (useful even if the download fails).
+        match crate::ytdlp::fetch_track(&track.url).await {
+            Ok(meta) => {
+                db::mark_url_resolved(
+                    &state.pool,
+                    &track.url,
+                    &meta.provider_id,
+                    meta.title.as_deref().unwrap_or(""),
+                    meta.artist.as_deref().unwrap_or(""),
+                    meta.duration_ms,
+                )
+                .await?;
+            }
+            Err(e) => {
+                warn!("{}: yt-dlp metadata failed: {e:#}", track.url);
+                db::mark_url_terminal(
+                    &state.pool,
+                    &track.url,
+                    state::FAILED,
+                    &format!("metadata: {e}"),
+                )
+                .await?;
+                continue;
+            }
+        }
+
+        db::mark_url_downloading(&state.pool, &track.url).await?;
+
+        match crate::ytdlp::download(&track.url, &out_dir, &format).await {
+            Ok(src) => {
+                if let Err(e) = finalize_url(state, &track, &src).await {
+                    warn!("{}: finalize failed: {e:#}", track.url);
+                    db::mark_url_terminal(
+                        &state.pool,
+                        &track.url,
+                        state::FAILED,
+                        &format!("{e:#}"),
+                    )
+                    .await?;
+                }
+            }
+            Err(e) => {
+                warn!("{}: yt-dlp download failed: {e:#}", track.url);
+                db::mark_url_terminal(
+                    &state.pool,
+                    &track.url,
+                    state::FAILED,
+                    &format!("download: {e}"),
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Move a downloaded URL track into the store and derive the lossy variants.
+async fn finalize_url(
+    state: &Arc<AppState>,
+    track: &crate::models::UrlTrack,
+    src: &Path,
+) -> Result<()> {
+    let cfg = &state.config;
+    let stem = track.provider_id.as_deref().unwrap_or("track");
+    let flac_dst = cfg.flac_dir().join(format!("{stem}.flac"));
+    let mp3_320 = cfg.mp3_320_dir().join(format!("{stem}.mp3"));
+    let mp3_128 = cfg.mp3_128_dir().join(format!("{stem}.mp3"));
+
+    let is_flac = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("flac"))
+        .unwrap_or(false);
+
+    if is_flac {
+        tokio::fs::create_dir_all(cfg.flac_dir()).await?;
+        tokio::fs::copy(src, &flac_dst).await?;
+        transcode::to_mp3(&cfg.ffmpeg, &flac_dst, &mp3_320, 320).await?;
+        transcode::to_mp3(&cfg.ffmpeg, &flac_dst, &mp3_128, 128).await?;
+        db::mark_url_ready(
+            &state.pool,
+            &track.url,
+            "flac",
+            Some(&flac_dst.display().to_string()),
+            Some(&mp3_320.display().to_string()),
+            Some(&mp3_128.display().to_string()),
+        )
+        .await?;
+        info!("{}: ready (flac + 320 + 128)", track.url);
+    } else {
+        let probed = transcode::probe_bitrate(&cfg.ffprobe, src).await;
+        let is_320 = probed.map(|b| b >= 256_000).unwrap_or(true);
+        if is_320 {
+            tokio::fs::create_dir_all(cfg.mp3_320_dir()).await?;
+            tokio::fs::copy(src, &mp3_320).await?;
+            transcode::to_mp3(&cfg.ffmpeg, &mp3_320, &mp3_128, 128).await?;
+            db::mark_url_ready(
+                &state.pool,
+                &track.url,
+                "mp3-320",
+                None,
+                Some(&mp3_320.display().to_string()),
+                Some(&mp3_128.display().to_string()),
+            )
+            .await?;
+            info!("{}: ready (mp3 320 + 128)", track.url);
+        } else {
+            tokio::fs::create_dir_all(cfg.mp3_128_dir()).await?;
+            tokio::fs::copy(src, &mp3_128).await?;
+            db::mark_url_ready(
+                &state.pool,
+                &track.url,
+                "mp3-128",
+                None,
+                None,
+                Some(&mp3_128.display().to_string()),
+            )
+            .await?;
+            info!("{}: ready (mp3 128)", track.url);
+        }
+    }
+
+    let _ = tokio::fs::remove_file(src).await;
     Ok(())
 }
 
@@ -93,7 +234,13 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     } else if state.deemix_login.blocked(now) {
         false
     } else {
-        match deemix::login(&state.http, &state.config.deemix_url, &state.config.deemix_arl).await {
+        match deemix::login(
+            &state.http,
+            &state.config.deemix_url,
+            &state.config.deemix_arl,
+        )
+        .await
+        {
             Ok(()) => {
                 state.deemix_login.note_success();
                 true
@@ -119,8 +266,15 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
                 artist,
                 album,
             }) => {
-                db::mark_resolved(&state.pool, &track.isrc, &deezer_id, &title, &artist, &album)
-                    .await?;
+                db::mark_resolved(
+                    &state.pool,
+                    &track.isrc,
+                    &deezer_id,
+                    &title,
+                    &artist,
+                    &album,
+                )
+                .await?;
 
                 if !deemix_ready {
                     continue;
@@ -227,9 +381,7 @@ async fn advance_downloads(state: &Arc<AppState>) -> Result<()> {
             None => {
                 // Not in the queue: it may have finished and been evicted, so
                 // try to collect it before declaring a timeout.
-                if !finalize(state, &track).await?
-                    && db::now() - track.updated_at > timeout
-                {
+                if !finalize(state, &track).await? && db::now() - track.updated_at > timeout {
                     db::mark_terminal(
                         &state.pool,
                         &track.isrc,
