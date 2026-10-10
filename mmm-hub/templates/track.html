@@ -258,5 +258,17 @@ content %}
         </table>
         {% endif %}
     </section>
+
+    <section>
+        <h2>music-api</h2>
+        <div
+            id="track-music-api"
+            hx-get="/track/{{ id }}/music-api"
+            hx-trigger="load"
+            hx-swap="innerHTML"
+        >
+            <p class="hub-muted">lädt …</p>
+        </div>
+    </section>
 </div>
 {% endblock %}

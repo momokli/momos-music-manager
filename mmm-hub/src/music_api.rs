@@ -545,6 +545,139 @@ pub async fn logs(cfg: &Config, limit: usize) -> Vec<LogLine> {
         .unwrap_or_default()
 }
 
+// ── control endpoints ────────────────────────────────────────────────────────
+
+/// `GET /worker` — is the worker paused?
+pub async fn worker_paused(cfg: &Config) -> bool {
+    let url = format!("{}/worker", cfg.music_api_base);
+    match reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(token(cfg).unwrap_or_default())
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v["paused"].as_bool())
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// `POST /worker/pause|resume`.
+pub async fn set_worker_paused(cfg: &Config, paused: bool) -> Result<()> {
+    let verb = if paused { "pause" } else { "resume" };
+    let url = format!("{}/worker/{verb}", cfg.music_api_base);
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(token(cfg)?)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("music-api {url} -> {}", resp.status());
+    }
+    Ok(())
+}
+
+/// `POST /isrc/{isrc}/retry`.
+pub async fn retry_isrc(cfg: &Config, isrc: &str) -> Result<()> {
+    let url = format!(
+        "{}/isrc/{}/retry",
+        cfg.music_api_base,
+        urlencoding::encode(isrc)
+    );
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(token(cfg)?)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("music-api {url} -> {}", resp.status());
+    }
+    Ok(())
+}
+
+/// `POST /orders/{id}/cancel`.
+pub async fn cancel_order(cfg: &Config, id: &str) -> Result<()> {
+    let url = format!(
+        "{}/orders/{}/cancel",
+        cfg.music_api_base,
+        urlencoding::encode(id)
+    );
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(token(cfg)?)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("music-api {url} -> {}", resp.status());
+    }
+    Ok(())
+}
+
+/// `POST /orders/{id}/priority`.
+pub async fn set_order_priority(cfg: &Config, id: &str, priority: i64) -> Result<()> {
+    let url = format!(
+        "{}/orders/{}/priority",
+        cfg.music_api_base,
+        urlencoding::encode(id)
+    );
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(token(cfg)?)
+        .json(&serde_json::json!({ "priority": priority }))
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("music-api {url} -> {}", resp.status());
+    }
+    Ok(())
+}
+
+/// One order as returned by `GET /orders`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrderRow {
+    #[serde(rename = "id", alias = "orderId")]
+    pub id: String,
+    pub status: String,
+    #[serde(default)]
+    pub priority: i64,
+    #[serde(default)]
+    pub created_at: i64,
+}
+
+#[derive(Deserialize, Default)]
+struct OrdersResp {
+    #[serde(default)]
+    orders: Vec<OrderRow>,
+}
+
+/// `GET /orders?limit=n` — recent orders (empty on failure).
+pub async fn orders(cfg: &Config, limit: usize) -> Vec<OrderRow> {
+    let url = format!("{}/orders", cfg.music_api_base);
+    let resp = match reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(token(cfg).unwrap_or_default())
+        .query(&[("limit", limit.to_string())])
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Vec::new(),
+    };
+    resp.json::<OrdersResp>()
+        .await
+        .map(|b| b.orders)
+        .unwrap_or_default()
+}
+
 /// ISRCs whose cached state is not `ready` (missing from cache = not ready).
 pub async fn missing_isrcs(pool: &SqlitePool, isrcs: &[String]) -> Vec<String> {
     let mut ready: std::collections::HashSet<String> = std::collections::HashSet::new();

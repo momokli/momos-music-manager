@@ -1,0 +1,64 @@
+{% if !configured %}
+<p class="hub-muted">music-api ist nicht konfiguriert (Token unter <a href="/admin">Admin</a>).</p>
+{% else if isrc == "" %}
+<p class="hub-muted">Kein ISRC — nichts abzugleichen.</p>
+{% else %}
+<div class="hub-filter">
+    <button hx-post="/track/{{ track_id }}/music-api/order" hx-swap="none" hx-disabled-elt="this">
+        Ordern
+    </button>
+    <button
+        hx-post="/track/{{ track_id }}/music-api/retry"
+        hx-swap="none"
+        hx-disabled-elt="this"
+        class="secondary"
+    >
+        Retry
+    </button>
+</div>
+<table class="hub-dense-table">
+    <caption class="hub-visually-hidden">
+        music-api Metadaten für diesen Track
+    </caption>
+    <tbody>
+        <tr>
+            <th scope="row">ISRC</th>
+            <td><code>{{ isrc }}</code></td>
+        </tr>
+        <tr>
+            <th scope="row">Status</th>
+            <td>{% if found %}{{ state }}{% else %}<span class="hub-muted">nicht im Ledger</span>{% endif %}</td>
+        </tr>
+        <tr>
+            <th scope="row">Deezer-ID</th>
+            <td>{% if deezer_id != "" %}{{ deezer_id }}{% else %}—{% endif %}</td>
+        </tr>
+        <tr>
+            <th scope="row">Album</th>
+            <td>{% if album != "" %}{{ album }}{% else %}—{% endif %}</td>
+        </tr>
+        <tr>
+            <th scope="row">Artist</th>
+            <td>{% if artist != "" %}{{ artist }}{% else %}—{% endif %}</td>
+        </tr>
+        <tr>
+            <th scope="row">Titel</th>
+            <td>{% if title != "" %}{{ title }}{% else %}—{% endif %}</td>
+        </tr>
+        <tr>
+            <th scope="row">Formate</th>
+            <td>{% if formats != "" %}{{ formats }}{% else %}—{% endif %}</td>
+        </tr>
+        <tr>
+            <th scope="row">Objekte</th>
+            <td>{% if objects != "" %}{{ objects }}{% else %}—{% endif %}</td>
+        </tr>
+        {% if error != "" %}
+        <tr>
+            <th scope="row">Fehler</th>
+            <td>{{ error }}</td>
+        </tr>
+        {% endif %}
+    </tbody>
+</table>
+{% endif %}
