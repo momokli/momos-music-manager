@@ -166,3 +166,42 @@ async fn recommendations_use_relationship_signals() {
         "recommendation must carry a reason"
     );
 }
+
+#[tokio::test]
+async fn recommendations_exclude_setlist_and_rumpelkiste() {
+    use mmm_hub::tags;
+    let app = common::spawn().await;
+    let me = app.seed.alice;
+
+    sqlx::query(
+        "INSERT INTO hub_tracks (id, service, service_track_id, title, artists, album) VALUES
+            (81001, 'local', 's1', 'One', 'SetArti', 'SetAlbum'),
+            (81002, 'local', 's2', 'Two', 'SetArti', 'SetAlbum')",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let setlist = tags::create_group(&app.pool, me, "Setlist", "").await.unwrap();
+    tags::set_group_kind_role(&app.pool, me, setlist, "sort", "setlist")
+        .await
+        .unwrap();
+    let mood = tags::create_group(&app.pool, me, "Mood", "").await.unwrap();
+
+    let s_tag = tags::ensure_tag(&app.pool, me, "setlist25").await.unwrap();
+    let h_tag = tags::ensure_tag(&app.pool, me, "House").await.unwrap();
+    tags::add_tag_to_group(&app.pool, me, s_tag, setlist).await.unwrap();
+    tags::add_tag_to_group(&app.pool, me, h_tag, mood).await.unwrap();
+
+    // Related track (same artist) carries both tags.
+    tags::tag_track(&app.pool, me, 81002, s_tag).await.unwrap();
+    tags::tag_track(&app.pool, me, 81002, h_tag).await.unwrap();
+
+    let recs = mmm_hub::recommend::recommend_tags(&app.pool, 81001, 20).await;
+    let names: Vec<&str> = recs.iter().map(|r| r.name.as_str()).collect();
+    assert!(names.contains(&"House"), "Mood tag should be recommended: {names:?}");
+    assert!(
+        !names.contains(&"setlist25"),
+        "setlist tag must NOT be recommended: {names:?}"
+    );
+}

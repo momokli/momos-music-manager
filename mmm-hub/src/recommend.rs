@@ -111,6 +111,10 @@ pub async fn recommend_tags(pool: &SqlitePool, track_id: i64, limit: usize) -> V
            JOIN hub_tags t ON t.id = x.tag_id
            JOIN hub_users u ON u.id = t.owner_user_id
           WHERE x.tag_id NOT IN (SELECT tag_id FROM seed_tags)
+            AND x.tag_id NOT IN (
+                 SELECT gt.tag_id FROM hub_group_tags gt
+                   JOIN hub_tag_groups g ON g.id = gt.group_id
+                  WHERE g.role IN ('setlist', 'rumpelkiste'))
           GROUP BY x.tag_id, t.name, u.slug, x.kind",
     )
     .bind(track_id)
