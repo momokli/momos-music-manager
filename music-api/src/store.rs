@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use axum::Json;
 use axum::body::Body;
-use axum::extract::{Path as UrlPath, Query, State};
+use axum::extract::{Multipart, Path as UrlPath, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
@@ -40,10 +40,7 @@ impl Store {
 
     /// `<root>/<aa>/<bb>/<hash>` — two levels of fan-out keep directories small.
     pub fn path_for(&self, hash: &str) -> PathBuf {
-        self.root
-            .join(&hash[0..2])
-            .join(&hash[2..4])
-            .join(hash)
+        self.root.join(&hash[0..2]).join(&hash[2..4]).join(hash)
     }
 
     pub fn tmp_dir(&self) -> PathBuf {
@@ -75,8 +72,24 @@ pub struct ObjectMeta {
     pub original_path: Option<String>,
     pub isrc: Option<String>,
     pub name: Option<String>,
+    pub group_key: Option<String>,
+    pub stem_type: Option<String>,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub genre: Option<String>,
+    pub comment: Option<String>,
+    pub bpm: Option<f64>,
+    pub musical_key: Option<String>,
+    pub duration_ms: Option<i64>,
     pub created_at: i64,
 }
+
+/// The columns of `store_objects`, in `ObjectMeta` order — shared by the listing
+/// and the single-object meta endpoint so they never drift.
+const OBJECT_COLUMNS: &str = "hash, size, content_type, original_path, isrc, name, \
+     group_key, stem_type, title, artist, album, genre, comment, bpm, musical_key, \
+     duration_ms, created_at";
 
 pub async fn init(pool: &Pool<Sqlite>, store: &Store) -> anyhow::Result<()> {
     sqlx::query(
@@ -90,6 +103,14 @@ pub async fn init(pool: &Pool<Sqlite>, store: &Store) -> anyhow::Result<()> {
             name          TEXT,
             group_key     TEXT,
             stem_type     TEXT,
+            title         TEXT,
+            artist        TEXT,
+            album         TEXT,
+            genre         TEXT,
+            comment       TEXT,
+            bpm           REAL,
+            musical_key   TEXT,
+            duration_ms   INTEGER,
             created_at    INTEGER NOT NULL
         );
         "#,
@@ -97,8 +118,19 @@ pub async fn init(pool: &Pool<Sqlite>, store: &Store) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    // Additive columns for stores created before stem grouping existed.
-    for col in ["group_key TEXT", "stem_type TEXT"] {
+    // Additive columns for stores created before stem grouping / tags existed.
+    for col in [
+        "group_key TEXT",
+        "stem_type TEXT",
+        "title TEXT",
+        "artist TEXT",
+        "album TEXT",
+        "genre TEXT",
+        "comment TEXT",
+        "bpm REAL",
+        "musical_key TEXT",
+        "duration_ms INTEGER",
+    ] {
         let _ = sqlx::query(&format!("ALTER TABLE store_objects ADD COLUMN {col}"))
             .execute(pool)
             .await;
@@ -119,6 +151,15 @@ pub struct ImportMeta {
     pub group_key: Option<String>,
     /// Stem part (`vocals`/`bass`/`drums`/`instrumental`/`other`) when applicable.
     pub stem_type: Option<String>,
+    // ── tags read *before* canonicalisation clears the Comment ──
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub genre: Option<String>,
+    pub comment: Option<String>,
+    pub bpm: Option<f64>,
+    pub musical_key: Option<String>,
+    pub duration_ms: Option<i64>,
 }
 
 /// Place the already-canonicalised file at `src` into the store under `hash` and
@@ -173,11 +214,20 @@ pub async fn import_file(
 
     sqlx::query(
         "INSERT INTO store_objects
-           (hash, size, content_type, original_path, isrc, name, group_key, stem_type, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (hash, size, content_type, original_path, isrc, name, group_key, stem_type,
+            title, artist, album, genre, comment, bpm, musical_key, duration_ms, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(hash) DO UPDATE SET
-           group_key = COALESCE(store_objects.group_key, excluded.group_key),
-           stem_type = COALESCE(store_objects.stem_type, excluded.stem_type)",
+           group_key   = COALESCE(store_objects.group_key, excluded.group_key),
+           stem_type   = COALESCE(store_objects.stem_type, excluded.stem_type),
+           title       = COALESCE(store_objects.title, excluded.title),
+           artist      = COALESCE(store_objects.artist, excluded.artist),
+           album       = COALESCE(store_objects.album, excluded.album),
+           genre       = COALESCE(store_objects.genre, excluded.genre),
+           comment     = COALESCE(store_objects.comment, excluded.comment),
+           bpm         = COALESCE(store_objects.bpm, excluded.bpm),
+           musical_key = COALESCE(store_objects.musical_key, excluded.musical_key),
+           duration_ms = COALESCE(store_objects.duration_ms, excluded.duration_ms)",
     )
     .bind(hash)
     .bind(size as i64)
@@ -187,6 +237,14 @@ pub async fn import_file(
     .bind(&meta.name)
     .bind(&meta.group_key)
     .bind(&meta.stem_type)
+    .bind(&meta.title)
+    .bind(&meta.artist)
+    .bind(&meta.album)
+    .bind(&meta.genre)
+    .bind(&meta.comment)
+    .bind(&meta.bpm)
+    .bind(&meta.musical_key)
+    .bind(&meta.duration_ms)
     .bind(crate::db::now())
     .execute(pool)
     .await?;
@@ -319,11 +377,126 @@ pub async fn put(
         .into_response()
 }
 
+/// `POST /objects` — multipart upload (Part B).
+///
+/// The client just sends the file; the server canonicalises + hashes it (a
+/// browser cannot), so the same audio with a different Comment dedupes. Optional
+/// fields override the tags read from the file: `isrc`, `name`, `groupKey`,
+/// `stemType`, `originalPath`.
+pub async fn upload(State(state): State<Arc<AppState>>, mut multipart: Multipart) -> Response {
+    let mut file_tmp: Option<PathBuf> = None;
+    let mut filename: Option<String> = None;
+    let mut isrc: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut group_key: Option<String> = None;
+    let mut stem_type: Option<String> = None;
+    let mut original_path: Option<String> = None;
+
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        let field_name = field.name().unwrap_or("").to_string();
+        match field_name.as_str() {
+            "file" => {
+                let fname = field.file_name().map(|s| s.to_string());
+                let ext = fname
+                    .as_deref()
+                    .and_then(|f| Path::new(f).extension())
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if !crate::ingest::AUDIO_EXTS.contains(&ext.as_str()) {
+                    return bad_request(&format!("unsupported audio extension '{ext}'"));
+                }
+                if let Err(e) = tokio::fs::create_dir_all(state.store.tmp_dir()).await {
+                    return internal(format!("creating tmp dir: {e}"));
+                }
+                let tmp = state
+                    .store
+                    .tmp_dir()
+                    .join(format!("{}-upload.{ext}", uuid::Uuid::new_v4()));
+                let mut f = match tokio::fs::File::create(&tmp).await {
+                    Ok(f) => f,
+                    Err(e) => return internal(format!("creating temp file: {e}")),
+                };
+                let mut written: u64 = 0;
+                loop {
+                    match field.chunk().await {
+                        Ok(Some(chunk)) => {
+                            written += chunk.len() as u64;
+                            if written > state.store.max_bytes {
+                                let _ = tokio::fs::remove_file(&tmp).await;
+                                return (
+                                    StatusCode::PAYLOAD_TOO_LARGE,
+                                    Json(serde_json::json!({ "error": "upload exceeds the size limit" })),
+                                )
+                                    .into_response();
+                            }
+                            if let Err(e) = f.write_all(&chunk).await {
+                                let _ = tokio::fs::remove_file(&tmp).await;
+                                return internal(format!("writing temp file: {e}"));
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            let _ = tokio::fs::remove_file(&tmp).await;
+                            return bad_request(&format!("read error: {e}"));
+                        }
+                    }
+                }
+                drop(f);
+                filename = fname;
+                file_tmp = Some(tmp);
+            }
+            "isrc" => isrc = field.text().await.ok(),
+            "name" => name = field.text().await.ok(),
+            "groupKey" | "group_key" => group_key = field.text().await.ok(),
+            "stemType" | "stem_type" => stem_type = field.text().await.ok(),
+            "originalPath" | "original_path" => original_path = field.text().await.ok(),
+            _ => {}
+        }
+    }
+
+    let Some(tmp) = file_tmp else {
+        return bad_request("no 'file' field in the multipart body");
+    };
+
+    let rel = PathBuf::from(
+        name.clone()
+            .or_else(|| filename.clone())
+            .unwrap_or_else(|| "upload".to_string()),
+    );
+    let overrides = ImportMeta {
+        isrc,
+        name: name.or(filename),
+        group_key,
+        stem_type,
+        original_path,
+        ..Default::default()
+    };
+    let outcome =
+        match crate::ingest::ingest_file(&state.pool, &state.store, &tmp, &rel, &overrides).await {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return internal(format!("ingest: {e:#}"));
+            }
+        };
+    let _ = tokio::fs::remove_file(&tmp).await;
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "hash": outcome.hash,
+            "size": outcome.size,
+            "stored": outcome.stored,
+            "groupKey": outcome.group_key,
+            "stemType": outcome.stem_type,
+        })),
+    )
+        .into_response()
+}
+
 /// `HEAD /objects/{sha256}` — is it backed up?
-pub async fn head(
-    State(state): State<Arc<AppState>>,
-    UrlPath(hash): UrlPath<String>,
-) -> Response {
+pub async fn head(State(state): State<Arc<AppState>>, UrlPath(hash): UrlPath<String>) -> Response {
     if !valid_hash(&hash) {
         return StatusCode::BAD_REQUEST.into_response();
     }
@@ -363,10 +536,7 @@ pub async fn get(
         if start >= total || start > end {
             return (
                 StatusCode::RANGE_NOT_SATISFIABLE,
-                [(
-                    header::CONTENT_RANGE,
-                    format!("bytes */{total}"),
-                )],
+                [(header::CONTENT_RANGE, format!("bytes */{total}"))],
             )
                 .into_response();
         }
@@ -376,8 +546,10 @@ pub async fn get(
         let len = end - start + 1;
         let stream = ReaderStream::new(file.take(len));
         let mut resp = Body::from_stream(stream).into_response();
-        resp.headers_mut()
-            .insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/octet-stream"));
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/octet-stream"),
+        );
         resp.headers_mut().insert(
             header::CONTENT_RANGE,
             header::HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")).unwrap(),
@@ -392,8 +564,10 @@ pub async fn get(
 
     let stream = ReaderStream::new(file);
     let mut resp = Body::from_stream(stream).into_response();
-    resp.headers_mut()
-        .insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/octet-stream"));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/octet-stream"),
+    );
     resp.headers_mut().insert(
         header::CONTENT_LENGTH,
         header::HeaderValue::from_str(&total.to_string()).unwrap(),
@@ -423,10 +597,7 @@ pub struct CheckRequest {
 }
 
 /// `POST /objects/check` — which of these keys are present?
-pub async fn check(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<CheckRequest>,
-) -> Response {
+pub async fn check(State(state): State<Arc<AppState>>, Json(req): Json<CheckRequest>) -> Response {
     let mut present = Vec::new();
     let mut missing = Vec::new();
     for hash in req.hashes {
@@ -434,7 +605,10 @@ pub async fn check(
             missing.push(hash);
             continue;
         }
-        if tokio::fs::metadata(state.store.path_for(&hash)).await.is_ok() {
+        if tokio::fs::metadata(state.store.path_for(&hash))
+            .await
+            .is_ok()
+        {
             present.push(hash);
         } else {
             missing.push(hash);
@@ -457,10 +631,9 @@ pub async fn list(State(state): State<Arc<AppState>>, Query(q): Query<ListQuery>
         .fetch_one(&state.pool)
         .await
         .unwrap_or(0);
-    let objects: Vec<ObjectMeta> = sqlx::query_as(
-        "SELECT hash, size, content_type, original_path, isrc, name, created_at
-           FROM store_objects ORDER BY created_at DESC LIMIT ? OFFSET ?",
-    )
+    let objects: Vec<ObjectMeta> = sqlx::query_as(&format!(
+        "SELECT {OBJECT_COLUMNS} FROM store_objects ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    ))
     .bind(limit)
     .bind(offset)
     .fetch_all(&state.pool)
@@ -468,6 +641,28 @@ pub async fn list(State(state): State<Arc<AppState>>, Query(q): Query<ListQuery>
     .unwrap_or_default();
 
     Json(serde_json::json!({ "objects": objects, "total": total })).into_response()
+}
+
+/// `GET /objects/{hash}/meta` — the stored metadata row (tags, stem grouping).
+pub async fn meta(State(state): State<Arc<AppState>>, UrlPath(hash): UrlPath<String>) -> Response {
+    if !valid_hash(&hash) {
+        return bad_request("key must be a 64-char lowercase hex sha256");
+    }
+    match sqlx::query_as::<_, ObjectMeta>(&format!(
+        "SELECT {OBJECT_COLUMNS} FROM store_objects WHERE hash = ?"
+    ))
+    .bind(&hash)
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(Some(m)) => Json(m).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "unknown object" })),
+        )
+            .into_response(),
+        Err(e) => internal(format!("reading object meta: {e}")),
+    }
 }
 
 fn internal(msg: impl std::fmt::Display) -> Response {

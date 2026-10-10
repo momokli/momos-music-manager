@@ -42,6 +42,8 @@ async fn harness() -> Harness {
         ffprobe: "ffprobe".to_string(),
         worker_interval: Duration::from_secs(5),
         download_timeout: Duration::from_secs(60),
+        ssh_sources: Vec::new(),
+        ssh_ingest_interval: Duration::from_secs(0),
     };
 
     for dir in [
@@ -57,16 +59,19 @@ async fn harness() -> Harness {
     let pool = connect_db(&config).await.unwrap();
     db::init(&pool).await.unwrap();
 
+    let store = music_api::store::Store::new(
+        root.join("objects"),
+        music_api::store::DEFAULT_MAX_UPLOAD_BYTES,
+    );
+    music_api::store::init(&pool, &store).await.unwrap();
+
     let state = Arc::new(AppState {
         pool,
         config,
         http: reqwest::Client::new(),
         notify: Arc::new(tokio::sync::Notify::new()),
         deemix_login: Default::default(),
-        store: music_api::store::Store::new(
-            root.join("objects"),
-            music_api::store::DEFAULT_MAX_UPLOAD_BYTES,
-        ),
+        store,
     });
 
     Harness {
@@ -79,7 +84,13 @@ async fn harness() -> Harness {
 async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Vec<u8>) {
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     (status, bytes)
 }
 
@@ -123,7 +134,10 @@ async fn health_is_public() {
     let h = harness().await;
     let (status, _) = send(
         &h.app,
-        Request::builder().uri("/health").body(Body::empty()).unwrap(),
+        Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -252,7 +266,11 @@ async fn serves_ready_files_and_flips_order_to_done() {
     create_order(&h.app, &["AEA0D1846146"]).await;
 
     // Seed a finished track (the worker would normally do this).
-    let mp3_320 = write_file(&h.state.config.mp3_320_dir(), "AEA0D1846146.mp3", b"ID3fake");
+    let mp3_320 = write_file(
+        &h.state.config.mp3_320_dir(),
+        "AEA0D1846146.mp3",
+        b"ID3fake",
+    );
     db::mark_ready(
         &h.state.pool,
         "AEA0D1846146",
@@ -390,7 +408,13 @@ async fn object_store_round_trips_and_verifies() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
-    let part = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let part = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     assert_eq!(part, b"hello");
 
     // Re-upload is a no-op.
@@ -411,9 +435,7 @@ async fn object_store_round_trips_and_verifies() {
         &h.app,
         authed("POST", "/objects/check")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(
-                serde_json::json!({"hashes": [hash, missing]}),
-            ))
+            .body(json_body(serde_json::json!({"hashes": [hash, missing]})))
             .unwrap(),
     )
     .await;
@@ -447,4 +469,284 @@ async fn object_store_rejects_a_wrong_digest() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn object_meta_returns_tags() {
+    let h = harness().await;
+    let src = write_file(h._tmp.path(), "song.flac", b"fake-flac-bytes");
+    let hash = sha256_hex(b"fake-flac-bytes");
+    let meta = music_api::store::ImportMeta {
+        content_type: Some("audio/flac".into()),
+        original_path: Some("song.flac".into()),
+        isrc: Some("DEQ022280682".into()),
+        name: Some("song.flac".into()),
+        group_key: Some("Artist - Title".into()),
+        stem_type: None,
+        title: Some("Altbau".into()),
+        artist: Some("01099".into()),
+        album: Some("liked".into()),
+        genre: Some("Rap".into()),
+        comment: Some("[___] liked".into()),
+        bpm: None,
+        musical_key: Some("11m".into()),
+        duration_ms: Some(139_640),
+    };
+    music_api::store::import_file(&h.state.pool, &h.state.store, &hash, &src, &meta)
+        .await
+        .unwrap();
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", &format!("/objects/{hash}/meta"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["isrc"], "DEQ022280682");
+    assert_eq!(v["musicalKey"], "11m");
+    assert_eq!(v["title"], "Altbau");
+    assert_eq!(v["groupKey"], "Artist - Title");
+
+    // Unknown object → 404.
+    let (status, _) = send(
+        &h.app,
+        authed("GET", &format!("/objects/{}/meta", sha256_hex(b"nope")))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn metadata_upsert_and_get() {
+    let h = harness().await;
+
+    // Unknown ISRC → 404.
+    let (status, _) = send(
+        &h.app,
+        authed("GET", "/metadata/DEQ022280682")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, body) = send(
+        &h.app,
+        authed("POST", "/metadata")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [{
+                    "isrc": "deq022280682",
+                    "bpm": 128.0,
+                    "key": "11m",
+                    "title": "Altbau",
+                    "source": "traktor"
+                }]
+            })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["upserted"], 1);
+
+    // Normalised lookup (case-insensitive ISRC).
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/metadata/DEQ022280682")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["isrc"], "DEQ022280682");
+    assert_eq!(v["bpm"], 128.0);
+    assert_eq!(v["musicalKey"], "11m");
+    assert_eq!(v["source"], "traktor");
+}
+
+#[tokio::test]
+async fn metadata_merge_keeps_non_null() {
+    let h = harness().await;
+
+    // First push: bpm only.
+    let _ = send(
+        &h.app,
+        authed("POST", "/metadata")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [{ "isrc": "USQX91201487", "bpm": 124.0, "source": "mmm" }]
+            })))
+            .unwrap(),
+    )
+    .await;
+
+    // Second push: key only (bpm null) — must not wipe the bpm.
+    let _ = send(
+        &h.app,
+        authed("POST", "/metadata")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [{ "isrc": "USQX91201487", "key": "8A", "source": "traktor" }]
+            })))
+            .unwrap(),
+    )
+    .await;
+
+    let (_, body) = send(
+        &h.app,
+        authed("GET", "/metadata/USQX91201487")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["bpm"], 124.0, "bpm must survive a null-field push");
+    assert_eq!(v["musicalKey"], "8A");
+}
+
+#[tokio::test]
+async fn ingest_ssh_requires_a_source() {
+    let h = harness().await;
+
+    // No SSH_SOURCES configured → 400.
+    let (status, _) = send(
+        &h.app,
+        authed("POST", "/ingest/ssh")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({ "all": true })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Runs listing is empty.
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/ingest/runs").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["runs"].as_array().unwrap().len(), 0);
+}
+
+/// A minimal (silent) WAV — WAV is ingested raw, so no real audio is needed.
+fn fake_wav() -> Vec<u8> {
+    let mut v = Vec::new();
+    v.extend_from_slice(b"RIFF");
+    v.extend_from_slice(&36u32.to_le_bytes());
+    v.extend_from_slice(b"WAVEfmt ");
+    v.extend_from_slice(&16u32.to_le_bytes());
+    v.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    v.extend_from_slice(&1u16.to_le_bytes()); // mono
+    v.extend_from_slice(&44100u32.to_le_bytes());
+    v.extend_from_slice(&88200u32.to_le_bytes());
+    v.extend_from_slice(&2u16.to_le_bytes());
+    v.extend_from_slice(&16u16.to_le_bytes());
+    v.extend_from_slice(b"data");
+    v.extend_from_slice(&0u32.to_le_bytes());
+    v
+}
+
+fn multipart_body(boundary: &str, filename: &str, bytes: &[u8]) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    b.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
+    );
+    b.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+    b.extend_from_slice(bytes);
+    b.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    b
+}
+
+#[tokio::test]
+async fn upload_stores_and_hashes() {
+    let h = harness().await;
+    let wav = fake_wav();
+    let hash = sha256_hex(&wav);
+    let boundary = "X-BOUNDARY";
+
+    let (status, body) = send(
+        &h.app,
+        authed("POST", "/objects")
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(multipart_body(boundary, "song.wav", &wav)))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "upload failed: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["hash"], hash);
+    assert_eq!(v["stored"], true);
+
+    // The object is now retrievable byte-for-byte.
+    let (status, got) = send(
+        &h.app,
+        authed("GET", &format!("/objects/{hash}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, wav);
+}
+
+#[tokio::test]
+async fn upload_dedup_is_noop() {
+    let h = harness().await;
+    let wav = fake_wav();
+    let boundary = "X-BOUNDARY";
+    let body = multipart_body(boundary, "song.wav", &wav);
+
+    for expected_stored in [true, false] {
+        let (status, resp) = send(
+            &h.app,
+            authed("POST", "/objects")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(v["stored"], expected_stored);
+    }
+}
+
+#[tokio::test]
+async fn upload_rejects_non_audio() {
+    let h = harness().await;
+    let boundary = "X-BOUNDARY";
+    let (status, _) = send(
+        &h.app,
+        authed("POST", "/objects")
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(multipart_body(boundary, "notes.txt", b"hello")))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

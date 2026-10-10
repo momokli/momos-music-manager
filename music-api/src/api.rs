@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -28,7 +28,14 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/isrc/{isrc}", get(get_isrc))
         .route("/isrc/{isrc}/{format}", get(get_file))
         // Content-addressed object store (Backpack backup / file home).
-        .route("/objects", get(crate::store::list))
+        // `POST /objects` is the multipart upload (Part B); the body limit is
+        // disabled here because the handler enforces `STORE_MAX_UPLOAD_BYTES`.
+        .route(
+            "/objects",
+            get(crate::store::list)
+                .post(crate::store::upload)
+                .layer(DefaultBodyLimit::disable()),
+        )
         .route("/objects/check", post(crate::store::check))
         .route(
             "/objects/{hash}",
@@ -36,6 +43,14 @@ pub fn router() -> Router<Arc<AppState>> {
                 .head(crate::store::head)
                 .get(crate::store::get),
         )
+        .route("/objects/{hash}/meta", get(crate::store::meta))
+        // Per-ISRC metadata (Part C) — the hub pushes BPM/key here.
+        .route("/metadata", post(crate::metadata::post_metadata))
+        .route("/metadata/{isrc}", get(crate::metadata::get_metadata))
+        // Server-side SSH pull-ingest (Part A).
+        .route("/ingest/ssh", post(crate::ssh_ingest::post_ingest_ssh))
+        .route("/ingest/runs", get(crate::ssh_ingest::list_runs))
+        .route("/ingest/runs/{id}", get(crate::ssh_ingest::get_run))
 }
 
 fn error(code: StatusCode, msg: impl Into<String>) -> Response {
@@ -105,7 +120,10 @@ async fn get_order(State(state): State<Arc<AppState>>, Path(id): Path<String>) -
         Ok(i) => i,
         Err(e) => {
             tracing::error!("order_items failed: {e:#}");
-            return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read order items");
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to read order items",
+            );
         }
     };
     Json(json!({

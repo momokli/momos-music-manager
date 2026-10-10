@@ -1593,7 +1593,14 @@ async fn tags_groups_collectives_are_renameable() {
 async fn no_shell_page_returns_500() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
-    for path in ["/", "/me/playlists", "/sql", "/search?q=shared", "/login"] {
+    for path in [
+        "/",
+        "/me/playlists",
+        "/sql",
+        "/search?q=shared",
+        "/login",
+        "/upload",
+    ] {
         let resp = app
             .client()
             .get(app.url(path))
@@ -1607,4 +1614,42 @@ async fn no_shell_page_returns_500() {
             resp.status()
         );
     }
+}
+
+#[tokio::test]
+async fn upload_page_renders_form_and_history() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // Seed one upload row so the history is non-empty.
+    sqlx::query(
+        "INSERT INTO hub_uploads (user_id, hash, name, isrc, size, stored, uploaded_at)
+         VALUES (?1, ?2, 'song.flac', 'DEQ022280682', 12345, 1, '2026-01-01T00:00:00+00:00')",
+    )
+    .bind(app.seed.alice)
+    .bind("a".repeat(64))
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let resp = app
+        .client()
+        .get(app.url("/upload"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    assert!(html.contains("action=\"/upload\""));
+    assert!(html.contains("multipart/form-data"));
+    assert!(html.contains("song.flac"));
+    assert!(html.contains("DEQ022280682"));
+}
+
+#[tokio::test]
+async fn upload_page_requires_login() {
+    let app = common::spawn().await;
+    let resp = app.client().get(app.url("/upload")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
 }

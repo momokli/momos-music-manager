@@ -11,13 +11,15 @@ const NML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?>
    <LOCATION DIR="/Music/" FILE="a.mp3" VOLUME="Mac"/>
    <TITLE>Alpha</TITLE>
    <ARTIST>Artist A</ARTIST>
-   <INFO PLAYCOUNT="7" LAST_PLAY="2024/3/1" RATING="255"/>
+   <INFO PLAYCOUNT="7" LAST_PLAY="2024/3/1" RATING="255" KEY="7m"/>
+   <TEMPO BPM="128.000000" BPM_QUALITY="100.000000"/>
   </ENTRY>
   <ENTRY>
    <LOCATION DIR="/Music/" FILE="b.mp3" VOLUME="Mac"/>
    <TITLE>Beta</TITLE>
    <ARTIST>Artist B</ARTIST>
-   <INFO PLAYCOUNT="0" RATING="0"/>
+   <INFO PLAYCOUNT="0" RATING="0" KEY="10m"/>
+   <TEMPO BPM="124.000000" BPM_QUALITY="100.000000"/>
   </ENTRY>
   <ENTRY>
    <LOCATION DIR="/Music/" FILE="c.mp3" VOLUME="Mac"/>
@@ -99,6 +101,24 @@ async fn traktor_import_stores_meta_and_playlists() {
     .await
     .unwrap();
     assert_eq!(rating_b, None, "rating 0 -> none");
+
+    // BPM/key from TEMPO + INFO/@KEY land in hub_track_analysis (Part C).
+    assert_eq!(stats.analyzed, 2, "both matched tracks carry BPM/key");
+    let (bpm, key, source) = {
+        let r =
+            sqlx::query("SELECT bpm, key, source FROM hub_track_analysis WHERE track_id = 9001")
+                .fetch_one(&app.pool)
+                .await
+                .unwrap();
+        (
+            r.get::<Option<f64>, _>("bpm"),
+            r.get::<Option<String>, _>("key"),
+            r.get::<String, _>("source"),
+        )
+    };
+    assert_eq!(bpm, Some(128.0));
+    assert_eq!(key.as_deref(), Some("7m"));
+    assert_eq!(source, "traktor");
 
     // Node types.
     let types: Vec<(String, String)> = sqlx::query_as(

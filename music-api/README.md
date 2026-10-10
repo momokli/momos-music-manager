@@ -97,6 +97,53 @@ is probed with ffprobe: a ≥256 kbps MP3 becomes the 320 source (and 128 is
 derived from it), a lower one is stored as 128 only. The dedicated deemix
 download dir is ours, so the source file is removed after it has been collected.
 
+## Object store, ingest & metadata
+
+Beyond orders, the service is the content-addressed **object store** and the
+**ISRC metadata** authority.
+
+### Object store (`/objects`)
+
+| Method | Path                     | Use                                              |
+| ------ | ------------------------ | ------------------------------------------------ |
+| `POST` | `/objects`               | multipart upload (server canonicalises + hashes) |
+| `PUT`  | `/objects/{sha256}`      | upload (idempotent; `400` on digest mismatch)    |
+| `HEAD` | `/objects/{sha256}`      | exists?                                          |
+| `GET`  | `/objects/{sha256}`      | download (`Range` supported)                     |
+| `GET`  | `/objects/{sha256}/meta` | stored metadata (tags, stem grouping)            |
+| `POST` | `/objects/check`         | bulk `{hashes:[…]}` → `{present,missing}`        |
+| `GET`  | `/objects`               | paged listing                                    |
+
+### SSH pull-ingest (Part A)
+
+`music-api` pulls a remote tree over SSH/rsync into the store. Configure sources
+as a JSON array:
+
+```jsonc
+// SSH_SOURCES='[{"name":"nas","host":"backup","user":"momo","port":22,
+//   "path":"/volume1/media/stems","include":["*.stem.m4a","*.flac"]}]'
+// SSH_SOURCES_FILE=/opt/music-api/ssh-sources.json   (alternative)
+// SSH_INGEST_INTERVAL_SECS=0                          (0 = off)
+```
+
+Trigger: `music-api ssh-ingest --source nas | --all`, `POST /ingest/ssh`
+(`{"source":"nas"}` or `{"all":true}` → `202 {runIds}`), or the background tick.
+Runs are recorded in `ingest_runs` (`GET /ingest/runs`, `GET /ingest/runs/{id}`).
+Ingest is idempotent: an object already in the store is skipped. `rsync` must be
+installed on the host.
+
+### Metadata (`/metadata`)
+
+Per-ISRC metadata, merged from the ingest (stem tags: ISRC, key, title, …) and the
+hub (BPM/key from Traktor/analysis).
+
+| Method | Path               | Use                                                               |
+| ------ | ------------------ | ----------------------------------------------------------------- |
+| `POST` | `/metadata`        | bulk upsert `{items:[{isrc,bpm?,key?,camelot?,title?,…,source}]}` |
+| `GET`  | `/metadata/{isrc}` | the merged record (`404` if unknown)                              |
+
+Merge rule: a non-null field wins over null; `source` records the last writer.
+
 ## Configuration
 
 See [`.env.example`](.env.example). Everything is env-driven; `MUSIC_API_TOKEN`

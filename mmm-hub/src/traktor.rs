@@ -17,6 +17,8 @@ pub struct Stats {
     pub entries: usize,
     pub matched: usize,
     pub playlists: usize,
+    /// Tracks whose BPM/key were written to `hub_track_analysis`.
+    pub analyzed: usize,
 }
 
 struct Entry {
@@ -25,6 +27,11 @@ struct Entry {
     play_count: i64,
     last_played: Option<String>,
     rating: Option<i64>,
+    /// `TEMPO/@BPM` — Traktor's beatgrid tempo.
+    bpm: Option<f64>,
+    /// `INFO/@KEY` — Traktor's key in display notation (e.g. `7m`), the same
+    /// notation the stems carry as `initialkey`.
+    key: Option<String>,
 }
 
 /// Import a `collection.nml` file from disk for `user_id`.
@@ -49,16 +56,22 @@ pub async fn import_str(pool: &SqlitePool, user_id: i64, xml: &str) -> Result<St
             }
             let artist = text_of(&e, "ARTIST");
             let info = e.children().find(|n| n.has_tag_name("INFO"));
-            let (play_count, last_played, rating) = match info {
+            let (play_count, last_played, rating, key) = match info {
                 Some(i) => (
                     i.attribute("PLAYCOUNT")
                         .and_then(|v| v.parse::<i64>().ok())
                         .unwrap_or(0),
                     i.attribute("LAST_PLAY").map(str::to_string),
                     parse_rating(i.attribute("RATING")),
+                    i.attribute("KEY").map(str::to_string),
                 ),
-                None => (0, None, None),
+                None => (0, None, None, None),
             };
+            let bpm = e
+                .children()
+                .find(|n| n.has_tag_name("TEMPO"))
+                .and_then(|t| t.attribute("BPM"))
+                .and_then(|v| v.parse::<f64>().ok());
             let file = e
                 .children()
                 .find(|n| n.has_tag_name("LOCATION"))
@@ -74,6 +87,8 @@ pub async fn import_str(pool: &SqlitePool, user_id: i64, xml: &str) -> Result<St
                 play_count,
                 last_played,
                 rating,
+                bpm,
+                key,
             });
         }
     }
@@ -103,6 +118,7 @@ pub async fn import_str(pool: &SqlitePool, user_id: i64, xml: &str) -> Result<St
         .execute(pool)
         .await?;
 
+    let mut analyzed = 0usize;
     for (en, id) in entries.iter().zip(&track_of) {
         let Some(track_id) = id else { continue };
         sqlx::query(
@@ -118,6 +134,11 @@ pub async fn import_str(pool: &SqlitePool, user_id: i64, xml: &str) -> Result<St
         .bind(&now)
         .execute(pool)
         .await?;
+
+        // Traktor's BPM/key are the DJ's own analysis — forward them (Part C).
+        if store_traktor_analysis(pool, *track_id, en.bpm, en.key.as_deref(), &now).await? {
+            analyzed += 1;
+        }
     }
 
     // ── the COLLECTION pseudo-playlist (all matched collection tracks) ───────
@@ -163,7 +184,41 @@ pub async fn import_str(pool: &SqlitePool, user_id: i64, xml: &str) -> Result<St
         entries: stats_entries,
         matched,
         playlists: playlist_count,
+        analyzed,
     })
+}
+
+/// Write Traktor's BPM/key into `hub_track_analysis` (`source='traktor'`).
+///
+/// Traktor's values win over a previous analysis (they are the DJ's own
+/// beatgrid); a null field keeps whatever was there. Returns `true` when a row
+/// was written.
+async fn store_traktor_analysis(
+    pool: &SqlitePool,
+    track_id: i64,
+    bpm: Option<f64>,
+    key: Option<&str>,
+    now: &str,
+) -> Result<bool> {
+    if bpm.is_none() && key.is_none() {
+        return Ok(false);
+    }
+    sqlx::query(
+        "INSERT INTO hub_track_analysis (track_id, bpm, key, camelot, source, analyzed_at)
+         VALUES (?1, ?2, ?3, NULL, 'traktor', ?4)
+         ON CONFLICT(track_id) DO UPDATE SET
+             bpm = COALESCE(excluded.bpm, hub_track_analysis.bpm),
+             key = COALESCE(excluded.key, hub_track_analysis.key),
+             source = 'traktor',
+             analyzed_at = excluded.analyzed_at",
+    )
+    .bind(track_id)
+    .bind(bpm)
+    .bind(key)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(true)
 }
 
 fn text_of(node: &roxmltree::Node, tag: &str) -> String {

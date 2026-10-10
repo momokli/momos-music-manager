@@ -1,0 +1,72 @@
+{% extends "base.html" %} {% block title %}Upload — MMM Hub{% endblock %} {% block content %}
+<hgroup>
+    <h1>Upload</h1>
+    <p>FLAC / Stems / MP3 / WAV in den Object Store hochladen.</p>
+</hgroup>
+
+<h2>Neue Datei</h2>
+<form method="post" action="/upload" enctype="multipart/form-data">
+    <div class="hub-grid">
+        <label>
+            Datei
+            <input
+                type="file"
+                name="file"
+                accept=".flac,.m4a,.mp4,.mp3,.wav,.aif,.aiff,.ogg,.wma,.alac,.dsf"
+                required
+            />
+        </label>
+        <label>
+            ISRC (optional)
+            <input type="text" name="isrc" placeholder="DEQ022280682" />
+        </label>
+        <label>
+            Group Key (optional)
+            <input type="text" name="groupKey" placeholder="Artist - Title" />
+        </label>
+        <label>
+            Stem-Typ (optional)
+            <input type="text" name="stemType" placeholder="vocals / bass / drums / …" />
+        </label>
+    </div>
+    <button type="submit">Hochladen</button>
+</form>
+<p class="hub-muted">
+    Der Server kanonisiert und hasht die Datei selbst — dieselbe Audio mit anderem
+    Comment landet als ein Objekt (Dedup). ISRC/Key/Titel werden aus den Tags gelesen.
+</p>
+
+<h2>Meine Uploads</h2>
+{% if uploads.is_empty() %}
+<p class="hub-muted">Noch nichts hochgeladen.</p>
+{% else %}
+<div class="overflow-auto">
+    <table>
+        <caption class="hub-visually-hidden">
+            Meine Uploads
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Name</th>
+                <th scope="col">ISRC</th>
+                <th scope="col">Größe</th>
+                <th scope="col">Status</th>
+                <th scope="col">Hash</th>
+                <th scope="col">Zeit</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in uploads %}
+            <tr>
+                <td>{{ u.name }}</td>
+                <td>{{ u.isrc }}</td>
+                <td>{{ u.size }}</td>
+                <td>{% if u.stored %}neu{% else %}Dedup{% endif %}</td>
+                <td><code>{{ u.hash }}</code></td>
+                <td>{{ u.uploaded_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %} {% endblock %}

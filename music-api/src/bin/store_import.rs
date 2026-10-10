@@ -10,110 +10,19 @@
 //!   `STORE_ROOT=… DATABASE_URL=sqlite:… store-import <SOURCE_DIR> [MANIFEST_TSV]`
 //!
 //! Running it twice is safe: an existing object is skipped.
+//!
+//! The canonicalise / classify / tag helpers live in `music_api::ingest` so the
+//! SSH puller and the HTTP upload share exactly this behaviour.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use lofty::config::WriteOptions;
-use lofty::prelude::*;
-use lofty::tag::ItemKey;
-use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use walkdir::WalkDir;
 
+use music_api::ingest::{self, AUDIO_EXTS};
 use music_api::store::{self, ImportMeta, Store};
-
-const AUDIO_EXTS: &[&str] = &[
-    "wav", "m4a", "flac", "mp3", "aif", "aiff", "ogg", "wma", "alac", "dsf",
-];
-
-/// Stem parts are suffixed `_vocals`, `_bass`, … on both WAV parts and their set.
-const STEM_PARTS: &[&str] = &["vocals", "bass", "drums", "instrumental", "other"];
-
-fn hex(bytes: impl AsRef<[u8]>) -> String {
-    bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hex(hasher.finalize()))
-}
-
-/// Canonical form: the file with MMM's Comment tag cleared. WAV has no MMM
-/// comment (stems are source files), so its raw bytes are used as-is.
-fn canonicalise(src: &Path, dest: &Path) -> Result<String> {
-    let result = (|| -> Result<String> {
-        std::fs::copy(src, dest)?;
-        let mut tagged = lofty::read_from_path(dest).map_err(|e| anyhow::anyhow!("{e}"))?;
-        if let Some(tag) = tagged.primary_tag_mut() {
-            tag.remove_key(&ItemKey::Comment);
-        }
-        tagged
-            .save_to_path(dest, WriteOptions::default())
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        sha256_file(dest)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(dest);
-    }
-    result
-}
-
-fn content_type(ext: &str) -> &'static str {
-    match ext {
-        "flac" => "audio/flac",
-        "m4a" | "alac" => "audio/mp4",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "aif" | "aiff" => "audio/aiff",
-        "ogg" => "audio/ogg",
-        _ => "application/octet-stream",
-    }
-}
-
-/// The track a stem part belongs to: the parent directory when nested, otherwise
-/// the file name with the stem `_part` and extension stripped.
-fn classify(rel: &Path) -> (String, Option<String>) {
-    let parent = rel.parent().filter(|p| !p.as_os_str().is_empty());
-    let file_name = rel
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_string();
-    let stem_type = STEM_PARTS.iter().find_map(|part| {
-        let needle = format!("_{part}");
-        if file_name.to_lowercase().contains(&needle) {
-            Some((*part).to_string())
-        } else {
-            None
-        }
-    });
-
-    let group_key = match parent {
-        Some(p) => p.to_string_lossy().to_string(),
-        None => {
-            let base = file_name.trim_end_matches(".stem.m4a");
-            // Drop the extension for flat files (`Artist - Title.flac` → title).
-            let base = Path::new(base)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(base);
-            base.to_string()
-        }
-    };
-    (group_key, stem_type)
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -187,25 +96,34 @@ async fn main() -> Result<()> {
         let rel = path.strip_prefix(&source).unwrap_or(path);
         files += 1;
 
-        let (group_key, stem_type) = classify(rel);
+        let (group_key, stem_type) = ingest::classify(rel);
+        let tags = ingest::extract_tags(path);
         let meta = ImportMeta {
-            content_type: Some(content_type(&ext).to_string()),
+            content_type: Some(ingest::content_type(&ext).to_string()),
             original_path: Some(rel.to_string_lossy().to_string()),
-            isrc: None,
+            isrc: tags.isrc.clone(),
             name: path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .map(|s| s.to_string()),
             group_key: Some(group_key.clone()),
             stem_type: stem_type.clone(),
+            title: tags.title.clone(),
+            artist: tags.artist.clone(),
+            album: tags.album.clone(),
+            genre: tags.genre.clone(),
+            comment: tags.comment.clone(),
+            bpm: tags.bpm,
+            musical_key: tags.musical_key.clone(),
+            duration_ms: tags.duration_ms,
         };
 
         // WAV: raw bytes. Everything else: canonicalise (clear the Comment tag).
         let hash_result = if ext == "wav" {
-            sha256_file(path).map(|h| (h, None))
+            ingest::sha256_file(path).map(|h| (h, None))
         } else {
             let dest = tmp_canon.join(format!("{}.{}", uuid::Uuid::new_v4(), ext));
-            canonicalise(path, &dest).map(|h| (h, Some(dest)))
+            ingest::canonicalise(path, &dest).map(|h| (h, Some(dest)))
         };
 
         let (hash, canon_tmp) = match hash_result {
