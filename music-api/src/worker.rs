@@ -256,7 +256,18 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     for track in pending {
         // Always resolve first: metadata is useful even when we cannot download.
         match deezer::lookup_isrc(&state.http, &state.config.deezer_base, &track.isrc).await {
-            Ok(deezer::Lookup::Absent { reason }) => {
+            Ok(deezer::Lookup::Absent {
+                reason,
+                title,
+                artist,
+            }) => {
+                // Fallback: Deezer knows the track but cannot stream it — try
+                // yt-dlp (YouTube search) before declaring it absent.
+                if let (Some(t), Some(a)) = (title.as_deref(), artist.as_deref()) {
+                    if !t.is_empty() && !a.is_empty() && try_fallback(state, &track, a, t).await? {
+                        continue;
+                    }
+                }
                 info!("{}: absent on Deezer ({reason})", track.isrc);
                 db::mark_terminal(&state.pool, &track.isrc, state::ABSENT, &reason).await?;
             }
@@ -313,6 +324,51 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Fallback for a Deezer-absent track: search YouTube via yt-dlp, download the
+/// best match, and run it through the normal finalize path. Returns `true` when
+/// the track ended up `ready`.
+async fn try_fallback(
+    state: &Arc<AppState>,
+    track: &Track,
+    artist: &str,
+    title: &str,
+) -> Result<bool> {
+    let format = std::env::var("YTDLP_FORMAT").unwrap_or_else(|_| "flac".to_string());
+    let out_dir = state.config.data_dir.join("ytdlp-incoming");
+    let query = format!("{artist} - {title}");
+
+    let src = match crate::ytdlp::search(&query, &out_dir, &format).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("{}: yt-dlp fallback failed: {e:#}", track.isrc);
+            return Ok(false);
+        }
+    };
+
+    // Copy into the deemix download dir under the name `finalize` expects, so we
+    // reuse the store/transcode path unchanged.
+    let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("flac");
+    let dst = state
+        .config
+        .deemix_download_dir
+        .join(format!("{artist} - {title}.{ext}"));
+    tokio::fs::create_dir_all(&state.config.deemix_download_dir).await?;
+    tokio::fs::copy(&src, &dst).await?;
+    let _ = tokio::fs::remove_file(&src).await;
+
+    // Persist the metadata so `finalize` can locate the file, then finalize.
+    db::mark_resolved(&state.pool, &track.isrc, "", title, artist, "").await?;
+    let resolved = db::get_track(&state.pool, &track.isrc)
+        .await?
+        .unwrap_or_else(|| track.clone());
+    if finalize(state, &resolved).await? {
+        info!("{}: ready via yt-dlp fallback", track.isrc);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 /// Phase B: poll deemix for the in-flight downloads and finalise them.

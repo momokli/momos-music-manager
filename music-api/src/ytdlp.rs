@@ -217,6 +217,13 @@ pub async fn download(url: &str, out_dir: &Path, format: &str) -> Result<PathBuf
     find_newest_audio(out_dir).context("yt-dlp reported success but no audio file was found")
 }
 
+/// Search YouTube for `query` (e.g. `"Artist - Title"`) and download the best
+/// match. Used as a fallback when Deezer has no streamable track.
+pub async fn search(query: &str, out_dir: &Path, format: &str) -> Result<PathBuf> {
+    let target = format!("ytsearch1:{query}");
+    download(&target, out_dir, format).await
+}
+
 fn find_newest_audio(dir: &Path) -> Option<PathBuf> {
     const EXTS: &[&str] = &["flac", "mp3", "m4a", "opus", "ogg", "wav"];
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
