@@ -1584,6 +1584,9 @@ struct DigRow {
     /// Sum of the group weights of this track's tags (scoring-engine signal).
     tag_weight: f64,
     tag_weight_disp: String,
+    /// Seed↔candidate: sum of group weights of tags shared with the seed.
+    shared_weight: f64,
+    shared_weight_disp: String,
     /// Per-user presence with playlist names (track-detail style).
     presence: Vec<DigUserRow>,
     /// Resolved tags with their groups.
@@ -1664,6 +1667,8 @@ async fn merge_candidate(
             score: 0,
             tag_weight: 0.0,
             tag_weight_disp: String::new(),
+            shared_weight: 0.0,
+            shared_weight_disp: String::new(),
             presence: Vec::new(),
             tags: Vec::new(),
         },
@@ -1822,6 +1827,7 @@ async fn digging_page(
 
     let mut has_seed = false;
     let (mut seed_id, mut seed_title, mut seed_artists) = (0i64, String::new(), String::new());
+    let mut seed_tag_ids: HashSet<i64> = HashSet::new();
     let mut cand: HashMap<String, DigRow> = HashMap::new();
 
     if let Some(sid) = q.seed {
@@ -1843,6 +1849,15 @@ async fn digging_page(
             .ok()
             .flatten();
             let seed_artist = seed.artists.split(',').next().unwrap_or("").trim().to_string();
+            seed_tag_ids = sqlx::query_scalar::<_, i64>(
+                "SELECT tag_id FROM hub_track_resolved_tags WHERE track_id = ?1",
+            )
+            .bind(sid)
+            .fetch_all(&st.pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
 
             // Fetch every source concurrently. External HTTP calls overlap instead
             // of chaining, so the page cost is the *max* latency, not the sum.
@@ -1963,6 +1978,18 @@ async fn digging_page(
             r.tag_weight = r
                 .tags
                 .iter()
+                .map(|t| {
+                    t.groups
+                        .iter()
+                        .map(|g| g.weight)
+                        .fold(0.0_f64, f64::max)
+                })
+                .sum();
+            // Seed↔candidate agreement: only tags the seed also has.
+            r.shared_weight = r
+                .tags
+                .iter()
+                .filter(|t| seed_tag_ids.contains(&t.id))
                 .map(|t| {
                     t.groups
                         .iter()
@@ -2092,10 +2119,13 @@ async fn digging_page(
     });
 
     for r in rows.iter_mut() {
+        // Ranking engine: base signals + weighted tag agreement (shared) and
+        // candidate curation (own tags). Tune the *group* weights to steer this.
         r.score = r.users * 10
             + r.playlists * 3
             + r.likes * 2
             + r.sources.len() as i64
+            + (r.shared_weight * 3.0).round() as i64
             + r.tag_weight.round() as i64;
         r.bpm_disp = r
             .bpm
@@ -2103,6 +2133,11 @@ async fn digging_page(
             .unwrap_or_else(|| "—".to_string());
         r.tag_weight_disp = if r.tag_weight > 0.0 {
             format!("{:.0}", r.tag_weight)
+        } else {
+            "—".to_string()
+        };
+        r.shared_weight_disp = if r.shared_weight > 0.0 {
+            format!("{:.0}", r.shared_weight)
         } else {
             "—".to_string()
         };

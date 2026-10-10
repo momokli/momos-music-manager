@@ -662,7 +662,10 @@ async fn group_weight_drives_digging_score_and_parents_visible() {
         .send()
         .await
         .unwrap();
-    assert!(body(keeps).await.contains("Shared Anthem"));
+    let keeps_html = body(keeps).await;
+    assert!(keeps_html.contains("Shared Anthem"));
+    // Seed↔candidate agreement signal is rendered (t_all shares the seed's tag).
+    assert!(keeps_html.contains("Seed-Match"));
     let drops = app
         .client()
         .get(app.url(&format!("/digging?seed={seed}&wmin=10")))

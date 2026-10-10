@@ -132,6 +132,7 @@ content %}
                 <th scope="col">Quellen</th>
                 <th scope="col">Bei uns</th>
                 <th scope="col">Tags</th>
+                <th scope="col">Seed-Match</th>
                 <th scope="col">Tag-Gew.</th>
                 <th scope="col">BPM</th>
                 <th scope="col">Key</th>
@@ -184,6 +185,7 @@ content %}
                     </div>
                     {% endfor %} {% endif %}
                 </td>
+                <td>{{ r.shared_weight_disp }}</td>
                 <td>{{ r.tag_weight_disp }}</td>
                 <td>{{ r.bpm_disp }}</td>
                 <td>{% if r.camelot != "" %}{{ r.camelot }}{% else %}—{% endif %}</td>
