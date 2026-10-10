@@ -1,4 +1,5 @@
-{% extends "base.html" %} {% block title %}Downloads — MMM Hub{% endblock %} {% block content %}
+{% extends "base.html" %} {% block title %}Downloads — MMM Hub{% endblock %} {% block
+content %}
 <nav class="hub-crumbs" aria-label="Brotkrumen">
     <ol>
         <li><a href="/">Übersicht</a></li>
@@ -7,13 +8,18 @@
 </nav>
 <hgroup>
     <h1>Downloads</h1>
-    <p class="hub-muted">music-api-Status (Cache) und Live-Queue</p>
+    <p class="hub-muted">music-api-Status (Cache), alle Hub-Tracks und Live-Queue</p>
 </hgroup>
 
 {% if music_api %}
 <section class="hub-actions" aria-label="Aktionen">
-    <form method="post" action="/downloads/refresh">
+    <form method="post" action="{{ refresh_action }}">
         <button type="submit" class="secondary outline">Status aktualisieren</button>
+    </form>
+    <form method="post" action="{{ order_action }}">
+        <button type="submit" class="secondary outline">
+            Alles ordern (nicht ready)
+        </button>
     </form>
 </section>
 {% else %}
@@ -47,9 +53,101 @@
         </article>
     </div>
     <p class="hub-muted">
-        ready-Formate: flac {{ ready_flac }} · mp3-320 {{ ready_320 }} · mp3-128 {{ ready_128 }}
-        {% if ready_other > 0 %}· sonstige {{ ready_other }}{% endif %}
+        ready-Formate: flac {{ ready_flac }} · mp3-320 {{ ready_320 }} · mp3-128 {{
+        ready_128 }} {% if ready_other > 0 %}· sonstige {{ ready_other }}{% endif %}
     </p>
+</section>
+
+<section aria-label="Alle Hub-Tracks">
+    <h2>Alle Hub-Tracks ({{ row_total }})</h2>
+    <form method="get" action="/downloads" class="hub-actions">
+        <label>
+            Status
+            <select name="status">
+                {% for o in status_options %}
+                <option value="{{ o.value }}" {% if o.selected %}selected{% endif %}>
+                    {{ o.label }}
+                </option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Format
+            <select name="format">
+                {% for o in format_options %}
+                <option value="{{ o.value }}" {% if o.selected %}selected{% endif %}>
+                    {{ o.label }}
+                </option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Suche
+            <input
+                type="search"
+                name="q"
+                value="{{ q }}"
+                placeholder="Titel, Artist, ISRC"
+            />
+        </label>
+        <button type="submit" class="secondary outline">Filtern</button>
+        {% if has_filters %}<a href="/downloads" role="button" class="secondary outline"
+            >Zurücksetzen</a
+        >{% endif %}
+    </form>
+
+    {% if rows.is_empty() %}
+    <p class="hub-muted">Keine Tracks für die aktuelle Auswahl.</p>
+    {% else %}
+    <div class="overflow-auto hub-scroll-y">
+        <table class="hub-dense-table">
+            <caption class="hub-visually-hidden">
+                Alle Hub-Tracks mit music-api-Status
+            </caption>
+            <thead>
+                <tr>
+                    <th scope="col">ISRC</th>
+                    <th scope="col">Titel</th>
+                    <th scope="col">Artists</th>
+                    <th scope="col">Service</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Format</th>
+                    <th scope="col">Deezer-ID</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in rows %}
+                <tr>
+                    <td><code>{{ r.isrc }}</code></td>
+                    <td>{{ r.title }}</td>
+                    <td>{{ r.artists }}</td>
+                    <td>{{ r.service }}</td>
+                    <td>{{ r.state }}</td>
+                    <td>{{ r.source_format }}</td>
+                    <td>{{ r.deezer_id }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <nav class="hub-actions" aria-label="Seiten-Navigation">
+        {% if prev_disabled %}
+        <span class="hub-muted">Zurück</span>
+        {% else %}
+        <a href="{{ prev_href }}" role="button" class="secondary outline">Zurück</a>
+        {% endif %} {% for p in page_links %} {% if p.active %}
+        <span aria-current="page"><strong>{{ p.label }}</strong></span>
+        {% else %}
+        <a href="{{ p.href }}">{{ p.label }}</a>
+        {% endif %} {% endfor %} {% if next_disabled %}
+        <span class="hub-muted">Weiter</span>
+        {% else %}
+        <a href="{{ next_href }}" role="button" class="secondary outline">Weiter</a>
+        {% endif %}
+        <span class="hub-muted">Seite {{ page }} von {{ pages }}</span>
+    </nav>
+    {% endif %}
 </section>
 
 {% if music_api %}

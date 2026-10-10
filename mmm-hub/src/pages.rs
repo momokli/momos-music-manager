@@ -76,6 +76,7 @@ pub fn router(state: AppState) -> Router {
         .route("/track/{id}/download", get(track_download))
         .route("/downloads", get(downloads_page))
         .route("/downloads/refresh", post(downloads_refresh))
+        .route("/downloads/order-all", post(downloads_order_all))
         .with_state(state)
 }
 
@@ -785,7 +786,263 @@ fn audio_content_type(format: &str) -> &'static str {
     }
 }
 
-// ── downloads (music-api queue + cached state overview) ─────────────────────
+// ── downloads (music-api queue + cached state overview + all-tracks table) ──
+
+/// Rows per page in the all-tracks table.
+const DOWNLOADS_PER_PAGE: i64 = 100;
+/// Cap on how many ISRCs a single "order all" invocation will order.
+const DOWNLOADS_ORDER_CAP: usize = 500;
+
+/// `FROM`/`WHERE` shared by the count, page and ISRC-list queries. Only tracks
+/// that actually carry an ISRC can be matched against the music-api cache.
+const DOWNLOADS_FROM: &str = " FROM hub_tracks t LEFT JOIN hub_music_state ms ON ms.isrc = t.isrc \
+     WHERE t.isrc IS NOT NULL AND TRIM(t.isrc) <> ''";
+
+#[derive(Deserialize, Default)]
+struct DownloadsQuery {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    page: Option<i64>,
+    #[serde(default)]
+    msg: Option<String>,
+}
+
+/// Normalized, validated filter state for the downloads table.
+struct DownloadFilters {
+    status: String,
+    format: String,
+    q: String,
+    page: i64,
+}
+
+impl DownloadFilters {
+    fn from_query(q: &DownloadsQuery) -> Self {
+        let status = match q.status.as_deref() {
+            Some(s @ ("ready" | "pending" | "downloading" | "absent" | "failed" | "unknown")) => {
+                s.to_string()
+            }
+            _ => "all".to_string(),
+        };
+        let format = match q.format.as_deref() {
+            Some(f @ ("flac" | "320" | "128")) => f.to_string(),
+            _ => "all".to_string(),
+        };
+        let page = q.page.unwrap_or(1).max(1);
+        let text = q.q.clone().unwrap_or_default().trim().to_string();
+        Self {
+            status,
+            format,
+            q: text,
+            page,
+        }
+    }
+
+    /// Query string of the active (non-default) filters, without `page`.
+    fn query_string(&self) -> String {
+        let mut parts = Vec::new();
+        if self.status != "all" {
+            parts.push(format!("status={}", urlencoding::encode(&self.status)));
+        }
+        if self.format != "all" {
+            parts.push(format!("format={}", urlencoding::encode(&self.format)));
+        }
+        if !self.q.is_empty() {
+            parts.push(format!("q={}", urlencoding::encode(&self.q)));
+        }
+        parts.join("&")
+    }
+
+    fn has_filters(&self) -> bool {
+        self.status != "all" || self.format != "all" || !self.q.is_empty()
+    }
+}
+
+/// Append a filter query string to a base URL, picking the right separator.
+fn append_qs(base: &str, qs: &str) -> String {
+    if qs.is_empty() {
+        base.to_string()
+    } else if base.contains('?') {
+        format!("{base}&{qs}")
+    } else {
+        format!("{base}?{qs}")
+    }
+}
+
+/// Append the `WHERE` conditions for the downloads table to a query builder.
+/// Format filtering mirrors `music_api::format_bucket` (flac > 320 > 128).
+fn push_download_filters(qb: &mut QueryBuilder<'_, sqlx::Sqlite>, f: &DownloadFilters) {
+    if f.status != "all" {
+        if f.status == "unknown" {
+            qb.push(" AND (ms.state IS NULL OR ms.state = 'unknown')");
+        } else {
+            qb.push(" AND ms.state = ").push_bind(f.status.clone());
+        }
+    }
+    if f.format != "all" {
+        let hay = "LOWER(COALESCE(ms.source_format, '') || ' ' || COALESCE(ms.formats, ''))";
+        match f.format.as_str() {
+            "flac" => {
+                qb.push(format!(" AND {hay} LIKE '%flac%'"));
+            }
+            "320" => {
+                qb.push(format!(
+                    " AND {hay} NOT LIKE '%flac%' AND {hay} LIKE '%320%'"
+                ));
+            }
+            "128" => {
+                qb.push(format!(
+                    " AND {hay} NOT LIKE '%flac%' AND {hay} NOT LIKE '%320%' AND {hay} LIKE '%128%'"
+                ));
+            }
+            _ => {}
+        }
+    }
+    if !f.q.is_empty() {
+        let like = format!("%{}%", f.q.to_lowercase());
+        qb.push(" AND (LOWER(COALESCE(t.title, '')) LIKE ")
+            .push_bind(like.clone())
+            .push(" OR LOWER(COALESCE(t.artists, '')) LIKE ")
+            .push_bind(like.clone())
+            .push(" OR LOWER(COALESCE(t.isrc, '')) LIKE ")
+            .push_bind(like)
+            .push(")");
+    }
+}
+
+/// Count the tracks matching the current filters.
+async fn download_count(pool: &sqlx::SqlitePool, f: &DownloadFilters) -> i64 {
+    let mut qb = QueryBuilder::new(format!("SELECT COUNT(*){DOWNLOADS_FROM}"));
+    push_download_filters(&mut qb, f);
+    qb.build_query_scalar::<i64>()
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0)
+}
+
+/// One page of the all-tracks table, ordered so actionable (non-ready) rows
+/// come first, then by artist/title/ISRC for a stable order.
+async fn download_rows(
+    pool: &sqlx::SqlitePool,
+    f: &DownloadFilters,
+    page: i64,
+) -> Vec<DownloadTrackRow> {
+    let offset = (page - 1).max(0) * DOWNLOADS_PER_PAGE;
+    let mut qb = QueryBuilder::new(format!(
+        "SELECT t.isrc AS isrc, COALESCE(t.title, '') AS title, \
+         COALESCE(t.artists, '') AS artists, t.service AS service, \
+         COALESCE(ms.state, 'unknown') AS state, \
+         COALESCE(ms.source_format, '') AS source_format, \
+         COALESCE(ms.deezer_id, '') AS deezer_id{DOWNLOADS_FROM}"
+    ));
+    push_download_filters(&mut qb, f);
+    qb.push(
+        " ORDER BY CASE COALESCE(ms.state, 'unknown') \
+         WHEN 'unknown' THEN 0 WHEN 'absent' THEN 1 WHEN 'failed' THEN 2 \
+         WHEN 'pending' THEN 3 WHEN 'downloading' THEN 4 WHEN 'ready' THEN 5 ELSE 6 END, \
+         t.artists, t.title, t.isrc",
+    );
+    qb.push(" LIMIT ").push_bind(DOWNLOADS_PER_PAGE);
+    qb.push(" OFFSET ").push_bind(offset);
+    qb.build()
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| DownloadTrackRow {
+            isrc: r.get::<Option<String>, _>("isrc").unwrap_or_default(),
+            title: r.get::<Option<String>, _>("title").unwrap_or_default(),
+            artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
+            service: r.get::<Option<String>, _>("service").unwrap_or_default(),
+            state: r.get::<Option<String>, _>("state").unwrap_or_default(),
+            source_format: r
+                .get::<Option<String>, _>("source_format")
+                .unwrap_or_default(),
+            deezer_id: r.get::<Option<String>, _>("deezer_id").unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// Distinct ISRCs matching the current filters (for order/refresh actions).
+async fn filtered_isrcs(pool: &sqlx::SqlitePool, f: &DownloadFilters) -> Vec<String> {
+    let mut qb = QueryBuilder::new(format!("SELECT t.isrc AS isrc{DOWNLOADS_FROM}"));
+    push_download_filters(&mut qb, f);
+    qb.push(" ORDER BY t.isrc");
+    let rows = qb.build().fetch_all(pool).await.unwrap_or_default();
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for r in rows {
+        let isrc = r
+            .get::<Option<String>, _>("isrc")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !isrc.is_empty() && seen.insert(isrc.clone()) {
+            out.push(isrc);
+        }
+    }
+    out
+}
+
+/// Windowed page links (up to 5 numbers) around the current page.
+fn page_links(f: &DownloadFilters, pages: i64) -> Vec<PageLink> {
+    let qs = f.query_string();
+    let href = |p: i64| append_qs(&format!("/downloads?page={p}"), &qs);
+    let mut out = Vec::new();
+    if pages < 1 {
+        return out;
+    }
+    let start = (f.page - 2).max(1);
+    let end = (start + 4).min(pages);
+    let start = (end - 4).max(1);
+    for p in start..=end {
+        out.push(PageLink {
+            href: href(p),
+            label: p.to_string(),
+            active: p == f.page,
+        });
+    }
+    out
+}
+
+fn status_options(current: &str) -> Vec<FilterOption> {
+    [
+        ("all", "Alle"),
+        ("ready", "ready"),
+        ("pending", "pending"),
+        ("downloading", "downloading"),
+        ("absent", "absent"),
+        ("failed", "failed"),
+        ("unknown", "unknown"),
+    ]
+    .iter()
+    .map(|(v, l)| FilterOption {
+        value: v.to_string(),
+        label: l.to_string(),
+        selected: *v == current,
+    })
+    .collect()
+}
+
+fn format_options(current: &str) -> Vec<FilterOption> {
+    [
+        ("all", "Alle"),
+        ("flac", "FLAC"),
+        ("320", "MP3 320"),
+        ("128", "MP3 128"),
+    ]
+    .iter()
+    .map(|(v, l)| FilterOption {
+        value: v.to_string(),
+        label: l.to_string(),
+        selected: *v == current,
+    })
+    .collect()
+}
 
 #[derive(Template)]
 #[template(path = "downloads.html")]
@@ -809,6 +1066,22 @@ struct DownloadsPage {
     queue_ok: bool,
     queue_error: String,
     queue_items: Vec<QueueItem>,
+    // All-tracks table (filtered + paginated).
+    rows: Vec<DownloadTrackRow>,
+    row_total: i64,
+    page: i64,
+    pages: i64,
+    page_links: Vec<PageLink>,
+    prev_href: String,
+    prev_disabled: bool,
+    next_href: String,
+    next_disabled: bool,
+    status_options: Vec<FilterOption>,
+    format_options: Vec<FilterOption>,
+    q: String,
+    has_filters: bool,
+    refresh_action: String,
+    order_action: String,
 }
 
 struct QueueItem {
@@ -819,10 +1092,36 @@ struct QueueItem {
     state: String,
 }
 
-/// `GET /downloads` — cached music-api state overview + live queue.
+/// One row of the all-tracks table.
+struct DownloadTrackRow {
+    isrc: String,
+    title: String,
+    artists: String,
+    service: String,
+    state: String,
+    source_format: String,
+    deezer_id: String,
+}
+
+/// A pagination link with a precomputed `active` flag (askama-safe).
+struct PageLink {
+    href: String,
+    label: String,
+    active: bool,
+}
+
+/// A `<select>` option with a precomputed `selected` flag (askama-safe).
+struct FilterOption {
+    value: String,
+    label: String,
+    selected: bool,
+}
+
+/// `GET /downloads` — cached music-api state overview, all-tracks table and
+/// live queue.
 async fn downloads_page(
     State(st): State<AppState>,
-    Query(msg): Query<AdminMsg>,
+    Query(q): Query<DownloadsQuery>,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "downloads").await else {
@@ -844,9 +1143,21 @@ async fn downloads_page(
         }
     }
 
+    let mut f = DownloadFilters::from_query(&q);
+    let row_total = download_count(&st.pool, &f).await;
+    let pages = if row_total == 0 {
+        1
+    } else {
+        (row_total + DOWNLOADS_PER_PAGE - 1) / DOWNLOADS_PER_PAGE
+    };
+    f.page = f.page.min(pages).max(1);
+    let rows = download_rows(&st.pool, &f, f.page).await;
+    let links = page_links(&f, pages);
+    let qs = f.query_string();
+
     render(&DownloadsPage {
         nav,
-        flash: msg.msg.unwrap_or_default(),
+        flash: q.msg.clone().unwrap_or_default(),
         music_api,
         total: s.total,
         ready: s.ready,
@@ -861,27 +1172,87 @@ async fn downloads_page(
         queue_ok,
         queue_error,
         queue_items,
+        rows,
+        row_total,
+        page: f.page,
+        pages,
+        page_links: links,
+        prev_href: append_qs(&format!("/downloads?page={}", (f.page - 1).max(1)), &qs),
+        prev_disabled: f.page <= 1,
+        next_href: append_qs(&format!("/downloads?page={}", (f.page + 1).min(pages)), &qs),
+        next_disabled: f.page >= pages,
+        status_options: status_options(&f.status),
+        format_options: format_options(&f.format),
+        q: f.q.clone(),
+        has_filters: f.has_filters(),
+        refresh_action: append_qs("/downloads/refresh", &qs),
+        order_action: append_qs("/downloads/order-all", &qs),
     })
 }
 
-/// `POST /downloads/refresh` — refresh the cached music-api state for every
-/// ISRC currently in the cache.
-async fn downloads_refresh(State(st): State<AppState>, headers: HeaderMap) -> Response {
+/// `POST /downloads/refresh` — refresh the cached music-api state for the
+/// tracks matching the current filters (all tracks when unfiltered).
+async fn downloads_refresh(
+    State(st): State<AppState>,
+    Query(q): Query<DownloadsQuery>,
+    headers: HeaderMap,
+) -> Response {
     if crate::ui::nav(&st, &headers, "downloads").await.is_none() {
         return Redirect::to("/login").into_response();
     }
+    let f = DownloadFilters::from_query(&q);
+    let target = append_qs("/downloads", &f.query_string());
     if st.cfg.music_api_token.is_none() {
-        return flash_redirect("/downloads", "music-api nicht konfiguriert".to_string());
+        return flash_redirect(&target, "music-api nicht konfiguriert".to_string());
     }
-    let isrcs: Vec<String> = sqlx::query_scalar("SELECT isrc FROM hub_music_state")
-        .fetch_all(&st.pool)
-        .await
-        .unwrap_or_default();
+    let isrcs = filtered_isrcs(&st.pool, &f).await;
     if isrcs.is_empty() {
-        return flash_redirect("/downloads", "Keine ISRCs im Cache".to_string());
+        return flash_redirect(&target, "Keine Tracks für die aktuelle Auswahl".to_string());
     }
     let (ready, total, _) = crate::music_api::refresh_states(&st.pool, &st.cfg, &isrcs, 1000).await;
-    flash_redirect("/downloads", format!("{ready}/{total} bereit"))
+    flash_redirect(&target, format!("{ready}/{total} bereit"))
+}
+
+/// `POST /downloads/order-all` — order every matching track whose cached state
+/// is not `ready`. The ISRC list is capped per invocation (the SQLite `IN`
+/// chunking happens inside `music_api::missing_isrcs`).
+async fn downloads_order_all(
+    State(st): State<AppState>,
+    Query(q): Query<DownloadsQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if crate::ui::nav(&st, &headers, "downloads").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    let f = DownloadFilters::from_query(&q);
+    let target = append_qs("/downloads", &f.query_string());
+    if st.cfg.music_api_token.is_none() {
+        return flash_redirect(&target, "music-api nicht konfiguriert".to_string());
+    }
+    let isrcs = filtered_isrcs(&st.pool, &f).await;
+    if isrcs.is_empty() {
+        return flash_redirect(&target, "Keine Tracks für die aktuelle Auswahl".to_string());
+    }
+    let matched = isrcs.len();
+    let capped: Vec<String> = isrcs.into_iter().take(DOWNLOADS_ORDER_CAP).collect();
+    let _ = crate::music_api::refresh_states(&st.pool, &st.cfg, &capped, 300).await;
+    let missing = crate::music_api::missing_isrcs(&st.pool, &capped).await;
+    if missing.is_empty() {
+        return flash_redirect(&target, "Alles bereits vorhanden".to_string());
+    }
+    let msg = match crate::music_api::order(&st.cfg, &missing).await {
+        Ok(oid) => {
+            let mut m = format!("{} fehlende bestellt (Order {oid})", missing.len());
+            if matched > DOWNLOADS_ORDER_CAP {
+                m.push_str(&format!(
+                    " — {matched} Treffer, auf {DOWNLOADS_ORDER_CAP} begrenzt"
+                ));
+            }
+            m
+        }
+        Err(e) => format!("music-api Fehler: {e}"),
+    };
+    flash_redirect(&target, msg)
 }
 
 /// Best-effort parse of the music-api `/queue` payload. Accepts either a bare
