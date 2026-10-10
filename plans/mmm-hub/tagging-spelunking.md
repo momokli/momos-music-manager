@@ -1,6 +1,6 @@
 # Plan: Hub Tagging-System + Spelunking-Engine
 
-**Status**: proposed
+**Status**: approved
 **Owner**: next agent
 **Branch**: (per leaf issue) `feat/hub-…`
 **Depends on**: existing tag layer (`plans/mmm-hub/*`, ADR-073), MMM parent/energy import, group weights + ranked groups
@@ -12,52 +12,91 @@
 
 ---
 
+## 0. GitHub-Artefakte
+
+**Epic**: #203 · **Milestones**: #15 `hub-tags-0.10.0`, #16 `hub-insights-0.11.0`,
+#17 `hub-traktor-0.13.0`, #18 `hub-scoring-0.12.0`, #19 `hub-tasks-0.14.0`,
+#20 `hub-sim-0.15.0`.
+
+| Plan-ID | Issue | Titel                                                    |
+| ------- | ----- | -------------------------------------------------------- |
+| T1-1    | #204  | group kind/role columns + backfill                       |
+| T1-2    | #205  | tag-page group filter (multi)                            |
+| T1-3    | #206  | create tag from tag page                                 |
+| T1-4    | #207  | genre variation / main direction                         |
+| T2-1    | #208  | tag insights — top artists                               |
+| T2-2    | #209  | tag co-occurrence (same + cross group)                   |
+| T2-3    | #210  | jump/discover from co-tag                                |
+| T3-1    | #211  | traktor import CLI (collection.nml)                      |
+| T3-2    | #212  | traktor playlists + sessions                             |
+| T3-3    | #213  | traktor meta views for scoring                           |
+| T4-1    | #214  | ripeness score (meta+tags, human>meta)                   |
+| T4-2    | #215  | traktor signal in ripeness                               |
+| T4-3    | #216  | scoring settings in UI                                   |
+| T4-4    | #217  | engine params — all weights + distributions configurable |
+| T5-1    | #218  | track tagged-complete flag                               |
+| T5-2    | #219  | daily/weekly tagging task                                |
+| T5-3    | #220  | tag-task UI                                              |
+| T6-1    | #221  | similarity v2 — tag overlap cross-group                  |
+| T6-2    | #222  | rumpelkiste exception in similarity                      |
+| T6-3    | #223  | wire sim into digging/overlap                            |
+
+---
+
 ## 1. Anforderungen (sortiert)
 
 ### A — Tag-Verwaltung & Gruppen-Typen
+
 - **A1** Tag-Seite (`/tags`): **Filter nach Tag-Gruppen** (mehrere gleichzeitig).
 - **A2** Tag-Seite: **direkt neue Tags anlegen** (ohne Umweg über eine Playlist).
 - **A3** Gruppen bekommen einen **Typ**:
-  - *Klassifizierend* (5): **Mood, Vibe, Phase/Energy, Genre, Attribute** (a.k.a. Merkmal).
-  - *Sortierend*: **Rumpelkiste, Setlist**.
+  - _Klassifizierend_ (5): **Mood, Vibe, Phase/Energy, Genre, Attribute** (a.k.a. Merkmal).
+  - _Sortierend_: **Rumpelkiste, Setlist**.
   - → `hub_tag_groups.kind` (`class` | `sort`), plus semantische Rollen `rumpelkiste`, `setlist`, `genre`, `phase`.
 - **A4** **Genre-Sonderfall**: Genre-Tags haben **Variation + Hauptrichtung** (z. B. Variation `Psy` → Haupt `Trance`; Variation `Tech` → Haupt `House`). → als Parent-Relation (Variation = Tag, Hauptrichtung = Parent) im Genre-Kontext, genutzt fürs Scoring/Ähnlichkeit.
 
 ### B — Tag-Insights (Tag-Detailseite `/tag/{id}`)
+
 - **B1** **Top-Artists** dieses Tags (Häufigkeit absteigend).
-- **B2** **Co-Occurrence-Tags**: welche Tags kommen besonders oft mit diesem Tag zusammen vor — **innerhalb derselben Gruppe** *und* **über Gruppen hinweg** (z. B. `Mood Dark` ↔ `Mood Melancholisch`, `Mood Dark` ↔ `Vibe Warehouse`).
+- **B2** **Co-Occurrence-Tags**: welche Tags kommen besonders oft mit diesem Tag zusammen vor — **innerhalb derselben Gruppe** _und_ **über Gruppen hinweg** (z. B. `Mood Dark` ↔ `Mood Melancholisch`, `Mood Dark` ↔ `Vibe Warehouse`).
 - **B3** **Sprung/Discovery**: von einem Co-Tag direkt auf den Tag springen bzw. ins Digging/Overlap zu den gemeinsamen Tracks.
 - **B4** Metric: Co-Occurrence via Jaccard/Lift über `hub_track_resolved_tags`, gruppiert je Gruppe.
 
 ### C — Similarity zwischen zwei Tracks
+
 - **C1** **Tag-Overlap-Boost**: mehrere gemeinsame Tags erhöhen die Ähnlichkeit — **stärker, wenn sie in unterschiedlichen Gruppen liegen** (Cross-Group zählt mehr als Same-Group).
 - **C2** **Rumpelkiste-Ausnahme**: ist ein Track über eine **Rumpelkiste-Playlist** verknüpft, wird diese Playlist **nicht** für den Ähnlichkeitsvergleich herangezogen — nur **andere** Playlists oder die **Tags**.
 
 ### D — Scoring-System
-- **D1** **Ripeness Score** ("wie gut sind die Daten *atomar* für diesen Track?"):
+
+- **D1** **Ripeness Score** ("wie gut sind die Daten _atomar_ für diesen Track?"):
   - **Track-Meta**: BPM, Key, Album, Genre, Cover, Artist, Title.
   - **Human-Tags**: Tags in Gruppen.
   - **Traktor-Meta**: play count, last played, rating (none|1-5), Vorkommen in Traktor-Playlists/Collection/Session-History.
   - **Regel: HUMAN TAGS > META TAGS** (Tags wiegen mehr als Metafelder).
 - **D2** **Tag-Punkte je Gruppe** (positionsbasiert): 1. Tag = **100**, 2. = **50**, 3. = **25**, 4. = **10**, 5. = **5**, ab 6. = **1**.
-  - Die Punkte hängen an der **Gruppe** (Multiset), **nicht** am einzelnen Tag: Löscht man den „100er"-Tag, verschwinden nicht 100, sondern die **niedrigste** Stufe der Gruppe. Beispiel: 2 Vibe-Tags = 150; entfernt man *einen* (egal welchen) → −50 (die „billigste" Stufe).
+  - Die Punkte hängen an der **Gruppe** (Multiset), **nicht** am einzelnen Tag: Löscht man den „100er"-Tag, verschwinden nicht 100, sondern die **niedrigste** Stufe der Gruppe. Beispiel: 2 Vibe-Tags = 150; entfernt man _einen_ (egal welchen) → −50 (die „billigste" Stufe).
   - Formel: `group_points(k) = Σ_{i=1..k} w_i` mit `w = [100,50,25,10,5,1,1,…]`.
 - **D3** **Similarity Score** (zwischen zwei Tracks) separat vom Ripeness (siehe C).
 - **D4** **Schwellwert-Option**: Tracks mit **Score > 500** in der Tag-Aufgabe **auslassen**.
 
 ### E — Traktor-Meta-Ingest (Voraussetzung für D1/E)
+
 - **E1** Pro User **`collection.nml`** importieren: play count, last played, rating, Playlists/Collection/Session-History.
 - **E2** Speicherung + Views fürs Scoring/„am häufigsten gespielt".
 
 ### F — Tägliche/wöchentliche Tag-Aufgabe
+
 - **F1** Ein Track gilt als **vollständig getaggt**, wenn **alle 5 klassifizierenden Gruppen** getaggt sind **oder** der User ihn als **fertig** markiert.
 - **F2** Die Aufgabe zeigt **am häufigsten gespielte Traktor-Tracks zuerst**, gemäß Scoring.
 - **F3** **Cadence**: täglich **und** wöchentlich (Reset/Rollover, Historie).
 - **F4** Option D4 (Score > 500 auslassen) hier anwenden.
 
 ### G — Engine-Integration
+
 - **G1** Ripeness + Similarity in **Digging** (Suche/Ähnlichkeit), **Overlap** und **Tag-Insights** nutzen.
 - **G2** Faktoren/Schwellen **konfigurierbar im Web-UI** (admin-Settings + pro Collective).
+- **G3** **Alle Gewichtungen, Verteilungen und Koeffizienten** sind als **Werte** im Hub hinterlegt (kein Hardcoding) und im UI **fine-tunebar**: Tag-Punkt-Vektor, Cross-Group-Bonus, Gewichte je Gruppe bzw. Tag-Typ (z. B. Rumpelkiste-Match zählt wenig, Mood-Match viel), `shared_weight` vs. `candidate_weight`, Similarity-Koeffizienten, Schwellen. Typed Setting-Keys mit Default + Validierung; pro Collective überschreibbar. → **T4-4** (#217).
 
 ---
 
@@ -89,15 +128,15 @@ SIM(a,b)     = Σ_over shared group g  w_g * cross_group_bonus
 
 ## 3. Datenmodell-Deltas (Skizze)
 
-| Migration | Inhalt |
-| --- | --- |
-| `hub_tag_groups.kind` + `role` | `ALTER TABLE hub_tag_groups ADD COLUMN kind TEXT NOT NULL DEFAULT 'class'; ADD COLUMN role TEXT NOT NULL DEFAULT '';` (Rollen: `rumpelkiste`, `setlist`, `genre`, `phase`) |
-| `hub_traktor_tracks` | `(user_id, track_id, play_count INT, last_played TEXT, rating INT, imported_at)` PK `(user_id, track_id)` |
-| `hub_traktor_playlists` / `_tracks` | Traktor-Playlists + Mitgliedschaft (für „Vorkommen in …") |
-| `hub_traktor_sessions` / `_tracks` | Session-History-Vorkommen |
-| `hub_track_tag_done` | `(user_id, track_id, marked_at)` – manuelles „fertig getaggt" |
-| `hub_tag_tasks` | `(user_id, cadence daily|weekly, period, track_id, status, created_at)` – Aufgabe/Cadence |
-| `hub_track_ripeness` (optional, cache) | `(track_id, ripeness REAL, computed_at)` – wenn On-the-fly zu teuer |
+| Migration                              | Inhalt                                                                                                                                                                     |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `hub_tag_groups.kind` + `role`         | `ALTER TABLE hub_tag_groups ADD COLUMN kind TEXT NOT NULL DEFAULT 'class'; ADD COLUMN role TEXT NOT NULL DEFAULT '';` (Rollen: `rumpelkiste`, `setlist`, `genre`, `phase`) |
+| `hub_traktor_tracks`                   | `(user_id, track_id, play_count INT, last_played TEXT, rating INT, imported_at)` PK `(user_id, track_id)`                                                                  |
+| `hub_traktor_playlists` / `_tracks`    | Traktor-Playlists + Mitgliedschaft (für „Vorkommen in …")                                                                                                                  |
+| `hub_traktor_sessions` / `_tracks`     | Session-History-Vorkommen                                                                                                                                                  |
+| `hub_track_tag_done`                   | `(user_id, track_id, marked_at)` – manuelles „fertig getaggt"                                                                                                              |
+| `hub_tag_tasks`                        | `(user_id, cadence daily                                                                                                                                                   | weekly, period, track_id, status, created_at)` – Aufgabe/Cadence |
+| `hub_track_ripeness` (optional, cache) | `(track_id, ripeness REAL, computed_at)` – wenn On-the-fly zu teuer                                                                                                        |
 
 Genre Variation/Haupt: **kein** neues Schema — nutzt `hub_tag_parents` (Variation → Haupt) im Genre-Kontext.
 
@@ -105,14 +144,14 @@ Genre Variation/Haupt: **kein** neues Schema — nutzt `hub_tag_parents` (Variat
 
 ## 4. Milestones (Vorschlag)
 
-| Milestone | Outcome | Migration |
-| --- | --- | --- |
-| `hub-tags-0.10.0` | Gruppen-Typen/Rollen, Genre Variation/Haupt, Tag-Seite: Gruppen-Filter + Tags anlegen | 026 |
-| `hub-insights-0.11.0` | Tag-Insights: Top-Artists, Co-Occurrence (same- & cross-group), Sprung/Discovery | — |
-| `hub-traktor-0.13.0` | Traktor-Meta-Ingest (playcount/rating/sessions) ins Hub | 027 |
-| `hub-scoring-0.12.0` | Ripeness-Score (Meta+Tags+Traktor), Tag-Punkte je Gruppe, konfigurierbar | 028 |
-| `hub-tasks-0.14.0` | Tägliche/wöchentliche Tag-Aufgabe + „fertig"-Markierung + Score>500-Skip | 029 |
-| `hub-sim-0.15.0` | Similarity v2 (Tag-Overlap cross-group, Rumpelkiste-Ausnahme), in Digging/Overlap | — |
+| Milestone             | Outcome                                                                               | Migration |
+| --------------------- | ------------------------------------------------------------------------------------- | --------- |
+| `hub-tags-0.10.0`     | Gruppen-Typen/Rollen, Genre Variation/Haupt, Tag-Seite: Gruppen-Filter + Tags anlegen | 026       |
+| `hub-insights-0.11.0` | Tag-Insights: Top-Artists, Co-Occurrence (same- & cross-group), Sprung/Discovery      | —         |
+| `hub-traktor-0.13.0`  | Traktor-Meta-Ingest (playcount/rating/sessions) ins Hub                               | 027       |
+| `hub-scoring-0.12.0`  | Ripeness-Score (Meta+Tags+Traktor), Tag-Punkte je Gruppe, konfigurierbar              | 028       |
+| `hub-tasks-0.14.0`    | Tägliche/wöchentliche Tag-Aufgabe + „fertig"-Markierung + Score>500-Skip              | 029       |
+| `hub-sim-0.15.0`      | Similarity v2 (Tag-Overlap cross-group, Rumpelkiste-Ausnahme), in Digging/Overlap     | —         |
 
 > Reihenfolge: `0.10 → 0.11 → 0.13 → 0.12 → 0.14 → 0.15` (Traktor vor Scoring, weil Scoring Traktor-Meta braucht).
 > `0.11` und `0.15` können parallel zu `0.13` laufen.
@@ -122,35 +161,42 @@ Genre Variation/Haupt: **kein** neues Schema — nutzt `hub_tag_parents` (Variat
 ## 5. Leaf-Issues (Backlog)
 
 ### Milestone `hub-tags-0.10.0`
-- **T1-1** `feat(hub): group kind/role columns + backfill` — Migration + `hub_tag_groups.kind/role`, Rumpelkiste/Setlist/Genre/Phase rollen. *(AC: Migration läuft frisch; `kind`/`role` in `list_groups_for`/`group_detail`; Test.)*
-- **T1-2** `feat(hub): tag-page group filter (multi)` — `/tags?groups=` mehrfach; server-side. *(AC: Filter kombiniert sich mit q/mine/owner/collective; Test.)*
-- **T1-3** `feat(hub): create tag from tag page` — Formular + `POST /tags/create` (Owner = aktueller User). *(AC: Tag erscheint, Group optional; Test.)*
-- **T1-4** `feat(hub): genre variation / main direction` — UI zum Setzen (Variation→Parent) + Anzeige; Import aus MMM falls vorhanden. *(AC: Relation persistiert; in Genre-Gruppe sichtbar; Test.)*
+
+- **T1-1** `feat(hub): group kind/role columns + backfill` — Migration + `hub_tag_groups.kind/role`, Rumpelkiste/Setlist/Genre/Phase rollen. _(AC: Migration läuft frisch; `kind`/`role` in `list_groups_for`/`group_detail`; Test.)_
+- **T1-2** `feat(hub): tag-page group filter (multi)` — `/tags?groups=` mehrfach; server-side. _(AC: Filter kombiniert sich mit q/mine/owner/collective; Test.)_
+- **T1-3** `feat(hub): create tag from tag page` — Formular + `POST /tags/create` (Owner = aktueller User). _(AC: Tag erscheint, Group optional; Test.)_
+- **T1-4** `feat(hub): genre variation / main direction` — UI zum Setzen (Variation→Parent) + Anzeige; Import aus MMM falls vorhanden. _(AC: Relation persistiert; in Genre-Gruppe sichtbar; Test.)_
 
 ### Milestone `hub-insights-0.11.0`
-- **T2-1** `feat(hub): tag insights — top artists` — aggregierte Artists je Tag auf `/tag/{id}`. *(AC: sortiert; Test.)*
-- **T2-2** `feat(hub): tag co-occurrence (same + cross group)` — Lift/Jaccard je Gruppe; Anzeige „kommt oft mit …". *(AC: Beispiel Mood Dark↔Vibe Warehouse sichtbar; Test.)*
-- **T2-3** `feat(hub): jump/discover from co-tag` — Links Tag→Tag sowie → `/overlap?tag=`/`/digging`. *(AC: Links erzeugen korrekte Auswahl; Test.)*
+
+- **T2-1** `feat(hub): tag insights — top artists` — aggregierte Artists je Tag auf `/tag/{id}`. _(AC: sortiert; Test.)_
+- **T2-2** `feat(hub): tag co-occurrence (same + cross group)` — Lift/Jaccard je Gruppe; Anzeige „kommt oft mit …". _(AC: Beispiel Mood Dark↔Vibe Warehouse sichtbar; Test.)_
+- **T2-3** `feat(hub): jump/discover from co-tag` — Links Tag→Tag sowie → `/overlap?tag=`/`/digging`. _(AC: Links erzeugen korrekte Auswahl; Test.)_
 
 ### Milestone `hub-traktor-0.13.0`
-- **T3-1** `feat(hub): traktor import CLI (collection.nml)` — Parse + Store playcount/lastplayed/rating. *(AC: Test mit Beispiel-NML.)*
-- **T3-2** `feat(hub): traktor playlists + sessions` — Membership + Session-History. *(AC: Views; Test.)*
-- **T3-3** `feat(hub): traktor meta views for scoring` — `v_track_traktor(track,playcount,lastplayed,rating,sessions)`. *(AC: View liefert Werte; Test.)*
+
+- **T3-1** `feat(hub): traktor import CLI (collection.nml)` — Parse + Store playcount/lastplayed/rating. _(AC: Test mit Beispiel-NML.)_
+- **T3-2** `feat(hub): traktor playlists + sessions` — Membership + Session-History. _(AC: Views; Test.)_
+- **T3-3** `feat(hub): traktor meta views for scoring` — `v_track_traktor(track,playcount,lastplayed,rating,sessions)`. _(AC: View liefert Werte; Test.)_
 
 ### Milestone `hub-scoring-0.12.0`
-- **T4-1** `feat(hub): ripeness score (meta+tags, human>meta)` — Kern-Algo + `hub_track_ripeness`-Cache/Endpoint. *(AC: `group_points` exakt lt. §2; Unit-Tests inkl. „Löschen entfernt niedrigste Stufe".)*
-- **T4-2** `feat(hub): traktor signal in ripeness` — playcount/lastplayed/rating/sessions einfließen. *(AC: Gewicht konfigurierbar; Test.)*
-- **T4-3** `feat(hub): scoring settings in UI` — `engine_*`-Keys erweitert (Weights, Threshold 500). *(AC: `/admin` editierbar; Test.)*
+
+- **T4-1** `feat(hub): ripeness score (meta+tags, human>meta)` — Kern-Algo + `hub_track_ripeness`-Cache/Endpoint. _(AC: `group_points` exakt lt. §2; Unit-Tests inkl. „Löschen entfernt niedrigste Stufe".)_
+- **T4-2** `feat(hub): traktor signal in ripeness` — playcount/lastplayed/rating/sessions einfließen. _(AC: Gewicht konfigurierbar; Test.)_
+- **T4-3** `feat(hub): scoring settings in UI` — `engine_*`-Keys erweitert (Weights, Threshold 500). _(AC: `/admin` editierbar; Test.)_
+- **T4-4** `feat(hub): engine params — all weights + distributions configurable` — zentrales Setting-Registry für **alle** Engine-Werte mit Default/Range/Validierung, editierbar im UI, pro Collective überschreibbar. _(AC: Registry listet jeden Parameter; Wertänderung wirkt; Test.)_
 
 ### Milestone `hub-tasks-0.14.0`
-- **T5-1** `feat(hub): track tagged-complete flag` — `hub_track_tag_done` + „fertig"-Button; Auto-Regel (alle 5 Klassifizierungsgruppen). *(AC: Zustand + Anzeige; Test.)*
-- **T5-2** `feat(hub): daily/weekly tagging task` — Queue (Traktor-playcount-first, Score<500), Cadence + Historie. *(AC: tägl./wöchentl. Liste; Test.)*
-- **T5-3** `feat(hub): tag-task UI` — Seite/Widget „Tagge jetzt" mit Track + Tag-Eingabe. *(AC: Aktion setzt Tags; Test.)*
+
+- **T5-1** `feat(hub): track tagged-complete flag` — `hub_track_tag_done` + „fertig"-Button; Auto-Regel (alle 5 Klassifizierungsgruppen). _(AC: Zustand + Anzeige; Test.)_
+- **T5-2** `feat(hub): daily/weekly tagging task` — Queue (Traktor-playcount-first, Score<500), Cadence + Historie. _(AC: tägl./wöchentl. Liste; Test.)_
+- **T5-3** `feat(hub): tag-task UI` — Seite/Widget „Tagge jetzt" mit Track + Tag-Eingabe. _(AC: Aktion setzt Tags; Test.)_
 
 ### Milestone `hub-sim-0.15.0`
-- **T6-1** `feat(hub): similarity v2 — tag overlap cross-group` — Boost je gemeinsamer Gruppe, cross-group stärker. *(AC: Tests mit Fixtures.)*
-- **T6-2** `feat(hub): rumpelkiste exception in similarity` — Rumpelkiste-Playlist-Kanten beim Vergleich ignorieren. *(AC: Test: Track nur via Rumpelkiste verknüpft zählt nicht.)*
-- **T6-3** `feat(hub): wire sim into digging/overlap` — Ripeness/Similarity in Digging-Score + Overlap-Ranking; konfigurierbar. *(AC: bestehende Tests grün + neue.)*
+
+- **T6-1** `feat(hub): similarity v2 — tag overlap cross-group` — Boost je gemeinsamer Gruppe, cross-group stärker. _(AC: Tests mit Fixtures.)_
+- **T6-2** `feat(hub): rumpelkiste exception in similarity` — Rumpelkiste-Playlist-Kanten beim Vergleich ignorieren. _(AC: Test: Track nur via Rumpelkiste verknüpft zählt nicht.)_
+- **T6-3** `feat(hub): wire sim into digging/overlap` — Ripeness/Similarity in Digging-Score + Overlap-Ranking; konfigurierbar. _(AC: bestehende Tests grün + neue.)_
 
 ---
 
