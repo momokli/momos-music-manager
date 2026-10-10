@@ -18,7 +18,7 @@ use tokio::net::TcpListener;
 use mmm_hub::config::Config;
 use mmm_hub::{
     analyze, analyzer, api, audio, db, features, freqblog, genres, ingest, mmm_import, pages,
-    settings, spotify, tags, web, worker,
+    settings, spotify, tags, traktor, web, worker,
 };
 
 #[derive(Parser)]
@@ -107,6 +107,27 @@ enum Command {
     Users,
     /// Insert deterministic demo data (no Spotify needed).
     SeedDemo,
+    /// Ingest public YouTube playlists for a user.
+    YoutubeIngest {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        channel_url: String,
+    },
+    /// Ingest public SoundCloud playlists for a user.
+    SoundcloudIngest {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        profile_url: String,
+    },
+    /// Import a Traktor collection.nml for a user (playcount/rating/playlists).
+    ImportTraktor {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        file: String,
+    },
 }
 
 #[tokio::main]
@@ -139,6 +160,13 @@ async fn main() -> Result<()> {
         Command::Query { sql } => cmd_query(cfg, &sql).await,
         Command::Users => cmd_users(cfg).await,
         Command::SeedDemo => cmd_seed_demo(cfg).await,
+        Command::YoutubeIngest { user, channel_url } => {
+            cmd_youtube_ingest(cfg, &user, &channel_url).await
+        }
+        Command::SoundcloudIngest { user, profile_url } => {
+            cmd_soundcloud_ingest(cfg, &user, &profile_url).await
+        }
+        Command::ImportTraktor { user, file } => cmd_import_traktor(cfg, &user, &file).await,
     }
 }
 
@@ -333,7 +361,11 @@ async fn cmd_freqblog(cfg: Config, limit: usize) -> Result<()> {
     let (processed, exhausted) = freqblog::backfill(&pool, &cfg, limit).await?;
     println!(
         "✓ {processed} Tracks verarbeitet{}",
-        if exhausted { " (Budget erreicht oder nichts mehr offen)" } else { "" }
+        if exhausted {
+            " (Budget erreicht oder nichts mehr offen)"
+        } else {
+            ""
+        }
     );
     Ok(())
 }
@@ -342,9 +374,7 @@ async fn cmd_analyze(cfg: Config, limit: usize) -> Result<()> {
     let pool = db::connect(&cfg.database_url).await?;
     let cfg = settings::overlay_config(&pool, cfg).await;
     let (emb_pending, an_pending) = analyze::pending_counts(&pool).await;
-    println!(
-        "Analyse: {emb_pending} ohne Embedding, {an_pending} ohne BPM/Key"
-    );
+    println!("Analyse: {emb_pending} ohne Embedding, {an_pending} ohne BPM/Key");
     let inproc = cfg.effnet_inprocess && audio::available() && cfg.effnet_model.is_some();
     if inproc {
         println!("Embeddings: in-process (Rust/ort).");
@@ -389,6 +419,21 @@ async fn cmd_import_mmm_tags(cfg: Config, db_path: &str, user: &str) -> Result<(
     println!(
         "✓ importiert: {} Gruppen, {} Tags, {} mit Playlist verlinkt, {} Parent-/Alias-Tags, {} Energy-Ränge, {} übersprungen",
         s.groups, s.tags, s.linked, s.parents, s.ranked, s.skipped
+    );
+    Ok(())
+}
+
+async fn cmd_import_traktor(cfg: Config, user: &str, file: &str) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    let uid: i64 = sqlx::query_scalar("SELECT id FROM hub_users WHERE slug = ?1 COLLATE NOCASE")
+        .bind(user)
+        .fetch_optional(&pool)
+        .await?
+        .context("user not found")?;
+    let s = traktor::import_nml(&pool, uid, file).await?;
+    println!(
+        "✓ Traktor: {} Einträge, {} gematcht, {} Playlists/Nodes",
+        s.entries, s.matched, s.playlists
     );
     Ok(())
 }
@@ -496,7 +541,9 @@ async fn cmd_seed_demo(cfg: Config) -> Result<()> {
     let pool = db::connect(&cfg.database_url).await?;
     ingest::seed_demo(&pool).await?;
     println!("✓ Demo-Daten eingefügt (momo, simon, jonas).");
-    println!("  Beispiel: mmm-hub query \"SELECT title, artists, user_ids FROM hub_v_shared_tracks\"");
+    println!(
+        "  Beispiel: mmm-hub query \"SELECT title, artists, user_ids FROM hub_v_shared_tracks\""
+    );
     Ok(())
 }
 
@@ -509,5 +556,27 @@ async fn cmd_users(cfg: Config) -> Result<()> {
     )
     .await?;
     print_table(&columns, &rows);
+    Ok(())
+}
+
+async fn cmd_youtube_ingest(cfg: Config, user: &str, channel_url: &str) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    println!(
+        "Ingesting YouTube public playlists for user {} from {}...",
+        user, channel_url
+    );
+    let summary = ingest::ingest_youtube_public(&pool, user, channel_url).await?;
+    println!("Done. Summary: {:?}", summary);
+    Ok(())
+}
+
+async fn cmd_soundcloud_ingest(cfg: Config, user: &str, profile_url: &str) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    println!(
+        "Ingesting SoundCloud public playlists for user {} from {}...",
+        user, profile_url
+    );
+    let summary = ingest::ingest_soundcloud_public(&pool, user, profile_url).await?;
+    println!("Done. Summary: {:?}", summary);
     Ok(())
 }

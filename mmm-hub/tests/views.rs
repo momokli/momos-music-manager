@@ -31,7 +31,10 @@ async fn migrations_run_cleanly_on_fresh_db() {
     .fetch_one(&app.pool)
     .await
     .unwrap();
-    assert_eq!(views, 5, "expected the overlap views + track-tags view");
+    assert_eq!(
+        views, 6,
+        "expected the overlap views + track-tags + traktor view"
+    );
 }
 
 /// `hub_v_shared_tracks` should return exactly the tracks present for >= 2
@@ -57,11 +60,7 @@ async fn shared_tracks_view_lists_exactly_the_cross_user_tracks() {
     assert_eq!(got.len(), 3, "exactly three shared tracks");
     assert_eq!(
         got,
-        vec![
-            (app.seed.t_all, 3),
-            (app.seed.t_two, 2),
-            (app.seed.t_pl, 2),
-        ]
+        vec![(app.seed.t_all, 3), (app.seed.t_two, 2), (app.seed.t_pl, 2),]
     );
 
     // The user-only tracks must not leak in.
@@ -101,12 +100,11 @@ async fn user_overlap_view_counts_pairwise_shared_tracks() {
 async fn track_playlists_view_has_one_row_per_membership() {
     let app = common::spawn().await;
 
-    let mut rows: Vec<(i64, i64, i64)> = sqlx::query_as(
-        "SELECT track_id, user_id, playlist_id FROM hub_v_track_playlists",
-    )
-    .fetch_all(&app.pool)
-    .await
-    .unwrap();
+    let mut rows: Vec<(i64, i64, i64)> =
+        sqlx::query_as("SELECT track_id, user_id, playlist_id FROM hub_v_track_playlists")
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
     rows.sort();
 
     assert_eq!(rows.len(), 4, "exactly four memberships");

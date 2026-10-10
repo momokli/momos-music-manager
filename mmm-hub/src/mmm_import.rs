@@ -40,14 +40,13 @@ pub struct Summary {
 
 /// Import categories + tags from `mmm_db` into the hub user `user_slug`.
 pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Result<Summary> {
-    let user_id: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM hub_users WHERE slug = ?1 COLLATE NOCASE LIMIT 1",
-    )
-    .bind(user_slug)
-    .fetch_optional(hub)
-    .await
-    .ok()
-    .flatten();
+    let user_id: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM hub_users WHERE slug = ?1 COLLATE NOCASE LIMIT 1")
+            .bind(user_slug)
+            .fetch_optional(hub)
+            .await
+            .ok()
+            .flatten();
     let Some(user_id) = user_id else {
         bail!("hub user '{user_slug}' not found");
     };
@@ -84,12 +83,11 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
     }
 
     // Tags.
-    let tag_rows = sqlx::query_as::<_, (String, i64)>(
-        "SELECT name, category_id FROM tags ORDER BY name",
-    )
-    .fetch_all(&mmm)
-    .await
-    .context("read tags")?;
+    let tag_rows =
+        sqlx::query_as::<_, (String, i64)>("SELECT name, category_id FROM tags ORDER BY name")
+            .fetch_all(&mmm)
+            .await
+            .context("read tags")?;
 
     for (name, mmm_cat_id) in tag_rows {
         // Skip names with no alphanumerics (e.g. pure-emoji) — they have no slug.

@@ -24,6 +24,8 @@ pub mod settings;
 pub mod similar;
 pub mod spotify;
 pub mod tags;
+pub mod traktor;
 pub mod ui;
 pub mod web;
 pub mod worker;
+pub mod ytdlp;
