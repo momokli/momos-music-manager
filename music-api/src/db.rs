@@ -159,25 +159,41 @@ pub async fn create_order(
     pool: &Pool<Sqlite>,
     order_id: &str,
     isrcs: &[String],
+    priority: i64,
 ) -> anyhow::Result<()> {
     let ts = now();
     let mut tx = pool.begin().await?;
 
-    sqlx::query("INSERT INTO orders (id, status, created_at, updated_at) VALUES (?, 'open', ?, ?)")
-        .bind(order_id)
+    sqlx::query(
+        "INSERT INTO orders (id, status, priority, created_at, updated_at)
+         VALUES (?, 'open', ?, ?, ?)",
+    )
+    .bind(order_id)
+    .bind(priority)
+    .bind(ts)
+    .bind(ts)
+    .execute(&mut *tx)
+    .await?;
+
+    for isrc in isrcs {
+        sqlx::query(
+            "INSERT OR IGNORE INTO tracks (isrc, state, priority, created_at, updated_at)
+             VALUES (?, 'pending', ?, ?, ?)",
+        )
+        .bind(isrc)
+        .bind(priority)
         .bind(ts)
         .bind(ts)
         .execute(&mut *tx)
         .await?;
-
-    for isrc in isrcs {
+        // A re-order with a higher priority should bump an existing pending row.
         sqlx::query(
-            "INSERT OR IGNORE INTO tracks (isrc, state, created_at, updated_at)
-             VALUES (?, 'pending', ?, ?)",
+            "UPDATE tracks SET priority = MAX(priority, ?), updated_at = ?
+              WHERE isrc = ? AND state = 'pending'",
         )
+        .bind(priority)
+        .bind(ts)
         .bind(isrc)
-        .bind(ts)
-        .bind(ts)
         .execute(&mut *tx)
         .await?;
 
