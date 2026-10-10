@@ -7,11 +7,11 @@
 use std::collections::{HashMap, HashSet};
 
 use askama::Template;
+use axum::Router;
 use axum::extract::{Form, Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use serde::Deserialize;
 use sqlx::{QueryBuilder, Row};
 
@@ -48,7 +48,10 @@ pub fn router(state: AppState) -> Router {
         .route("/collectives/{id}/join", post(collective_join))
         .route("/collectives/{id}/leave", post(collective_leave))
         .route("/collectives/{id}/member", post(collective_set_member))
-        .route("/collectives/{id}/member/remove", post(collective_remove_member))
+        .route(
+            "/collectives/{id}/member/remove",
+            post(collective_remove_member),
+        )
         .route("/collectives/{id}/delete", post(collective_delete))
         .route("/digging", get(digging_page))
         .route("/digging/enrich", post(digging_enrich))
@@ -59,6 +62,8 @@ pub fn router(state: AppState) -> Router {
         .route("/playlist/{id}/tag", post(playlist_tag))
         .route("/playlist/{id}/tag/add", post(playlist_tag_add))
         .route("/playlist/{id}/tag/remove", post(playlist_tag_remove))
+        .route("/playlist/{id}/order", post(playlist_order))
+        .route("/playlist/{id}/download", get(playlist_download))
         .with_state(state)
 }
 
@@ -209,11 +214,12 @@ async fn user_page(
         return not_found("User nicht gefunden.");
     };
 
-    let liked_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_liked_tracks WHERE user_id = ?1")
-        .bind(user_id)
-        .fetch_one(&st.pool)
-        .await
-        .unwrap_or(0);
+    let liked_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM hub_liked_tracks WHERE user_id = ?1")
+            .bind(user_id)
+            .fetch_one(&st.pool)
+            .await
+            .unwrap_or(0);
 
     let rows = sqlx::query(
         "SELECT p.id, p.name,
@@ -274,6 +280,8 @@ struct PlaylistPage {
     feeds: Vec<TagFeed>,
     /// The current user's tags, for the picker.
     my_tags: Vec<TagOption>,
+    /// Whether the music-api service is configured (download/order buttons).
+    music_api: bool,
 }
 
 struct TagFeed {
@@ -370,7 +378,173 @@ async fn playlist_page(
         tracks,
         feeds,
         my_tags,
+        music_api: st.cfg.music_api_token.is_some(),
     })
+}
+
+#[derive(Deserialize)]
+struct DownloadQuery {
+    format: Option<String>,
+}
+
+fn sanitize_filename(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// Build a ZIP of a playlist's tracks that `music-api` can currently serve.
+async fn build_playlist_zip(
+    cfg: &crate::config::Config,
+    tracks: &[sqlx::sqlite::SqliteRow],
+    format: &str,
+    path: &std::path::Path,
+) -> anyhow::Result<usize> {
+    use std::io::Write;
+    let file = std::fs::File::create(path)?;
+    let mut zw = zip::ZipWriter::new(file);
+    let opts =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut used: HashSet<String> = HashSet::new();
+    let mut n = 0usize;
+    for r in tracks {
+        let isrc = r
+            .get::<Option<String>, _>("isrc")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if isrc.is_empty() {
+            continue;
+        }
+        let bytes = match crate::music_api::file_bytes(cfg, &isrc, format).await {
+            Ok(b) => b,
+            Err(_) => continue, // not downloaded / not in ledger yet
+        };
+        let artists = r.get::<Option<String>, _>("artists").unwrap_or_default();
+        let title = r.get::<Option<String>, _>("title").unwrap_or_default();
+        let base = sanitize_filename(&format!("{artists} - {title}"));
+        let base = if base.is_empty() { isrc.clone() } else { base };
+        let mut name = format!("{base}.{format}");
+        let mut i = 2;
+        while used.contains(&name) {
+            name = format!("{base} ({i}).{format}");
+            i += 1;
+        }
+        used.insert(name.clone());
+        zw.start_file(name, opts)?;
+        zw.write_all(&bytes)?;
+        n += 1;
+    }
+    zw.finish()?;
+    Ok(n)
+}
+
+/// `GET /playlist/{id}/download[?format=flac]` — stream a ZIP of the playlist's
+/// music-api-ready tracks.
+async fn playlist_download(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<DownloadQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if crate::ui::nav(&st, &headers, "playlist").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    let fmt = q.format.unwrap_or_else(|| "flac".into());
+    let format = if !fmt.is_empty() && fmt.chars().all(|c| c.is_ascii_alphanumeric()) {
+        fmt
+    } else {
+        "flac".to_string()
+    };
+
+    let name: Option<String> = sqlx::query_scalar("SELECT name FROM hub_playlists WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(&st.pool)
+        .await
+        .ok()
+        .flatten();
+    let Some(name) = name else {
+        return not_found("Playlist nicht gefunden.");
+    };
+
+    let tracks = sqlx::query(
+        "SELECT t.isrc, t.title, t.artists FROM hub_playlist_tracks hpt
+           JOIN hub_tracks t ON t.id = hpt.track_id
+          WHERE hpt.playlist_id = ?1 ORDER BY hpt.position",
+    )
+    .bind(id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
+    let tmp = std::env::temp_dir().join(format!(
+        "hub-pl-{id}-{}.zip",
+        crate::spotify::random_token()
+    ));
+    let count = match build_playlist_zip(&st.cfg, &tracks, &format, &tmp).await {
+        Ok(n) => n,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("ZIP: {e}")).into_response(),
+    };
+    if count == 0 {
+        let _ = std::fs::remove_file(&tmp);
+        return (
+            StatusCode::BAD_GATEWAY,
+            "Keine Dateien über music-api verfügbar (erst ordern).",
+        )
+            .into_response();
+    }
+
+    let file = match tokio::fs::File::open(&tmp).await {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("open: {e}")).into_response(),
+    };
+    // Unlink now — on Linux the open fd stays valid, so the temp file is cleaned
+    // up when the stream finishes.
+    let _ = std::fs::remove_file(&tmp);
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let filename = format!("{}.zip", sanitize_filename(&name));
+    Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/zip")
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// `POST /playlist/{id}/order` — order all of the playlist's ISRCs at music-api.
+async fn playlist_order(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((_uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let isrcs: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT t.isrc FROM hub_playlist_tracks hpt
+           JOIN hub_tracks t ON t.id = hpt.track_id
+          WHERE hpt.playlist_id = ?1 AND t.isrc IS NOT NULL AND t.isrc <> ''",
+    )
+    .bind(id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+    let msg = if isrcs.is_empty() {
+        "Keine ISRCs in dieser Playlist".to_string()
+    } else {
+        match crate::music_api::order(&st.cfg, &isrcs).await {
+            Ok(oid) => format!("{} ISRCs bestellt (Order {oid})", isrcs.len()),
+            Err(e) => format!("music-api Fehler: {e}"),
+        }
+    };
+    flash_redirect(&format!("/playlist/{id}"), msg)
 }
 
 #[derive(Deserialize)]
@@ -527,11 +701,7 @@ fn opt_cmp(a: Option<f64>, b: Option<f64>, desc: bool) -> std::cmp::Ordering {
     match (a, b) {
         (Some(x), Some(y)) => {
             let o = x.partial_cmp(&y).unwrap_or(Ordering::Equal);
-            if desc {
-                o.reverse()
-            } else {
-                o
-            }
+            if desc { o.reverse() } else { o }
         }
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
@@ -765,7 +935,10 @@ async fn tagged_track_ids(
     needle: &str,
 ) -> HashSet<i64> {
     let mut set = HashSet::new();
-    let tag_ids: Vec<i64> = crate::tags::matching_tag_ids(pool, needle).await.into_iter().collect();
+    let tag_ids: Vec<i64> = crate::tags::matching_tag_ids(pool, needle)
+        .await
+        .into_iter()
+        .collect();
     if tag_ids.is_empty() {
         return set;
     }
@@ -800,12 +973,11 @@ async fn overlap_page(
         return Redirect::to("/login").into_response();
     };
 
-    let all_users = sqlx::query_as::<_, (i64, String)>(
-        "SELECT id, slug FROM hub_users ORDER BY slug",
-    )
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default();
+    let all_users =
+        sqlx::query_as::<_, (i64, String)>("SELECT id, slug FROM hub_users ORDER BY slug")
+            .fetch_all(&st.pool)
+            .await
+            .unwrap_or_default();
     let slug_of: HashMap<i64, String> = all_users.iter().cloned().collect();
 
     let scope = match q.scope.as_deref() {
@@ -819,7 +991,10 @@ async fn overlap_page(
     let bpm_min_raw = q.bpm_min.clone().unwrap_or_default().trim().to_string();
     let bpm_max_raw = q.bpm_max.clone().unwrap_or_default().trim().to_string();
     let key = q.key.clone().unwrap_or_default().trim().to_string();
-    let key_harmonic = matches!(q.key_harmonic.as_deref(), Some("1") | Some("on") | Some("true"));
+    let key_harmonic = matches!(
+        q.key_harmonic.as_deref(),
+        Some("1") | Some("on") | Some("true")
+    );
     let bpm_min = bpm_min_raw.parse::<f64>().ok();
     let bpm_max = bpm_max_raw.parse::<f64>().ok();
     let q_text = q.q.clone().unwrap_or_default().trim().to_string();
@@ -927,10 +1102,11 @@ async fn overlap_page(
     let mut rows: Vec<CompareRow> = Vec::new();
     let mut pair_counts: HashMap<(i64, i64), i64> = HashMap::new();
     for (tid, t) in acc {
-        let (bpm_opt, camelot, energy_opt) = audio
-            .get(&tid)
-            .cloned()
-            .unwrap_or((None, String::new(), None));
+        let (bpm_opt, camelot, energy_opt) =
+            audio
+                .get(&tid)
+                .cloned()
+                .unwrap_or((None, String::new(), None));
         // BPM range filter: a set range excludes tracks without BPM data.
         if bpm_min.is_some() || bpm_max.is_some() {
             match bpm_opt {
@@ -1030,11 +1206,7 @@ async fn overlap_page(
             "key" => match (camelot_rank(&a.key), camelot_rank(&b.key)) {
                 (Some(x), Some(y)) => {
                     let o = x.cmp(&y);
-                    if desc {
-                        o.reverse()
-                    } else {
-                        o
-                    }
+                    if desc { o.reverse() } else { o }
                 }
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -1042,12 +1214,8 @@ async fn overlap_page(
             },
             _ => {
                 let o = a.present_count.cmp(&b.present_count);
-                if desc {
-                    o.reverse()
-                } else {
-                    o
-                }
-            },
+                if desc { o.reverse() } else { o }
+            }
         };
         ord.then_with(|| a.artists.cmp(&b.artists))
             .then_with(|| a.title.cmp(&b.title))
@@ -1151,7 +1319,11 @@ async fn overlap_page(
 
     let sort_link = |field: &str| -> SortLink {
         let active = sort == field;
-        let next_dir = if active && dir == "asc" { "desc" } else { "asc" };
+        let next_dir = if active && dir == "asc" {
+            "desc"
+        } else {
+            "asc"
+        };
         let mut f = filters.clone();
         f.sort = field.to_string();
         f.dir = next_dir.to_string();
@@ -1235,12 +1407,18 @@ async fn overlap_enrich(State(st): State<AppState>, headers: HeaderMap, body: St
         return Redirect::to("/login").into_response();
     }
     let p = form_params(&body);
-    let get = |k: &str| p.get(k).and_then(|v| v.first()).cloned().unwrap_or_default();
+    let get = |k: &str| {
+        p.get(k)
+            .and_then(|v| v.first())
+            .cloned()
+            .unwrap_or_default()
+    };
 
-    let all_users = sqlx::query_as::<_, (i64, String)>("SELECT id, slug FROM hub_users ORDER BY slug")
-        .fetch_all(&st.pool)
-        .await
-        .unwrap_or_default();
+    let all_users =
+        sqlx::query_as::<_, (i64, String)>("SELECT id, slug FROM hub_users ORDER BY slug")
+            .fetch_all(&st.pool)
+            .await
+            .unwrap_or_default();
     let scope = match get("scope").as_str() {
         "owned" => "owned",
         "followed" => "followed",
@@ -1432,7 +1610,10 @@ async fn similar_page(
         let mut by_spotify: HashMap<&str, HashSet<i64>> = HashMap::new();
         for e in &entries {
             if !e.spotify_id.is_empty() {
-                by_spotify.entry(e.spotify_id.as_str()).or_default().insert(e.uid);
+                by_spotify
+                    .entry(e.spotify_id.as_str())
+                    .or_default()
+                    .insert(e.uid);
             }
         }
         let shared_ids: HashSet<&str> = by_spotify
@@ -1851,7 +2032,13 @@ async fn digging_page(
             .await
             .ok()
             .flatten();
-            let seed_artist = seed.artists.split(',').next().unwrap_or("").trim().to_string();
+            let seed_artist = seed
+                .artists
+                .split(',')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
             seed_tag_ids = sqlx::query_scalar::<_, i64>(
                 "SELECT tag_id FROM hub_track_resolved_tags WHERE track_id = ?1",
             )
@@ -1985,24 +2172,14 @@ async fn digging_page(
             r.tag_weight = r
                 .tags
                 .iter()
-                .map(|t| {
-                    t.groups
-                        .iter()
-                        .map(|g| g.weight)
-                        .fold(0.0_f64, f64::max)
-                })
+                .map(|t| t.groups.iter().map(|g| g.weight).fold(0.0_f64, f64::max))
                 .sum();
             // Seed↔candidate agreement: only tags the seed also has.
             r.shared_weight = r
                 .tags
                 .iter()
                 .filter(|t| seed_tag_ids.contains(&t.id))
-                .map(|t| {
-                    t.groups
-                        .iter()
-                        .map(|g| g.weight)
-                        .fold(0.0_f64, f64::max)
-                })
+                .map(|t| t.groups.iter().map(|g| g.weight).fold(0.0_f64, f64::max))
                 .sum();
         }
     }
@@ -2105,7 +2282,12 @@ async fn digging_page(
         if !towner.is_empty() && !r.tags.iter().any(|t| t.owner.eq_ignore_ascii_case(&towner)) {
             return false;
         }
-        if tgroup != 0 && !r.tags.iter().any(|t| t.groups.iter().any(|g| g.id == tgroup)) {
+        if tgroup != 0
+            && !r
+                .tags
+                .iter()
+                .any(|t| t.groups.iter().any(|g| g.id == tgroup))
+        {
             return false;
         }
         if !powner.is_empty()
@@ -2265,17 +2447,18 @@ async fn digging_page(
         }
     })
     .collect();
-    let pl_owner_opts: Vec<SelOpt> = sqlx::query_scalar::<_, String>("SELECT slug FROM hub_users ORDER BY slug")
-        .fetch_all(&st.pool)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|slug| SelOpt {
-            selected: slug.eq_ignore_ascii_case(&powner),
-            label: format!("@{slug}"),
-            value: slug,
-        })
-        .collect();
+    let pl_owner_opts: Vec<SelOpt> =
+        sqlx::query_scalar::<_, String>("SELECT slug FROM hub_users ORDER BY slug")
+            .fetch_all(&st.pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|slug| SelOpt {
+                selected: slug.eq_ignore_ascii_case(&powner),
+                label: format!("@{slug}"),
+                value: slug,
+            })
+            .collect();
 
     let reset_href = {
         let mut s = format!("/digging?seed={seed_id}");
@@ -2403,16 +2586,17 @@ async fn admin_page(
         })
         .collect();
     let registration_open = crate::settings::registration_open(&st.pool).await;
-    let users = sqlx::query_as::<_, (String, i64)>("SELECT slug, is_admin FROM hub_users ORDER BY slug")
-        .fetch_all(&st.pool)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(slug, admin)| AdminUser {
-            slug,
-            is_admin: admin == 1,
-        })
-        .collect();
+    let users =
+        sqlx::query_as::<_, (String, i64)>("SELECT slug, is_admin FROM hub_users ORDER BY slug")
+            .fetch_all(&st.pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(slug, admin)| AdminUser {
+                slug,
+                is_admin: admin == 1,
+            })
+            .collect();
 
     render(&AdminPage {
         nav,
@@ -2455,7 +2639,8 @@ async fn admin_save(
     )
     .await;
 
-    Redirect::to("/admin?msg=Gespeichert%20%E2%80%94%20Keys%20greifen%20nach%20Neustart").into_response()
+    Redirect::to("/admin?msg=Gespeichert%20%E2%80%94%20Keys%20greifen%20nach%20Neustart")
+        .into_response()
 }
 
 // ── tags (resolved playlist layer) ──────────────────────────────────────────
@@ -2671,11 +2856,7 @@ async fn tag_detail_page(
     let tracks = d
         .tracks
         .into_iter()
-        .map(|(id, title, artists)| TagTrack {
-            id,
-            title,
-            artists,
-        })
+        .map(|(id, title, artists)| TagTrack { id, title, artists })
         .collect();
     let is_owner = d.owner.eq_ignore_ascii_case(&nav.slug);
     let parents: Vec<GroupRef> = crate::tags::tag_parents_of(&st.pool, id)
@@ -3066,7 +3247,6 @@ struct GroupTag {
     id: i64,
     name: String,
     owner: String,
-    rank: Option<i64>,
     rank_disp: String,
 }
 
@@ -3122,7 +3302,6 @@ async fn group_page(
             id,
             name,
             owner,
-            rank,
             rank_disp: rank
                 .map(|r| r.to_string())
                 .unwrap_or_else(|| "—".to_string()),
@@ -3186,7 +3365,12 @@ async fn group_set_collective(
     let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
-    let cid = f.collective_id.trim().parse::<i64>().ok().filter(|p| *p != 0);
+    let cid = f
+        .collective_id
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|p| *p != 0);
     let _ = crate::tags::set_group_collective(&st.pool, uid, id, cid).await;
     Redirect::to(&format!("/groups/{id}")).into_response()
 }

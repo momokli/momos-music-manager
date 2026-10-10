@@ -24,6 +24,8 @@ dotenvy = "0.15"
 bcrypt = "0.15"
 askama = "0.14"
 libc = "0.2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tokio-util = { version = "0.7", features = ["io"] }
 
 # EffNet audio embeddings (Discogs-EffNet via ONNX Runtime). Optional so the
 # default/CI build stays light; enable with `--features effnet`.

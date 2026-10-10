@@ -67,7 +67,31 @@ content %}
     {% endif %}
 </section>
 
-{% if tracks.is_empty() %}
+{% if music_api %}
+<section
+    class="hub-actions"
+    aria-label="music-api"
+    style="display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center"
+>
+    <form method="post" action="/playlist/{{ id }}/order">
+        <button type="submit">Fehlende ordern (music-api)</button>
+    </form>
+    <form
+        method="get"
+        action="/playlist/{{ id }}/download"
+        style="display: inline-flex; gap: 0.3rem; align-items: center"
+    >
+        <select name="format" aria-label="Format">
+            <option value="flac">flac</option>
+            <option value="mp3">mp3</option>
+            <option value="wav">wav</option>
+            <option value="m4a">m4a</option>
+        </select>
+        <button type="submit" class="secondary">Playlist als ZIP laden</button>
+    </form>
+    <span class="hub-muted">Lädt alle bereits vorhandenen Tracks als ZIP.</span>
+</section>
+{% endif %} {% if tracks.is_empty() %}
 <p>Keine Tracks in dieser Playlist.</p>
 {% else %}
 <div class="overflow-auto">

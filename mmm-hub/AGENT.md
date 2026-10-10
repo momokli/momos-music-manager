@@ -22,17 +22,17 @@ Users (all admins): `momo`, `Mctoastus`, `ANKD`.
 
 ## 2. Access & hosts
 
-| Thing | Value |
-| --- | --- |
-| Deploy host | `ssh music-catalog` (alias in `~/.ssh/config`) = **192.168.178.200** |
-| LAN jump host | `ssh lan` (Caddy + public reachability live here) |
-| Public URL | **https://hub.zukkafabrik.de** (behind Caddy on `lan`) |
-| App dir on server | `/home/momo/mmm-hub` |
-| Live DB | `/home/momo/mmm-hub/hub.db` (+ `-wal`/`-shm`) |
-| Sanitized copy | `hub-public.db` → Datasette `data.zukkafabrik.de`, SchemaSpy `schema.zukkafabrik.de` |
-| systemd unit | `mmm-hub` (`sudo systemctl restart mmm-hub`) |
-| Audio analyzer | Essentia service on `.200:8711` (`deploy/analyzer/`) |
-| Git remote | `github` → `github.com:momokli/momos-music-manager.git` |
+| Thing             | Value                                                                                |
+| ----------------- | ------------------------------------------------------------------------------------ |
+| Deploy host       | `ssh music-catalog` (alias in `~/.ssh/config`) = **192.168.178.200**                 |
+| LAN jump host     | `ssh lan` (Caddy + public reachability live here)                                    |
+| Public URL        | **https://hub.zukkafabrik.de** (behind Caddy on `lan`)                               |
+| App dir on server | `/home/momo/mmm-hub`                                                                 |
+| Live DB           | `/home/momo/mmm-hub/hub.db` (+ `-wal`/`-shm`)                                        |
+| Sanitized copy    | `hub-public.db` → Datasette `data.zukkafabrik.de`, SchemaSpy `schema.zukkafabrik.de` |
+| systemd unit      | `mmm-hub` (`sudo systemctl restart mmm-hub`)                                         |
+| Audio analyzer    | Essentia service on `.200:8711` (`deploy/analyzer/`)                                 |
+| Git remote        | `github` → `github.com:momokli/momos-music-manager.git`                              |
 
 Login for smoke tests: `Mctoastus` / `1234` (also `momo`, `ANKD`; passwords may differ).
 
@@ -144,7 +144,7 @@ Web (session-gated): `/`, `/login`, `/signup`, `/logout`, `/me/playlists`, `/sea
 `member/remove`, `collective`, `delete`), `/collectives`, `/collectives/create`,
 `/collectives/{id}` (+ `update`, `join`, `leave`, `member`, `member/remove`, `delete`),
 `/digging` (+ `POST /digging/enrich`), `/admin`, `/settings`, `/user/{slug}`,
-`/playlist/{id}` (+ `tag`, `tag/add`, `tag/remove`), `/sql`.
+`/playlist/{id}` (+ `tag`, `tag/add`, `tag/remove`, `POST order`, `GET download`), `/sql`.
 
 JSON API: `GET /api/hub/{health,users,me,tracks/{id},overlap,playlists}`, `POST /api/hub/query`,
 `POST /api/hub/services/{service}/sync`, `GET /api/hub/services/{service}/connect`,
@@ -172,19 +172,29 @@ JSON API: `GET /api/hub/{health,users,me,tracks/{id},overlap,playlists}`, `POST 
   `tag_energy_levels`. **A tag has NO ranking of its own — only via its group.**
 
 ### Ranking engine (digging)
+
 - Sources: **Hub-intern** (co-occurrence in seed's playlists), **ReccoBeats** (recommendations),
   **cosine.club**, **Last.fm**, **Audio** (EffNet neighbors). Fetched **concurrently**.
 - Signals per candidate: `shared_weight` (Σ group weights of tags **shared with the seed**),
   `candidate_weight` (Σ group weights of the candidate's **own** tags), plus base counts
   (users/playlists/likes/sources).
 - Formula: `score = users·base_users + playlists·base_playlists + likes·base_likes +
-  sources·base_sources + shared·shared_factor + candidate·candidate_factor`.
+sources·base_sources + shared·shared_factor + candidate·candidate_factor`.
 - **All factors configurable at `/admin`** (`settings::ENGINE_*`; `settings::engine()` loads
   them live per request). `engine_parent_match` (1/0) expands seed tags to ancestors/descendants.
 - Digging filters: `mine`, `bpm`+`tol` (absolute BPM tolerance), `harm`, `towner`, `tgroup`,
   `powner`, `tag` (hierarchy-aware), `wmin` (min candidate tag weight).
 - On-demand enrichment: `POST /overlap/enrich` and `POST /digging/enrich` queue tracks;
   worker drains ReccoBeats first (fast) then a **separate bounded FreqBlog loop** (slow, paid).
+
+### music-api (whole-playlist download)
+
+- The playlist page (`music_api` token configured) shows **„Fehlende ordern"**
+  (`POST /playlist/{id}/order` → `music_api::order` with the playlist's distinct ISRCs) and
+  **„Playlist als ZIP laden"** (`GET /playlist/{id}/download?format=flac`).
+- Download builds a ZIP of all tracks music-api can currently serve
+  (`GET /isrc/{isrc}/{format}` per track, misses skipped), then streams it (temp file is
+  unlinked before streaming — Linux fd stays valid). `format` ∈ flac/mp3/wav/m4a.
 
 ---
 
@@ -229,7 +239,7 @@ Idempotent. Imports: categories→groups, tags (+playlist link), `tag_parents`, 
 ## 10. Gotchas (learned the hard way)
 
 - **askama `==` inside an HTML attribute tag** breaks the build (`failed to parse template
-  source`). Precompute a bool field in Rust (e.g. `selected`/`active`) and use `{% if x.y %}`.
+source`). Precompute a bool field in Rust (e.g. `selected`/`active`) and use `{% if x.y %}`.
 - **SQLite bind-variable limit**: `IN (…)` with huge id lists silently fails. **Chunk** them
   (we use 300–900 per chunk; see `dig_details`, `tagged_track_ids`, `enroll`, `similar`).
 - **N+1 kills the page**: batch presence/tags (`dig_details`, `digging::presence_many`) and

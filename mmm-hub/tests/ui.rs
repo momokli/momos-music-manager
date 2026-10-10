@@ -768,7 +768,10 @@ async fn ranked_group_orders_tags_and_shows_rank() {
     assert!(html.contains("Ranked-Gruppe"));
     let i_start = html.find("start").unwrap();
     let i_peak = html.find("peak").unwrap();
-    assert!(i_start < i_peak, "rank 1 (start) sorts before rank 5 (peak)");
+    assert!(
+        i_start < i_peak,
+        "rank 1 (start) sorts before rank 5 (peak)"
+    );
 
     // Tag page shows the rank.
     let tp = app
@@ -779,6 +782,50 @@ async fn ranked_group_orders_tags_and_shows_rank() {
         .await
         .unwrap();
     assert!(body(tp).await.contains("Rang 1"));
+}
+
+#[tokio::test]
+async fn playlist_music_api_controls_and_endpoints() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // Give one playlist track an ISRC so the endpoints do real work.
+    sqlx::query("UPDATE hub_tracks SET isrc = 'USABC1234567' WHERE id = ?1")
+        .bind(app.seed.t_all)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+
+    // music-api is unconfigured in tests -> controls hidden on the playlist page.
+    let page = app
+        .client()
+        .get(app.url(&format!("/playlist/{}", app.seed.pl_alice)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), reqwest::StatusCode::OK);
+    assert!(!body(page).await.contains("Fehlende ordern"));
+
+    // Order endpoint redirects (music-api unconfigured -> error flash).
+    let order = app
+        .client()
+        .post(app.url(&format!("/playlist/{}/order", app.seed.pl_alice)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(order.status(), reqwest::StatusCode::SEE_OTHER);
+
+    // Download endpoint: nothing fetchable -> 502 (no files available).
+    let dl = app
+        .client()
+        .get(app.url(&format!("/playlist/{}/download", app.seed.pl_alice)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dl.status(), reqwest::StatusCode::BAD_GATEWAY);
 }
 
 #[tokio::test]
@@ -796,7 +843,10 @@ async fn toggle_returns_row_fragment_for_htmx() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let html = body(resp).await;
-    assert!(html.trim_start().starts_with("<tr"), "expected a row fragment");
+    assert!(
+        html.trim_start().starts_with("<tr"),
+        "expected a row fragment"
+    );
     assert!(html.contains("Deep House"));
 }
 
@@ -860,9 +910,15 @@ async fn track_page_distinguishes_owned_and_followed_playlists() {
     assert!(html.contains("Deep House"));
     assert!(html.contains("hub-tag-own"), "own tag missing");
     assert!(html.contains("hub-tag-follow"), "followed tag missing");
-    assert!(html.contains("@alice") && html.contains("@bob"), "user rows missing");
+    assert!(
+        html.contains("@alice") && html.contains("@bob"),
+        "user rows missing"
+    );
     // Guard against unrendered askama placeholders leaking as literal text.
-    assert!(!html.contains("{u."), "unrendered askama placeholder leaked");
+    assert!(
+        !html.contains("{u."),
+        "unrendered askama placeholder leaked"
+    );
 }
 
 #[tokio::test]
@@ -880,7 +936,10 @@ async fn playlist_detail_shows_both_owners() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let html = body(resp).await;
     assert!(html.contains("@alice"), "hub user missing");
-    assert!(html.contains("Spotify-Besitzer: Alice"), "spotify owner missing");
+    assert!(
+        html.contains("Spotify-Besitzer: Alice"),
+        "spotify owner missing"
+    );
 }
 
 #[tokio::test]
@@ -941,9 +1000,11 @@ async fn collective_members_are_contributors() {
         .unwrap();
 
     // Bob isn't in the collective yet -> no role on the group.
-    assert!(mmm_hub::tags::effective_role_of(&app.pool, app.seed.bob, g)
-        .await
-        .is_none());
+    assert!(
+        mmm_hub::tags::effective_role_of(&app.pool, app.seed.bob, g)
+            .await
+            .is_none()
+    );
 
     // Add him to the *collective* -> contributor on the group.
     mmm_hub::tags::set_collective_member(&app.pool, app.seed.alice, col, "bob", "member")
@@ -956,10 +1017,12 @@ async fn collective_members_are_contributors() {
         Some("contributor")
     );
     assert!(mmm_hub::tags::can_contribute(&app.pool, app.seed.bob, g).await);
-    assert!(mmm_hub::tags::list_groups_for(&app.pool, app.seed.bob)
-        .await
-        .iter()
-        .any(|x| x.id == g && x.inherited));
+    assert!(
+        mmm_hub::tags::list_groups_for(&app.pool, app.seed.bob)
+            .await
+            .iter()
+            .any(|x| x.id == g && x.inherited)
+    );
 }
 
 #[tokio::test]
@@ -1141,12 +1204,16 @@ async fn digging_bpm_tolerance_is_absolute() {
 
     let seed = app.seed.t_pl;
     // tol=0 (exakt) and tol=2 -> the 3-BPM-away candidate is out.
-    assert!(!fetch(&app, &cookie, &format!("/digging?seed={seed}&bpm=1&tol=0"))
-        .await
-        .contains("Shared Anthem"));
-    assert!(!fetch(&app, &cookie, &format!("/digging?seed={seed}&bpm=1&tol=2"))
-        .await
-        .contains("Shared Anthem"));
+    assert!(
+        !fetch(&app, &cookie, &format!("/digging?seed={seed}&bpm=1&tol=0"))
+            .await
+            .contains("Shared Anthem")
+    );
+    assert!(
+        !fetch(&app, &cookie, &format!("/digging?seed={seed}&bpm=1&tol=2"))
+            .await
+            .contains("Shared Anthem")
+    );
     // tol=3 -> included, and the tolerance selector is rendered.
     let h3 = fetch(&app, &cookie, &format!("/digging?seed={seed}&bpm=1&tol=3")).await;
     assert!(h3.contains("Shared Anthem"));
@@ -1221,23 +1288,37 @@ async fn digging_filters_by_tag_owner_group_and_playlist_owner() {
 
     let seed = app.seed.t_pl;
     // Tag owner filter.
-    assert!(fetch(&app, &cookie, &format!("/digging?seed={seed}&towner=alice"))
+    assert!(
+        fetch(&app, &cookie, &format!("/digging?seed={seed}&towner=alice"))
+            .await
+            .contains("Shared Anthem")
+    );
+    assert!(
+        !fetch(
+            &app,
+            &cookie,
+            &format!("/digging?seed={seed}&towner=nobody")
+        )
         .await
-        .contains("Shared Anthem"));
-    assert!(!fetch(&app, &cookie, &format!("/digging?seed={seed}&towner=nobody"))
-        .await
-        .contains("Shared Anthem"));
+        .contains("Shared Anthem")
+    );
     // Tag group filter.
-    assert!(fetch(&app, &cookie, &format!("/digging?seed={seed}&tgroup={g}"))
-        .await
-        .contains("Shared Anthem"));
+    assert!(
+        fetch(&app, &cookie, &format!("/digging?seed={seed}&tgroup={g}"))
+            .await
+            .contains("Shared Anthem")
+    );
     // Playlist owner filter: t_all is in alice's playlist, not bob's.
-    assert!(fetch(&app, &cookie, &format!("/digging?seed={seed}&powner=alice"))
-        .await
-        .contains("Shared Anthem"));
-    assert!(!fetch(&app, &cookie, &format!("/digging?seed={seed}&powner=bob"))
-        .await
-        .contains("Shared Anthem"));
+    assert!(
+        fetch(&app, &cookie, &format!("/digging?seed={seed}&powner=alice"))
+            .await
+            .contains("Shared Anthem")
+    );
+    assert!(
+        !fetch(&app, &cookie, &format!("/digging?seed={seed}&powner=bob"))
+            .await
+            .contains("Shared Anthem")
+    );
 
     // The filter selects are rendered.
     let html = fetch(&app, &cookie, &format!("/digging?seed={seed}")).await;
@@ -1321,7 +1402,9 @@ async fn admin_can_save_settings() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
     assert_eq!(
-        mmm_hub::settings::get(&app.pool, "lastfm_api_key").await.as_deref(),
+        mmm_hub::settings::get(&app.pool, "lastfm_api_key")
+            .await
+            .as_deref(),
         Some("KEY123")
     );
     assert!(mmm_hub::settings::registration_open(&app.pool).await);
