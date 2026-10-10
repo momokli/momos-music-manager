@@ -1534,6 +1534,7 @@ struct OverlapPage {
     sort_bpm: SortLink,
     sort_key: SortLink,
     sort_energy: SortLink,
+    sort_ripeness: SortLink,
     /// Playlist include picker (`?pl=`).
     playlists: Vec<PlaylistOpt>,
     pl_active: bool,
@@ -1591,6 +1592,8 @@ struct CompareRow {
     bpm_num: Option<f64>,
     energy_num: Option<f64>,
     present_count: i64,
+    ripeness_num: f64,
+    ripeness_disp: String,
     cells: Vec<CompareCell>,
 }
 
@@ -1797,12 +1800,13 @@ async fn overlap_page(
         Some("bpm") => "bpm",
         Some("key") => "key",
         Some("energy") => "energy",
+        Some("ripeness") => "ripeness",
         _ => "present",
     };
     let dir = match q.dir.as_deref() {
         Some("asc") => "asc",
         Some("desc") => "desc",
-        _ if sort == "present" => "desc",
+        _ if sort == "present" || sort == "ripeness" => "desc",
         _ => "asc",
     };
 
@@ -1985,8 +1989,22 @@ async fn overlap_page(
             bpm_num: bpm_opt,
             energy_num: energy_opt,
             present_count: present.len() as i64,
+            ripeness_num: 0.0,
+            ripeness_disp: "—".to_string(),
             cells,
         });
+    }
+
+    // Ripeness signal (#223): data completeness per shared track, only when the
+    // caller actually sorts by it (keeps the default path unchanged).
+    if sort == "ripeness" && !rows.is_empty() {
+        let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        let e = crate::settings::engine(&st.pool).await;
+        let ripe = crate::scoring::ripeness_many(&st.pool, &ids, &e).await;
+        for r in rows.iter_mut() {
+            r.ripeness_num = ripe.get(&r.id).copied().unwrap_or(0.0);
+            r.ripeness_disp = format!("{:.0}", r.ripeness_num);
+        }
     }
 
     // Sort by the chosen field; tracks without the value always go last.
@@ -1995,6 +2013,13 @@ async fn overlap_page(
         let ord = match sort {
             "bpm" => opt_cmp(a.bpm_num, b.bpm_num, desc),
             "energy" => opt_cmp(a.energy_num, b.energy_num, desc),
+            "ripeness" => {
+                let o = a
+                    .ripeness_num
+                    .partial_cmp(&b.ripeness_num)
+                    .unwrap_or(std::cmp::Ordering::Equal);
+                if desc { o.reverse() } else { o }
+            }
             "key" => match (camelot_rank(&a.key), camelot_rank(&b.key)) {
                 (Some(x), Some(y)) => {
                     let o = x.cmp(&y);
@@ -2163,6 +2188,7 @@ async fn overlap_page(
         sort_bpm: sort_link("bpm"),
         sort_key: sort_link("key"),
         sort_energy: sort_link("energy"),
+        sort_ripeness: sort_link("ripeness"),
         playlists,
         pl_active: !pl_ids.is_empty(),
         sort_value: sort.to_string(),
@@ -2562,6 +2588,12 @@ struct DigRow {
     /// Seed↔candidate: sum of group weights of tags shared with the seed.
     shared_weight: f64,
     shared_weight_disp: String,
+    /// Seed↔candidate similarity v2 (cross-group bonus, Rumpelkiste-aware).
+    similarity: f64,
+    similarity_disp: String,
+    /// Ripeness score of the candidate (data completeness).
+    ripeness: f64,
+    ripeness_disp: String,
     /// Per-user presence with playlist names (track-detail style).
     presence: Vec<DigUserRow>,
     /// Resolved tags with their groups.
@@ -2644,6 +2676,10 @@ async fn merge_candidate(
             tag_weight_disp: String::new(),
             shared_weight: 0.0,
             shared_weight_disp: String::new(),
+            similarity: 0.0,
+            similarity_disp: String::new(),
+            ripeness: 0.0,
+            ripeness_disp: String::new(),
             presence: Vec::new(),
             tags: Vec::new(),
         },
@@ -2974,6 +3010,19 @@ async fn digging_page(
                 .map(|t| t.groups.iter().map(|g| g.weight).fold(0.0_f64, f64::max))
                 .sum();
         }
+
+        // Ranking signals (#223): similarity v2 (seed↔candidate, Rumpelkiste-aware)
+        // and ripeness (data completeness), both fed by the configurable engine.
+        let sim_map =
+            crate::similarity::similarity_to_seed(&st.pool, seed_id, &matched_ids, &engine).await;
+        let ripe_map = crate::scoring::ripeness_many(&st.pool, &matched_ids, &engine).await;
+        for r in cand.values_mut() {
+            if !r.matched {
+                continue;
+            }
+            r.similarity = sim_map.get(&r.track_id).copied().unwrap_or(0.0);
+            r.ripeness = ripe_map.get(&r.track_id).copied().unwrap_or(0.0);
+        }
     }
 
     // Load BPM/key for matched candidates (for the similarity filters).
@@ -3101,13 +3150,16 @@ async fn digging_page(
 
     for r in rows.iter_mut() {
         // Ranking engine (configurable in the web UI): base signals + weighted
-        // seed-match (shared) and candidate curation (own tags).
+        // seed-match (shared + similarity v2) + candidate curation (own tags) +
+        // ripeness (#223).
         let score = r.users as f64 * engine.base_users
             + r.playlists as f64 * engine.base_playlists
             + r.likes as f64 * engine.base_likes
             + r.sources.len() as f64 * engine.base_sources
             + r.shared_weight * engine.shared_factor
-            + r.tag_weight * engine.candidate_factor;
+            + r.tag_weight * engine.candidate_factor
+            + r.similarity * engine.sim_factor
+            + r.ripeness * engine.ripeness_factor;
         r.score = score.round() as i64;
         r.bpm_disp = r
             .bpm
@@ -3120,6 +3172,16 @@ async fn digging_page(
         };
         r.shared_weight_disp = if r.shared_weight > 0.0 {
             format!("{:.0}", r.shared_weight)
+        } else {
+            "—".to_string()
+        };
+        r.similarity_disp = if r.similarity > 0.0 {
+            format!("{:.1}", r.similarity)
+        } else {
+            "—".to_string()
+        };
+        r.ripeness_disp = if r.ripeness > 0.0 {
+            format!("{:.0}", r.ripeness)
         } else {
             "—".to_string()
         };

@@ -7,7 +7,7 @@
 //! tag: deleting any tag from a group removes the cheapest tier, never the
 //! "100 points" tier. See [`group_points`].
 
-use sqlx::SqlitePool;
+use sqlx::{QueryBuilder, Row, SqlitePool};
 
 use crate::settings::Engine;
 
@@ -136,6 +136,125 @@ pub async fn ripeness(pool: &SqlitePool, track_id: i64, e: &Engine) -> Ripeness 
     out
 }
 
+/// Ripeness totals (`RIPENESS`) for a specific set of tracks, batched — used by
+/// the Digging/Overlap ranking (#223). Missing tracks simply have no entry.
+pub async fn ripeness_many(pool: &SqlitePool, ids: &[i64], e: &Engine) -> HashMap<i64, f64> {
+    let mut out: HashMap<i64, f64> = HashMap::new();
+    if ids.is_empty() {
+        return out;
+    }
+
+    // Position-weighted tag score per track.
+    let mut tag_score: HashMap<i64, f64> = HashMap::new();
+    for chunk in ids.chunks(900) {
+        let mut qb = QueryBuilder::new(
+            "SELECT rt.track_id, gt.group_id, COUNT(*)
+               FROM hub_track_resolved_tags rt
+               JOIN hub_group_tags gt ON gt.tag_id = rt.tag_id
+              WHERE rt.track_id IN (",
+        );
+        {
+            let mut sep = qb.separated(", ");
+            for id in chunk {
+                sep.push_bind(*id);
+            }
+        }
+        qb.push(") GROUP BY rt.track_id, gt.group_id");
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            let cnt: i64 = r.get(2);
+            *tag_score.entry(r.get(0)).or_insert(0.0) +=
+                group_points(&e.tag_points, cnt.max(0) as usize);
+        }
+    }
+
+    // Traktor signal per track.
+    let cap = e.trak_playcount_cap.max(1.0);
+    let mut trak: HashMap<i64, f64> = HashMap::new();
+    for chunk in ids.chunks(900) {
+        let mut qb = QueryBuilder::new(
+            "SELECT track_id, play_count, rating, last_played,
+                    session_occurrence, playlist_occurrence
+               FROM hub_v_track_traktor WHERE track_id IN (",
+        );
+        {
+            let mut sep = qb.separated(", ");
+            for id in chunk {
+                sep.push_bind(*id);
+            }
+        }
+        qb.push(")");
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            let pc: i64 = r.get(1);
+            let rating: Option<i64> = r.get(2);
+            let last: Option<String> = r.get(3);
+            let sess: i64 = r.get(4);
+            let pl: i64 = r.get(5);
+            let pc_norm = (pc as f64 / cap).min(1.0);
+            let rating_norm = rating.map(|v| v as f64 / 5.0).unwrap_or(0.0);
+            let recency = if last.map(|s| !s.trim().is_empty()).unwrap_or(false) {
+                1.0
+            } else {
+                0.0
+            };
+            let occ = if sess > 0 || pl > 0 { 1.0 } else { 0.0 };
+            trak.insert(r.get(0), pc_norm + rating_norm + recency + occ);
+        }
+    }
+
+    // Meta-field presence per track.
+    let mut meta_score: HashMap<i64, f64> = HashMap::new();
+    for chunk in ids.chunks(900) {
+        let mut qb = QueryBuilder::new(
+            "SELECT t.id, COALESCE(t.title,'') AS title, COALESCE(t.artists,'') AS artists,
+                    COALESCE(t.album,'') AS album, t.image_url,
+                    CAST((SELECT bpm FROM v_track_audio WHERE track_id = t.id) AS TEXT) AS bpm,
+                    CAST((SELECT camelot FROM v_track_audio WHERE track_id = t.id) AS TEXT) AS camelot,
+                    (SELECT COUNT(*) FROM hub_track_genres WHERE track_id = t.id) AS genres
+               FROM hub_tracks t WHERE t.id IN (",
+        );
+        {
+            let mut sep = qb.separated(", ");
+            for id in chunk {
+                sep.push_bind(*id);
+            }
+        }
+        qb.push(")");
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            let has = |v: &str| !v.trim().is_empty();
+            let n = [
+                has(&r.get::<String, _>("title")),
+                has(&r.get::<String, _>("artists")),
+                has(&r.get::<String, _>("album")),
+                r.get::<Option<String>, _>("image_url")
+                    .map(|s| has(&s))
+                    .unwrap_or(false),
+                r.get::<Option<String>, _>("bpm")
+                    .map(|s| has(&s))
+                    .unwrap_or(false),
+                r.get::<Option<String>, _>("camelot")
+                    .map(|s| has(&s))
+                    .unwrap_or(false),
+                r.get::<i64, _>("genres") > 0,
+            ]
+            .iter()
+            .filter(|b| **b)
+            .count() as f64;
+            meta_score.insert(r.get(0), n);
+        }
+    }
+
+    for id in ids {
+        let t = tag_score.get(id).copied().unwrap_or(0.0);
+        let m = meta_score.get(id).copied().unwrap_or(0.0);
+        let k = trak.get(id).copied().unwrap_or(0.0);
+        out.insert(
+            *id,
+            e.tag_weight * t + e.meta_weight * m + e.trak_weight * k,
+        );
+    }
+    out
+}
+
 /// One row of the tag queue.
 #[derive(Debug, Clone)]
 pub struct QueueRow {
@@ -216,7 +335,6 @@ pub async fn queue(
 
     let mut out: Vec<QueueRow> = Vec::with_capacity(meta_rows.len());
     for r in &meta_rows {
-        use sqlx::Row;
         let id: i64 = r.get("id");
         let (t_score, t_count) = tag_score.get(&id).copied().unwrap_or((0.0, 0));
         if only_untagged && t_count > 0 {
