@@ -8,11 +8,7 @@
     </p>
 </hgroup>
 
-<form
-    method="get"
-    action="/albums"
-    class="hub-filter"
->
+<form method="get" action="/albums" class="hub-filter">
     <input type="search" name="q" value="{{ q }}" placeholder="Album / Künstler …" />
     <input type="text" name="artist" value="{{ artist }}" placeholder="Künstler exakt" />
     <button type="submit">Filtern</button>
@@ -30,9 +26,30 @@
         <thead>
             <tr>
                 <th scope="col"></th>
-                <th scope="col">Album</th>
-                <th scope="col">Künstler</th>
-                <th scope="col" title="Tracks insgesamt">Tracks</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_album.href }}"
+                        class="hub-sort{% if s_album.active %} hub-sort-on{% endif %}"
+                        >{{ s_album.label }}{% if s_album.active %} {{ s_album.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_artists.href }}"
+                        class="hub-sort{% if s_artists.active %} hub-sort-on{% endif %}"
+                        >{{ s_artists.label }}{% if s_artists.active %} {{ s_artists.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col" title="Tracks insgesamt">
+                    <a
+                        href="{{ s_tracks.href }}"
+                        class="hub-sort{% if s_tracks.active %} hub-sort-on{% endif %}"
+                        >{{ s_tracks.label }}{% if s_tracks.active %} {{ s_tracks.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
             </tr>
         </thead>
         <tbody>

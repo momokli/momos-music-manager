@@ -113,7 +113,7 @@ async fn queue_page(
         Default::default()
     };
 
-    let needle = q.to_lowercase();
+    let needle_toks = crate::table::tokens(&q);
     let max = f
         .max
         .as_deref()
@@ -124,9 +124,8 @@ async fn queue_page(
         .await
         .into_iter()
         .filter(|r| {
-            (needle.is_empty()
-                || r.title.to_lowercase().contains(&needle)
-                || r.artists.to_lowercase().contains(&needle))
+            let hay = format!("{} {} {}", r.title, r.artists, r.album).to_lowercase();
+            (needle_toks.is_empty() || needle_toks.iter().all(|t| hay.contains(t.as_str())))
                 && (!mine || mine_ids.contains(&r.track_id))
         })
         .take(500)

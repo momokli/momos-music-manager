@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use askama::Template;
 use axum::Router;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
@@ -184,6 +184,8 @@ struct ArtistFilter {
     pl: Option<String>,
     /// `name` (default) | `plays` | `tracks`.
     sort: Option<String>,
+    /// `asc` | `desc`.
+    dir: Option<String>,
 }
 
 #[derive(Template)]
@@ -200,6 +202,9 @@ struct ArtistsPage {
     sort_tracks: bool,
     total: usize,
     rows: Vec<ArtistRow>,
+    s_name: crate::table::SortHead,
+    s_tracks: crate::table::SortHead,
+    s_plays: crate::table::SortHead,
 }
 
 struct ArtistRow {
@@ -224,6 +229,7 @@ struct ArtistAgg {
 async fn artists_page(
     State(st): State<AppState>,
     Query(f): Query<ArtistFilter>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "artists").await else {
@@ -238,6 +244,15 @@ async fn artists_page(
         Some("plays") => "plays",
         Some("tracks") => "tracks",
         _ => "name",
+    }
+    .to_string();
+    // Preserve the legacy defaults (name asc, plays/tracks desc) when no
+    // explicit direction is given; header links always carry one.
+    let dir = match f.dir.as_deref() {
+        Some("asc") => "asc",
+        Some("desc") => "desc",
+        _ if sort == "name" => "asc",
+        _ => "desc",
     }
     .to_string();
 
@@ -312,11 +327,13 @@ async fn artists_page(
         }
     }
 
-    let ql = q.to_lowercase();
+    // Order-independent tokenised search: every token must appear in the name.
+    let toks = crate::table::tokens(&q);
     let mut rows: Vec<ArtistRow> = map
         .into_values()
         .filter(|a| {
-            (ql.is_empty() || a.name.to_lowercase().contains(&ql))
+            let lname = a.name.to_lowercase();
+            (toks.iter().all(|t| lname.contains(t.as_str())))
                 && (!plays_only || a.plays_by_user.get(&me).copied().unwrap_or(0) > 0)
                 && (!tags_only || a.tagged > 0)
                 && (!pl_only || a.in_playlists > 0)
@@ -339,20 +356,28 @@ async fn artists_page(
 
     match sort.as_str() {
         "plays" => rows.sort_by(|a, b| {
-            b.my_plays
-                .cmp(&a.my_plays)
+            a.my_plays
+                .cmp(&b.my_plays)
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         }),
         "tracks" => rows.sort_by(|a, b| {
-            b.tracks
-                .cmp(&a.tracks)
+            a.tracks
+                .cmp(&b.tracks)
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         }),
         _ => rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
     }
+    if dir == "desc" {
+        rows.reverse();
+    }
 
     let total = rows.len();
     rows.truncate(LIST_LIMIT);
+
+    let rawq = raw.as_deref().unwrap_or("");
+    let s_name = crate::table::sort_head(rawq, "name", "Künstler", &sort, &dir);
+    let s_tracks = crate::table::sort_head(rawq, "tracks", "Tracks", &sort, &dir);
+    let s_plays = crate::table::sort_head(rawq, "plays", "Plays (mir)", &sort, &dir);
 
     render(&ArtistsPage {
         nav,
@@ -366,6 +391,9 @@ async fn artists_page(
         sort_tracks: sort == "tracks",
         total,
         rows,
+        s_name,
+        s_tracks,
+        s_plays,
     })
 }
 

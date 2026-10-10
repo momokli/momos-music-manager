@@ -1,5 +1,5 @@
-{% extends "base.html" %} {% block title %}Künstler — Spelunke{% endblock %} {% block content
-%}
+{% extends "base.html" %} {% block title %}Künstler — Spelunke{% endblock %} {% block
+content %}
 <hgroup>
     <h1>Künstler</h1>
     <p class="hub-muted">
@@ -8,11 +8,7 @@
     </p>
 </hgroup>
 
-<form
-    method="get"
-    action="/artists"
-    class="hub-filter"
->
+<form method="get" action="/artists" class="hub-filter">
     <input
         type="search"
         name="q"
@@ -26,16 +22,36 @@
         <option value="tracks" {% if sort_tracks %}selected{% endif %}>Tracks</option>
     </select>
     <label style="margin: 0"
-        ><input type="checkbox" name="plays" value="1" {% if plays_only %}checked{% endif %} />
+        ><input
+            type="checkbox"
+            name="plays"
+            value="1"
+            {%
+            if
+            plays_only
+            %}checked{%
+            endif
+            %}
+        />
         von mir gespielt</label
     >
     <label style="margin: 0"
-        ><input type="checkbox" name="tags" value="1" {% if tags_only %}checked{% endif %} />
+        ><input
+            type="checkbox"
+            name="tags"
+            value="1"
+            {%
+            if
+            tags_only
+            %}checked{%
+            endif
+            %}
+        />
         getaggt</label
     >
     <label style="margin: 0"
-        ><input type="checkbox" name="pl" value="1" {% if pl_only %}checked{% endif %} /> in
-        Playlists</label
+        ><input type="checkbox" name="pl" value="1" {% if pl_only %}checked{% endif %} />
+        in Playlists</label
     >
     <button type="submit">Filtern</button>
     <a href="/artists" role="button" class="secondary outline">Zurücksetzen</a>
@@ -51,11 +67,32 @@
         </caption>
         <thead>
             <tr>
-                <th scope="col">Künstler</th>
-                <th scope="col" title="Tracks dieses Künstlers">Tracks</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_name.href }}"
+                        class="hub-sort{% if s_name.active %} hub-sort-on{% endif %}"
+                        >{{ s_name.label }}{% if s_name.active %} {{ s_name.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+                <th scope="col" title="Tracks dieses Künstlers">
+                    <a
+                        href="{{ s_tracks.href }}"
+                        class="hub-sort{% if s_tracks.active %} hub-sort-on{% endif %}"
+                        >{{ s_tracks.label }}{% if s_tracks.active %} {{ s_tracks.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
                 <th scope="col" title="Tracks mit mindestens einem Tag">Getaggt</th>
                 <th scope="col" title="Tracks in mindestens einer Playlist">In Pl.</th>
-                <th scope="col" title="Meine Traktor-Plays">Plays (mir)</th>
+                <th scope="col" title="Meine Traktor-Plays">
+                    <a
+                        href="{{ s_plays.href }}"
+                        class="hub-sort{% if s_plays.active %} hub-sort-on{% endif %}"
+                        >{{ s_plays.label }}{% if s_plays.active %} {{ s_plays.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
                 <th scope="col" title="Plays aller Nutzer zusammen">Plays (alle)</th>
                 <th scope="col">Spotify</th>
             </tr>
@@ -66,7 +103,8 @@
                 <td><a href="{{ a.href }}">{{ a.name }}</a></td>
                 <td>{{ a.tracks }}</td>
                 <td>
-                    {% if a.tagged > 0 %}{{ a.tagged }}{% else %}<span class="hub-muted">—</span
+                    {% if a.tagged > 0 %}{{ a.tagged }}{% else %}<span class="hub-muted"
+                        >—</span
                     >{% endif %}
                 </td>
                 <td>
@@ -76,17 +114,23 @@
                     >{% endif %}
                 </td>
                 <td>
-                    {% if a.my_plays > 0 %}{{ a.my_plays }}{% else %}<span class="hub-muted"
+                    {% if a.my_plays > 0 %}{{ a.my_plays }}{% else %}<span
+                        class="hub-muted"
                         >—</span
                     >{% endif %}
                 </td>
                 <td>
-                    {% if a.all_plays > 0 %}{{ a.all_plays }}{% else %}<span class="hub-muted"
+                    {% if a.all_plays > 0 %}{{ a.all_plays }}{% else %}<span
+                        class="hub-muted"
                         >—</span
                     >{% endif %}
                 </td>
                 <td>
-                    <a href="{{ a.spotify }}" target="_blank" rel="noopener" title="Auf Spotify suchen"
+                    <a
+                        href="{{ a.spotify }}"
+                        target="_blank"
+                        rel="noopener"
+                        title="Auf Spotify suchen"
                         >↗</a
                     >
                 </td>
