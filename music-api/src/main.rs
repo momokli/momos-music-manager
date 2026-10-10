@@ -33,16 +33,27 @@ async fn main() -> anyhow::Result<()> {
     let pool = connect_db(&config).await?;
     db::init(&pool).await?;
 
-    let store = music_api::store::Store::new(
-        config.store_root.clone(),
-        config.store_max_upload_bytes,
-    );
+    let store =
+        music_api::store::Store::new(config.store_root.clone(), config.store_max_upload_bytes);
     music_api::store::init(&pool, &store).await?;
 
     let http = reqwest::Client::builder()
         .cookie_store(true)
         .timeout(Duration::from_secs(60))
         .build()?;
+
+    // Warn early when the ARL cannot stream FLAC — otherwise every download
+    // silently falls back to a lower bitrate (see issue #233).
+    if let Some(tier) = music_api::deezer::check_arl_tier(&http, &config.deemix_arl).await {
+        if tier.can_stream_flac() {
+            info!("ARL tier: {} (lossless available)", tier.offer);
+        } else {
+            tracing::warn!(
+                "ARL tier: {} — FLAC/HQ unavailable, downloads fall back to a lower bitrate",
+                tier.offer
+            );
+        }
+    }
 
     let state = Arc::new(AppState {
         pool,

@@ -79,7 +79,13 @@ async fn harness() -> Harness {
 async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Vec<u8>) {
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     (status, bytes)
 }
 
@@ -123,7 +129,10 @@ async fn health_is_public() {
     let h = harness().await;
     let (status, _) = send(
         &h.app,
-        Request::builder().uri("/health").body(Body::empty()).unwrap(),
+        Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -252,7 +261,11 @@ async fn serves_ready_files_and_flips_order_to_done() {
     create_order(&h.app, &["AEA0D1846146"]).await;
 
     // Seed a finished track (the worker would normally do this).
-    let mp3_320 = write_file(&h.state.config.mp3_320_dir(), "AEA0D1846146.mp3", b"ID3fake");
+    let mp3_320 = write_file(
+        &h.state.config.mp3_320_dir(),
+        "AEA0D1846146.mp3",
+        b"ID3fake",
+    );
     db::mark_ready(
         &h.state.pool,
         "AEA0D1846146",
@@ -390,7 +403,13 @@ async fn object_store_round_trips_and_verifies() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
-    let part = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let part = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     assert_eq!(part, b"hello");
 
     // Re-upload is a no-op.
@@ -411,9 +430,7 @@ async fn object_store_round_trips_and_verifies() {
         &h.app,
         authed("POST", "/objects/check")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(
-                serde_json::json!({"hashes": [hash, missing]}),
-            ))
+            .body(json_body(serde_json::json!({"hashes": [hash, missing]})))
             .unwrap(),
     )
     .await;
@@ -447,4 +464,29 @@ async fn object_store_rejects_a_wrong_digest() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn order_priority_reaches_the_queue() {
+    let h = harness().await;
+    let (status, _) = send(
+        &h.app,
+        authed("POST", "/orders")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [{ "isrc": "AEA0D1846146" }],
+                "priority": 42
+            })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(&h.app, authed("GET", "/queue").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let items = v["isrc"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["isrc"], "AEA0D1846146");
+    assert_eq!(items[0]["priority"], 42);
 }

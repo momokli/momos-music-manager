@@ -11,9 +11,11 @@ pub mod db;
 pub mod deemix;
 pub mod deezer;
 pub mod models;
+pub mod spotdl;
 pub mod store;
 pub mod transcode;
 pub mod worker;
+pub mod ytdlp;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,8 +45,10 @@ pub struct AppState {
 /// Build the fully-stated router: public `/health`, everything else behind the
 /// bearer check.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let protected = api::router()
-        .layer(middleware::from_fn_with_state(state.clone(), auth::require_bearer));
+    let protected = api::router().layer(middleware::from_fn_with_state(
+        state.clone(),
+        auth::require_bearer,
+    ));
     Router::new()
         .route("/health", get(api::health))
         .merge(protected)
