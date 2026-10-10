@@ -29,6 +29,15 @@ pub const YOUTUBE_CLIENT_ID: &str = "youtube_client_id";
 pub const YOUTUBE_CLIENT_SECRET: &str = "youtube_client_secret";
 pub const REGISTRATION_OPEN: &str = "registration_open";
 
+// Ranking-engine knobs (editable in the web UI, no secrets).
+pub const ENGINE_SHARED_FACTOR: &str = "engine_shared_factor";
+pub const ENGINE_CANDIDATE_FACTOR: &str = "engine_candidate_factor";
+pub const ENGINE_BASE_USERS: &str = "engine_base_users";
+pub const ENGINE_BASE_PLAYLISTS: &str = "engine_base_playlists";
+pub const ENGINE_BASE_LIKES: &str = "engine_base_likes";
+pub const ENGINE_BASE_SOURCES: &str = "engine_base_sources";
+pub const ENGINE_PARENT_MATCH: &str = "engine_parent_match";
+
 /// Keys surfaced on the admin page, with a human label and whether it's secret.
 pub const ADMIN_FIELDS: &[(&str, &str, bool)] = &[
     (LASTFM_API_KEY, "Last.fm API-Key", true),
@@ -50,7 +59,63 @@ pub const ADMIN_FIELDS: &[(&str, &str, bool)] = &[
     (EFFNET_LABELS, "EffNet Genre-Labels (JSON)", false),
     (ANALYZER_BASE, "BPM/Key-Analyzer URL (z.B. http://127.0.0.1:8711)", false),
     (ANALYZE_TMP, "Verzeichnis fuer Analyse-Temp-Dateien", false),
+    (ENGINE_SHARED_FACTOR, "Engine: Faktor Seed-Match (shared)", false),
+    (ENGINE_CANDIDATE_FACTOR, "Engine: Faktor Kandidaten-Tags", false),
+    (ENGINE_BASE_USERS, "Engine: Basis User-Uebereinstimmung", false),
+    (ENGINE_BASE_PLAYLISTS, "Engine: Basis Playlist-Treffer", false),
+    (ENGINE_BASE_LIKES, "Engine: Basis Likes", false),
+    (ENGINE_BASE_SOURCES, "Engine: Basis Quellen", false),
+    (ENGINE_PARENT_MATCH, "Engine: Parent-Tag-Match (1/0)", false),
 ];
+
+/// Ranking-engine configuration, resolved from settings with sane defaults.
+#[derive(Debug, Clone)]
+pub struct Engine {
+    pub shared_factor: f64,
+    pub candidate_factor: f64,
+    pub base_users: f64,
+    pub base_playlists: f64,
+    pub base_likes: f64,
+    pub base_sources: f64,
+    pub parent_match: bool,
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Engine {
+            shared_factor: 3.0,
+            candidate_factor: 1.0,
+            base_users: 10.0,
+            base_playlists: 3.0,
+            base_likes: 2.0,
+            base_sources: 1.0,
+            parent_match: false,
+        }
+    }
+}
+
+/// Load the ranking-engine config from `hub_settings` (falls back to defaults).
+pub async fn engine(pool: &SqlitePool) -> Engine {
+    let s = load_all(pool).await;
+    let num = |k: &str, d: f64| {
+        s.get(k)
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .unwrap_or(d)
+    };
+    let flag = |k: &str, d: bool| match s.get(k).map(|v| v.trim().to_lowercase()) {
+        Some(v) => matches!(v.as_str(), "1" | "true" | "on" | "yes"),
+        None => d,
+    };
+    Engine {
+        shared_factor: num(ENGINE_SHARED_FACTOR, 3.0),
+        candidate_factor: num(ENGINE_CANDIDATE_FACTOR, 1.0),
+        base_users: num(ENGINE_BASE_USERS, 10.0),
+        base_playlists: num(ENGINE_BASE_PLAYLISTS, 3.0),
+        base_likes: num(ENGINE_BASE_LIKES, 2.0),
+        base_sources: num(ENGINE_BASE_SOURCES, 1.0),
+        parent_match: flag(ENGINE_PARENT_MATCH, false),
+    }
+}
 
 pub async fn load_all(pool: &SqlitePool) -> HashMap<String, String> {
     sqlx::query_as::<_, (String, String)>("SELECT key, value FROM hub_settings")

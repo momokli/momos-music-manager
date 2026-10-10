@@ -687,6 +687,46 @@ async fn group_weight_drives_digging_score_and_parents_visible() {
 }
 
 #[tokio::test]
+async fn ranking_engine_is_settings_driven() {
+    let app = common::spawn().await;
+
+    // Defaults.
+    let e = mmm_hub::settings::engine(&app.pool).await;
+    assert_eq!(e.shared_factor, 3.0);
+    assert_eq!(e.candidate_factor, 1.0);
+    assert!(!e.parent_match);
+
+    // Override via settings; the engine picks it up.
+    mmm_hub::settings::set(&app.pool, mmm_hub::settings::ENGINE_SHARED_FACTOR, "7.5")
+        .await
+        .unwrap();
+    mmm_hub::settings::set(&app.pool, mmm_hub::settings::ENGINE_PARENT_MATCH, "1")
+        .await
+        .unwrap();
+    let e = mmm_hub::settings::engine(&app.pool).await;
+    assert_eq!(e.shared_factor, 7.5);
+    assert!(e.parent_match);
+
+    // The admin page exposes the engine knobs (as an admin).
+    sqlx::query("UPDATE hub_users SET is_admin = 1 WHERE id = ?1")
+        .bind(app.seed.alice)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let cookie = app.session_cookie(app.seed.alice).await;
+    let html = app
+        .client()
+        .get(app.url("/admin"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let html = body(html).await;
+    assert!(html.contains("engine_shared_factor"));
+    assert!(html.contains("engine_parent_match"));
+}
+
+#[tokio::test]
 async fn toggle_returns_row_fragment_for_htmx() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;

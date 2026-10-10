@@ -1819,6 +1819,7 @@ async fn digging_page(
     };
     let lastfm_enabled = st.cfg.lastfm_api_key.is_some();
     let freqblog_enabled = crate::freqblog::enabled(&st.cfg);
+    let engine = crate::settings::engine(&st.pool).await;
     let freqblog_remaining = if freqblog_enabled {
         crate::freqblog::remaining(&st.pool, &st.cfg).await
     } else {
@@ -1858,6 +1859,10 @@ async fn digging_page(
             .unwrap_or_default()
             .into_iter()
             .collect();
+            if engine.parent_match && !seed_tag_ids.is_empty() {
+                let ids: Vec<i64> = seed_tag_ids.iter().copied().collect();
+                seed_tag_ids = crate::tags::related_tag_ids(&st.pool, &ids).await;
+            }
 
             // Fetch every source concurrently. External HTTP calls overlap instead
             // of chaining, so the page cost is the *max* latency, not the sum.
@@ -2119,14 +2124,15 @@ async fn digging_page(
     });
 
     for r in rows.iter_mut() {
-        // Ranking engine: base signals + weighted tag agreement (shared) and
-        // candidate curation (own tags). Tune the *group* weights to steer this.
-        r.score = r.users * 10
-            + r.playlists * 3
-            + r.likes * 2
-            + r.sources.len() as i64
-            + (r.shared_weight * 3.0).round() as i64
-            + r.tag_weight.round() as i64;
+        // Ranking engine (configurable in the web UI): base signals + weighted
+        // seed-match (shared) and candidate curation (own tags).
+        let score = r.users as f64 * engine.base_users
+            + r.playlists as f64 * engine.base_playlists
+            + r.likes as f64 * engine.base_likes
+            + r.sources.len() as f64 * engine.base_sources
+            + r.shared_weight * engine.shared_factor
+            + r.tag_weight * engine.candidate_factor;
+        r.score = score.round() as i64;
         r.bpm_disp = r
             .bpm
             .map(|b| format!("{b:.0}"))

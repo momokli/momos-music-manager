@@ -356,6 +356,41 @@ pub async fn tag_children_of(pool: &SqlitePool, tag_id: i64) -> Vec<(i64, String
     .unwrap_or_default()
 }
 
+/// A tag set expanded with all ancestors and descendants (transitively) — used
+/// for "parent match": a shared ancestor/descendant counts as related.
+pub async fn related_tag_ids(pool: &SqlitePool, ids: &[i64]) -> HashSet<i64> {
+    let mut seen: HashSet<i64> = ids.iter().copied().collect();
+    let mut frontier: Vec<i64> = ids.to_vec();
+    while !frontier.is_empty() {
+        let mut qb = QueryBuilder::new(
+            "SELECT parent_tag_id AS id FROM hub_tag_parents WHERE tag_id IN (",
+        );
+        {
+            let mut sep = qb.separated(", ");
+            for id in &frontier {
+                sep.push_bind(*id);
+            }
+        }
+        qb.push(") UNION SELECT tag_id AS id FROM hub_tag_parents WHERE parent_tag_id IN (");
+        {
+            let mut sep = qb.separated(", ");
+            for id in &frontier {
+                sep.push_bind(*id);
+            }
+        }
+        qb.push(")");
+        let mut next: Vec<i64> = Vec::new();
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            let id: i64 = r.get("id");
+            if seen.insert(id) {
+                next.push(id);
+            }
+        }
+        frontier = next;
+    }
+    seen
+}
+
 /// Add a parent relationship (both tags must exist). Idempotent.
 pub async fn add_tag_parent(pool: &SqlitePool, tag_id: i64, parent_tag_id: i64) -> Result<()> {
     if tag_id == parent_tag_id {
