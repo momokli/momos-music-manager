@@ -17,9 +17,12 @@ pub struct IsrcState {
     pub title: Option<String>,
     pub artist: Option<String>,
     pub formats: Option<Vec<String>>,
+    /// Classified delivered format: `flac` | `mp3-320` | `mp3-128`.
+    pub source_format: Option<String>,
     pub error: Option<String>,
 }
 
+#[allow(dead_code)]
 impl IsrcState {
     /// In the music-api ledger and not an "unknown ISRC" error.
     pub fn known(&self) -> bool {
@@ -33,6 +36,36 @@ impl IsrcState {
             .as_ref()
             .map(|f| f.join(", "))
             .unwrap_or_default()
+    }
+}
+
+/// A cached music-api state for one ISRC, read from `hub_music_state` (no
+/// network). Used by the track page and the downloads overview.
+#[derive(Debug, Clone, Default)]
+pub struct CachedState {
+    pub state: String,
+    pub source_format: Option<String>,
+    pub formats: Vec<String>,
+    pub deezer_id: Option<String>,
+}
+
+impl CachedState {
+    pub fn ready(&self) -> bool {
+        self.state == "ready"
+    }
+
+    /// Human label like `ready · flac` / `pending` / `absent`.
+    pub fn label(&self) -> String {
+        let fmt = self
+            .source_format
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.formats.first().cloned());
+        match fmt {
+            Some(f) if !self.state.is_empty() => format!("{} · {}", self.state, f),
+            Some(f) => f,
+            None => self.state.clone(),
+        }
     }
 }
 
@@ -95,13 +128,29 @@ pub async fn order(cfg: &Config, isrcs: &[String]) -> Result<String> {
 
 // ── state cache + bulk helpers (progress / order-only-missing) ───────────────
 
-async fn store_state(pool: &SqlitePool, isrc: &str, state: &str) {
+async fn store_state(
+    pool: &SqlitePool,
+    isrc: &str,
+    state: &str,
+    source_format: Option<&str>,
+    formats: Option<&str>,
+    deezer_id: Option<&str>,
+) {
     let _ = sqlx::query(
-        "INSERT INTO hub_music_state (isrc, state, checked_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT(isrc) DO UPDATE SET state = excluded.state, checked_at = excluded.checked_at",
+        "INSERT INTO hub_music_state (isrc, state, source_format, formats, deezer_id, checked_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(isrc) DO UPDATE SET
+             state = excluded.state,
+             source_format = excluded.source_format,
+             formats = excluded.formats,
+             deezer_id = COALESCE(excluded.deezer_id, hub_music_state.deezer_id),
+             checked_at = excluded.checked_at",
     )
     .bind(isrc)
     .bind(state)
+    .bind(source_format)
+    .bind(formats)
+    .bind(deezer_id)
     .bind(chrono::Utc::now().to_rfc3339())
     .execute(pool)
     .await;
@@ -128,25 +177,150 @@ pub async fn refresh_states(
             let cfg = cfg.clone();
             let isrc = isrc.clone();
             set.spawn(async move {
-                let state = status(&cfg, &isrc)
-                    .await
-                    .ok()
-                    .and_then(|s| s.state)
-                    .unwrap_or_default();
-                (isrc, state)
+                let st = status(&cfg, &isrc).await.ok();
+                (isrc, st)
             });
         }
-        while let Some(Ok((isrc, state))) = set.join_next().await {
-            if !state.is_empty() {
-                store_state(pool, &isrc, &state).await;
-                refreshed += 1;
-                if state == "ready" {
-                    ready += 1;
-                }
+        while let Some(Ok((isrc, st))) = set.join_next().await {
+            let Some(st) = st else { continue };
+            let Some(state) = st.state.clone().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let formats = st
+                .formats
+                .as_ref()
+                .filter(|f| !f.is_empty())
+                .map(|f| f.join(","));
+            store_state(
+                pool,
+                &isrc,
+                &state,
+                st.source_format.as_deref(),
+                formats.as_deref(),
+                st.deezer_id.as_deref(),
+            )
+            .await;
+            refreshed += 1;
+            if state == "ready" {
+                ready += 1;
             }
         }
     }
     (ready, total, refreshed)
+}
+
+/// Read the cached state (incl. format) for one ISRC — no network call.
+pub async fn cached_state(pool: &SqlitePool, isrc: &str) -> Option<CachedState> {
+    use sqlx::Row;
+    let row = sqlx::query(
+        "SELECT state, source_format, formats, deezer_id FROM hub_music_state WHERE isrc = ?1",
+    )
+    .bind(isrc)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    Some(CachedState {
+        state: row.get::<Option<String>, _>("state").unwrap_or_default(),
+        source_format: row.get::<Option<String>, _>("source_format"),
+        formats: row
+            .get::<Option<String>, _>("formats")
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        deezer_id: row.get::<Option<String>, _>("deezer_id"),
+    })
+}
+
+/// Aggregate counts over the whole `hub_music_state` cache (downloads page).
+#[derive(Debug, Clone, Default)]
+pub struct CacheSummary {
+    pub total: usize,
+    pub ready: usize,
+    pub ready_flac: usize,
+    pub ready_320: usize,
+    pub ready_128: usize,
+    pub ready_other: usize,
+    pub pending: usize,
+    pub downloading: usize,
+    pub absent: usize,
+    pub failed: usize,
+}
+
+pub async fn cache_summary(pool: &SqlitePool) -> CacheSummary {
+    use sqlx::Row;
+    let mut s = CacheSummary::default();
+    let rows = sqlx::query("SELECT state, source_format, formats FROM hub_music_state")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+    for r in rows {
+        s.total += 1;
+        let state = r.get::<Option<String>, _>("state").unwrap_or_default();
+        match state.as_str() {
+            "ready" => {
+                s.ready += 1;
+                let sf = r.get::<Option<String>, _>("source_format");
+                let formats = r.get::<Option<String>, _>("formats").unwrap_or_default();
+                match format_bucket(sf.as_deref(), &formats) {
+                    "flac" => s.ready_flac += 1,
+                    "320" => s.ready_320 += 1,
+                    "128" => s.ready_128 += 1,
+                    _ => s.ready_other += 1,
+                }
+            }
+            "pending" => s.pending += 1,
+            "downloading" => s.downloading += 1,
+            "absent" => s.absent += 1,
+            "failed" => s.failed += 1,
+            _ => {}
+        }
+    }
+    s
+}
+
+/// Coarse format bucket for the ready distribution: `flac` | `320` | `128` | `other`.
+pub fn format_bucket(source_format: Option<&str>, formats: &str) -> &'static str {
+    let mut hay = String::new();
+    if let Some(s) = source_format {
+        hay.push_str(s);
+        hay.push(' ');
+    }
+    hay.push_str(formats);
+    let h = hay.to_lowercase();
+    if h.contains("flac") {
+        "flac"
+    } else if h.contains("320") {
+        "320"
+    } else if h.contains("128") {
+        "128"
+    } else {
+        "other"
+    }
+}
+
+/// `GET /queue` — the live music-api download queue (title/artist/priority).
+/// Returns an empty array when the endpoint is unavailable (e.g. an older
+/// music-api without PR #239), so callers never have to special-case a 404.
+pub async fn queue(cfg: &Config) -> Result<serde_json::Value> {
+    let url = format!("{}/queue", cfg.music_api_base);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(token(cfg)?)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        return Ok(serde_json::Value::Array(Vec::new()));
+    }
+    Ok(resp
+        .json::<serde_json::Value>()
+        .await
+        .unwrap_or(serde_json::Value::Array(Vec::new())))
 }
 
 /// ISRCs whose cached state is not `ready` (missing from cache = not ready).
