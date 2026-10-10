@@ -8,11 +8,7 @@ content %}
     </p>
 </hgroup>
 
-<form
-    method="get"
-    action="/tag-queue"
-    class="hub-filter"
->
+<form method="get" action="/tag-queue" class="hub-filter">
     <input
         type="search"
         name="q"
@@ -103,9 +99,14 @@ content %}
                 >
                     <td>{{ loop.index }}</td>
                     <td>
-                        <strong>{{ r.title }}</strong><br /><span class="hub-muted"
-                            >{{ r.artists }}</span
-                        >
+                        <strong>{{ r.title }}</strong>
+                        <a
+                            href="/track/{{ r.id }}"
+                            onclick="event.stopPropagation()"
+                            class="hub-x"
+                            title="Track-Home öffnen"
+                            >↗</a
+                        ><br /><span class="hub-muted">{{ r.artists }}</span>
                     </td>
                     <td>{{ r.total }}</td>
                     <td>{{ r.tag_count }}</td>

@@ -14,6 +14,12 @@
                 >{% if !loop.last %}, {% endif %}{% endfor %}
             </p>
         </div>
+        <a
+            href="/track/{{ id }}"
+            style="margin-left: auto; white-space: nowrap"
+            title="Track-Home öffnen"
+            >↗ Track-Home</a
+        >
     </div>
 
     {% if music_api && has_isrc %}
