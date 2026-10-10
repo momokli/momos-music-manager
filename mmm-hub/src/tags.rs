@@ -1798,6 +1798,8 @@ pub struct TagCooccurrence {
     pub same_group: bool,
     /// Lift = P(A,B) / (P(A)·P(B)).
     pub lift: f64,
+    /// Jaccard = |A∩B| / |A∪B| over the tracks carrying either tag.
+    pub jaccard: f64,
     /// Tracks carrying both tags.
     pub both: i64,
     /// Tracks carrying the other tag (its total support).
@@ -1846,8 +1848,9 @@ pub async fn tag_top_artists(pool: &SqlitePool, tag_id: i64) -> Vec<(String, i64
 
 /// Tags that co-occur with `tag_id` on the same tracks, within and across
 /// groups. Lift = P(A,B) / (P(A)·P(B)); restricted to other tags carrying at
-/// least `min_support` tracks. Ordered by lift (then co-track count); at most 40
-/// rows are returned (the caller trims further).
+/// least `min_support` tracks. At most 40 rows are returned (the caller trims
+/// further); they are ranked by the configured co-occurrence metric
+/// (`engine_cooc_metric`, default `lift`).
 pub async fn tag_cooccurrence(
     pool: &SqlitePool,
     tag_id: i64,
@@ -1962,7 +1965,7 @@ pub async fn tag_cooccurrence(
     }
 
     let empty: Vec<i64> = Vec::new();
-    pairs
+    let mut out: Vec<TagCooccurrence> = pairs
         .into_iter()
         .map(|(other_id, name, both, support, lift)| {
             let cgroups = cand_groups.get(&other_id).unwrap_or(&empty);
@@ -1978,18 +1981,35 @@ pub async fn tag_cooccurrence(
             } else {
                 (false, String::new())
             };
+            let union = (with_tag + support - both).max(1) as f64;
             TagCooccurrence {
                 tag_id: other_id,
                 name,
                 group,
                 same_group,
                 lift,
+                jaccard: both as f64 / union,
                 both,
                 support,
                 sample_track_id: samples.get(&other_id).copied().unwrap_or(0),
             }
         })
-        .collect()
+        .collect();
+
+    // Rank by the configured metric (#217).
+    let metric = crate::settings::get(pool, crate::settings::ENGINE_COOC_METRIC)
+        .await
+        .map(|v| v.trim().to_lowercase())
+        .unwrap_or_else(|| "lift".to_string());
+    if metric == "jaccard" {
+        out.sort_by(|a, b| {
+            b.jaccard
+                .partial_cmp(&a.jaccard)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.both.cmp(&a.both))
+        });
+    }
+    out
 }
 
 #[cfg(test)]

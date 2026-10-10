@@ -73,7 +73,7 @@ tar czf - -C mmm-hub --exclude target --exclude 'hub.db*' --exclude .env \
   `COSINECLUB_API`, `FREQBlog_API`, `EFFNET_MODEL`, `EFFNET_LABELS`,
   `HUB_ANALYZER_URL`, `HUB_ANALYZE_TMP`, `HUB_DATABASE_URL`, `HUB_HOST`, `HUB_PORT`.
 - **Config priority**: env > `.env` > settings in DB (`hub_settings`, edited on `/admin`) > defaults.
-- **Admin-only settings page** `/admin` (`settings::ADMIN_FIELDS`) stores API keys + the
+- **Admin-only settings page** `/admin` (`settings::SETTINGS` typed registry) stores API keys + the
   whole **ranking engine** config (see §7).
 - ⚠️ **Rotate secrets**: `DEEMIX_ARL` and `MUSIC_API_TOKEN` were once printed into a chat — the
   user should rotate them.
@@ -111,7 +111,7 @@ mmm-hub/
 │   ├── tagqueue.rs        /tag-queue (ripeness-sorted) + direct tagging + player
 │   ├── artists.rs         /artists + /artist/{name} explorer
 │   ├── history.rs         import-run ledger + change events (all sources)
-│   ├── settings.rs        hub_settings + ADMIN_FIELDS + Engine config
+│   ├── settings.rs        hub_settings + SETTINGS registry + Engine config
 │   └── mmm_import.rs      import tags/categories/parents/energy from MMM library.db
 └── tests/                 cargo integration tests (harness = tests/common/mod.rs)
 ```
