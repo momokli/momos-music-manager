@@ -133,3 +133,29 @@ async fn tagging_with_a_group_places_the_tag_in_it() {
     .unwrap();
     assert_eq!(n, 1, "tag placed in the Mood group");
 }
+
+#[tokio::test]
+async fn recommendations_use_relationship_signals() {
+    use mmm_hub::tags;
+    let app = common::spawn().await;
+    let me = app.seed.alice;
+
+    // Two tracks by the same artist; one is tagged.
+    sqlx::query(
+        "INSERT INTO hub_tracks (id, service, service_track_id, title, artists, album) VALUES
+            (80001, 'local', 'r1', 'One', 'RelArti', 'RelAlbum'),
+            (80002, 'local', 'r2', 'Two', 'RelArti', 'RelAlbum')",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    let house = tags::ensure_tag(&app.pool, me, "House").await.unwrap();
+    tags::tag_track(&app.pool, me, 80002, house).await.unwrap();
+
+    // 80001 shares artist + album with the tagged 80002 -> House is recommended.
+    let recs = tags::recommended_tags(&app.pool, 80001, 10).await;
+    assert!(
+        recs.iter().any(|(id, ..)| *id == house),
+        "artist/album relationship should recommend House: {recs:?}"
+    );
+}

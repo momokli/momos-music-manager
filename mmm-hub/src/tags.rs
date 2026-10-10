@@ -500,21 +500,56 @@ pub async fn list_user_tags(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String
 /// Tags that co-occur with a track's tags ("how others tagged similar tracks"),
 /// excluding tags already on the track. Returns `(tag_id, name, owner, score)`
 /// ordered by co-occurrence count descending.
+///
+/// Relationship-based recommendation: aggregates candidate tags from several
+/// neighbourhoods of the track, weighted by how strong the relation is:
+///   * tracks sharing a tag with the seed        (weight 2)
+///   * tracks in the same playlists as the seed  (weight 1)
+///   * tracks by the same artist                 (weight 1)
+///   * tracks on the same album                  (weight 1)
+/// Tags already on the track are excluded; tags owned by any hub user count.
 pub async fn recommended_tags(
     pool: &SqlitePool,
     track_id: i64,
     limit: i64,
 ) -> Vec<(i64, String, String, i64)> {
     sqlx::query_as::<_, (i64, String, String, i64)>(
-        "SELECT rt2.tag_id, t.name, u.slug, COUNT(DISTINCT rt2.track_id) AS c
-           FROM hub_track_resolved_tags rt1
-           JOIN hub_track_resolved_tags rt2 ON rt2.track_id = rt1.track_id
-           JOIN hub_tags t ON t.id = rt2.tag_id
+        "WITH s AS (SELECT ?1 AS id),
+              seed_tags AS (SELECT tag_id FROM hub_track_resolved_tags WHERE track_id = (SELECT id FROM s)),
+              cand AS (
+                 SELECT rt2.tag_id AS tag_id, 2 AS w
+                   FROM hub_track_resolved_tags rt1
+                   JOIN hub_track_resolved_tags rt2 ON rt2.track_id = rt1.track_id
+                  WHERE rt1.tag_id IN (SELECT tag_id FROM seed_tags)
+                    AND rt2.track_id <> (SELECT id FROM s)
+                 UNION ALL
+                 SELECT rt.tag_id, 1
+                   FROM hub_playlist_tracks p1
+                   JOIN hub_playlist_tracks p2 ON p2.playlist_id = p1.playlist_id
+                   JOIN hub_track_resolved_tags rt ON rt.track_id = p2.track_id
+                  WHERE p1.track_id = (SELECT id FROM s) AND p2.track_id <> (SELECT id FROM s)
+                 UNION ALL
+                 SELECT rt.tag_id, 1
+                   FROM hub_tracks t1
+                   JOIN hub_tracks t2 ON t2.artists = t1.artists AND t2.id <> t1.id
+                   JOIN hub_track_resolved_tags rt ON rt.track_id = t2.id
+                  WHERE t1.id = (SELECT id FROM s)
+                    AND t1.artists IS NOT NULL AND TRIM(t1.artists) <> ''
+                 UNION ALL
+                 SELECT rt.tag_id, 1
+                   FROM hub_tracks a1
+                   JOIN hub_tracks a2 ON a2.album = a1.album AND a2.id <> a1.id
+                   JOIN hub_track_resolved_tags rt ON rt.track_id = a2.id
+                  WHERE a1.id = (SELECT id FROM s)
+                    AND a1.album IS NOT NULL AND TRIM(a1.album) <> ''
+              )
+         SELECT x.tag_id, t.name, u.slug, SUM(x.w) AS score
+           FROM cand x
+           JOIN hub_tags t ON t.id = x.tag_id
            JOIN hub_users u ON u.id = t.owner_user_id
-          WHERE rt1.tag_id IN (SELECT tag_id FROM hub_track_resolved_tags WHERE track_id = ?1)
-            AND rt2.tag_id NOT IN (SELECT tag_id FROM hub_track_resolved_tags WHERE track_id = ?1)
-          GROUP BY rt2.tag_id, t.name, u.slug
-          ORDER BY c DESC, t.name
+          WHERE x.tag_id NOT IN (SELECT tag_id FROM seed_tags)
+          GROUP BY x.tag_id, t.name, u.slug
+          ORDER BY score DESC, t.name
           LIMIT ?2",
     )
     .bind(track_id)
