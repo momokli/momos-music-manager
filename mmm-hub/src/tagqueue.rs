@@ -183,9 +183,7 @@ async fn queue_page(
 // ── detail panel (htmx partial) ─────────────────────────────────────────────
 
 struct DetailTag {
-    id: i64,
     name: String,
-    owner: String,
     groups: String,
     mine: bool,
 }
@@ -195,26 +193,53 @@ struct DetailGroupTag {
     name: String,
 }
 
+struct DetailLink {
+    name: String,
+    href: String,
+}
+
+struct PlRow {
+    owner: String,
+    name: String,
+    href: String,
+}
+
 #[derive(Template)]
 #[template(path = "queue_detail.html")]
 struct QueueDetail {
     id: i64,
     title: String,
-    artists: String,
+    artists: Vec<DetailLink>,
     album: String,
+    album_href: String,
+    album_link: bool,
+    cover: String,
     duration: String,
+    explicit: String,
     isrc: String,
+    bpm: String,
+    key: String,
+    energy: String,
+    genres: String,
+    spotify_id: String,
     has_isrc: bool,
     music_api: bool,
     tags: Vec<DetailTag>,
+    playlists: Vec<PlRow>,
     my_tags: Vec<DetailGroupTag>,
 }
 
 async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
     let row = sqlx::query(
-        "SELECT COALESCE(title,'') AS title, COALESCE(artists,'') AS artists,
-                COALESCE(album,'') AS album, duration_ms, COALESCE(isrc,'') AS isrc
-           FROM hub_tracks WHERE id = ?1",
+        "SELECT COALESCE(t.title,'') AS title, COALESCE(t.artists,'') AS artists,
+                COALESCE(t.album,'') AS album, t.duration_ms,
+                COALESCE(t.isrc,'') AS isrc, COALESCE(t.explicit,0) AS explicit,
+                COALESCE(t.image_url,'') AS image_url,
+                CAST((SELECT bpm FROM v_track_audio WHERE track_id = t.id) AS TEXT) AS bpm,
+                CAST((SELECT camelot FROM v_track_audio WHERE track_id = t.id) AS TEXT) AS musickey,
+                CAST((SELECT energy FROM hub_track_features WHERE track_id = t.id) AS TEXT) AS energy,
+                (SELECT COUNT(*) FROM hub_track_genres WHERE track_id = t.id) AS genres
+           FROM hub_tracks t WHERE t.id = ?1",
     )
     .bind(id)
     .fetch_optional(&st.pool)
@@ -222,30 +247,43 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
     .ok()
     .flatten()?;
 
-    let duration = {
-        let ms = row.get::<Option<i64>, _>("duration_ms").unwrap_or(0);
-        if ms > 0 {
-            format!("{}:{:02}", ms / 60000, (ms % 60000) / 1000)
+    let ms = row.get::<Option<i64>, _>("duration_ms").unwrap_or(0);
+    let duration = if ms > 0 {
+        format!("{}:{:02}", ms / 60000, (ms % 60000) / 1000)
+    } else {
+        String::new()
+    };
+    let nonnull = |k: &str| -> String {
+        row.get::<Option<String>, _>(k)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "—".to_string())
+    };
+    let album = row.get::<String, _>("album");
+    let album_href = if album.trim().is_empty() {
+        String::new()
+    } else {
+        format!("/album/{}", urlencoding::encode(&album))
+    };
+    let artists_str = row.get::<String, _>("artists");
+    let artists: Vec<DetailLink> = artists_str
+        .split(",")
+        .map(|a| a.trim())
+        .filter(|a| !a.is_empty())
+        .map(|a| DetailLink {
+            name: a.to_string(),
+            href: format!("/artist/{}", urlencoding::encode(a)),
+        })
+        .collect();
+    let genres = {
+        let n = row.get::<i64, _>("genres");
+        if n > 0 {
+            n.to_string()
         } else {
-            String::new()
+            "—".to_string()
         }
     };
 
-    let tag_rows = sqlx::query_as::<_, (i64, String, String, String)>(
-        "SELECT t.id, t.name, u.slug,
-                (SELECT COALESCE(GROUP_CONCAT(g.icon || ' ' || g.name, ' · '), '')
-                   FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
-                  WHERE gt.tag_id = t.id) AS groups
-           FROM hub_track_resolved_tags rt
-           JOIN hub_tags t ON t.id = rt.tag_id
-           JOIN hub_users u ON u.id = t.owner_user_id
-          WHERE rt.track_id = ?1
-          ORDER BY t.name LIMIT 200",
-    )
-    .bind(id)
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default();
     let my_tag_ids: std::collections::HashSet<i64> =
         sqlx::query_scalar::<_, i64>("SELECT id FROM hub_tags WHERE owner_user_id = ?1")
             .bind(me)
@@ -254,16 +292,52 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
             .unwrap_or_default()
             .into_iter()
             .collect();
+
+    // Tags, sorted by their (first) group name, then tag name.
+    let tag_rows = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT t.id, t.name,
+                (SELECT COALESCE(GROUP_CONCAT(g.icon || ' ' || g.name, ' · '), '')
+                   FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
+                  WHERE gt.tag_id = t.id) AS groups,
+                (SELECT COALESCE(MIN(g.name),'')
+                   FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
+                  WHERE gt.tag_id = t.id) AS gsort
+           FROM hub_track_resolved_tags rt
+           JOIN hub_tags t ON t.id = rt.tag_id
+          WHERE rt.track_id = ?1
+          ORDER BY gsort COLLATE NOCASE, t.name COLLATE NOCASE LIMIT 300",
+    )
+    .bind(id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
     let tags: Vec<DetailTag> = tag_rows
         .into_iter()
-        .map(|(id, name, owner, groups)| DetailTag {
+        .map(|(id, name, groups)| DetailTag {
             mine: my_tag_ids.contains(&id),
-            id,
             name,
-            owner,
             groups,
         })
         .collect();
+
+    let playlists: Vec<PlRow> = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT u.slug, COALESCE(hp.name,''), hp.id
+           FROM hub_playlist_tracks hpt
+           JOIN hub_playlists hp ON hp.id = hpt.playlist_id
+           JOIN hub_users u ON u.id = hp.user_id
+          WHERE hpt.track_id = ?1 ORDER BY u.slug, hp.name LIMIT 200",
+    )
+    .bind(id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(owner, name, pid)| PlRow {
+        owner,
+        name,
+        href: format!("/playlist/{pid}"),
+    })
+    .collect();
 
     let my_tags: Vec<DetailGroupTag> = crate::tags::list_user_tags(&st.pool, me)
         .await
@@ -271,17 +345,43 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
         .map(|(id, name)| DetailGroupTag { id, name })
         .collect();
 
+    let spotify_id: String = sqlx::query_scalar(
+        "SELECT external_id FROM hub_track_external_ids WHERE track_id = ?1 AND service = 'spotify' LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+
     let isrc = row.get::<String, _>("isrc");
+    let has_isrc = !isrc.trim().is_empty();
     Some(QueueDetail {
         id,
         title: row.get("title"),
-        artists: row.get("artists"),
-        album: row.get("album"),
+        artists,
+        album_link: !album_href.is_empty(),
+        album,
+        album_href,
+        cover: row.get("image_url"),
         duration,
-        has_isrc: !isrc.trim().is_empty(),
+        explicit: if row.get::<i64, _>("explicit") != 0 {
+            "ja"
+        } else {
+            "nein"
+        }
+        .to_string(),
         isrc,
+        has_isrc,
         music_api: st.cfg.music_api_token.is_some(),
+        bpm: nonnull("bpm"),
+        key: nonnull("musickey"),
+        energy: nonnull("energy"),
+        genres,
+        spotify_id,
         tags,
+        playlists,
         my_tags,
     })
 }

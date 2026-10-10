@@ -148,3 +148,22 @@ async fn tag_queue_tolerates_empty_max_param() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
 }
+
+#[tokio::test]
+async fn detail_shows_all_meta_and_relations() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+    let html = app
+        .client()
+        .get(app.url(&format!("/tag-queue/{}", app.seed.t_all)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    for label in ["Album", "ISRC", "BPM", "Key", "Energy", "Genres", "Tags", "In Playlists"] {
+        assert!(html.contains(label), "detail missing {label}");
+    }
+}

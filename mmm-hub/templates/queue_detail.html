@@ -1,12 +1,20 @@
 <section class="hub-detail">
-    <hgroup>
-        <h2 style="margin-bottom: 0">{{ title }}</h2>
-        <p class="hub-muted">
-            {{ artists }}{% if album != "" %} · {{ album }}{% endif %}{% if duration != ""
-            %} · {{ duration }}{% endif %} {% if isrc != "" %}· <code>{{ isrc }}</code>{%
-            endif %}
-        </p>
-    </hgroup>
+    <div style="display: flex; gap: 0.6rem; align-items: flex-start">
+        {% if cover != "" %}<img
+            src="{{ cover }}"
+            alt=""
+            loading="lazy"
+            style="width: 5rem; height: 5rem; object-fit: cover; border-radius: 0.4rem"
+        />{% endif %}
+        <div style="min-width: 0">
+            <h2 style="margin: 0 0 0.1rem">{{ title }}</h2>
+            <p class="hub-muted" style="margin: 0">
+                {% for a in artists %}<a href="{{ a.href }}" class="hub-tag"
+                    >{{ a.name }}</a
+                >{% if !loop.last %}, {% endif %}{% endfor %}
+            </p>
+        </div>
+    </div>
 
     {% if music_api && has_isrc %}
     <div class="hub-player">
@@ -24,16 +32,80 @@
     <p class="hub-muted">Kein Player (music-api oder ISRC fehlt).</p>
     {% endif %}
 
-    <h3 style="margin: 0.6rem 0 0.2rem">Tags</h3>
+    <table class="hub-kv" style="margin: 0.4rem 0">
+        <tbody>
+            <tr>
+                <th scope="row">Album</th>
+                <td>
+                    {% if album_link %}<a href="{{ album_href }}">{{ album }}</a>{% else
+                    %}—{% endif %}
+                </td>
+            </tr>
+            <tr>
+                <th scope="row">Dauer</th>
+                <td>{% if duration != "" %}{{ duration }}{% else %}—{% endif %}</td>
+            </tr>
+            <tr>
+                <th scope="row">Explicit</th>
+                <td>{{ explicit }}</td>
+            </tr>
+            <tr>
+                <th scope="row">ISRC</th>
+                <td>{% if isrc != "" %}<code>{{ isrc }}</code>{% else %}—{% endif %}</td>
+            </tr>
+            <tr>
+                <th scope="row">BPM</th>
+                <td>{{ bpm }}</td>
+            </tr>
+            <tr>
+                <th scope="row">Key</th>
+                <td>{{ key }}</td>
+            </tr>
+            <tr>
+                <th scope="row">Energy</th>
+                <td>{{ energy }}</td>
+            </tr>
+            <tr>
+                <th scope="row">Genres</th>
+                <td>{{ genres }}</td>
+            </tr>
+            {% if spotify_id != "" %}
+            <tr>
+                <th scope="row">Spotify</th>
+                <td>
+                    <a
+                        href="https://open.spotify.com/track/{{ spotify_id }}"
+                        target="_blank"
+                        rel="noreferrer"
+                        ><code>{{ spotify_id }}</code></a
+                    >
+                </td>
+            </tr>
+            {% endif %}
+        </tbody>
+    </table>
+
+    <h3 style="margin: 0.4rem 0 0.2rem">Tags</h3>
     {% if tags.is_empty() %}
     <p class="hub-muted">Noch keine Tags.</p>
     {% else %}
     <div style="display: flex; flex-wrap: wrap; gap: 0.3rem">
         {% for t in tags %}
-        <span
-            class="hub-chip"
-            title="{% if t.mine %}von dir{% else %}@{{ t.owner }}{% endif %}"
-            >{{ t.name }}{% if t.groups != "" %} · {{ t.groups }}{% endif %}</span
+        <span class="hub-chip" title="{% if t.mine %}von dir{% endif %}"
+            >{{ t.name }}{% if t.groups != "" %} · {{ t.groups }}{% endif %}{% if t.mine
+            %}
+            <form
+                method="post"
+                action="/tag-queue/{{ id }}/untag"
+                hx-post="/tag-queue/{{ id }}/untag"
+                hx-target="#queue-detail"
+                hx-swap="innerHTML"
+                style="display: inline"
+            >
+                <input type="hidden" name="name" value="{{ t.name }}" />
+                <button type="submit" class="outline" style="padding: 0 0.3rem">×</button>
+            </form>
+            {% endif %}</span
         >
         {% endfor %}
     </div>
@@ -60,4 +132,18 @@
         </datalist>
         <button type="submit">Taggen</button>
     </form>
+
+    <h3 style="margin: 0.6rem 0 0.2rem">In Playlists</h3>
+    {% if playlists.is_empty() %}
+    <p class="hub-muted">In keiner Playlist.</p>
+    {% else %}
+    <div style="display: flex; flex-direction: column; gap: 0.15rem">
+        {% for p in playlists %}
+        <div>
+            <a href="/user/{{ p.owner }}" class="hub-muted">@{{ p.owner }}</a> ·
+            <a href="{{ p.href }}">{{ p.name }}</a>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
 </section>
