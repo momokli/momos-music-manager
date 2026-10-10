@@ -26,6 +26,7 @@ pub mod settings;
 pub mod similar;
 pub mod soundcloud;
 pub mod spotify;
+pub mod tagqueue;
 pub mod tags;
 pub mod traktor;
 pub mod ui;

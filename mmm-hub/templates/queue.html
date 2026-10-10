@@ -1,0 +1,108 @@
+{% extends "base.html" %} {% block title %}Tag-Queue — MMM Hub{% endblock %} {% block
+content %}
+<hgroup>
+    <h1>Tag-Queue</h1>
+    <p class="hub-muted">
+        Tracks nach <strong>Ripeness</strong> aufsteigend — die am schlechtesten getaggten
+        zuerst. Track anklicken für Details, Tagging &amp; Player.
+    </p>
+</hgroup>
+
+<form
+    method="get"
+    action="/tag-queue"
+    style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center"
+>
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Track / Künstler suchen …"
+        aria-label="Suchen"
+    />
+    <label style="display: flex; gap: 0.3rem; align-items: center">
+        max Ripeness
+        <input
+            type="number"
+            name="max"
+            value="{{ max }}"
+            placeholder="∞"
+            style="width: 6rem"
+            aria-label="Max Ripeness"
+        />
+    </label>
+    <label style="display: flex; gap: 0.25rem; align-items: center">
+        <input type="checkbox" name="untagged" value="1" {% if untagged %}checked{% endif %} />
+        nur ungetaggt
+    </label>
+    <label style="display: flex; gap: 0.25rem; align-items: center">
+        <input type="checkbox" name="mine" value="1" {% if mine %}checked{% endif %} /> nur
+        meine Playlists
+    </label>
+    <button type="submit">Filtern</button>
+    <span class="hub-muted">{{ total_shown }} Tracks</span>
+</form>
+
+<div
+    style="
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 0.6rem;
+        align-items: start;
+    "
+>
+    <div
+        class="hub-scroll-y overflow-auto"
+        style="max-height: 74vh; overflow: auto; border: 1px solid var(--pico-muted-border-color)"
+    >
+        <table class="hub-dense-table">
+            <caption class="hub-visually-hidden">
+                Tag-Queue
+            </caption>
+            <thead>
+                <tr>
+                    <th scope="col">#</th>
+                    <th scope="col">Track</th>
+                    <th scope="col">Ripeness</th>
+                    <th scope="col">Tags</th>
+                    <th scope="col">Meta</th>
+                    <th scope="col">Traktor</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in rows %}
+                <tr
+                    hx-get="/tag-queue/{{ r.id }}"
+                    hx-target="#queue-detail"
+                    hx-swap="innerHTML"
+                    style="cursor: pointer"
+                >
+                    <td>{{ loop.index }}</td>
+                    <td>
+                        <strong>{{ r.title }}</strong><br /><span class="hub-muted"
+                            >{{ r.artists }}</span
+                        >
+                    </td>
+                    <td>{{ r.total }}</td>
+                    <td>{{ r.tag_count }}</td>
+                    <td>{{ r.meta_score }}</td>
+                    <td>{{ r.traktor }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div
+        id="queue-detail"
+        class="hub-scroll-y overflow-auto"
+        style="
+            max-height: 74vh;
+            overflow: auto;
+            border: 1px solid var(--pico-muted-border-color);
+            padding: 0.5rem;
+        "
+    >
+        <p class="hub-muted">Track links anklicken für Details &amp; Tagging.</p>
+    </div>
+</div>
+{% endblock %}

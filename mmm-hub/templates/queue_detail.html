@@ -1,0 +1,48 @@
+<section class="hub-detail">
+    <hgroup>
+        <h2 style="margin-bottom: 0">{{ title }}</h2>
+        <p class="hub-muted">
+            {{ artists }}{% if album != "" %} · {{ album }}{% endif %}{% if duration != ""
+            %} · {{ duration }}{% endif %} {% if isrc != "" %}· <code>{{ isrc }}</code>{% endif %}
+        </p>
+    </hgroup>
+
+    {% if music_api && has_isrc %}
+    <audio controls preload="none" src="/track/{{ id }}/stream" style="width: 100%"></audio>
+    {% else %}
+    <p class="hub-muted">Kein Player (music-api oder ISRC fehlt).</p>
+    {% endif %}
+
+    <h3 style="margin: 0.6rem 0 0.2rem">Tags</h3>
+    {% if tags.is_empty() %}
+    <p class="hub-muted">Noch keine Tags.</p>
+    {% else %}
+    <div style="display: flex; flex-wrap: wrap; gap: 0.3rem">
+        {% for t in tags %}
+        <span class="hub-chip" title="{% if t.mine %}von dir{% else %}@{{ t.owner }}{% endif %}"
+            >{{ t.name }}{% if t.groups != "" %} · {{ t.groups }}{% endif %}</span
+        >
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <form
+        hx-post="/tag-queue/{{ id }}/tag"
+        hx-target="#queue-detail"
+        hx-swap="innerHTML"
+        style="display: flex; gap: 0.3rem; margin-top: 0.5rem; align-items: center"
+    >
+        <input
+            type="text"
+            name="name"
+            list="my-tags"
+            placeholder="Tag …"
+            aria-label="Tag"
+            required
+        />
+        <datalist id="my-tags">
+            {% for t in my_tags %}<option value="{{ t.name }}"></option>{% endfor %}
+        </datalist>
+        <button type="submit">Taggen</button>
+    </form>
+</section>

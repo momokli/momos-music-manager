@@ -11,6 +11,8 @@ use sqlx::SqlitePool;
 
 use crate::settings::Engine;
 
+use std::collections::HashMap;
+
 /// Points contributed by a group holding `k` tags. Position `i` (0-based) uses
 /// `points[i]`; beyond the vector the last value repeats.
 pub fn group_points(points: &[f64], k: usize) -> f64 {
@@ -131,6 +133,142 @@ pub async fn ripeness(pool: &SqlitePool, track_id: i64, e: &Engine) -> Ripeness 
     out.total = e.tag_weight * out.tag_score
         + e.meta_weight * out.meta_score
         + e.trak_weight * out.traktor_score;
+    out
+}
+
+/// One row of the tag queue.
+#[derive(Debug, Clone)]
+pub struct QueueRow {
+    pub track_id: i64,
+    pub title: String,
+    pub artists: String,
+    pub album: String,
+    pub total: f64,
+    pub tag_score: f64,
+    pub meta_score: f64,
+    pub traktor_score: f64,
+    pub tag_count: i64,
+}
+
+/// Build the tag queue: every track scored by ripeness, ascending (least-ripe
+/// first = most in need of tagging). `max_total` hides tracks already "ripe
+/// enough" (the configurable threshold). `only_untagged` keeps only tracks with
+/// no tags at all.
+pub async fn queue(
+    pool: &SqlitePool,
+    e: &Engine,
+    max_total: Option<f64>,
+    only_untagged: bool,
+    limit: usize,
+) -> Vec<QueueRow> {
+    // Tag counts per (track, group) -> position-weighted tag score per track.
+    let tag_rows = sqlx::query_as::<_, (i64, i64, i64)>(
+        "SELECT rt.track_id, gt.group_id, COUNT(*)
+           FROM hub_track_resolved_tags rt
+           JOIN hub_group_tags gt ON gt.tag_id = rt.tag_id
+          GROUP BY rt.track_id, gt.group_id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let mut tag_score: HashMap<i64, (f64, i64)> = HashMap::new();
+    for (tid, _gid, cnt) in tag_rows {
+        let slot = tag_score.entry(tid).or_insert((0.0, 0));
+        slot.0 += group_points(&e.tag_points, cnt.max(0) as usize);
+        slot.1 += cnt;
+    }
+
+    // Traktor signal per track.
+    let trak_rows = sqlx::query_as::<_, (i64, i64, Option<i64>, Option<String>, i64, i64)>(
+        "SELECT track_id, play_count, rating, last_played, session_occurrence, playlist_occurrence
+           FROM hub_v_track_traktor",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let cap = e.trak_playcount_cap.max(1.0);
+    let mut trak: HashMap<i64, f64> = HashMap::new();
+    for (tid, pc, rating, last, sess, pl) in trak_rows {
+        let pc_norm = (pc as f64 / cap).min(1.0);
+        let rating_norm = rating.map(|r| r as f64 / 5.0).unwrap_or(0.0);
+        let recency = if last.map(|s| !s.trim().is_empty()).unwrap_or(false) {
+            1.0
+        } else {
+            0.0
+        };
+        let occ = if sess > 0 || pl > 0 { 1.0 } else { 0.0 };
+        trak.insert(tid, pc_norm + rating_norm + recency + occ);
+    }
+
+    // Track meta.
+    let meta_rows = sqlx::query(
+        "SELECT t.id, COALESCE(t.title,'') AS title, COALESCE(t.artists,'') AS artists,
+                COALESCE(t.album,'') AS album, t.image_url,
+                (SELECT bpm FROM v_track_audio WHERE track_id = t.id) AS bpm,
+                (SELECT camelot FROM v_track_audio WHERE track_id = t.id) AS camelot,
+                (SELECT COUNT(*) FROM hub_track_genres WHERE track_id = t.id) AS genres
+           FROM hub_tracks t",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut out: Vec<QueueRow> = Vec::with_capacity(meta_rows.len());
+    for r in &meta_rows {
+        use sqlx::Row;
+        let id: i64 = r.get("id");
+        let (t_score, t_count) = tag_score.get(&id).copied().unwrap_or((0.0, 0));
+        if only_untagged && t_count > 0 {
+            continue;
+        }
+        let has = |v: &str| !v.trim().is_empty();
+        let meta_score = [
+            has(&r.get::<String, _>("title")),
+            has(&r.get::<String, _>("artists")),
+            has(&r.get::<String, _>("album")),
+            r.get::<Option<String>, _>("image_url")
+                .map(|s| has(&s))
+                .unwrap_or(false),
+            r.get::<Option<String>, _>("bpm")
+                .map(|s| has(&s))
+                .unwrap_or(false),
+            r.get::<Option<String>, _>("camelot")
+                .map(|s| has(&s))
+                .unwrap_or(false),
+            r.get::<i64, _>("genres") > 0,
+        ]
+        .iter()
+        .filter(|b| **b)
+        .count() as f64;
+        let traktor_score = trak.get(&id).copied().unwrap_or(0.0);
+        let total =
+            e.tag_weight * t_score + e.meta_weight * meta_score + e.trak_weight * traktor_score;
+        if let Some(max) = max_total {
+            if total > max {
+                continue;
+            }
+        }
+        out.push(QueueRow {
+            track_id: id,
+            title: r.get("title"),
+            artists: r.get("artists"),
+            album: r.get("album"),
+            total,
+            tag_score: t_score,
+            meta_score,
+            traktor_score,
+            tag_count: t_count,
+        });
+    }
+    // Least ripe first; stable tie-break by artist/title.
+    out.sort_by(|a, b| {
+        a.total
+            .partial_cmp(&b.total)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.artists.cmp(&b.artists))
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    out.truncate(limit);
     out
 }
 

@@ -66,6 +66,13 @@ pub async fn rebuild(pool: &SqlitePool) -> Result<ResolveSummary> {
     )
     .execute(pool)
     .await?;
+    // Direct (manual) track↔tag links, independent of any playlist.
+    sqlx::query(
+        "INSERT OR IGNORE INTO hub_track_resolved_tags (track_id, tag_id)
+         SELECT DISTINCT track_id, tag_id FROM hub_track_tag_manual",
+    )
+    .execute(pool)
+    .await?;
     let tags: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_tags")
         .fetch_one(pool)
         .await
@@ -83,6 +90,118 @@ pub async fn rebuild(pool: &SqlitePool) -> Result<ResolveSummary> {
         sources: sources as usize,
         resolved: resolved as usize,
     })
+}
+
+/// Tag a track directly (manual link owned by `user_id`). Idempotent.
+pub async fn tag_track(pool: &SqlitePool, user_id: i64, track_id: i64, tag_id: i64) -> Result<()> {
+    let owned =
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2")
+            .bind(tag_id)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    if owned.is_none() {
+        bail!("tag not owned by user");
+    }
+    sqlx::query(
+        "INSERT OR IGNORE INTO hub_track_tag_manual (track_id, tag_id, user_id, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(track_id)
+    .bind(tag_id)
+    .bind(user_id)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    rebuild(pool).await?;
+    Ok(())
+}
+
+/// Remove a direct (manual) track↔tag link. Idempotent.
+pub async fn untag_track(
+    pool: &SqlitePool,
+    user_id: i64,
+    track_id: i64,
+    tag_id: i64,
+) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM hub_track_tag_manual WHERE track_id = ?1 AND tag_id = ?2 AND user_id = ?3",
+    )
+    .bind(track_id)
+    .bind(tag_id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    rebuild(pool).await?;
+    Ok(())
+}
+
+/// Whether the manual link exists (for the queue's tag-toggle display).
+pub async fn is_tagged_manually(
+    pool: &SqlitePool,
+    user_id: i64,
+    track_id: i64,
+    tag_id: i64,
+) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM hub_track_tag_manual WHERE track_id = ?1 AND tag_id = ?2 AND user_id = ?3",
+    )
+    .bind(track_id)
+    .bind(tag_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+/// Set whether a tag keeps (archives) tracks that leave the source playlist.
+pub async fn set_source_keep_on_remove(
+    pool: &SqlitePool,
+    actor_user_id: i64,
+    tag_id: i64,
+    playlist_id: i64,
+    keep: bool,
+) -> Result<()> {
+    let owned =
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2")
+            .bind(tag_id)
+            .bind(actor_user_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    if owned.is_none() {
+        bail!("tag not owned by user");
+    }
+    sqlx::query(
+        "UPDATE hub_tag_sources SET keep_on_remove = ?1 WHERE tag_id = ?2 AND playlist_id = ?3",
+    )
+    .bind(keep as i64)
+    .bind(tag_id)
+    .bind(playlist_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Opt a tag into bi-way playlist sync (push tagged tracks to a linked playlist).
+pub async fn set_tag_sync(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    tag_id: i64,
+    sync: bool,
+) -> Result<()> {
+    sqlx::query("UPDATE hub_tags SET sync_playlist = ?1 WHERE id = ?2 AND owner_user_id = ?3")
+        .bind(sync as i64)
+        .bind(tag_id)
+        .bind(owner_user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Create (or update) a tag owned by a user, without a source playlist.
