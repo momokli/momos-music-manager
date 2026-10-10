@@ -865,6 +865,7 @@ struct TrackPage {
     spotify_id: String,
     tag_clouds: Vec<TagCloudRow>,
     untag_action: String,
+    tag_action: String,
     htmx: bool,
     my_groups: Vec<GroupRef>,
 }
@@ -888,10 +889,8 @@ struct GroupRef {
 }
 
 struct RecTag {
-    id: i64,
     name: String,
-    owner: String,
-    score: i64,
+    reason: String,
 }
 
 struct UserGroup {
@@ -1174,14 +1173,12 @@ async fn track_page(
     let e = crate::settings::engine(&st.pool).await;
     let rip = crate::scoring::ripeness(&st.pool, id, &e).await;
     let my_tags = crate::tags::list_user_tags(&st.pool, nav.id).await;
-    let recommended: Vec<RecTag> = crate::tags::recommended_tags(&st.pool, id, 12)
+    let recommended: Vec<RecTag> = crate::recommend::recommend_tags(&st.pool, id, 12)
         .await
         .into_iter()
-        .map(|(id, name, owner, score)| RecTag {
-            id,
-            name,
-            owner,
-            score,
+        .map(|r| RecTag {
+            reason: r.why(),
+            name: r.name,
         })
         .collect();
     let can_stream = st.cfg.music_api_token.is_some() && !isrc.trim().is_empty();
@@ -1277,6 +1274,7 @@ async fn track_page(
         spotify_id,
         tag_clouds,
         untag_action: format!("/track/{id}/untag"),
+        tag_action: format!("/track/{id}/tag"),
         htmx: false,
         my_groups,
     };

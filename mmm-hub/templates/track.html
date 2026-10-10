@@ -197,27 +197,7 @@ content %}
                             </datalist>
                             <button type="submit">Taggen</button>
                         </form>
-                        {% if !recommended.is_empty() %}
-                        <div style="margin-top: 0.4rem">
-                            <span class="hub-muted">Empfohlen (wie andere taggen):</span>
-                            {% for r in recommended %}
-                            <form
-                                method="post"
-                                action="/track/{{ id }}/tag"
-                                style="display: inline"
-                            >
-                                <input type="hidden" name="name" value="{{ r.name }}" />
-                                <button
-                                    type="submit"
-                                    class="hub-chip"
-                                    title="von @{{ r.owner }} · {{ r.score }}× genutzt"
-                                >
-                                    {{ r.name }}
-                                </button>
-                            </form>
-                            {% endfor %}
-                        </div>
-                        {% endif %}
+                        {% include "_partials/rec_tags.html" %}
                     </td>
                 </tr>
                 <tr>

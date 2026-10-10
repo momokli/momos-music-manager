@@ -129,28 +129,7 @@
         <button type="submit">Taggen</button>
     </form>
 
-    {% if !recommended.is_empty() %}
-    <div style="margin-top: 0.4rem">
-        <span class="hub-muted">Empfohlen:</span>
-        {% for r in recommended %}
-        <form
-            hx-post="/tag-queue/{{ id }}/tag"
-            hx-target="#queue-detail"
-            hx-swap="innerHTML"
-            style="display: inline"
-        >
-            <input type="hidden" name="name" value="{{ r.name }}" />
-            <button
-                type="submit"
-                class="hub-chip"
-                title="von @{{ r.owner }} · Score {{ r.score }}"
-            >
-                {{ r.name }}
-            </button>
-        </form>
-        {% endfor %}
-    </div>
-    {% endif %}
+    {% include "_partials/rec_tags.html" %}
 
     <h3 style="margin: 0.6rem 0 0.2rem">In Playlists</h3>
     {% if playlists.is_empty() %}

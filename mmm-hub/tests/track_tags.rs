@@ -153,9 +153,16 @@ async fn recommendations_use_relationship_signals() {
     tags::tag_track(&app.pool, me, 80002, house).await.unwrap();
 
     // 80001 shares artist + album with the tagged 80002 -> House is recommended.
-    let recs = tags::recommended_tags(&app.pool, 80001, 10).await;
+    let recs = mmm_hub::recommend::recommend_tags(&app.pool, 80001, 10).await;
     assert!(
-        recs.iter().any(|(id, ..)| *id == house),
-        "artist/album relationship should recommend House: {recs:?}"
+        recs.iter().any(|r| r.name == "House"),
+        "artist/album relationship should recommend House: {:?}",
+        recs.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
+    // The recommendation explains itself (artist / album signal).
+    let house = recs.iter().find(|r| r.name == "House").unwrap();
+    assert!(
+        !house.why().is_empty(),
+        "recommendation must carry a reason"
     );
 }
