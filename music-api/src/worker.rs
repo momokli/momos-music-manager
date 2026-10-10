@@ -93,7 +93,13 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     } else if state.deemix_login.blocked(now) {
         false
     } else {
-        match deemix::login(&state.http, &state.config.deemix_url, &state.config.deemix_arl).await {
+        match deemix::login(
+            &state.http,
+            &state.config.deemix_url,
+            &state.config.deemix_arl,
+        )
+        .await
+        {
             Ok(()) => {
                 state.deemix_login.note_success();
                 true
@@ -111,6 +117,10 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
         match deezer::lookup_isrc(&state.http, &state.config.deezer_base, &track.isrc).await {
             Ok(deezer::Lookup::Absent { reason }) => {
                 info!("{}: absent on Deezer ({reason})", track.isrc);
+                state.logs.push(
+                    "warn",
+                    format!("{}: absent on Deezer ({reason})", track.isrc),
+                );
                 db::mark_terminal(&state.pool, &track.isrc, state::ABSENT, &reason).await?;
             }
             Ok(deezer::Lookup::Found {
@@ -119,8 +129,19 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
                 artist,
                 album,
             }) => {
-                db::mark_resolved(&state.pool, &track.isrc, &deezer_id, &title, &artist, &album)
-                    .await?;
+                db::mark_resolved(
+                    &state.pool,
+                    &track.isrc,
+                    &deezer_id,
+                    &title,
+                    &artist,
+                    &album,
+                )
+                .await?;
+                state.logs.push(
+                    "info",
+                    format!("{}: resolved — {title} / {artist}", track.isrc),
+                );
 
                 if !deemix_ready {
                     continue;
@@ -138,6 +159,9 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
                     Ok(deemix::AddOutcome::Queued { uuid }) => {
                         let uuid = uuid.unwrap_or_else(|| format!("track_{deezer_id}_1"));
                         debug!("{}: queued at deemix as {uuid}", track.isrc);
+                        state
+                            .logs
+                            .push("info", format!("{}: queued at deemix", track.isrc));
                         db::mark_downloading(&state.pool, &track.isrc, &uuid).await?;
                     }
                     Ok(deemix::AddOutcome::Rejected { errid }) => {
@@ -150,6 +174,7 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
                             (state::FAILED, format!("deemix rejected: {errid}"))
                         };
                         warn!("{}: {msg}", track.isrc);
+                        state.logs.push("warn", format!("{}: {msg}", track.isrc));
                         db::mark_terminal(&state.pool, &track.isrc, st, &msg).await?;
                     }
                     Err(e) => warn!("{}: deemix addToQueue failed: {e:#}", track.isrc),
@@ -220,6 +245,9 @@ async fn advance_downloads(state: &Arc<AppState>) -> Result<()> {
                     item.progress.unwrap_or(0.0)
                 );
                 if db::now() - track.updated_at > timeout {
+                    state
+                        .logs
+                        .push("warn", format!("{}: download timeout", track.isrc));
                     db::mark_terminal(&state.pool, &track.isrc, state::FAILED, "download timeout")
                         .await?;
                 }
@@ -227,9 +255,7 @@ async fn advance_downloads(state: &Arc<AppState>) -> Result<()> {
             None => {
                 // Not in the queue: it may have finished and been evicted, so
                 // try to collect it before declaring a timeout.
-                if !finalize(state, &track).await?
-                    && db::now() - track.updated_at > timeout
-                {
+                if !finalize(state, &track).await? && db::now() - track.updated_at > timeout {
                     db::mark_terminal(
                         &state.pool,
                         &track.isrc,
@@ -285,6 +311,9 @@ async fn finalize(state: &Arc<AppState>, track: &Track) -> Result<bool> {
         )
         .await?;
         info!("{}: ready (flac + 320 + 128)", track.isrc);
+        state
+            .logs
+            .push("info", format!("{}: ready (flac)", track.isrc));
     } else {
         // deemix fell back (no lossless available). The delivered MP3 may be
         // 320 *or* 128 — the ARL's Deezer tier decides — so classify it by what

@@ -27,6 +27,11 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/orders/{id}", get(get_order))
         .route("/isrc/{isrc}", get(get_isrc))
         .route("/isrc/{isrc}/{format}", get(get_file))
+        // Bulk metadata/state for many ISRCs at once (hub enrichment).
+        .route("/tracks", get(get_tracks))
+        // Live deemix queue + recent service events.
+        .route("/queue", get(get_queue))
+        .route("/logs", get(get_logs))
         // Content-addressed object store (Backpack backup / file home).
         .route("/objects", get(crate::store::list))
         .route("/objects/check", post(crate::store::check))
@@ -69,8 +74,98 @@ async fn create_order(
     // Wake the worker so a fresh order starts immediately instead of on the
     // next tick.
     state.notify.notify_one();
+    state
+        .logs
+        .push("info", format!("order {order_id}: {} ISRC(s)", isrcs.len()));
 
     Json(json!({ "orderId": order_id, "status": "open", "count": isrcs.len() })).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct TracksQuery {
+    /// Comma-separated ISRCs (bounded).
+    isrcs: Option<String>,
+    limit: Option<usize>,
+}
+
+/// `GET /tracks?isrcs=a,b,c` — bulk metadata + state + delivered formats + object
+/// presence for many ISRCs in one call. Unknown ISRCs come back with
+/// `"unknown": true` (never omitted) so indexes stay aligned.
+async fn get_tracks(State(state): State<Arc<AppState>>, Query(q): Query<TracksQuery>) -> Response {
+    let limit = q.limit.unwrap_or(200).clamp(1, 500);
+    let raw = q.isrcs.unwrap_or_default();
+    let mut isrcs: Vec<String> = raw
+        .split(',')
+        .map(db::normalize_isrc)
+        .filter(|s| !s.is_empty())
+        .collect();
+    isrcs.sort();
+    isrcs.dedup();
+    isrcs.truncate(limit);
+
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(isrcs.len());
+    for isrc in &isrcs {
+        match db::get_track(&state.pool, isrc).await {
+            Ok(Some(t)) => {
+                let objects: Vec<serde_json::Value> = sqlx::query_as::<_, (String, i64)>(
+                    "SELECT hash, size FROM store_objects WHERE isrc = ?1 ORDER BY created_at DESC",
+                )
+                .bind(isrc)
+                .fetch_all(&state.pool)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(hash, size)| json!({ "hash": hash, "size": size }))
+                .collect();
+                out.push(json!({
+                    "isrc": t.isrc,
+                    "state": t.state,
+                    "deezerId": t.deezer_id,
+                    "title": t.title,
+                    "artist": t.artist,
+                    "album": t.album,
+                    "sourceFormat": t.source_format,
+                    "formats": t.formats(),
+                    "error": t.error,
+                    "objects": objects,
+                }));
+            }
+            _ => out.push(json!({ "isrc": isrc, "unknown": true })),
+        }
+    }
+    Json(json!({ "tracks": out })).into_response()
+}
+
+/// `GET /queue` — the live deemix queue (bounded to what deemix returns).
+async fn get_queue(State(state): State<Arc<AppState>>) -> Response {
+    match crate::deemix::queue(&state.http, &state.config.deemix_url).await {
+        Ok(q) => {
+            let items: Vec<serde_json::Value> = q
+                .into_iter()
+                .map(|(id, it)| {
+                    json!({
+                        "id": id,
+                        "title": it.title,
+                        "status": it.status,
+                        "progress": it.progress,
+                    })
+                })
+                .collect();
+            Json(json!({ "items": items })).into_response()
+        }
+        Err(e) => Json(json!({ "items": [], "error": e.to_string() })).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LogsQuery {
+    limit: Option<usize>,
+}
+
+/// `GET /logs?limit=n` — recent service events, newest first.
+async fn get_logs(State(state): State<Arc<AppState>>, Query(q): Query<LogsQuery>) -> Response {
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    Json(json!({ "logs": state.logs.recent(limit) })).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,7 +200,10 @@ async fn get_order(State(state): State<Arc<AppState>>, Path(id): Path<String>) -
         Ok(i) => i,
         Err(e) => {
             tracing::error!("order_items failed: {e:#}");
-            return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read order items");
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to read order items",
+            );
         }
     };
     Json(json!({

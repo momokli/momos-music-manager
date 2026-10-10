@@ -10,6 +10,7 @@ pub mod config;
 pub mod db;
 pub mod deemix;
 pub mod deezer;
+pub mod logbuf;
 pub mod models;
 pub mod store;
 pub mod transcode;
@@ -38,13 +39,17 @@ pub struct AppState {
     pub deemix_login: worker::LoginBackoff,
     /// Content-addressed object store.
     pub store: store::Store,
+    /// Recent service events (surfaced via `GET /logs`).
+    pub logs: logbuf::LogBuffer,
 }
 
 /// Build the fully-stated router: public `/health`, everything else behind the
 /// bearer check.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let protected = api::router()
-        .layer(middleware::from_fn_with_state(state.clone(), auth::require_bearer));
+    let protected = api::router().layer(middleware::from_fn_with_state(
+        state.clone(),
+        auth::require_bearer,
+    ));
     Router::new()
         .route("/health", get(api::health))
         .merge(protected)
