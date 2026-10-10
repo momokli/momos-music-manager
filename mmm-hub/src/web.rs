@@ -4,11 +4,11 @@
 //! instead of a loopback listener, so it works for any logged-in user in a browser.
 
 use askama::Template;
+use axum::Router;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::{Row, SqlitePool};
@@ -31,7 +31,10 @@ pub fn router(state: AppState) -> Router {
         .route("/track/{id}", get(track_page))
         .route("/track/{id}/fetch", post(track_fetch))
         .route("/api/hub/services/{service}/connect", get(connect))
-        .route("/api/hub/services/{service}/fetch-playlists", post(fetch_playlists_handler))
+        .route(
+            "/api/hub/services/{service}/fetch-playlists",
+            post(fetch_playlists_handler),
+        )
         .route("/api/hub/services/{service}/sync-html", post(sync_html))
         .route("/api/hub/playlists/{id}/toggle", post(toggle_playlist))
         .route("/api/hub/playlists/enable-all", post(enable_all))
@@ -297,8 +300,12 @@ fn filter_clause(filter: &str) -> &'static str {
         "with_items" => " AND p.items_available = 1",
         "not_fetched" => " AND p.items_available = 0 AND p.enabled_for_fetch = 1",
         "error" => " AND p.fetch_error IS NOT NULL",
-        "tagged" => " AND EXISTS (SELECT 1 FROM hub_tag_sources s JOIN hub_tags t ON t.id = s.tag_id WHERE s.playlist_id = p.id AND t.owner_user_id = ?1)",
-        "untagged" => " AND NOT EXISTS (SELECT 1 FROM hub_tag_sources s JOIN hub_tags t ON t.id = s.tag_id WHERE s.playlist_id = p.id AND t.owner_user_id = ?1)",
+        "tagged" => {
+            " AND EXISTS (SELECT 1 FROM hub_tag_sources s JOIN hub_tags t ON t.id = s.tag_id WHERE s.playlist_id = p.id AND t.owner_user_id = ?1)"
+        }
+        "untagged" => {
+            " AND NOT EXISTS (SELECT 1 FROM hub_tag_sources s JOIN hub_tags t ON t.id = s.tag_id WHERE s.playlist_id = p.id AND t.owner_user_id = ?1)"
+        }
         _ => "",
     }
 }
@@ -588,7 +595,8 @@ async fn fetch_playlists_handler(
                 "{} Playlists geholt ({} eigene, {} gefolgt)",
                 f.total, f.owned, f.followed
             );
-            Redirect::to(&format!("/me/playlists?msg={}", urlencoding::encode(&msg))).into_response()
+            Redirect::to(&format!("/me/playlists?msg={}", urlencoding::encode(&msg)))
+                .into_response()
         }
         Err(e) => error_page(&format!("Playlists holen fehlgeschlagen: {e}")),
     }
@@ -667,8 +675,10 @@ async fn sync_html(
     if headers.get("hx-request").is_some() {
         Html("<span class=\"hub-badge hub-badge-ok\">synchronisiert ✓</span>").into_response()
     } else {
-        Redirect::to("/me/playlists?msg=Synchronisation+eingericht+%E2%80%94+l%C3%A4uft+im+Hintergrund")
-            .into_response()
+        Redirect::to(
+            "/me/playlists?msg=Synchronisation+eingericht+%E2%80%94+l%C3%A4uft+im+Hintergrund",
+        )
+        .into_response()
     }
 }
 
@@ -788,7 +798,10 @@ fn render_table(columns: &[String], rows: &[Value]) -> String {
     } else {
         String::new()
     };
-    let mut out = format!("<p class=\"muted\">{} Zeile(n){note}</p><table>", rows.len());
+    let mut out = format!(
+        "<p class=\"muted\">{} Zeile(n){note}</p><table>",
+        rows.len()
+    );
     out.push_str("<tr>");
     for c in columns {
         out.push_str(&format!("<th>{}</th>", esc(c)));
@@ -835,6 +848,7 @@ struct TrackPage {
     tags: Vec<TrackTag>,
     genres: Vec<String>,
     flash: String,
+    music_api: bool,
 }
 
 struct UserGroup {
@@ -1139,6 +1153,7 @@ async fn track_page(
         tags,
         genres,
         flash: flash.msg.unwrap_or_default(),
+        music_api: st.cfg.music_api_token.is_some(),
     };
 
     match page.render() {
@@ -1353,13 +1368,14 @@ async fn callback(
         Err(e) => return error_page(&format!("Token-Austausch fehlgeschlagen: {e}")),
     };
 
-    let (remote_id, display_name) = match spotify::api_get(&st.cfg.spotify_api_base, &tokens.access_token, "/me").await {
-        Ok((200, me)) => (
-            me["id"].as_str().map(str::to_string),
-            me["display_name"].as_str().map(str::to_string),
-        ),
-        _ => (None, None),
-    };
+    let (remote_id, display_name) =
+        match spotify::api_get(&st.cfg.spotify_api_base, &tokens.access_token, "/me").await {
+            Ok((200, me)) => (
+                me["id"].as_str().map(str::to_string),
+                me["display_name"].as_str().map(str::to_string),
+            ),
+            _ => (None, None),
+        };
 
     if let Err(e) = crate::ingest::store_initial_tokens(
         &st.pool,

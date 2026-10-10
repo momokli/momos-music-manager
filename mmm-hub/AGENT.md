@@ -144,7 +144,9 @@ Web (session-gated): `/`, `/login`, `/signup`, `/logout`, `/me/playlists`, `/sea
 `member/remove`, `collective`, `delete`), `/collectives`, `/collectives/create`,
 `/collectives/{id}` (+ `update`, `join`, `leave`, `member`, `member/remove`, `delete`),
 `/digging` (+ `POST /digging/enrich`), `/admin`, `/settings`, `/user/{slug}`,
-`/playlist/{id}` (+ `tag`, `tag/add`, `tag/remove`, `POST order`, `GET download`), `/sql`.
+`/playlist/{id}` (+ `tag`, `tag/add`, `tag/remove`, `POST order`, `POST refresh`,
+`GET progress`, `GET download`), `/tag/{id}` (+ `rename`, `group/*`, `POST order`,
+`GET progress`, `GET download`), `/track/{id}/download`, `/sql`.
 
 JSON API: `GET /api/hub/{health,users,me,tracks/{id},overlap,playlists}`, `POST /api/hub/query`,
 `POST /api/hub/services/{service}/sync`, `GET /api/hub/services/{service}/connect`,
@@ -189,12 +191,15 @@ sources·base_sources + shared·shared_factor + candidate·candidate_factor`.
 
 ### music-api (whole-playlist download)
 
-- The playlist page (`music_api` token configured) shows **„Fehlende ordern"**
-  (`POST /playlist/{id}/order` → `music_api::order` with the playlist's distinct ISRCs) and
-  **„Playlist als ZIP laden"** (`GET /playlist/{id}/download?format=flac`).
-- Download builds a ZIP of all tracks music-api can currently serve
-  (`GET /isrc/{isrc}/{format}` per track, misses skipped), then streams it (temp file is
-  unlinked before streaming — Linux fd stays valid). `format` ∈ flac/mp3/wav/m4a.
+- Playlist & tag pages (token configured) show **„Fehlende ordern"**, **„Status aktualisieren"**,
+  a **format** select and **„… als ZIP laden"**, plus a live **`x/y bereit`** badge (htmx polls
+  `/…/{id}/progress` every 10s).
+- **Order only missing**: `order_missing` refreshes `hub_music_state` (cache of per-ISRC state,
+  migration 025) then orders only ISRCs not yet `ready` (`POST /orders`).
+- **Download**: `zip_for` → `build_playlist_zip` fetches every ready track (`GET /isrc/{isrc}/{format}`,
+  misses skipped) into a ZIP, then streams it (tmp unlinked before streaming — Linux fd stays valid).
+  Single track: `GET /track/{id}/download?format=…`. `format` ∈ flac/mp3/wav/m4a.
+- State cache: `music_api::{refresh_states, cached_counts, missing_isrcs}`.
 
 ---
 

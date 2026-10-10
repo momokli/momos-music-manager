@@ -12,7 +12,8 @@ content %}
     <a href="/digging?seed={{ id }}">Digging von diesem Track →</a> ·
     <a href="https://digdeeper.fm/" target="_blank" rel="noreferrer"
         >auf digdeeper.fm öffnen (extern)</a
-    >
+    >{% if music_api %} · <a href="/track/{{ id }}/download?format=flac">FLAC laden</a> ·
+    <a href="/track/{{ id }}/download?format=mp3">MP3 laden</a>{% endif %}
 </p>
 
 <div class="hub-dense hub-cols">

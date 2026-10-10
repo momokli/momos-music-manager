@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::json;
+use sqlx::SqlitePool;
 
 use crate::config::Config;
 
@@ -90,4 +91,108 @@ pub async fn order(cfg: &Config, isrcs: &[String]) -> Result<String> {
         .with_context(|| format!("POST {url}"))?;
     let v: serde_json::Value = resp.json().await.unwrap_or_default();
     Ok(v["orderId"].as_str().unwrap_or_default().to_string())
+}
+
+// ── state cache + bulk helpers (progress / order-only-missing) ───────────────
+
+async fn store_state(pool: &SqlitePool, isrc: &str, state: &str) {
+    let _ = sqlx::query(
+        "INSERT INTO hub_music_state (isrc, state, checked_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(isrc) DO UPDATE SET state = excluded.state, checked_at = excluded.checked_at",
+    )
+    .bind(isrc)
+    .bind(state)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await;
+}
+
+/// Refresh the cached music-api state for up to `cap` ISRCs (bounded concurrency).
+/// Returns `(ready, total, refreshed)`.
+pub async fn refresh_states(
+    pool: &SqlitePool,
+    cfg: &Config,
+    isrcs: &[String],
+    cap: usize,
+) -> (usize, usize, usize) {
+    if cfg.music_api_token.is_none() {
+        return (0, 0, 0);
+    }
+    let list: Vec<String> = isrcs.iter().take(cap).cloned().collect();
+    let total = list.len();
+    let mut ready = 0usize;
+    let mut refreshed = 0usize;
+    for chunk in list.chunks(8) {
+        let mut set = tokio::task::JoinSet::new();
+        for isrc in chunk {
+            let cfg = cfg.clone();
+            let isrc = isrc.clone();
+            set.spawn(async move {
+                let state = status(&cfg, &isrc)
+                    .await
+                    .ok()
+                    .and_then(|s| s.state)
+                    .unwrap_or_default();
+                (isrc, state)
+            });
+        }
+        while let Some(Ok((isrc, state))) = set.join_next().await {
+            if !state.is_empty() {
+                store_state(pool, &isrc, &state).await;
+                refreshed += 1;
+                if state == "ready" {
+                    ready += 1;
+                }
+            }
+        }
+    }
+    (ready, total, refreshed)
+}
+
+/// ISRCs whose cached state is not `ready` (missing from cache = not ready).
+pub async fn missing_isrcs(pool: &SqlitePool, isrcs: &[String]) -> Vec<String> {
+    let mut ready: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for chunk in isrcs.chunks(900) {
+        let mut qb = sqlx::QueryBuilder::new(
+            "SELECT isrc FROM hub_music_state WHERE state = 'ready' AND isrc IN (",
+        );
+        let mut sep = qb.separated(", ");
+        for i in chunk {
+            sep.push_bind(i.clone());
+        }
+        qb.push(")");
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            use sqlx::Row;
+            ready.insert(r.get::<Option<String>, _>("isrc").unwrap_or_default());
+        }
+    }
+    isrcs
+        .iter()
+        .filter(|i| !ready.contains(*i))
+        .cloned()
+        .collect()
+}
+
+/// `(ready, total)` from the **cached** state (no network) — for cheap progress
+/// indicators that are polled by the UI.
+pub async fn cached_counts(pool: &SqlitePool, isrcs: &[String]) -> (usize, usize) {
+    let mut ready = 0usize;
+    let mut seen = 0usize;
+    for chunk in isrcs.chunks(900) {
+        let mut qb =
+            sqlx::QueryBuilder::new("SELECT isrc, state FROM hub_music_state WHERE isrc IN (");
+        let mut sep = qb.separated(", ");
+        for i in chunk {
+            sep.push_bind(i.clone());
+        }
+        qb.push(")");
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            use sqlx::Row;
+            seen += 1;
+            if r.get::<Option<String>, _>("state").as_deref() == Some("ready") {
+                ready += 1;
+            }
+        }
+    }
+    (ready, seen)
 }

@@ -94,6 +94,42 @@ content %}
     {% for c in children %}<a href="/tag/{{ c.id }}" class="hub-chip">{{ c.name }}</a>{%
     endfor %} {% endif %}
 </section>
+{% endif %} {% if music_api %}
+<section
+    class="hub-actions"
+    aria-label="music-api"
+    style="
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        align-items: center;
+        margin-bottom: 0.4rem;
+    "
+>
+    <form method="post" action="/tag/{{ id }}/order">
+        <button type="submit">Fehlende ordern (music-api)</button>
+    </form>
+    <form
+        method="get"
+        action="/tag/{{ id }}/download"
+        style="display: inline-flex; gap: 0.3rem; align-items: center"
+    >
+        <select name="format" aria-label="Format">
+            <option value="flac">flac</option>
+            <option value="mp3">mp3</option>
+            <option value="wav">wav</option>
+            <option value="m4a">m4a</option>
+        </select>
+        <button type="submit" class="secondary">Tag als ZIP laden</button>
+    </form>
+    <span
+        class="hub-badge hub-badge-ok"
+        hx-get="/tag/{{ id }}/progress"
+        hx-trigger="every 10s"
+        hx-swap="innerHTML"
+        >{{ ready }}/{{ total }} bereit</span
+    >
+</section>
 {% endif %} {% if tracks.is_empty() %}
 <p class="hub-muted">Keine Tracks (Quell-Playlist leer oder noch nicht gefetcht).</p>
 {% else %}

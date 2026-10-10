@@ -826,6 +826,40 @@ async fn playlist_music_api_controls_and_endpoints() {
         .await
         .unwrap();
     assert_eq!(dl.status(), reqwest::StatusCode::BAD_GATEWAY);
+
+    // Progress indicator endpoint works.
+    let prog = app
+        .client()
+        .get(app.url(&format!("/playlist/{}/progress", app.seed.pl_alice)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(prog.status(), reqwest::StatusCode::OK);
+    assert!(body(prog).await.contains("bereit"));
+
+    // Single-track download: unconfigured music-api -> 502.
+    let td = app
+        .client()
+        .get(app.url(&format!("/track/{}/download", app.seed.t_all)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(td.status(), reqwest::StatusCode::BAD_GATEWAY);
+
+    // Tag download: nothing fetchable -> 502.
+    let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
+        .await
+        .unwrap();
+    let tagdl = app
+        .client()
+        .get(app.url(&format!("/tag/{tag}/download")))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tagdl.status(), reqwest::StatusCode::BAD_GATEWAY);
 }
 
 #[tokio::test]

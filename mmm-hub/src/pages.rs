@@ -63,7 +63,13 @@ pub fn router(state: AppState) -> Router {
         .route("/playlist/{id}/tag/add", post(playlist_tag_add))
         .route("/playlist/{id}/tag/remove", post(playlist_tag_remove))
         .route("/playlist/{id}/order", post(playlist_order))
+        .route("/playlist/{id}/refresh", post(playlist_refresh))
+        .route("/playlist/{id}/progress", get(playlist_progress))
         .route("/playlist/{id}/download", get(playlist_download))
+        .route("/tag/{id}/order", post(tag_order))
+        .route("/tag/{id}/download", get(tag_download))
+        .route("/tag/{id}/progress", get(tag_progress))
+        .route("/track/{id}/download", get(track_download))
         .with_state(state)
 }
 
@@ -282,6 +288,8 @@ struct PlaylistPage {
     my_tags: Vec<TagOption>,
     /// Whether the music-api service is configured (download/order buttons).
     music_api: bool,
+    ready: usize,
+    total: usize,
 }
 
 struct TagFeed {
@@ -368,6 +376,18 @@ async fn playlist_page(
         })
         .collect();
 
+    let isrcs: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT t.isrc FROM hub_playlist_tracks hpt
+           JOIN hub_tracks t ON t.id = hpt.track_id
+          WHERE hpt.playlist_id = ?1 AND t.isrc IS NOT NULL AND t.isrc <> ''",
+    )
+    .bind(id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+    let total = isrcs.len();
+    let (ready, _) = crate::music_api::cached_counts(&st.pool, &isrcs).await;
+
     render(&PlaylistPage {
         nav,
         flash: String::new(),
@@ -379,6 +399,8 @@ async fn playlist_page(
         feeds,
         my_tags,
         music_api: st.cfg.music_api_token.is_some(),
+        ready,
+        total,
     })
 }
 
@@ -444,6 +466,77 @@ async fn build_playlist_zip(
     Ok(n)
 }
 
+/// Stream a ZIP temp file as an attachment, unlinking it before the stream (the
+/// open fd stays valid on Linux).
+async fn zip_response(tmp: std::path::PathBuf, filename: String) -> Response {
+    let file = match tokio::fs::File::open(&tmp).await {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("open: {e}")).into_response(),
+    };
+    let _ = std::fs::remove_file(&tmp);
+    let stream = tokio_util::io::ReaderStream::new(file);
+    Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/zip")
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Collect the `music_api` status states of a set of ISRCs from cache; drives
+/// the progress indicators without hitting the network.
+async fn progress_counts(st: &AppState, isrcs: &[String]) -> (usize, usize) {
+    let (ready, _) = crate::music_api::cached_counts(&st.pool, isrcs).await;
+    (ready, isrcs.len())
+}
+
+fn rows_isrcs(rows: &[sqlx::sqlite::SqliteRow]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for r in rows {
+        let isrc = r
+            .get::<Option<String>, _>("isrc")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !isrc.is_empty() && seen.insert(isrc.clone()) {
+            out.push(isrc);
+        }
+    }
+    out
+}
+
+const PL_TRACKS_SQL: &str = "SELECT t.isrc, t.title, t.artists FROM hub_playlist_tracks hpt
+     JOIN hub_tracks t ON t.id = hpt.track_id WHERE hpt.playlist_id = ?1 ORDER BY hpt.position";
+const TAG_TRACKS_SQL: &str = "SELECT t.isrc, t.title, t.artists FROM hub_track_resolved_tags rt
+     JOIN hub_tracks t ON t.id = rt.track_id WHERE rt.tag_id = ?1 ORDER BY t.artists, t.title";
+
+/// Order only the ISRCs that music-api does **not** already have (refreshes the
+/// cache first). Returns a flash message.)
+async fn order_missing(
+    pool: &sqlx::SqlitePool,
+    cfg: &crate::config::Config,
+    isrcs: &[String],
+) -> String {
+    if cfg.music_api_token.is_none() {
+        return "music-api nicht konfiguriert".to_string();
+    }
+    if isrcs.is_empty() {
+        return "Keine ISRCs vorhanden".to_string();
+    }
+    let _ = crate::music_api::refresh_states(pool, cfg, isrcs, 300).await;
+    let missing = crate::music_api::missing_isrcs(pool, isrcs).await;
+    if missing.is_empty() {
+        return "Alles bereits vorhanden".to_string();
+    }
+    match crate::music_api::order(cfg, &missing).await {
+        Ok(oid) => format!("{} fehlende bestellt (Order {oid})", missing.len()),
+        Err(e) => format!("music-api Fehler: {e}"),
+    }
+}
+
 /// `GET /playlist/{id}/download[?format=flac]` — stream a ZIP of the playlist's
 /// music-api-ready tracks.
 async fn playlist_download(
@@ -455,13 +548,7 @@ async fn playlist_download(
     if crate::ui::nav(&st, &headers, "playlist").await.is_none() {
         return Redirect::to("/login").into_response();
     }
-    let fmt = q.format.unwrap_or_else(|| "flac".into());
-    let format = if !fmt.is_empty() && fmt.chars().all(|c| c.is_ascii_alphanumeric()) {
-        fmt
-    } else {
-        "flac".to_string()
-    };
-
+    let format = valid_format(q.format);
     let name: Option<String> = sqlx::query_scalar("SELECT name FROM hub_playlists WHERE id = ?1")
         .bind(id)
         .fetch_optional(&st.pool)
@@ -471,22 +558,51 @@ async fn playlist_download(
     let Some(name) = name else {
         return not_found("Playlist nicht gefunden.");
     };
+    let tracks = sqlx::query(PL_TRACKS_SQL)
+        .bind(id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    zip_for(&st, &tracks, &format, &sanitize_filename(&name)).await
+}
 
-    let tracks = sqlx::query(
-        "SELECT t.isrc, t.title, t.artists FROM hub_playlist_tracks hpt
-           JOIN hub_tracks t ON t.id = hpt.track_id
-          WHERE hpt.playlist_id = ?1 ORDER BY hpt.position",
-    )
-    .bind(id)
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default();
+/// `GET /tag/{id}/download[?format=flac]` — stream a ZIP of the tag's tracks.
+async fn tag_download(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<DownloadQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if crate::ui::nav(&st, &headers, "tags").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    let format = valid_format(q.format);
+    let name: Option<String> = sqlx::query_scalar("SELECT name FROM hub_tags WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(&st.pool)
+        .await
+        .ok()
+        .flatten();
+    let Some(name) = name else {
+        return not_found("Tag nicht gefunden.");
+    };
+    let tracks = sqlx::query(TAG_TRACKS_SQL)
+        .bind(id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    zip_for(&st, &tracks, &format, &sanitize_filename(&name)).await
+}
 
-    let tmp = std::env::temp_dir().join(format!(
-        "hub-pl-{id}-{}.zip",
-        crate::spotify::random_token()
-    ));
-    let count = match build_playlist_zip(&st.cfg, &tracks, &format, &tmp).await {
+/// Build the ZIP and return it (or a helpful error).
+async fn zip_for(
+    st: &AppState,
+    tracks: &[sqlx::sqlite::SqliteRow],
+    format: &str,
+    label: &str,
+) -> Response {
+    let tmp = std::env::temp_dir().join(format!("hub-{}.zip", crate::spotify::random_token()));
+    let count = match build_playlist_zip(&st.cfg, tracks, format, &tmp).await {
         Ok(n) => n,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("ZIP: {e}")).into_response(),
     };
@@ -498,27 +614,17 @@ async fn playlist_download(
         )
             .into_response();
     }
-
-    let file = match tokio::fs::File::open(&tmp).await {
-        Ok(f) => f,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("open: {e}")).into_response(),
-    };
-    // Unlink now — on Linux the open fd stays valid, so the temp file is cleaned
-    // up when the stream finishes.
-    let _ = std::fs::remove_file(&tmp);
-    let stream = tokio_util::io::ReaderStream::new(file);
-    let filename = format!("{}.zip", sanitize_filename(&name));
-    Response::builder()
-        .header(axum::http::header::CONTENT_TYPE, "application/zip")
-        .header(
-            axum::http::header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{filename}\""),
-        )
-        .body(axum::body::Body::from_stream(stream))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    zip_response(tmp, format!("{label}.zip")).await
 }
 
-/// `POST /playlist/{id}/order` — order all of the playlist's ISRCs at music-api.
+fn valid_format(f: Option<String>) -> String {
+    match f {
+        Some(f) if !f.is_empty() && f.chars().all(|c| c.is_ascii_alphanumeric()) => f,
+        _ => "flac".to_string(),
+    }
+}
+
+/// `POST /playlist/{id}/order` — order only the playlist's missing ISRCs.
 async fn playlist_order(
     State(st): State<AppState>,
     Path(id): Path<i64>,
@@ -527,24 +633,150 @@ async fn playlist_order(
     let Some((_uid, _slug)) = crate::web::current_user(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
-    let isrcs: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT t.isrc FROM hub_playlist_tracks hpt
-           JOIN hub_tracks t ON t.id = hpt.track_id
-          WHERE hpt.playlist_id = ?1 AND t.isrc IS NOT NULL AND t.isrc <> ''",
-    )
-    .bind(id)
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default();
-    let msg = if isrcs.is_empty() {
-        "Keine ISRCs in dieser Playlist".to_string()
-    } else {
-        match crate::music_api::order(&st.cfg, &isrcs).await {
-            Ok(oid) => format!("{} ISRCs bestellt (Order {oid})", isrcs.len()),
-            Err(e) => format!("music-api Fehler: {e}"),
-        }
-    };
+    let tracks = sqlx::query(PL_TRACKS_SQL)
+        .bind(id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    let msg = order_missing(&st.pool, &st.cfg, &rows_isrcs(&tracks)).await;
     flash_redirect(&format!("/playlist/{id}"), msg)
+}
+
+/// `POST /tag/{id}/order` — order only the tag's missing ISRCs.
+async fn tag_order(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((_uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let tracks = sqlx::query(TAG_TRACKS_SQL)
+        .bind(id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    let msg = order_missing(&st.pool, &st.cfg, &rows_isrcs(&tracks)).await;
+    flash_redirect(&format!("/tag/{id}"), msg)
+}
+
+/// `POST /playlist/{id}/refresh` — refresh the music-api state cache.
+async fn playlist_refresh(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((_uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let tracks = sqlx::query(PL_TRACKS_SQL)
+        .bind(id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    let isrcs = rows_isrcs(&tracks);
+    let (ready, total, _) = crate::music_api::refresh_states(&st.pool, &st.cfg, &isrcs, 300).await;
+    flash_redirect(
+        &format!("/playlist/{id}"),
+        format!("{ready}/{total} bereit"),
+    )
+}
+
+/// `GET /playlist/{id}/progress` — cached ready/total (htmx-pollable).
+async fn playlist_progress(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    if crate::ui::nav(&st, &headers, "playlist").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    let tracks = sqlx::query(PL_TRACKS_SQL)
+        .bind(id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    let (ready, total) = progress_counts(&st, &rows_isrcs(&tracks)).await;
+    format!("{ready}/{total} bereit").into_response()
+}
+
+/// `GET /tag/{id}/progress` — cached ready/total (htmx-pollable).
+async fn tag_progress(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    if crate::ui::nav(&st, &headers, "tags").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    let tracks = sqlx::query(TAG_TRACKS_SQL)
+        .bind(id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    let (ready, total) = progress_counts(&st, &rows_isrcs(&tracks)).await;
+    format!("{ready}/{total} bereit").into_response()
+}
+
+/// `GET /track/{id}/download[?format=flac]` — stream a single track's file.
+async fn track_download(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<DownloadQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if crate::ui::nav(&st, &headers, "track").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    let format = valid_format(q.format);
+    let row = sqlx::query("SELECT t.isrc, t.title, t.artists FROM hub_tracks t WHERE t.id = ?1")
+        .bind(id)
+        .fetch_optional(&st.pool)
+        .await
+        .ok()
+        .flatten();
+    let Some(r) = row else {
+        return not_found("Track nicht gefunden.");
+    };
+    let isrc = r
+        .get::<Option<String>, _>("isrc")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if isrc.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Track hat keine ISRC").into_response();
+    }
+    match crate::music_api::file_bytes(&st.cfg, &isrc, &format).await {
+        Ok(bytes) => {
+            let artists = r.get::<Option<String>, _>("artists").unwrap_or_default();
+            let title = r.get::<Option<String>, _>("title").unwrap_or_default();
+            let filename = sanitize_filename(&format!("{artists} - {title}.{format}"));
+            let ct = audio_content_type(&format);
+            Response::builder()
+                .header(axum::http::header::CONTENT_TYPE, ct)
+                .header(
+                    axum::http::header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{filename}\""),
+                )
+                .body(axum::body::Body::from(bytes))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("music-api: nicht verfügbar (erst ordern): {e}"),
+        )
+            .into_response(),
+    }
+}
+
+fn audio_content_type(format: &str) -> &'static str {
+    match format {
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" | "aac" => "audio/mp4",
+        "ogg" => "audio/ogg",
+        _ => "audio/flac",
+    }
 }
 
 #[derive(Deserialize)]
@@ -2823,6 +3055,9 @@ struct TagDetailPage {
     children: Vec<GroupRef>,
     source_count: i64,
     tracks: Vec<TagTrack>,
+    music_api: bool,
+    ready: usize,
+    total: usize,
 }
 
 async fn tag_detail_page(
@@ -2859,6 +3094,17 @@ async fn tag_detail_page(
         .map(|(id, title, artists)| TagTrack { id, title, artists })
         .collect();
     let is_owner = d.owner.eq_ignore_ascii_case(&nav.slug);
+    let isrcs: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT t.isrc FROM hub_track_resolved_tags rt
+           JOIN hub_tracks t ON t.id = rt.track_id
+          WHERE rt.tag_id = ?1 AND t.isrc IS NOT NULL AND t.isrc <> ''",
+    )
+    .bind(id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+    let total = isrcs.len();
+    let (ready, _) = crate::music_api::cached_counts(&st.pool, &isrcs).await;
     let parents: Vec<GroupRef> = crate::tags::tag_parents_of(&st.pool, id)
         .await
         .into_iter()
@@ -2890,6 +3136,9 @@ async fn tag_detail_page(
         children,
         source_count: d.source_count,
         tracks,
+        music_api: st.cfg.music_api_token.is_some(),
+        ready,
+        total,
     })
 }
 
