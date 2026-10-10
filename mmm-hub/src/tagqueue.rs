@@ -235,6 +235,7 @@ struct QueueDetail {
     htmx: bool,
     playlists: Vec<PlRow>,
     my_tags: Vec<DetailGroupTag>,
+    my_groups: Vec<DetailGroupTag>,
 }
 
 async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
@@ -371,6 +372,11 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
         .into_iter()
         .map(|(id, name)| DetailGroupTag { id, name })
         .collect();
+    let my_groups: Vec<DetailGroupTag> = crate::tags::groups_i_contribute(&st.pool, me)
+        .await
+        .into_iter()
+        .map(|(id, name, _icon)| DetailGroupTag { id, name })
+        .collect();
 
     let spotify_id: String = sqlx::query_scalar(
         "SELECT external_id FROM hub_track_external_ids WHERE track_id = ?1 AND service = 'spotify' LIMIT 1",
@@ -412,6 +418,7 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
         htmx: true,
         playlists,
         my_tags,
+        my_groups,
     })
 }
 
@@ -432,6 +439,9 @@ async fn queue_detail(
 #[derive(Deserialize)]
 struct TagForm {
     name: String,
+    /// Optional group (free text) to place the new tag into, e.g. "Mood".
+    #[serde(default)]
+    group: Option<String>,
 }
 
 async fn queue_tag(
@@ -445,6 +455,11 @@ async fn queue_tag(
     };
     if !f.name.trim().is_empty() {
         if let Ok(tag_id) = crate::tags::ensure_tag(&st.pool, nav.id, &f.name).await {
+            if let Some(g) = f.group.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+                if let Ok(gid) = crate::tags::create_group(&st.pool, nav.id, g, "").await {
+                    let _ = crate::tags::add_tag_to_group(&st.pool, nav.id, tag_id, gid).await;
+                }
+            }
             let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
         }
     }

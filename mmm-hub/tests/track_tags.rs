@@ -104,3 +104,32 @@ async fn recommended_tags_appear_from_cooccurrence() {
     assert!(html.contains("Empfohlen"), "recommendation section missing");
     assert!(html.contains("Melancholisch"), "recommended tag missing");
 }
+
+#[tokio::test]
+async fn tagging_with_a_group_places_the_tag_in_it() {
+    let app = common::spawn().await;
+    let alice = app.seed.alice;
+    let track = app.seed.t_all;
+    let cookie = app.session_cookie(alice).await;
+
+    let resp = app
+        .client()
+        .post(app.url(&format!("/track/{track}/tag")))
+        .header("Cookie", &cookie)
+        .form(&[("name", "Dark"), ("group", "Mood")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_group_tags gt
+           JOIN hub_tags t ON t.id = gt.tag_id
+           JOIN hub_tag_groups g ON g.id = gt.group_id
+          WHERE t.name = 'Dark' AND g.name = 'Mood'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1, "tag placed in the Mood group");
+}

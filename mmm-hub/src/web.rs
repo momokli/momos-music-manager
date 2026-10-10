@@ -866,6 +866,7 @@ struct TrackPage {
     tag_clouds: Vec<TagCloudRow>,
     untag_action: String,
     htmx: bool,
+    my_groups: Vec<GroupRef>,
 }
 
 struct TagCloudRow {
@@ -878,6 +879,12 @@ struct TagChipRow {
     id: i64,
     name: String,
     mine: bool,
+}
+
+struct GroupRef {
+    id: i64,
+    name: String,
+    icon: String,
 }
 
 struct RecTag {
@@ -1230,6 +1237,12 @@ async fn track_page(
     .flatten()
     .unwrap_or_default();
 
+    let my_groups: Vec<GroupRef> = crate::tags::groups_i_contribute(&st.pool, nav.id)
+        .await
+        .into_iter()
+        .map(|(id, name, icon)| GroupRef { id, name, icon })
+        .collect();
+
     let page = TrackPage {
         nav,
         id,
@@ -1265,6 +1278,7 @@ async fn track_page(
         tag_clouds,
         untag_action: format!("/track/{id}/untag"),
         htmx: false,
+        my_groups,
     };
 
     match page.render() {
@@ -1276,6 +1290,8 @@ async fn track_page(
 #[derive(Deserialize)]
 struct TrackTagForm {
     name: String,
+    #[serde(default)]
+    group: Option<String>,
 }
 
 /// Directly tag the track (track view = core element).
@@ -1290,6 +1306,11 @@ async fn track_tag(
     };
     if !f.name.trim().is_empty() {
         if let Ok(tag_id) = crate::tags::ensure_tag(&st.pool, nav.id, &f.name).await {
+            if let Some(g) = f.group.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+                if let Ok(gid) = crate::tags::create_group(&st.pool, nav.id, g, "").await {
+                    let _ = crate::tags::add_tag_to_group(&st.pool, nav.id, tag_id, gid).await;
+                }
+            }
             let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
         }
     }

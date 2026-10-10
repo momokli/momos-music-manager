@@ -182,6 +182,19 @@ content %}
                                 <option value="{{ t.1 }}"></option>
                                 {% endfor %}
                             </datalist>
+                            <input
+                                type="text"
+                                name="group"
+                                list="my-groups"
+                                placeholder="Gruppe (optional)"
+                                aria-label="Gruppe"
+                                style="width: 9rem"
+                            />
+                            <datalist id="my-groups">
+                                {% for g in my_groups %}
+                                <option value="{{ g.name }}"></option>
+                                {% endfor %}
+                            </datalist>
                             <button type="submit">Taggen</button>
                         </form>
                         {% if !recommended.is_empty() %}
