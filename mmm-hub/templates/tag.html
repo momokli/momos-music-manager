@@ -177,14 +177,7 @@ content %}
     <form method="post" action="/tag/{{ id }}/source/keep" style="display: inline">
         <input type="hidden" name="playlist_id" value="{{ s.id }}" />
         <input type="hidden" name="keep" value="0" />
-        <button
-            type="submit"
-            class="outline"
-            style="padding: 0 0.35rem"
-            title="Archiv aus"
-        >
-            ×
-        </button>
+        <button type="submit" class="hub-x" title="Archiv aus">×</button>
     </form>
     {% endfor %} {% endif %}
 </section>

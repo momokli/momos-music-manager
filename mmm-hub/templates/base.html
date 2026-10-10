@@ -20,8 +20,107 @@
         --pico-block-spacing-horizontal: 0.6rem;
       }
       body {
-        font-size: 0.9rem;
+        font-size: 0.86rem;
         line-height: 1.4;
+      }
+      /* ── terminal aesthetic ─────────────────────────────────────────── */
+      :root {
+        --pico-font-family: ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, Consolas,
+          monospace;
+        --pico-primary: #7ee787;
+        --pico-primary-hover: #9ff0a6;
+        --pico-primary-focus: rgba(126, 231, 135, 0.3);
+        --pico-primary-inverse: #04120a;
+        --pico-border-radius: 0.15rem;
+      }
+      ::selection {
+        background: #7ee787;
+        color: #04120a;
+      }
+      a {
+        text-decoration: none;
+      }
+      a:hover {
+        color: var(--pico-primary);
+        text-decoration: underline;
+      }
+      /* mechanical buttons: crisp, uppercase, press-down feedback */
+      button,
+      [type="submit"],
+      [type="button"],
+      input[type="submit"],
+      .button {
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        font-size: 0.72rem !important;
+        font-weight: 700;
+        padding: 0.22rem 0.6rem !important;
+        border-radius: 0.15rem;
+        border-width: 1px;
+        box-shadow:
+          inset 0 -2px 0 rgba(0, 0, 0, 0.45),
+          0 1px 0 rgba(0, 0, 0, 0.4);
+        transition:
+          transform 0.04s ease,
+          filter 0.08s ease,
+          box-shadow 0.08s ease;
+      }
+      button:hover,
+      [type="submit"]:hover,
+      input[type="submit"]:hover {
+        filter: brightness(1.15);
+      }
+      button:active,
+      [type="submit"]:active,
+      input[type="submit"]:active {
+        transform: translateY(1px);
+        box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5);
+      }
+      button:focus-visible,
+      a:focus-visible,
+      input:focus-visible,
+      select:focus-visible,
+      [type="submit"]:focus-visible {
+        outline: 2px solid var(--pico-primary);
+        outline-offset: 1px;
+      }
+      /* tiny icon/remove button (use class="hub-x") */
+      .hub-x {
+        padding: 0 0.32rem !important;
+        min-width: 1.3rem;
+        height: 1.35rem;
+        line-height: 1;
+        font-size: 0.7rem !important;
+        letter-spacing: 0;
+        border-radius: 0.15rem;
+        vertical-align: middle;
+      }
+      /* chips / inline tags */
+      .hub-chip,
+      .hub-tag,
+      button.hub-chip {
+        padding: 0.05rem 0.42rem;
+        border-radius: 0.15rem;
+        font-size: 0.72rem;
+        line-height: 1.55;
+        border: 1px solid var(--pico-muted-border-color);
+        background: transparent;
+        text-transform: none;
+        letter-spacing: 0;
+        box-shadow: none;
+      }
+      a.hub-tag:hover,
+      button.hub-chip:hover {
+        border-color: var(--pico-primary);
+        color: var(--pico-primary);
+      }
+      table.hub-dense-table tbody tr:hover {
+        background: rgba(126, 231, 135, 0.07);
+      }
+      input,
+      select,
+      textarea {
+        border-radius: 0.15rem;
       }
       article {
         padding: 0.6rem 0.75rem;

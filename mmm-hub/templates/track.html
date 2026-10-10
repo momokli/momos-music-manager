@@ -91,7 +91,10 @@ content %}
                 </tr>
                 <tr>
                     <th scope="row">Album</th>
-                    <td>{% if album != "" %}<a href="/album/{{ album }}">{{ album }}</a>{% else %}—{% endif %}</td>
+                    <td>
+                        {% if album != "" %}<a href="/album/{{ album }}">{{ album }}</a>{%
+                        else %}—{% endif %}
+                    </td>
                 </tr>
                 <tr>
                     <th scope="row">Dauer</th>
@@ -183,8 +186,7 @@ content %}
                                     />
                                     <button
                                         type="submit"
-                                        class="outline"
-                                        style="padding: 0 0.35rem"
+                                        class="hub-x"
                                         title="Tag entfernen"
                                     >
                                         ×
