@@ -1,5 +1,6 @@
 //! `/downloads` page + music-api state-cache tests (format column, summary,
-//! track-page status from cache).
+//! track-page status from cache) and the all-tracks table (filters, pagination,
+//! order-all).
 //!
 //! The music-api service is unconfigured in tests, so the live queue is skipped
 //! and only the cached `hub_music_state` overview is exercised.
@@ -25,6 +26,16 @@ async fn seed_state(
     .execute(&app.pool)
     .await
     .expect("insert hub_music_state");
+}
+
+/// Give a seeded track an ISRC so it shows up in the all-tracks table.
+async fn set_isrc(app: &common::TestApp, track_id: i64, isrc: &str) {
+    sqlx::query("UPDATE hub_tracks SET isrc = ?1 WHERE id = ?2")
+        .bind(isrc)
+        .bind(track_id)
+        .execute(&app.pool)
+        .await
+        .expect("set isrc");
 }
 
 #[tokio::test]
@@ -228,4 +239,216 @@ async fn track_page_shows_cached_music_state() {
         html.contains("ready · flac"),
         "cached music-api state missing on track page: {html}"
     );
+}
+
+// ── all-tracks table (filters, pagination, order-all) ───────────────────────
+
+#[tokio::test]
+async fn downloads_table_lists_hub_tracks_with_state() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    set_isrc(&app, app.seed.t_all, "USAAA0000001").await;
+    set_isrc(&app, app.seed.t_two, "USAAA0000002").await;
+    seed_state(&app, "USAAA0000001", "ready", Some("flac"), Some("flac")).await;
+
+    let resp = app
+        .client()
+        .get(app.url("/downloads"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = resp.text().await.unwrap();
+
+    assert!(html.contains("Alle Hub-Tracks"), "table heading missing");
+    // Both ISRC-bearing tracks are listed.
+    assert!(html.contains("USAAA0000001"), "ready track missing");
+    assert!(html.contains("USAAA0000002"), "unknown track missing");
+    // The cached state + format are shown; the uncached one defaults to unknown.
+    assert!(html.contains("ready"), "ready state missing");
+    assert!(html.contains("flac"), "ready format missing");
+    assert!(html.contains("unknown"), "default unknown state missing");
+    // Total reflects the two ISRC-bearing tracks.
+    assert!(html.contains("Alle Hub-Tracks (2)"), "row total wrong");
+}
+
+#[tokio::test]
+async fn downloads_status_filter_is_server_side() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    set_isrc(&app, app.seed.t_all, "USAAA0000001").await;
+    set_isrc(&app, app.seed.t_two, "USAAA0000002").await;
+    seed_state(&app, "USAAA0000001", "ready", Some("flac"), Some("flac")).await;
+
+    let resp = app
+        .client()
+        .get(app.url("/downloads?status=ready"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = resp.text().await.unwrap();
+
+    assert!(html.contains("USAAA0000001"), "ready track should remain");
+    assert!(
+        !html.contains("USAAA0000002"),
+        "non-ready track should be filtered out"
+    );
+    assert!(html.contains("Alle Hub-Tracks (1)"), "filtered total wrong");
+}
+
+#[tokio::test]
+async fn downloads_format_filter_matches_bucket() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    set_isrc(&app, app.seed.t_all, "USAAA0000001").await;
+    set_isrc(&app, app.seed.t_two, "USAAA0000002").await;
+    seed_state(&app, "USAAA0000001", "ready", Some("flac"), Some("flac")).await;
+    seed_state(
+        &app,
+        "USAAA0000002",
+        "ready",
+        Some("mp3-320"),
+        Some("mp3-320"),
+    )
+    .await;
+
+    let resp = app
+        .client()
+        .get(app.url("/downloads?format=flac"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let html = resp.text().await.unwrap();
+    assert!(html.contains("USAAA0000001"), "flac track should remain");
+    assert!(
+        !html.contains("USAAA0000002"),
+        "320 track should be filtered out of flac"
+    );
+    assert!(html.contains("Alle Hub-Tracks (1)"), "format total wrong");
+}
+
+#[tokio::test]
+async fn downloads_text_search_filters_title_artist_isrc() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    set_isrc(&app, app.seed.t_all, "USAAA0000001").await; // title "Shared Anthem"
+    set_isrc(&app, app.seed.t_two, "USAAA0000002").await; // title "Two Users"
+
+    let resp = app
+        .client()
+        .get(app.url("/downloads?q=anthem"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let html = resp.text().await.unwrap();
+    assert!(
+        html.contains("USAAA0000001"),
+        "matching title should remain"
+    );
+    assert!(
+        !html.contains("USAAA0000002"),
+        "non-matching title should be filtered out"
+    );
+}
+
+#[tokio::test]
+async fn downloads_pagination_splits_rows() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // 150 ISRC-bearing tracks -> 2 pages of 100/50.
+    for i in 0..150 {
+        sqlx::query(
+            "INSERT INTO hub_tracks (service, service_track_id, isrc, title, artists, first_seen_at)
+             VALUES ('spotify', ?1, ?2, ?3, ?4, '2026-01-01T00:00:00+00:00')",
+        )
+        .bind(format!("pg-{i:03}"))
+        .bind(format!("PAG{i:010}"))
+        .bind(format!("Title {i:03}"))
+        .bind(format!("Artist {i:03}"))
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+
+    let page1 = app
+        .client()
+        .get(app.url("/downloads"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let html1 = page1.text().await.unwrap();
+    assert!(html1.contains("Alle Hub-Tracks (150)"), "total wrong");
+    assert!(html1.contains("Seite 1 von 2"), "page indicator wrong");
+    assert!(
+        html1.contains("PAG0000000000"),
+        "first row missing on page 1"
+    );
+    assert!(
+        !html1.contains("PAG0000000149"),
+        "last row should not be on page 1"
+    );
+
+    let page2 = app
+        .client()
+        .get(app.url("/downloads?page=2"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let html2 = page2.text().await.unwrap();
+    assert!(html2.contains("Seite 2 von 2"), "page 2 indicator wrong");
+    assert!(
+        html2.contains("PAG0000000149"),
+        "last row missing on page 2"
+    );
+    assert!(
+        !html2.contains("PAG0000000000"),
+        "first row should not be on page 2"
+    );
+}
+
+#[tokio::test]
+async fn order_all_requires_login() {
+    let app = common::spawn().await;
+    let resp = app
+        .client()
+        .post(app.url("/downloads/order-all"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers()["location"], "/login");
+}
+
+#[tokio::test]
+async fn order_all_redirects_with_flash_when_unconfigured() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+    set_isrc(&app, app.seed.t_all, "USAAA0000001").await;
+
+    let resp = app
+        .client()
+        .post(app.url("/downloads/order-all"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    let loc = resp.headers()["location"].to_str().unwrap();
+    assert!(
+        loc.starts_with("/downloads"),
+        "should redirect to /downloads"
+    );
+    assert!(loc.contains("msg="), "should carry a flash message");
 }
