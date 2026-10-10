@@ -48,7 +48,7 @@ content %}
 </details>
 {% endif %}
 
-<section style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center">
+<section class="hub-filter">
     {% if is_owner %}
     <form method="post" action="/collectives/{{ id }}/delete" style="display: inline">
         <button type="submit" class="secondary outline">Collective löschen</button>

@@ -132,6 +132,25 @@
         color: var(--pico-muted-color);
         font-weight: 700;
       }
+      /* shared filter bar — uniform across list pages */
+      .hub-filter {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        align-items: center;
+        margin-bottom: 0.5rem;
+      }
+      .hub-filter input,
+      .hub-filter select {
+        margin: 0;
+      }
+      .hub-filter > .hub-filter-end {
+        margin-left: auto;
+      }
+      .hub-empty {
+        color: var(--pico-muted-color);
+        font-size: 0.85rem;
+      }
       input,
       select,
       textarea {
