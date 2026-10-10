@@ -78,13 +78,11 @@ async fn albums_page(
     let a_needle = artist.to_lowercase();
 
     let raw = sqlx::query(
-        "SELECT COALESCE(album,'') AS album,
+        "SELECT album,
                 COUNT(*) AS tracks,
-                COALESCE(GROUP_CONCAT(DISTINCT artists), '') AS artists,
-                (SELECT t2.image_url FROM hub_tracks t2
-                  WHERE t2.album = t.album AND t2.image_url IS NOT NULL AND t2.image_url <> ''
-                  LIMIT 1) AS cover
-           FROM hub_tracks t
+                GROUP_CONCAT(DISTINCT artists) AS artists,
+                MAX(image_url) AS cover
+           FROM hub_tracks
           WHERE album IS NOT NULL AND TRIM(album) <> ''
           GROUP BY album
           ORDER BY album COLLATE NOCASE",
@@ -96,8 +94,8 @@ async fn albums_page(
     let rows: Vec<AlbumRow> = raw
         .into_iter()
         .filter_map(|r| {
-            let name: String = r.get("album");
-            let artists: String = r.get("artists");
+            let name: String = r.get::<Option<String>, _>("album").unwrap_or_default();
+            let artists: String = r.get::<Option<String>, _>("artists").unwrap_or_default();
             if !needle.is_empty()
                 && !name.to_lowercase().contains(&needle)
                 && !artists.to_lowercase().contains(&needle)
