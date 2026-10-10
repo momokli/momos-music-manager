@@ -23,6 +23,7 @@ pub mod pages;
 pub mod scoring;
 pub mod settings;
 pub mod similar;
+pub mod soundcloud;
 pub mod spotify;
 pub mod tags;
 pub mod traktor;
