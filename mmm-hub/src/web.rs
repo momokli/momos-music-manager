@@ -890,6 +890,7 @@ struct GroupRef {
 
 struct RecTag {
     name: String,
+    group: String,
     reason: String,
 }
 
@@ -1178,6 +1179,7 @@ async fn track_page(
         .into_iter()
         .map(|r| RecTag {
             reason: r.why(),
+            group: r.group,
             name: r.name,
         })
         .collect();

@@ -1,5 +1,6 @@
 {# Shared recommended-tags renderer (uniform across track view + tag-queue). Context:
-recommended: [{ name, reason }], tag_action, htmx #} {% if !recommended.is_empty() %}
+recommended: [{ name, group, reason }], tag_action, htmx #} {% if !recommended.is_empty()
+%}
 <div style="margin-top: 0.45rem">
     <span class="hub-cloud-h">Empfohlen — warum</span>
     <div class="hub-cloud">
@@ -22,10 +23,13 @@ recommended: [{ name, reason }], tag_action, htmx #} {% if !recommended.is_empty
             <button
                 type="submit"
                 class="hub-chip hub-rec"
-                title="Taggen: {{ r.name }} — {{ r.reason }}"
+                title="Taggen: {{ r.name }} - {{ r.reason }}"
             >
                 <span class="hub-rec-name">{{ r.name }}</span>
-                <span class="hub-rec-why">{{ r.reason }}</span>
+                <span class="hub-rec-why"
+                    >{% if r.group != "" %}◧ {{ r.group }} · {% endif %}{{ r.reason
+                    }}</span
+                >
             </button>
         </form>
         {% endfor %}

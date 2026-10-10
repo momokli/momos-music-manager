@@ -190,6 +190,7 @@ struct TagChip {
 
 struct RecChip {
     name: String,
+    group: String,
     reason: String,
 }
 
@@ -389,6 +390,7 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
         .into_iter()
         .map(|r| RecChip {
             reason: r.why(),
+            group: r.group,
             name: r.name,
         })
         .collect();
