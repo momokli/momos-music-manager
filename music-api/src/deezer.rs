@@ -1,6 +1,7 @@
 //! Deezer public API: ISRC → track resolution (no auth, no deemix needed).
 
 use serde::Deserialize;
+use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
 pub struct DeezerArtist {
@@ -54,11 +55,7 @@ pub enum Lookup {
 }
 
 /// Resolve a single ISRC against Deezer's public API.
-pub async fn lookup_isrc(
-    http: &reqwest::Client,
-    base: &str,
-    isrc: &str,
-) -> anyhow::Result<Lookup> {
+pub async fn lookup_isrc(http: &reqwest::Client, base: &str, isrc: &str) -> anyhow::Result<Lookup> {
     let url = format!("{base}/track/isrc:{isrc}");
     let resp = http.get(&url).send().await?;
 
@@ -99,6 +96,55 @@ pub fn deemix_track_url(deezer_id: &str) -> String {
     format!("https://www.deezer.com/track/{deezer_id}")
 }
 
+/// The account tier behind an ARL, as reported by Deezer's web API.
+#[derive(Debug, Clone)]
+pub struct ArlTier {
+    /// e.g. `Deezer Free`, `Deezer Premium`, `Deezer HiFi`.
+    pub offer: String,
+    /// Whether the account may stream lossless (FLAC).
+    pub lossless: bool,
+}
+
+impl ArlTier {
+    /// True when the account can stream FLAC/HQ.
+    pub fn can_stream_flac(&self) -> bool {
+        self.lossless
+    }
+}
+
+/// Query Deezer's web API for the tier behind an ARL. The ARL is sent as a
+/// cookie; the response is never logged (it echoes account data).
+///
+/// Returns `None` when the ARL is empty or the response cannot be parsed.
+pub async fn check_arl_tier(http: &reqwest::Client, arl: &str) -> Option<ArlTier> {
+    if arl.trim().is_empty() {
+        return None;
+    }
+    let resp = http
+        .get(
+            "https://www.deezer.com/ajax/gw-light.php\
+             ?method=deezer.getUserData&api_version=1.0&api_token=null",
+        )
+        .header("Cookie", format!("arl={arl}"))
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        )
+        .send()
+        .await
+        .ok()?;
+    let body: Value = resp.json().await.ok()?;
+    let results = &body["results"];
+    let offer = results["OFFER_NAME"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+    let lossless = results["USER"]["OPTIONS"]["web_sound_quality"]["lossless"]
+        .as_bool()
+        .unwrap_or(false);
+    Some(ArlTier { offer, lossless })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,8 +161,7 @@ mod tests {
 
     #[test]
     fn parses_absent_payload() {
-        let json =
-            r#"{"error":{"type":"DataException","message":"no data","code":800}}"#;
+        let json = r#"{"error":{"type":"DataException","message":"no data","code":800}}"#;
         let r: DeezerTrackResponse = serde_json::from_str(json).unwrap();
         let err = r.error.unwrap();
         assert_eq!(err.code, 800);
