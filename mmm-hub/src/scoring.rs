@@ -72,8 +72,8 @@ pub async fn ripeness(pool: &SqlitePool, track_id: i64, e: &Engine) -> Ripeness 
         ),
     >(
         "SELECT t.title, t.artists, t.album, t.duration_ms, t.image_url,
-                (SELECT bpm FROM v_track_audio WHERE track_id = t.id) AS bpm,
-                (SELECT camelot FROM v_track_audio WHERE track_id = t.id) AS camelot,
+                CAST((SELECT bpm FROM v_track_audio WHERE track_id = t.id) AS TEXT) AS bpm,
+                CAST((SELECT camelot FROM v_track_audio WHERE track_id = t.id) AS TEXT) AS camelot,
                 (SELECT COUNT(*) FROM hub_track_genres WHERE track_id = t.id) AS genres
            FROM hub_tracks t WHERE t.id = ?1",
     )
@@ -204,8 +204,8 @@ pub async fn queue(
     let meta_rows = sqlx::query(
         "SELECT t.id, COALESCE(t.title,'') AS title, COALESCE(t.artists,'') AS artists,
                 COALESCE(t.album,'') AS album, t.image_url,
-                (SELECT bpm FROM v_track_audio WHERE track_id = t.id) AS bpm,
-                (SELECT camelot FROM v_track_audio WHERE track_id = t.id) AS camelot,
+                CAST((SELECT bpm FROM v_track_audio WHERE track_id = t.id) AS TEXT) AS bpm,
+                CAST((SELECT camelot FROM v_track_audio WHERE track_id = t.id) AS TEXT) AS camelot,
                 (SELECT COUNT(*) FROM hub_track_genres WHERE track_id = t.id) AS genres
            FROM hub_tracks t",
     )
