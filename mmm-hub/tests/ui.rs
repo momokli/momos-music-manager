@@ -1211,9 +1211,9 @@ async fn track_page_shows_tags_with_groups() {
     // Tag name (== playlist name) links to the tag page.
     assert!(html.contains(&format!("/tag/{tag}")));
     assert!(html.contains("Deep House"));
-    // Group is shown with its icon and links to the group page.
+    // Uniform grouped tag cloud: group header (icon + name) is rendered.
     assert!(html.contains("💜 Mood"), "group icon + name must be shown");
-    assert!(html.contains(&format!("/groups/{g}")));
+    assert!(html.contains("hub-cloud-h"), "grouped cloud header missing");
 }
 
 #[tokio::test]

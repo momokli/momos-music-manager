@@ -158,38 +158,7 @@ content %}
                 <tr>
                     <th scope="row">Tags</th>
                     <td>
-                        {% if tag_clouds.is_empty() %}<span class="hub-muted">—</span>{%
-                        else %} {% for c in tag_clouds %}
-                        <h4 class="hub-cloud-h">{{ c.icon }} {{ c.group }}</h4>
-                        <div class="hub-cloud">
-                            {% for t in c.chips %}
-                            <span
-                                class="hub-chip"
-                                title="{% if t.mine %}von dir{% endif %}"
-                                ><a href="/tag/{{ t.id }}">{{ t.name }}</a>{% if t.mine %}
-                                <form
-                                    method="post"
-                                    action="/track/{{ id }}/untag"
-                                    style="display: inline"
-                                >
-                                    <input
-                                        type="hidden"
-                                        name="name"
-                                        value="{{ t.name }}"
-                                    />
-                                    <button
-                                        type="submit"
-                                        class="hub-x"
-                                        title="Tag entfernen"
-                                    >
-                                        ×
-                                    </button>
-                                </form>
-                                {% endif %}</span
-                            >
-                            {% endfor %}
-                        </div>
-                        {% endfor %} {% endif %}
+                        {% include "_partials/tag_clouds.html" %}
                         <form
                             method="post"
                             action="/track/{{ id }}/tag"

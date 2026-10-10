@@ -183,6 +183,7 @@ async fn queue_page(
 // ── detail panel (htmx partial) ─────────────────────────────────────────────
 
 struct TagChip {
+    id: i64,
     name: String,
     mine: bool,
 }
@@ -230,6 +231,8 @@ struct QueueDetail {
     has_isrc: bool,
     music_api: bool,
     tag_clouds: Vec<TagCloud>,
+    untag_action: String,
+    htmx: bool,
     playlists: Vec<PlRow>,
     my_tags: Vec<DetailGroupTag>,
 }
@@ -329,6 +332,7 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
         };
         let e = map.entry(key).or_insert_with(|| (icon, Vec::new()));
         e.1.push(TagChip {
+            id,
             name,
             mine: my_tag_ids.contains(&id),
         });
@@ -404,6 +408,8 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
         genres,
         spotify_id,
         tag_clouds,
+        untag_action: format!("/tag-queue/{id}/untag"),
+        htmx: true,
         playlists,
         my_tags,
     })

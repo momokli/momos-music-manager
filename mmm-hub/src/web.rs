@@ -864,6 +864,8 @@ struct TrackPage {
     me: String,
     spotify_id: String,
     tag_clouds: Vec<TagCloudRow>,
+    untag_action: String,
+    htmx: bool,
 }
 
 struct TagCloudRow {
@@ -1261,6 +1263,8 @@ async fn track_page(
         me,
         spotify_id,
         tag_clouds,
+        untag_action: format!("/track/{id}/untag"),
+        htmx: false,
     };
 
     match page.render() {
