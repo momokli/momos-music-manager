@@ -9,6 +9,29 @@
     </p>
 </hgroup>
 
+<form
+    method="post"
+    action="/tags/create"
+    style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center"
+>
+    <input
+        type="text"
+        name="name"
+        placeholder="Neuer Tag …"
+        aria-label="Neuer Tag"
+        required
+    />
+    {% if !group_options.is_empty() %}
+    <select name="group" aria-label="Gruppe (optional)">
+        <option value="0">Gruppe: keine</option>
+        {% for g in group_options %}
+        <option value="{{ g.id }}">{{ g.icon }} {{ g.name }}</option>
+        {% endfor %}
+    </select>
+    {% endif %}
+    <button type="submit">Tag anlegen</button>
+</form>
+
 <nav aria-label="Filter">
     <ul>
         <li>
@@ -22,9 +45,9 @@
     </ul>
 </nav>
 
-{% if group_id != 0 %}
+{% if groups_label != "" %}
 <p class="hub-muted">
-    Gruppe: {{ group_label }} ·
+    Gruppen: {{ groups_label }} ·
     <a href="/tags{% if mine %}?mine=1{% endif %}">Filter entfernen</a>
 </p>
 {% endif %}
@@ -34,8 +57,8 @@
     action="/tags"
     style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center"
 >
-    {% if mine %}<input type="hidden" name="mine" value="1" />{% endif %} {% if group_id
-    != 0 %}<input type="hidden" name="group" value="{{ group_id }}" />{% endif %}
+    {% if mine %}<input type="hidden" name="mine" value="1" />{% endif %}
+    <input type="hidden" name="groups" id="groups-hidden" value="{{ groups_csv }}" />
     <input
         type="search"
         name="q"
@@ -43,6 +66,21 @@
         placeholder="Tag suchen …"
         aria-label="Tag suchen"
     />
+    {% if !group_options.is_empty() %}
+    <select
+        id="groups-select"
+        multiple
+        size="1"
+        aria-label="Tag-Gruppen (Mehrfachauswahl)"
+        title="Tag-Gruppen (Mehrfachauswahl)"
+    >
+        {% for g in group_options %}
+        <option value="{{ g.id }}" {% if g.selected %}selected{% endif %}>
+            {{ g.icon }} {{ g.name }}
+        </option>
+        {% endfor %}
+    </select>
+    {% endif %}
     <select name="owner" aria-label="Besitzer">
         <option value="">Besitzer: alle</option>
         {% for o in owner_options %}
@@ -63,6 +101,22 @@
     {% endif %}
     <button type="submit">Filtern</button>
 </form>
+<script>
+    (function () {
+        var sel = document.getElementById("groups-select");
+        var hid = document.getElementById("groups-hidden");
+        if (!sel || !hid) return;
+        var sync = function () {
+            hid.value = Array.from(sel.selectedOptions)
+                .map(function (o) {
+                    return o.value;
+                })
+                .join(",");
+        };
+        sel.addEventListener("change", sync);
+        if (sel.form) sel.form.addEventListener("submit", sync);
+    })();
+</script>
 
 {% if tags.is_empty() %}
 <p class="hub-muted">

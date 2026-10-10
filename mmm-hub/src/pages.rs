@@ -24,10 +24,13 @@ pub fn router(state: AppState) -> Router {
         .route("/overlap/enrich", post(overlap_enrich))
         .route("/playlists/similar", get(similar_page))
         .route("/tags", get(tags_page))
+        .route("/tags/create", post(tag_create))
         .route("/tag/{id}", get(tag_detail_page))
         .route("/tag/{id}/rename", post(tag_rename))
         .route("/tag/{id}/group/add", post(tag_group_add))
         .route("/tag/{id}/group/remove", post(tag_group_remove))
+        .route("/tag/{id}/parent/add", post(tag_parent_add))
+        .route("/tag/{id}/parent/remove", post(tag_parent_remove))
         .route("/groups", get(groups_page))
         .route("/groups/create", post(group_create))
         .route("/groups/{id}", get(group_page))
@@ -2882,8 +2885,10 @@ struct TagFilter {
     q: Option<String>,
     /// "1" = only my tags.
     mine: Option<String>,
-    /// Filter to tags in this group.
+    /// Legacy single-group filter (kept for old links).
     group: Option<i64>,
+    /// Multi-group filter, comma-separated group ids (e.g. `groups=3,7`).
+    groups: Option<String>,
     /// Filter to tags in any group of this collective.
     collective: Option<i64>,
     /// Filter to tags owned by this user slug.
@@ -2897,13 +2902,22 @@ struct TagsPage {
     flash: String,
     q: String,
     mine: bool,
-    group_id: i64,
-    group_label: String,
+    group_options: Vec<GroupOption>,
+    groups_csv: String,
+    groups_label: String,
     collective_id: i64,
     owner: String,
     owner_options: Vec<OwnerOption>,
     collective_options: Vec<ParentOption>,
     tags: Vec<TagRow>,
+}
+
+/// A selectable group in the tag-page group filter.
+struct GroupOption {
+    id: i64,
+    name: String,
+    icon: String,
+    selected: bool,
 }
 
 /// A lightweight group reference for templates.
@@ -2943,17 +2957,26 @@ async fn tags_page(
     let q = f.q.unwrap_or_default().trim().to_string();
     let mine = f.mine.as_deref() == Some("1");
     let me = nav.id;
-    let (group_id, group_label) = match f.group {
-        Some(gid) => match crate::tags::group_detail(&st.pool, me, gid).await {
-            Some(g) => (g.id, format!("{} {}", g.icon, g.name).trim().to_string()),
-            None => (0, String::new()),
-        },
-        None => (0, String::new()),
-    };
+    // Multi-group selection: legacy `group` plus comma-separated `groups`.
+    let mut group_ids: Vec<i64> = Vec::new();
+    if let Some(g) = f.group {
+        if g != 0 {
+            group_ids.push(g);
+        }
+    }
+    if let Some(csv) = f.groups.as_deref() {
+        for part in csv.split(',') {
+            if let Ok(v) = part.trim().parse::<i64>() {
+                if v != 0 && !group_ids.contains(&v) {
+                    group_ids.push(v);
+                }
+            }
+        }
+    }
     let owner = f.owner.unwrap_or_default().trim().to_string();
     let collective_id = f.collective.unwrap_or(0);
 
-    let rows = sqlx::query(
+    let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
         "SELECT t.id, t.name, u.slug AS owner,
                 (SELECT GROUP_CONCAT(g.icon || ' ' || g.name, ' · ')
                    FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
@@ -2965,26 +2988,45 @@ async fn tags_page(
                 (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count
            FROM hub_tags t
            JOIN hub_users u ON u.id = t.owner_user_id
-          WHERE (?1 = '' OR lower(t.name) LIKE '%' || lower(?1) || '%')
-            AND (?2 = 0 OR t.owner_user_id = ?3)
-            AND (?4 = 0 OR EXISTS (SELECT 1 FROM hub_group_tags gt2
-                                    WHERE gt2.tag_id = t.id AND gt2.group_id = ?4))
-            AND (?5 = '' OR u.slug = ?5 COLLATE NOCASE)
-            AND (?6 = 0 OR EXISTS (SELECT 1 FROM hub_group_tags gt3
-                                    JOIN hub_tag_groups g3 ON g3.id = gt3.group_id
-                                   WHERE gt3.tag_id = t.id AND g3.collective_id = ?6))
-          ORDER BY u.slug, t.name
-          LIMIT 1000",
-    )
-    .bind(&q)
-    .bind(mine as i64)
-    .bind(me)
-    .bind(f.group.unwrap_or(0))
-    .bind(&owner)
-    .bind(collective_id)
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default();
+          WHERE 1 = 1",
+    );
+    if !q.is_empty() {
+        qb.push(" AND lower(t.name) LIKE ")
+            .push_bind(format!("%{}%", q.to_lowercase()));
+    }
+    if mine {
+        qb.push(" AND t.owner_user_id = ").push_bind(me);
+    }
+    if !owner.is_empty() {
+        qb.push(" AND u.slug = ")
+            .push_bind(owner.clone())
+            .push(" COLLATE NOCASE");
+    }
+    if collective_id != 0 {
+        qb.push(
+            " AND EXISTS (SELECT 1 FROM hub_group_tags gt3
+                           JOIN hub_tag_groups g3 ON g3.id = gt3.group_id
+                          WHERE gt3.tag_id = t.id AND g3.collective_id = ",
+        )
+        .push_bind(collective_id)
+        .push(")");
+    }
+    if !group_ids.is_empty() {
+        qb.push(
+            " AND EXISTS (SELECT 1 FROM hub_group_tags gt2
+                          WHERE gt2.tag_id = t.id AND gt2.group_id IN (",
+        );
+        {
+            let mut sep = qb.separated(", ");
+            for gid in &group_ids {
+                sep.push_bind(*gid);
+            }
+        }
+        qb.push("))");
+    }
+    qb.push(" ORDER BY u.slug, t.name LIMIT 1000");
+
+    let rows = qb.build().fetch_all(&st.pool).await.unwrap_or_default();
 
     let tags: Vec<TagRow> = rows
         .iter()
@@ -3017,19 +3059,71 @@ async fn tags_page(
             icon,
         })
         .collect();
+    let group_options: Vec<GroupOption> = crate::tags::list_groups_for(&st.pool, me)
+        .await
+        .into_iter()
+        .map(|g| GroupOption {
+            selected: group_ids.contains(&g.id),
+            id: g.id,
+            name: g.name,
+            icon: g.icon,
+        })
+        .collect();
+    let groups_csv = group_ids
+        .iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let groups_label = group_options
+        .iter()
+        .filter(|g| g.selected)
+        .map(|g| format!("{} {}", g.icon, g.name).trim().to_string())
+        .collect::<Vec<_>>()
+        .join(" · ");
     render(&TagsPage {
         nav,
         flash: String::new(),
         q,
         mine,
-        group_id,
-        group_label,
+        group_options,
+        groups_csv,
+        groups_label,
         collective_id,
         owner,
         owner_options,
         collective_options,
         tags,
     })
+}
+
+#[derive(Deserialize)]
+struct TagCreateForm {
+    name: String,
+    /// Optional group to place the new tag into.
+    group: Option<i64>,
+}
+
+/// Issue #206: create a tag directly from the tag page (owner = current user).
+async fn tag_create(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<TagCreateForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if f.name.trim().is_empty() {
+        return Redirect::to("/tags").into_response();
+    }
+    if let Ok(tag_id) = crate::tags::ensure_tag(&st.pool, nav.id, &f.name).await {
+        if let Some(g) = f.group {
+            if g != 0 {
+                // Best-effort: the tag is created regardless of group rights.
+                let _ = crate::tags::add_tag_to_group(&st.pool, nav.id, tag_id, g).await;
+            }
+        }
+    }
+    Redirect::to("/tags").into_response()
 }
 
 // ── tag detail ───────────────────────────────────────────────────────────────
@@ -3053,6 +3147,8 @@ struct TagDetailPage {
     my_groups: Vec<GroupRef>,
     parents: Vec<GroupRef>,
     children: Vec<GroupRef>,
+    /// True when the tag lives in a group with the `genre` role.
+    genre_mode: bool,
     source_count: i64,
     tracks: Vec<TagTrack>,
     music_api: bool,
@@ -3134,6 +3230,7 @@ async fn tag_detail_page(
         my_groups,
         parents,
         children,
+        genre_mode: crate::tags::tag_is_genre(&st.pool, id).await,
         source_count: d.source_count,
         tracks,
         music_api: st.cfg.music_api_token.is_some(),
@@ -3165,6 +3262,85 @@ async fn tag_rename(
     };
     let msg = match crate::tags::rename_tag(&st.pool, uid, id, &f.name).await {
         Ok(()) => "Tag umbenannt".to_string(),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    flash_redirect(&format!("/tag/{id}"), msg)
+}
+
+#[derive(Deserialize)]
+struct TagParentForm {
+    parent: String,
+}
+
+#[derive(Deserialize)]
+struct TagParentIdForm {
+    parent_id: i64,
+}
+
+/// Owner-only: tag name -> slug for the tag with `id`.
+async fn tag_owner_slug(st: &AppState, id: i64) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT u.slug FROM hub_tags t JOIN hub_users u ON u.id = t.owner_user_id WHERE t.id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Issue #207: set the "Hauptrichtung" (parent) of a genre variation tag.
+async fn tag_parent_add(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<TagParentForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if tag_owner_slug(&st, id).await.as_deref() != Some(&nav.slug) {
+        return flash_redirect(
+            &format!("/tag/{id}"),
+            "Nur der Besitzer kann das ändern".into(),
+        );
+    }
+    if f.parent.trim().is_empty() {
+        return flash_redirect(&format!("/tag/{id}"), "Name fehlt".into());
+    }
+    let parent_id = match crate::tags::find_tag_id_by_name(&st.pool, &f.parent).await {
+        Some(pid) => pid,
+        None => match crate::tags::ensure_tag(&st.pool, nav.id, &f.parent).await {
+            Ok(pid) => pid,
+            Err(_) => {
+                return flash_redirect(&format!("/tag/{id}"), "Ungültiger Name".into());
+            }
+        },
+    };
+    let msg = match crate::tags::add_tag_parent(&st.pool, id, parent_id).await {
+        Ok(()) => "Hauptrichtung gesetzt".to_string(),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    flash_redirect(&format!("/tag/{id}"), msg)
+}
+
+async fn tag_parent_remove(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<TagParentIdForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if tag_owner_slug(&st, id).await.as_deref() != Some(&nav.slug) {
+        return flash_redirect(
+            &format!("/tag/{id}"),
+            "Nur der Besitzer kann das ändern".into(),
+        );
+    }
+    let msg = match crate::tags::remove_tag_parent(&st.pool, id, f.parent_id).await {
+        Ok(()) => "Hauptrichtung entfernt".to_string(),
         Err(e) => format!("Fehler: {e}"),
     };
     flash_redirect(&format!("/tag/{id}"), msg)

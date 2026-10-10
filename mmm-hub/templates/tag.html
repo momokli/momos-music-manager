@@ -75,7 +75,7 @@ content %}
     {% endif %}
 </section>
 
-{% if !parents.is_empty() || !children.is_empty() %}
+{% if !parents.is_empty() || !children.is_empty() || is_owner %}
 <section
     aria-label="Tag-Hierarchie"
     style="
@@ -87,12 +87,40 @@ content %}
     "
 >
     {% if !parents.is_empty() %}
-    <span class="hub-muted">Parent-Tags:</span>
-    {% for p in parents %}<a href="/tag/{{ p.id }}" class="hub-chip">{{ p.name }}</a>{%
+    <span class="hub-muted"
+        >{% if genre_mode %}Hauptrichtung:{% else %}Parent-Tags:{% endif %}</span
+    >
+    {% for p in parents %}{% if is_owner %}
+    <form method="post" action="/tag/{{ id }}/parent/remove" style="display: inline-flex">
+        <input type="hidden" name="parent_id" value="{{ p.id }}" />
+        <button type="submit" class="hub-chip" title="Hauptrichtung entfernen">
+            {{ p.name }} ×
+        </button>
+    </form>
+    {% else %}<a href="/tag/{{ p.id }}" class="hub-chip">{{ p.name }}</a>{% endif %}{%
     endfor %} {% endif %} {% if !children.is_empty() %}
-    <span class="hub-muted">Kind-Tags:</span>
+    <span class="hub-muted"
+        >{% if genre_mode %}Variationen:{% else %}Kind-Tags:{% endif %}</span
+    >
     {% for c in children %}<a href="/tag/{{ c.id }}" class="hub-chip">{{ c.name }}</a>{%
-    endfor %} {% endif %}
+    endfor %} {% endif %} {% if is_owner %}
+    <form
+        method="post"
+        action="/tag/{{ id }}/parent/add"
+        style="display: inline-flex; gap: 0.25rem; align-items: center"
+    >
+        <input
+            type="text"
+            name="parent"
+            placeholder="{% if genre_mode %}Hauptrichtung …{% else %}Parent-Tag …{% endif %}"
+            aria-label="Parent-Tag"
+            required
+        />
+        <button type="submit" class="secondary">
+            {% if genre_mode %}Hauptrichtung setzen{% else %}Parent hinzufügen{% endif %}
+        </button>
+    </form>
+    {% endif %}
 </section>
 {% endif %} {% if music_api %}
 <section

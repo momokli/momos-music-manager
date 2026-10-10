@@ -165,15 +165,14 @@ pub async fn link_playlist_to_tag(
     tag_id: i64,
     playlist_id: i64,
 ) -> Result<()> {
-    let owned = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2",
-    )
-    .bind(tag_id)
-    .bind(owner_user_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    let owned =
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2")
+            .bind(tag_id)
+            .bind(owner_user_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
     if owned.is_none() {
         bail!("tag {tag_id} does not belong to you");
     }
@@ -362,9 +361,8 @@ pub async fn related_tag_ids(pool: &SqlitePool, ids: &[i64]) -> HashSet<i64> {
     let mut seen: HashSet<i64> = ids.iter().copied().collect();
     let mut frontier: Vec<i64> = ids.to_vec();
     while !frontier.is_empty() {
-        let mut qb = QueryBuilder::new(
-            "SELECT parent_tag_id AS id FROM hub_tag_parents WHERE tag_id IN (",
-        );
+        let mut qb =
+            QueryBuilder::new("SELECT parent_tag_id AS id FROM hub_tag_parents WHERE tag_id IN (");
         {
             let mut sep = qb.separated(", ");
             for id in &frontier {
@@ -406,6 +404,41 @@ pub async fn add_tag_parent(pool: &SqlitePool, tag_id: i64, parent_tag_id: i64) 
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Remove a parent relationship. Idempotent.
+pub async fn remove_tag_parent(pool: &SqlitePool, tag_id: i64, parent_tag_id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM hub_tag_parents WHERE tag_id = ?1 AND parent_tag_id = ?2")
+        .bind(tag_id)
+        .bind(parent_tag_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Case-insensitive lookup of any tag by exact name (any owner).
+pub async fn find_tag_id_by_name(pool: &SqlitePool, name: &str) -> Option<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM hub_tags WHERE lower(name) = lower(?1) ORDER BY id LIMIT 1",
+    )
+    .bind(name.trim())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+/// True when the tag sits in at least one group with semantic role `genre`.
+pub async fn tag_is_genre(pool: &SqlitePool, tag_id: i64) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
+          WHERE gt.tag_id = ?1 AND g.role = 'genre'",
+    )
+    .bind(tag_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0)
+        > 0
 }
 
 /// Distinct tag owners (user slugs) — for the filter picker.
@@ -462,6 +495,10 @@ pub struct Group {
     pub members: i64,
     /// Importance weight (used by the scoring engine).
     pub weight: f64,
+    /// `class` (classifying) or `sort` (sorting) group kind.
+    pub kind: String,
+    /// Semantic role (`""`, `rumpelkiste`, `setlist`, `genre`, `phase`).
+    pub semantic_role: String,
 }
 
 #[derive(Debug)]
@@ -479,6 +516,10 @@ pub struct GroupDetail {
     pub collective_icon: String,
     pub weight: f64,
     pub ranked: bool,
+    /// `class` (classifying) or `sort` (sorting) group kind.
+    pub kind: String,
+    /// Semantic role (`""`, `rumpelkiste`, `setlist`, `genre`, `phase`).
+    pub semantic_role: String,
     pub members: Vec<(String, String)>,
     /// `(tag_id, tag name, tag owner slug, rank)`.
     pub tags: Vec<(i64, String, String, Option<i64>)>,
@@ -508,6 +549,17 @@ pub struct CollectiveDetail {
     pub groups: Vec<(i64, String, String, i64, f64)>,
 }
 
+/// Infer `(kind, semantic_role)` from a well-known group name (case-insensitive).
+pub fn infer_group_kind_role(name: &str) -> (&'static str, &'static str) {
+    match name.trim().to_lowercase().as_str() {
+        "rumpelkiste" | "rumpel" => ("sort", "rumpelkiste"),
+        "setlist" | "setlists" => ("sort", "setlist"),
+        "genre" | "genres" => ("class", "genre"),
+        "phase" | "phase/energy" | "phase / energy" | "energy" => ("class", "phase"),
+        _ => ("class", ""),
+    }
+}
+
 /// Create a group owned by `owner_user_id` (idempotent on the slug); the owner
 /// becomes its `owner` member.
 pub async fn create_group(
@@ -524,10 +576,11 @@ pub async fn create_group(
     if slug.is_empty() {
         bail!("group name has no usable characters");
     }
+    let (kind, role) = infer_group_kind_role(name);
     let now = chrono::Utc::now().to_rfc3339();
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO hub_tag_groups (owner_user_id, name, slug, icon, sort_order, created_at)
-         VALUES (?1, ?2, ?3, ?4, 0, ?5)
+        "INSERT INTO hub_tag_groups (owner_user_id, name, slug, icon, sort_order, created_at, kind, role)
+         VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)
          ON CONFLICT(owner_user_id, slug) DO UPDATE SET name = excluded.name, icon = excluded.icon
          RETURNING id",
     )
@@ -536,6 +589,8 @@ pub async fn create_group(
     .bind(&slug)
     .bind(icon)
     .bind(&now)
+    .bind(kind)
+    .bind(role)
     .fetch_one(pool)
     .await?;
     sqlx::query(
@@ -649,6 +704,7 @@ pub async fn can_contribute(pool: &SqlitePool, user_id: i64, group_id: i64) -> b
 pub async fn list_groups_for(pool: &SqlitePool, user_id: i64) -> Vec<Group> {
     let rows = sqlx::query(
         "SELECT g.id, g.name, g.icon, u.slug AS owner, g.weight,
+                COALESCE(g.kind,'class') AS kind, COALESCE(g.role,'') AS semantic_role,
                 (SELECT COUNT(*) FROM hub_group_tags gt WHERE gt.group_id = g.id) AS tag_count,
                 (SELECT COUNT(*) FROM hub_group_members mm WHERE mm.group_id = g.id) AS members
            FROM hub_tag_groups g
@@ -673,6 +729,12 @@ pub async fn list_groups_for(pool: &SqlitePool, user_id: i64) -> Vec<Group> {
                 tag_count: r.get::<Option<i64>, _>("tag_count").unwrap_or(0),
                 members: r.get::<Option<i64>, _>("members").unwrap_or(0),
                 weight: r.get::<Option<f64>, _>("weight").unwrap_or(0.0),
+                kind: r
+                    .get::<Option<String>, _>("kind")
+                    .unwrap_or_else(|| "class".into()),
+                semantic_role: r
+                    .get::<Option<String>, _>("semantic_role")
+                    .unwrap_or_default(),
             });
         }
     }
@@ -683,6 +745,7 @@ pub async fn list_groups_for(pool: &SqlitePool, user_id: i64) -> Vec<Group> {
 pub async fn list_discover_groups(pool: &SqlitePool, user_id: i64) -> Vec<Group> {
     let rows = sqlx::query(
         "SELECT g.id, g.name, g.icon, u.slug AS owner, g.weight,
+                COALESCE(g.kind,'class') AS kind, COALESCE(g.role,'') AS semantic_role,
                 (SELECT COUNT(*) FROM hub_group_tags gt WHERE gt.group_id = g.id) AS tag_count,
                 (SELECT COUNT(*) FROM hub_group_members mm WHERE mm.group_id = g.id) AS members
            FROM hub_tag_groups g
@@ -706,6 +769,12 @@ pub async fn list_discover_groups(pool: &SqlitePool, user_id: i64) -> Vec<Group>
             tag_count: r.get::<Option<i64>, _>("tag_count").unwrap_or(0),
             members: r.get::<Option<i64>, _>("members").unwrap_or(0),
             weight: r.get::<Option<f64>, _>("weight").unwrap_or(0.0),
+            kind: r
+                .get::<Option<String>, _>("kind")
+                .unwrap_or_else(|| "class".into()),
+            semantic_role: r
+                .get::<Option<String>, _>("semantic_role")
+                .unwrap_or_default(),
         })
         .collect()
 }
@@ -891,7 +960,8 @@ pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Opt
     let row = sqlx::query(
         "SELECT g.id, g.name, COALESCE(g.icon,'') AS icon, u.slug AS owner,
                 COALESCE(g.collective_id, 0) AS collective_id, g.weight,
-                COALESCE(g.ranked, 0) AS ranked
+                COALESCE(g.ranked, 0) AS ranked,
+                COALESCE(g.kind,'class') AS kind, COALESCE(g.role,'') AS semantic_role
            FROM hub_tag_groups g JOIN hub_users u ON u.id = g.owner_user_id
           WHERE g.id = ?1",
     )
@@ -903,8 +973,7 @@ pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Opt
     let role = effective_role_of(pool, user_id, group_id)
         .await
         .unwrap_or_default();
-    let role_inherited =
-        !role.is_empty() && own_role_of(pool, user_id, group_id).await.is_none();
+    let role_inherited = !role.is_empty() && own_role_of(pool, user_id, group_id).await.is_none();
     let collective_id: i64 = row.get("collective_id");
     let (collective_name, collective_icon) = if collective_id != 0 {
         sqlx::query_as::<_, (String, String)>(
@@ -949,9 +1018,44 @@ pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Opt
         collective_icon,
         weight: row.get::<Option<f64>, _>("weight").unwrap_or(0.0),
         ranked: row.get::<Option<i64>, _>("ranked").unwrap_or(0) == 1,
+        kind: row
+            .get::<Option<String>, _>("kind")
+            .unwrap_or_else(|| "class".into()),
+        semantic_role: row
+            .get::<Option<String>, _>("semantic_role")
+            .unwrap_or_default(),
         members,
         tags,
     })
+}
+
+/// Semantic group roles recognized by the engine (`""` = none).
+pub const GROUP_ROLES: &[&str] = &["", "rumpelkiste", "setlist", "genre", "phase"];
+
+/// Update a group's kind (`class`|`sort`) and semantic role.
+pub async fn set_group_kind_role(
+    pool: &SqlitePool,
+    actor_user_id: i64,
+    group_id: i64,
+    kind: &str,
+    role: &str,
+) -> Result<()> {
+    if !can_contribute(pool, actor_user_id, group_id).await {
+        bail!("you can't change this group");
+    }
+    let kind = if kind == "sort" { "sort" } else { "class" };
+    let role = if GROUP_ROLES.contains(&role) {
+        role
+    } else {
+        ""
+    };
+    sqlx::query("UPDATE hub_tag_groups SET kind = ?1, role = ?2 WHERE id = ?3")
+        .bind(kind)
+        .bind(role)
+        .bind(group_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Mark/unmark a group as "ranked" (its tags can be ordered 1..5).
@@ -1160,7 +1264,9 @@ pub async fn list_discover_collectives(pool: &SqlitePool, user_id: i64) -> Vec<C
     .fetch_all(pool)
     .await
     .unwrap_or_default();
-    rows.iter().map(|r| collective_from_row(r, String::new())).collect()
+    rows.iter()
+        .map(|r| collective_from_row(r, String::new()))
+        .collect()
 }
 
 pub async fn join_collective(pool: &SqlitePool, user_id: i64, id: i64) -> Result<()> {
@@ -1274,15 +1380,14 @@ pub async fn update_collective(
     if slug.is_empty() {
         bail!("collective name has no usable characters");
     }
-    let clash = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM hub_collectives WHERE slug = ?1 AND id <> ?2",
-    )
-    .bind(&slug)
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    let clash =
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_collectives WHERE slug = ?1 AND id <> ?2")
+            .bind(&slug)
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
     if clash.is_some() {
         bail!("es gibt schon ein Collective mit diesem Namen");
     }
@@ -1316,7 +1421,11 @@ pub async fn collectives_i_belong(pool: &SqlitePool, user_id: i64) -> Vec<(i64, 
     .unwrap_or_default()
 }
 
-pub async fn collective_detail(pool: &SqlitePool, user_id: i64, id: i64) -> Option<CollectiveDetail> {
+pub async fn collective_detail(
+    pool: &SqlitePool,
+    user_id: i64,
+    id: i64,
+) -> Option<CollectiveDetail> {
     let row = sqlx::query(
         "SELECT c.id, c.name, COALESCE(c.icon,'') AS icon, u.slug AS owner
            FROM hub_collectives c JOIN hub_users u ON u.id = c.owner_user_id
@@ -1410,7 +1519,10 @@ mod tests {
     #[test]
     fn normalisation() {
         assert_eq!(normalize_name("Deep  House!"), "deep house");
-        assert_eq!(normalize_name("  Fusion / Bachstelzen "), "fusion bachstelzen");
+        assert_eq!(
+            normalize_name("  Fusion / Bachstelzen "),
+            "fusion bachstelzen"
+        );
         assert_eq!(normalize_name(""), "");
     }
 
