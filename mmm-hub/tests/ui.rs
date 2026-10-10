@@ -47,7 +47,7 @@ async fn dashboard_renders_shell_and_active_nav() {
     let html = body(resp).await;
 
     // Shell: brand, nav items, user menu.
-    assert!(html.contains("MMM Hub"), "brand missing");
+    assert!(html.contains("Spelunke"), "brand missing");
     assert!(html.contains("Übersicht"), "nav item missing");
     assert!(html.contains("/me/playlists"), "playlists nav missing");
     assert!(html.contains("@alice"), "user slug missing");
@@ -97,7 +97,7 @@ async fn track_page_renders_in_shell() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let html = body(resp).await;
     assert!(html.contains("Shared Anthem"));
-    assert!(html.contains("MMM Hub"), "shell missing on track page");
+    assert!(html.contains("Spelunke"), "shell missing on track page");
     assert!(html.contains("@alice"));
 }
 

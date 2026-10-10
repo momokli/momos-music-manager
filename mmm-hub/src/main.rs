@@ -1,4 +1,4 @@
-//! MMM Hub — CLI for the multi-user Spotify ingest + exploration service.
+//! Spelunke — CLI for the multi-user Spotify ingest + exploration service.
 //!
 //!   mmm-hub serve                  # web UI + JSON API + SQL console
 //!   mmm-hub auth   --user <slug>   # one-time loopback Spotify link
@@ -25,7 +25,7 @@ use mmm_hub::{
 #[command(
     name = "mmm-hub",
     version,
-    about = "MMM Hub — multi-user music ingest + exploration"
+    about = "Spelunke — multi-user music ingest + exploration"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -190,8 +190,8 @@ async fn cmd_serve(cfg: Config, host: Option<String>, port: Option<u16>) -> Resu
 
     let listener = TcpListener::bind((host.as_str(), port)).await?;
     let addr = listener.local_addr()?;
-    tracing::info!("MMM Hub listening on http://{addr}");
-    println!("MMM Hub auf http://{addr}");
+    tracing::info!("Spelunke listening on http://{addr}");
+    println!("Spelunke auf http://{addr}");
     println!("  Web-UI:              GET  /");
     println!("  Spotify verbinden:   GET  /api/hub/services/spotify/connect");
     println!("  GET  /api/hub/health");
@@ -288,8 +288,8 @@ async fn wait_for_callback(listener: TcpListener) -> Result<(String, String)> {
     }
 
     let body = match &error {
-        Some(e) => format!("<html><body><h1>MMM Hub</h1><p>Spotify-Fehler: {e}</p></body></html>"),
-        None => "<html><body><h1>MMM Hub</h1><p>Fertig — Fenster kann geschlossen werden.</p></body></html>".to_string(),
+        Some(e) => format!("<html><body><h1>Spelunke</h1><p>Spotify-Fehler: {e}</p></body></html>"),
+        None => "<html><body><h1>Spelunke</h1><p>Fertig — Fenster kann geschlossen werden.</p></body></html>".to_string(),
     };
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

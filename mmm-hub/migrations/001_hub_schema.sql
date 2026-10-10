@@ -1,4 +1,4 @@
--- MMM Hub — skeleton schema (walking skeleton).
+-- Spelunke — skeleton schema (walking skeleton).
 -- Table/view names match plans/mmm-hub/00-interface.md so this converges with
 -- the planned M1/M2/M3. Deviations for the skeleton are additive only:
 --   * hub_users.slug — CLI-addressable local user handle (OIDC comes in M2).
