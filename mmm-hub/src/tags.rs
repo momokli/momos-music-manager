@@ -478,9 +478,10 @@ pub struct GroupDetail {
     pub collective_name: String,
     pub collective_icon: String,
     pub weight: f64,
+    pub ranked: bool,
     pub members: Vec<(String, String)>,
-    /// `(tag_id, tag name, tag owner slug)`.
-    pub tags: Vec<(i64, String, String)>,
+    /// `(tag_id, tag name, tag owner slug, rank)`.
+    pub tags: Vec<(i64, String, String, Option<i64>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -871,9 +872,12 @@ pub async fn remove_tag_from_group(
 }
 
 /// Groups a tag belongs to: `(id, name, icon)`.
-pub async fn groups_for_tag(pool: &SqlitePool, tag_id: i64) -> Vec<(i64, String, String)> {
-    sqlx::query_as::<_, (i64, String, String)>(
-        "SELECT g.id, g.name, COALESCE(g.icon,'')
+pub async fn groups_for_tag(
+    pool: &SqlitePool,
+    tag_id: i64,
+) -> Vec<(i64, String, String, Option<i64>, bool)> {
+    sqlx::query_as::<_, (i64, String, String, Option<i64>, bool)>(
+        "SELECT g.id, g.name, COALESCE(g.icon,''), gt.rank, COALESCE(g.ranked,0) AS ranked
            FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
           WHERE gt.tag_id = ?1 ORDER BY g.name",
     )
@@ -886,7 +890,8 @@ pub async fn groups_for_tag(pool: &SqlitePool, tag_id: i64) -> Vec<(i64, String,
 pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<GroupDetail> {
     let row = sqlx::query(
         "SELECT g.id, g.name, COALESCE(g.icon,'') AS icon, u.slug AS owner,
-                COALESCE(g.collective_id, 0) AS collective_id, g.weight
+                COALESCE(g.collective_id, 0) AS collective_id, g.weight,
+                COALESCE(g.ranked, 0) AS ranked
            FROM hub_tag_groups g JOIN hub_users u ON u.id = g.owner_user_id
           WHERE g.id = ?1",
     )
@@ -922,11 +927,11 @@ pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Opt
     .fetch_all(pool)
     .await
     .unwrap_or_default();
-    let tags = sqlx::query_as::<_, (i64, String, String)>(
-        "SELECT t.id, t.name, u.slug FROM hub_group_tags gt
+    let tags = sqlx::query_as::<_, (i64, String, String, Option<i64>)>(
+        "SELECT t.id, t.name, u.slug, gt.rank FROM hub_group_tags gt
            JOIN hub_tags t ON t.id = gt.tag_id
            JOIN hub_users u ON u.id = t.owner_user_id
-          WHERE gt.group_id = ?1 ORDER BY t.name",
+          WHERE gt.group_id = ?1 ORDER BY (gt.rank IS NULL), gt.rank, t.name",
     )
     .bind(group_id)
     .fetch_all(pool)
@@ -943,9 +948,49 @@ pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Opt
         collective_name,
         collective_icon,
         weight: row.get::<Option<f64>, _>("weight").unwrap_or(0.0),
+        ranked: row.get::<Option<i64>, _>("ranked").unwrap_or(0) == 1,
         members,
         tags,
     })
+}
+
+/// Mark/unmark a group as "ranked" (its tags can be ordered 1..5).
+pub async fn set_group_ranked(
+    pool: &SqlitePool,
+    actor_user_id: i64,
+    group_id: i64,
+    ranked: bool,
+) -> Result<()> {
+    if !can_contribute(pool, actor_user_id, group_id).await {
+        bail!("you can't change this group");
+    }
+    sqlx::query("UPDATE hub_tag_groups SET ranked = ?1 WHERE id = ?2")
+        .bind(ranked as i64)
+        .bind(group_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Set (or clear, with `None`) a tag's rank within a ranked group (0..5).
+pub async fn set_group_tag_rank(
+    pool: &SqlitePool,
+    actor_user_id: i64,
+    group_id: i64,
+    tag_id: i64,
+    rank: Option<i64>,
+) -> Result<()> {
+    if !can_contribute(pool, actor_user_id, group_id).await {
+        bail!("you can't change this group");
+    }
+    let rank = rank.filter(|r| (0..=5).contains(r));
+    sqlx::query("UPDATE hub_group_tags SET rank = ?1 WHERE group_id = ?2 AND tag_id = ?3")
+        .bind(rank)
+        .bind(group_id)
+        .bind(tag_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Set a group's importance weight. Any contributor (owner or collective
@@ -1321,7 +1366,8 @@ pub struct TagDetail {
     pub id: i64,
     pub name: String,
     pub owner: String,
-    pub groups: Vec<(i64, String, String)>,
+    /// `(group_id, group name, group icon, rank, group_ranked)`.
+    pub groups: Vec<(i64, String, String, Option<i64>, bool)>,
     pub source_count: i64,
     pub tracks: Vec<(i64, String, String)>,
 }

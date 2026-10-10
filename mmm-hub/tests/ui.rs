@@ -727,6 +727,61 @@ async fn ranking_engine_is_settings_driven() {
 }
 
 #[tokio::test]
+async fn ranked_group_orders_tags_and_shows_rank() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Phase", "⚡")
+        .await
+        .unwrap();
+    let start = mmm_hub::tags::ensure_tag(&app.pool, app.seed.alice, "start")
+        .await
+        .unwrap();
+    let peak = mmm_hub::tags::ensure_tag(&app.pool, app.seed.alice, "peak")
+        .await
+        .unwrap();
+    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, start, g)
+        .await
+        .unwrap();
+    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, peak, g)
+        .await
+        .unwrap();
+    mmm_hub::tags::set_group_ranked(&app.pool, app.seed.alice, g, true)
+        .await
+        .unwrap();
+    mmm_hub::tags::set_group_tag_rank(&app.pool, app.seed.alice, g, start, Some(1))
+        .await
+        .unwrap();
+    mmm_hub::tags::set_group_tag_rank(&app.pool, app.seed.alice, g, peak, Some(5))
+        .await
+        .unwrap();
+
+    // Group page: ranked control + rank badges, ordered 1..5.
+    let gp = app
+        .client()
+        .get(app.url(&format!("/groups/{g}")))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let html = body(gp).await;
+    assert!(html.contains("Ranked-Gruppe"));
+    let i_start = html.find("start").unwrap();
+    let i_peak = html.find("peak").unwrap();
+    assert!(i_start < i_peak, "rank 1 (start) sorts before rank 5 (peak)");
+
+    // Tag page shows the rank.
+    let tp = app
+        .client()
+        .get(app.url(&format!("/tag/{start}")))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert!(body(tp).await.contains("Rang 1"));
+}
+
+#[tokio::test]
 async fn toggle_returns_row_fragment_for_htmx() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
@@ -925,7 +980,7 @@ async fn groups_have_roles_and_hold_tags() {
         mmm_hub::tags::groups_for_tag(&app.pool, tag)
             .await
             .iter()
-            .any(|(id, _, _)| *id == g)
+            .any(|(id, _, _, _, _)| *id == g)
     );
 
     // Bob isn't a member -> it shows up in discover; he subscribes.

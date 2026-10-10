@@ -180,7 +180,35 @@ content %}
 {% endif %}
 
 <h3>Tags in dieser Gruppe ({{ tags.len() }})</h3>
-{% if tags.is_empty() %}
+{% if can_edit %}
+<form
+    method="post"
+    action="/groups/{{ id }}/ranked"
+    style="
+        display: flex;
+        gap: 0.4rem;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 0.4rem;
+    "
+>
+    <input type="hidden" name="back" value="/groups/{{ id }}" />
+    {% if ranked %}
+    <input type="hidden" name="ranked" value="0" />
+    <button type="submit" class="secondary outline">
+        Ranked-Gruppe: an (ausschalten)
+    </button>
+    {% else %}
+    <input type="hidden" name="ranked" value="1" />
+    <button type="submit" class="secondary outline">
+        Als Ranked-Gruppe markieren (1–5)
+    </button>
+    {% endif %}
+    <span class="hub-muted"
+        >Rang der Tags in dieser Gruppe (z. B. Phase: start=1 … peak=5).</span
+    >
+</form>
+{% endif %} {% if tags.is_empty() %}
 <p class="hub-muted">
     Noch keine Tags — öffne einen <a href="/tags">Tag</a> und füge ihn hier hinzu.
 </p>
@@ -189,9 +217,10 @@ content %}
     <table class="hub-dense-table">
         <thead>
             <tr>
-                <th scope="col">Tag</th>
+                <th scope="col">{% if ranked %}Rang{% else %}Tag{% endif %}</th>
+                {% if !ranked %}
                 <th scope="col">Besitzer</th>
-                {% if can_edit %}
+                {% endif %} {% if can_edit %}
                 <th scope="col"></th>
                 {% endif %}
             </tr>
@@ -199,10 +228,36 @@ content %}
         <tbody>
             {% for t in tags %}
             <tr>
-                <td><a href="/tag/{{ t.id }}">{{ t.name }}</a></td>
-                <td><a href="/user/{{ t.owner }}">@{{ t.owner }}</a></td>
-                {% if can_edit %}
                 <td>
+                    <a href="/tag/{{ t.id }}">{{ t.name }}</a>
+                    {% if ranked %}<span class="hub-badge hub-badge-ok"
+                        >{{ t.rank_disp }}</span
+                    >{% endif %}
+                </td>
+                {% if !ranked %}
+                <td><a href="/user/{{ t.owner }}">@{{ t.owner }}</a></td>
+                {% endif %} {% if can_edit %}
+                <td>
+                    {% if ranked %}
+                    <form
+                        method="post"
+                        action="/groups/{{ id }}/tag-rank"
+                        style="display: inline-flex; gap: 0.25rem; align-items: center"
+                    >
+                        <input type="hidden" name="back" value="/groups/{{ id }}" />
+                        <input type="hidden" name="tag_id" value="{{ t.id }}" />
+                        <select name="rank" aria-label="Rang">
+                            <option value="">—</option>
+                            <option value="0">0</option>
+                            <option value="1">1</option>
+                            <option value="2">2</option>
+                            <option value="3">3</option>
+                            <option value="4">4</option>
+                            <option value="5">5</option>
+                        </select>
+                        <button type="submit" class="secondary">setzen</button>
+                    </form>
+                    {% endif %}
                     <form
                         method="post"
                         action="/tag/{{ t.id }}/group/remove"

@@ -35,6 +35,7 @@ pub struct Summary {
     pub linked: usize,
     pub skipped: usize,
     pub parents: usize,
+    pub ranked: usize,
 }
 
 /// Import categories + tags from `mmm_db` into the hub user `user_slug`.
@@ -143,6 +144,37 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
                 summary.parents += 1;
             }
         }
+    }
+
+    // Energy levels (`tag_energy_levels`, 0..5): mark the category's hub group
+    // as ranked and set each tag's rank within it (e.g. Phase: start=1 … peak=5).
+    let energy_rows = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT t.name, t.category_id, e.energy_level FROM tag_energy_levels e
+           JOIN tags t ON t.id = e.tag_id",
+    )
+    .fetch_all(&mmm)
+    .await
+    .unwrap_or_default();
+    let mut ranked_groups: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for (name, mmm_cat_id, level) in energy_rows {
+        let tag_id = name_to_hub.get(&name.trim().to_lowercase()).copied();
+        let group_id = cat_map.get(&mmm_cat_id).copied();
+        if let (Some(tag_id), Some(group_id)) = (tag_id, group_id) {
+            sqlx::query("UPDATE hub_group_tags SET rank = ?1 WHERE group_id = ?2 AND tag_id = ?3")
+                .bind(level)
+                .bind(group_id)
+                .bind(tag_id)
+                .execute(hub)
+                .await?;
+            ranked_groups.insert(group_id);
+            summary.ranked += 1;
+        }
+    }
+    for gid in ranked_groups {
+        sqlx::query("UPDATE hub_tag_groups SET ranked = 1 WHERE id = ?1")
+            .bind(gid)
+            .execute(hub)
+            .await?;
     }
 
     crate::tags::rebuild(hub).await?;

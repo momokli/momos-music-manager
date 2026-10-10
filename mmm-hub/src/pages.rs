@@ -33,6 +33,8 @@ pub fn router(state: AppState) -> Router {
         .route("/groups/{id}", get(group_page))
         .route("/groups/{id}/update", post(group_update))
         .route("/groups/{id}/weight", post(group_set_weight))
+        .route("/groups/{id}/ranked", post(group_set_ranked))
+        .route("/groups/{id}/tag-rank", post(group_tag_rank))
         .route("/groups/{id}/subscribe", post(group_subscribe))
         .route("/groups/{id}/unsubscribe", post(group_unsubscribe))
         .route("/groups/{id}/role", post(group_set_role))
@@ -2494,6 +2496,15 @@ struct GroupRef {
     icon: String,
 }
 
+/// A tag's membership in a group, for the tag detail page.
+struct TagGroup {
+    id: i64,
+    name: String,
+    icon: String,
+    rank_disp: String,
+    ranked: bool,
+}
+
 struct TagRow {
     id: i64,
     name: String,
@@ -2621,7 +2632,7 @@ struct TagDetailPage {
     name: String,
     owner: String,
     is_owner: bool,
-    groups: Vec<GroupRef>,
+    groups: Vec<TagGroup>,
     my_groups: Vec<GroupRef>,
     parents: Vec<GroupRef>,
     children: Vec<GroupRef>,
@@ -2641,10 +2652,16 @@ async fn tag_detail_page(
     let Some(d) = crate::tags::tag_detail(&st.pool, id).await else {
         return not_found("Tag nicht gefunden.");
     };
-    let groups: Vec<GroupRef> = d
+    let groups: Vec<TagGroup> = d
         .groups
         .into_iter()
-        .map(|(id, name, icon)| GroupRef { id, name, icon })
+        .map(|(id, name, icon, rank, ranked)| TagGroup {
+            id,
+            name,
+            icon,
+            ranked,
+            rank_disp: rank.map(|r| r.to_string()).unwrap_or_default(),
+        })
         .collect();
     let my_groups: Vec<GroupRef> = crate::tags::groups_i_contribute(&st.pool, nav.id)
         .await
@@ -2970,6 +2987,64 @@ async fn group_set_weight(
     flash_redirect(&back, msg)
 }
 
+#[derive(Deserialize)]
+struct RankedForm {
+    #[serde(default)]
+    ranked: Option<String>,
+    #[serde(default)]
+    back: Option<String>,
+}
+
+async fn group_set_ranked(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<RankedForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let ranked = matches!(f.ranked.as_deref(), Some("1") | Some("on") | Some("true"));
+    let msg = match crate::tags::set_group_ranked(&st.pool, uid, id, ranked).await {
+        Ok(()) => format!("Ranked-Gruppe: {}", if ranked { "an" } else { "aus" }),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    let back = f
+        .back
+        .filter(|b| b.starts_with('/'))
+        .unwrap_or_else(|| format!("/groups/{id}"));
+    flash_redirect(&back, msg)
+}
+
+#[derive(Deserialize)]
+struct TagRankForm {
+    tag_id: i64,
+    #[serde(default)]
+    rank: Option<i64>,
+    #[serde(default)]
+    back: Option<String>,
+}
+
+async fn group_tag_rank(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<TagRankForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let msg = match crate::tags::set_group_tag_rank(&st.pool, uid, id, f.tag_id, f.rank).await {
+        Ok(()) => "Rang gesetzt".to_string(),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    let back = f
+        .back
+        .filter(|b| b.starts_with('/'))
+        .unwrap_or_else(|| format!("/groups/{id}"));
+    flash_redirect(&back, msg)
+}
+
 struct ParentOption {
     id: i64,
     name: String,
@@ -2991,6 +3066,8 @@ struct GroupTag {
     id: i64,
     name: String,
     owner: String,
+    rank: Option<i64>,
+    rank_disp: String,
 }
 
 #[derive(Template)]
@@ -3004,6 +3081,7 @@ struct GroupPage {
     owner: String,
     is_owner: bool,
     can_edit: bool,
+    ranked: bool,
     role_inherited: bool,
     collective_id: i64,
     collective_label: String,
@@ -3040,7 +3118,15 @@ async fn group_page(
     let tags = d
         .tags
         .into_iter()
-        .map(|(id, name, owner)| GroupTag { id, name, owner })
+        .map(|(id, name, owner, rank)| GroupTag {
+            id,
+            name,
+            owner,
+            rank,
+            rank_disp: rank
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "—".to_string()),
+        })
         .collect();
     let users = sqlx::query_scalar::<_, String>("SELECT slug FROM hub_users ORDER BY slug")
         .fetch_all(&st.pool)
@@ -3073,6 +3159,7 @@ async fn group_page(
         owner: d.owner,
         is_owner,
         can_edit,
+        ranked: d.ranked,
         role_inherited: d.role_inherited,
         collective_id: d.collective_id,
         collective_label,

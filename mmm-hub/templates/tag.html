@@ -55,7 +55,8 @@ content %}
     >
         <input type="hidden" name="group_id" value="{{ g.id }}" />
         <button type="submit" class="hub-tag" title="Aus Gruppe entfernen">
-            {{ g.icon }} {{ g.name }} ×
+            {{ g.icon }} {{ g.name }}{% if g.ranked && g.rank_disp != "" %} (Rang {{
+            g.rank_disp }}){% endif %} ×
         </button>
     </form>
     {% endfor %} {% if !my_groups.is_empty() %}
