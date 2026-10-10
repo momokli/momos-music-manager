@@ -1724,3 +1724,57 @@ trusted friends on the LAN.
   hub. The public surface is intentionally separate from the authenticated hub.
 - The published plan docs (`plans/mmm-hub/auth.md`) still describe the OIDC design; this
   ADR supersedes that part — the shipped auth is local accounts + server-side sessions.
+
+## ADR-074: music-api als ISRC-Metadaten- und Objekt-Autorität (SSH-Ingest + Metadaten-Kette)
+
+**Date**: 2026-10-10
+**Status**: Accepted (Part A + Part B + Part C implementiert)
+**Relates**: ADR-065 (music-api als Download-Autorität), ADR-066 (Object Store statt NAS-SSH)
+
+**Context**: Der Object Store auf `.200` (ADR-066) ist der einzige Datei-Ort, aber er
+wird bisher nur von MMMs eigenem Scan und dem deemix-Order-Pfad gefüttert. Zwei
+Dateiquellen fehlen:
+
+1. Der **NAS-Bestand** (`ssh backup` vom Musik-Server, Synology `backup`): ~8653
+   `.stem.m4a` + 93 `.flac` (1,3 TB) unter `/volume1/media/stems`. Die Stems tragen
+   **ISRC + `initialkey` + Titel/Artist/Album/Genre** — aber **kein BPM**.
+2. **Uploads** der Nutzer (FLAC/Stems/MP3/…).
+
+Gleichzeitig soll `music-api` eine **ISRC→Metadaten**-Auskunft werden: jemand fragt
+für eine ISRC BPM und Key ab. Key kommt aus den Stem-Tags; BPM hält der Hub (Traktor
+`collection.nml`, MMM-Daten, eigene Analyse).
+
+**Decision**:
+
+- **Geteilter Ingest-Core** (`music-api/src/ingest.rs`): `canonicalise` (Comment
+  leeren) → SHA-256 → `store::import_file` → Tags lesen. Aus der Einmal-CLI
+  `store-import` promoviert; CLI, SSH-Puller und (künftiger) Upload nutzen ihn.
+  `AUDIO_EXTS` enthält jetzt auch `mp4` (die Traktor-Stems sind `.stem.mp4`).
+- **Part A — SSH-Pull-Ingest**: `music-api` zieht per `rsync` über SSH in ein
+  Staging, ingestiert, räumt auf. Config `SSH_SOURCES`/`SSH_SOURCES_FILE`,
+  Trigger CLI (`ssh-ingest`), HTTP (`POST /ingest/ssh`) und optionaler Tick.
+  Runs werden in `ingest_runs` protokolliert. Idempotent (content-addressed).
+  **SSH nur server-seitig** — MMM fasst weiter kein SSH an (ADR-066 bleibt für MMM).
+- **Part C — Metadaten-Kette**: neue Tabelle `track_metadata` (ISRC-PK) +
+  `POST /metadata` (Bulk-Upsert, Merge: non-null gewinnt) + `GET /metadata/{isrc}`.
+  Der Ingest schreibt aus den Tags; der Hub pusht BPM/Key. Der Hub-Traktor-Import
+  liest jetzt `TEMPO/@BPM` und `INFO/@KEY` (Traktor-Anzeige-Notation, z.B. `7m` —
+  dieselbe wie die Stem-`initialkey`) nach `hub_track_analysis` (`source='traktor'`);
+  `mmm-hub push-metadata` schickt sie an `music-api`.
+- `store_objects` bekommt Tag-Spalten (title/artist/album/genre/comment/bpm/
+  musical_key/duration_ms); `GET /objects/{hash}/meta` liefert sie.
+
+**Consequences**:
+
+- Der Store ist ein **metadaten-tragender** Ort, nicht nur ein Blob-Bucket.
+- `music-api` beantwortet ISRC→{bpm, key, camelot, title, artist, …}; Key aus den
+  Stems, BPM aus dem Hub.
+- **Traktor-Key-Notation**: NML `INFO/@KEY` ist die Anzeige-Notation (`7m`), nicht
+  der numerische `MUSICAL_KEY/@VALUE` (0–23). Wir lesen `INFO/@KEY`, weil es zur
+  Stem-`initialkey` passt. Eine Camelot-Ableitung ist offen.
+- **Merge-Politik**: non-null gewinnt, `source` merkt den letzten Schreiber. Wenn
+  Stem-Key und Hub-Key kollidieren, gewinnt der letzte Schreiber (offen: Priorität).
+- **Part B — HTTP-Upload**: `POST /objects` (multipart) kanonisiert + hasht
+  serverseitig (ein Browser kann das nicht), damit dieselbe Audio dedupliziert.
+  Der Hub hat eine `/upload`-Seite (`hub_uploads`, Migration 034) und
+  `music_api::upload_object`.

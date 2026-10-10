@@ -36,6 +36,28 @@ All notable changes to Momo's Music Manager.
     `https://hub.zukkafabrik.de`; sibling read-only Datasette (`data.zukkafabrik.de`) and
     SchemaSpy (`schema.zukkafabrik.de`) over a sanitized copy `hub-public.db`.
 
+- **music-api — ISRC-Metadaten- und Objekt-Autorität** _(tracked on branch
+  `feat/music-api-ingest`, not yet released to `main`)_: the `.200` service now
+  ingests files and serves per-ISRC metadata.
+  - **Shared ingest core** (`music-api/src/ingest.rs`): canonicalise (clear the
+    Comment) → SHA-256 → `store::import_file` → read tags. Promoted from the
+    one-shot `store-import` CLI; `AUDIO_EXTS` now includes `mp4` (the Traktor
+    stems are `.stem.mp4`).
+  - **SSH pull-ingest (Part A)**: `music-api` pulls a remote tree over SSH/rsync
+    into the store (`SSH_SOURCES` / `SSH_SOURCES_FILE`); triggers `music-api
+ssh-ingest`, `POST /ingest/ssh`, or a background tick. Runs in `ingest_runs`
+    (`GET /ingest/runs`). SSH stays server-side only (ADR-066 unchanged for MMM).
+  - **HTTP upload (Part B)**: `POST /objects` (multipart) canonicalises + hashes
+    server-side, so the same audio dedupes; the hub gets a `/upload` page
+    (`hub_uploads`, migration 034) and `music_api::upload_object`.
+  - **Metadata (Part C)**: `track_metadata` (ISRC-keyed) + `POST /metadata` (bulk
+    upsert, non-null wins) + `GET /metadata/{isrc}`. The ingest writes stem tags
+    (ISRC, key, title, …); the hub pushes BPM/key. `store_objects` gained tag
+    columns and `GET /objects/{hash}/meta`.
+  - **Hub**: the Traktor import now reads `TEMPO/@BPM` and `INFO/@KEY` into
+    `hub_track_analysis` (`source='traktor'`); `mmm-hub push-metadata` forwards
+    BPM/key to `music-api`.
+
 ## [1.14.0] — 2026-10-02
 
 ### Added

@@ -128,6 +128,8 @@ enum Command {
         #[arg(long)]
         file: String,
     },
+    /// Push BPM/key metadata (Traktor/analysis/features) to music-api.
+    PushMetadata,
 }
 
 #[tokio::main]
@@ -167,6 +169,7 @@ async fn main() -> Result<()> {
             cmd_soundcloud_ingest(cfg, &user, &profile_url).await
         }
         Command::ImportTraktor { user, file } => cmd_import_traktor(cfg, &user, &file).await,
+        Command::PushMetadata => cmd_push_metadata(cfg).await,
     }
 }
 
@@ -432,9 +435,22 @@ async fn cmd_import_traktor(cfg: Config, user: &str, file: &str) -> Result<()> {
         .context("user not found")?;
     let s = traktor::import_nml(&pool, uid, file).await?;
     println!(
-        "✓ Traktor: {} Einträge, {} gematcht, {} Playlists/Nodes",
-        s.entries, s.matched, s.playlists
+        "✓ Traktor: {} Einträge, {} gematcht, {} Playlists/Nodes, {} mit BPM/Key",
+        s.entries, s.matched, s.playlists, s.analyzed
     );
+    // Forward the freshly imported BPM/key to music-api (best effort).
+    match mmm_hub::music_api::push_metadata(&pool, &cfg).await {
+        Ok(n) => println!("✓ {n} Metadaten-Einträge an music-api gepusht"),
+        Err(e) => println!("⚠ music-api-Push übersprungen: {e:#}"),
+    }
+    Ok(())
+}
+
+/// `mmm-hub push-metadata` — forward the hub's BPM/key to music-api.
+async fn cmd_push_metadata(cfg: Config) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    let n = mmm_hub::music_api::push_metadata(&pool, &cfg).await?;
+    println!("✓ {n} Metadaten-Einträge an music-api gepusht");
     Ok(())
 }
 

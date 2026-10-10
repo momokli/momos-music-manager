@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use askama::Template;
 use axum::Router;
-use axum::extract::{Form, Path, Query, RawQuery, State};
+use axum::extract::{Form, Multipart, Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -61,6 +61,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin", get(admin_page).post(admin_save))
         .route("/settings", get(settings_page))
         .route("/import", get(import_page).post(import_submit))
+        .route("/upload", get(upload_page).post(upload_submit))
         .route("/user/{slug}", get(user_page))
         .route("/playlist/{id}", get(playlist_page))
         .route("/playlist/{id}/tag", post(playlist_tag))
@@ -4817,4 +4818,140 @@ async fn import_submit(
         Err(e) => format!("Import fehlgeschlagen: {e:#}"),
     };
     flash_redirect("/import", msg)
+}
+
+// ── upload into the object store (Part B) ───────────────────────────────────
+
+#[derive(Template)]
+#[template(path = "upload.html")]
+struct UploadPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    uploads: Vec<UploadRow>,
+}
+
+struct UploadRow {
+    hash: String,
+    name: String,
+    isrc: String,
+    size: String,
+    stored: bool,
+    uploaded_at: String,
+}
+
+async fn recent_uploads(st: &AppState, user_id: i64) -> Vec<UploadRow> {
+    let rows = sqlx::query(
+        "SELECT hash, name, isrc, size, stored, uploaded_at
+           FROM hub_uploads WHERE user_id = ?1 ORDER BY id DESC LIMIT 50",
+    )
+    .bind(user_id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+    rows.iter()
+        .map(|r| UploadRow {
+            hash: r.get("hash"),
+            name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+            isrc: r.get::<Option<String>, _>("isrc").unwrap_or_default(),
+            size: r
+                .get::<Option<i64>, _>("size")
+                .map(|s| format!("{:.1} MiB", s as f64 / 1048576.0))
+                .unwrap_or_default(),
+            stored: r.get::<i64, _>("stored") != 0,
+            uploaded_at: r
+                .get::<Option<String>, _>("uploaded_at")
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+async fn upload_page(
+    State(st): State<AppState>,
+    Query(q): Query<ImportQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "upload").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let uploads = recent_uploads(&st, nav.id).await;
+    render(&UploadPage {
+        nav,
+        flash: q.msg.unwrap_or_default(),
+        uploads,
+    })
+}
+
+async fn upload_submit(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "upload").await else {
+        return Redirect::to("/login").into_response();
+    };
+
+    let mut filename: Option<String> = None;
+    let mut bytes: Option<Vec<u8>> = None;
+    let mut isrc: Option<String> = None;
+    let mut group_key: Option<String> = None;
+    let mut stem_type: Option<String> = None;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        match field.name().unwrap_or("") {
+            "file" => {
+                filename = field.file_name().map(|s| s.to_string());
+                match field.bytes().await {
+                    Ok(b) => bytes = Some(b.to_vec()),
+                    Err(e) => return flash_redirect("/upload", format!("Lesefehler: {e}")),
+                }
+            }
+            "isrc" => isrc = field.text().await.ok(),
+            "groupKey" => group_key = field.text().await.ok(),
+            "stemType" => stem_type = field.text().await.ok(),
+            _ => {}
+        }
+    }
+
+    let (Some(filename), Some(bytes)) = (filename, bytes) else {
+        return flash_redirect("/upload", "Keine Datei gewählt.".to_string());
+    };
+    let size = bytes.len() as i64;
+
+    match crate::music_api::upload_object(
+        &st.cfg,
+        &filename,
+        bytes,
+        isrc.as_deref(),
+        group_key.as_deref(),
+        stem_type.as_deref(),
+    )
+    .await
+    {
+        Ok((hash, stored)) => {
+            let _ = sqlx::query(
+                "INSERT INTO hub_uploads
+                     (user_id, hash, name, isrc, group_key, stem_type, size, stored, uploaded_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )
+            .bind(nav.id)
+            .bind(&hash)
+            .bind(&filename)
+            .bind(&isrc)
+            .bind(&group_key)
+            .bind(&stem_type)
+            .bind(size)
+            .bind(if stored { 1 } else { 0 })
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&st.pool)
+            .await;
+            let short = if hash.len() >= 12 { &hash[..12] } else { &hash };
+            let msg = if stored {
+                format!("✓ {filename} hochgeladen ({short})")
+            } else {
+                format!("✓ {filename} war schon im Store ({short})")
+            };
+            flash_redirect("/upload", msg)
+        }
+        Err(e) => flash_redirect("/upload", format!("Upload fehlgeschlagen: {e:#}")),
+    }
 }

@@ -43,6 +43,8 @@ async fn harness() -> Harness {
         ffprobe: "ffprobe".to_string(),
         worker_interval: Duration::from_secs(5),
         download_timeout: Duration::from_secs(60),
+        ssh_sources: Vec::new(),
+        ssh_ingest_interval: Duration::from_secs(0),
     };
 
     for dir in [

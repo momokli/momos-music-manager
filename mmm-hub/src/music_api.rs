@@ -1,7 +1,7 @@
 //! Adapter for the `music-api` service (ISRC-keyed order/consume, on .200:8710).
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::SqlitePool;
 
@@ -387,6 +387,126 @@ pub async fn missing_isrcs(pool: &SqlitePool, isrcs: &[String]) -> Vec<String> {
         .filter(|i| !ready.contains(*i))
         .cloned()
         .collect()
+}
+
+// ── metadata push (Part C) ──────────────────────────────────────────────────
+
+/// One item in a `POST /metadata` batch.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MetadataPushItem {
+    isrc: String,
+    bpm: Option<f64>,
+    key: Option<String>,
+    camelot: Option<String>,
+    title: Option<String>,
+    artist: Option<String>,
+    source: String,
+}
+
+/// Gather BPM/key the hub holds (Traktor analysis ∪ ReccoBeats features) and
+/// push them to `music-api`'s `POST /metadata`. Returns the number of items
+/// pushed. Requires `MUSIC_API_TOKEN`.
+pub async fn push_metadata(pool: &SqlitePool, cfg: &Config) -> Result<usize> {
+    use sqlx::Row;
+    let token = token(cfg)?;
+
+    // Local analysis (Traktor/essentia) first, ReccoBeats as the fallback.
+    let rows = sqlx::query(
+        "SELECT t.isrc AS isrc,
+                COALESCE(a.bpm, f.bpm)         AS bpm,
+                a.key                          AS key,
+                COALESCE(a.camelot, f.camelot) AS camelot,
+                t.title                        AS title,
+                t.artists                      AS artist
+           FROM hub_tracks t
+           LEFT JOIN hub_track_analysis a ON a.track_id = t.id
+           LEFT JOIN hub_track_features f ON f.track_id = t.id
+          WHERE t.isrc IS NOT NULL AND trim(t.isrc) <> ''
+            AND (a.bpm IS NOT NULL OR a.key IS NOT NULL OR f.bpm IS NOT NULL)",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let items: Vec<MetadataPushItem> = rows
+        .iter()
+        .map(|r| MetadataPushItem {
+            isrc: r.get::<String, _>("isrc"),
+            bpm: r.get::<Option<f64>, _>("bpm"),
+            key: r.get::<Option<String>, _>("key"),
+            camelot: r.get::<Option<String>, _>("camelot"),
+            title: r.get::<Option<String>, _>("title"),
+            artist: r.get::<Option<String>, _>("artist"),
+            source: "hub".to_string(),
+        })
+        .collect();
+
+    let url = format!("{}/metadata", cfg.music_api_base);
+    let mut pushed = 0usize;
+    for chunk in items.chunks(500) {
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .bearer_auth(token)
+            .json(&json!({ "items": chunk }))
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        if !resp.status().is_success() {
+            anyhow::bail!("music-api {url} -> {}", resp.status());
+        }
+        pushed += chunk.len();
+    }
+    Ok(pushed)
+}
+
+// ── object upload (Part B) ──────────────────────────────────────────────────
+
+/// `POST /objects` (multipart) — upload a file into the store. The server
+/// canonicalises + hashes it, so the same audio with a different Comment dedupes.
+/// Returns `(hash, stored)`; `stored == false` is a dedup hit.
+pub async fn upload_object(
+    cfg: &Config,
+    filename: &str,
+    bytes: Vec<u8>,
+    isrc: Option<&str>,
+    group_key: Option<&str>,
+    stem_type: Option<&str>,
+) -> Result<(String, bool)> {
+    let token = token(cfg)?;
+    let url = format!("{}/objects", cfg.music_api_base);
+
+    let part = reqwest::multipart::Part::bytes(bytes).file_name(filename.to_string());
+    let mut form = reqwest::multipart::Form::new().part("file", part);
+    if let Some(v) = isrc.filter(|s| !s.is_empty()) {
+        form = form.text("isrc", v.to_string());
+    }
+    if let Some(v) = group_key.filter(|s| !s.is_empty()) {
+        form = form.text("groupKey", v.to_string());
+    }
+    if let Some(v) = stem_type.filter(|s| !s.is_empty()) {
+        form = form.text("stemType", v.to_string());
+    }
+
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(token)
+        .multipart(form)
+        .timeout(std::time::Duration::from_secs(600))
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    let v: serde_json::Value = resp.json().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!(
+            "music-api {url} -> {status}: {}",
+            v["error"].as_str().unwrap_or("")
+        );
+    }
+    Ok((
+        v["hash"].as_str().unwrap_or_default().to_string(),
+        v["stored"].as_bool().unwrap_or(false),
+    ))
 }
 
 /// `(ready, total)` from the **cached** state (no network) — for cheap progress

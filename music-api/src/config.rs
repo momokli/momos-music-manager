@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use anyhow::Context;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Bearer token the API requires on every non-public route.
@@ -33,6 +35,10 @@ pub struct Config {
     pub worker_interval: Duration,
     /// How long to wait for a single deemix download before giving up.
     pub download_timeout: Duration,
+    /// Configured SSH pull sources (Part A). Empty = feature off.
+    pub ssh_sources: Vec<crate::ssh_ingest::SshSource>,
+    /// Background SSH-ingest interval; zero disables the tick.
+    pub ssh_ingest_interval: Duration,
 }
 
 impl Config {
@@ -50,6 +56,20 @@ impl Config {
             std::env::var("STORE_ROOT")
                 .unwrap_or_else(|_| data_dir.join("objects").display().to_string()),
         );
+
+        // SSH pull sources (Part A): a JSON file wins over the inline env var.
+        let ssh_sources = match std::env::var("SSH_SOURCES_FILE").ok() {
+            Some(path) => {
+                let raw = std::fs::read_to_string(&path)
+                    .with_context(|| format!("read SSH_SOURCES_FILE {path}"))?;
+                crate::ssh_ingest::parse_sources(&raw)?
+            }
+            None => match std::env::var("SSH_SOURCES") {
+                Ok(raw) if !raw.trim().is_empty() => crate::ssh_ingest::parse_sources(&raw)?,
+                _ => Vec::new(),
+            },
+        };
+        let ssh_ingest_interval = Duration::from_secs(env_parse("SSH_INGEST_INTERVAL_SECS", 0u64));
 
         Ok(Self {
             token,
@@ -78,6 +98,8 @@ impl Config {
             ffprobe: std::env::var("FFPROBE").unwrap_or_else(|_| "ffprobe".to_string()),
             worker_interval: Duration::from_secs(env_parse("WORKER_INTERVAL_SECS", 5u64)),
             download_timeout: Duration::from_secs(env_parse("DOWNLOAD_TIMEOUT_SECS", 900u64)),
+            ssh_sources,
+            ssh_ingest_interval,
         })
     }
 

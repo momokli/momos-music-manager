@@ -2,6 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use sqlx::{Pool, Sqlite};
 
 use crate::models::{Order, OrderItem, Track, UrlOrder, UrlOrderItem, UrlTrack, state};
@@ -149,7 +150,135 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    // Ingest runs (SSH pull / upload) — progress + history for the UI.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS ingest_runs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind        TEXT NOT NULL,
+            source      TEXT,
+            status      TEXT NOT NULL,
+            files       INTEGER NOT NULL DEFAULT 0,
+            stored      INTEGER NOT NULL DEFAULT 0,
+            skipped     INTEGER NOT NULL DEFAULT 0,
+            failed      INTEGER NOT NULL DEFAULT 0,
+            bytes       INTEGER NOT NULL DEFAULT 0,
+            error       TEXT,
+            started_at  INTEGER NOT NULL,
+            finished_at INTEGER
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Per-ISRC metadata (Part C) — merged from stem tags and hub pushes.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS track_metadata (
+            isrc        TEXT PRIMARY KEY,
+            bpm         REAL,
+            musical_key TEXT,
+            camelot     TEXT,
+            title       TEXT,
+            artist      TEXT,
+            album       TEXT,
+            genre       TEXT,
+            source      TEXT,
+            updated_at  INTEGER NOT NULL
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
     Ok(())
+}
+
+/// A recorded ingest run (SSH pull or upload).
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestRun {
+    pub id: i64,
+    pub kind: String,
+    pub source: Option<String>,
+    pub status: String,
+    pub files: i64,
+    pub stored: i64,
+    pub skipped: i64,
+    pub failed: i64,
+    pub bytes: i64,
+    pub error: Option<String>,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+}
+
+/// Open a run row (status `running`) and return its id.
+pub async fn start_ingest_run(
+    pool: &Pool<Sqlite>,
+    kind: &str,
+    source: Option<&str>,
+) -> anyhow::Result<i64> {
+    let id = sqlx::query(
+        "INSERT INTO ingest_runs (kind, source, status, started_at) VALUES (?, ?, 'running', ?)",
+    )
+    .bind(kind)
+    .bind(source)
+    .bind(now())
+    .execute(pool)
+    .await?
+    .last_insert_rowid();
+    Ok(id)
+}
+
+/// Close a run row with its final counters.
+#[allow(clippy::too_many_arguments)]
+pub async fn finish_ingest_run(
+    pool: &Pool<Sqlite>,
+    id: i64,
+    status: &str,
+    files: i64,
+    stored: i64,
+    skipped: i64,
+    failed: i64,
+    bytes: i64,
+    error: Option<&str>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE ingest_runs
+            SET status = ?, files = ?, stored = ?, skipped = ?, failed = ?, bytes = ?,
+                error = ?, finished_at = ?
+          WHERE id = ?",
+    )
+    .bind(status)
+    .bind(files)
+    .bind(stored)
+    .bind(skipped)
+    .bind(failed)
+    .bind(bytes)
+    .bind(error)
+    .bind(now())
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_ingest_runs(pool: &Pool<Sqlite>, limit: i64) -> anyhow::Result<Vec<IngestRun>> {
+    Ok(
+        sqlx::query_as::<_, IngestRun>("SELECT * FROM ingest_runs ORDER BY id DESC LIMIT ?")
+            .bind(limit)
+            .fetch_all(pool)
+            .await?,
+    )
+}
+
+pub async fn get_ingest_run(pool: &Pool<Sqlite>, id: i64) -> anyhow::Result<Option<IngestRun>> {
+    Ok(
+        sqlx::query_as::<_, IngestRun>("SELECT * FROM ingest_runs WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?,
+    )
 }
 
 /// Create an order for the given (already normalised, de-duplicated) ISRCs.
