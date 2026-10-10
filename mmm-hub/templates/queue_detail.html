@@ -3,12 +3,23 @@
         <h2 style="margin-bottom: 0">{{ title }}</h2>
         <p class="hub-muted">
             {{ artists }}{% if album != "" %} · {{ album }}{% endif %}{% if duration != ""
-            %} · {{ duration }}{% endif %} {% if isrc != "" %}· <code>{{ isrc }}</code>{% endif %}
+            %} · {{ duration }}{% endif %} {% if isrc != "" %}· <code>{{ isrc }}</code>{%
+            endif %}
         </p>
     </hgroup>
 
     {% if music_api && has_isrc %}
-    <audio controls preload="none" src="/track/{{ id }}/stream" style="width: 100%"></audio>
+    <div class="hub-player">
+        <button class="hub-playbtn" type="button" aria-label="Abspielen">▶</button>
+        <div class="hub-wave" role="slider" tabindex="0" aria-label="Fortschritt">
+            <div class="hub-wave-fill"></div>
+        </div>
+        <span class="hub-time">0:00 / 0:00</span>
+        <audio preload="none" src="/track/{{ id }}/stream"></audio>
+    </div>
+    <div class="hub-player-error" hidden>
+        <span>Noch nicht in music-api verfügbar.</span>
+    </div>
     {% else %}
     <p class="hub-muted">Kein Player (music-api oder ISRC fehlt).</p>
     {% endif %}
@@ -19,7 +30,9 @@
     {% else %}
     <div style="display: flex; flex-wrap: wrap; gap: 0.3rem">
         {% for t in tags %}
-        <span class="hub-chip" title="{% if t.mine %}von dir{% else %}@{{ t.owner }}{% endif %}"
+        <span
+            class="hub-chip"
+            title="{% if t.mine %}von dir{% else %}@{{ t.owner }}{% endif %}"
             >{{ t.name }}{% if t.groups != "" %} · {{ t.groups }}{% endif %}</span
         >
         {% endfor %}
@@ -41,7 +54,9 @@
             required
         />
         <datalist id="my-tags">
-            {% for t in my_tags %}<option value="{{ t.name }}"></option>{% endfor %}
+            {% for t in my_tags %}
+            <option value="{{ t.name }}"></option>
+            {% endfor %}
         </datalist>
         <button type="submit">Taggen</button>
     </form>

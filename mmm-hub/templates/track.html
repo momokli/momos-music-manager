@@ -17,12 +17,22 @@ content %}
 </p>
 
 {% if can_stream %}
-<audio
-    controls
-    preload="none"
-    src="/track/{{ id }}/stream"
-    style="width: 100%; margin: 0.4rem 0"
-></audio>
+<div class="hub-player">
+    <button class="hub-playbtn" type="button" aria-label="Abspielen">▶</button>
+    <div class="hub-wave" role="slider" tabindex="0" aria-label="Fortschritt">
+        <div class="hub-wave-fill"></div>
+    </div>
+    <span class="hub-time">0:00 / 0:00</span>
+    <audio preload="none" src="/track/{{ id }}/stream"></audio>
+</div>
+<div class="hub-player-error" hidden>
+    <span>Noch nicht in music-api verfügbar.</span>
+    {% if fetchable %}
+    <form method="post" action="/track/{{ id }}/fetch" style="display: inline">
+        <button class="outline" type="submit">Jetzt holen</button>
+    </form>
+    {% endif %}
+</div>
 {% else if spotify_id != "" %}
 <iframe
     style="border-radius: 12px; width: 100%"

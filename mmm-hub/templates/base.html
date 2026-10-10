@@ -431,6 +431,95 @@
         padding: 0.4rem 0.6rem;
         margin-bottom: 0.5rem;
       }
+
+      /* SoundCloud-style player */
+      .hub-player {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.45rem 0.6rem;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(0, 0, 0, 0.06));
+        border: 1px solid var(--pico-muted-border-color);
+        border-radius: 0.6rem;
+        margin: 0.5rem 0;
+      }
+      .hub-playbtn {
+        flex: 0 0 auto;
+        width: 2.6rem;
+        height: 2.6rem;
+        border-radius: 50%;
+        border: none;
+        background: var(--pico-primary);
+        color: var(--pico-primary-inverse, #fff);
+        font-size: 1rem;
+        line-height: 1;
+        cursor: pointer;
+        display: grid;
+        place-items: center;
+        transition: transform 0.08s ease;
+        margin: 0;
+        padding: 0;
+      }
+      .hub-playbtn:hover {
+        transform: scale(1.06);
+      }
+      .hub-wave {
+        position: relative;
+        flex: 1 1 auto;
+        height: 2.2rem;
+        cursor: pointer;
+        border-radius: 0.3rem;
+        overflow: hidden;
+        background-image: repeating-linear-gradient(
+          90deg,
+          var(--pico-muted-color) 0,
+          var(--pico-muted-color) 2px,
+          transparent 2px,
+          transparent 4px
+        );
+        opacity: 0.55;
+        -webkit-mask: repeating-linear-gradient(
+          90deg,
+          #000 0,
+          #000 2px,
+          transparent 2px,
+          transparent 4px
+        );
+        mask: repeating-linear-gradient(
+          90deg,
+          #000 0,
+          #000 2px,
+          transparent 2px,
+          transparent 4px
+        );
+      }
+      .hub-wave-fill {
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 0;
+        background: var(--pico-primary);
+        opacity: 0.85;
+        pointer-events: none;
+      }
+      .hub-time {
+        flex: 0 0 auto;
+        font-variant-numeric: tabular-nums;
+        font-size: 0.78rem;
+        color: var(--pico-muted-color);
+        min-width: 5.5rem;
+        text-align: right;
+      }
+      .hub-player-error {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        padding: 0.5rem 0.6rem;
+        border: 1px dashed var(--pico-muted-border-color);
+        border-radius: 0.5rem;
+        color: var(--pico-muted-color);
+        font-size: 0.85rem;
+        margin: 0.5rem 0;
+      }
     </style>
   </head>
   <body>
@@ -508,5 +597,59 @@
       <article class="hub-flash hub-flash-ok" role="status">{{ flash }}</article>
       {% endif %} {% endblock %} {% block content %}{% endblock %}
     </main>
+    <script>
+      (function () {
+        function fmt(s) {
+          s = Math.floor(s || 0);
+          return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+        }
+        function init(p) {
+          if (p.dataset.playerInit) return;
+          p.dataset.playerInit = "1";
+          var a = p.querySelector("audio");
+          var btn = p.querySelector(".hub-playbtn");
+          var wave = p.querySelector(".hub-wave");
+          var fill = p.querySelector(".hub-wave-fill");
+          var time = p.querySelector(".hub-time");
+          var wrap = p.parentElement;
+          var err = wrap ? wrap.querySelector(".hub-player-error") : null;
+          function fail() {
+            p.style.display = "none";
+            if (err) err.hidden = false;
+          }
+          btn.addEventListener("click", function () {
+            if (a.paused) a.play().catch(fail);
+            else a.pause();
+          });
+          a.addEventListener("play", function () {
+            btn.textContent = "\u275A\u275A";
+          });
+          a.addEventListener("pause", function () {
+            btn.textContent = "\u25B6";
+          });
+          a.addEventListener("timeupdate", function () {
+            var d = a.duration || 0;
+            fill.style.width = (d ? (a.currentTime / d) * 100 : 0) + "%";
+            time.textContent = fmt(a.currentTime) + " / " + fmt(d);
+          });
+          a.addEventListener("loadedmetadata", function () {
+            time.textContent = "0:00 / " + fmt(a.duration);
+          });
+          a.addEventListener("error", fail);
+          wave.addEventListener("click", function (e) {
+            var r = wave.getBoundingClientRect();
+            var ratio = (e.clientX - r.left) / r.width;
+            if (a.duration) a.currentTime = ratio * a.duration;
+          });
+        }
+        document.querySelectorAll(".hub-player").forEach(init);
+        if (window.htmx && htmx.onLoad) {
+          htmx.onLoad(function (root) {
+            if (root && root.querySelectorAll)
+              root.querySelectorAll(".hub-player").forEach(init);
+          });
+        }
+      })();
+    </script>
   </body>
 </html>
