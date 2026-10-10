@@ -45,18 +45,23 @@ Login for smoke tests: `Mctoastus` / `1234` (also `momo`, `ANKD`; passwords may 
 ### Deploy loop (copy-paste, works)
 
 ```bash
-# run from repo root
-tar czf - -C mmm-hub --exclude target --exclude 'hub.db*' --exclude .env \
-  --exclude 'datasette-*' --exclude 'make-public*' --exclude docs --exclude 'models' --exclude 'tmp' . \
-  | ssh music-catalog 'tar xzf - -C ~/mmm-hub 2>/dev/null && find ~/mmm-hub -name "._*" -delete' \
-  && ssh music-catalog 'cd ~/mmm-hub && ~/.cargo/bin/cargo build --release --locked 2>&1 | tail -1 && sudo systemctl restart mmm-hub && sleep 2 && systemctl is-active mmm-hub'
+# run from repo root — rsync (NOT tar; tar silently skipped files)
+rsync -az --delete \
+  --exclude 'target' --exclude 'hub.db*' --exclude '.env' \
+  --exclude 'datasette-*' --exclude 'make-public*' --exclude 'docs' \
+  --exclude 'models' --exclude 'tmp' --exclude '.git' \
+  mmm-hub/ music-catalog:~/mmm-hub/ \
+  && ssh music-catalog 'cd ~/mmm-hub && ~/.cargo/bin/cargo build --release --locked 2>&1 | tail -1 && sudo systemctl restart mmm-hub && sleep 3 && systemctl is-active mmm-hub'
 ```
 
-- **Never ship the DB or `.env`** (excluded above). The tar excludes `docs/`, `models/`,
-  `tmp/` too.
-- `find … -name "._*" -delete` strips macOS AppleDouble junk.
+- **Never ship the DB or `.env`** (excluded above).
+- **`--delete` is required**: without it, stale files linger (e.g. an old migration
+  file) and SQLx fails with `migration N was previously applied but has been modified`.
+- **Always rebuild after syncing**: SQLx **embeds** the migrations into the binary, so a
+  migration change needs a fresh `cargo build` — otherwise SQLx reads the old version.
 - Migrations run automatically on boot (sqlx migrate). Additive only — **never edit
-  `001_initial_schema.sql`**.
+  `001_initial_schema.sql`**. Check the highest existing number before adding one
+  (the server may have migrations your branch does not).
 - Live smoke (cookie auth):
   ```bash
   cd /tmp && rm -f hc.txt
@@ -84,7 +89,7 @@ tar czf - -C mmm-hub --exclude target --exclude 'hub.db*' --exclude .env \
 
 ```
 mmm-hub/
-├── migrations/            001…027 (additive; consolidate per release)
+├── migrations/            001…033 (additive; consolidate per release)
 ├── templates/             askama: base.html + one per page + _partials/
 ├── src/
 │   ├── main.rs            CLI (serve/auth/ingest/fetch-playlists/backfill/set-password/
@@ -97,7 +102,10 @@ mmm-hub/
 │   ├── ui.rs              shared nav (crate::ui::nav) + shell bits
 │   ├── db/                connect + migrate; db/testing.rs = Playwright/test seeds
 │   ├── spotify.rs         OAuth client + sync
-│   ├── ingest.rs          likes + owned/collaborative playlist items
+│   ├── soundcloud.rs      SoundCloud api-v2 client (scraped client_id; sets + likes)
+│   ├── ytdlp.rs           yt-dlp subprocess (YouTube playlists/tracks)
+│   ├── music_api.rs       music-api adapter (ISRC state cache, orders, queue)
+│   ├── ingest.rs          likes + owned/collaborative playlist items (Spotify/YT/SC)
 │   ├── worker.rs          background loops (Spotify sync + enrichment)
 │   ├── features.rs        ReccoBeats audio features + on-demand request queue
 │   ├── freqblog.rs        paid fallback (quota-guarded, ISRC lookup)
@@ -154,7 +162,8 @@ Web (session-gated): `/`, `/login`, `/signup`, `/logout`, `/me/playlists`, `/sea
 `/digging` (+ `POST /digging/enrich`), `/admin`, `/settings`, `/user/{slug}`,
 `/playlist/{id}` (+ `tag`, `tag/add`, `tag/remove`, `POST order`, `POST prioritize`,
 `POST refresh`, `GET progress`, `GET download`), `/tag/{id}` (+ `rename`, `group/*`, `POST order`,
-`GET progress`, `GET download`), `/track/{id}/download`, `/sql`.
+`GET progress`, `GET download`), `/track/{id}/download`, `/import` (+ `POST`),
+`/downloads` (+ `POST /downloads/refresh`, `POST /downloads/order-all`), `/sql`.
 
 JSON API: `GET /api/hub/{health,users,me,tracks/{id},tracks/{id}/ripeness,overlap,playlists}`,
 `POST /api/hub/query`, `POST /api/hub/services/{service}/sync`, `GET /api/hub/services/{service}/connect`,
@@ -211,7 +220,15 @@ sources·base_sources + shared·shared_factor + candidate·candidate_factor`.
   misses skipped) into a ZIP, then streams it (tmp unlinked before streaming — Linux fd stays valid).
   Single track: `GET /track/{id}/download?format=…`. `format` ∈ flac/mp3/wav/m4a.
 - State cache: `music_api::{refresh_states, cached_counts, missing_isrcs}`; each cached row also
-  stores the music-api `error`/reason (migration 029), shown on the track page and the downloads table.
+  stores the music-api `error`/reason (migration 033), shown on the track page and the downloads table.
+- **`/downloads`**: cache summary + live queue (`GET /queue`) + a **table of all hub tracks**
+  (LEFT JOIN `hub_music_state`) with server-side filters (`status`/`format`/`q`), pagination
+  (100/page) and **Alles ordern** (`POST /downloads/order-all`, capped 500/call).
+- **`/import`**: manual import of a YouTube channel/playlist or SoundCloud set/likes URL.
+- **SoundCloud**: `src/soundcloud.rs` scrapes the public `client_id` from `window.__sc_hydration`
+  and calls api-v2 (`/resolve`, `/users/{id}/playlists`, `/users/{id}/likes`).
+- **music-api fallback** (server-side): Deezer then yt-dlp (`ytsearch1:`) then spotDL. Config:
+  `YTDLP`, `YTDLP_COOKIES`, `YTDLP_FORMAT`, `SPOTDL`, `FALLBACK_ORDER`.
 
 ---
 
@@ -297,3 +314,9 @@ source`). Precompute a bool field in Rust (e.g. `selected`/`active`) and use `{%
   `/overlap`, `/digging`.
 - Engine factors **per collective** (currently global via `/admin`).
 - SoundCloud / YouTube ingest per user (issues **#177/#178**) — needs API keys/OAuth apps.
+- **yt-dlp 403** on download (YouTube bot detection) — needs `YTDLP_COOKIES` or a proxy.
+- **spotDL** path set (`SPOTDL=/home/momo/.local/bin/spotdl`), not yet end-to-end verified.
+- **`absent: no data`** tracks have no metadata → fallback cannot fire; needs an
+  ISRC→metadata source (e.g. MusicBrainz).
+- **Old deemix queue** (~40k `completed` files) could be pruned.
+- See `progress-music-api-hub-integration.md` (repo root) for the full 2026-10-10 session.
