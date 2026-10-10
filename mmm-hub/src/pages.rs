@@ -60,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .route("/digging/enrich", post(digging_enrich))
         .route("/admin", get(admin_page).post(admin_save))
         .route("/settings", get(settings_page))
+        .route("/import", get(import_page).post(import_submit))
         .route("/user/{slug}", get(user_page))
         .route("/playlist/{id}", get(playlist_page))
         .route("/playlist/{id}/tag", post(playlist_tag))
@@ -4132,4 +4133,134 @@ async fn settings_page(State(st): State<AppState>, headers: HeaderMap) -> Respon
         nav,
         flash: String::new(),
     })
+}
+
+// ── manual import (YouTube / SoundCloud) ─────────────────────────────────────
+
+#[derive(Template)]
+#[template(path = "import.html")]
+struct ImportPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    services: Vec<ServiceOption>,
+    url: String,
+    playlists: Vec<ImportPlaylistRow>,
+}
+
+/// One selectable service with a precomputed `selected` flag — keeps the
+/// template free of `==` comparisons inside HTML tags.
+struct ServiceOption {
+    value: &'static str,
+    label: &'static str,
+    selected: bool,
+}
+
+fn service_options(current: &str) -> Vec<ServiceOption> {
+    [("youtube", "YouTube"), ("soundcloud", "SoundCloud")]
+        .into_iter()
+        .map(|(value, label)| ServiceOption {
+            value,
+            label,
+            selected: value == current,
+        })
+        .collect()
+}
+
+struct ImportPlaylistRow {
+    id: i64,
+    name: String,
+    service: String,
+    track_count: String,
+    fetched_at: String,
+}
+
+#[derive(Deserialize, Default)]
+struct ImportQuery {
+    msg: Option<String>,
+    service: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ImportForm {
+    service: String,
+    url: String,
+}
+
+/// The user's already-imported YouTube/SoundCloud playlists.
+async fn import_playlists(st: &AppState, user_id: i64) -> Vec<ImportPlaylistRow> {
+    let rows = sqlx::query(
+        "SELECT id, name, service, track_count, fetched_at
+           FROM hub_playlists
+          WHERE user_id = ?1 AND service IN ('youtube', 'soundcloud')
+          ORDER BY service, name",
+    )
+    .bind(user_id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
+    rows.iter()
+        .map(|r| ImportPlaylistRow {
+            id: r.get("id"),
+            name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+            service: r.get::<Option<String>, _>("service").unwrap_or_default(),
+            track_count: r
+                .get::<Option<i64>, _>("track_count")
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "—".to_string()),
+            fetched_at: r
+                .get::<Option<String>, _>("fetched_at")
+                .unwrap_or_else(|| "—".to_string()),
+        })
+        .collect()
+}
+
+async fn import_page(
+    State(st): State<AppState>,
+    Query(q): Query<ImportQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "import").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let service = q.service.unwrap_or_else(|| "youtube".to_string());
+    let playlists = import_playlists(&st, nav.id).await;
+    render(&ImportPage {
+        nav,
+        flash: q.msg.unwrap_or_default(),
+        services: service_options(&service),
+        url: String::new(),
+        playlists,
+    })
+}
+
+async fn import_submit(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<ImportForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "import").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let url = f.url.trim().to_string();
+    if url.is_empty() {
+        return flash_redirect("/import", "Bitte eine URL angeben.".to_string());
+    }
+
+    let result = match f.service.trim().to_lowercase().as_str() {
+        "youtube" => crate::ingest::ingest_youtube_public(&st.pool, &nav.slug, &url).await,
+        "soundcloud" => crate::ingest::ingest_soundcloud_public(&st.pool, &nav.slug, &url).await,
+        other => {
+            return flash_redirect("/import", format!("Unbekannter Dienst: {other}"));
+        }
+    };
+
+    let msg = match result {
+        Ok(s) => format!(
+            "Import fertig: {} Playlist(s) gefunden, {} mit Tracks, {} Track-Verknüpfungen.",
+            s.playlists, s.owned_with_items, s.memberships
+        ),
+        Err(e) => format!("Import fehlgeschlagen: {e:#}"),
+    };
+    flash_redirect("/import", msg)
 }

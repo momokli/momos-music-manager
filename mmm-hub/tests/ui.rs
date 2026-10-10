@@ -21,7 +21,7 @@ async fn dashboard_requires_login() {
 #[tokio::test]
 async fn guarded_shell_pages_require_login() {
     let app = common::spawn().await;
-    for path in ["/me/playlists", "/sql", "/search"] {
+    for path in ["/me/playlists", "/sql", "/search", "/import"] {
         let resp = app.client().get(app.url(path)).send().await.unwrap();
         assert_eq!(
             resp.status(),
@@ -181,6 +181,45 @@ async fn compare_scope_owned_drops_followed_only_tracks() {
     assert!(
         !html.contains("Playlist Only"),
         "followed-only overlap should be filtered out"
+    );
+}
+
+#[tokio::test]
+async fn import_page_renders_form_and_playlists() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // Seed a YouTube playlist for alice so the listing is non-empty.
+    sqlx::query(
+        "INSERT INTO hub_playlists (user_id, service, playlist_id, name, is_liked, track_count, items_available, fetched_at)
+         VALUES (?1, 'youtube', 'yt-pl-1', 'YouTube Mix', 0, 3, 1, '2026-01-01T00:00:00+00:00')",
+    )
+    .bind(app.seed.alice)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let resp = app
+        .client()
+        .get(app.url("/import"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+
+    // Form: service select + URL field, posting back to /import.
+    assert!(html.contains("action=\"/import\""), "import form missing");
+    assert!(html.contains("name=\"service\""), "service field missing");
+    assert!(html.contains("name=\"url\""), "url field missing");
+    assert!(html.contains("SoundCloud"), "service option missing");
+    // The seeded playlist shows up in the listing.
+    assert!(html.contains("YouTube Mix"), "imported playlist missing");
+    // The nav marks Import as the active item.
+    assert!(
+        html.contains("aria-current=\"page\""),
+        "active nav marker missing"
     );
 }
 

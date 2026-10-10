@@ -619,7 +619,65 @@ async fn upsert_track_from_ytdlp(
     Ok(Some(id))
 }
 
+/// Fetch and store a single public playlist (YouTube or SoundCloud) for a user.
+///
+/// Returns the number of track memberships added. Errors are propagated so the
+/// caller can skip a broken playlist without aborting the whole ingest.
+async fn ingest_public_playlist(
+    pool: &SqlitePool,
+    user_id: i64,
+    service: &str,
+    playlist_id: &str,
+    playlist_name: &str,
+    playlist_url: &str,
+) -> Result<usize> {
+    let tracks = ytdlp::fetch_playlist_tracks(playlist_url).await?;
+    println!("  got {} tracks", tracks.len());
+
+    // Upsert playlist metadata.
+    let local_playlist_id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_playlists (user_id, service, playlist_id, name, is_liked, track_count, items_available, fetched_at)
+         VALUES (?1, ?2, ?3, ?4, 0, ?5, 1, ?6)
+         ON CONFLICT(user_id, service, playlist_id) DO UPDATE SET
+             name = excluded.name,
+             track_count = excluded.track_count,
+             items_available = excluded.items_available,
+             fetched_at = excluded.fetched_at
+         RETURNING id",
+    )
+    .bind(user_id)
+    .bind(service)
+    .bind(playlist_id)
+    .bind(playlist_name)
+    .bind(tracks.len() as i64)
+    .bind(now_iso())
+    .fetch_one(pool)
+    .await?;
+
+    // Upsert each track and link it to the playlist.
+    let mut memberships = 0usize;
+    for track in tracks {
+        if let Some(track_id) = upsert_track_from_ytdlp(pool, &track).await? {
+            sqlx::query(
+                "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position, added_at)
+                 VALUES (?1, ?2, NULL, ?3)
+                 ON CONFLICT(playlist_id, track_id) DO NOTHING",
+            )
+            .bind(local_playlist_id)
+            .bind(track_id)
+            .bind(now_iso())
+            .execute(pool)
+            .await?;
+            memberships += 1;
+        }
+    }
+    Ok(memberships)
+}
+
 /// Ingest public YouTube playlists for a user.
+///
+/// Every playlist is fetched independently: a single failing playlist is logged
+/// and skipped so the remaining playlists still import.
 pub async fn ingest_youtube_public(
     pool: &SqlitePool,
     user_slug: &str,
@@ -628,64 +686,54 @@ pub async fn ingest_youtube_public(
     let user_id = ensure_user(pool, user_slug).await?;
     let mut summary = Summary::default();
 
-    // Fetch playlist entries from channel page
+    // Fetch playlist entries from the channel page.
     let playlist_entries = ytdlp::fetch_user_playlists(channel_url).await?;
     summary.playlists = playlist_entries.len();
     println!(
         "Found {} playlists for user {}",
         summary.playlists, user_slug
     );
-    // For each playlist, fetch tracks and store them.
-    for playlist in playlist_entries.iter().take(2) {
+
+    for (idx, playlist) in playlist_entries.iter().enumerate() {
         let Some(playlist_id) = playlist.playlist_id() else {
             continue;
         };
         let playlist_url = format!("https://www.youtube.com/playlist?list={}", playlist_id);
-        println!(
-            "Fetching tracks for playlist {:?}: {}",
-            playlist.title, playlist_url
-        );
-        let tracks = ytdlp::fetch_playlist_tracks(&playlist_url).await?;
-        println!("  got {} tracks", tracks.len());
-
-        // Upsert playlist metadata
         let playlist_name = playlist.title.as_deref().unwrap_or("");
-        let local_playlist_id: i64 = sqlx::query_scalar(
-            "INSERT INTO hub_playlists (user_id, service, playlist_id, name, is_liked, track_count, items_available, fetched_at)
-             VALUES (?1, 'youtube', ?2, ?3, 0, ?4, 1, ?5)
-             ON CONFLICT(user_id, service, playlist_id) DO UPDATE SET
-                 name = excluded.name,
-                 track_count = excluded.track_count,
-                 items_available = excluded.items_available,
-                 fetched_at = excluded.fetched_at
-             RETURNING id",
+        println!(
+            "[{}/{}] Fetching tracks for playlist {:?}: {}",
+            idx + 1,
+            summary.playlists,
+            playlist.title,
+            playlist_url
+        );
+        match ingest_public_playlist(
+            pool,
+            user_id,
+            "youtube",
+            playlist_id,
+            playlist_name,
+            &playlist_url,
         )
-        .bind(user_id)
-        .bind(playlist_id)
-        .bind(playlist_name)
-        .bind(tracks.len() as i64)
-        .bind(now_iso())
-        .fetch_one(pool)
-        .await?;
-
-        // Upsert each track and link to playlist
-        for track in tracks {
-            if let Some(track_id) = upsert_track_from_ytdlp(pool, &track).await? {
-                sqlx::query(
-                    "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position, added_at)
-                     VALUES (?1, ?2, NULL, ?3)
-                     ON CONFLICT(playlist_id, track_id) DO NOTHING",
-                )
-                .bind(local_playlist_id)
-                .bind(track_id)
-                .bind(now_iso())
-                .execute(pool)
-                .await?;
-                summary.memberships += 1;
+        .await
+        {
+            Ok(memberships) => {
+                summary.memberships += memberships;
+                summary.owned_with_items += 1;
+            }
+            Err(e) => {
+                eprintln!(
+                    "  ! playlist {:?} ({}) failed, skipping: {e:#}",
+                    playlist.title, playlist_id
+                );
             }
         }
-        summary.owned_with_items += 1;
     }
+
+    println!(
+        "YouTube ingest done for {}: {} playlists, {} track memberships",
+        user_slug, summary.owned_with_items, summary.memberships
+    );
     Ok(summary)
 }
 
@@ -910,5 +958,10 @@ pub async fn ingest_soundcloud_public_with_api_base(
             }
         }
     }
+
+    println!(
+        "SoundCloud ingest done for {}: {} playlists, {} track memberships",
+        user_slug, summary.owned_with_items, summary.memberships
+    );
     Ok(summary)
 }
