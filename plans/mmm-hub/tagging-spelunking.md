@@ -16,7 +16,7 @@
 
 **Epic**: #203 · **Milestones**: #15 `hub-tags-0.10.0`, #16 `hub-insights-0.11.0`,
 #17 `hub-traktor-0.13.0`, #18 `hub-scoring-0.12.0`, #19 `hub-tasks-0.14.0`,
-#20 `hub-sim-0.15.0`, #21 `hub-history-0.16.0`.
+#20 `hub-sim-0.15.0`, #21 `hub-history-0.16.0`, #22 `hub-artists-0.17.0`.
 
 | Plan-ID | Issue | Titel                                                    |
 | ------- | ----- | -------------------------------------------------------- |
@@ -43,6 +43,12 @@
 | H1      | #224  | import-run ledger (all sources)                          |
 | H2      | #225  | import diff / change events                              |
 | H3      | #226  | import history UI                                        |
+| AR1     | #227  | artist explorer - list + filters                         |
+| AR2     | #228  | artist profile - most played (me + others) + Spotify     |
+| AR3     | #229  | artist profile - tag view                                |
+| AR4     | #230  | artist profile - playlist membership                     |
+| AR5     | #231  | artist profile - collabs, b2b, album co-artists          |
+| AR6     | #232  | artist reference scoring + visibility                    |
 
 ---
 
@@ -93,6 +99,18 @@
 - **H2** **Change-Events / Diff**: Zwischen zwei Importen wird erfasst, **was sich über die Zeit ändert** — `hub_import_events` (added/removed/changed) für Playlist-Mitgliedschaft, Track-Meta-Deltas, Traktor-playcount/rating/last-played usw. Querschnitt über alle Quellen.
 - **H3** **History-UI**: Läufe je Quelle/User + Timeline der Änderungen (pro Track, pro Playlist), filterbar wie die übrigen Tabellen.
 - **H4** **Traktor-Quelle**: **jeder User lädt seine eigene `collection.nml` hoch** (siehe E1).
+
+### I — Künstler-Explorer
+
+- **I1** **Eigene Nav-View** `Künstler`: Liste **aller Künstler** mit **Filtern** (z. B. wie häufig von wem gespielt, getaggt, in Playlists), server-side. Klick → Künstlerprofil.
+- **I2** **Künstlerprofil** `/artist/{name}` mit Insights:
+  - **Most played Tracks** von **mir und von den anderen** (aus Traktor-playcount).
+  - **Tag-View**: wie die Tracks des Künstlers getaggt sind.
+  - **Playlists**: in welchen Playlists (meine / andere) er vorkommt.
+  - **Kollaborationspartner** (Multi-Artist-Tracks), **most played b2b-Sets** mit anderen Künstlern, Künstler auf **denselben Alben**.
+  - **Absprung auf Spotify** (Deep-Link).
+- **I3** **Referenz-Künstler** = Scoring über **gemeinsame Tags + Kollaborationspartner + b2b**; im Profil werden **zunächst nur meine Referenzen** gezeigt, die der anderen sind **auswählbar**.
+- **I4** Datenquellen: Tags/Playlists aus dem Hub, playcount/b2b aus dem **Traktor-Ingest** (E), Kollabs/Alben aus Track-Metadaten.
 
 ### E — Traktor-Meta-Ingest (Voraussetzung für D1/E)
 
@@ -170,6 +188,7 @@ Genre Variation/Haupt: **kein** neues Schema — nutzt `hub_tag_parents` (Variat
 | `hub-tasks-0.14.0`    | Tägliche/wöchentliche Tag-Aufgabe + „fertig"-Markierung                               | 029       |
 | `hub-sim-0.15.0`      | Similarity v2 (Tag-Overlap cross-group, Rumpelkiste-Ausnahme), in Digging/Overlap     | —         |
 | `hub-history-0.16.0`  | Historisierung aller Import-Quellen (Run-Ledger, Change-Events, History-UI)           | 030       |
+| `hub-artists-0.17.0`  | Künstler-Explorer: Liste + Filter, Künstlerprofil, Referenz-Scoring                   | —         |
 
 > Reihenfolge: `0.10 → 0.11 → 0.13 → 0.12 → 0.14 → 0.15` (Traktor vor Scoring, weil Scoring Traktor-Meta braucht). `0.16` (History) kann ab `0.13` parallel laufen.
 > `0.11` und `0.15` können parallel zu `0.13` laufen.
@@ -222,6 +241,15 @@ Genre Variation/Haupt: **kein** neues Schema — nutzt `hub_tag_parents` (Variat
 - **H2** `feat(hub): import diff / change events` — `hub_import_events`, Diff zwischen Importen (Mitgliedschaft, Meta, playcount/rating). _(AC: Spotify- und Traktor-Delta-Tests.)_
 - **H3** `feat(hub): import history UI` — Lauf-Liste + Change-Timeline, filterbar. _(AC: Runs + Diffs sichtbar; Test.)_
 
+### Milestone `hub-artists-0.17.0`
+
+- **AR1** `feat(hub): artist explorer - list + filters` — Nav-View + server-side Filter, Sprung ins Profil. _(AC: Liste + Filter; Test.)_
+- **AR2** `feat(hub): artist profile shell + most played (me + others) + Spotify link` — `/artist/{name}`; playcount je User; Deep-Link. _(AC: je-User-Werte; Test.)_
+- **AR3** `feat(hub): artist profile - tag view` — Tag-Verteilung/Gruppen/Top-Tags/Energy des Künstlers. _(AC: Aggregate korrekt; Test.)_
+- **AR4** `feat(hub): artist profile - playlist membership` — Playlists (meine/andere) je Owner/Scope. _(AC: korrekt; Test.)_
+- **AR5** `feat(hub): artist profile - collaborations, b2b, album co-artists` — Panels mit Datenquelle oder leerem Zustand. _(AC: Panels; Tests.)_
+- **AR6** `feat(hub): artist reference scoring + visibility` — Referenzen aus Tags+Collabs+b2b; meine zuerst, andere auswählbar. _(AC: Ranking + Sichtbarkeit; Test.)_
+
 ---
 
 ## 6. Entscheidungen
@@ -253,6 +281,7 @@ T2-1..3 (unabhängig)
 T3-1..3 ─→ T4-1..3 ─→ T5-1..3
 T4-1 ─→ T5-2, T6-3 (Engine-Integration)
 T3-1 ─→ H1 ─→ H2 ─→ H3 (History; jede Quelle schreibt Runs)
+T3-1..2 ─→ AR2..AR6 (Künstlerprofil braucht Traktor-playcount); AR1 unabhängig
 ```
 
 Blockt nichts außerhalb: alles baut auf der bestehenden Tag-Schicht auf.
