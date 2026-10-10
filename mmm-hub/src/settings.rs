@@ -45,6 +45,11 @@ pub const ENGINE_TAG_POINTS: &str = "engine_tag_points";
 pub const ENGINE_TRAK_PLAYCOUNT_CAP: &str = "engine_trak_playcount_cap";
 pub const ENGINE_TAG_OVERLAP_BASE: &str = "engine_tag_overlap_base";
 pub const ENGINE_CROSS_GROUP_BONUS: &str = "engine_cross_group_bonus";
+// Tag-recommendation neighbourhood weights.
+pub const ENGINE_REC_TAG: &str = "engine_rec_tag";
+pub const ENGINE_REC_PLAYLIST: &str = "engine_rec_playlist";
+pub const ENGINE_REC_ARTIST: &str = "engine_rec_artist";
+pub const ENGINE_REC_ALBUM: &str = "engine_rec_album";
 
 /// Keys surfaced on the admin page, with a human label and whether it's secret.
 pub const ADMIN_FIELDS: &[(&str, &str, bool)] = &[
@@ -121,6 +126,22 @@ pub const ADMIN_FIELDS: &[(&str, &str, bool)] = &[
         "Similarity: Bonus fuer Tag-Paare aus verschiedenen Gruppen",
         false,
     ),
+    (ENGINE_REC_TAG, "Empfehlung: Gewicht geteilte Tags", false),
+    (
+        ENGINE_REC_PLAYLIST,
+        "Empfehlung: Gewicht gleiche Playlists",
+        false,
+    ),
+    (
+        ENGINE_REC_ARTIST,
+        "Empfehlung: Gewicht gleicher Artist",
+        false,
+    ),
+    (
+        ENGINE_REC_ALBUM,
+        "Empfehlung: Gewicht gleiches Album",
+        false,
+    ),
 ];
 
 /// Ranking-engine configuration, resolved from settings with sane defaults.
@@ -143,6 +164,11 @@ pub struct Engine {
     /// Similarity v2 knobs.
     pub tag_overlap_base: f64,
     pub cross_group_bonus: f64,
+    /// Tag-recommendation neighbourhood weights.
+    pub rec_tag: f64,
+    pub rec_playlist: f64,
+    pub rec_artist: f64,
+    pub rec_album: f64,
 }
 
 impl Default for Engine {
@@ -162,6 +188,10 @@ impl Default for Engine {
             trak_playcount_cap: 100.0,
             tag_overlap_base: 1.0,
             cross_group_bonus: 1.5,
+            rec_tag: 2.0,
+            rec_playlist: 1.0,
+            rec_artist: 1.0,
+            rec_album: 1.0,
         }
     }
 }
@@ -202,6 +232,10 @@ pub async fn engine(pool: &SqlitePool) -> Engine {
         trak_playcount_cap: num(ENGINE_TRAK_PLAYCOUNT_CAP, 100.0),
         tag_overlap_base: num(ENGINE_TAG_OVERLAP_BASE, 1.0),
         cross_group_bonus: num(ENGINE_CROSS_GROUP_BONUS, 1.5),
+        rec_tag: num(ENGINE_REC_TAG, 2.0),
+        rec_playlist: num(ENGINE_REC_PLAYLIST, 1.0),
+        rec_artist: num(ENGINE_REC_ARTIST, 1.0),
+        rec_album: num(ENGINE_REC_ALBUM, 1.0),
     }
 }
 

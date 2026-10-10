@@ -188,6 +188,12 @@ struct TagChip {
     mine: bool,
 }
 
+struct RecChip {
+    name: String,
+    owner: String,
+    score: i64,
+}
+
 struct TagCloud {
     group: String,
     icon: String,
@@ -236,6 +242,7 @@ struct QueueDetail {
     playlists: Vec<PlRow>,
     my_tags: Vec<DetailGroupTag>,
     my_groups: Vec<DetailGroupTag>,
+    recommended: Vec<RecChip>,
 }
 
 async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
@@ -377,6 +384,11 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
         .into_iter()
         .map(|(id, name, _icon)| DetailGroupTag { id, name })
         .collect();
+    let recommended: Vec<RecChip> = crate::tags::recommended_tags(&st.pool, id, 16)
+        .await
+        .into_iter()
+        .map(|(_id, name, owner, score)| RecChip { name, owner, score })
+        .collect();
 
     let spotify_id: String = sqlx::query_scalar(
         "SELECT external_id FROM hub_track_external_ids WHERE track_id = ?1 AND service = 'spotify' LIMIT 1",
@@ -419,6 +431,7 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
         playlists,
         my_tags,
         my_groups,
+        recommended,
     })
 }
 
