@@ -1,5 +1,5 @@
-{% extends "base.html" %} {% block title %}music-api — Spelunke{% endblock %} {% block content
-%}
+{% extends "base.html" %} {% block title %}music-api — Spelunke{% endblock %} {% block
+content %}
 <hgroup>
     <h1>music-api</h1>
     <p class="hub-muted">
@@ -27,8 +27,19 @@
         Fehlende ordern
     </button>
     <span class="hub-muted"
-        >{{ tracks_with_isrc }} Tracks mit ISRC · {{ ready }} ready · {{ errors }} Fehler</span
+        >{{ tracks_with_isrc }} Tracks mit ISRC · {{ ready }} ready · {{ errors }}
+        Fehler</span
     >
+</div>
+
+<h2>Worker</h2>
+<div
+    id="music-worker"
+    hx-get="/music-api/worker"
+    hx-trigger="load, every 5s"
+    hx-swap="innerHTML"
+>
+    <p class="hub-muted">lädt …</p>
 </div>
 
 <h2>Live-Queue</h2>
@@ -45,6 +56,16 @@
 <div
     id="music-logs"
     hx-get="/music-api/logs"
+    hx-trigger="load, every 5s"
+    hx-swap="innerHTML"
+>
+    <p class="hub-muted">lädt …</p>
+</div>
+
+<h2>Orders</h2>
+<div
+    id="music-orders"
+    hx-get="/music-api/orders"
     hx-trigger="load, every 5s"
     hx-swap="innerHTML"
 >

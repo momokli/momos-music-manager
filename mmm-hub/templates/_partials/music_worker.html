@@ -1,0 +1,7 @@
+{% if paused %}
+<span class="hub-badge hub-badge-no">Worker pausiert</span>
+<button hx-post="/music-api/worker/resume" hx-swap="none" class="secondary">Fortsetzen</button>
+{% else %}
+<span class="hub-badge hub-badge-ok">Worker läuft</span>
+<button hx-post="/music-api/worker/pause" hx-swap="none" class="secondary">Pausieren</button>
+{% endif %}

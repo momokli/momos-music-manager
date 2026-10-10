@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         deemix_login: Default::default(),
         store,
         logs: music_api::logbuf::LogBuffer::new(),
+        paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
 
     let worker_state = state.clone();

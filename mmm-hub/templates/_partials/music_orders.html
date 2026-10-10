@@ -1,0 +1,48 @@
+{% if rows.is_empty() %}
+<p class="hub-muted">Keine Orders.</p>
+{% else %}
+<div class="overflow-auto hub-scroll-y">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            music-api Orders
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Order</th>
+                <th scope="col">Status</th>
+                <th scope="col">Prio</th>
+                <th scope="col">Angelegt</th>
+                <th scope="col">Aktionen</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for o in rows %}
+            <tr>
+                <td><code>{{ o.id }}</code></td>
+                <td>{{ o.status }}</td>
+                <td>{{ o.priority }}</td>
+                <td>{{ o.created }}</td>
+                <td class="hub-nowrap">
+                    <button
+                        hx-post="/music-api/order/prioritize"
+                        hx-vals='{"id":"{{ o.id }}"}'
+                        hx-swap="none"
+                        class="secondary outline"
+                    >
+                        Priorisieren
+                    </button>
+                    <button
+                        hx-post="/music-api/order/cancel"
+                        hx-vals='{"id":"{{ o.id }}"}'
+                        hx-swap="none"
+                        class="secondary outline"
+                    >
+                        Abbrechen
+                    </button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}

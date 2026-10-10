@@ -75,6 +75,11 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    // Additive: order priority (higher = processed earlier). Ignored if present.
+    let _ = sqlx::query("ALTER TABLE orders ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
+
     Ok(())
 }
 
@@ -85,16 +90,21 @@ pub async fn create_order(
     pool: &Pool<Sqlite>,
     order_id: &str,
     isrcs: &[String],
+    priority: i64,
 ) -> anyhow::Result<()> {
     let ts = now();
     let mut tx = pool.begin().await?;
 
-    sqlx::query("INSERT INTO orders (id, status, created_at, updated_at) VALUES (?, 'open', ?, ?)")
-        .bind(order_id)
-        .bind(ts)
-        .bind(ts)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "INSERT INTO orders (id, status, created_at, updated_at, priority)
+         VALUES (?, 'open', ?, ?, ?)",
+    )
+    .bind(order_id)
+    .bind(ts)
+    .bind(ts)
+    .bind(priority)
+    .execute(&mut *tx)
+    .await?;
 
     for isrc in isrcs {
         sqlx::query(
@@ -161,11 +171,10 @@ pub fn derive_order_status(states: &[String]) -> &'static str {
 
 /// Refresh every order that contains this ISRC.
 pub async fn refresh_orders_for_isrc(pool: &Pool<Sqlite>, isrc: &str) -> anyhow::Result<()> {
-    let ids: Vec<String> =
-        sqlx::query_scalar("SELECT order_id FROM order_items WHERE isrc = ?")
-            .bind(isrc)
-            .fetch_all(pool)
-            .await?;
+    let ids: Vec<String> = sqlx::query_scalar("SELECT order_id FROM order_items WHERE isrc = ?")
+        .bind(isrc)
+        .fetch_all(pool)
+        .await?;
     for id in ids {
         refresh_order(pool, &id).await?;
     }
@@ -174,7 +183,7 @@ pub async fn refresh_orders_for_isrc(pool: &Pool<Sqlite>, isrc: &str) -> anyhow:
 
 pub async fn get_order(pool: &Pool<Sqlite>, id: &str) -> anyhow::Result<Option<Order>> {
     Ok(sqlx::query_as::<_, Order>(
-        "SELECT id, status, created_at, updated_at FROM orders WHERE id = ?",
+        "SELECT id, status, created_at, updated_at, priority FROM orders WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -188,7 +197,7 @@ pub async fn list_orders(
 ) -> anyhow::Result<Vec<Order>> {
     match status {
         Some(s) => Ok(sqlx::query_as::<_, Order>(
-            "SELECT id, status, created_at, updated_at FROM orders
+            "SELECT id, status, created_at, updated_at, priority FROM orders
               WHERE status = ? ORDER BY created_at DESC LIMIT ?",
         )
         .bind(s)
@@ -196,7 +205,7 @@ pub async fn list_orders(
         .fetch_all(pool)
         .await?),
         None => Ok(sqlx::query_as::<_, Order>(
-            "SELECT id, status, created_at, updated_at FROM orders
+            "SELECT id, status, created_at, updated_at, priority FROM orders
               ORDER BY created_at DESC LIMIT ?",
         )
         .bind(limit)
@@ -241,11 +250,63 @@ pub async fn get_track(pool: &Pool<Sqlite>, isrc: &str) -> anyhow::Result<Option
 
 pub async fn pending_tracks(pool: &Pool<Sqlite>, limit: i64) -> anyhow::Result<Vec<Track>> {
     Ok(sqlx::query_as::<_, Track>(
-        "SELECT * FROM tracks WHERE state = 'pending' ORDER BY created_at ASC LIMIT ?",
+        "SELECT * FROM tracks t WHERE t.state = 'pending'
+          ORDER BY COALESCE((SELECT MAX(o.priority) FROM order_items oi
+                              JOIN orders o ON o.id = oi.order_id
+                             WHERE oi.isrc = t.isrc), 0) DESC,
+                   t.created_at ASC
+          LIMIT ?",
     )
     .bind(limit)
     .fetch_all(pool)
     .await?)
+}
+
+/// Reset a non-ready track to `pending` so the worker re-resolves/re-downloads it.
+pub async fn reset_track_to_pending(pool: &Pool<Sqlite>, isrc: &str) -> anyhow::Result<bool> {
+    let n = sqlx::query(
+        "UPDATE tracks SET state = 'pending', error = NULL, deemix_uuid = NULL, updated_at = ?
+          WHERE isrc = ? AND state <> 'ready'",
+    )
+    .bind(now())
+    .bind(isrc)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    refresh_orders_for_isrc(pool, isrc).await?;
+    Ok(n > 0)
+}
+
+/// Set an order's priority (higher = processed earlier).
+pub async fn set_order_priority(
+    pool: &Pool<Sqlite>,
+    order_id: &str,
+    priority: i64,
+) -> anyhow::Result<bool> {
+    let n = sqlx::query("UPDATE orders SET priority = ?, updated_at = ? WHERE id = ?")
+        .bind(priority)
+        .bind(now())
+        .bind(order_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(n > 0)
+}
+
+/// Cancel an order: mark it `cancelled` and drop its item links (tracks are global
+/// and shared across orders, so their states are left untouched).
+pub async fn cancel_order(pool: &Pool<Sqlite>, order_id: &str) -> anyhow::Result<bool> {
+    let n = sqlx::query("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ?")
+        .bind(now())
+        .bind(order_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    sqlx::query("DELETE FROM order_items WHERE order_id = ?")
+        .bind(order_id)
+        .execute(pool)
+        .await?;
+    Ok(n > 0)
 }
 
 pub async fn downloading_tracks(pool: &Pool<Sqlite>) -> anyhow::Result<Vec<Track>> {

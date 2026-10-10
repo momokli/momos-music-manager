@@ -58,8 +58,11 @@ impl LoginBackoff {
 /// Run forever, waking on the configured interval or when nudged by a new order.
 pub async fn run(state: Arc<AppState>) {
     loop {
-        if let Err(e) = tick(&state).await {
-            warn!("worker tick failed: {e:#}");
+        // When paused, do no work — but keep listening for a resume notify.
+        if !state.paused.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Err(e) = tick(&state).await {
+                warn!("worker tick failed: {e:#}");
+            }
         }
         tokio::select! {
             _ = tokio::time::sleep(state.config.worker_interval) => {}
