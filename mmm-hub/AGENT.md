@@ -2,6 +2,12 @@
 
 > **Last updated**: 2026-10-10 · branch `feat/mmm-hub` · PR **#202** (open, → `main`)
 > Keep this file current. It is the entry point for any agent working on `mmm-hub/`.
+>
+> **New in this batch (tagging + spelunking engine):** migrations `026`
+> (group `kind`/`role`) and `027` (Traktor ingest + `hub_v_track_traktor`), new
+> modules `src/traktor.rs` and `src/scoring.rs`, tag-page multi-group filter +
+> create form, genre variation/main direction, tag insights, ripeness score +
+> engine knobs. See `plans/mmm-hub/tagging-spelunking.md` for the full plan.
 
 ---
 
@@ -78,7 +84,7 @@ tar czf - -C mmm-hub --exclude target --exclude 'hub.db*' --exclude .env \
 
 ```
 mmm-hub/
-├── migrations/            001…024 (additive; consolidate per release)
+├── migrations/            001…027 (additive; consolidate per release)
 ├── templates/             askama: base.html + one per page + _partials/
 ├── src/
 │   ├── main.rs            CLI (serve/auth/ingest/fetch-playlists/backfill/set-password/
@@ -100,6 +106,8 @@ mmm-hub/
 │   ├── audio.rs analyzer.rs analyze.rs  local BPM/key + embeddings
 │   ├── digging.rs         digging sources (internal_suggestions, presence, Matcher)
 │   ├── tags.rs            the tag/group/collective layer (big)
+│   ├── traktor.rs         Traktor collection.nml ingest (playcount/rating/playlists)
+│   ├── scoring.rs         ripeness score (tag points per group, meta, traktor signal)
 │   ├── settings.rs        hub_settings + ADMIN_FIELDS + Engine config
 │   └── mmm_import.rs      import tags/categories/parents/energy from MMM library.db
 └── tests/                 cargo integration tests (harness = tests/common/mod.rs)
@@ -148,9 +156,11 @@ Web (session-gated): `/`, `/login`, `/signup`, `/logout`, `/me/playlists`, `/sea
 `GET progress`, `GET download`), `/tag/{id}` (+ `rename`, `group/*`, `POST order`,
 `GET progress`, `GET download`), `/track/{id}/download`, `/sql`.
 
-JSON API: `GET /api/hub/{health,users,me,tracks/{id},overlap,playlists}`, `POST /api/hub/query`,
-`POST /api/hub/services/{service}/sync`, `GET /api/hub/services/{service}/connect`,
+JSON API: `GET /api/hub/{health,users,me,tracks/{id},tracks/{id}/ripeness,overlap,playlists}`,
+`POST /api/hub/query`, `POST /api/hub/services/{service}/sync`, `GET /api/hub/services/{service}/connect`,
 `POST /api/hub/playlists/{id}/toggle`, `POST /api/hub/playlists/{enable,disable}-all`.
+
+CLI: `mmm-hub import-traktor --user <slug> --file collection.nml`.
 
 ---
 
@@ -206,7 +216,7 @@ sources·base_sources + shared·shared_factor + candidate·candidate_factor`.
 ## 8. Testing
 
 ```bash
-cd mmm-hub && cargo test          # ~85 tests (lib + integration). Must stay green.
+cd mmm-hub && cargo test          # ~101 tests (lib + integration). Must stay green.
 ```
 
 - Integration harness: `tests/common/mod.rs` → `common::spawn()` boots the real router on a
