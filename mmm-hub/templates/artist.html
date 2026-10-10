@@ -1,0 +1,323 @@
+{% extends "base.html" %} {% block title %}{{ name }} — MMM Hub{% endblock %} {% block content
+%}
+<nav class="hub-crumbs" aria-label="Brotkrumen">
+    <ol>
+        <li><a href="/">Übersicht</a></li>
+        <li><a href="/artists">Künstler</a></li>
+        <li>{{ name }}</li>
+    </ol>
+</nav>
+<div class="hub-page-head">
+    <h1>{{ name }}</h1>
+    <div class="hub-actions">
+        <a href="{{ spotify }}" target="_blank" rel="noopener" role="button" class="secondary outline"
+            >Auf Spotify suchen ↗</a
+        >
+    </div>
+</div>
+<p class="hub-muted">
+    {{ track_count }} Tracks · {{ total_plays }} Plays · {{ user_count }} Nutzer mit Plays
+</p>
+
+<!-- AR2: most played tracks per user -->
+<section aria-label="Meistgespielt" style="margin-bottom: 0.7rem">
+    <h2>Meistgespielt</h2>
+    {% if has_me %}
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Deine meistgespielten Tracks dieses Künstlers
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">#</th>
+                <th scope="col">Track</th>
+                <th scope="col">Album</th>
+                <th scope="col" title="Traktor play count">Plays</th>
+                <th scope="col">Zuletzt</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for p in my_plays %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td><a href="/track/{{ p.track_id }}">{{ p.title }}</a></td>
+                <td>{% if p.album != "" %}{{ p.album }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                <td>{{ p.plays }}</td>
+                <td>{% if p.last != "" %}{{ p.last }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="hub-muted">Du hast (noch) keine Plays für diesen Künstler — Traktor importiert?</p>
+    {% endif %}
+
+    {% if !others.is_empty() %}
+    <h3>Andere Nutzer</h3>
+    {% for u in others %}
+    <details>
+        <summary>@{{ u.slug }} · {{ u.total_plays }} Plays</summary>
+        <table class="hub-dense-table" style="margin-top: 0.3rem">
+            <thead>
+                <tr>
+                    <th scope="col">#</th>
+                    <th scope="col">Track</th>
+                    <th scope="col">Album</th>
+                    <th scope="col">Plays</th>
+                    <th scope="col">Zuletzt</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in u.rows %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td><a href="/track/{{ p.track_id }}">{{ p.title }}</a></td>
+                    <td>{% if p.album != "" %}{{ p.album }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                    <td>{{ p.plays }}</td>
+                    <td>{% if p.last != "" %}{{ p.last }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </details>
+    {% endfor %}
+    {% else %}
+    <p class="hub-muted">Keine Plays anderer Nutzer.</p>
+    {% endif %}
+</section>
+
+<!-- AR3: tag view -->
+<section aria-label="Tags" style="margin-bottom: 0.7rem">
+    <h2>Tags</h2>
+    {% if !has_tags %}
+    <p class="hub-muted">Keine Tags für die Tracks dieses Künstlers.</p>
+    {% else %}
+    <div class="hub-cols">
+        <div>
+            <h3>Verteilung nach Gruppen</h3>
+            {% if tag_groups.is_empty() %}
+            <p class="hub-muted">Keine Gruppen-Zuordnung.</p>
+            {% else %}
+            <table class="hub-dense-table">
+                <thead>
+                    <tr>
+                        <th scope="col">Gruppe</th>
+                        <th scope="col" title="Tracks mit einem Tag dieser Gruppe">Tracks</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for g in tag_groups %}
+                    <tr>
+                        <td>{{ g.icon }} {{ g.name }}</td>
+                        <td>{{ g.tracks }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+        </div>
+        <div>
+            <h3>Top-Tags</h3>
+            {% if top_tags.is_empty() %}
+            <p class="hub-muted">Keine Tags.</p>
+            {% else %}
+            <p>
+                {% for t in top_tags %}<a href="/tag/{{ t.id }}" class="hub-chip"
+                    >{{ t.name }} <span class="hub-muted">{{ t.tracks }}</span></a
+                >{% endfor %}
+            </p>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+</section>
+
+<!-- AR4: playlist membership -->
+<section aria-label="Playlists" style="margin-bottom: 0.7rem">
+    <h2>Playlists</h2>
+    {% if my_playlists.is_empty() && other_playlist_groups.is_empty() %}
+    <p class="hub-muted">In keinen Playlists.</p>
+    {% endif %}
+    {% if !my_playlists.is_empty() %}
+    <h3>Meine</h3>
+    <table class="hub-dense-table">
+        <thead>
+            <tr>
+                <th scope="col">Playlist</th>
+                <th scope="col">Owner</th>
+                <th scope="col" title="Tracks dieses Künstlers in der Playlist">Tracks</th>
+                <th scope="col">Scope</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for p in my_playlists %}
+            <tr>
+                <td><a href="/playlist/{{ p.id }}">{{ p.name }}</a></td>
+                <td>{% if p.owner_name != "" %}{{ p.owner_name }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                <td>{{ p.shared }}</td>
+                <td>{% if p.owned %}meine{% else %}gefolgt{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+    {% if !other_playlist_groups.is_empty() %}
+    <h3>Andere</h3>
+    {% for g in other_playlist_groups %}
+    <details>
+        <summary>@{{ g.slug }} · {{ g.rows.len() }} Playlists</summary>
+        <table class="hub-dense-table" style="margin-top: 0.3rem">
+            <thead>
+                <tr>
+                    <th scope="col">Playlist</th>
+                    <th scope="col">Owner</th>
+                    <th scope="col">Tracks</th>
+                    <th scope="col">Scope</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in g.rows %}
+                <tr>
+                    <td><a href="/playlist/{{ p.id }}">{{ p.name }}</a></td>
+                    <td>{% if p.owner_name != "" %}{{ p.owner_name }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                    <td>{{ p.shared }}</td>
+                    <td>{% if p.owned %}meine{% else %}gefolgt{% endif %}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </details>
+    {% endfor %}
+    {% endif %}
+</section>
+
+<!-- AR5: collaborations, b2b, album co-artists -->
+<section aria-label="Kollaborationen" style="margin-bottom: 0.7rem">
+    <h2>Kollaborationen</h2>
+    <div class="hub-cols">
+        <div>
+            <h3>Kollaborationspartner</h3>
+            {% if collabs.is_empty() %}
+            <p class="hub-muted">Keine Multi-Artist-Tracks.</p>
+            {% else %}
+            <table class="hub-dense-table">
+                <thead>
+                    <tr>
+                        <th scope="col">Künstler</th>
+                        <th scope="col">Tracks</th>
+                        <th scope="col">Plays</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for c in collabs %}
+                    <tr>
+                        <td><a href="{{ c.href }}">{{ c.name }}</a></td>
+                        <td>{{ c.tracks }}</td>
+                        <td>{{ c.plays }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+        </div>
+        <div>
+            <h3>B2B-Sets <span class="hub-muted">(Traktor, „b2b")</span></h3>
+            {% if b2b.is_empty() %}
+            <p class="hub-muted">Keine b2b-Sets gefunden.</p>
+            {% else %}
+            <table class="hub-dense-table">
+                <thead>
+                    <tr>
+                        <th scope="col">Set</th>
+                        <th scope="col">User</th>
+                        <th scope="col" title="Tracks dieses Künstlers im Set">Tracks</th>
+                        <th scope="col">Weitere Künstler</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for b in b2b %}
+                    <tr>
+                        <td>{{ b.playlist }}</td>
+                        <td>@{{ b.user_slug }}</td>
+                        <td>{{ b.tracks }}</td>
+                        <td class="hub-cell-pl">{% if b.others != "" %}{{ b.others }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+        </div>
+    </div>
+    <h3>Künstler auf denselben Alben</h3>
+    {% if albums.is_empty() %}
+    <p class="hub-muted">Keine Album-Daten.</p>
+    {% else %}
+    <div class="overflow-auto hub-scroll-y">
+        <table class="hub-dense-table">
+            <thead>
+                <tr>
+                    <th scope="col">Album</th>
+                    <th scope="col" title="Tracks dieses Künstlers auf dem Album">Tracks</th>
+                    <th scope="col">Weitere Künstler</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for a in albums %}
+                <tr>
+                    <td class="hub-cell-pl">{{ a.album }}</td>
+                    <td>{{ a.tracks }}</td>
+                    <td class="hub-cell-pl">{% if a.others != "" %}{{ a.others }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>
+
+<!-- AR6: reference artists -->
+<section aria-label="Referenzen" style="margin-bottom: 0.7rem">
+    <h2>Referenz-Künstler</h2>
+    <p class="hub-muted">
+        Score = {{ ref_user_options.len() }} Nutzer wählbar · angezeigt für @{{ ref_user }}. Aus
+        gemeinsamen Tags, Kollaborationen und b2b.
+    </p>
+    <p>
+        {% for o in ref_user_options %}<a
+            href="{{ self_href }}?user={{ o.slug }}"
+            class="hub-chip {% if o.selected %}hub-chip-on{% endif %}"
+            >@{{ o.slug }} <span class="hub-muted">{{ o.count }}</span></a
+        >{% endfor %}
+    </p>
+    {% if references.is_empty() %}
+    <p class="hub-muted">Keine Referenzen für @{{ ref_user }}.</p>
+    {% else %}
+    <div class="overflow-auto hub-scroll-y">
+        <table class="hub-dense-table">
+            <thead>
+                <tr>
+                    <th scope="col">#</th>
+                    <th scope="col">Künstler</th>
+                    <th scope="col" title="Gewichteter Gesamtscore">Score</th>
+                    <th scope="col" title="Gemeinsame Tags">Tags</th>
+                    <th scope="col" title="Gemeinsame Tracks (Kollaboration)">Kollab</th>
+                    <th scope="col" title="Gemeinsame b2b-Sets">b2b</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in references %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td><a href="{{ r.href }}">{{ r.name }}</a></td>
+                    <td>{{ r.score }}</td>
+                    <td>{{ r.shared_tags }}</td>
+                    <td>{{ r.collab }}</td>
+                    <td>{{ r.b2b }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}
