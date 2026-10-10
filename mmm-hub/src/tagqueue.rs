@@ -38,8 +38,8 @@ fn render<T: Template>(t: &T) -> Response {
 #[derive(Deserialize, Default)]
 struct QueueFilter {
     q: Option<String>,
-    /// Hide tracks with ripeness above this value ("don't show above X").
-    max: Option<f64>,
+    /// Hide tracks with ripeness above this value (empty = no limit).
+    max: Option<String>,
     /// "1" = only tracks with no tags at all.
     untagged: Option<String>,
     /// "1" = only tracks that appear in one of my playlists.
@@ -114,7 +114,13 @@ async fn queue_page(
     };
 
     let needle = q.to_lowercase();
-    let rows: Vec<QueueRowView> = crate::scoring::queue(&st.pool, &e, f.max, untagged, &sort, 2000)
+    let max = f
+        .max
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<f64>().ok());
+    let rows: Vec<QueueRowView> = crate::scoring::queue(&st.pool, &e, max, untagged, &sort, 2000)
         .await
         .into_iter()
         .filter(|r| {
@@ -158,7 +164,13 @@ async fn queue_page(
         nav,
         flash: String::new(),
         q,
-        max: f.max.map(|m| m.to_string()).unwrap_or_default(),
+        max: f
+            .max
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default()
+            .to_string(),
         untagged,
         mine,
         sort,

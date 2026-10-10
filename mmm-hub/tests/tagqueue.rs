@@ -134,3 +134,17 @@ async fn tag_queue_sort_is_selectable() {
         "selected sort not reflected"
     );
 }
+
+#[tokio::test]
+async fn tag_queue_tolerates_empty_max_param() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+    let resp = app
+        .client()
+        .get(app.url("/tag-queue?q=&max=&sort=ripeness-desc"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+}
