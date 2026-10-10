@@ -101,6 +101,17 @@ content %}
         aria-label="Tag"
         style="width: 12rem"
     />
+    <input
+        type="number"
+        name="wmin"
+        value="{% if wmin > 0.0 %}{{ wmin }}{% endif %}"
+        min="0"
+        step="1"
+        placeholder="Tag-Gew. ≥"
+        aria-label="Mindest-Tag-Gewichtung"
+        style="width: 7rem"
+        title="Nur Treffer, deren Tags eine Gruppe mit mindestens dieser Gewichtung haben"
+    />
     <button type="submit">Filtern</button>
     <a href="{{ reset_href }}" role="button" class="secondary outline"
         >Filter zurücksetzen</a
@@ -121,6 +132,7 @@ content %}
                 <th scope="col">Quellen</th>
                 <th scope="col">Bei uns</th>
                 <th scope="col">Tags</th>
+                <th scope="col">Tag-Gew.</th>
                 <th scope="col">BPM</th>
                 <th scope="col">Key</th>
                 <th scope="col">Score</th>
@@ -172,6 +184,7 @@ content %}
                     </div>
                     {% endfor %} {% endif %}
                 </td>
+                <td>{{ r.tag_weight_disp }}</td>
                 <td>{{ r.bpm_disp }}</td>
                 <td>{% if r.camelot != "" %}{{ r.camelot }}{% else %}—{% endif %}</td>
                 <td>{{ r.score }}</td>

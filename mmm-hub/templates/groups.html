@@ -47,6 +47,7 @@ content %}
                 <th scope="col">Rolle</th>
                 <th scope="col">Owner</th>
                 <th scope="col">Tags</th>
+                <th scope="col">Gew.</th>
                 <th scope="col">Mitglieder</th>
             </tr>
         </thead>
@@ -60,6 +61,7 @@ content %}
                 </td>
                 <td><a href="/user/{{ g.owner }}">@{{ g.owner }}</a></td>
                 <td><a href="/tags?group={{ g.id }}">{{ g.tag_count }}</a></td>
+                <td>{{ g.weight }}</td>
                 <td>{{ g.members }}</td>
             </tr>
             {% endfor %}

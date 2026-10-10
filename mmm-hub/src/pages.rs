@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/groups/create", post(group_create))
         .route("/groups/{id}", get(group_page))
         .route("/groups/{id}/update", post(group_update))
+        .route("/groups/{id}/weight", post(group_set_weight))
         .route("/groups/{id}/subscribe", post(group_subscribe))
         .route("/groups/{id}/unsubscribe", post(group_unsubscribe))
         .route("/groups/{id}/role", post(group_set_role))
@@ -1527,6 +1528,8 @@ struct DiggingQuery {
     powner: Option<String>,
     /// Filter: tag name (hierarchy-aware: also matches child tags).
     tag: Option<String>,
+    /// Filter: minimum tag weight (group-weight signal).
+    wmin: Option<f64>,
 }
 
 /// A `<select>` option with a precomputed `selected` flag.
@@ -1557,6 +1560,7 @@ struct DiggingPage {
     tag_group_opts: Vec<SelOpt>,
     pl_owner_opts: Vec<SelOpt>,
     tag: String,
+    wmin: f64,
     mine: bool,
     bpm: bool,
     harm: bool,
@@ -1577,6 +1581,9 @@ struct DigRow {
     bpm_disp: String,
     camelot: String,
     score: i64,
+    /// Sum of the group weights of this track's tags (scoring-engine signal).
+    tag_weight: f64,
+    tag_weight_disp: String,
     /// Per-user presence with playlist names (track-detail style).
     presence: Vec<DigUserRow>,
     /// Resolved tags with their groups.
@@ -1610,6 +1617,7 @@ struct DigGroup {
     id: i64,
     icon: String,
     name: String,
+    weight: f64,
 }
 
 /// Merge a (possibly external) candidate into the session map: dedupe by hub
@@ -1654,6 +1662,8 @@ async fn merge_candidate(
             bpm_disp: String::new(),
             camelot: String::new(),
             score: 0,
+            tag_weight: 0.0,
+            tag_weight_disp: String::new(),
             presence: Vec::new(),
             tags: Vec::new(),
         },
@@ -1744,7 +1754,8 @@ async fn dig_details(
         // Resolved tags + their groups (LEFT JOIN, so a tag can repeat per group).
         let mut qb = QueryBuilder::new(
             "SELECT rt.track_id AS tid, t.id AS tag_id, t.name AS tag, u.slug AS owner,
-                    g.id AS gid, g.name AS gname, COALESCE(g.icon, '') AS gicon
+                    g.id AS gid, g.name AS gname, COALESCE(g.icon, '') AS gicon,
+                    COALESCE(g.weight, 0) AS gweight
                FROM hub_track_resolved_tags rt
                JOIN hub_tags t ON t.id = rt.tag_id
                JOIN hub_users u ON u.id = t.owner_user_id
@@ -1765,6 +1776,7 @@ async fn dig_details(
             let gid: Option<i64> = r.get("gid");
             let gname: String = r.get::<Option<String>, _>("gname").unwrap_or_default();
             let gicon: String = r.get::<Option<String>, _>("gicon").unwrap_or_default();
+            let gweight: f64 = r.get::<Option<f64>, _>("gweight").unwrap_or(0.0);
             let list = tags.entry(tid).or_default();
             let t = match list.iter().position(|x| x.id == tag_id) {
                 Some(i) => &mut list[i],
@@ -1783,6 +1795,7 @@ async fn dig_details(
                     id: gid.unwrap_or(0),
                     icon: gicon,
                     name: gname,
+                    weight: gweight,
                 });
             }
         }
@@ -1945,6 +1958,18 @@ async fn digging_page(
                 .map(|u| (u.owned.len() + u.followed.len()) as i64)
                 .sum();
             r.likes = r.presence.iter().filter(|u| u.liked).count() as i64;
+            // Scoring-engine signal: importance of the track's tags = the max
+            // group weight over each tag's groups, summed over the track's tags.
+            r.tag_weight = r
+                .tags
+                .iter()
+                .map(|t| {
+                    t.groups
+                        .iter()
+                        .map(|g| g.weight)
+                        .fold(0.0_f64, f64::max)
+                })
+                .sum();
         }
     }
 
@@ -2011,6 +2036,7 @@ async fn digging_page(
     let tgroup = q.tgroup.filter(|t| *t > 0).unwrap_or(0);
     let powner = q.powner.clone().unwrap_or_default().trim().to_string();
     let tag = q.tag.clone().unwrap_or_default().trim().to_string();
+    let wmin = q.wmin.filter(|w| *w > 0.0).unwrap_or(0.0);
     let tag_ids: HashSet<i64> = if tag.is_empty() {
         HashSet::new()
     } else {
@@ -2059,15 +2085,27 @@ async fn digging_page(
         if !tag.is_empty() && !r.tags.iter().any(|t| tag_ids.contains(&t.id)) {
             return false;
         }
+        if wmin > 0.0 && r.tag_weight < wmin {
+            return false;
+        }
         true
     });
 
     for r in rows.iter_mut() {
-        r.score = r.users * 10 + r.playlists * 3 + r.likes * 2 + r.sources.len() as i64;
+        r.score = r.users * 10
+            + r.playlists * 3
+            + r.likes * 2
+            + r.sources.len() as i64
+            + r.tag_weight.round() as i64;
         r.bpm_disp = r
             .bpm
             .map(|b| format!("{b:.0}"))
             .unwrap_or_else(|| "—".to_string());
+        r.tag_weight_disp = if r.tag_weight > 0.0 {
+            format!("{:.0}", r.tag_weight)
+        } else {
+            "—".to_string()
+        };
     }
     rows.sort_by(|a, b| {
         b.score
@@ -2101,6 +2139,9 @@ async fn digging_page(
         }
         if !tag.is_empty() {
             s.push_str(&format!("&tag={}", urlencoding::encode(&tag)));
+        }
+        if wmin > 0.0 {
+            s.push_str(&format!("&wmin={wmin}"));
         }
         s
     };
@@ -2226,6 +2267,7 @@ async fn digging_page(
         tag_group_opts,
         pl_owner_opts,
         tag,
+        wmin,
         mine: mine_only,
         bpm: bpm_only,
         harm: harm_only,
@@ -2416,6 +2458,7 @@ struct TagRow {
     name: String,
     owner: String,
     groups: String,
+    parents: String,
     track_count: i64,
     source_count: i64,
 }
@@ -2446,6 +2489,9 @@ async fn tags_page(
                 (SELECT GROUP_CONCAT(g.icon || ' ' || g.name, ' · ')
                    FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
                   WHERE gt.tag_id = t.id) AS groups,
+                (SELECT GROUP_CONCAT(p.name, ' · ')
+                   FROM hub_tag_parents tp JOIN hub_tags p ON p.id = tp.parent_tag_id
+                  WHERE tp.tag_id = t.id) AS parents,
                 (SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id) AS track_count,
                 (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count
            FROM hub_tags t
@@ -2478,6 +2524,7 @@ async fn tags_page(
             name: r.get::<Option<String>, _>("name").unwrap_or_default(),
             owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
             groups: r.get::<Option<String>, _>("groups").unwrap_or_default(),
+            parents: r.get::<Option<String>, _>("parents").unwrap_or_default(),
             track_count: r.get::<Option<i64>, _>("track_count").unwrap_or(0),
             source_count: r.get::<Option<i64>, _>("source_count").unwrap_or(0),
         })
@@ -2677,6 +2724,7 @@ struct GroupRow {
     inherited: bool,
     tag_count: i64,
     members: i64,
+    weight: f64,
 }
 
 fn group_row(g: crate::tags::Group) -> GroupRow {
@@ -2689,6 +2737,7 @@ fn group_row(g: crate::tags::Group) -> GroupRow {
         inherited: g.inherited,
         tag_count: g.tag_count,
         members: g.members,
+        weight: g.weight,
     }
 }
 
@@ -2853,6 +2902,33 @@ async fn group_update(
     flash_redirect(&format!("/groups/{id}"), msg)
 }
 
+#[derive(Deserialize)]
+struct WeightForm {
+    weight: f64,
+    #[serde(default)]
+    back: Option<String>,
+}
+
+async fn group_set_weight(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<WeightForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let msg = match crate::tags::set_group_weight(&st.pool, uid, id, f.weight).await {
+        Ok(()) => format!("Gewichtung: {:.1}", f.weight),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    let back = f
+        .back
+        .filter(|b| b.starts_with('/'))
+        .unwrap_or_else(|| format!("/groups/{id}"));
+    flash_redirect(&back, msg)
+}
+
 struct ParentOption {
     id: i64,
     name: String,
@@ -2890,6 +2966,7 @@ struct GroupPage {
     role_inherited: bool,
     collective_id: i64,
     collective_label: String,
+    weight: f64,
     collective_options: Vec<ParentOption>,
     members: Vec<MemberRow>,
     tags: Vec<GroupTag>,
@@ -2958,6 +3035,7 @@ async fn group_page(
         role_inherited: d.role_inherited,
         collective_id: d.collective_id,
         collective_label,
+        weight: d.weight,
         collective_options,
         members,
         tags,
@@ -3144,6 +3222,7 @@ struct CollGroup {
     name: String,
     icon: String,
     tag_count: i64,
+    weight: f64,
 }
 
 #[derive(Template)]
@@ -3185,11 +3264,12 @@ async fn collective_page(
     let groups = d
         .groups
         .into_iter()
-        .map(|(id, name, icon, tag_count)| CollGroup {
+        .map(|(id, name, icon, tag_count, weight)| CollGroup {
             id,
             name,
             icon,
             tag_count,
+            weight,
         })
         .collect();
     // The owner's own groups not yet in this collective.

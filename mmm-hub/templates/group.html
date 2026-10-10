@@ -46,6 +46,38 @@ content %}
         <button type="submit">Speichern</button>
     </form>
 </details>
+{% endif %} {% if can_edit %}
+<details>
+    <summary>Gewichtung / Ranking ({{ weight }})</summary>
+    <form
+        method="post"
+        action="/groups/{{ id }}/weight"
+        style="
+            display: flex;
+            gap: 0.4rem;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-top: 0.4rem;
+        "
+    >
+        <input
+            type="number"
+            name="weight"
+            value="{{ weight }}"
+            min="0"
+            max="100"
+            step="0.5"
+            aria-label="Gewichtung"
+            style="width: 6rem"
+        />
+        <input type="hidden" name="back" value="/groups/{{ id }}" />
+        <button type="submit">Speichern</button>
+        <span class="hub-muted"
+            >Höhere Gewichtung = Tag-Treffer dieser Gruppe zählen stärker im
+            Ranking.</span
+        >
+    </form>
+</details>
 {% endif %} {% if is_owner %}
 <form method="post" action="/groups/{{ id }}/delete" style="display: inline">
     <button type="submit" class="secondary outline">Gruppe löschen</button>

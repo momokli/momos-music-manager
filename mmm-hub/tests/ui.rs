@@ -625,6 +625,65 @@ async fn tag_hierarchy_is_used_in_filters() {
 }
 
 #[tokio::test]
+async fn group_weight_drives_digging_score_and_parents_visible() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // Tag (from alice's playlist, has t_all) in a group with weight 5.
+    let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
+        .await
+        .unwrap();
+    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Mood", "💜")
+        .await
+        .unwrap();
+    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, tag, g)
+        .await
+        .unwrap();
+    mmm_hub::tags::set_group_weight(&app.pool, app.seed.alice, g, 5.0)
+        .await
+        .unwrap();
+
+    // /tags shows the Parent-Tags column.
+    let tags_html = app
+        .client()
+        .get(app.url("/tags"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert!(body(tags_html).await.contains("Parent-Tags"));
+
+    // Digging: the candidate carries a tag-weight of 5 -> wmin 5 keeps it, 10 drops it.
+    let seed = app.seed.t_pl;
+    let keeps = app
+        .client()
+        .get(app.url(&format!("/digging?seed={seed}&wmin=5")))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert!(body(keeps).await.contains("Shared Anthem"));
+    let drops = app
+        .client()
+        .get(app.url(&format!("/digging?seed={seed}&wmin=10")))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert!(!body(drops).await.contains("Shared Anthem"));
+
+    // The group page exposes the weight control (owner).
+    let gp = app
+        .client()
+        .get(app.url(&format!("/groups/{g}")))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert!(body(gp).await.contains("Gewichtung / Ranking"));
+}
+
+#[tokio::test]
 async fn toggle_returns_row_fragment_for_htmx() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;

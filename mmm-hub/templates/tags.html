@@ -78,6 +78,7 @@
         <thead>
             <tr>
                 <th scope="col">Tag</th>
+                <th scope="col">Parent-Tags</th>
                 <th scope="col">Gruppen</th>
                 <th scope="col">Besitzer</th>
                 <th scope="col">Tracks</th>
@@ -88,6 +89,7 @@
             {% for t in tags %}
             <tr>
                 <td><a href="/tag/{{ t.id }}">{{ t.name }}</a></td>
+                <td>{% if t.parents != "" %}{{ t.parents }}{% else %}—{% endif %}</td>
                 <td>{% if t.groups != "" %}{{ t.groups }}{% else %}—{% endif %}</td>
                 <td><a href="/user/{{ t.owner }}">@{{ t.owner }}</a></td>
                 <td>{{ t.track_count }}</td>

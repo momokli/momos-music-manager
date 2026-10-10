@@ -425,6 +425,8 @@ pub struct Group {
     pub inherited: bool,
     pub tag_count: i64,
     pub members: i64,
+    /// Importance weight (used by the scoring engine).
+    pub weight: f64,
 }
 
 #[derive(Debug)]
@@ -440,6 +442,7 @@ pub struct GroupDetail {
     pub collective_id: i64,
     pub collective_name: String,
     pub collective_icon: String,
+    pub weight: f64,
     pub members: Vec<(String, String)>,
     /// `(tag_id, tag name, tag owner slug)`.
     pub tags: Vec<(i64, String, String)>,
@@ -465,8 +468,8 @@ pub struct CollectiveDetail {
     pub role: String,
     pub is_owner: bool,
     pub members: Vec<(String, String)>,
-    /// `(group_id, group name, group icon, tag count)`.
-    pub groups: Vec<(i64, String, String, i64)>,
+    /// `(group_id, group name, group icon, tag count, weight)`.
+    pub groups: Vec<(i64, String, String, i64, f64)>,
 }
 
 /// Create a group owned by `owner_user_id` (idempotent on the slug); the owner
@@ -609,7 +612,7 @@ pub async fn can_contribute(pool: &SqlitePool, user_id: i64, group_id: i64) -> b
 /// inherited from a parent (contributor) group.
 pub async fn list_groups_for(pool: &SqlitePool, user_id: i64) -> Vec<Group> {
     let rows = sqlx::query(
-        "SELECT g.id, g.name, g.icon, u.slug AS owner,
+        "SELECT g.id, g.name, g.icon, u.slug AS owner, g.weight,
                 (SELECT COUNT(*) FROM hub_group_tags gt WHERE gt.group_id = g.id) AS tag_count,
                 (SELECT COUNT(*) FROM hub_group_members mm WHERE mm.group_id = g.id) AS members
            FROM hub_tag_groups g
@@ -633,6 +636,7 @@ pub async fn list_groups_for(pool: &SqlitePool, user_id: i64) -> Vec<Group> {
                 inherited,
                 tag_count: r.get::<Option<i64>, _>("tag_count").unwrap_or(0),
                 members: r.get::<Option<i64>, _>("members").unwrap_or(0),
+                weight: r.get::<Option<f64>, _>("weight").unwrap_or(0.0),
             });
         }
     }
@@ -642,7 +646,7 @@ pub async fn list_groups_for(pool: &SqlitePool, user_id: i64) -> Vec<Group> {
 /// Groups the user is *not* a member of (to discover / subscribe to).
 pub async fn list_discover_groups(pool: &SqlitePool, user_id: i64) -> Vec<Group> {
     let rows = sqlx::query(
-        "SELECT g.id, g.name, g.icon, u.slug AS owner,
+        "SELECT g.id, g.name, g.icon, u.slug AS owner, g.weight,
                 (SELECT COUNT(*) FROM hub_group_tags gt WHERE gt.group_id = g.id) AS tag_count,
                 (SELECT COUNT(*) FROM hub_group_members mm WHERE mm.group_id = g.id) AS members
            FROM hub_tag_groups g
@@ -665,6 +669,7 @@ pub async fn list_discover_groups(pool: &SqlitePool, user_id: i64) -> Vec<Group>
             inherited: false,
             tag_count: r.get::<Option<i64>, _>("tag_count").unwrap_or(0),
             members: r.get::<Option<i64>, _>("members").unwrap_or(0),
+            weight: r.get::<Option<f64>, _>("weight").unwrap_or(0.0),
         })
         .collect()
 }
@@ -846,7 +851,7 @@ pub async fn groups_for_tag(pool: &SqlitePool, tag_id: i64) -> Vec<(i64, String,
 pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<GroupDetail> {
     let row = sqlx::query(
         "SELECT g.id, g.name, COALESCE(g.icon,'') AS icon, u.slug AS owner,
-                COALESCE(g.collective_id, 0) AS collective_id
+                COALESCE(g.collective_id, 0) AS collective_id, g.weight
            FROM hub_tag_groups g JOIN hub_users u ON u.id = g.owner_user_id
           WHERE g.id = ?1",
     )
@@ -902,9 +907,30 @@ pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Opt
         collective_id,
         collective_name,
         collective_icon,
+        weight: row.get::<Option<f64>, _>("weight").unwrap_or(0.0),
         members,
         tags,
     })
+}
+
+/// Set a group's importance weight. Any contributor (owner or collective
+/// member) may do this, so a collective can rank its groups.
+pub async fn set_group_weight(
+    pool: &SqlitePool,
+    actor_user_id: i64,
+    group_id: i64,
+    weight: f64,
+) -> Result<()> {
+    if !can_contribute(pool, actor_user_id, group_id).await {
+        bail!("you can't change this group's weight");
+    }
+    let weight = weight.clamp(0.0, 100.0);
+    sqlx::query("UPDATE hub_tag_groups SET weight = ?1 WHERE id = ?2")
+        .bind(weight)
+        .bind(group_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Set (or clear) the collective a group belongs to. The group's owner may do
@@ -1233,9 +1259,9 @@ pub async fn collective_detail(pool: &SqlitePool, user_id: i64, id: i64) -> Opti
     .fetch_all(pool)
     .await
     .unwrap_or_default();
-    let groups = sqlx::query_as::<_, (i64, String, String, i64)>(
+    let groups = sqlx::query_as::<_, (i64, String, String, i64, f64)>(
         "SELECT g.id, g.name, COALESCE(g.icon,''),
-                (SELECT COUNT(*) FROM hub_group_tags gt WHERE gt.group_id = g.id)
+                (SELECT COUNT(*) FROM hub_group_tags gt WHERE gt.group_id = g.id), g.weight
            FROM hub_tag_groups g WHERE g.collective_id = ?1 ORDER BY g.name",
     )
     .bind(id)
