@@ -106,3 +106,61 @@ async fn search_sort_headers_work() {
     assert!(html.contains("sort=title"), "sortable header missing");
     assert!(html.contains("Shared Anthem"), "result missing");
 }
+
+/// A single typo in a token still finds the row (tags page).
+#[tokio::test]
+async fn tags_search_tolerates_a_typo() {
+    let app = common::spawn().await;
+    let alice = app.seed.alice;
+    let cookie = app.session_cookie(alice).await;
+    mmm_hub::tags::ensure_tag(&app.pool, alice, "Warehouse")
+        .await
+        .unwrap();
+
+    let html = get(&app, &cookie, "/tags?q=warehose").await; // missing 'u'
+    assert!(html.contains("Warehouse"), "one-edit typo not tolerated");
+}
+
+/// A single typo in the track search still finds the row.
+#[tokio::test]
+async fn search_tolerates_a_typo() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+    let html = get(&app, &cookie, "/search?q=anthen").await; // 'anthem' with a typo
+    assert!(
+        html.contains("Shared Anthem"),
+        "one-edit typo not tolerated"
+    );
+}
+
+/// The tag detail page's track list is searchable (order-independent + typo) and
+/// sortable by header.
+#[tokio::test]
+async fn tag_detail_track_search_and_sort() {
+    let app = common::spawn().await;
+    let alice = app.seed.alice;
+    let cookie = app.session_cookie(alice).await;
+    let tag = mmm_hub::tags::ensure_tag(&app.pool, alice, "SetlistX")
+        .await
+        .unwrap();
+    for tr in [app.seed.t_all, app.seed.t_pl] {
+        sqlx::query(
+            "INSERT OR IGNORE INTO hub_track_resolved_tags (track_id, tag_id) VALUES (?1, ?2)",
+        )
+        .bind(tr)
+        .bind(tag)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+
+    let html = get(&app, &cookie, &format!("/tag/{tag}?q=anthem")).await;
+    assert!(html.contains("Shared Anthem"), "match missing");
+    assert!(!html.contains("Playlist Only"), "filter did not exclude");
+
+    let html = get(&app, &cookie, &format!("/tag/{tag}?q=anthen")).await;
+    assert!(html.contains("Shared Anthem"), "typo not tolerated");
+
+    let html = get(&app, &cookie, &format!("/tag/{tag}?sort=title&dir=desc")).await;
+    assert!(html.contains("sort=title"), "sortable header missing");
+}

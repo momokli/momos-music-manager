@@ -1,5 +1,5 @@
-{% extends "base.html" %} {% block title %}{{ name }} — Spelunke{% endblock %} {% block content
-%}
+{% extends "base.html" %} {% block title %}{{ name }} — Spelunke{% endblock %} {% block
+content %}
 <nav class="hub-crumbs" aria-label="Brotkrumen">
     <ol>
         <li><a href="/">Übersicht</a></li>
@@ -18,8 +18,10 @@
     <div>
         <h1 style="margin-bottom: 0.1rem">{{ name }}</h1>
         <p class="hub-muted" style="margin: 0">
-            {{ track_count }} Tracks ·
-            {% for a in artists %}<a href="{{ a.href }}" class="hub-tag">{{ a.name }}</a
+            {{ track_count }} Tracks · {% for a in artists %}<a
+                href="{{ a.href }}"
+                class="hub-tag"
+                >{{ a.name }}</a
             >{% endfor %}
         </p>
     </div>
@@ -33,9 +35,30 @@
         <thead>
             <tr>
                 <th scope="col">#</th>
-                <th scope="col">Track</th>
-                <th scope="col">Künstler</th>
-                <th scope="col">Dauer</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_title.href }}"
+                        class="hub-sort{% if s_title.active %} hub-sort-on{% endif %}"
+                        >{{ s_title.label }}{% if s_title.active %} {{ s_title.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_artists.href }}"
+                        class="hub-sort{% if s_artists.active %} hub-sort-on{% endif %}"
+                        >{{ s_artists.label }}{% if s_artists.active %} {{ s_artists.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_duration.href }}"
+                        class="hub-sort{% if s_duration.active %} hub-sort-on{% endif %}"
+                        >{{ s_duration.label }}{% if s_duration.active %} {{
+                        s_duration.arrow }}{% endif %}</a
+                    >
+                </th>
             </tr>
         </thead>
         <tbody>
@@ -43,7 +66,9 @@
             <tr>
                 <td>{{ loop.index }}</td>
                 <td><a href="/track/{{ t.id }}">{{ t.title }}</a></td>
-                <td class="hub-cell-pl"><a href="/artist/{{ t.artists }}">{{ t.artists }}</a></td>
+                <td class="hub-cell-pl">
+                    <a href="/artist/{{ t.artists }}">{{ t.artists }}</a>
+                </td>
                 <td>{% if t.duration != "" %}{{ t.duration }}{% else %}—{% endif %}</td>
             </tr>
             {% endfor %}

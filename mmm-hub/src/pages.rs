@@ -150,6 +150,37 @@ struct SearchQuery {
     dir: Option<String>,
 }
 
+async fn run_search(
+    pool: &sqlx::SqlitePool,
+    q: &str,
+    sort: &str,
+    dir: &str,
+    allowed: &[(&str, &str)],
+    strict: bool,
+    limit: i64,
+) -> Vec<SearchRow> {
+    let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+        "SELECT * FROM (SELECT id, title, artists, album FROM hub_tracks) WHERE 1 = 1",
+    );
+    if strict {
+        crate::table::push_fuzzy(&mut qb, q, &["title", "artists", "album"]);
+    }
+    crate::table::order_by(&mut qb, sort, dir, allowed, "artists");
+    qb.push(" LIMIT ").push_bind(limit);
+    qb.build()
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|r| SearchRow {
+            id: r.get("id"),
+            title: r.get::<Option<String>, _>("title").unwrap_or_default(),
+            artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
+            album: r.get::<Option<String>, _>("album").unwrap_or_default(),
+        })
+        .collect()
+}
+
 async fn search_page(
     State(st): State<AppState>,
     Query(params): Query<SearchQuery>,
@@ -176,20 +207,19 @@ async fn search_page(
     let mut tracks = Vec::new();
 
     if !q.is_empty() {
-        let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
-            "SELECT * FROM (SELECT id, title, artists, album FROM hub_tracks) WHERE 1 = 1",
-        );
-        crate::table::push_fuzzy(&mut qb, &q, &["title", "artists", "album"]);
-        crate::table::order_by(&mut qb, &sort, &dir, allowed, "artists");
-        qb.push(" LIMIT 100");
-
-        for r in qb.build().fetch_all(&st.pool).await.unwrap_or_default() {
-            tracks.push(SearchRow {
-                id: r.get("id"),
-                title: r.get::<Option<String>, _>("title").unwrap_or_default(),
-                artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
-                album: r.get::<Option<String>, _>("album").unwrap_or_default(),
+        // Strict token match first; on no hits, fall back to a broad pass with
+        // typo tolerance (order-independent, one edit per token).
+        tracks = run_search(&st.pool, &q, &sort, &dir, allowed, true, 100).await;
+        if tracks.is_empty() {
+            let toks = crate::table::tokens(&q);
+            tracks = run_search(&st.pool, &q, &sort, &dir, allowed, false, 5000).await;
+            tracks.retain(|r| {
+                crate::table::matches_typo(
+                    &format!("{} {} {}", r.title, r.artists, r.album).to_lowercase(),
+                    &toks,
+                )
             });
+            tracks.truncate(100);
         }
     }
 
@@ -311,6 +341,7 @@ struct PlaylistPage {
     name: String,
     owner: String,
     owner_name: String,
+    q: String,
     tracks: Vec<PlaylistTrackRow>,
     /// Tags this playlist currently feeds.
     feeds: Vec<TagFeed>,
@@ -320,6 +351,8 @@ struct PlaylistPage {
     music_api: bool,
     ready: usize,
     total: usize,
+    s_pos: crate::table::SortHead,
+    s_title: crate::table::SortHead,
 }
 
 struct TagFeed {
@@ -340,9 +373,18 @@ struct PlaylistTrackRow {
     artists: String,
 }
 
+#[derive(Deserialize, Default)]
+struct PlaylistTableFilter {
+    q: Option<String>,
+    sort: Option<String>,
+    dir: Option<String>,
+}
+
 async fn playlist_page(
     State(st): State<AppState>,
     Path(id): Path<i64>,
+    Query(pf): Query<PlaylistTableFilter>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "playlist").await else {
@@ -381,19 +423,30 @@ async fn playlist_page(
         None => Vec::new(),
     };
 
-    let rows = sqlx::query(
-        "SELECT t.id, hpt.position, t.title, t.artists
+    let q = pf.q.unwrap_or_default().trim().to_string();
+    let allowed: &[(&str, &str)] = &[
+        ("pos", "position"),
+        ("title", "title"),
+        ("artists", "artists"),
+    ];
+    let (sort, dir) =
+        crate::table::resolve_sort(pf.sort.as_deref(), pf.dir.as_deref(), allowed, "pos", "asc");
+    let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+        "SELECT * FROM (SELECT t.id AS id, hpt.position AS position, t.title AS title, t.artists AS artists
            FROM hub_playlist_tracks hpt
            JOIN hub_tracks t ON t.id = hpt.track_id
-          WHERE hpt.playlist_id = ?1
-          ORDER BY hpt.position",
-    )
-    .bind(id)
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default();
+          WHERE hpt.playlist_id = ",
+    );
+    qb.push_bind(id);
+    qb.push(") WHERE 1 = 1");
+    crate::table::push_fuzzy(&mut qb, &q, &["title", "artists"]);
+    crate::table::order_by(&mut qb, &sort, &dir, allowed, "pos");
 
-    let tracks: Vec<PlaylistTrackRow> = rows
+    let tracks: Vec<PlaylistTrackRow> = qb
+        .build()
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default()
         .iter()
         .map(|r| PlaylistTrackRow {
             position: r
@@ -418,6 +471,9 @@ async fn playlist_page(
     let total = isrcs.len();
     let (ready, _) = crate::music_api::cached_counts(&st.pool, &isrcs).await;
 
+    let rawq = raw.as_deref().unwrap_or("");
+    let s_pos = crate::table::sort_head(rawq, "pos", "#", &sort, &dir);
+    let s_title = crate::table::sort_head(rawq, "title", "Titel", &sort, &dir);
     render(&PlaylistPage {
         nav,
         flash: String::new(),
@@ -425,12 +481,15 @@ async fn playlist_page(
         name: name.unwrap_or_default(),
         owner: owner.unwrap_or_default(),
         owner_name: owner_name.filter(|s| !s.is_empty()).unwrap_or_default(),
+        q,
         tracks,
         feeds,
         my_tags,
         music_api: st.cfg.music_api_token.is_some(),
         ready,
         total,
+        s_pos,
+        s_title,
     })
 }
 
@@ -1739,8 +1798,7 @@ fn shared_ids(acc: &HashMap<i64, TrackAcc>) -> Vec<i64> {
 /// Case-insensitive full-text match over title + artists.
 fn text_matches(title: &str, artists: &str, q: &str) -> bool {
     let hay = format!("{title} {artists}").to_lowercase();
-    let toks = crate::table::tokens(q);
-    toks.is_empty() || toks.iter().all(|t| hay.contains(t.as_str()))
+    crate::table::matches_typo(&hay, &crate::table::tokens(q))
 }
 
 /// Ids from `candidate_ids` that resolve to a tag matching `needle` — either a
@@ -3409,6 +3467,10 @@ async fn digging_enrich(
 #[derive(Deserialize, Default)]
 struct AdminMsg {
     msg: Option<String>,
+    /// Optional table filter/sort (shared by pages that reuse this query struct).
+    q: Option<String>,
+    sort: Option<String>,
+    dir: Option<String>,
 }
 
 #[derive(Template)]
@@ -3709,6 +3771,88 @@ struct TagRow {
     source_count: i64,
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn run_tags(
+    pool: &sqlx::SqlitePool,
+    q: &str,
+    me: i64,
+    mine: bool,
+    owner: &str,
+    collective_id: i64,
+    group_ids: &[i64],
+    sort: &str,
+    dir: &str,
+    allowed: &[(&str, &str)],
+    strict: bool,
+    limit: i64,
+) -> Vec<TagRow> {
+    let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+        "SELECT * FROM (SELECT t.id AS id, t.name AS name, u.slug AS owner,
+                (SELECT GROUP_CONCAT(g.icon || ' ' || g.name, ' · ')
+                   FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
+                  WHERE gt.tag_id = t.id) AS groups,
+                (SELECT GROUP_CONCAT(p.name, ' · ')
+                   FROM hub_tag_parents tp JOIN hub_tags p ON p.id = tp.parent_tag_id
+                  WHERE tp.tag_id = t.id) AS parents,
+                (SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id) AS track_count,
+                (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count
+           FROM hub_tags t
+           JOIN hub_users u ON u.id = t.owner_user_id
+          WHERE 1 = 1",
+    );
+    if mine {
+        qb.push(" AND t.owner_user_id = ").push_bind(me);
+    }
+    if !owner.is_empty() {
+        qb.push(" AND u.slug = ")
+            .push_bind(owner.to_string())
+            .push(" COLLATE NOCASE");
+    }
+    if collective_id != 0 {
+        qb.push(
+            " AND EXISTS (SELECT 1 FROM hub_group_tags gt3
+                           JOIN hub_tag_groups g3 ON g3.id = gt3.group_id
+                          WHERE gt3.tag_id = t.id AND g3.collective_id = ",
+        )
+        .push_bind(collective_id)
+        .push(")");
+    }
+    if !group_ids.is_empty() {
+        qb.push(
+            " AND EXISTS (SELECT 1 FROM hub_group_tags gt2
+                          WHERE gt2.tag_id = t.id AND gt2.group_id IN (",
+        );
+        {
+            let mut sep = qb.separated(", ");
+            for gid in group_ids {
+                sep.push_bind(*gid);
+            }
+        }
+        qb.push("))");
+    }
+    qb.push(") WHERE 1 = 1");
+    if strict {
+        crate::table::push_fuzzy(&mut qb, q, &["name", "owner", "groups", "parents"]);
+    }
+    crate::table::order_by(&mut qb, sort, dir, allowed, "name");
+    qb.push(" LIMIT ").push_bind(limit);
+    qb.build()
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|r| TagRow {
+            id: r.get::<i64, _>("id"),
+            name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+            owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
+            groups: r.get::<Option<String>, _>("groups").unwrap_or_default(),
+            parents: r.get::<Option<String>, _>("parents").unwrap_or_default(),
+            track_count: r.get::<Option<i64>, _>("track_count").unwrap_or(0),
+            source_count: r.get::<Option<i64>, _>("source_count").unwrap_or(0),
+        })
+        .collect()
+}
+
 async fn tags_page(
     State(st): State<AppState>,
     Query(f): Query<TagFilter>,
@@ -3751,70 +3895,47 @@ async fn tags_page(
     let (sort, dir) =
         crate::table::resolve_sort(f.sort.as_deref(), f.dir.as_deref(), allowed, "name", "asc");
 
-    let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
-        "SELECT * FROM (SELECT t.id AS id, t.name AS name, u.slug AS owner,
-                (SELECT GROUP_CONCAT(g.icon || ' ' || g.name, ' · ')
-                   FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
-                  WHERE gt.tag_id = t.id) AS groups,
-                (SELECT GROUP_CONCAT(p.name, ' · ')
-                   FROM hub_tag_parents tp JOIN hub_tags p ON p.id = tp.parent_tag_id
-                  WHERE tp.tag_id = t.id) AS parents,
-                (SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id) AS track_count,
-                (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count
-           FROM hub_tags t
-           JOIN hub_users u ON u.id = t.owner_user_id
-          WHERE 1 = 1",
-    );
-    if mine {
-        qb.push(" AND t.owner_user_id = ").push_bind(me);
-    }
-    if !owner.is_empty() {
-        qb.push(" AND u.slug = ")
-            .push_bind(owner.clone())
-            .push(" COLLATE NOCASE");
-    }
-    if collective_id != 0 {
-        qb.push(
-            " AND EXISTS (SELECT 1 FROM hub_group_tags gt3
-                           JOIN hub_tag_groups g3 ON g3.id = gt3.group_id
-                          WHERE gt3.tag_id = t.id AND g3.collective_id = ",
+    // Strict token match first; on no hits, a broad pass + one-edit typo tolerance.
+    let mut tags = run_tags(
+        &st.pool,
+        &q,
+        me,
+        mine,
+        &owner,
+        collective_id,
+        &group_ids,
+        &sort,
+        &dir,
+        allowed,
+        true,
+        1000,
+    )
+    .await;
+    if tags.is_empty() && !q.is_empty() {
+        let toks = crate::table::tokens(&q);
+        tags = run_tags(
+            &st.pool,
+            &q,
+            me,
+            mine,
+            &owner,
+            collective_id,
+            &group_ids,
+            &sort,
+            &dir,
+            allowed,
+            false,
+            3000,
         )
-        .push_bind(collective_id)
-        .push(")");
+        .await;
+        tags.retain(|t| {
+            crate::table::matches_typo(
+                &format!("{} {} {} {}", t.name, t.owner, t.groups, t.parents).to_lowercase(),
+                &toks,
+            )
+        });
+        tags.truncate(1000);
     }
-    if !group_ids.is_empty() {
-        qb.push(
-            " AND EXISTS (SELECT 1 FROM hub_group_tags gt2
-                          WHERE gt2.tag_id = t.id AND gt2.group_id IN (",
-        );
-        {
-            let mut sep = qb.separated(", ");
-            for gid in &group_ids {
-                sep.push_bind(*gid);
-            }
-        }
-        qb.push("))");
-    }
-    // Fuzzy full-text over every visible text column (order-independent).
-    qb.push(") WHERE 1 = 1");
-    crate::table::push_fuzzy(&mut qb, &q, &["name", "owner", "groups", "parents"]);
-    crate::table::order_by(&mut qb, &sort, &dir, allowed, "name");
-    qb.push(" LIMIT 1000");
-
-    let rows = qb.build().fetch_all(&st.pool).await.unwrap_or_default();
-
-    let tags: Vec<TagRow> = rows
-        .iter()
-        .map(|r| TagRow {
-            id: r.get::<i64, _>("id"),
-            name: r.get::<Option<String>, _>("name").unwrap_or_default(),
-            owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
-            groups: r.get::<Option<String>, _>("groups").unwrap_or_default(),
-            parents: r.get::<Option<String>, _>("parents").unwrap_or_default(),
-            track_count: r.get::<Option<i64>, _>("track_count").unwrap_or(0),
-            source_count: r.get::<Option<i64>, _>("source_count").unwrap_or(0),
-        })
-        .collect();
 
     let owner_options: Vec<OwnerOption> = crate::tags::tag_owners(&st.pool)
         .await
@@ -3973,7 +4094,10 @@ struct TagDetailPage {
     sources: Vec<TagSource>,
     /// Bi-way sync: mirror tagged tracks onto the source playlists.
     sync: bool,
+    q: String,
     tracks: Vec<TagTrack>,
+    s_title: crate::table::SortHead,
+    s_artists: crate::table::SortHead,
     top_artists: Vec<TopArtist>,
     cooccur: Vec<CooccurRow>,
     music_api: bool,
@@ -3985,6 +4109,7 @@ async fn tag_detail_page(
     State(st): State<AppState>,
     Path(id): Path<i64>,
     Query(msg): Query<AdminMsg>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
@@ -4009,11 +4134,38 @@ async fn tag_detail_page(
         .into_iter()
         .map(|(id, name, icon)| GroupRef { id, name, icon })
         .collect();
-    let tracks = d
+    let q = msg.q.clone().unwrap_or_default().trim().to_string();
+    let allowed: &[(&str, &str)] = &[("title", "title"), ("artists", "artists")];
+    let (sort, dir) = crate::table::resolve_sort(
+        msg.sort.as_deref(),
+        msg.dir.as_deref(),
+        allowed,
+        "artists",
+        "asc",
+    );
+    let toks = crate::table::tokens(&q);
+    let mut tracks: Vec<TagTrack> = d
         .tracks
         .into_iter()
         .map(|(id, title, artists)| TagTrack { id, title, artists })
+        .filter(|t| {
+            crate::table::matches_typo(&format!("{} {}", t.title, t.artists).to_lowercase(), &toks)
+        })
         .collect();
+    {
+        let desc = dir == "desc";
+        tracks.sort_by(|a, b| {
+            let o = if sort == "title" {
+                a.title.to_lowercase().cmp(&b.title.to_lowercase())
+            } else {
+                a.artists
+                    .to_lowercase()
+                    .cmp(&b.artists.to_lowercase())
+                    .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+            };
+            if desc { o.reverse() } else { o }
+        });
+    }
     let is_owner = d.owner.eq_ignore_ascii_case(&nav.slug);
     let isrcs: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT t.isrc FROM hub_track_resolved_tags rt
@@ -4127,7 +4279,22 @@ async fn tag_detail_page(
         source_count: d.source_count,
         sources,
         sync,
+        q,
         tracks,
+        s_title: crate::table::sort_head(
+            raw.as_deref().unwrap_or(""),
+            "title",
+            "Titel",
+            &sort,
+            &dir,
+        ),
+        s_artists: crate::table::sort_head(
+            raw.as_deref().unwrap_or(""),
+            "artists",
+            "Artists",
+            &sort,
+            &dir,
+        ),
         top_artists,
         cooccur,
         music_api: st.cfg.music_api_token.is_some(),
@@ -4416,7 +4583,7 @@ async fn groups_page(
         .into_iter()
         .map(group_row)
         .filter(|g| {
-            crate::table::matches(
+            crate::table::matches_typo(
                 &format!("{} {} {}", g.name, g.owner, g.role).to_lowercase(),
                 &toks,
             )
@@ -4893,7 +5060,7 @@ async fn collectives_page(
         .into_iter()
         .map(coll_row)
         .filter(|c| {
-            crate::table::matches(
+            crate::table::matches_typo(
                 &format!("{} {} {}", c.name, c.owner, c.role).to_lowercase(),
                 &toks,
             )

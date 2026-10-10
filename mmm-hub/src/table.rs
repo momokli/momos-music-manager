@@ -26,6 +26,49 @@ pub fn matches(hay: &str, toks: &[String]) -> bool {
     toks.is_empty() || toks.iter().all(|t| hay.contains(t.as_str()))
 }
 
+/// Bounded Levenshtein distance; returns `max + 1` once it is known to exceed
+/// `max` (so callers can test `<= 1` cheaply).
+pub fn levenshtein(a: &str, b: &str, max: usize) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.len().abs_diff(b.len()) > max {
+        return max + 1;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut cur = vec![0usize; b.len() + 1];
+        cur[0] = i;
+        let mut row_min = cur[0];
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            let v = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+            cur[j] = v;
+            row_min = row_min.min(v);
+        }
+        if row_min > max {
+            return max + 1;
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// Typo-tolerant variant of [`matches`]: every token either appears as a
+/// substring of `hay`, or is within edit distance `<= 1` of one of `hay`'s words.
+/// Used only where matching happens in Rust (the SQL pages use a stricter pass
+/// first and fall back to this on an empty result).
+pub fn matches_typo(hay: &str, toks: &[String]) -> bool {
+    toks.iter().all(|t| {
+        if t.len() < 3 || hay.contains(t.as_str()) {
+            // Very short tokens stay strict to avoid noisy over-matching.
+            return hay.contains(t.as_str());
+        }
+        hay.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty() && w.len().abs_diff(t.len()) <= 1)
+            .any(|w| levenshtein(t, w, 1) <= 1)
+    })
+}
+
 /// An SQL fragment (AND-able) plus its binds: every query token must appear in
 /// at least one of `cols`. Returns `None` for an empty query or no columns.
 ///
@@ -230,5 +273,28 @@ mod tests {
         assert!(h.href.contains("sort=name"));
         assert!(h.href.contains("dir=desc"));
         assert!(!h.href.contains("sort=name&dir=asc&sort"));
+    }
+
+    #[test]
+    fn levenshtein_bounded() {
+        assert_eq!(levenshtein("dark", "dark", 1), 0);
+        assert_eq!(levenshtein("dork", "dark", 1), 1);
+        assert_eq!(levenshtein("darkk", "dark", 1), 1);
+        // Exceeds max -> returns max + 1.
+        assert_eq!(levenshtein("kitten", "sitting", 2), 3);
+    }
+
+    #[test]
+    fn matches_typo_tolerates_one_edit() {
+        let toks = |q: &str| tokens(q);
+        // Exact substring still matches.
+        assert!(matches_typo("warehouse dark", &toks("dark")));
+        // One substitution.
+        assert!(matches_typo("warehouse dark", &toks("dork")));
+        // One insertion on the data word.
+        assert!(matches_typo("warehouse dark", &toks("darkk")));
+        assert!(!matches_typo("warehouse dark", &toks("zebra")));
+        // Short tokens stay strict.
+        assert!(!matches_typo("warehouse", &toks("wx")));
     }
 }

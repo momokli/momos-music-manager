@@ -404,6 +404,12 @@ async fn artists_page(
 struct ArtistQuery {
     /// Selected reference user (defaults to me).
     user: Option<String>,
+    /// Whitelisted sort field for the track tables (`t_*`), the album table
+    /// (`al_*`) or the playlist tables (`pl_*`); unknown fields fall back to
+    /// each table's own default.
+    sort: Option<String>,
+    /// `asc` | `desc`.
+    dir: Option<String>,
 }
 
 #[derive(Template)]
@@ -441,6 +447,18 @@ struct ArtistPage {
     ref_user: String,
     ref_user_options: Vec<RefUserOption>,
     references: Vec<RefRow>,
+
+    // sortable headers (AR2 tracks, AR4 playlists, AR5c albums)
+    s_t_title: crate::table::SortHead,
+    s_t_album: crate::table::SortHead,
+    s_t_plays: crate::table::SortHead,
+    s_t_last: crate::table::SortHead,
+    s_al_album: crate::table::SortHead,
+    s_al_tracks: crate::table::SortHead,
+    s_pl_name: crate::table::SortHead,
+    s_pl_owner: crate::table::SortHead,
+    s_pl_shared: crate::table::SortHead,
+    s_pl_scope: crate::table::SortHead,
 }
 
 struct PlayRow {
@@ -517,10 +535,63 @@ struct RefUserOption {
     count: i64,
 }
 
+/// Sort a per-user play table in place (server-side, header-driven).
+fn sort_playrows(rows: &mut [PlayRow], field: &str, dir: &str) {
+    let ci = |s: &str| s.to_lowercase();
+    match field {
+        "t_title" => rows.sort_by(|a, b| ci(&a.title).cmp(&ci(&b.title))),
+        "t_album" => rows.sort_by(|a, b| {
+            ci(&a.album)
+                .cmp(&ci(&b.album))
+                .then_with(|| ci(&a.title).cmp(&ci(&b.title)))
+        }),
+        "t_last" => rows.sort_by(|a, b| {
+            a.last
+                .cmp(&b.last)
+                .then_with(|| ci(&a.title).cmp(&ci(&b.title)))
+        }),
+        _ => rows.sort_by(|a, b| {
+            a.plays
+                .cmp(&b.plays)
+                .then_with(|| ci(&a.title).cmp(&ci(&b.title)))
+        }),
+    }
+    if dir.eq_ignore_ascii_case("desc") {
+        rows.reverse();
+    }
+}
+
+/// Sort a playlist table in place (server-side, header-driven).
+fn sort_playlists(rows: &mut [PlaylistRow], field: &str, dir: &str) {
+    let ci = |s: &str| s.to_lowercase();
+    match field {
+        "pl_owner" => rows.sort_by(|a, b| {
+            ci(&a.owner_name)
+                .cmp(&ci(&b.owner_name))
+                .then_with(|| ci(&a.name).cmp(&ci(&b.name)))
+        }),
+        "pl_shared" => rows.sort_by(|a, b| {
+            a.shared
+                .cmp(&b.shared)
+                .then_with(|| ci(&a.name).cmp(&ci(&b.name)))
+        }),
+        "pl_scope" => rows.sort_by(|a, b| {
+            (a.owned as i64)
+                .cmp(&(b.owned as i64))
+                .then_with(|| ci(&a.name).cmp(&ci(&b.name)))
+        }),
+        _ => rows.sort_by(|a, b| ci(&a.name).cmp(&ci(&b.name))),
+    }
+    if dir.eq_ignore_ascii_case("desc") {
+        rows.reverse();
+    }
+}
+
 async fn artist_page(
     State(st): State<AppState>,
     Path(name): Path<String>,
     Query(f): Query<ArtistQuery>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "artists").await else {
@@ -528,6 +599,43 @@ async fn artist_page(
     };
     let me = nav.id;
     let target = artist_key(&name);
+
+    // Per-table whitelists (disjoint field names so the shared `?sort=` only
+    // ever activates one table; the others keep their own default order).
+    let tracks_allowed: &[(&str, &str)] = &[
+        ("t_title", "title"),
+        ("t_album", "album"),
+        ("t_plays", "plays"),
+        ("t_last", "last"),
+    ];
+    let albums_allowed: &[(&str, &str)] = &[("al_album", "album"), ("al_tracks", "tracks")];
+    let pl_allowed: &[(&str, &str)] = &[
+        ("pl_name", "name"),
+        ("pl_owner", "owner_name"),
+        ("pl_shared", "shared"),
+        ("pl_scope", "owned"),
+    ];
+    let (t_sort, t_dir) = crate::table::resolve_sort(
+        f.sort.as_deref(),
+        f.dir.as_deref(),
+        tracks_allowed,
+        "t_plays",
+        "desc",
+    );
+    let (al_sort, al_dir) = crate::table::resolve_sort(
+        f.sort.as_deref(),
+        f.dir.as_deref(),
+        albums_allowed,
+        "al_tracks",
+        "desc",
+    );
+    let (pl_sort, pl_dir) = crate::table::resolve_sort(
+        f.sort.as_deref(),
+        f.dir.as_deref(),
+        pl_allowed,
+        "pl_name",
+        "asc",
+    );
 
     let tracks = load_tracks(&st.pool).await;
     let artist_tracks: Vec<&TrackInfo> = tracks
@@ -614,12 +722,10 @@ async fn artist_page(
     let mut my_plays: Vec<PlayRow> = Vec::new();
     let mut others: Vec<OtherUser> = Vec::new();
     let user_count = plays_by_user.len() as i64;
-    for (uid, mut list) in plays_by_user {
-        list.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
+    for (uid, list) in plays_by_user {
         let total: i64 = list.iter().map(|x| x.1).sum();
-        let rows: Vec<PlayRow> = list
+        let mut rows: Vec<PlayRow> = list
             .into_iter()
-            .take(20)
             .map(|(tid, pc, title, album, last)| PlayRow {
                 track_id: tid,
                 title,
@@ -628,6 +734,8 @@ async fn artist_page(
                 last,
             })
             .collect();
+        sort_playrows(&mut rows, &t_sort, &t_dir);
+        rows.truncate(20);
         if uid == me {
             my_plays = rows;
         } else {
@@ -745,12 +853,12 @@ async fn artist_page(
             }
         }
     }
-    my_playlists.sort_by(|a, b| a.name.cmp(&b.name));
+    sort_playlists(&mut my_playlists, &pl_sort, &pl_dir);
     my_playlists.dedup_by(|a, b| a.id == b.id);
     let other_playlist_groups: Vec<OwnerPlaylists> = pl_by_user
         .into_iter()
         .map(|(slug, mut rows)| {
-            rows.sort_by(|a, b| a.name.cmp(&b.name));
+            sort_playlists(&mut rows, &pl_sort, &pl_dir);
             rows.dedup_by(|a, b| a.id == b.id);
             OwnerPlaylists { slug, rows }
         })
@@ -909,7 +1017,17 @@ async fn artist_page(
             }
         })
         .collect();
-    albums.sort_by(|a, b| b.tracks.cmp(&a.tracks).then_with(|| a.album.cmp(&b.album)));
+    match al_sort.as_str() {
+        "al_album" => albums.sort_by(|a, b| a.album.to_lowercase().cmp(&b.album.to_lowercase())),
+        _ => albums.sort_by(|a, b| {
+            a.tracks
+                .cmp(&b.tracks)
+                .then_with(|| a.album.to_lowercase().cmp(&b.album.to_lowercase()))
+        }),
+    }
+    if al_dir.eq_ignore_ascii_case("desc") {
+        albums.reverse();
+    }
 
     // ── AR6: reference artists ───────────────────────────────────────────────
     // shared-tag candidates → candidate -> (name, shared tag ids, track ids)
@@ -1077,6 +1195,18 @@ async fn artist_page(
         })
         .collect();
 
+    let rawq = raw.as_deref().unwrap_or("");
+    let s_t_title = crate::table::sort_head(rawq, "t_title", "Track", &t_sort, &t_dir);
+    let s_t_album = crate::table::sort_head(rawq, "t_album", "Album", &t_sort, &t_dir);
+    let s_t_plays = crate::table::sort_head(rawq, "t_plays", "Plays", &t_sort, &t_dir);
+    let s_t_last = crate::table::sort_head(rawq, "t_last", "Zuletzt", &t_sort, &t_dir);
+    let s_al_album = crate::table::sort_head(rawq, "al_album", "Album", &al_sort, &al_dir);
+    let s_al_tracks = crate::table::sort_head(rawq, "al_tracks", "Tracks", &al_sort, &al_dir);
+    let s_pl_name = crate::table::sort_head(rawq, "pl_name", "Playlist", &pl_sort, &pl_dir);
+    let s_pl_owner = crate::table::sort_head(rawq, "pl_owner", "Owner", &pl_sort, &pl_dir);
+    let s_pl_shared = crate::table::sort_head(rawq, "pl_shared", "Tracks", &pl_sort, &pl_dir);
+    let s_pl_scope = crate::table::sort_head(rawq, "pl_scope", "Scope", &pl_sort, &pl_dir);
+
     render(&ArtistPage {
         nav,
         flash: String::new(),
@@ -1100,6 +1230,16 @@ async fn artist_page(
         ref_user: selected_slug,
         ref_user_options,
         references,
+        s_t_title,
+        s_t_album,
+        s_t_plays,
+        s_t_last,
+        s_al_album,
+        s_al_tracks,
+        s_pl_name,
+        s_pl_owner,
+        s_pl_shared,
+        s_pl_scope,
     })
 }
 

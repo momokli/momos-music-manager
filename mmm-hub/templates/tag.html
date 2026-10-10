@@ -295,8 +295,23 @@ content %}
         </table>
     </div>
 </section>
-{% endif %} {% if tracks.is_empty() %}
-<p class="hub-empty">Keine Tracks (Quell-Playlist leer oder noch nicht gefetcht).</p>
+{% endif %}
+
+<form method="get" action="/tag/{{ id }}" class="hub-filter" role="search">
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Suchen (alle Felder, beliebige Reihenfolge) …"
+        aria-label="Tracks suchen"
+    />
+    <button type="submit">Suchen</button>
+</form>
+
+{% if tracks.is_empty() %}
+<p class="hub-empty">
+    Keine Tracks (Quell-Playlist leer, noch nicht gefetcht oder kein Suchtreffer).
+</p>
 {% else %}
 <div class="overflow-auto hub-scroll-y">
     <table class="hub-dense-table">
@@ -306,14 +321,29 @@ content %}
         <thead>
             <tr>
                 <th scope="col">#</th>
-                <th scope="col">Track</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_title.href }}"
+                        class="hub-sort{% if s_title.active %} hub-sort-on{% endif %}"
+                        >Titel{% if s_title.active %} {{ s_title.arrow }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_artists.href }}"
+                        class="hub-sort{% if s_artists.active %} hub-sort-on{% endif %}"
+                        >Artists{% if s_artists.active %} {{ s_artists.arrow }}{% endif
+                        %}</a
+                    >
+                </th>
             </tr>
         </thead>
         <tbody>
             {% for t in tracks %}
             <tr>
                 <td>{{ loop.index }}</td>
-                <td><a href="/track/{{ t.id }}">{{ t.artists }} — {{ t.title }}</a></td>
+                <td><a href="/track/{{ t.id }}">{{ t.title }}</a></td>
+                <td>{{ t.artists }}</td>
             </tr>
             {% endfor %}
         </tbody>

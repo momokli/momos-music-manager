@@ -50,6 +50,15 @@ struct AlbumFilter {
     dir: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct AlbumTrackFilter {
+    /// Whitelisted sort field: `title` (default) | `artists` | `duration`.
+    sort: Option<String>,
+    /// `asc` | `desc`.
+    dir: Option<String>,
+}
+
 #[derive(Template)]
 #[template(path = "albums.html")]
 struct AlbumsPage {
@@ -154,6 +163,7 @@ struct AlbumTrack {
     title: String,
     artists: String,
     duration: String,
+    duration_ms: i64,
 }
 
 struct ArtistLink {
@@ -171,16 +181,30 @@ struct AlbumPage {
     artists: Vec<ArtistLink>,
     track_count: usize,
     tracks: Vec<AlbumTrack>,
+    s_title: crate::table::SortHead,
+    s_artists: crate::table::SortHead,
+    s_duration: crate::table::SortHead,
 }
 
 async fn album_page(
     State(st): State<AppState>,
     Path(name): Path<String>,
+    Query(f): Query<AlbumTrackFilter>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "albums").await else {
         return Redirect::to("/login").into_response();
     };
+
+    let allowed: &[(&str, &str)] = &[
+        ("title", "title"),
+        ("artists", "artists"),
+        ("duration", "duration_ms"),
+    ];
+    let (sort, dir) =
+        crate::table::resolve_sort(f.sort.as_deref(), f.dir.as_deref(), allowed, "title", "asc");
+
     let rows = sqlx::query(
         "SELECT id, COALESCE(title,'') AS title, COALESCE(artists,'') AS artists,
                 duration_ms, image_url
@@ -221,9 +245,38 @@ async fn album_page(
             title: r.get("title"),
             artists: a,
             duration,
+            duration_ms: ms,
         });
     }
+
+    // Server-side sort of the (bounded) in-memory track list.
+    let ci = |s: &str| s.to_lowercase();
+    match sort.as_str() {
+        "artists" => tracks.sort_by(|a, b| {
+            ci(&a.artists)
+                .cmp(&ci(&b.artists))
+                .then_with(|| ci(&a.title).cmp(&ci(&b.title)))
+        }),
+        "duration" => tracks.sort_by(|a, b| {
+            a.duration_ms
+                .cmp(&b.duration_ms)
+                .then_with(|| ci(&a.title).cmp(&ci(&b.title)))
+        }),
+        _ => tracks.sort_by(|a, b| {
+            ci(&a.title)
+                .cmp(&ci(&b.title))
+                .then_with(|| ci(&a.artists).cmp(&ci(&b.artists)))
+        }),
+    }
+    if dir == "desc" {
+        tracks.reverse();
+    }
+
     let track_count = tracks.len();
+    let rawq = raw.as_deref().unwrap_or("");
+    let s_title = crate::table::sort_head(rawq, "title", "Track", &sort, &dir);
+    let s_artists = crate::table::sort_head(rawq, "artists", "Künstler", &sort, &dir);
+    let s_duration = crate::table::sort_head(rawq, "duration", "Dauer", &sort, &dir);
     render(&AlbumPage {
         nav,
         flash: String::new(),
@@ -232,5 +285,8 @@ async fn album_page(
         artists,
         track_count,
         tracks,
+        s_title,
+        s_artists,
+        s_duration,
     })
 }

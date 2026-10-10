@@ -1,5 +1,5 @@
-{% extends "base.html" %} {% block title %}{{ name }} — Spelunke{% endblock %} {% block content
-%}
+{% extends "base.html" %} {% block title %}{{ name }} — Spelunke{% endblock %} {% block
+content %}
 <nav class="hub-crumbs" aria-label="Brotkrumen">
     <ol>
         <li><a href="/">Übersicht</a></li>
@@ -10,7 +10,12 @@
 <div class="hub-page-head">
     <h1>{{ name }}</h1>
     <div class="hub-actions">
-        <a href="{{ spotify }}" target="_blank" rel="noopener" role="button" class="secondary outline"
+        <a
+            href="{{ spotify }}"
+            target="_blank"
+            rel="noopener"
+            role="button"
+            class="secondary outline"
             >Auf Spotify suchen ↗</a
         >
     </div>
@@ -30,10 +35,38 @@
         <thead>
             <tr>
                 <th scope="col">#</th>
-                <th scope="col">Track</th>
-                <th scope="col">Album</th>
-                <th scope="col" title="Traktor play count">Plays</th>
-                <th scope="col">Zuletzt</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_t_title.href }}"
+                        class="hub-sort{% if s_t_title.active %} hub-sort-on{% endif %}"
+                        >{{ s_t_title.label }}{% if s_t_title.active %} {{ s_t_title.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_t_album.href }}"
+                        class="hub-sort{% if s_t_album.active %} hub-sort-on{% endif %}"
+                        >{{ s_t_album.label }}{% if s_t_album.active %} {{ s_t_album.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col" title="Traktor play count">
+                    <a
+                        href="{{ s_t_plays.href }}"
+                        class="hub-sort{% if s_t_plays.active %} hub-sort-on{% endif %}"
+                        >{{ s_t_plays.label }}{% if s_t_plays.active %} {{ s_t_plays.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_t_last.href }}"
+                        class="hub-sort{% if s_t_last.active %} hub-sort-on{% endif %}"
+                        >{{ s_t_last.label }}{% if s_t_last.active %} {{ s_t_last.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
             </tr>
         </thead>
         <tbody>
@@ -41,18 +74,25 @@
             <tr>
                 <td>{{ loop.index }}</td>
                 <td><a href="/track/{{ p.track_id }}">{{ p.title }}</a></td>
-                <td>{% if p.album != "" %}<a href="/album/{{ p.album }}">{{ p.album }}</a>{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                <td>
+                    {% if p.album != "" %}<a href="/album/{{ p.album }}">{{ p.album }}</a
+                    >{% else %}<span class="hub-muted">—</span>{% endif %}
+                </td>
                 <td>{{ p.plays }}</td>
-                <td>{% if p.last != "" %}{{ p.last }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                <td>
+                    {% if p.last != "" %}{{ p.last }}{% else %}<span class="hub-muted"
+                        >—</span
+                    >{% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
     {% else %}
-    <p class="hub-muted">Du hast (noch) keine Plays für diesen Künstler — Traktor importiert?</p>
-    {% endif %}
-
-    {% if !others.is_empty() %}
+    <p class="hub-muted">
+        Du hast (noch) keine Plays für diesen Künstler — Traktor importiert?
+    </p>
+    {% endif %} {% if !others.is_empty() %}
     <h3>Andere Nutzer</h3>
     {% for u in others %}
     <details>
@@ -61,10 +101,38 @@
             <thead>
                 <tr>
                     <th scope="col">#</th>
-                    <th scope="col">Track</th>
-                    <th scope="col">Album</th>
-                    <th scope="col">Plays</th>
-                    <th scope="col">Zuletzt</th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_t_title.href }}"
+                            class="hub-sort{% if s_t_title.active %} hub-sort-on{% endif %}"
+                            >{{ s_t_title.label }}{% if s_t_title.active %} {{
+                            s_t_title.arrow }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_t_album.href }}"
+                            class="hub-sort{% if s_t_album.active %} hub-sort-on{% endif %}"
+                            >{{ s_t_album.label }}{% if s_t_album.active %} {{
+                            s_t_album.arrow }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_t_plays.href }}"
+                            class="hub-sort{% if s_t_plays.active %} hub-sort-on{% endif %}"
+                            >{{ s_t_plays.label }}{% if s_t_plays.active %} {{
+                            s_t_plays.arrow }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_t_last.href }}"
+                            class="hub-sort{% if s_t_last.active %} hub-sort-on{% endif %}"
+                            >{{ s_t_last.label }}{% if s_t_last.active %} {{
+                            s_t_last.arrow }}{% endif %}</a
+                        >
+                    </th>
                 </tr>
             </thead>
             <tbody>
@@ -72,16 +140,23 @@
                 <tr>
                     <td>{{ loop.index }}</td>
                     <td><a href="/track/{{ p.track_id }}">{{ p.title }}</a></td>
-                    <td>{% if p.album != "" %}<a href="/album/{{ p.album }}">{{ p.album }}</a>{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                    <td>
+                        {% if p.album != "" %}<a href="/album/{{ p.album }}"
+                            >{{ p.album }}</a
+                        >{% else %}<span class="hub-muted">—</span>{% endif %}
+                    </td>
                     <td>{{ p.plays }}</td>
-                    <td>{% if p.last != "" %}{{ p.last }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                    <td>
+                        {% if p.last != "" %}{{ p.last }}{% else %}<span class="hub-muted"
+                            >—</span
+                        >{% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
     </details>
-    {% endfor %}
-    {% else %}
+    {% endfor %} {% else %}
     <p class="hub-empty">Keine Plays anderer Nutzer.</p>
     {% endif %}
 </section>
@@ -102,7 +177,9 @@
                 <thead>
                     <tr>
                         <th scope="col">Gruppe</th>
-                        <th scope="col" title="Tracks mit einem Tag dieser Gruppe">Tracks</th>
+                        <th scope="col" title="Tracks mit einem Tag dieser Gruppe">
+                            Tracks
+                        </th>
                     </tr>
                 </thead>
                 <tbody>
@@ -137,31 +214,62 @@
     <h2>Playlists</h2>
     {% if my_playlists.is_empty() && other_playlist_groups.is_empty() %}
     <p class="hub-empty">In keinen Playlists.</p>
-    {% endif %}
-    {% if !my_playlists.is_empty() %}
+    {% endif %} {% if !my_playlists.is_empty() %}
     <h3>Meine</h3>
     <table class="hub-dense-table">
         <thead>
             <tr>
-                <th scope="col">Playlist</th>
-                <th scope="col">Owner</th>
-                <th scope="col" title="Tracks dieses Künstlers in der Playlist">Tracks</th>
-                <th scope="col">Scope</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_pl_name.href }}"
+                        class="hub-sort{% if s_pl_name.active %} hub-sort-on{% endif %}"
+                        >{{ s_pl_name.label }}{% if s_pl_name.active %} {{ s_pl_name.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_pl_owner.href }}"
+                        class="hub-sort{% if s_pl_owner.active %} hub-sort-on{% endif %}"
+                        >{{ s_pl_owner.label }}{% if s_pl_owner.active %} {{
+                        s_pl_owner.arrow }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col" title="Tracks dieses Künstlers in der Playlist">
+                    <a
+                        href="{{ s_pl_shared.href }}"
+                        class="hub-sort{% if s_pl_shared.active %} hub-sort-on{% endif %}"
+                        >{{ s_pl_shared.label }}{% if s_pl_shared.active %} {{
+                        s_pl_shared.arrow }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_pl_scope.href }}"
+                        class="hub-sort{% if s_pl_scope.active %} hub-sort-on{% endif %}"
+                        >{{ s_pl_scope.label }}{% if s_pl_scope.active %} {{
+                        s_pl_scope.arrow }}{% endif %}</a
+                    >
+                </th>
             </tr>
         </thead>
         <tbody>
             {% for p in my_playlists %}
             <tr>
                 <td><a href="/playlist/{{ p.id }}">{{ p.name }}</a></td>
-                <td>{% if p.owner_name != "" %}{{ p.owner_name }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                <td>
+                    {% if p.owner_name != "" %}{{ p.owner_name }}{% else %}<span
+                        class="hub-muted"
+                        >—</span
+                    >{% endif %}
+                </td>
                 <td>{{ p.shared }}</td>
                 <td>{% if p.owned %}meine{% else %}gefolgt{% endif %}</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
-    {% endif %}
-    {% if !other_playlist_groups.is_empty() %}
+    {% endif %} {% if !other_playlist_groups.is_empty() %}
     <h3>Andere</h3>
     {% for g in other_playlist_groups %}
     <details>
@@ -169,17 +277,50 @@
         <table class="hub-dense-table" style="margin-top: 0.3rem">
             <thead>
                 <tr>
-                    <th scope="col">Playlist</th>
-                    <th scope="col">Owner</th>
-                    <th scope="col">Tracks</th>
-                    <th scope="col">Scope</th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_pl_name.href }}"
+                            class="hub-sort{% if s_pl_name.active %} hub-sort-on{% endif %}"
+                            >{{ s_pl_name.label }}{% if s_pl_name.active %} {{
+                            s_pl_name.arrow }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_pl_owner.href }}"
+                            class="hub-sort{% if s_pl_owner.active %} hub-sort-on{% endif %}"
+                            >{{ s_pl_owner.label }}{% if s_pl_owner.active %} {{
+                            s_pl_owner.arrow }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_pl_shared.href }}"
+                            class="hub-sort{% if s_pl_shared.active %} hub-sort-on{% endif %}"
+                            >{{ s_pl_shared.label }}{% if s_pl_shared.active %} {{
+                            s_pl_shared.arrow }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_pl_scope.href }}"
+                            class="hub-sort{% if s_pl_scope.active %} hub-sort-on{% endif %}"
+                            >{{ s_pl_scope.label }}{% if s_pl_scope.active %} {{
+                            s_pl_scope.arrow }}{% endif %}</a
+                        >
+                    </th>
                 </tr>
             </thead>
             <tbody>
                 {% for p in g.rows %}
                 <tr>
                     <td><a href="/playlist/{{ p.id }}">{{ p.name }}</a></td>
-                    <td>{% if p.owner_name != "" %}{{ p.owner_name }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                    <td>
+                        {% if p.owner_name != "" %}{{ p.owner_name }}{% else %}<span
+                            class="hub-muted"
+                            >—</span
+                        >{% endif %}
+                    </td>
                     <td>{{ p.shared }}</td>
                     <td>{% if p.owned %}meine{% else %}gefolgt{% endif %}</td>
                 </tr>
@@ -187,8 +328,7 @@
             </tbody>
         </table>
     </details>
-    {% endfor %}
-    {% endif %}
+    {% endfor %} {% endif %}
 </section>
 
 <!-- AR5: collaborations, b2b, album co-artists -->
@@ -240,7 +380,12 @@
                         <td>{{ b.playlist }}</td>
                         <td>@{{ b.user_slug }}</td>
                         <td>{{ b.tracks }}</td>
-                        <td class="hub-cell-pl">{% if b.others != "" %}{{ b.others }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                        <td class="hub-cell-pl">
+                            {% if b.others != "" %}{{ b.others }}{% else %}<span
+                                class="hub-muted"
+                                >—</span
+                            >{% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -256,17 +401,38 @@
         <table class="hub-dense-table">
             <thead>
                 <tr>
-                    <th scope="col">Album</th>
-                    <th scope="col" title="Tracks dieses Künstlers auf dem Album">Tracks</th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_al_album.href }}"
+                            class="hub-sort{% if s_al_album.active %} hub-sort-on{% endif %}"
+                            >{{ s_al_album.label }}{% if s_al_album.active %} {{
+                            s_al_album.arrow }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col" title="Tracks dieses Künstlers auf dem Album">
+                        <a
+                            href="{{ s_al_tracks.href }}"
+                            class="hub-sort{% if s_al_tracks.active %} hub-sort-on{% endif %}"
+                            >{{ s_al_tracks.label }}{% if s_al_tracks.active %} {{
+                            s_al_tracks.arrow }}{% endif %}</a
+                        >
+                    </th>
                     <th scope="col">Weitere Künstler</th>
                 </tr>
             </thead>
             <tbody>
                 {% for a in albums %}
                 <tr>
-                    <td class="hub-cell-pl"><a href="/album/{{ a.album }}">{{ a.album }}</a></td>
+                    <td class="hub-cell-pl">
+                        <a href="/album/{{ a.album }}">{{ a.album }}</a>
+                    </td>
                     <td>{{ a.tracks }}</td>
-                    <td class="hub-cell-pl">{% if a.others != "" %}{{ a.others }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                    <td class="hub-cell-pl">
+                        {% if a.others != "" %}{{ a.others }}{% else %}<span
+                            class="hub-muted"
+                            >—</span
+                        >{% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -279,8 +445,8 @@
 <section aria-label="Referenzen" style="margin-bottom: 0.7rem">
     <h2>Referenz-Künstler</h2>
     <p class="hub-muted">
-        Score = {{ ref_user_options.len() }} Nutzer wählbar · angezeigt für @{{ ref_user }}. Aus
-        gemeinsamen Tags, Kollaborationen und b2b.
+        Score = {{ ref_user_options.len() }} Nutzer wählbar · angezeigt für @{{ ref_user
+        }}. Aus gemeinsamen Tags, Kollaborationen und b2b.
     </p>
     <p>
         {% for o in ref_user_options %}<a

@@ -125,7 +125,7 @@ async fn queue_page(
         .into_iter()
         .filter(|r| {
             let hay = format!("{} {} {}", r.title, r.artists, r.album).to_lowercase();
-            (needle_toks.is_empty() || needle_toks.iter().all(|t| hay.contains(t.as_str())))
+            crate::table::matches_typo(&hay, &needle_toks)
                 && (!mine || mine_ids.contains(&r.track_id))
         })
         .take(500)

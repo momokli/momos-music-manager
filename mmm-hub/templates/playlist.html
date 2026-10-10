@@ -109,18 +109,45 @@ content %}
         >{{ ready }}/{{ total }} bereit</span
     >
 </section>
-{% endif %} {% if tracks.is_empty() %}
+{% endif %}
+
+<form method="get" action="/playlist/{{ id }}" class="hub-filter" role="search">
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Suchen (alle Felder, beliebige Reihenfolge) …"
+        aria-label="Tracks suchen"
+    />
+    <button type="submit">Suchen</button>
+</form>
+
+{% if tracks.is_empty() %}
 <p>Keine Tracks in dieser Playlist.</p>
 {% else %}
 <div class="overflow-auto">
-    <table>
+    <table class="hub-dense-table">
         <caption class="hub-visually-hidden">
-            Tracks dieser Playlist in Reihenfolge
+            Tracks dieser Playlist
         </caption>
         <thead>
             <tr>
-                <th scope="col">#</th>
-                <th scope="col">Track</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_pos.href }}"
+                        class="hub-sort{% if s_pos.active %} hub-sort-on{% endif %}"
+                        >{{ s_pos.label }}{% if s_pos.active %} {{ s_pos.arrow }}{% endif
+                        %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_title.href }}"
+                        class="hub-sort{% if s_title.active %} hub-sort-on{% endif %}"
+                        >{{ s_title.label }}{% if s_title.active %} {{ s_title.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
             </tr>
         </thead>
         <tbody>
