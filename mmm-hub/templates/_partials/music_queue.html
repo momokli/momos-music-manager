@@ -1,0 +1,29 @@
+{% if !error.is_empty() %}
+<p class="hub-flash hub-flash-err">{{ error }}</p>
+{% endif %} {% if items.is_empty() %}
+<p class="hub-muted">Queue leer.</p>
+{% else %}
+<div class="overflow-auto hub-scroll-y">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            music-api Live-Queue
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Titel</th>
+                <th scope="col">Status</th>
+                <th scope="col">Fortschritt</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for q in items %}
+            <tr>
+                <td>{{ q.title }}</td>
+                <td>{{ q.status }}</td>
+                <td>{{ q.progress }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}

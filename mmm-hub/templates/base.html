@@ -277,6 +277,47 @@
         background: #3a1f22;
         color: #ff9a9a;
       }
+      /* Toasts: transient, stacked bottom-right */
+      #hub-toasts {
+        position: fixed;
+        right: 1rem;
+        bottom: 1rem;
+        z-index: 1000;
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+        align-items: flex-end;
+      }
+      .hub-toast {
+        padding: 0.45rem 0.7rem;
+        border-radius: 0.4rem;
+        font-size: 0.82rem;
+        max-width: 26rem;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+        animation: hub-toast-in 0.12s ease-out;
+      }
+      .hub-toast-ok {
+        background: #123c22;
+        color: #5fe08a;
+      }
+      .hub-toast-err {
+        background: #3a1f22;
+        color: #ff9a9a;
+      }
+      .hub-toast-info {
+        background: #1c2b3a;
+        color: #9ecbff;
+      }
+      @keyframes hub-toast-in {
+        from {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
       .hub-muted {
         color: var(--pico-muted-color);
       }
@@ -715,6 +756,7 @@
               <li><a href="/import">Import</a></li>
               <li><a href="/downloads">Downloads</a></li>
               <li><a href="/history">Historie</a></li>
+              <li><a href="/music-api">music-api</a></li>
               <li><a href="/sql">SQL</a></li>
             </ul>
           </details>
@@ -741,9 +783,38 @@
 
     <main class="container-fluid" id="main">
       {% block flash %} {% if flash != "" %}
-      <article class="hub-flash hub-flash-ok" role="status">{{ flash }}</article>
+      <div id="hub-flash-init" data-msg="{{ flash }}" hidden></div>
       {% endif %} {% endblock %} {% block content %}{% endblock %}
     </main>
+    <div id="hub-toasts" aria-live="polite"></div>
+    <script>
+      // Toast helper: hubToast(msg, kind) where kind ∈ ok|err|info.
+      window.hubToast = function (msg, kind) {
+        var box = document.getElementById("hub-toasts");
+        if (!box) return;
+        var el = document.createElement("div");
+        el.className = "hub-toast hub-toast-" + (kind || "info");
+        el.textContent = msg;
+        box.appendChild(el);
+        setTimeout(function () {
+          el.style.transition = "opacity .3s";
+          el.style.opacity = "0";
+          setTimeout(function () {
+            el.remove();
+          }, 320);
+        }, 4000);
+      };
+      // htmx responses may carry `HX-Trigger: {"toast":{"msg":"…","kind":"ok"}}`.
+      document.body.addEventListener("toast", function (e) {
+        var d = e.detail || {};
+        if (d.msg) window.hubToast(d.msg, d.kind || "info");
+      });
+      // Server-rendered flash -> toast on load.
+      (function () {
+        var fi = document.getElementById("hub-flash-init");
+        if (fi && fi.dataset.msg) window.hubToast(fi.dataset.msg, "ok");
+      })();
+    </script>
     <script>
       (function () {
         function fmt(s) {

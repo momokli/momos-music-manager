@@ -22,6 +22,7 @@ pub mod ingest;
 pub mod lastfm;
 pub mod mmm_import;
 pub mod music_api;
+pub mod music_ops;
 pub mod pages;
 pub mod recommend;
 pub mod scoring;

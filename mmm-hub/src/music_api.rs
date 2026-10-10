@@ -411,6 +411,140 @@ pub async fn queue(cfg: &Config) -> Result<serde_json::Value> {
         .unwrap_or(serde_json::Value::Array(Vec::new())))
 }
 
+// ── native integration: bulk metadata, live queue, event log ─────────────────
+
+/// One object-store entry for an ISRC (presence proof for downloads/restore).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ObjRef {
+    pub hash: String,
+    pub size: i64,
+}
+
+/// Bulk metadata/state for one ISRC (from `GET /tracks`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackMeta {
+    pub isrc: String,
+    pub state: Option<String>,
+    pub deezer_id: Option<String>,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub source_format: Option<String>,
+    #[serde(default)]
+    pub formats: Vec<String>,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub objects: Vec<ObjRef>,
+    /// True when the ISRC is not in the music-api ledger at all.
+    #[serde(default)]
+    pub unknown: bool,
+}
+
+impl TrackMeta {
+    pub fn ready(&self) -> bool {
+        self.state.as_deref() == Some("ready")
+    }
+    /// Total stored object bytes (sum over objects).
+    pub fn object_bytes(&self) -> i64 {
+        self.objects.iter().map(|o| o.size).sum()
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct TracksResp {
+    #[serde(default)]
+    tracks: Vec<TrackMeta>,
+}
+
+/// `GET /tracks?isrcs=a,b,c` — bulk metadata + state + objects for many ISRCs.
+pub async fn tracks(cfg: &Config, isrcs: &[String]) -> Result<Vec<TrackMeta>> {
+    if isrcs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let url = format!("{}/tracks", cfg.music_api_base);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(token(cfg)?)
+        .query(&[("isrcs", isrcs.join(","))])
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("music-api {url} -> {}", resp.status());
+    }
+    let body: TracksResp = resp.json().await.unwrap_or_default();
+    Ok(body.tracks)
+}
+
+/// One entry of the live deemix queue.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct QueueEntry {
+    pub id: String,
+    pub title: Option<String>,
+    pub status: String,
+    pub progress: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct QueueResp {
+    #[serde(default)]
+    items: Vec<QueueEntry>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// `GET /queue` — typed live queue (empty on failure).
+pub async fn live_queue(cfg: &Config) -> (Vec<QueueEntry>, Option<String>) {
+    let url = format!("{}/queue", cfg.music_api_base);
+    let resp = match reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(token(cfg).unwrap_or_default())
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return (Vec::new(), None),
+    };
+    match resp.json::<QueueResp>().await {
+        Ok(b) => (b.items, b.error),
+        Err(_) => (Vec::new(), None),
+    }
+}
+
+/// One service event (from `GET /logs`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LogLine {
+    pub at: i64,
+    pub level: String,
+    pub msg: String,
+}
+
+#[derive(Deserialize)]
+struct LogsResp {
+    #[serde(default)]
+    logs: Vec<LogLine>,
+}
+
+/// `GET /logs?limit=n` — recent service events (empty on failure).
+pub async fn logs(cfg: &Config, limit: usize) -> Vec<LogLine> {
+    let url = format!("{}/logs", cfg.music_api_base);
+    let resp = match reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(token(cfg).unwrap_or_default())
+        .query(&[("limit", limit.to_string())])
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Vec::new(),
+    };
+    resp.json::<LogsResp>()
+        .await
+        .map(|b| b.logs)
+        .unwrap_or_default()
+}
+
 /// ISRCs whose cached state is not `ready` (missing from cache = not ready).
 pub async fn missing_isrcs(pool: &SqlitePool, isrcs: &[String]) -> Vec<String> {
     let mut ready: std::collections::HashSet<String> = std::collections::HashSet::new();

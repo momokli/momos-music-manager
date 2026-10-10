@@ -1,0 +1,53 @@
+{% extends "base.html" %} {% block title %}music-api — Spelunke{% endblock %} {% block content
+%}
+<hgroup>
+    <h1>music-api</h1>
+    <p class="hub-muted">
+        Download-Autorität auf dem Server — Live-Queue, Aktivität und Aktionen. Aktionen
+        geben sofort Feedback (Toast).
+    </p>
+</hgroup>
+
+{% if !configured %}
+<p class="hub-empty">
+    music-api ist nicht konfiguriert. Token/Base-URL unter <a href="/admin">Admin</a>
+    setzen.
+</p>
+{% else %}
+<div class="hub-filter">
+    <button hx-post="/music-api/refresh" hx-swap="none" hx-disabled-elt="this">
+        States aktualisieren
+    </button>
+    <button
+        hx-post="/music-api/order-missing"
+        hx-swap="none"
+        hx-disabled-elt="this"
+        class="secondary"
+    >
+        Fehlende ordern
+    </button>
+    <span class="hub-muted"
+        >{{ tracks_with_isrc }} Tracks mit ISRC · {{ ready }} ready · {{ errors }} Fehler</span
+    >
+</div>
+
+<h2>Live-Queue</h2>
+<div
+    id="music-queue"
+    hx-get="/music-api/queue"
+    hx-trigger="load, every 3s"
+    hx-swap="innerHTML"
+>
+    <p class="hub-muted">lädt …</p>
+</div>
+
+<h2>Aktivität</h2>
+<div
+    id="music-logs"
+    hx-get="/music-api/logs"
+    hx-trigger="load, every 5s"
+    hx-swap="innerHTML"
+>
+    <p class="hub-muted">lädt …</p>
+</div>
+{% endif %} {% endblock %}
