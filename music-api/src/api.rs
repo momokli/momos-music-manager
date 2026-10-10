@@ -73,7 +73,7 @@ async fn create_order(
     }
 
     let order_id = uuid::Uuid::new_v4().to_string();
-    if let Err(e) = db::create_order(&state.pool, &order_id, &isrcs).await {
+    if let Err(e) = db::create_order(&state.pool, &order_id, &isrcs, req.priority).await {
         tracing::error!("create_order failed: {e:#}");
         return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to create order");
     }
@@ -465,6 +465,7 @@ async fn get_queue(State(state): State<Arc<AppState>>) -> Response {
     Json(json!({
         "isrc": isrc_pending.iter().map(|t| json!({
             "isrc": t.isrc, "state": t.state, "title": t.title, "artist": t.artist,
+            "priority": t.priority,
         })).collect::<Vec<_>>(),
         "url": url_pending.iter().map(|t| json!({
             "url": t.url, "provider": t.provider, "state": t.state,

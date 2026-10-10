@@ -86,6 +86,9 @@ pub struct OrderItem {
 #[derive(Debug, Deserialize)]
 pub struct CreateOrderRequest {
     pub items: Vec<OrderItemRequest>,
+    /// Optional priority for the whole order (higher = sooner). Default 0.
+    #[serde(default)]
+    pub priority: i64,
 }
 
 #[derive(Debug, Deserialize)]
