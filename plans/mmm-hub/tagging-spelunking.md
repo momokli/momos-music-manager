@@ -16,7 +16,7 @@
 
 **Epic**: #203 · **Milestones**: #15 `hub-tags-0.10.0`, #16 `hub-insights-0.11.0`,
 #17 `hub-traktor-0.13.0`, #18 `hub-scoring-0.12.0`, #19 `hub-tasks-0.14.0`,
-#20 `hub-sim-0.15.0`.
+#20 `hub-sim-0.15.0`, #21 `hub-history-0.16.0`.
 
 | Plan-ID | Issue | Titel                                                    |
 | ------- | ----- | -------------------------------------------------------- |
@@ -40,6 +40,9 @@
 | T6-1    | #221  | similarity v2 — tag overlap cross-group                  |
 | T6-2    | #222  | rumpelkiste exception in similarity                      |
 | T6-3    | #223  | wire sim into digging/overlap                            |
+| H1      | #224  | import-run ledger (all sources)                          |
+| H2      | #225  | import diff / change events                              |
+| H3      | #226  | import history UI                                        |
 
 ---
 
@@ -81,9 +84,16 @@
 - **D3** **Similarity Score** (zwischen zwei Tracks) separat vom Ripeness (siehe C).
 - **D4** **Score-Schwelle ist ein UI-Filter, kein Hard-Cutoff**: In jeder Ansicht (Tag-Aufgabe, Digging, Overlap, Track-Liste, …) gibt es einen **Score-Filter** (min/max). Der Ripeness-Score wird **on the fly** berechnet und ist **unabhängig von fixen Werten**; es gibt keinen eingebauten Ausschluss. Default des Filters ist offen (kein Ausschluss).
 
+### H — Historisierung aller Import-Quellen
+
+- **H1** **Run-Ledger**: Jeder Import (Spotify-Sync, Traktor-Upload, später SoundCloud/YouTube) schreibt einen Lauf mit Zeitstempel, Quelle, Status und Statistiken in `hub_import_runs`.
+- **H2** **Change-Events / Diff**: Zwischen zwei Importen wird erfasst, **was sich über die Zeit ändert** — `hub_import_events` (added/removed/changed) für Playlist-Mitgliedschaft, Track-Meta-Deltas, Traktor-playcount/rating/last-played usw. Querschnitt über alle Quellen.
+- **H3** **History-UI**: Läufe je Quelle/User + Timeline der Änderungen (pro Track, pro Playlist), filterbar wie die übrigen Tabellen.
+- **H4** **Traktor-Quelle**: **jeder User lädt seine eigene `collection.nml` hoch** (siehe E1).
+
 ### E — Traktor-Meta-Ingest (Voraussetzung für D1/E)
 
-- **E1** Pro User **`collection.nml`** importieren: play count, last played, rating, Playlists/Collection/Session-History.
+- **E1** Pro User **`collection.nml`** importieren: play count, last played, rating, Playlists/Collection/Session-History. **Upload über die UI** (jeder User lädt seine eigene Datei hoch).
 - **E2** Speicherung + Views fürs Scoring/„am häufigsten gespielt".
 
 ### F — Tägliche/wöchentliche Tag-Aufgabe
@@ -138,6 +148,8 @@ SIM(a,b)     = Σ_over shared group g  w_g * cross_group_bonus
 | `hub_track_tag_done`                   | `(user_id, track_id, marked_at)` – manuelles „fertig getaggt"                                                                                                              |
 | `hub_tag_tasks`                        | `(user_id, cadence daily                                                                                                                                                   | weekly, period, track_id, status, created_at)` – Aufgabe/Cadence |
 | `hub_track_ripeness` (optional, cache) | `(track_id, ripeness REAL, computed_at)` – wenn On-the-fly zu teuer                                                                                                        |
+| `hub_import_runs`                      | `(id, user_id, source, started_at, finished_at, status, stats)` – Run-Ledger für alle Quellen                                                                              |
+| `hub_import_events`                    | `(id, run_id, user_id, source, entity_type, entity_ref, change, before, after, at)` – Änderungen über Zeit                                                                 |
 
 Genre Variation/Haupt: **kein** neues Schema — nutzt `hub_tag_parents` (Variation → Haupt) im Genre-Kontext.
 
@@ -151,10 +163,11 @@ Genre Variation/Haupt: **kein** neues Schema — nutzt `hub_tag_parents` (Variat
 | `hub-insights-0.11.0` | Tag-Insights: Top-Artists, Co-Occurrence (same- & cross-group), Sprung/Discovery      | —         |
 | `hub-traktor-0.13.0`  | Traktor-Meta-Ingest (playcount/rating/sessions) ins Hub                               | 027       |
 | `hub-scoring-0.12.0`  | Ripeness-Score (Meta+Tags+Traktor), Tag-Punkte je Gruppe, konfigurierbar              | 028       |
-| `hub-tasks-0.14.0`    | Tägliche/wöchentliche Tag-Aufgabe + „fertig"-Markierung + Score>500-Skip              | 029       |
+| `hub-tasks-0.14.0`    | Tägliche/wöchentliche Tag-Aufgabe + „fertig"-Markierung                               | 029       |
 | `hub-sim-0.15.0`      | Similarity v2 (Tag-Overlap cross-group, Rumpelkiste-Ausnahme), in Digging/Overlap     | —         |
+| `hub-history-0.16.0`  | Historisierung aller Import-Quellen (Run-Ledger, Change-Events, History-UI)           | 030       |
 
-> Reihenfolge: `0.10 → 0.11 → 0.13 → 0.12 → 0.14 → 0.15` (Traktor vor Scoring, weil Scoring Traktor-Meta braucht).
+> Reihenfolge: `0.10 → 0.11 → 0.13 → 0.12 → 0.14 → 0.15` (Traktor vor Scoring, weil Scoring Traktor-Meta braucht). `0.16` (History) kann ab `0.13` parallel laufen.
 > `0.11` und `0.15` können parallel zu `0.13` laufen.
 
 ---
@@ -199,6 +212,12 @@ Genre Variation/Haupt: **kein** neues Schema — nutzt `hub_tag_parents` (Variat
 - **T6-2** `feat(hub): rumpelkiste exception in similarity` — Rumpelkiste-Playlist-Kanten beim Vergleich ignorieren. _(AC: Test: Track nur via Rumpelkiste verknüpft zählt nicht.)_
 - **T6-3** `feat(hub): wire sim into digging/overlap` — Ripeness/Similarity in Digging-Score + Overlap-Ranking; konfigurierbar. _(AC: bestehende Tests grün + neue.)_
 
+### Milestone `hub-history-0.16.0`
+
+- **H1** `feat(hub): import-run ledger (all sources)` — Migration + `hub_import_runs`; jeder Importer schreibt einen Lauf. _(AC: Run-Row je Import; Test.)_
+- **H2** `feat(hub): import diff / change events` — `hub_import_events`, Diff zwischen Importen (Mitgliedschaft, Meta, playcount/rating). _(AC: Spotify- und Traktor-Delta-Tests.)_
+- **H3** `feat(hub): import history UI` — Lauf-Liste + Change-Timeline, filterbar. _(AC: Runs + Diffs sichtbar; Test.)_
+
 ---
 
 ## 6. Entscheidungen
@@ -208,8 +227,12 @@ Genre Variation/Haupt: **kein** neues Schema — nutzt `hub_tag_parents` (Variat
 1. **„Attribute" = eigene Gruppe _zusätzlich_ zu Merkmal** — beide eigenständig, später im UI anpassbar. (§1 A3)
 2. **Genre Hauptrichtung**: Relation Variation→Hauptrichtung (Parent) — dient Anzeige **und** optional dem Scoring/Similarity. (§1 A4)
 3. **Score-Schwelle**: **kein Hard-Cutoff** — Score **on the fly**, in **jeder** UI als **Filter** (min/max). (§1 D4/F4)
+4. **Traktor-Quelle**: **jeder User lädt seine eigene `collection.nml` hoch**. (§1 E1/H4)
+5. **Historisierung**: Importe **aller Quellen** werden historisiert (Run-Ledger + Change-Events + UI) — was ändert sich über die Zeit. (§1 H)
 
-**Noch offen:** 4. Meta-Gewichte: Default-Verhältnis HUMAN:META (Vorschlag 3:1) und Traktor-Anteil? 5. Traktor-Quelle: welche `.nml`/Pfade, pro User hochgeladen oder serverseitig gemountet? 6. Cadence: Tages-/Wochen-Reset-Zeit (UTC?) + „streak"-Anzeige gewünscht? 7. Co-Occurrence-Metrik: Jaccard vs. Lift vs. Konfidenz?
+**Noch offen:** 4. Meta-Gewichte: Default-Verhältnis HUMAN:META (Vorschlag 3:1) und Traktor-Anteil? 6. Cadence: Tages-/Wochen-Reset-Zeit (UTC?) + „streak"-Anzeige gewünscht? 7. Co-Occurrence-Metrik: Jaccard vs. Lift vs. Konfidenz?
+
+(Alles Übrige ist über das Engine-Setting-Registry — T4-4/#217 — on the fly justierbar.)
 
 ---
 
@@ -220,7 +243,8 @@ T1-1 ─┬─ T1-2, T1-3, T1-4
       └─ (Roles) ─→ T6-2 (Rumpelkiste)
 T2-1..3 (unabhängig)
 T3-1..3 ─→ T4-1..3 ─→ T5-1..3
-T4-1 ─→ T5-2 (Score<500), T6-3 (Engine-Integration)
+T4-1 ─→ T5-2, T6-3 (Engine-Integration)
+T3-1 ─→ H1 ─→ H2 ─→ H3 (History; jede Quelle schreibt Runs)
 ```
 
 Blockt nichts außerhalb: alles baut auf der bestehenden Tag-Schicht auf.
