@@ -1,9 +1,11 @@
-{% extends "base.html" %} {% block title %}Admin — Spelunke{% endblock %} {% block content %}
+{% extends "base.html" %} {% block title %}Admin — Spelunke{% endblock %} {% block content
+%}
 <hgroup>
     <h1>Admin</h1>
     <p class="hub-muted">
-        API-Keys & Infrastruktur. Geheime Werte werden nie angezeigt (Feld leer lassen = unverändert).
-        Keys greifen <strong>nach einem Neustart</strong>; die Umgebung (.env) bleibt Fallback.
+        API-Keys & Infrastruktur. Geheime Werte werden nie angezeigt (Feld leer lassen =
+        unverändert). Keys greifen <strong>nach einem Neustart</strong>; die Umgebung
+        (.env) bleibt Fallback.
     </p>
 </hgroup>
 
@@ -15,15 +17,62 @@
         <tbody>
             {% for f in fields %}
             <tr>
-                <th scope="row" style="white-space: nowrap">{{ f.label }}</th>
+                <th scope="row" style="white-space: nowrap">
+                    {{ f.label }}{% if f.hint != "" %}
+                    <div class="hub-muted" style="font-weight: 400; font-size: 0.7rem">
+                        {{ f.hint }}
+                    </div>
+                    {% endif %}
+                </th>
                 <td>
+                    {% if f.kind == "bool" %}
+                    <input
+                        type="checkbox"
+                        name="{{ f.key }}"
+                        value="1"
+                        {%
+                        if
+                        f.checked
+                        %}checked{%
+                        endif
+                        %}
+                    />
+                    {% else if f.kind == "enum" %}
+                    <select name="{{ f.key }}">
+                        {% for o in f.options %}
+                        <option
+                            value="{{ o.value }}"
+                            {%
+                            if
+                            o.selected
+                            %}selected{%
+                            endif
+                            %}
+                        >
+                            {{ o.value }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                    {% else if f.kind == "num" %}
+                    <input
+                        name="{{ f.key }}"
+                        type="number"
+                        step="any"
+                        value="{{ f.value }}"
+                        min="{{ f.min }}"
+                        max="{{ f.max }}"
+                        placeholder="{{ f.default }}"
+                        autocomplete="off"
+                    />
+                    {% else %}
                     <input
                         name="{{ f.key }}"
                         type="{% if f.secret %}password{% else %}text{% endif %}"
                         value="{{ f.value }}"
-                        placeholder="{% if f.set %}••• gesetzt{% else %}—{% endif %}"
+                        placeholder="{% if f.set %}••• gesetzt{% else %}{{ f.default }}{% endif %}"
                         autocomplete="off"
                     />
+                    {% endif %}
                 </td>
             </tr>
             {% endfor %}
@@ -31,7 +80,16 @@
     </table>
 
     <label>
-        <input type="checkbox" name="registration_open" {% if registration_open %}checked{% endif %}/>
+        <input
+            type="checkbox"
+            name="registration_open"
+            {%
+            if
+            registration_open
+            %}checked{%
+            endif
+            %}
+        />
         Registrierung offen (neue Accounts erlauben)
     </label>
 

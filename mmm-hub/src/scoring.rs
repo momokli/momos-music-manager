@@ -85,17 +85,24 @@ pub async fn ripeness(pool: &SqlitePool, track_id: i64, e: &Engine) -> Ripeness 
 
     let present = |s: &Option<String>| s.as_deref().map(|v| !v.trim().is_empty()).unwrap_or(false);
     if let Some((title, artists, album, _dur, image, bpm, camelot, genres)) = meta {
-        let checks = [
-            ("Titel", present(&title)),
-            ("Artist", present(&artists)),
-            ("Album", present(&album)),
-            ("Cover", present(&image)),
-            ("BPM", present(&bpm)),
-            ("Key", present(&camelot)),
-            ("Genre", genres > 0),
+        let checks: [(&str, bool, f64); 7] = [
+            ("Titel", present(&title), e.meta_title),
+            ("Artist", present(&artists), e.meta_artist),
+            ("Album", present(&album), e.meta_album),
+            ("Cover", present(&image), e.meta_cover),
+            ("BPM", present(&bpm), e.meta_bpm),
+            ("Key", present(&camelot), e.meta_key),
+            ("Genre", genres > 0, e.meta_genre),
         ];
-        out.meta_score = checks.iter().filter(|(_, ok)| *ok).count() as f64;
-        out.meta_present = checks.iter().map(|(n, ok)| (n.to_string(), *ok)).collect();
+        out.meta_score = checks
+            .iter()
+            .filter(|(_, ok, _)| *ok)
+            .map(|(_, _, w)| *w)
+            .sum();
+        out.meta_present = checks
+            .iter()
+            .map(|(n, ok, _)| (n.to_string(), *ok))
+            .collect();
     }
 
     // Traktor signal.
@@ -221,24 +228,31 @@ pub async fn ripeness_many(pool: &SqlitePool, ids: &[i64], e: &Engine) -> HashMa
         qb.push(")");
         for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
             let has = |v: &str| !v.trim().is_empty();
-            let n = [
-                has(&r.get::<String, _>("title")),
-                has(&r.get::<String, _>("artists")),
-                has(&r.get::<String, _>("album")),
-                r.get::<Option<String>, _>("image_url")
-                    .map(|s| has(&s))
-                    .unwrap_or(false),
-                r.get::<Option<String>, _>("bpm")
-                    .map(|s| has(&s))
-                    .unwrap_or(false),
-                r.get::<Option<String>, _>("camelot")
-                    .map(|s| has(&s))
-                    .unwrap_or(false),
-                r.get::<i64, _>("genres") > 0,
-            ]
-            .iter()
-            .filter(|b| **b)
-            .count() as f64;
+            let flags: [(bool, f64); 7] = [
+                (has(&r.get::<String, _>("title")), e.meta_title),
+                (has(&r.get::<String, _>("artists")), e.meta_artist),
+                (has(&r.get::<String, _>("album")), e.meta_album),
+                (
+                    r.get::<Option<String>, _>("image_url")
+                        .map(|s| has(&s))
+                        .unwrap_or(false),
+                    e.meta_cover,
+                ),
+                (
+                    r.get::<Option<String>, _>("bpm")
+                        .map(|s| has(&s))
+                        .unwrap_or(false),
+                    e.meta_bpm,
+                ),
+                (
+                    r.get::<Option<String>, _>("camelot")
+                        .map(|s| has(&s))
+                        .unwrap_or(false),
+                    e.meta_key,
+                ),
+                (r.get::<i64, _>("genres") > 0, e.meta_genre),
+            ];
+            let n: f64 = flags.iter().filter(|(b, _)| *b).map(|(_, w)| *w).sum();
             meta_score.insert(r.get(0), n);
         }
     }
@@ -341,24 +355,34 @@ pub async fn queue(
             continue;
         }
         let has = |v: &str| !v.trim().is_empty();
-        let meta_score = [
-            has(&r.get::<String, _>("title")),
-            has(&r.get::<String, _>("artists")),
-            has(&r.get::<String, _>("album")),
-            r.get::<Option<String>, _>("image_url")
-                .map(|s| has(&s))
-                .unwrap_or(false),
-            r.get::<Option<String>, _>("bpm")
-                .map(|s| has(&s))
-                .unwrap_or(false),
-            r.get::<Option<String>, _>("camelot")
-                .map(|s| has(&s))
-                .unwrap_or(false),
-            r.get::<i64, _>("genres") > 0,
+        let meta_score: f64 = [
+            (has(&r.get::<String, _>("title")), e.meta_title),
+            (has(&r.get::<String, _>("artists")), e.meta_artist),
+            (has(&r.get::<String, _>("album")), e.meta_album),
+            (
+                r.get::<Option<String>, _>("image_url")
+                    .map(|s| has(&s))
+                    .unwrap_or(false),
+                e.meta_cover,
+            ),
+            (
+                r.get::<Option<String>, _>("bpm")
+                    .map(|s| has(&s))
+                    .unwrap_or(false),
+                e.meta_bpm,
+            ),
+            (
+                r.get::<Option<String>, _>("camelot")
+                    .map(|s| has(&s))
+                    .unwrap_or(false),
+                e.meta_key,
+            ),
+            (r.get::<i64, _>("genres") > 0, e.meta_genre),
         ]
         .iter()
-        .filter(|b| **b)
-        .count() as f64;
+        .filter(|(b, _)| *b)
+        .map(|(_, w)| *w)
+        .sum();
         let traktor_score = trak.get(&id).copied().unwrap_or(0.0);
         let total =
             e.tag_weight * t_score + e.meta_weight * meta_score + e.trak_weight * traktor_score;

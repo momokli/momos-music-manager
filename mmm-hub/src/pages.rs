@@ -3404,8 +3404,21 @@ struct AdminField {
     key: String,
     label: String,
     secret: bool,
+    /// Widget: "num" | "bool" | "enum" | "text".
+    kind: String,
+    min: String,
+    max: String,
+    default: String,
+    hint: String,
     set: bool,
     value: String,
+    checked: bool,
+    options: Vec<AdminOption>,
+}
+
+struct AdminOption {
+    value: String,
+    selected: bool,
 }
 
 struct AdminUser {
@@ -3425,17 +3438,92 @@ async fn admin_page(
         return (StatusCode::FORBIDDEN, "Nur Admins.").into_response();
     }
 
+    use crate::settings::SettingKind;
     let s = crate::settings::load_all(&st.pool).await;
-    let fields = crate::settings::ADMIN_FIELDS
+    let fmt = |o: Option<f64>| o.map(|x| format!("{x}")).unwrap_or_default();
+    let fields = crate::settings::SETTINGS
         .iter()
-        .map(|(key, label, secret)| {
-            let v = s.get(*key).cloned().unwrap_or_default();
+        .map(|spec| {
+            let stored = s.get(spec.key).cloned().unwrap_or_default();
+            let is_set = !stored.is_empty();
+            let mut options = Vec::new();
+            let (kind, min, max, hint) = match spec.kind {
+                SettingKind::Num => (
+                    "num",
+                    fmt(spec.min),
+                    fmt(spec.max),
+                    format!(
+                        "Default {} · {}–{}",
+                        spec.default,
+                        fmt(spec.min),
+                        fmt(spec.max)
+                    ),
+                ),
+                SettingKind::Bool => (
+                    "bool",
+                    String::new(),
+                    String::new(),
+                    if spec.default == "1" {
+                        "Default an".to_string()
+                    } else {
+                        "Default aus".to_string()
+                    },
+                ),
+                SettingKind::Csv => (
+                    "text",
+                    String::new(),
+                    String::new(),
+                    format!("CSV · Default {}", spec.default),
+                ),
+                SettingKind::Enum(allowed) => {
+                    let cur = if stored.is_empty() {
+                        spec.default.to_string()
+                    } else {
+                        stored.clone()
+                    };
+                    for a in allowed {
+                        options.push(AdminOption {
+                            value: (*a).to_string(),
+                            selected: *a == cur,
+                        });
+                    }
+                    (
+                        "enum",
+                        String::new(),
+                        String::new(),
+                        format!("Default {}", spec.default),
+                    )
+                }
+                SettingKind::Text => (
+                    "text",
+                    String::new(),
+                    String::new(),
+                    if spec.secret {
+                        "geheim".to_string()
+                    } else {
+                        String::new()
+                    },
+                ),
+            };
             AdminField {
-                key: (*key).to_string(),
-                label: (*label).to_string(),
-                secret: *secret,
-                set: !v.is_empty(),
-                value: if *secret { String::new() } else { v },
+                key: spec.key.to_string(),
+                label: spec.label.to_string(),
+                secret: spec.secret,
+                kind: kind.to_string(),
+                min,
+                max,
+                default: spec.default.to_string(),
+                hint,
+                set: is_set,
+                value: if spec.secret {
+                    String::new()
+                } else if matches!(spec.kind, SettingKind::Enum(_)) {
+                    String::new()
+                } else {
+                    stored.clone()
+                },
+                checked: stored == "1" || (stored.is_empty() && spec.default == "1"),
+                options,
             }
         })
         .collect();
@@ -3473,12 +3561,34 @@ async fn admin_save(
         return (StatusCode::FORBIDDEN, "Nur Admins.").into_response();
     }
 
-    // Non-empty values are stored; empty means "leave unchanged".
-    for (key, _label, _secret) in crate::settings::ADMIN_FIELDS {
-        if let Some(v) = map.get(*key) {
-            let v = v.trim();
-            if !v.is_empty() {
-                let _ = crate::settings::set(&st.pool, key, v).await;
+    use crate::settings::SettingKind;
+    let mut errors: Vec<String> = Vec::new();
+    for spec in crate::settings::SETTINGS {
+        // Booleans are always written (unchecked boxes are absent from the form),
+        // so a flag can be turned back off.
+        if matches!(spec.kind, SettingKind::Bool) {
+            let on = map
+                .get(spec.key)
+                .map(|v| {
+                    matches!(
+                        v.trim().to_lowercase().as_str(),
+                        "1" | "true" | "on" | "yes"
+                    )
+                })
+                .unwrap_or(false);
+            let _ = crate::settings::set(&st.pool, spec.key, if on { "1" } else { "0" }).await;
+            continue;
+        }
+        // Everything else: non-empty overwrites, empty means "leave unchanged".
+        if let Some(raw) = map.get(spec.key) {
+            if raw.trim().is_empty() {
+                continue;
+            }
+            match crate::settings::validate(spec, raw) {
+                Ok(v) => {
+                    let _ = crate::settings::set(&st.pool, spec.key, &v).await;
+                }
+                Err(e) => errors.push(e),
             }
         }
     }
@@ -3493,8 +3603,12 @@ async fn admin_save(
     )
     .await;
 
-    Redirect::to("/admin?msg=Gespeichert%20%E2%80%94%20Keys%20greifen%20nach%20Neustart")
-        .into_response()
+    let msg = if errors.is_empty() {
+        "Gespeichert — Keys greifen nach Neustart".to_string()
+    } else {
+        format!("Fehler: {}", errors.join("; "))
+    };
+    Redirect::to(&format!("/admin?msg={}", urlencoding::encode(&msg))).into_response()
 }
 
 // ── tags (resolved playlist layer) ──────────────────────────────────────────
