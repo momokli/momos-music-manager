@@ -67,6 +67,7 @@ pub fn router(state: AppState) -> Router {
         .route("/playlist/{id}/tag/add", post(playlist_tag_add))
         .route("/playlist/{id}/tag/remove", post(playlist_tag_remove))
         .route("/playlist/{id}/order", post(playlist_order))
+        .route("/playlist/{id}/prioritize", post(playlist_prioritize))
         .route("/playlist/{id}/refresh", post(playlist_refresh))
         .route("/playlist/{id}/progress", get(playlist_progress))
         .route("/playlist/{id}/download", get(playlist_download))
@@ -649,6 +650,40 @@ async fn playlist_order(
     flash_redirect(&format!("/playlist/{id}"), msg)
 }
 
+/// Priority bump for the whole-playlist queue (`higher = earlier`).
+const PLAYLIST_PRIORITY: i32 = 10;
+
+/// `POST /playlist/{id}/prioritize` — (re-)order every ISRC of the playlist with
+/// an elevated priority so music-api downloads it ahead of unprompted orders.
+async fn playlist_prioritize(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((_uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let target = format!("/playlist/{id}");
+    if st.cfg.music_api_token.is_none() {
+        return flash_redirect(&target, "music-api nicht konfiguriert".to_string());
+    }
+    let tracks = sqlx::query(PL_TRACKS_SQL)
+        .bind(id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    let isrcs = rows_isrcs(&tracks);
+    if isrcs.is_empty() {
+        return flash_redirect(&target, "Keine ISRCs vorhanden".to_string());
+    }
+    let msg = match crate::music_api::order_with_priority(&st.cfg, &isrcs, PLAYLIST_PRIORITY).await
+    {
+        Ok(oid) => format!("{} priorisiert (Order {oid})", isrcs.len()),
+        Err(e) => format!("music-api Fehler: {e}"),
+    };
+    flash_redirect(&target, msg)
+}
+
 /// `POST /tag/{id}/order` — order only the tag's missing ISRCs.
 async fn tag_order(
     State(st): State<AppState>,
@@ -937,7 +972,8 @@ async fn download_rows(
          COALESCE(t.artists, '') AS artists, t.service AS service, \
          COALESCE(ms.state, 'unknown') AS state, \
          COALESCE(ms.source_format, '') AS source_format, \
-         COALESCE(ms.deezer_id, '') AS deezer_id{DOWNLOADS_FROM}"
+         COALESCE(ms.deezer_id, '') AS deezer_id, \
+         COALESCE(ms.error, '') AS error{DOWNLOADS_FROM}"
     ));
     push_download_filters(&mut qb, f);
     qb.push(
@@ -963,6 +999,7 @@ async fn download_rows(
                 .get::<Option<String>, _>("source_format")
                 .unwrap_or_default(),
             deezer_id: r.get::<Option<String>, _>("deezer_id").unwrap_or_default(),
+            error: r.get::<Option<String>, _>("error").unwrap_or_default(),
         })
         .collect()
 }
@@ -1062,6 +1099,8 @@ struct DownloadsPage {
     downloading: usize,
     absent: usize,
     failed: usize,
+    /// Cached rows that carry an error/reason.
+    errors: usize,
     // Live music-api queue.
     queue_ok: bool,
     queue_error: String,
@@ -1101,6 +1140,7 @@ struct DownloadTrackRow {
     state: String,
     source_format: String,
     deezer_id: String,
+    error: String,
 }
 
 /// A pagination link with a precomputed `active` flag (askama-safe).
@@ -1169,6 +1209,7 @@ async fn downloads_page(
         downloading: s.downloading,
         absent: s.absent,
         failed: s.failed,
+        errors: s.errors,
         queue_ok,
         queue_error,
         queue_items,

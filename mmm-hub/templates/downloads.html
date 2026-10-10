@@ -54,7 +54,8 @@ content %}
     </div>
     <p class="hub-muted">
         ready-Formate: flac {{ ready_flac }} · mp3-320 {{ ready_320 }} · mp3-128 {{
-        ready_128 }} {% if ready_other > 0 %}· sonstige {{ ready_other }}{% endif %}
+        ready_128 }} {% if ready_other > 0 %}· sonstige {{ ready_other }}{% endif %} {% if
+        errors > 0 %}· mit Fehler {{ errors }}{% endif %}
     </p>
 </section>
 
@@ -113,6 +114,7 @@ content %}
                     <th scope="col">State</th>
                     <th scope="col">Format</th>
                     <th scope="col">Deezer-ID</th>
+                    <th scope="col">Fehler</th>
                 </tr>
             </thead>
             <tbody>
@@ -125,6 +127,7 @@ content %}
                     <td>{{ r.state }}</td>
                     <td>{{ r.source_format }}</td>
                     <td>{{ r.deezer_id }}</td>
+                    <td>{{ r.error }}</td>
                 </tr>
                 {% endfor %}
             </tbody>

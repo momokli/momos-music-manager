@@ -902,6 +902,47 @@ async fn playlist_music_api_controls_and_endpoints() {
 }
 
 #[tokio::test]
+async fn playlist_prioritize_requires_login() {
+    let app = common::spawn().await;
+    let resp = app
+        .client()
+        .post(app.url(&format!("/playlist/{}/prioritize", app.seed.pl_alice)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers()["location"], "/login");
+}
+
+#[tokio::test]
+async fn playlist_prioritize_flashes_when_unconfigured() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // Give a playlist track an ISRC so the handler has a non-empty ISRC list.
+    sqlx::query("UPDATE hub_tracks SET isrc = 'USABC1234567' WHERE id = ?1")
+        .bind(app.seed.t_all)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+
+    let resp = app
+        .client()
+        .post(app.url(&format!("/playlist/{}/prioritize", app.seed.pl_alice)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    let loc = resp.headers()["location"].to_str().unwrap();
+    assert!(
+        loc.starts_with(&format!("/playlist/{}", app.seed.pl_alice)),
+        "should redirect to the playlist page: {loc}"
+    );
+    assert!(loc.contains("msg="), "should carry a flash message: {loc}");
+}
+
+#[tokio::test]
 async fn toggle_returns_row_fragment_for_htmx() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
