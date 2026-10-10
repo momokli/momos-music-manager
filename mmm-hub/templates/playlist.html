@@ -76,6 +76,15 @@ content %}
     <form method="post" action="/playlist/{{ id }}/order">
         <button type="submit">Fehlende ordern (music-api)</button>
     </form>
+    <form method="post" action="/playlist/{{ id }}/prioritize">
+        <button
+            type="submit"
+            class="secondary"
+            title="Alle ISRCs mit hoher Priorität in die music-api-Queue"
+        >
+            Priorisieren
+        </button>
+    </form>
     <form method="post" action="/playlist/{{ id }}/refresh">
         <button type="submit" class="secondary outline">Status aktualisieren</button>
     </form>

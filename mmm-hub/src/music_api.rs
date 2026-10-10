@@ -47,6 +47,8 @@ pub struct CachedState {
     pub source_format: Option<String>,
     pub formats: Vec<String>,
     pub deezer_id: Option<String>,
+    /// Error/reason reported by music-api (e.g. `no data`, `download timeout`).
+    pub error: Option<String>,
 }
 
 impl CachedState {
@@ -54,17 +56,23 @@ impl CachedState {
         self.state == "ready"
     }
 
-    /// Human label like `ready · flac` / `pending` / `absent`.
+    /// Human label like `ready · flac` / `pending` / `absent · no data` — the
+    /// error reason is appended when present so the UI can show *why*.
     pub fn label(&self) -> String {
         let fmt = self
             .source_format
             .clone()
             .filter(|s| !s.is_empty())
             .or_else(|| self.formats.first().cloned());
-        match fmt {
+        let base = match fmt {
             Some(f) if !self.state.is_empty() => format!("{} · {}", self.state, f),
             Some(f) => f,
             None => self.state.clone(),
+        };
+        match self.error.clone().filter(|e| !e.is_empty()) {
+            Some(e) if base.is_empty() => e,
+            Some(e) => format!("{base} · {e}"),
+            None => base,
         }
     }
 }
@@ -172,6 +180,22 @@ pub async fn order(cfg: &Config, isrcs: &[String]) -> Result<String> {
     Ok(v["orderId"].as_str().unwrap_or_default().to_string())
 }
 
+/// `POST /orders` with an explicit `priority` (higher = earlier). Returns the
+/// order id. Used by the playlist "Priorisieren" action.
+pub async fn order_with_priority(cfg: &Config, isrcs: &[String], priority: i32) -> Result<String> {
+    let url = format!("{}/orders", cfg.music_api_base);
+    let items: Vec<_> = isrcs.iter().map(|i| json!({ "isrc": i })).collect();
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(token(cfg)?)
+        .json(&json!({ "items": items, "priority": priority }))
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let v: serde_json::Value = resp.json().await.unwrap_or_default();
+    Ok(v["orderId"].as_str().unwrap_or_default().to_string())
+}
+
 // ── state cache + bulk helpers (progress / order-only-missing) ───────────────
 
 async fn store_state(
@@ -181,15 +205,17 @@ async fn store_state(
     source_format: Option<&str>,
     formats: Option<&str>,
     deezer_id: Option<&str>,
+    error: Option<&str>,
 ) {
     let _ = sqlx::query(
-        "INSERT INTO hub_music_state (isrc, state, source_format, formats, deezer_id, checked_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO hub_music_state (isrc, state, source_format, formats, deezer_id, error, checked_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(isrc) DO UPDATE SET
              state = excluded.state,
              source_format = excluded.source_format,
              formats = excluded.formats,
              deezer_id = COALESCE(excluded.deezer_id, hub_music_state.deezer_id),
+             error = excluded.error,
              checked_at = excluded.checked_at",
     )
     .bind(isrc)
@@ -197,6 +223,7 @@ async fn store_state(
     .bind(source_format)
     .bind(formats)
     .bind(deezer_id)
+    .bind(error)
     .bind(chrono::Utc::now().to_rfc3339())
     .execute(pool)
     .await;
@@ -229,9 +256,14 @@ pub async fn refresh_states(
         }
         while let Some(Ok((isrc, st))) = set.join_next().await {
             let Some(st) = st else { continue };
-            let Some(state) = st.state.clone().filter(|s| !s.is_empty()) else {
+            let state = st.state.clone().filter(|s| !s.is_empty());
+            let error = st.error.clone().filter(|s| !s.is_empty());
+            // Keep rows that carry an error even without a state, so the reason
+            // (e.g. "unknown ISRC") is still visible in the UI.
+            if state.is_none() && error.is_none() {
                 continue;
-            };
+            }
+            let state = state.unwrap_or_else(|| "unknown".to_string());
             let formats = st
                 .formats
                 .as_ref()
@@ -244,6 +276,7 @@ pub async fn refresh_states(
                 st.source_format.as_deref(),
                 formats.as_deref(),
                 st.deezer_id.as_deref(),
+                error.as_deref(),
             )
             .await;
             refreshed += 1;
@@ -259,7 +292,7 @@ pub async fn refresh_states(
 pub async fn cached_state(pool: &SqlitePool, isrc: &str) -> Option<CachedState> {
     use sqlx::Row;
     let row = sqlx::query(
-        "SELECT state, source_format, formats, deezer_id FROM hub_music_state WHERE isrc = ?1",
+        "SELECT state, source_format, formats, deezer_id, error FROM hub_music_state WHERE isrc = ?1",
     )
     .bind(isrc)
     .fetch_optional(pool)
@@ -279,6 +312,7 @@ pub async fn cached_state(pool: &SqlitePool, isrc: &str) -> Option<CachedState> 
             })
             .unwrap_or_default(),
         deezer_id: row.get::<Option<String>, _>("deezer_id"),
+        error: row.get::<Option<String>, _>("error"),
     })
 }
 
@@ -295,17 +329,25 @@ pub struct CacheSummary {
     pub downloading: usize,
     pub absent: usize,
     pub failed: usize,
+    /// Rows that carry an error/reason (regardless of state).
+    pub errors: usize,
 }
 
 pub async fn cache_summary(pool: &SqlitePool) -> CacheSummary {
     use sqlx::Row;
     let mut s = CacheSummary::default();
-    let rows = sqlx::query("SELECT state, source_format, formats FROM hub_music_state")
+    let rows = sqlx::query("SELECT state, source_format, formats, error FROM hub_music_state")
         .fetch_all(pool)
         .await
         .unwrap_or_default();
     for r in rows {
         s.total += 1;
+        if r.get::<Option<String>, _>("error")
+            .filter(|e| !e.is_empty())
+            .is_some()
+        {
+            s.errors += 1;
+        }
         let state = r.get::<Option<String>, _>("state").unwrap_or_default();
         match state.as_str() {
             "ready" => {
