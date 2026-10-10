@@ -11,6 +11,7 @@ pub mod db;
 pub mod deemix;
 pub mod deezer;
 pub mod models;
+pub mod spotdl;
 pub mod store;
 pub mod transcode;
 pub mod worker;
