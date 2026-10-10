@@ -38,6 +38,20 @@ async fn set_isrc(app: &common::TestApp, track_id: i64, isrc: &str) {
         .expect("set isrc");
 }
 
+/// Seed a cached state that also carries an error/reason.
+async fn seed_state_error(app: &common::TestApp, isrc: &str, state: &str, error: &str) {
+    sqlx::query(
+        "INSERT INTO hub_music_state (isrc, state, error, checked_at) VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(isrc)
+    .bind(state)
+    .bind(error)
+    .bind("2026-01-01T00:00:00+00:00")
+    .execute(&app.pool)
+    .await
+    .expect("insert hub_music_state error");
+}
+
 #[tokio::test]
 async fn downloads_requires_login() {
     let app = common::spawn().await;
@@ -200,6 +214,60 @@ async fn cache_summary_counts_states_and_formats() {
     assert_eq!(s.downloading, 1);
     assert_eq!(s.absent, 1);
     assert_eq!(s.failed, 1);
+    assert_eq!(s.errors, 0);
+}
+
+#[tokio::test]
+async fn cached_state_reads_error() {
+    let app = common::spawn().await;
+    seed_state_error(&app, "ISRCERR0001", "absent", "no data").await;
+
+    let c = mmm_hub::music_api::cached_state(&app.pool, "ISRCERR0001")
+        .await
+        .expect("cached state");
+    assert_eq!(c.state, "absent");
+    assert!(!c.ready());
+    assert_eq!(c.error.as_deref(), Some("no data"));
+    assert_eq!(c.label(), "absent · no data");
+}
+
+#[tokio::test]
+async fn cache_summary_counts_errors() {
+    let app = common::spawn().await;
+    seed_state_error(&app, "ISRCERR0001", "absent", "no data").await;
+    seed_state_error(&app, "ISRCERR0002", "failed", "download timeout").await;
+    seed_state(&app, "ISRCERR0003", "ready", Some("flac"), Some("flac")).await;
+
+    let s = mmm_hub::music_api::cache_summary(&app.pool).await;
+    assert_eq!(s.total, 3);
+    assert_eq!(s.errors, 2);
+}
+
+#[tokio::test]
+async fn downloads_table_renders_error_reason() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    set_isrc(&app, app.seed.t_all, "USAAA0000001").await;
+    seed_state_error(&app, "USAAA0000001", "failed", "download timeout").await;
+
+    let resp = app
+        .client()
+        .get(app.url("/downloads"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = resp.text().await.unwrap();
+    assert!(
+        html.contains("Fehler"),
+        "error column header missing: {html}"
+    );
+    assert!(
+        html.contains("download timeout"),
+        "error reason not rendered: {html}"
+    );
 }
 
 #[test]
