@@ -80,7 +80,7 @@ async fn albums_page(
     let raw = sqlx::query(
         "SELECT album,
                 COUNT(*) AS tracks,
-                GROUP_CONCAT(DISTINCT artists) AS artists,
+                MAX(artists) AS artists,
                 MAX(image_url) AS cover
            FROM hub_tracks
           WHERE album IS NOT NULL AND TRIM(album) <> ''
@@ -115,6 +115,8 @@ async fn albums_page(
         })
         .collect();
     let total = rows.len();
+    let mut rows = rows;
+    rows.truncate(600);
     render(&AlbumsPage {
         nav,
         flash: String::new(),

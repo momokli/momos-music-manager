@@ -16,7 +16,10 @@
     <input type="search" name="q" value="{{ q }}" placeholder="Album / Künstler …" />
     <input type="text" name="artist" value="{{ artist }}" placeholder="Künstler exakt" />
     <button type="submit">Filtern</button>
-    <span class="hub-muted">{{ total }} Alben</span>
+    <span class="hub-muted"
+        >{{ total }} Alben{% if total > rows.len() %} (erste {{ rows.len() }}){% endif
+        %}</span
+    >
 </form>
 
 <div class="overflow-auto hub-scroll-y" style="max-height: 76vh; overflow: auto">
@@ -40,7 +43,12 @@
                         src="{{ a.cover }}"
                         alt=""
                         loading="lazy"
-                        style="width: 1.8rem; height: 1.8rem; object-fit: cover; border-radius: 0.25rem"
+                        style="
+                            width: 1.8rem;
+                            height: 1.8rem;
+                            object-fit: cover;
+                            border-radius: 0.25rem;
+                        "
                     />{% endif %}
                 </td>
                 <td><a href="{{ a.href }}">{{ a.name }}</a></td>
