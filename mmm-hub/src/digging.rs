@@ -22,6 +22,9 @@ pub struct Suggestion {
 }
 
 /// Tracks that co-occur with `seed_track_id` in the same playlists.
+///
+/// Rumpelkiste playlists are excluded (#222): co-membership in a junk-drawer
+/// playlist is not evidence of similarity.
 pub async fn internal_suggestions(
     pool: &SqlitePool,
     seed_track_id: i64,
@@ -39,6 +42,11 @@ pub async fn internal_suggestions(
            JOIN hub_users u ON u.id = hp.user_id
            JOIN hub_tracks t ON t.id = hpt2.track_id
           WHERE seed.track_id = ?1
+            AND seed.playlist_id NOT IN (
+                SELECT ts.playlist_id FROM hub_tag_sources ts
+                  JOIN hub_group_tags gt ON gt.tag_id = ts.tag_id
+                  JOIN hub_tag_groups g ON g.id = gt.group_id
+                 WHERE g.role = 'rumpelkiste')
           GROUP BY hpt2.track_id
           ORDER BY shared DESC, users DESC, t.artists, t.title
           LIMIT ?2",
@@ -213,7 +221,10 @@ impl Matcher {
                 .get::<Option<String>, _>("artists")
                 .unwrap_or_default()
                 .to_lowercase();
-            by_title.entry(title).or_default().push((r.get("id"), artists));
+            by_title
+                .entry(title)
+                .or_default()
+                .push((r.get("id"), artists));
         }
 
         Matcher {
@@ -230,7 +241,12 @@ impl Matcher {
     pub fn by_name(&self, artists: &str, title: &str) -> Option<i64> {
         let key = title.trim().to_lowercase();
         let list = self.by_title.get(&key)?;
-        let first = artists.split(',').next().unwrap_or("").trim().to_lowercase();
+        let first = artists
+            .split(',')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
         if first.is_empty() {
             return list.first().map(|(id, _)| *id);
         }

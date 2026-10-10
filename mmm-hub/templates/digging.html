@@ -134,6 +134,8 @@ content %}
                 <th scope="col">Tags</th>
                 <th scope="col">Seed-Match</th>
                 <th scope="col">Tag-Gew.</th>
+                <th scope="col">Sim</th>
+                <th scope="col">Ripe</th>
                 <th scope="col">BPM</th>
                 <th scope="col">Key</th>
                 <th scope="col">Score</th>
@@ -187,6 +189,8 @@ content %}
                 </td>
                 <td>{{ r.shared_weight_disp }}</td>
                 <td>{{ r.tag_weight_disp }}</td>
+                <td>{{ r.similarity_disp }}</td>
+                <td>{{ r.ripeness_disp }}</td>
                 <td>{{ r.bpm_disp }}</td>
                 <td>{% if r.camelot != "" %}{{ r.camelot }}{% else %}—{% endif %}</td>
                 <td>{{ r.score }}</td>

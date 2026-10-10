@@ -206,6 +206,15 @@ content %}
                         %}</a
                     >
                 </th>
+                <th scope="col">
+                    <a
+                        href="{{ sort_ripeness.href }}"
+                        class="hub-sort{% if sort_ripeness.active %} hub-sort-on{% endif %}"
+                        title="Nach Daten-Reife sortieren"
+                        >Ripe{% if sort_ripeness.active %} {{ sort_ripeness.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
                 {% for c in columns %}
                 <th scope="col">@{{ c.slug }}</th>
                 {% endfor %}
@@ -225,6 +234,7 @@ content %}
                 <td class="hub-nowrap">{{ r.bpm }}</td>
                 <td class="hub-nowrap">{{ r.key }}</td>
                 <td class="hub-nowrap">{{ r.energy }}</td>
+                <td class="hub-nowrap">{{ r.ripeness_disp }}</td>
                 {% for cell in r.cells %}
                 <td class="hub-cell-pl">
                     {% if cell.liked %}<span title="geliked">♥</span>{% endif %} {% for p
