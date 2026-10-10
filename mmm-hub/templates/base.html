@@ -668,49 +668,40 @@
           <a href="/" {% if nav.active == "dashboard" %}aria-current="page"{% endif %}>Übersicht</a>
         </li>
         <li>
-          <a href="/me/playlists" {% if nav.active == "playlists" %}aria-current="page"{% endif %}>Playlists</a>
+          <details class="dropdown">
+            <summary {% if nav.active == "playlists" || nav.active == "queue" || nav.active == "tags" || nav.active == "groups" || nav.active == "collectives" || nav.active == "playlist" || nav.active == "tag" || nav.active == "group" %}aria-current="page"{% endif %}>Bibliothek</summary>
+            <ul>
+              <li><a href="/me/playlists">Playlists</a></li>
+              <li><a href="/tag-queue">Tag-Queue</a></li>
+              <li><a href="/tags">Tags</a></li>
+              <li><a href="/groups">Gruppen</a></li>
+              <li><a href="/collectives">Collectives</a></li>
+            </ul>
+          </details>
         </li>
         <li>
-          <a href="/import" {% if nav.active == "import" %}aria-current="page"{% endif %}>Import</a>
+          <details class="dropdown">
+            <summary {% if nav.active == "search" || nav.active == "artists" || nav.active == "albums" || nav.active == "overlap" || nav.active == "similar" || nav.active == "digging" || nav.active == "artist" || nav.active == "album" %}aria-current="page"{% endif %}>Entdecken</summary>
+            <ul>
+              <li><a href="/search">Suche</a></li>
+              <li><a href="/artists">Künstler</a></li>
+              <li><a href="/albums">Alben</a></li>
+              <li><a href="/overlap">Overlap</a></li>
+              <li><a href="/playlists/similar">Ähnliche Playlists</a></li>
+              <li><a href="/digging">Digging</a></li>
+            </ul>
+          </details>
         </li>
         <li>
-          <a href="/search" {% if nav.active == "search" %}aria-current="page"{% endif %}>Suche</a>
-        </li>
-        <li>
-          <a href="/overlap" {% if nav.active == "overlap" %}aria-current="page"{% endif %}>Entdecken</a>
-        </li>
-        <li>
-          <a href="/playlists/similar" {% if nav.active == "similar" %}aria-current="page"{% endif %}>Ähnlich</a>
-        </li>
-        <li>
-          <a href="/tags" {% if nav.active == "tags" %}aria-current="page"{% endif %}>Tags</a>
-        </li>
-        <li>
-          <a href="/artists" {% if nav.active == "artists" %}aria-current="page"{% endif %}>Künstler</a>
-        </li>
-        <li>
-          <a href="/albums" {% if nav.active == "albums" %}aria-current="page"{% endif %}>Alben</a>
-        </li>
-        <li>
-          <a href="/tag-queue" {% if nav.active == "queue" %}aria-current="page"{% endif %}>Tag-Queue</a>
-        </li>
-        <li>
-          <a href="/groups" {% if nav.active == "groups" %}aria-current="page"{% endif %}>Gruppen</a>
-        </li>
-        <li>
-          <a href="/collectives" {% if nav.active == "collectives" %}aria-current="page"{% endif %}>Collectives</a>
-        </li>
-        <li>
-          <a href="/digging" {% if nav.active == "digging" %}aria-current="page"{% endif %}>Digging</a>
-        </li>
-        <li>
-          <a href="/downloads" {% if nav.active == "downloads" %}aria-current="page"{% endif %}>Downloads</a>
-        </li>
-        <li>
-          <a href="/history" {% if nav.active == "history" %}aria-current="page"{% endif %}>Historie</a>
-        </li>
-        <li>
-          <a href="/sql" {% if nav.active == "sql" %}aria-current="page"{% endif %}>SQL</a>
+          <details class="dropdown">
+            <summary {% if nav.active == "import" || nav.active == "downloads" || nav.active == "history" || nav.active == "sql" %}aria-current="page"{% endif %}>Daten</summary>
+            <ul>
+              <li><a href="/import">Import</a></li>
+              <li><a href="/downloads">Downloads</a></li>
+              <li><a href="/history">Historie</a></li>
+              <li><a href="/sql">SQL</a></li>
+            </ul>
+          </details>
         </li>
       </ul>
       <ul>
