@@ -9,6 +9,9 @@ playlists does it sit".
 It is the multi-tenant little brother of the single-user Momo's Music Manager:
 same tech stack (axum + sqlx + SQLite), but its own crate, its own schema, its own DB.
 
+> **Working on the hub? Read [`AGENT.md`](AGENT.md) first** — deploy loop, SSH/hosts,
+> env, full schema (migrations 001–024), feature map, engine config, and gotchas.
+
 ## What it does
 
 - `auth` – one-time Spotify OAuth via a **loopback** redirect
@@ -104,7 +107,9 @@ POST /api/hub/services/{service}/sync  # queue a fresh sync for the current user
 
 ## Data model
 
-Migrations `001`–`006`:
+Migrations **`001`–`024`** — the live schema is the source of truth
+(`sqlite3 hub.db .schema`). See [`AGENT.md`](AGENT.md) §5 for the full table/view map.
+The early migrations include:
 
 - `hub_users` (handle `slug`, bcrypt `password_hash`), `hub_service_accounts`
   (per-user tokens), `hub_web_sessions` (server-side sessions).
