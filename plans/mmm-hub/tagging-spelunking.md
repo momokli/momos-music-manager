@@ -50,9 +50,10 @@
 - **A1** Tag-Seite (`/tags`): **Filter nach Tag-Gruppen** (mehrere gleichzeitig).
 - **A2** Tag-Seite: **direkt neue Tags anlegen** (ohne Umweg über eine Playlist).
 - **A3** Gruppen bekommen einen **Typ**:
-  - _Klassifizierend_ (5): **Mood, Vibe, Phase/Energy, Genre, Attribute** (a.k.a. Merkmal).
+  - _Klassifizierend_: **Mood, Vibe, Phase/Energy, Genre, Attribute, Merkmal** (Attribute ist eine **eigene** Gruppe _zusätzlich_ zu Merkmal — beide eigenständig; später im UI anpassbar).
   - _Sortierend_: **Rumpelkiste, Setlist**.
   - → `hub_tag_groups.kind` (`class` | `sort`), plus semantische Rollen `rumpelkiste`, `setlist`, `genre`, `phase`.
+  - **„Vollständig getaggt" bezieht sich auf die _aktuell konfigurierten_ klassifizierenden Gruppen — nicht hart auf 5** (siehe F1).
 - **A4** **Genre-Sonderfall**: Genre-Tags haben **Variation + Hauptrichtung** (z. B. Variation `Psy` → Haupt `Trance`; Variation `Tech` → Haupt `House`). → als Parent-Relation (Variation = Tag, Hauptrichtung = Parent) im Genre-Kontext, genutzt fürs Scoring/Ähnlichkeit.
 
 ### B — Tag-Insights (Tag-Detailseite `/tag/{id}`)
@@ -78,7 +79,7 @@
   - Die Punkte hängen an der **Gruppe** (Multiset), **nicht** am einzelnen Tag: Löscht man den „100er"-Tag, verschwinden nicht 100, sondern die **niedrigste** Stufe der Gruppe. Beispiel: 2 Vibe-Tags = 150; entfernt man _einen_ (egal welchen) → −50 (die „billigste" Stufe).
   - Formel: `group_points(k) = Σ_{i=1..k} w_i` mit `w = [100,50,25,10,5,1,1,…]`.
 - **D3** **Similarity Score** (zwischen zwei Tracks) separat vom Ripeness (siehe C).
-- **D4** **Schwellwert-Option**: Tracks mit **Score > 500** in der Tag-Aufgabe **auslassen**.
+- **D4** **Score-Schwelle ist ein UI-Filter, kein Hard-Cutoff**: In jeder Ansicht (Tag-Aufgabe, Digging, Overlap, Track-Liste, …) gibt es einen **Score-Filter** (min/max). Der Ripeness-Score wird **on the fly** berechnet und ist **unabhängig von fixen Werten**; es gibt keinen eingebauten Ausschluss. Default des Filters ist offen (kein Ausschluss).
 
 ### E — Traktor-Meta-Ingest (Voraussetzung für D1/E)
 
@@ -87,10 +88,10 @@
 
 ### F — Tägliche/wöchentliche Tag-Aufgabe
 
-- **F1** Ein Track gilt als **vollständig getaggt**, wenn **alle 5 klassifizierenden Gruppen** getaggt sind **oder** der User ihn als **fertig** markiert.
+- **F1** Ein Track gilt als **vollständig getaggt**, wenn **alle _konfigurierten_ klassifizierenden Gruppen** getaggt sind **oder** der User ihn als **fertig** markiert. (Kein hartes „5" — die Menge der Klassifizierungsgruppen ist Teil der Konfiguration.)
 - **F2** Die Aufgabe zeigt **am häufigsten gespielte Traktor-Tracks zuerst**, gemäß Scoring.
 - **F3** **Cadence**: täglich **und** wöchentlich (Reset/Rollover, Historie).
-- **F4** Option D4 (Score > 500 auslassen) hier anwenden.
+- **F4** Der Score-Filter (D4) ist hier wie überall ein **UI-Filter**, kein eingebauter Skip.
 
 ### G — Engine-Integration
 
@@ -183,13 +184,13 @@ Genre Variation/Haupt: **kein** neues Schema — nutzt `hub_tag_parents` (Variat
 
 - **T4-1** `feat(hub): ripeness score (meta+tags, human>meta)` — Kern-Algo + `hub_track_ripeness`-Cache/Endpoint. _(AC: `group_points` exakt lt. §2; Unit-Tests inkl. „Löschen entfernt niedrigste Stufe".)_
 - **T4-2** `feat(hub): traktor signal in ripeness` — playcount/lastplayed/rating/sessions einfließen. _(AC: Gewicht konfigurierbar; Test.)_
-- **T4-3** `feat(hub): scoring settings in UI` — `engine_*`-Keys erweitert (Weights, Threshold 500). _(AC: `/admin` editierbar; Test.)_
+- **T4-3** `feat(hub): scoring settings in UI` — `engine_*`-Keys erweitert (Gewichte etc.). Score selbst wird on the fly berechnet; kein eingebauter Schwellwert. _(AC: `/admin` editierbar; Test.)_
 - **T4-4** `feat(hub): engine params — all weights + distributions configurable` — zentrales Setting-Registry für **alle** Engine-Werte mit Default/Range/Validierung, editierbar im UI, pro Collective überschreibbar. _(AC: Registry listet jeden Parameter; Wertänderung wirkt; Test.)_
 
 ### Milestone `hub-tasks-0.14.0`
 
-- **T5-1** `feat(hub): track tagged-complete flag` — `hub_track_tag_done` + „fertig"-Button; Auto-Regel (alle 5 Klassifizierungsgruppen). _(AC: Zustand + Anzeige; Test.)_
-- **T5-2** `feat(hub): daily/weekly tagging task` — Queue (Traktor-playcount-first, Score<500), Cadence + Historie. _(AC: tägl./wöchentl. Liste; Test.)_
+- **T5-1** `feat(hub): track tagged-complete flag` — `hub_track_tag_done` + „fertig"-Button; Auto-Regel (alle _konfigurierten_ klassifizierenden Gruppen, nicht hart 5). _(AC: Zustand + Anzeige; Test.)_
+- **T5-2** `feat(hub): daily/weekly tagging task` — Queue (Traktor-playcount-first), Cadence + Historie. Score ist ein **UI-Filter**, kein eingebauter Skip. _(AC: tägl./wöchentl. Liste; Test.)_
 - **T5-3** `feat(hub): tag-task UI` — Seite/Widget „Tagge jetzt" mit Track + Tag-Eingabe. _(AC: Aktion setzt Tags; Test.)_
 
 ### Milestone `hub-sim-0.15.0`
@@ -200,15 +201,15 @@ Genre Variation/Haupt: **kein** neues Schema — nutzt `hub_tag_parents` (Variat
 
 ---
 
-## 6. Offene Entscheidungen (vor Umsetzung klären)
+## 6. Entscheidungen
 
-1. **„Attribute" = „Merkmal"?** (§1 A3) — eine Gruppe oder zwei? Vorschlag: identisch, Rollenname `attribute`.
-2. **Genre Hauptrichtung**: nur Anzeige oder **zählt als zusätzlicher Tag** im Scoring?
-3. **Score > 500**: hart (ausblenden) oder nur Sortierung (nach hinten)?
-4. **Meta-Gewichte**: Default-Verhältnis HUMAN:META (Vorschlag 3:1) und Traktor-Anteil.
-5. **Traktor-Quelle**: welche `.nml`/Pfade, pro User hochgeladen oder serverseitig gemountet?
-6. **Cadence**: Tages-/Wochen-Reset-Zeit (UTC?) + „streak"-Anzeige gewünscht?
-7. **Co-Occurrence-Metrik**: Jaccard vs. Lift vs. Konfidenz.
+**Entschieden** (2026-10-10):
+
+1. **„Attribute" = eigene Gruppe _zusätzlich_ zu Merkmal** — beide eigenständig, später im UI anpassbar. (§1 A3)
+2. **Genre Hauptrichtung**: Relation Variation→Hauptrichtung (Parent) — dient Anzeige **und** optional dem Scoring/Similarity. (§1 A4)
+3. **Score-Schwelle**: **kein Hard-Cutoff** — Score **on the fly**, in **jeder** UI als **Filter** (min/max). (§1 D4/F4)
+
+**Noch offen:** 4. Meta-Gewichte: Default-Verhältnis HUMAN:META (Vorschlag 3:1) und Traktor-Anteil? 5. Traktor-Quelle: welche `.nml`/Pfade, pro User hochgeladen oder serverseitig gemountet? 6. Cadence: Tages-/Wochen-Reset-Zeit (UTC?) + „streak"-Anzeige gewünscht? 7. Co-Occurrence-Metrik: Jaccard vs. Lift vs. Konfidenz?
 
 ---
 
