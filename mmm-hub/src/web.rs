@@ -849,6 +849,12 @@ struct TrackPage {
     genres: Vec<String>,
     flash: String,
     music_api: bool,
+    // Ripeness (issues #214/#215).
+    ripeness_total: i64,
+    ripeness_tag: i64,
+    ripeness_meta: i64,
+    ripeness_trak: String,
+    meta_present: Vec<(String, bool)>,
 }
 
 struct UserGroup {
@@ -1132,6 +1138,9 @@ async fn track_page(
         }
     }
 
+    let e = crate::settings::engine(&st.pool).await;
+    let rip = crate::scoring::ripeness(&st.pool, id, &e).await;
+
     let page = TrackPage {
         nav,
         id,
@@ -1154,6 +1163,11 @@ async fn track_page(
         genres,
         flash: flash.msg.unwrap_or_default(),
         music_api: st.cfg.music_api_token.is_some(),
+        ripeness_total: rip.total.round() as i64,
+        ripeness_tag: rip.tag_score.round() as i64,
+        ripeness_meta: rip.meta_score.round() as i64,
+        ripeness_trak: format!("{:.2}", rip.traktor_score),
+        meta_present: rip.meta_present,
     };
 
     match page.render() {

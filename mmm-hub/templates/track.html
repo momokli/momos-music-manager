@@ -20,6 +20,34 @@ content %}
     <section>
         <table class="hub-kv">
             <caption class="hub-visually-hidden">
+                Ripeness
+            </caption>
+            <tbody>
+                <tr>
+                    <th scope="row">Ripeness</th>
+                    <td>
+                        <strong>{{ ripeness_total }}</strong>
+                        <span class="hub-muted"
+                            >(Tags {{ ripeness_tag }} · Meta {{ ripeness_meta }} · Traktor
+                            {{ ripeness_trak }})</span
+                        >
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">Meta</th>
+                    <td>
+                        {% for m in meta_present %}<span class="hub-chip"
+                            >{% if m.1 %}✓{% else %}✗{% endif %} {{ m.0 }}</span
+                        >
+                        {% endfor %}
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </section>
+    <section>
+        <table class="hub-kv">
+            <caption class="hub-visually-hidden">
                 Track-Fakten
             </caption>
             <tbody>

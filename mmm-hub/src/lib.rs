@@ -20,6 +20,7 @@ pub mod lastfm;
 pub mod mmm_import;
 pub mod music_api;
 pub mod pages;
+pub mod scoring;
 pub mod settings;
 pub mod similar;
 pub mod spotify;

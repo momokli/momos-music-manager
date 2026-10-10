@@ -37,6 +37,12 @@ pub const ENGINE_BASE_PLAYLISTS: &str = "engine_base_playlists";
 pub const ENGINE_BASE_LIKES: &str = "engine_base_likes";
 pub const ENGINE_BASE_SOURCES: &str = "engine_base_sources";
 pub const ENGINE_PARENT_MATCH: &str = "engine_parent_match";
+// Ripeness-scoring knobs (all editable in the web UI).
+pub const ENGINE_TAG_WEIGHT: &str = "engine_tag_weight";
+pub const ENGINE_META_WEIGHT: &str = "engine_meta_weight";
+pub const ENGINE_TRAK_WEIGHT: &str = "engine_trak_weight";
+pub const ENGINE_TAG_POINTS: &str = "engine_tag_points";
+pub const ENGINE_TRAK_PLAYCOUNT_CAP: &str = "engine_trak_playcount_cap";
 
 /// Keys surfaced on the admin page, with a human label and whether it's secret.
 pub const ADMIN_FIELDS: &[(&str, &str, bool)] = &[
@@ -54,18 +60,55 @@ pub const ADMIN_FIELDS: &[(&str, &str, bool)] = &[
     (COSINE_BASE, "cosine.club Base-URL", false),
     (FREQBLOG_API_KEY, "FreqBlog API-Key", true),
     (FREQBLOG_BASE, "FreqBlog Base-URL", false),
-    (FREQBLOG_MONTHLY_CAP, "FreqBlog Monats-Budget (Requests)", false),
+    (
+        FREQBLOG_MONTHLY_CAP,
+        "FreqBlog Monats-Budget (Requests)",
+        false,
+    ),
     (EFFNET_MODEL, "EffNet ONNX-Modellpfad", false),
     (EFFNET_LABELS, "EffNet Genre-Labels (JSON)", false),
-    (ANALYZER_BASE, "BPM/Key-Analyzer URL (z.B. http://127.0.0.1:8711)", false),
+    (
+        ANALYZER_BASE,
+        "BPM/Key-Analyzer URL (z.B. http://127.0.0.1:8711)",
+        false,
+    ),
     (ANALYZE_TMP, "Verzeichnis fuer Analyse-Temp-Dateien", false),
-    (ENGINE_SHARED_FACTOR, "Engine: Faktor Seed-Match (shared)", false),
-    (ENGINE_CANDIDATE_FACTOR, "Engine: Faktor Kandidaten-Tags", false),
-    (ENGINE_BASE_USERS, "Engine: Basis User-Uebereinstimmung", false),
-    (ENGINE_BASE_PLAYLISTS, "Engine: Basis Playlist-Treffer", false),
+    (
+        ENGINE_SHARED_FACTOR,
+        "Engine: Faktor Seed-Match (shared)",
+        false,
+    ),
+    (
+        ENGINE_CANDIDATE_FACTOR,
+        "Engine: Faktor Kandidaten-Tags",
+        false,
+    ),
+    (
+        ENGINE_BASE_USERS,
+        "Engine: Basis User-Uebereinstimmung",
+        false,
+    ),
+    (
+        ENGINE_BASE_PLAYLISTS,
+        "Engine: Basis Playlist-Treffer",
+        false,
+    ),
     (ENGINE_BASE_LIKES, "Engine: Basis Likes", false),
     (ENGINE_BASE_SOURCES, "Engine: Basis Quellen", false),
     (ENGINE_PARENT_MATCH, "Engine: Parent-Tag-Match (1/0)", false),
+    (ENGINE_TAG_WEIGHT, "Scoring: Gewicht Human-Tags", false),
+    (ENGINE_META_WEIGHT, "Scoring: Gewicht Track-Meta", false),
+    (ENGINE_TRAK_WEIGHT, "Scoring: Gewicht Traktor-Signal", false),
+    (
+        ENGINE_TAG_POINTS,
+        "Scoring: Tag-Punkte je Position (CSV, z.B. 100,50,25,10,5,1)",
+        false,
+    ),
+    (
+        ENGINE_TRAK_PLAYCOUNT_CAP,
+        "Scoring: Playcount-Cap fuer Traktor-Signal",
+        false,
+    ),
 ];
 
 /// Ranking-engine configuration, resolved from settings with sane defaults.
@@ -78,6 +121,13 @@ pub struct Engine {
     pub base_likes: f64,
     pub base_sources: f64,
     pub parent_match: bool,
+    /// Ripeness-scoring weights.
+    pub tag_weight: f64,
+    pub meta_weight: f64,
+    pub trak_weight: f64,
+    /// Tag points per position within a group (index 0 = first tag).
+    pub tag_points: Vec<f64>,
+    pub trak_playcount_cap: f64,
 }
 
 impl Default for Engine {
@@ -90,6 +140,11 @@ impl Default for Engine {
             base_likes: 2.0,
             base_sources: 1.0,
             parent_match: false,
+            tag_weight: 3.0,
+            meta_weight: 1.0,
+            trak_weight: 0.5,
+            tag_points: vec![100.0, 50.0, 25.0, 10.0, 5.0, 1.0],
+            trak_playcount_cap: 100.0,
         }
     }
 }
@@ -106,6 +161,15 @@ pub async fn engine(pool: &SqlitePool) -> Engine {
         Some(v) => matches!(v.as_str(), "1" | "true" | "on" | "yes"),
         None => d,
     };
+    let points = s
+        .get(ENGINE_TAG_POINTS)
+        .map(|v| {
+            v.split(',')
+                .filter_map(|p| p.trim().parse::<f64>().ok())
+                .collect::<Vec<f64>>()
+        })
+        .filter(|v: &Vec<f64>| !v.is_empty())
+        .unwrap_or_else(|| Engine::default().tag_points);
     Engine {
         shared_factor: num(ENGINE_SHARED_FACTOR, 3.0),
         candidate_factor: num(ENGINE_CANDIDATE_FACTOR, 1.0),
@@ -114,6 +178,11 @@ pub async fn engine(pool: &SqlitePool) -> Engine {
         base_likes: num(ENGINE_BASE_LIKES, 2.0),
         base_sources: num(ENGINE_BASE_SOURCES, 1.0),
         parent_match: flag(ENGINE_PARENT_MATCH, false),
+        tag_weight: num(ENGINE_TAG_WEIGHT, 3.0),
+        meta_weight: num(ENGINE_META_WEIGHT, 1.0),
+        trak_weight: num(ENGINE_TRAK_WEIGHT, 0.5),
+        tag_points: points,
+        trak_playcount_cap: num(ENGINE_TRAK_PLAYCOUNT_CAP, 100.0),
     }
 }
 
@@ -165,7 +234,10 @@ pub async fn is_admin(st: &crate::api::AppState, user_id: i64) -> bool {
 }
 
 /// Overlay DB settings onto a config (env stays the fallback).
-pub async fn overlay_config(pool: &SqlitePool, mut cfg: crate::config::Config) -> crate::config::Config {
+pub async fn overlay_config(
+    pool: &SqlitePool,
+    mut cfg: crate::config::Config,
+) -> crate::config::Config {
     for (k, v) in load_all(pool).await {
         cfg.apply(&k, &v);
     }

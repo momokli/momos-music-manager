@@ -27,13 +27,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hub/health", get(health))
         .route("/api/hub/users", get(users))
         .route("/api/hub/tracks/{id}", get(track))
+        .route("/api/hub/tracks/{id}/ripeness", get(track_ripeness))
         .route("/api/hub/overlap", get(overlap))
         .route("/api/hub/similar", get(similar))
         .route("/api/hub/playlists", get(playlists))
         .route("/api/hub/query", post(query))
-        		.route("/api/hub/me", get(me))
-        		.route("/api/hub/services/{service}/sync", post(sync))
-        		.with_state(state)
+        .route("/api/hub/me", get(me))
+        .route("/api/hub/services/{service}/sync", post(sync))
+        .with_state(state)
 }
 
 type ApiError = (StatusCode, Json<Value>);
@@ -90,6 +91,38 @@ async fn similar(
         }));
     }
     Ok(Json(json!({ "data": data })))
+}
+
+/// `GET /api/hub/tracks/{id}/ripeness` — on-the-fly ripeness score (issue #214).
+async fn track_ripeness(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    if crate::web::current_user(&st, &headers).await.is_none() {
+        return Err(err(StatusCode::UNAUTHORIZED, "login required"));
+    }
+    let e = crate::settings::engine(&st.pool).await;
+    let r = crate::scoring::ripeness(&st.pool, id, &e).await;
+    let groups: Vec<Value> = r
+        .tags_per_group
+        .iter()
+        .map(|(gid, name, k)| json!({ "groupId": gid, "name": name, "tags": k }))
+        .collect();
+    let meta: Vec<Value> = r
+        .meta_present
+        .iter()
+        .map(|(n, ok)| json!({ "field": n, "present": ok }))
+        .collect();
+    Ok(Json(json!({ "data": {
+        "trackId": id,
+        "total": r.total,
+        "tagScore": r.tag_score,
+        "metaScore": r.meta_score,
+        "traktorScore": r.traktor_score,
+        "groups": groups,
+        "meta": meta,
+    }})))
 }
 
 /// Current session user plus their linked service accounts (issue M2-6).
