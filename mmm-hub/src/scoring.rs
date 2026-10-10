@@ -159,6 +159,7 @@ pub async fn queue(
     e: &Engine,
     max_total: Option<f64>,
     only_untagged: bool,
+    sort: &str,
     limit: usize,
 ) -> Vec<QueueRow> {
     // Tag counts per (track, group) -> position-weighted tag score per track.
@@ -260,14 +261,39 @@ pub async fn queue(
             tag_count: t_count,
         });
     }
-    // Least ripe first; stable tie-break by artist/title.
-    out.sort_by(|a, b| {
+    // Sort by the requested order (default: least ripe first).
+    let by_total = |a: &QueueRow, b: &QueueRow| {
         a.total
             .partial_cmp(&b.total)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.artists.cmp(&b.artists))
-            .then_with(|| a.title.cmp(&b.title))
-    });
+    };
+    match sort {
+        "ripeness-desc" => out.sort_by(|a, b| by_total(b, a)),
+        "title" => out.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+        "artist" => out.sort_by(|a, b| {
+            a.artists
+                .to_lowercase()
+                .cmp(&b.artists.to_lowercase())
+                .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+        }),
+        "tags" => out.sort_by(|a, b| a.tag_count.cmp(&b.tag_count).then_with(|| by_total(a, b))),
+        "tags-desc" => {
+            out.sort_by(|a, b| b.tag_count.cmp(&a.tag_count).then_with(|| by_total(a, b)))
+        }
+        "meta" => out.sort_by(|a, b| {
+            a.meta_score
+                .partial_cmp(&b.meta_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| by_total(a, b))
+        }),
+        "traktor" => out.sort_by(|a, b| {
+            b.traktor_score
+                .partial_cmp(&a.traktor_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| by_total(a, b))
+        }),
+        _ => out.sort_by(by_total),
+    }
     out.truncate(limit);
     out
 }

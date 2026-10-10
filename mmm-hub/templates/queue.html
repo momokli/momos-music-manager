@@ -32,12 +32,32 @@ content %}
         />
     </label>
     <label style="display: flex; gap: 0.25rem; align-items: center">
-        <input type="checkbox" name="untagged" value="1" {% if untagged %}checked{% endif %} />
+        <input
+            type="checkbox"
+            name="untagged"
+            value="1"
+            {%
+            if
+            untagged
+            %}checked{%
+            endif
+            %}
+        />
         nur ungetaggt
     </label>
+    <label style="display: flex; gap: 0.3rem; align-items: center">
+        Sortierung
+        <select name="sort" onchange="this.form.submit()" aria-label="Sortierung">
+            {% for o in sort_opts %}
+            <option value="{{ o.value }}" {% if o.selected %}selected{% endif %}>
+                {{ o.label }}
+            </option>
+            {% endfor %}
+        </select>
+    </label>
     <label style="display: flex; gap: 0.25rem; align-items: center">
-        <input type="checkbox" name="mine" value="1" {% if mine %}checked{% endif %} /> nur
-        meine Playlists
+        <input type="checkbox" name="mine" value="1" {% if mine %}checked{% endif %} />
+        nur meine Playlists
     </label>
     <button type="submit">Filtern</button>
     <span class="hub-muted">{{ total_shown }} Tracks</span>
@@ -53,7 +73,11 @@ content %}
 >
     <div
         class="hub-scroll-y overflow-auto"
-        style="max-height: 74vh; overflow: auto; border: 1px solid var(--pico-muted-border-color)"
+        style="
+            max-height: 74vh;
+            overflow: auto;
+            border: 1px solid var(--pico-muted-border-color);
+        "
     >
         <table class="hub-dense-table">
             <caption class="hub-visually-hidden">

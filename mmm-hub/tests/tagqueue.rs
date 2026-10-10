@@ -113,3 +113,24 @@ async fn stream_without_isrc_is_bad_request() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn tag_queue_sort_is_selectable() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+    let html = app
+        .client()
+        .get(app.url("/tag-queue?sort=title"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html.contains("Sortierung"), "sort control missing");
+    assert!(
+        html.contains("value=\"title\" selected"),
+        "selected sort not reflected"
+    );
+}

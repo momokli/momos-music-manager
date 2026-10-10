@@ -44,6 +44,9 @@ struct QueueFilter {
     untagged: Option<String>,
     /// "1" = only tracks that appear in one of my playlists.
     mine: Option<String>,
+    /// Sort key: ripeness (asc, default) | ripeness-desc | title | artist |
+    /// tags | tags-desc | meta | traktor.
+    sort: Option<String>,
 }
 
 #[derive(Template)]
@@ -55,8 +58,16 @@ struct QueuePage {
     max: String,
     untagged: bool,
     mine: bool,
+    sort: String,
+    sort_opts: Vec<SortOpt>,
     rows: Vec<QueueRowView>,
     total_shown: usize,
+}
+
+struct SortOpt {
+    value: String,
+    label: String,
+    selected: bool,
 }
 
 struct QueueRowView {
@@ -82,6 +93,7 @@ async fn queue_page(
     let q = f.q.unwrap_or_default().trim().to_string();
     let untagged = f.untagged.as_deref() == Some("1");
     let mine = f.mine.as_deref() == Some("1");
+    let sort = f.sort.unwrap_or_default();
     let e = crate::settings::engine(&st.pool).await;
 
     // Tracks in my playlists (for the "mine" filter).
@@ -102,7 +114,7 @@ async fn queue_page(
     };
 
     let needle = q.to_lowercase();
-    let rows: Vec<QueueRowView> = crate::scoring::queue(&st.pool, &e, f.max, untagged, 2000)
+    let rows: Vec<QueueRowView> = crate::scoring::queue(&st.pool, &e, f.max, untagged, &sort, 2000)
         .await
         .into_iter()
         .filter(|r| {
@@ -125,6 +137,23 @@ async fn queue_page(
         })
         .collect();
     let total_shown = rows.len();
+    let sort_opts: Vec<SortOpt> = [
+        ("", "Ripeness ↑ (am wenigsten getaggt)"),
+        ("ripeness-desc", "Ripeness ↓"),
+        ("title", "Titel"),
+        ("artist", "Künstler"),
+        ("tags", "Tags ↑"),
+        ("tags-desc", "Tags ↓"),
+        ("meta", "Meta ↑"),
+        ("traktor", "Traktor-Plays ↓"),
+    ]
+    .iter()
+    .map(|(v, l)| SortOpt {
+        value: (*v).to_string(),
+        label: (*l).to_string(),
+        selected: *v == sort,
+    })
+    .collect();
     render(&QueuePage {
         nav,
         flash: String::new(),
@@ -132,6 +161,8 @@ async fn queue_page(
         max: f.max.map(|m| m.to_string()).unwrap_or_default(),
         untagged,
         mine,
+        sort,
+        sort_opts,
         rows,
         total_shown,
     })
