@@ -26,6 +26,7 @@ pub mod pages;
 pub mod scoring;
 pub mod settings;
 pub mod similar;
+pub mod similarity;
 pub mod soundcloud;
 pub mod spotify;
 pub mod tagqueue;
