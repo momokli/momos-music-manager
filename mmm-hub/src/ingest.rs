@@ -6,6 +6,7 @@ use serde_json::Value;
 use sqlx::SqlitePool;
 
 use crate::config::Config;
+use crate::soundcloud;
 use crate::spotify::{self, Tokens};
 use crate::ytdlp;
 
@@ -688,74 +689,226 @@ pub async fn ingest_youtube_public(
     Ok(summary)
 }
 
-/// Ingest public SoundCloud playlists for a user.
+// ── SoundCloud ingest ──
+
+/// SoundCloud ids are JSON numbers; normalise to a string for `service_track_id`.
+fn sc_id(v: &Value) -> Option<String> {
+    match &v["id"] {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Upsert a SoundCloud track object (api-v2 shape) into `hub_tracks`.
+async fn upsert_track_from_soundcloud(pool: &SqlitePool, t: &Value) -> Result<Option<i64>> {
+    let Some(service_track_id) = sc_id(t) else {
+        return Ok(None);
+    };
+    let title = t["title"].as_str().unwrap_or("");
+    let artists = t["user"]["username"]
+        .as_str()
+        .or_else(|| t["publisher_metadata"]["artist"].as_str())
+        .unwrap_or("");
+    let duration_ms = t["duration"].as_i64();
+    let image_url = t["artwork_url"].as_str();
+    let isrc = t["publisher_metadata"]["isrc"].as_str();
+    let album = t["publisher_metadata"]["album_title"].as_str();
+    let explicit = t["publisher_metadata"]["explicit"]
+        .as_bool()
+        .map(|b| b as i64);
+
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_tracks
+             (service, service_track_id, isrc, title, artists, album, duration_ms, explicit,
+              image_url, first_seen_at)
+         VALUES ('soundcloud', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(service, service_track_id) DO UPDATE SET
+             isrc        = COALESCE(excluded.isrc, hub_tracks.isrc),
+             title       = excluded.title,
+             artists     = excluded.artists,
+             album       = COALESCE(excluded.album, hub_tracks.album),
+             duration_ms = excluded.duration_ms,
+             explicit    = COALESCE(excluded.explicit, hub_tracks.explicit),
+             image_url   = COALESCE(excluded.image_url, hub_tracks.image_url)
+         RETURNING id",
+    )
+    .bind(service_track_id)
+    .bind(isrc)
+    .bind(title)
+    .bind(artists)
+    .bind(album)
+    .bind(duration_ms)
+    .bind(explicit)
+    .bind(image_url)
+    .bind(now_iso())
+    .fetch_one(pool)
+    .await?;
+    Ok(Some(id))
+}
+
+/// Upsert a SoundCloud playlist (api-v2 shape) and replace its items.
+/// Returns the number of tracks linked, or `None` if the object has no id.
+async fn store_soundcloud_playlist(
+    pool: &SqlitePool,
+    user_id: i64,
+    pl: &Value,
+) -> Result<Option<usize>> {
+    let Some(playlist_id) = sc_id(pl) else {
+        return Ok(None);
+    };
+    let name = pl["title"].as_str().unwrap_or("");
+    let description = pl["description"].as_str();
+    let track_count = pl["track_count"].as_i64();
+    let local_playlist_id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_playlists
+             (user_id, service, playlist_id, name, description, is_liked, track_count,
+              items_available, fetched_at)
+         VALUES (?1, 'soundcloud', ?2, ?3, ?4, 0, ?5, 1, ?6)
+         ON CONFLICT(user_id, service, playlist_id) DO UPDATE SET
+             name = excluded.name,
+             description = excluded.description,
+             track_count = excluded.track_count,
+             items_available = excluded.items_available,
+             fetched_at = excluded.fetched_at
+         RETURNING id",
+    )
+    .bind(user_id)
+    .bind(&playlist_id)
+    .bind(name)
+    .bind(description)
+    .bind(track_count)
+    .bind(now_iso())
+    .fetch_one(pool)
+    .await?;
+
+    // Replace the playlist's items so re-ingest is idempotent.
+    sqlx::query("DELETE FROM hub_playlist_tracks WHERE playlist_id = ?1")
+        .bind(local_playlist_id)
+        .execute(pool)
+        .await?;
+
+    let mut count = 0usize;
+    let mut position = 0i64;
+    if let Some(tracks) = pl["tracks"].as_array() {
+        for t in tracks {
+            if let Some(track_id) = upsert_track_from_soundcloud(pool, t).await? {
+                sqlx::query(
+                    "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position, added_at)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(playlist_id, track_id) DO UPDATE SET
+                         position = excluded.position, added_at = excluded.added_at",
+                )
+                .bind(local_playlist_id)
+                .bind(track_id)
+                .bind(position)
+                .bind(t["created_at"].as_str())
+                .execute(pool)
+                .await?;
+                count += 1;
+                position += 1;
+            }
+        }
+    }
+    Ok(Some(count))
+}
+
+/// Replace a user's SoundCloud likes with `entries` (api-v2 like objects).
+/// Only SoundCloud-sourced likes are cleared, so Spotify likes survive.
+async fn store_soundcloud_likes(
+    pool: &SqlitePool,
+    user_id: i64,
+    entries: &[Value],
+) -> Result<usize> {
+    sqlx::query(
+        "DELETE FROM hub_liked_tracks
+          WHERE user_id = ?1
+            AND track_id IN (SELECT id FROM hub_tracks WHERE service = 'soundcloud')",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    let mut count = 0usize;
+    for entry in entries {
+        let t = &entry["track"];
+        if t.is_null() {
+            continue;
+        }
+        let Some(track_id) = upsert_track_from_soundcloud(pool, t).await? else {
+            continue;
+        };
+        sqlx::query(
+            "INSERT INTO hub_liked_tracks (user_id, track_id, liked_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(user_id, track_id) DO UPDATE SET liked_at = excluded.liked_at",
+        )
+        .bind(user_id)
+        .bind(track_id)
+        .bind(entry["created_at"].as_str())
+        .execute(pool)
+        .await?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Ingest public SoundCloud playlists/likes for a user.
+///
+/// `profile_url` may be a single set (`…/sets/discover`), all sets (`…/sets`),
+/// or likes (`…/likes`). Uses the api-v2 endpoints with a scraped `client_id`.
 pub async fn ingest_soundcloud_public(
     pool: &SqlitePool,
     user_slug: &str,
     profile_url: &str,
 ) -> anyhow::Result<Summary> {
+    ingest_soundcloud_public_with_api_base(
+        pool,
+        user_slug,
+        profile_url,
+        soundcloud::DEFAULT_API_BASE,
+    )
+    .await
+}
+
+/// [`ingest_soundcloud_public`] with an injectable api-v2 base (integration tests).
+pub async fn ingest_soundcloud_public_with_api_base(
+    pool: &SqlitePool,
+    user_slug: &str,
+    profile_url: &str,
+    api_base: &str,
+) -> anyhow::Result<Summary> {
     let user_id = ensure_user(pool, user_slug).await?;
     let mut summary = Summary::default();
 
-    // Fetch playlist entries from profile page (sets)
-    let playlist_entries = ytdlp::fetch_user_playlists(profile_url).await?;
-    summary.playlists = playlist_entries.len();
-    println!(
-        "Found {} playlists for user {}",
-        summary.playlists, user_slug
-    );
-    // For each playlist, fetch tracks and store them.
-    for playlist in playlist_entries.iter().take(2) {
-        let Some(playlist_id) = playlist.playlist_id() else {
-            continue;
-        };
-        // playlist_id is the SoundCloud playlist ID (e.g., "sets/123456")
-        // yt-dlp can fetch it directly with the original URL? We'll use the webpage_url if available.
-        let playlist_url = playlist.webpage_url.clone();
-        println!(
-            "Fetching tracks for playlist {:?}: {}",
-            playlist.title, playlist_url
-        );
-        let tracks = ytdlp::fetch_playlist_tracks(&playlist_url).await?;
-        println!("  got {} tracks", tracks.len());
+    let client = soundcloud::Client::connect(api_base, profile_url).await?;
+    let kind = soundcloud::classify(profile_url);
+    println!("SoundCloud: user id {}, kind {:?}", client.user_id(), kind);
 
-        // Upsert playlist metadata
-        let playlist_name = playlist.title.as_deref().unwrap_or("");
-        let local_playlist_id: i64 = sqlx::query_scalar(
-            "INSERT INTO hub_playlists (user_id, service, playlist_id, name, is_liked, track_count, items_available, fetched_at)
-             VALUES (?1, 'soundcloud', ?2, ?3, 0, ?4, 1, ?5)
-             ON CONFLICT(user_id, service, playlist_id) DO UPDATE SET
-                 name = excluded.name,
-                 track_count = excluded.track_count,
-                 items_available = excluded.items_available,
-                 fetched_at = excluded.fetched_at
-             RETURNING id",
-        )
-        .bind(user_id)
-        .bind(playlist_id)
-        .bind(playlist_name)
-        .bind(tracks.len() as i64)
-        .bind(now_iso())
-        .fetch_one(pool)
-        .await?;
-
-        // Upsert each track and link to playlist
-        for track in tracks {
-            if let Some(track_id) = upsert_track_from_ytdlp(pool, &track).await? {
-                sqlx::query(
-                    "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position, added_at)
-                     VALUES (?1, ?2, NULL, ?3)
-                     ON CONFLICT(playlist_id, track_id) DO NOTHING",
-                )
-                .bind(local_playlist_id)
-                .bind(track_id)
-                .bind(now_iso())
-                .execute(pool)
-                .await?;
-                summary.memberships += 1;
+    match kind {
+        soundcloud::UrlKind::Likes => {
+            let likes = client.user_likes().await?;
+            println!("  {} liked entries", likes.len());
+            summary.liked_tracks = store_soundcloud_likes(pool, user_id, &likes).await?;
+        }
+        soundcloud::UrlKind::AllPlaylists => {
+            let playlists = client.user_playlists().await?;
+            summary.playlists = playlists.len();
+            println!("  {} playlists", playlists.len());
+            for pl in &playlists {
+                if let Some(n) = store_soundcloud_playlist(pool, user_id, pl).await? {
+                    summary.memberships += n;
+                    summary.owned_with_items += 1;
+                }
             }
         }
-        summary.owned_with_items += 1;
+        soundcloud::UrlKind::SinglePlaylist => {
+            let pl = client.resolve(profile_url).await?;
+            summary.playlists = 1;
+            if let Some(n) = store_soundcloud_playlist(pool, user_id, &pl).await? {
+                summary.memberships += n;
+                summary.owned_with_items += 1;
+            }
+        }
     }
     Ok(summary)
 }
