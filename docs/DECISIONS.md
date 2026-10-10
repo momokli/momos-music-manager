@@ -1724,3 +1724,109 @@ trusted friends on the LAN.
   hub. The public surface is intentionally separate from the authenticated hub.
 - The published plan docs (`plans/mmm-hub/auth.md`) still describe the OIDC design; this
   ADR supersedes that part — the shipped auth is local accounts + server-side sessions.
+
+---
+
+## ADR-074: Spelunke — per-user tag layer over playlists (tags → groups → collectives)
+
+**Date**: 2026-10-10
+**Status**: Accepted (implemented on `feat/mmm-hub` / `feat/hub-music-status`)
+**Relates**: ADR-073 (hub as a crate), `plans/mmm-hub/tagging-spelunking.md`
+
+**Context**: Raw playlists are a weak signal: names drift, the same track sits in many
+lists, and there is no shared vocabulary for “mood”, “phase”, “vibe”. The hub needed a
+curated layer to compare tracks and to hang scoring/similarity/digging off.
+
+**Decision**:
+
+- **Tags are the curated layer above playlists.** A tag is created _from_ a playlist
+  (or by hand) and can be sourced by several playlists; the materialized
+  `hub_track_resolved_tags` table maps tracks → tags and is rebuilt on mutation
+  (ADR-071 spirit). Tags are **per user** (owner + visibility), but resolvable across all
+  users for comparison.
+- **Groups** (`hub_tag_groups`) bundle tags and carry a `kind`
+  (`class`/`sort`) + semantic `role` (`setlist`, `rumpelkiste`, `genre`, `phase`) and a
+  ranking weight; a tag may be in several groups. Ranked groups order their tags 1–5
+  (energy).
+- **Collectives** are a set of users who jointly own groups; every member is a
+  contributor to the collective’s groups.
+- **Insights** on `/tag/{id}` (top artists, co-occurrence within/across groups, jump to
+  digging/overlap) are derived, not stored.
+
+**Consequences**:
+
+- Comparison/scoring/digging read the tag layer, not raw playlists — reproducible and
+  explainable. Rebuilding resolved tags on mutation keeps filters current.
+- The tag layer is a _second_ interpretation of playlists; playlists that are “meta”
+  (e.g. liked, discovery) are excluded from tag creation.
+- Manual curation cost is real — offset by importing the MMM tag library and by
+  recommendations (ADR-075).
+
+---
+
+## ADR-075: Spelunke — one configurable engine (ripeness + similarity v2) behind a typed settings registry
+
+**Date**: 2026-10-10
+**Status**: Accepted (implemented on `feat/hub-music-status`)
+**Relates**: ADR-074 (tag layer), `#214/#215/#217/#221/#222/#223`
+
+**Context**: Ranking in the hub (tag-queue order, digging suggestions, overlap ordering)
+combined several ad-hoc signals with hardcoded factors, which made results opaque and
+untunable.
+
+**Decision**:
+
+- **Ripeness** (“how complete is a track’s data?”) = `tag_weight·TAG_SCORE +
+meta_weight·META_SCORE + trak_weight·TRAKTOR_SCORE`, with per-meta-field weights
+  (title/artist/album/cover/bpm/key/genre) and position-weighted tag points per group
+  (`100,50,25,10,5,1,…`, hanging on the group, not the tag).
+- **Similarity v2** between two tracks = shared tags (base) + a bonus for shared-tag
+  pairs in _different_ groups; **Rumpelkiste** tags/playlists are excluded.
+- **Digging and Overlap rank with ripeness + similarity** (`engine_sim_factor`,
+  `engine_ripeness_factor`), not just raw counts.
+- **Every knob is a typed setting** in `settings::SETTINGS` (`Num`/`Bool`/`Text`/`Csv`/
+  `Enum`) with default + range, validated on write and editable at `/admin`; the engine
+  is resolved from settings (env/default fallback). No engine constant is hardcoded.
+
+**Consequences**:
+
+- Results are tunable from the UI without redeploy; the registry is the single source of
+  truth and is unit-tested for defaults/ranges.
+- Dropping a tag no longer removes “the 100-point tag” — it removes the group’s cheapest
+  tier (deterministic, group-scoped).
+- Per-collective override of engine values is specified but **not yet implemented** (TODO).
+
+---
+
+## ADR-076: Spelunke — unified table UX: server-side sortable headers + tokenised fuzzy/typo search
+
+**Date**: 2026-10-10
+**Status**: Accepted (implemented on `feat/hub-music-status`)
+**Relates**: ADR-073/074/075
+
+**Context**: Every list view had its own filter/search behaviour; some had no search, some
+matched a single substring, and none were sortable by header. The same interaction should
+work everywhere and stay server-side (AGENT rule: “server-side filtering”).
+
+**Decision**:
+
+- **One shared module `src/table.rs`** provides `tokens`, `push_fuzzy`/`matches`,
+  `matches_typo`/`levenshtein`, `sort_head`/`resolve_sort`/`order_by`.
+- **Search is tokenised, order-independent and typo-tolerant**: a row matches when every
+  query token is a case-insensitive substring of _some_ visible field, or within edit
+  distance ≤ 1 of one of its words (short tokens stay strict). SQL pages run a strict
+  pass first and fall back to a bounded unfiltered scan re-filtered in Rust.
+- **Sorting is whitelisted per view** (`field → SQL expression`, never interpolated),
+  server-side, with clickable headers that toggle asc/desc and preserve all other query
+  parameters (including pagination).
+- **Rolled out to every data table**: `/search`, `/album`, `/artist`, `/tags`,
+  `/tag/{id}`, `/groups(/{id})`, `/collectives(/{id})`, `/me/playlists`, `/playlist/{id}`,
+  `/user/{slug}`, `/overlap`, `/playlists/similar`, `/tag-queue`, `/downloads`,
+  `/history`, `/admin`.
+
+**Consequences**:
+
+- Uniform, predictable interaction; no client-side filtering (page counts stay correct).
+- Fuzzy matching via `instr(...)` cannot use indexes → full scans, acceptable at hub scale
+  (tens of thousands of rows); the typo fallback is bounded by `LIMIT`.
+- New list views should reuse `table::*` rather than hand-rolling filters.

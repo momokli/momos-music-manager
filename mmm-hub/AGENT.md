@@ -1,13 +1,17 @@
 # mmm-hub — Agent Handover
 
-> **Last updated**: 2026-10-10 · branch `feat/mmm-hub` · PR **#202** (open, → `main`)
+> **Last updated**: 2026-10-10 · branch `feat/hub-music-status` (→ `feat/mmm-hub`)
 > Keep this file current. It is the entry point for any agent working on `mmm-hub/`.
 >
-> **New in this batch (tagging + spelunking engine):** migrations `026`
-> (group `kind`/`role`) and `027` (Traktor ingest + `hub_v_track_traktor`), new
-> modules `src/traktor.rs` and `src/scoring.rs`, tag-page multi-group filter +
-> create form, genre variation/main direction, tag insights, ripeness score +
-> engine knobs. See `plans/mmm-hub/tagging-spelunking.md` for the full plan.
+> **New in this batch (engine + unified UX):** migrations `028`–`035`
+> (music-state format/error, track tagging, import history, tag archive, album/artist
+> indexes), new module `src/table.rs` (server-side sortable headers + tokenised
+> fuzzy/typo search, rolled out to **every** list table), typed settings registry
+> (`settings::SETTINGS` — every engine knob configurable at `/admin`), similarity v2
+>
+> - ripeness wired into digging/overlap, and the tag recommendation engine with
+>   explanations. ADRs **[074](../docs/DECISIONS.md)/075/076**. See
+>   `plans/mmm-hub/tagging-spelunking.md`.
 
 ---
 
@@ -108,6 +112,8 @@ mmm-hub/
 │   ├── tags.rs            the tag/group/collective layer (big)
 │   ├── traktor.rs         Traktor collection.nml ingest (playcount/rating/playlists)
 │   ├── scoring.rs         ripeness score (tag points per group, meta, traktor signal)
+│   ├── similarity.rs      similarity v2 (tag overlap cross-group, rumpelkiste)
+│   ├── table.rs           shared table UX: sortable headers + fuzzy/typo search
 │   ├── tagqueue.rs        /tag-queue (ripeness-sorted) + direct tagging + player
 │   ├── artists.rs         /artists + /artist/{name} explorer
 │   ├── history.rs         import-run ledger + change events (all sources)
