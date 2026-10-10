@@ -88,14 +88,40 @@ pub async fn status(cfg: &Config, isrc: &str) -> Result<IsrcState> {
     Ok(body)
 }
 
+/// Map a hub-facing format token to the token the music-api service accepts
+/// (`flac` | `320` | `128`). The hub UI offers `flac`/`mp3`/`wav`/`m4a`; only
+/// flac + mp3 are actually delivered, so mp3* collapse to `320`.
+pub fn api_format(format: &str) -> String {
+    match format.to_lowercase().as_str() {
+        "flac" => "flac".to_string(),
+        "128" | "mp3-128" => "128".to_string(),
+        "320" | "mp3" | "mp3-320" => "320".to_string(),
+        other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod api_format_tests {
+    use super::api_format;
+    #[test]
+    fn maps_hub_formats_to_music_api_tokens() {
+        assert_eq!(api_format("flac"), "flac");
+        assert_eq!(api_format("mp3"), "320");
+        assert_eq!(api_format("mp3-320"), "320");
+        assert_eq!(api_format("128"), "128");
+        assert_eq!(api_format("mp3-128"), "128");
+    }
+}
+
 /// `GET /isrc/{isrc}/{format}` — fetch the actual audio bytes (e.g. `flac`).
-/// Errors if the service returns a non-success status (not yet downloaded etc.).
+/// `format` is a hub token; it is translated via [`api_format`].
 pub async fn file_bytes(cfg: &Config, isrc: &str, format: &str) -> Result<Vec<u8>> {
+    let api = api_format(format);
     let url = format!(
         "{}/isrc/{}/{}",
         cfg.music_api_base,
         urlencoding::encode(isrc),
-        urlencoding::encode(format)
+        urlencoding::encode(&api)
     );
     let resp = reqwest::Client::new()
         .get(&url)
