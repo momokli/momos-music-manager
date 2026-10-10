@@ -100,14 +100,15 @@
 
 - **F1** Ein Track gilt als **vollständig getaggt**, wenn **alle _konfigurierten_ klassifizierenden Gruppen** getaggt sind **oder** der User ihn als **fertig** markiert. (Kein hartes „5" — die Menge der Klassifizierungsgruppen ist Teil der Konfiguration.)
 - **F2** Die Aufgabe zeigt **am häufigsten gespielte Traktor-Tracks zuerst**, gemäß Scoring.
-- **F3** **Cadence**: täglich **und** wöchentlich (Reset/Rollover, Historie).
+- **F3** **Cadence**: täglich **und** wöchentlich (Reset/Rollover, Historie). **Reset-Zeiten sind konfigurierbar** (Tages-Uhrzeit + Wochen-Wochentag, Zeitzone) über das Setting-Registry.
 - **F4** Der Score-Filter (D4) ist hier wie überall ein **UI-Filter**, kein eingebauter Skip.
 
 ### G — Engine-Integration
 
 - **G1** Ripeness + Similarity in **Digging** (Suche/Ähnlichkeit), **Overlap** und **Tag-Insights** nutzen.
 - **G2** Faktoren/Schwellen **konfigurierbar im Web-UI** (admin-Settings + pro Collective).
-- **G3** **Alle Gewichtungen, Verteilungen und Koeffizienten** sind als **Werte** im Hub hinterlegt (kein Hardcoding) und im UI **fine-tunebar**: Tag-Punkt-Vektor, Cross-Group-Bonus, Gewichte je Gruppe bzw. Tag-Typ (z. B. Rumpelkiste-Match zählt wenig, Mood-Match viel), `shared_weight` vs. `candidate_weight`, Similarity-Koeffizienten, Schwellen. Typed Setting-Keys mit Default + Validierung; pro Collective überschreibbar. → **T4-4** (#217).
+- **G3** **Alle Gewichtungen, Verteilungen, Koeffizienten, Schwellen und Zeitpunkte** sind als **Werte** im Hub hinterlegt (kein Hardcoding) und im UI **fine-tunebar**: Tag-Punkt-Vektor, Cross-Group-Bonus, Gewichte je Gruppe bzw. Tag-Typ (z. B. Rumpelkiste-Match zählt wenig, Mood-Match viel), **Meta-Gewichte** (BPM/Key/Album/Genre/Cover/Artist/Title), **Traktor-Gewicht**, `shared_weight` vs. `candidate_weight`, Similarity-Koeffizienten, Score-Filter-Defaults, **Cadence-Reset-Zeiten** (Tages-/Wochen-Rollover), Co-Occurrence-Metrik-Wahl. Typed Setting-Keys mit Default + Range/Validierung; editierbar im UI, pro Collective überschreibbar. → **T4-4** (#217).
+- **G4** **Nichts ist hart im Code** — jede Konstante der Engine/Aufgaben wird über das Setting-Registry gelesen (Default → Setting → Collective-Override).
 
 ---
 
@@ -198,7 +199,7 @@ Genre Variation/Haupt: **kein** neues Schema — nutzt `hub_tag_parents` (Variat
 - **T4-1** `feat(hub): ripeness score (meta+tags, human>meta)` — Kern-Algo + `hub_track_ripeness`-Cache/Endpoint. _(AC: `group_points` exakt lt. §2; Unit-Tests inkl. „Löschen entfernt niedrigste Stufe".)_
 - **T4-2** `feat(hub): traktor signal in ripeness` — playcount/lastplayed/rating/sessions einfließen. _(AC: Gewicht konfigurierbar; Test.)_
 - **T4-3** `feat(hub): scoring settings in UI` — `engine_*`-Keys erweitert (Gewichte etc.). Score selbst wird on the fly berechnet; kein eingebauter Schwellwert. _(AC: `/admin` editierbar; Test.)_
-- **T4-4** `feat(hub): engine params — all weights + distributions configurable` — zentrales Setting-Registry für **alle** Engine-Werte mit Default/Range/Validierung, editierbar im UI, pro Collective überschreibbar. _(AC: Registry listet jeden Parameter; Wertänderung wirkt; Test.)_
+- **T4-4** `feat(hub): engine params — all weights + distributions configurable` — zentrales Setting-Registry für **jeden** Engine/Aufgaben-Wert (Tag-Punkt-Vektor, Cross-Group-Bonus, Gruppen-/Tag-Typ-Gewichte, **Meta-Gewichte**, Traktor-Gewicht, `shared_weight`/`candidate_weight`, Similarity-Koeffizienten, Score-Filter-Defaults, **Cadence-Reset-Zeiten**, Co-Occurrence-Metrik) mit Default/Range/Validierung, editierbar im UI, pro Collective überschreibbar. Kein Wert hardcodiert. _(AC: Registry listet jeden Parameter; Wertänderung wirkt; Test.)_
 
 ### Milestone `hub-tasks-0.14.0`
 
@@ -230,9 +231,13 @@ Genre Variation/Haupt: **kein** neues Schema — nutzt `hub_tag_parents` (Variat
 4. **Traktor-Quelle**: **jeder User lädt seine eigene `collection.nml` hoch**. (§1 E1/H4)
 5. **Historisierung**: Importe **aller Quellen** werden historisiert (Run-Ledger + Change-Events + UI) — was ändert sich über die Zeit. (§1 H)
 
-**Noch offen:** 4. Meta-Gewichte: Default-Verhältnis HUMAN:META (Vorschlag 3:1) und Traktor-Anteil? 6. Cadence: Tages-/Wochen-Reset-Zeit (UTC?) + „streak"-Anzeige gewünscht? 7. Co-Occurrence-Metrik: Jaccard vs. Lift vs. Konfidenz?
+**Alle Engine-Parameter sind konfigurierbar** (Setting-Registry, T4-4/#217) — es gibt keine offenen Entscheidungen mehr, die als Konstante festgezurrt werden müssten:
 
-(Alles Übrige ist über das Engine-Setting-Registry — T4-4/#217 — on the fly justierbar.)
+4. **Meta-Gewichte** (inkl. Verhältnis HUMAN:META und Traktor-Anteil) → Setting-Keys, Defaults nur als Startwert.
+5. **Cadence**: Reset-Zeiten (Tages-Uhrzeit, Wochen-Wochentag, Zeitzone) + Streak-Toggle → Setting-Keys.
+6. **Co-Occurrence-Metrik** (Jaccard/Lift/Konfidenz) → Setting-Key.
+
+> Gültige Defaults werden beim Bau der Engine festgelegt, sind aber **jederzeit im Web-UI änderbar**.
 
 ---
 
