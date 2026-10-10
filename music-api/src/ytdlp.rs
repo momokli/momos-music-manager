@@ -224,7 +224,7 @@ pub async fn search(query: &str, out_dir: &Path, format: &str) -> Result<PathBuf
     download(&target, out_dir, format).await
 }
 
-fn find_newest_audio(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn find_newest_audio(dir: &Path) -> Option<PathBuf> {
     const EXTS: &[&str] = &["flac", "mp3", "m4a", "opus", "ogg", "wav"];
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
