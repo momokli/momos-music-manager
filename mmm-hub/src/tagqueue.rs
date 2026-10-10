@@ -321,7 +321,7 @@ async fn track_stream(
     if isrc.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "Track hat keine ISRC").into_response();
     }
-    match crate::music_api::file_bytes(&st.cfg, &isrc, "128").await {
+    match crate::music_api::file_bytes_any(&st.cfg, &isrc, "128").await {
         Ok(bytes) => Response::builder()
             .header(axum::http::header::CONTENT_TYPE, "audio/mpeg")
             .header(axum::http::header::ACCEPT_RANGES, "none")

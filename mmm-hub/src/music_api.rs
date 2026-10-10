@@ -137,6 +137,26 @@ pub async fn file_bytes(cfg: &Config, isrc: &str, format: &str) -> Result<Vec<u8
     Ok(resp.bytes().await.context("read music-api body")?.to_vec())
 }
 
+/// Fetch audio bytes, falling back across formats until one is available.
+/// Tries `preferred` first, then 128 / 320 / flac. Use this when the caller
+/// only cares about getting *some* playable audio (player, downloads).
+pub async fn file_bytes_any(cfg: &Config, isrc: &str, preferred: &str) -> Result<Vec<u8>> {
+    let mut tried: Vec<String> = Vec::new();
+    let mut last_err: Option<anyhow::Error> = None;
+    for f in [preferred, "128", "320", "flac"] {
+        let api = api_format(f);
+        if tried.iter().any(|t| t == &api) {
+            continue;
+        }
+        tried.push(api.clone());
+        match file_bytes(cfg, isrc, f).await {
+            Ok(b) => return Ok(b),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no audio format available")))
+}
+
 /// `POST /orders` — order one or more ISRCs. Returns the order id.
 pub async fn order(cfg: &Config, isrcs: &[String]) -> Result<String> {
     let url = format!("{}/orders", cfg.music_api_base);

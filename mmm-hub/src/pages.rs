@@ -451,7 +451,7 @@ async fn build_playlist_zip(
         if isrc.is_empty() {
             continue;
         }
-        let bytes = match crate::music_api::file_bytes(cfg, &isrc, format).await {
+        let bytes = match crate::music_api::file_bytes_any(cfg, &isrc, format).await {
             Ok(b) => b,
             Err(_) => continue, // not downloaded / not in ledger yet
         };
@@ -754,7 +754,7 @@ async fn track_download(
     if isrc.is_empty() {
         return (StatusCode::BAD_REQUEST, "Track hat keine ISRC").into_response();
     }
-    match crate::music_api::file_bytes(&st.cfg, &isrc, &format).await {
+    match crate::music_api::file_bytes_any(&st.cfg, &isrc, &format).await {
         Ok(bytes) => {
             let artists = r.get::<Option<String>, _>("artists").unwrap_or_default();
             let title = r.get::<Option<String>, _>("title").unwrap_or_default();
