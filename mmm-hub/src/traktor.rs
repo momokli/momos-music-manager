@@ -37,6 +37,9 @@ pub async fn import_nml(pool: &SqlitePool, user_id: i64, path: &str) -> Result<S
 pub async fn import_str(pool: &SqlitePool, user_id: i64, xml: &str) -> Result<Stats> {
     let doc = roxmltree::Document::parse(xml).context("parse NML")?;
     let now = chrono::Utc::now().to_rfc3339();
+    let run_id = crate::history::start_run(pool, user_id, "traktor")
+        .await
+        .ok();
 
     // ── collection entries ──────────────────────────────────────────────────
     let mut entries: Vec<Entry> = Vec::new();
@@ -159,11 +162,20 @@ pub async fn import_str(pool: &SqlitePool, user_id: i64, xml: &str) -> Result<St
         playlist_count += 1;
     }
 
-    Ok(Stats {
+    let stats = Stats {
         entries: stats_entries,
         matched,
         playlists: playlist_count,
-    })
+    };
+    if let Some(rid) = run_id {
+        let js = serde_json::json!({
+            "entries": stats.entries,
+            "matched": stats.matched,
+            "playlists": stats.playlists,
+        });
+        let _ = crate::history::finish_run(pool, rid, "ok", &js).await;
+    }
+    Ok(stats)
 }
 
 fn text_of(node: &roxmltree::Node, tag: &str) -> String {

@@ -16,6 +16,7 @@ pub mod digging;
 pub mod features;
 pub mod freqblog;
 pub mod genres;
+pub mod history;
 pub mod ingest;
 pub mod lastfm;
 pub mod mmm_import;

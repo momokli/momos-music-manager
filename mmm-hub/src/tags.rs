@@ -73,6 +73,13 @@ pub async fn rebuild(pool: &SqlitePool) -> Result<ResolveSummary> {
     )
     .execute(pool)
     .await?;
+    // Archived (kept) links: tracks that left a keep_on_remove source playlist.
+    sqlx::query(
+        "INSERT OR IGNORE INTO hub_track_resolved_tags (track_id, tag_id)
+         SELECT DISTINCT track_id, tag_id FROM hub_track_tag_archive",
+    )
+    .execute(pool)
+    .await?;
     let tags: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_tags")
         .fetch_one(pool)
         .await
@@ -116,6 +123,8 @@ pub async fn tag_track(pool: &SqlitePool, user_id: i64, track_id: i64, tag_id: i
     .execute(pool)
     .await?;
     rebuild(pool).await?;
+    // Bi-way: mirror the tag onto opted-in (owned) source playlists.
+    let _ = sync_tag_to_playlists(pool, user_id, tag_id, track_id).await;
     Ok(())
 }
 
@@ -202,6 +211,73 @@ pub async fn set_tag_sync(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Archive a tag link so it survives removal from a `keep_on_remove` playlist.
+pub async fn archive_tag(
+    pool: &SqlitePool,
+    tag_id: i64,
+    track_id: i64,
+    source_playlist_id: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO hub_track_tag_archive
+             (tag_id, track_id, source_playlist_id, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(tag_id)
+    .bind(track_id)
+    .bind(source_playlist_id)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    rebuild(pool).await?;
+    Ok(())
+}
+
+/// Bi-way sync: when a track is tagged, add it to the (owned) source playlists
+/// of tags that opted in via `sync_playlist`. Hub-side membership only; returns
+/// the playlist ids that were updated.
+pub async fn sync_tag_to_playlists(
+    pool: &SqlitePool,
+    user_id: i64,
+    tag_id: i64,
+    track_id: i64,
+) -> Result<Vec<i64>> {
+    let sync: i64 =
+        sqlx::query_scalar("SELECT COALESCE(sync_playlist,0) FROM hub_tags WHERE id = ?1")
+            .bind(tag_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+    if sync == 0 {
+        return Ok(Vec::new());
+    }
+    let playlists: Vec<i64> = sqlx::query_scalar(
+        "SELECT ts.playlist_id FROM hub_tag_sources ts
+           JOIN hub_playlists hp ON hp.id = ts.playlist_id
+          WHERE ts.tag_id = ?1 AND hp.user_id = ?2",
+    )
+    .bind(tag_id)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let now = chrono::Utc::now().to_rfc3339();
+    for pl in &playlists {
+        sqlx::query(
+            "INSERT OR IGNORE INTO hub_playlist_tracks (playlist_id, track_id, added_at)
+             VALUES (?1, ?2, ?3)",
+        )
+        .bind(pl)
+        .bind(track_id)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+    }
+    Ok(playlists)
 }
 
 /// Create (or update) a tag owned by a user, without a source playlist.

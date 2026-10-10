@@ -36,6 +36,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hub/services/{service}/sync", post(sync))
         .with_state(state.clone())
         .merge(crate::artists::router(state.clone()))
+        .merge(crate::history::router(state.clone()))
         .merge(crate::tagqueue::router(state))
 }
 

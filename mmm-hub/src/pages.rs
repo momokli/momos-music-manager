@@ -31,6 +31,8 @@ pub fn router(state: AppState) -> Router {
         .route("/tag/{id}/group/remove", post(tag_group_remove))
         .route("/tag/{id}/parent/add", post(tag_parent_add))
         .route("/tag/{id}/parent/remove", post(tag_parent_remove))
+        .route("/tag/{id}/sync", post(tag_set_sync))
+        .route("/tag/{id}/source/keep", post(tag_source_keep))
         .route("/groups", get(groups_page))
         .route("/groups/create", post(group_create))
         .route("/groups/{id}", get(group_page))
@@ -3277,6 +3279,14 @@ struct TagTrack {
     artists: String,
 }
 
+/// A source playlist feeding a tag, plus its keep-on-remove policy.
+struct TagSource {
+    id: i64,
+    name: String,
+    owner: String,
+    keep: bool,
+}
+
 /// One row of the "top artists" insight table (pre-formatted percentages).
 struct TopArtist {
     name: String,
@@ -3316,6 +3326,10 @@ struct TagDetailPage {
     /// True when the tag lives in a group with the `genre` role.
     genre_mode: bool,
     source_count: i64,
+    /// Source playlists feeding this tag, with their keep-on-remove policy.
+    sources: Vec<TagSource>,
+    /// Bi-way sync: mirror tagged tracks onto the source playlists.
+    sync: bool,
     tracks: Vec<TagTrack>,
     top_artists: Vec<TopArtist>,
     cooccur: Vec<CooccurRow>,
@@ -3425,6 +3439,36 @@ async fn tag_detail_page(
             support: c.support,
         })
         .collect();
+    let sources: Vec<TagSource> = sqlx::query_as::<_, (i64, String, String, i64)>(
+        "SELECT ts.playlist_id, COALESCE(hp.name,''), COALESCE(u.slug,''),
+                COALESCE(ts.keep_on_remove, 0)
+           FROM hub_tag_sources ts
+           JOIN hub_playlists hp ON hp.id = ts.playlist_id
+           JOIN hub_users u ON u.id = hp.user_id
+          WHERE ts.tag_id = ?1 ORDER BY hp.name",
+    )
+    .bind(id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(id, name, owner, keep)| TagSource {
+        id,
+        name,
+        owner,
+        keep: keep != 0,
+    })
+    .collect();
+    let sync: bool = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(sync_playlist,0) FROM hub_tags WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(0)
+        != 0;
     render(&TagDetailPage {
         nav,
         flash: msg.msg.unwrap_or_default(),
@@ -3438,6 +3482,8 @@ async fn tag_detail_page(
         children,
         genre_mode: crate::tags::tag_is_genre(&st.pool, id).await,
         source_count: d.source_count,
+        sources,
+        sync,
         tracks,
         top_artists,
         cooccur,
@@ -3470,6 +3516,71 @@ async fn tag_rename(
     };
     let msg = match crate::tags::rename_tag(&st.pool, uid, id, &f.name).await {
         Ok(()) => "Tag umbenannt".to_string(),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    flash_redirect(&format!("/tag/{id}"), msg)
+}
+
+#[derive(Deserialize)]
+struct TagSyncForm {
+    on: i64,
+}
+
+#[derive(Deserialize)]
+struct TagSourceKeepForm {
+    playlist_id: i64,
+    keep: i64,
+}
+
+/// Owner-only: toggle bi-way sync for the tag.
+async fn tag_set_sync(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<TagSyncForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if tag_owner_slug(&st, id).await.as_deref() != Some(&nav.slug) {
+        return flash_redirect(
+            &format!("/tag/{id}"),
+            "Nur der Besitzer kann das ändern".into(),
+        );
+    }
+    let msg = match crate::tags::set_tag_sync(&st.pool, nav.id, id, f.on != 0).await {
+        Ok(()) => "Sync aktualisiert".to_string(),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    flash_redirect(&format!("/tag/{id}"), msg)
+}
+
+/// Owner-only: set the keep-on-remove (archive) policy of a source playlist.
+async fn tag_source_keep(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<TagSourceKeepForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if tag_owner_slug(&st, id).await.as_deref() != Some(&nav.slug) {
+        return flash_redirect(
+            &format!("/tag/{id}"),
+            "Nur der Besitzer kann das ändern".into(),
+        );
+    }
+    let msg = match crate::tags::set_source_keep_on_remove(
+        &st.pool,
+        nav.id,
+        id,
+        f.playlist_id,
+        f.keep != 0,
+    )
+    .await
+    {
+        Ok(()) => "Archiv-Policy aktualisiert".to_string(),
         Err(e) => format!("Fehler: {e}"),
     };
     flash_redirect(&format!("/tag/{id}"), msg)

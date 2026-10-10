@@ -84,7 +84,7 @@ tar czf - -C mmm-hub --exclude target --exclude 'hub.db*' --exclude .env \
 
 ```
 mmm-hub/
-├── migrations/            001…027 (additive; consolidate per release)
+├── migrations/            001…031 (additive; consolidate per release)
 ├── templates/             askama: base.html + one per page + _partials/
 ├── src/
 │   ├── main.rs            CLI (serve/auth/ingest/fetch-playlists/backfill/set-password/
@@ -108,6 +108,9 @@ mmm-hub/
 │   ├── tags.rs            the tag/group/collective layer (big)
 │   ├── traktor.rs         Traktor collection.nml ingest (playcount/rating/playlists)
 │   ├── scoring.rs         ripeness score (tag points per group, meta, traktor signal)
+│   ├── tagqueue.rs        /tag-queue (ripeness-sorted) + direct tagging + player
+│   ├── artists.rs         /artists + /artist/{name} explorer
+│   ├── history.rs         import-run ledger + change events (all sources)
 │   ├── settings.rs        hub_settings + ADMIN_FIELDS + Engine config
 │   └── mmm_import.rs      import tags/categories/parents/energy from MMM library.db
 └── tests/                 cargo integration tests (harness = tests/common/mod.rs)
@@ -161,6 +164,11 @@ JSON API: `GET /api/hub/{health,users,me,tracks/{id},tracks/{id}/ripeness,overla
 `POST /api/hub/playlists/{id}/toggle`, `POST /api/hub/playlists/{enable,disable}-all`.
 
 CLI: `mmm-hub import-traktor --user <slug> --file collection.nml`.
+
+New pages (this batch): `/tag-queue` (+`/{id}`, `/{id}/tag`, `/{id}/untag`),
+`/track/{id}/stream`, `/track/{id}/tag` + `/track/{id}/untag`, `/artists` +
+`/artist/{name}`, `/history`. Tag detail gained `/tag/{id}/sync` and
+`/tag/{id}/source/keep`; `/tags` supports multi-group `?groups=`.
 
 ---
 
@@ -216,7 +224,7 @@ sources·base_sources + shared·shared_factor + candidate·candidate_factor`.
 ## 8. Testing
 
 ```bash
-cd mmm-hub && cargo test          # ~101 tests (lib + integration). Must stay green.
+cd mmm-hub && cargo test          # ~145 tests (lib + integration). Must stay green.
 ```
 
 - Integration harness: `tests/common/mod.rs` → `common::spawn()` boots the real router on a
@@ -253,6 +261,7 @@ Idempotent. Imports: categories→groups, tags (+playlist link), `tag_parents`, 
 
 ## 10. Gotchas (learned the hard way)
 
+- **NEVER edit an applied migration** (not even a comment) — sqlx checksums migration files and the app will refuse to boot ("migration N was previously applied but has been modified"). Add a new file instead. Consolidate only on a fresh DB (release step).
 - **askama `==` inside an HTML attribute tag** breaks the build (`failed to parse template
 source`). Precompute a bool field in Rust (e.g. `selected`/`active`) and use `{% if x.y %}`.
 - **SQLite bind-variable limit**: `IN (…)` with huge id lists silently fails. **Chunk** them
