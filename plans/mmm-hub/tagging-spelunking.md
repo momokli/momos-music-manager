@@ -61,7 +61,10 @@
 
 ### B — Tag-Insights (Tag-Detailseite `/tag/{id}`)
 
-- **B1** **Top-Artists** dieses Tags (Häufigkeit absteigend).
+- **B1** **Top-Artists** dieses Tags: die **Top 10 Künstler**, die die meisten mit diesem Tag getaggten Tracks haben (absteigend nach Track-Anzahl). Je Künstler **zwei Prozentwerte**:
+  - **Anteil am Tag** = (getaggte Tracks dieses Künstlers) / (alle Tracks mit diesem Tag) — wie viel Prozent dieses Tags der Künstler ausmacht.
+  - **Anteil am Künstler** = (getaggte Tracks dieses Künstlers) / (alle Tracks des Künstlers im Hub) — wie stark der Künstler von diesem Tag „durchdrungen" ist.
+  - Künstler-Matching über **Artist-Name** (wie sonst im Hub).
 - **B2** **Co-Occurrence-Tags**: welche Tags kommen besonders oft mit diesem Tag zusammen vor — **innerhalb derselben Gruppe** _und_ **über Gruppen hinweg** (z. B. `Mood Dark` ↔ `Mood Melancholisch`, `Mood Dark` ↔ `Vibe Warehouse`).
 - **B3** **Sprung/Discovery**: von einem Co-Tag direkt auf den Tag springen bzw. ins Digging/Overlap zu den gemeinsamen Tracks.
 - **B4** Metric: Co-Occurrence via Jaccard/Lift über `hub_track_resolved_tags`, gruppiert je Gruppe.
@@ -184,7 +187,7 @@ Genre Variation/Haupt: **kein** neues Schema — nutzt `hub_tag_parents` (Variat
 
 ### Milestone `hub-insights-0.11.0`
 
-- **T2-1** `feat(hub): tag insights — top artists` — aggregierte Artists je Tag auf `/tag/{id}`. _(AC: sortiert; Test.)_
+- **T2-1** `feat(hub): tag insights — top artists` — auf `/tag/{id}`: **Top 10 Künstler** nach Anzahl der mit diesem Tag getaggten Tracks, je mit **zwei Prozentwerten** (Anteil am Tag = Künstler-Tracks-dieses-Tags / alle Tracks mit Tag; Anteil am Künstler = Künstler-Tracks-dieses-Tags / alle Tracks des Künstlers). _(AC: sortiert nach Anzahl; beide Prozente korrekt; Test.)_
 - **T2-2** `feat(hub): tag co-occurrence (same + cross group)` — Lift/Jaccard je Gruppe; Anzeige „kommt oft mit …". _(AC: Beispiel Mood Dark↔Vibe Warehouse sichtbar; Test.)_
 - **T2-3** `feat(hub): jump/discover from co-tag` — Links Tag→Tag sowie → `/overlap?tag=`/`/digging`. _(AC: Links erzeugen korrekte Auswahl; Test.)_
 
