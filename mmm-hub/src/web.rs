@@ -863,6 +863,19 @@ struct TrackPage {
     can_stream: bool,
     me: String,
     spotify_id: String,
+    tag_clouds: Vec<TagCloudRow>,
+}
+
+struct TagCloudRow {
+    group: String,
+    icon: String,
+    chips: Vec<TagChipRow>,
+}
+
+struct TagChipRow {
+    id: i64,
+    name: String,
+    mine: bool,
 }
 
 struct RecTag {
@@ -1164,6 +1177,47 @@ async fn track_page(
         .collect();
     let can_stream = st.cfg.music_api_token.is_some() && !isrc.trim().is_empty();
     let me = nav.slug.clone();
+    // Group the track's tags into clouds by their (first) group.
+    let tag_clouds: Vec<TagCloudRow> = {
+        let mut map: std::collections::BTreeMap<String, (String, Vec<TagChipRow>)> =
+            std::collections::BTreeMap::new();
+        for t in &tags {
+            let (gname, gicon) = t
+                .groups
+                .first()
+                .map(|g| {
+                    (
+                        g.name.clone(),
+                        if g.icon.trim().is_empty() {
+                            "•".to_string()
+                        } else {
+                            g.icon.clone()
+                        },
+                    )
+                })
+                .unwrap_or_else(|| ("Ohne Gruppe".to_string(), "•".to_string()));
+            let key = if gname.trim().is_empty() {
+                "Ohne Gruppe".to_string()
+            } else {
+                gname
+            };
+            let e = map.entry(key).or_insert_with(|| (gicon, Vec::new()));
+            e.1.push(TagChipRow {
+                id: t.id,
+                name: t.name.clone(),
+                mine: t.owner.eq_ignore_ascii_case(&me),
+            });
+        }
+        let mut clouds: Vec<TagCloudRow> = map
+            .into_iter()
+            .map(|(group, (icon, chips))| TagCloudRow { group, icon, chips })
+            .collect();
+        if let Some(pos) = clouds.iter().position(|c| c.group == "Ohne Gruppe") {
+            let last = clouds.remove(pos);
+            clouds.push(last);
+        }
+        clouds
+    };
     let spotify_id: String = sqlx::query_scalar(
         "SELECT external_id FROM hub_track_external_ids WHERE track_id = ?1 AND service = 'spotify' LIMIT 1",
     )
@@ -1206,6 +1260,7 @@ async fn track_page(
         can_stream,
         me,
         spotify_id,
+        tag_clouds,
     };
 
     match page.render() {

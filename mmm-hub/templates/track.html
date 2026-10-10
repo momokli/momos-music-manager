@@ -158,22 +158,15 @@ content %}
                 <tr>
                     <th scope="row">Tags</th>
                     <td>
-                        {% if tags.is_empty() %}<span class="hub-muted">—</span>{% else %}
-                        <ul class="hub-taglist">
-                            {% for t in tags %}
-                            <li>
-                                <a href="/user/{{ t.owner }}" class="hub-muted"
-                                    >@{{ t.owner }}</a
-                                >
-                                <a href="/tag/{{ t.id }}" class="hub-tag hub-tag-own"
-                                    >{{ t.name }}</a
-                                >
-                                {% for g in t.groups %}<a
-                                    href="/groups/{{ g.id }}"
-                                    class="hub-chip"
-                                    title="Gruppe"
-                                    >{{ g.icon }} {{ g.name }}</a
-                                >{% endfor %} {% if t.owner == me %}
+                        {% if tag_clouds.is_empty() %}<span class="hub-muted">—</span>{%
+                        else %} {% for c in tag_clouds %}
+                        <h4 class="hub-cloud-h">{{ c.icon }} {{ c.group }}</h4>
+                        <div class="hub-cloud">
+                            {% for t in c.chips %}
+                            <span
+                                class="hub-chip"
+                                title="{% if t.mine %}von dir{% endif %}"
+                                ><a href="/tag/{{ t.id }}">{{ t.name }}</a>{% if t.mine %}
                                 <form
                                     method="post"
                                     action="/track/{{ id }}/untag"
@@ -192,11 +185,11 @@ content %}
                                         ×
                                     </button>
                                 </form>
-                                {% endif %}
-                            </li>
+                                {% endif %}</span
+                            >
                             {% endfor %}
-                        </ul>
-                        {% endif %}
+                        </div>
+                        {% endfor %} {% endif %}
                         <form
                             method="post"
                             action="/track/{{ id }}/tag"
