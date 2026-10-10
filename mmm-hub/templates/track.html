@@ -1,0 +1,209 @@
+{% extends "base.html" %} {% block title %}{{ title }} — MMM Hub{% endblock %} {% block
+content %}
+<nav class="hub-crumbs" aria-label="Brotkrumen">
+    <ol>
+        <li><a href="/">Übersicht</a></li>
+        <li><a href="/search">Suche</a></li>
+        <li><a href="/overlap">Entdecken</a></li>
+        <li>Track #{{ id }}</li>
+    </ol>
+</nav>
+<p>
+    <a href="/digging?seed={{ id }}">Digging von diesem Track →</a> ·
+    <a href="https://digdeeper.fm/" target="_blank" rel="noreferrer"
+        >auf digdeeper.fm öffnen (extern)</a
+    >{% if music_api %} · <a href="/track/{{ id }}/download?format=flac">FLAC laden</a> ·
+    <a href="/track/{{ id }}/download?format=mp3">MP3 laden</a>{% endif %}
+</p>
+
+<div class="hub-dense hub-cols">
+    <section>
+        <table class="hub-kv">
+            <caption class="hub-visually-hidden">
+                Ripeness
+            </caption>
+            <tbody>
+                <tr>
+                    <th scope="row">Ripeness</th>
+                    <td>
+                        <strong>{{ ripeness_total }}</strong>
+                        <span class="hub-muted"
+                            >(Tags {{ ripeness_tag }} · Meta {{ ripeness_meta }} · Traktor
+                            {{ ripeness_trak }})</span
+                        >
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">Meta</th>
+                    <td>
+                        {% for m in meta_present %}<span class="hub-chip"
+                            >{% if m.1 %}✓{% else %}✗{% endif %} {{ m.0 }}</span
+                        >
+                        {% endfor %}
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </section>
+    <section>
+        <table class="hub-kv">
+            <caption class="hub-visually-hidden">
+                Track-Fakten
+            </caption>
+            <tbody>
+                <tr>
+                    <th scope="row">Titel</th>
+                    <td><strong>{{ title }}</strong></td>
+                </tr>
+                <tr>
+                    <th scope="row">Artists</th>
+                    <td>{{ artists }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">Album</th>
+                    <td>{{ album }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">Dauer</th>
+                    <td>{{ duration }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">Explicit</th>
+                    <td>{% if explicit %}ja{% else %}nein{% endif %}</td>
+                </tr>
+                <tr>
+                    <th scope="row">ISRC</th>
+                    <td>
+                        {% if isrc != "" %}<code>{{ isrc }}</code>{% else %}—{% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">IDs</th>
+                    <td>
+                        {% if external_ids.is_empty() %}—{% else %} {% for e in
+                        external_ids %}
+                        <a href="{{ e.url }}" target="_blank" rel="noreferrer"
+                            ><code>{{ e.service }}:{{ e.external_id }}</code></a
+                        >
+                        {% endfor %} {% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">music-api</th>
+                    <td>
+                        {{ avail_text }}{% if deezer_id != "" %} ·
+                        <a
+                            href="https://www.deezer.com/track/{{ deezer_id }}"
+                            target="_blank"
+                            rel="noreferrer"
+                            ><code>deezer:{{ deezer_id }}</code></a
+                        >{% endif %} {% if fetchable %}
+                        <form method="post" action="/track/{{ id }}/fetch">
+                            <button class="outline" type="submit">holen</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">BPM</th>
+                    <td>{{ bpm }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">Key</th>
+                    <td>{{ music_key }}</td>
+                </tr>
+                <tr>
+                    <th scope="row">Energy</th>
+                    <td>{{ energy }}</td>
+                </tr>
+                {% if feat_note != "" %}
+                <tr>
+                    <th scope="row"></th>
+                    <td class="hub-muted">{{ feat_note }}</td>
+                </tr>
+                {% endif %}
+                <tr>
+                    <th scope="row">Tags</th>
+                    <td>
+                        {% if tags.is_empty() %}—{% else %}
+                        <ul class="hub-taglist">
+                            {% for t in tags %}
+                            <li>
+                                <a href="/user/{{ t.owner }}" class="hub-muted"
+                                    >@{{ t.owner }}</a
+                                >
+                                <a href="/tag/{{ t.id }}" class="hub-tag hub-tag-own"
+                                    >{{ t.name }}</a
+                                >
+                                {% for g in t.groups %}<a
+                                    href="/groups/{{ g.id }}"
+                                    class="hub-chip"
+                                    title="Gruppe"
+                                    >{{ g.icon }} {{ g.name }}</a
+                                >{% endfor %}
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">Genres</th>
+                    <td>
+                        {% if genres.is_empty() %}—{% else %} {% for g in genres %}<span
+                            class="hub-tag"
+                            >{{ g }}</span
+                        >{% endfor %} {% endif %}
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section>
+        <h2>In Playlists</h2>
+        {% if users.is_empty() %}
+        <p class="hub-muted">
+            Niemand hat diesen Track (weder geliked noch in einer Playlist).
+        </p>
+        {% else %}
+        <table class="hub-dense-table">
+            <caption class="hub-visually-hidden">
+                Nutzer mit diesem Track
+            </caption>
+            <thead>
+                <tr>
+                    <th scope="col">User</th>
+                    <th scope="col">♥</th>
+                    <th scope="col">Playlists (eigen / gefolgt)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for u in users %}
+                <tr>
+                    <td class="hub-nowrap">
+                        <a href="/user/{{ u.slug }}">@{{ u.slug }}</a>
+                    </td>
+                    <td>{% if u.liked %}♥{% else %}—{% endif %}</td>
+                    <td>
+                        {% for p in u.owned %}<a
+                            href="/playlist/{{ p.id }}"
+                            class="hub-tag hub-tag-own"
+                            title="{{ p.owner }}"
+                            >{{ p.name }}</a
+                        >{% endfor %} {% for p in u.followed %}<a
+                            href="/playlist/{{ p.id }}"
+                            class="hub-tag hub-tag-follow"
+                            title="{{ p.owner }}"
+                            >{{ p.name }}</a
+                        >{% endfor %} {% if u.owned.is_empty() && u.followed.is_empty()
+                        %}<span class="hub-muted">nur geliked</span>{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}

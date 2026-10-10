@@ -1,0 +1,65 @@
+{% extends "base.html" %} {% block title %}Import — MMM Hub{% endblock %} {% block content %}
+<hgroup>
+    <h1>Import</h1>
+    <p>Öffentliche YouTube- oder SoundCloud-Playlists in den Hub holen.</p>
+</hgroup>
+
+<h2>Neuer Import</h2>
+<form method="post" action="/import">
+    <div class="hub-grid">
+        <label>
+            Dienst
+            <select name="service">
+                {% for o in services %}
+                <option value="{{ o.value }}" {% if o.selected %}selected{% endif %}>{{ o.label }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            URL
+            <input
+                type="url"
+                name="url"
+                value="{{ url }}"
+                placeholder="https://www.youtube.com/@user/playlists"
+                required
+            />
+        </label>
+    </div>
+    <button type="submit">Importieren</button>
+</form>
+<p class="hub-muted">
+    Beispiele: <code>https://www.youtube.com/@iMontouch/playlists</code> ·
+    <code>https://soundcloud.com/momokli/sets/discover</code>
+</p>
+
+<h2>Importierte Playlists</h2>
+{% if playlists.is_empty() %}
+<p class="hub-muted">Noch keine YouTube-/SoundCloud-Playlists importiert.</p>
+{% else %}
+<div class="overflow-auto">
+    <table>
+        <caption class="hub-visually-hidden">
+            Importierte Playlists
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Dienst</th>
+                <th scope="col">Tracks</th>
+                <th scope="col">Geholt</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for p in playlists %}
+            <tr>
+                <td><a href="/playlist/{{ p.id }}">{{ p.name }}</a></td>
+                <td>{{ p.service }}</td>
+                <td>{{ p.track_count }}</td>
+                <td>{{ p.fetched_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %} {% endblock %}

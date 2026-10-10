@@ -1,0 +1,33 @@
+{% extends "base.html" %} {% block title %}SQL — MMM Hub{% endblock %} {% block content %}
+<hgroup>
+  <h1>SQL-Konsole</h1>
+  <p class="hub-muted">
+    Read-only (<code>SELECT</code>/<code>WITH</code>) auf der geteilten <code>hub.db</code>.
+  </p>
+</hgroup>
+
+{% if error != "" %}
+<article class="hub-flash-err">{{ error }}</article>
+{% endif %}
+
+<form method="post" action="/sql">
+  <select id="preset" onchange="setPreset(this.value)">
+    <option value="">Vorlage…</option>
+    {% for p in presets %}
+    <option value="{{ p.0 }}">{{ p.1 }}</option>
+    {% endfor %}
+  </select>
+  <textarea id="sql" name="sql" rows="6" spellcheck="false">{{ sql }}</textarea>
+  <button type="submit">Ausführen</button>
+</form>
+
+{{ table_html|safe }}
+
+<script>
+  const PRESETS = {{ presets_json|safe }};
+  function setPreset(i) {
+    if (i === "") return;
+    document.getElementById("sql").value = PRESETS[+i];
+  }
+</script>
+{% endblock %}

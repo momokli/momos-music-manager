@@ -1,0 +1,243 @@
+{% extends "base.html" %} {% block title %}Entdecken — MMM Hub{% endblock %} {% block
+content %}
+<hgroup>
+    <h1>Entdecken</h1>
+    <p class="hub-muted">
+        Vergleiche die Nutzer — jede Zeile ein gemeinsamer Track, je Nutzer eine Spalte.
+    </p>
+</hgroup>
+
+<nav class="hub-filter" aria-label="Nutzer wählen">
+    <ul>
+        {% for u in picker %}
+        <li>
+            {% if u.selected %}<a
+                href="{{ u.href }}"
+                aria-current="true"
+                class="hub-chip hub-chip-on"
+                >@{{ u.slug }} ✓</a
+            >{% else %}<a href="{{ u.href }}" class="hub-chip">@{{ u.slug }}</a>{% endif
+            %}
+        </li>
+        {% endfor %}
+    </ul>
+</nav>
+
+<nav class="hub-filter" aria-label="Umfang">
+    <ul>
+        {% for s in scopes %}
+        <li>
+            {% if s.active %}<a href="{{ s.href }}" aria-current="page">{{ s.label }}</a
+            >{% else %}<a href="{{ s.href }}">{{ s.label }}</a>{% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+</nav>
+
+<p class="hub-muted">
+    {{ columns.len() }} Nutzer · {{ track_total }} gemeinsame Tracks {% if
+    !pairs.is_empty() %}· {% for p in pairs %}<span class="hub-tag"
+        >@{{ p.a }} ∩ @{{ p.b }}: {{ p.shared_tracks }}</span
+    >{% endfor %}{% endif %}
+</p>
+
+<form method="get" action="/overlap" class="hub-actions" role="search">
+    <input type="hidden" name="users" value="{{ users_csv }}" />
+    <input type="hidden" name="scope" value="{{ scope }}" />
+    <input type="hidden" name="sort" value="{{ sort_value }}" />
+    <input type="hidden" name="dir" value="{{ dir_value }}" />
+    <input
+        type="number"
+        name="bpm_min"
+        value="{{ bpm_min }}"
+        min="0"
+        step="1"
+        placeholder="BPM min"
+        aria-label="BPM min"
+        style="width: 6.5rem"
+    />
+    <input
+        type="number"
+        name="bpm_max"
+        value="{{ bpm_max }}"
+        min="0"
+        step="1"
+        placeholder="BPM max"
+        aria-label="BPM max"
+        style="width: 6.5rem"
+    />
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Titel / Artists …"
+        aria-label="Volltext (Titel, Artists)"
+    />
+    <input
+        type="text"
+        name="tag"
+        value="{{ tag }}"
+        list="hub-tag-options"
+        placeholder="Tag …"
+        aria-label="Tag"
+        style="width: 9rem"
+    />
+    <datalist id="hub-tag-options">
+        {% for t in tag_options %}
+        <option value="{{ t }}"></option>
+        {% endfor %}
+    </datalist>
+    <select name="key" aria-label="Key (Camelot)">
+        <option value="">Key: alle</option>
+        {% for k in key_options %}
+        <option value="{{ k.value }}" {% if k.selected %}selected{% endif %}>
+            {{ k.value }}
+        </option>
+        {% endfor %}
+    </select>
+    <label style="display: inline-flex; gap: 0.3rem; align-items: center; margin: 0">
+        <input
+            type="checkbox"
+            name="key_harmonic"
+            value="1"
+            {%
+            if
+            key_harmonic
+            %}checked{%
+            endif
+            %}
+        />
+        harmonisch
+    </label>
+    <button type="submit">Filtern</button>
+    <a
+        href="/overlap?users={{ users_csv }}&scope={{ scope }}"
+        role="button"
+        class="secondary outline"
+        >Reset</a
+    >
+    <button
+        type="submit"
+        formaction="/overlap/enrich"
+        formmethod="post"
+        class="secondary"
+        title="Fehlende BPM/Key für genau diese Auswahl über die API holen (der Worker hat dann Vorrang)"
+    >
+        ⚡ BPM/Key für Auswahl holen
+    </button>
+    {% if !playlists.is_empty() %}
+    <details class="hub-plpicker">
+        <summary>
+            Playlists ({{ playlists.len() }}){% if pl_active %} · gefiltert{% endif %}
+        </summary>
+        <div class="hub-plpick">
+            <p class="hub-muted">
+                Nur markierte Playlists zählen. Alle markiert = alle Playlists.
+            </p>
+            {% for p in playlists %}
+            <label class="hub-plpick-item">
+                <input
+                    type="checkbox"
+                    name="pl"
+                    value="{{ p.id }}"
+                    {%
+                    if
+                    p.checked
+                    %}checked{%
+                    endif
+                    %}
+                />
+                <span
+                    class="{% if p.owned %}hub-tag-own{% else %}hub-tag-follow{% endif %}"
+                    >{{ p.name }}</span
+                >
+                <span class="hub-muted">@{{ p.user }}</span>
+            </label>
+            {% endfor %}
+        </div>
+    </details>
+    {% endif %}
+</form>
+
+{% if !has_audio %}
+<p class="hub-muted">
+    Für diese Auswahl liegen noch keine BPM/Key-Daten vor — die Analyse läuft im
+    Hintergrund. BPM/Key-Filter wirken, sobald Daten da sind.
+</p>
+{% endif %} {% if rows.is_empty() %}
+<p class="hub-muted">Keine gemeinsamen Tracks für diese Auswahl.</p>
+{% else %}
+<div class="overflow-auto hub-scroll-y">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Gemeinsame Tracks je ausgewähltem Nutzer
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Track</th>
+                <th scope="col">
+                    <a
+                        href="{{ sort_present.href }}"
+                        class="hub-sort{% if sort_present.active %} hub-sort-on{% endif %}"
+                        title="Nach Übereinstimmung sortieren"
+                        >∩{% if sort_present.active %} {{ sort_present.arrow }}{% endif
+                        %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ sort_bpm.href }}"
+                        class="hub-sort{% if sort_bpm.active %} hub-sort-on{% endif %}"
+                        >BPM{% if sort_bpm.active %} {{ sort_bpm.arrow }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ sort_key.href }}"
+                        class="hub-sort{% if sort_key.active %} hub-sort-on{% endif %}"
+                        >Key{% if sort_key.active %} {{ sort_key.arrow }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ sort_energy.href }}"
+                        class="hub-sort{% if sort_energy.active %} hub-sort-on{% endif %}"
+                        >Energy{% if sort_energy.active %} {{ sort_energy.arrow }}{% endif
+                        %}</a
+                    >
+                </th>
+                {% for c in columns %}
+                <th scope="col">@{{ c.slug }}</th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in rows %}
+            <tr>
+                <td class="hub-cell-track">
+                    <a href="/track/{{ r.id }}">{{ r.artists }} — {{ r.title }}</a>
+                    · <a href="/digging?seed={{ r.id }}">dig</a> {% if r.isrc != "" %}<br /><code
+                        class="hub-muted"
+                        >{{ r.isrc }}</code
+                    >{% endif %}
+                </td>
+                <td class="hub-nowrap">{{ r.present_count }}</td>
+                <td class="hub-nowrap">{{ r.bpm }}</td>
+                <td class="hub-nowrap">{{ r.key }}</td>
+                <td class="hub-nowrap">{{ r.energy }}</td>
+                {% for cell in r.cells %}
+                <td class="hub-cell-pl">
+                    {% if cell.liked %}<span title="geliked">♥</span>{% endif %} {% for p
+                    in cell.playlists %}<span
+                        class="hub-tag {% if p.owned %}hub-tag-own{% else %}hub-tag-follow{% endif %}"
+                        >{{ p.name }}</span
+                    >{% endfor %} {% if !cell.present %}<span class="hub-muted">—</span>{%
+                    endif %}
+                </td>
+                {% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %} {% endblock %}

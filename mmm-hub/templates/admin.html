@@ -1,0 +1,63 @@
+{% extends "base.html" %} {% block title %}Admin — MMM Hub{% endblock %} {% block content %}
+<hgroup>
+    <h1>Admin</h1>
+    <p class="hub-muted">
+        API-Keys & Infrastruktur. Geheime Werte werden nie angezeigt (Feld leer lassen = unverändert).
+        Keys greifen <strong>nach einem Neustart</strong>; die Umgebung (.env) bleibt Fallback.
+    </p>
+</hgroup>
+
+<form method="post" action="/admin">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Einstellungen
+        </caption>
+        <tbody>
+            {% for f in fields %}
+            <tr>
+                <th scope="row" style="white-space: nowrap">{{ f.label }}</th>
+                <td>
+                    <input
+                        name="{{ f.key }}"
+                        type="{% if f.secret %}password{% else %}text{% endif %}"
+                        value="{{ f.value }}"
+                        placeholder="{% if f.set %}••• gesetzt{% else %}—{% endif %}"
+                        autocomplete="off"
+                    />
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <label>
+        <input type="checkbox" name="registration_open" {% if registration_open %}checked{% endif %}/>
+        Registrierung offen (neue Accounts erlauben)
+    </label>
+
+    <button type="submit">Speichern</button>
+</form>
+
+<h2>Nutzer</h2>
+<div class="overflow-auto">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Nutzer und Admin-Status
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Nutzer</th>
+                <th scope="col">Admin</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in users %}
+            <tr>
+                <td><a href="/user/{{ u.slug }}">@{{ u.slug }}</a></td>
+                <td>{% if u.is_admin %}ja{% else %}—{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

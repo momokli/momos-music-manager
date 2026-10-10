@@ -1,0 +1,39 @@
+[Unit]
+Description=mmm-analyzer - headless BPM/key analysis service (Essentia)
+Documentation=file:///home/momo/mmm-analyzer/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=momo
+Group=momo
+WorkingDirectory=/home/momo/mmm-analyzer
+
+Environment=PYTHONUNBUFFERED=1
+Environment=ANALYZER_HOST=127.0.0.1
+Environment=ANALYZER_PORT=8711
+Environment=ANALYZER_LOG_LEVEL=INFO
+Environment=ANALYZER_MODELS_DIR=/home/momo/mmm-analyzer/models
+Environment=ANALYZER_ENABLE_EMBEDDINGS=1
+
+ExecStart=/home/momo/mmm-analyzer/venv/bin/python /home/momo/mmm-analyzer/server.py
+
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+
+# --- sandboxing (read-only access to the media tree is enough) ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/momo/mmm-analyzer
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+
+[Install]
+WantedBy=multi-user.target

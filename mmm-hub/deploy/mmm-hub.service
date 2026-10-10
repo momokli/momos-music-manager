@@ -1,0 +1,15 @@
+[Unit]
+Description=MMM Hub (walking skeleton)
+After=network.target
+
+[Service]
+Type=simple
+User=momo
+WorkingDirectory=/home/momo/mmm-hub
+EnvironmentFile=/home/momo/mmm-hub/.env
+ExecStart=/home/momo/mmm-hub/target/release/mmm-hub serve --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
