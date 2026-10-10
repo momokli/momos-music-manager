@@ -1,0 +1,24 @@
+{#
+  Shared recommended-tags renderer (uniform across track view + tag-queue).
+  Context: recommended: [{ name, reason }], tag_action, htmx
+#}
+{% if !recommended.is_empty() %}
+<div style="margin-top: 0.45rem">
+    <span class="hub-cloud-h">Empfohlen — warum</span>
+    <div class="hub-cloud">
+        {% for r in recommended %}
+        <form
+            method="post"
+            action="{{ tag_action }}"
+            {% if htmx %}hx-post="{{ tag_action }}" hx-target="#queue-detail" hx-swap="innerHTML"{% endif %}
+            style="display: inline"
+        >
+            <input type="hidden" name="name" value="{{ r.name }}" />
+            <button type="submit" class="hub-chip" title="{{ r.reason }}">
+                {{ r.name }} <span class="hub-muted">· {{ r.reason }}</span>
+            </button>
+        </form>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}

@@ -30,6 +30,8 @@ pub fn router(state: AppState) -> Router {
         .route("/sql", get(sql_page).post(sql_run))
         .route("/track/{id}", get(track_page))
         .route("/track/{id}/fetch", post(track_fetch))
+        .route("/track/{id}/tag", post(track_tag))
+        .route("/track/{id}/untag", post(track_untag))
         .route("/api/hub/services/{service}/connect", get(connect))
         .route(
             "/api/hub/services/{service}/fetch-playlists",
@@ -855,6 +857,40 @@ struct TrackPage {
     ripeness_meta: i64,
     ripeness_trak: String,
     meta_present: Vec<(String, bool)>,
+    // Core-element additions: direct tagging + player + recommendations.
+    my_tags: Vec<(i64, String)>,
+    recommended: Vec<RecTag>,
+    can_stream: bool,
+    me: String,
+    spotify_id: String,
+    tag_clouds: Vec<TagCloudRow>,
+    untag_action: String,
+    tag_action: String,
+    htmx: bool,
+    my_groups: Vec<GroupRef>,
+}
+
+struct TagCloudRow {
+    group: String,
+    icon: String,
+    chips: Vec<TagChipRow>,
+}
+
+struct TagChipRow {
+    id: i64,
+    name: String,
+    mine: bool,
+}
+
+struct GroupRef {
+    id: i64,
+    name: String,
+    icon: String,
+}
+
+struct RecTag {
+    name: String,
+    reason: String,
 }
 
 struct UserGroup {
@@ -1136,6 +1172,73 @@ async fn track_page(
 
     let e = crate::settings::engine(&st.pool).await;
     let rip = crate::scoring::ripeness(&st.pool, id, &e).await;
+    let my_tags = crate::tags::list_user_tags(&st.pool, nav.id).await;
+    let recommended: Vec<RecTag> = crate::recommend::recommend_tags(&st.pool, id, 12)
+        .await
+        .into_iter()
+        .map(|r| RecTag {
+            reason: r.why(),
+            name: r.name,
+        })
+        .collect();
+    let can_stream = st.cfg.music_api_token.is_some() && !isrc.trim().is_empty();
+    let me = nav.slug.clone();
+    // Group the track's tags into clouds by their (first) group.
+    let tag_clouds: Vec<TagCloudRow> = {
+        let mut map: std::collections::BTreeMap<String, (String, Vec<TagChipRow>)> =
+            std::collections::BTreeMap::new();
+        for t in &tags {
+            let (gname, gicon) = t
+                .groups
+                .first()
+                .map(|g| {
+                    (
+                        g.name.clone(),
+                        if g.icon.trim().is_empty() {
+                            "•".to_string()
+                        } else {
+                            g.icon.clone()
+                        },
+                    )
+                })
+                .unwrap_or_else(|| ("Ohne Gruppe".to_string(), "•".to_string()));
+            let key = if gname.trim().is_empty() {
+                "Ohne Gruppe".to_string()
+            } else {
+                gname
+            };
+            let e = map.entry(key).or_insert_with(|| (gicon, Vec::new()));
+            e.1.push(TagChipRow {
+                id: t.id,
+                name: t.name.clone(),
+                mine: t.owner.eq_ignore_ascii_case(&me),
+            });
+        }
+        let mut clouds: Vec<TagCloudRow> = map
+            .into_iter()
+            .map(|(group, (icon, chips))| TagCloudRow { group, icon, chips })
+            .collect();
+        if let Some(pos) = clouds.iter().position(|c| c.group == "Ohne Gruppe") {
+            let last = clouds.remove(pos);
+            clouds.push(last);
+        }
+        clouds
+    };
+    let spotify_id: String = sqlx::query_scalar(
+        "SELECT external_id FROM hub_track_external_ids WHERE track_id = ?1 AND service = 'spotify' LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+
+    let my_groups: Vec<GroupRef> = crate::tags::groups_i_contribute(&st.pool, nav.id)
+        .await
+        .into_iter()
+        .map(|(id, name, icon)| GroupRef { id, name, icon })
+        .collect();
 
     let page = TrackPage {
         nav,
@@ -1164,12 +1267,68 @@ async fn track_page(
         ripeness_meta: rip.meta_score.round() as i64,
         ripeness_trak: format!("{:.2}", rip.traktor_score),
         meta_present: rip.meta_present,
+        my_tags,
+        recommended,
+        can_stream,
+        me,
+        spotify_id,
+        tag_clouds,
+        untag_action: format!("/track/{id}/untag"),
+        tag_action: format!("/track/{id}/tag"),
+        htmx: false,
+        my_groups,
     };
 
     match page.render() {
         Ok(html) => Html(html).into_response(),
         Err(e) => error_page(&format!("Template-Fehler: {e}")),
     }
+}
+
+#[derive(Deserialize)]
+struct TrackTagForm {
+    name: String,
+    #[serde(default)]
+    group: Option<String>,
+}
+
+/// Directly tag the track (track view = core element).
+async fn track_tag(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<TrackTagForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if !f.name.trim().is_empty() {
+        if let Ok(tag_id) = crate::tags::ensure_tag(&st.pool, nav.id, &f.name).await {
+            if let Some(g) = f.group.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+                if let Ok(gid) = crate::tags::create_group(&st.pool, nav.id, g, "").await {
+                    let _ = crate::tags::add_tag_to_group(&st.pool, nav.id, tag_id, gid).await;
+                }
+            }
+            let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
+        }
+    }
+    Redirect::to(&format!("/track/{id}")).into_response()
+}
+
+/// Remove a direct (manual) tag from the track.
+async fn track_untag(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<TrackTagForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(tag_id) = crate::tags::find_tag_id_by_name(&st.pool, &f.name).await {
+        let _ = crate::tags::untag_track(&st.pool, nav.id, id, tag_id).await;
+    }
+    Redirect::to(&format!("/track/{id}")).into_response()
 }
 
 /// A few recently seen tracks for the dashboard.

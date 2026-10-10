@@ -66,6 +66,20 @@ pub async fn rebuild(pool: &SqlitePool) -> Result<ResolveSummary> {
     )
     .execute(pool)
     .await?;
+    // Direct (manual) track↔tag links, independent of any playlist.
+    sqlx::query(
+        "INSERT OR IGNORE INTO hub_track_resolved_tags (track_id, tag_id)
+         SELECT DISTINCT track_id, tag_id FROM hub_track_tag_manual",
+    )
+    .execute(pool)
+    .await?;
+    // Archived (kept) links: tracks that left a keep_on_remove source playlist.
+    sqlx::query(
+        "INSERT OR IGNORE INTO hub_track_resolved_tags (track_id, tag_id)
+         SELECT DISTINCT track_id, tag_id FROM hub_track_tag_archive",
+    )
+    .execute(pool)
+    .await?;
     let tags: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_tags")
         .fetch_one(pool)
         .await
@@ -83,6 +97,187 @@ pub async fn rebuild(pool: &SqlitePool) -> Result<ResolveSummary> {
         sources: sources as usize,
         resolved: resolved as usize,
     })
+}
+
+/// Tag a track directly (manual link owned by `user_id`). Idempotent.
+pub async fn tag_track(pool: &SqlitePool, user_id: i64, track_id: i64, tag_id: i64) -> Result<()> {
+    let owned =
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2")
+            .bind(tag_id)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    if owned.is_none() {
+        bail!("tag not owned by user");
+    }
+    sqlx::query(
+        "INSERT OR IGNORE INTO hub_track_tag_manual (track_id, tag_id, user_id, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(track_id)
+    .bind(tag_id)
+    .bind(user_id)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    rebuild(pool).await?;
+    // Bi-way: mirror the tag onto opted-in (owned) source playlists.
+    let _ = sync_tag_to_playlists(pool, user_id, tag_id, track_id).await;
+    Ok(())
+}
+
+/// Remove a direct (manual) track↔tag link. Idempotent.
+pub async fn untag_track(
+    pool: &SqlitePool,
+    user_id: i64,
+    track_id: i64,
+    tag_id: i64,
+) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM hub_track_tag_manual WHERE track_id = ?1 AND tag_id = ?2 AND user_id = ?3",
+    )
+    .bind(track_id)
+    .bind(tag_id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    rebuild(pool).await?;
+    Ok(())
+}
+
+/// Whether the manual link exists (for the queue's tag-toggle display).
+pub async fn is_tagged_manually(
+    pool: &SqlitePool,
+    user_id: i64,
+    track_id: i64,
+    tag_id: i64,
+) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM hub_track_tag_manual WHERE track_id = ?1 AND tag_id = ?2 AND user_id = ?3",
+    )
+    .bind(track_id)
+    .bind(tag_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+/// Set whether a tag keeps (archives) tracks that leave the source playlist.
+pub async fn set_source_keep_on_remove(
+    pool: &SqlitePool,
+    actor_user_id: i64,
+    tag_id: i64,
+    playlist_id: i64,
+    keep: bool,
+) -> Result<()> {
+    let owned =
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2")
+            .bind(tag_id)
+            .bind(actor_user_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    if owned.is_none() {
+        bail!("tag not owned by user");
+    }
+    sqlx::query(
+        "UPDATE hub_tag_sources SET keep_on_remove = ?1 WHERE tag_id = ?2 AND playlist_id = ?3",
+    )
+    .bind(keep as i64)
+    .bind(tag_id)
+    .bind(playlist_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Opt a tag into bi-way playlist sync (push tagged tracks to a linked playlist).
+pub async fn set_tag_sync(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    tag_id: i64,
+    sync: bool,
+) -> Result<()> {
+    sqlx::query("UPDATE hub_tags SET sync_playlist = ?1 WHERE id = ?2 AND owner_user_id = ?3")
+        .bind(sync as i64)
+        .bind(tag_id)
+        .bind(owner_user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Archive a tag link so it survives removal from a `keep_on_remove` playlist.
+pub async fn archive_tag(
+    pool: &SqlitePool,
+    tag_id: i64,
+    track_id: i64,
+    source_playlist_id: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO hub_track_tag_archive
+             (tag_id, track_id, source_playlist_id, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(tag_id)
+    .bind(track_id)
+    .bind(source_playlist_id)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    rebuild(pool).await?;
+    Ok(())
+}
+
+/// Bi-way sync: when a track is tagged, add it to the (owned) source playlists
+/// of tags that opted in via `sync_playlist`. Hub-side membership only; returns
+/// the playlist ids that were updated.
+pub async fn sync_tag_to_playlists(
+    pool: &SqlitePool,
+    user_id: i64,
+    tag_id: i64,
+    track_id: i64,
+) -> Result<Vec<i64>> {
+    let sync: i64 =
+        sqlx::query_scalar("SELECT COALESCE(sync_playlist,0) FROM hub_tags WHERE id = ?1")
+            .bind(tag_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+    if sync == 0 {
+        return Ok(Vec::new());
+    }
+    let playlists: Vec<i64> = sqlx::query_scalar(
+        "SELECT ts.playlist_id FROM hub_tag_sources ts
+           JOIN hub_playlists hp ON hp.id = ts.playlist_id
+          WHERE ts.tag_id = ?1 AND hp.user_id = ?2",
+    )
+    .bind(tag_id)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let now = chrono::Utc::now().to_rfc3339();
+    for pl in &playlists {
+        sqlx::query(
+            "INSERT OR IGNORE INTO hub_playlist_tracks (playlist_id, track_id, added_at)
+             VALUES (?1, ?2, ?3)",
+        )
+        .bind(pl)
+        .bind(track_id)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+    }
+    Ok(playlists)
 }
 
 /// Create (or update) a tag owned by a user, without a source playlist.
@@ -302,6 +497,86 @@ pub async fn list_user_tags(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String
 /// Ids of tags (any owner) whose name contains `needle`, **plus all of their
 /// descendant tags** (transitively), so filtering by a broad/parent tag also
 /// matches its children (e.g. "house" -> "Beatport Top 100 - Progressive House").
+/// Tags that co-occur with a track's tags ("how others tagged similar tracks"),
+/// excluding tags already on the track. Returns `(tag_id, name, owner, score)`
+/// ordered by co-occurrence count descending.
+///
+/// Relationship-based recommendation: aggregates candidate tags from several
+/// neighbourhoods of the track, weighted by how strong the relation is:
+///   * tracks sharing a tag with the seed        (weight 2)
+///   * tracks in the same playlists as the seed  (weight 1)
+///   * tracks by the same artist                 (weight 1)
+///   * tracks on the same album                  (weight 1)
+/// Tags already on the track are excluded; tags owned by any hub user count.
+pub async fn recommended_tags(
+    pool: &SqlitePool,
+    track_id: i64,
+    limit: i64,
+) -> Vec<(i64, String, String, i64)> {
+    let e = crate::settings::engine(pool).await;
+    sqlx::query_as::<_, (i64, String, String, i64)>(
+        "WITH s AS (SELECT ?1 AS id),
+              seed_tags AS (SELECT tag_id FROM hub_track_resolved_tags WHERE track_id = (SELECT id FROM s)),
+              cand AS (
+                 SELECT rt2.tag_id AS tag_id, ?2 AS w
+                   FROM hub_track_resolved_tags rt1
+                   JOIN hub_track_resolved_tags rt2 ON rt2.track_id = rt1.track_id
+                  WHERE rt1.tag_id IN (SELECT tag_id FROM seed_tags)
+                    AND rt2.track_id <> (SELECT id FROM s)
+                 UNION ALL
+                 SELECT rt.tag_id, ?3
+                   FROM hub_playlist_tracks p1
+                   JOIN hub_playlist_tracks p2 ON p2.playlist_id = p1.playlist_id
+                   JOIN hub_track_resolved_tags rt ON rt.track_id = p2.track_id
+                  WHERE p1.track_id = (SELECT id FROM s) AND p2.track_id <> (SELECT id FROM s)
+                 UNION ALL
+                 SELECT rt.tag_id, ?4
+                   FROM hub_tracks t1
+                   JOIN hub_tracks t2 ON t2.artists = t1.artists AND t2.id <> t1.id
+                   JOIN hub_track_resolved_tags rt ON rt.track_id = t2.id
+                  WHERE t1.id = (SELECT id FROM s)
+                    AND t1.artists IS NOT NULL AND TRIM(t1.artists) <> ''
+                 UNION ALL
+                 SELECT rt.tag_id, ?5
+                   FROM hub_tracks a1
+                   JOIN hub_tracks a2 ON a2.album = a1.album AND a2.id <> a1.id
+                   JOIN hub_track_resolved_tags rt ON rt.track_id = a2.id
+                  WHERE a1.id = (SELECT id FROM s)
+                    AND a1.album IS NOT NULL AND TRIM(a1.album) <> ''
+              )
+         SELECT x.tag_id, t.name, u.slug, SUM(x.w) AS score
+           FROM cand x
+           JOIN hub_tags t ON t.id = x.tag_id
+           JOIN hub_users u ON u.id = t.owner_user_id
+          WHERE x.tag_id NOT IN (SELECT tag_id FROM seed_tags)
+          GROUP BY x.tag_id, t.name, u.slug
+          ORDER BY score DESC, t.name
+          LIMIT ?6",
+    )
+    .bind(track_id)
+    .bind(e.rec_tag.round() as i64)
+    .bind(e.rec_playlist.round() as i64)
+    .bind(e.rec_artist.round() as i64)
+    .bind(e.rec_album.round() as i64)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
+/// `(id, name)` of every tag this track carries (any owner) — for the tag form.
+pub async fn tags_on_track(pool: &SqlitePool, track_id: i64) -> Vec<(i64, String)> {
+    sqlx::query_as::<_, (i64, String)>(
+        "SELECT t.id, t.name FROM hub_track_resolved_tags rt
+           JOIN hub_tags t ON t.id = rt.tag_id
+          WHERE rt.track_id = ?1 ORDER BY t.name",
+    )
+    .bind(track_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
 pub async fn matching_tag_ids(pool: &SqlitePool, needle: &str) -> HashSet<i64> {
     let like = format!("%{}%", needle.to_lowercase());
     let roots: Vec<i64> = sqlx::query_scalar("SELECT id FROM hub_tags WHERE lower(name) LIKE ?1")

@@ -1,0 +1,132 @@
+{% extends "base.html" %} {% block title %}Import-Historie — Spelunke{% endblock %} {% block
+content %}
+<div class="hub-page-head">
+    <h1>Import-Historie</h1>
+    <span class="hub-muted">{{ run_count }} Läufe · {{ event_count }} Änderungen</span>
+</div>
+
+<form
+    method="get"
+    action="/history"
+    class="hub-filter"
+>
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Quelle / Typ / Referenz suchen …"
+        aria-label="Suchen"
+    />
+    <label style="display: flex; gap: 0.3rem; align-items: center">
+        Quelle
+        <select name="source" aria-label="Quelle">
+            <option value="">alle</option>
+            {% for s in sources %}
+            <option value="{{ s.value }}" {% if s.selected %}selected{% endif %}>{{ s.value }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label style="display: flex; gap: 0.3rem; align-items: center">
+        User
+        <select name="user" aria-label="User">
+            <option value="">alle</option>
+            {% for u in users %}
+            <option value="{{ u.value }}" {% if u.selected %}selected{% endif %}>@{{ u.value }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <button type="submit">Filtern</button>
+    <a href="/history" role="button" class="secondary outline">Zurücksetzen</a>
+</form>
+
+<div
+    style="
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+        gap: 0.6rem;
+        align-items: start;
+    "
+>
+    <div
+        class="hub-scroll-y overflow-auto"
+        style="max-height: 74vh; overflow: auto; border: 1px solid var(--pico-muted-border-color)"
+    >
+        <table class="hub-dense-table">
+            <caption class="hub-visually-hidden">
+                Import-Läufe je Quelle und User
+            </caption>
+            <thead>
+                <tr>
+                    <th scope="col">#</th>
+                    <th scope="col">Quelle</th>
+                    <th scope="col">User</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Start</th>
+                    <th scope="col">Ende</th>
+                    <th scope="col">Stats</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in runs %}
+                <tr>
+                    <td>{{ r.id }}</td>
+                    <td>{{ r.source }}</td>
+                    <td>@{{ r.user }}</td>
+                    <td><span class="hub-badge {{ r.status_class }}">{{ r.status }}</span></td>
+                    <td class="hub-nowrap">{{ r.started }}</td>
+                    <td class="hub-nowrap">{{ r.finished }}</td>
+                    <td class="hub-muted">{{ r.stats }}</td>
+                </tr>
+                {% endfor %}
+                {% if run_count == 0 %}
+                <tr>
+                    <td colspan="7" class="hub-empty">Keine Import-Läufe.</td>
+                </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+
+    <div
+        class="hub-scroll-y overflow-auto"
+        style="max-height: 74vh; overflow: auto; border: 1px solid var(--pico-muted-border-color)"
+    >
+        <table class="hub-dense-table">
+            <caption class="hub-visually-hidden">
+                Timeline der Änderungen
+            </caption>
+            <thead>
+                <tr>
+                    <th scope="col">Zeit</th>
+                    <th scope="col">Quelle</th>
+                    <th scope="col">User</th>
+                    <th scope="col">Typ</th>
+                    <th scope="col">Referenz</th>
+                    <th scope="col">Änderung</th>
+                    <th scope="col">vorher</th>
+                    <th scope="col">nachher</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for e in events %}
+                <tr>
+                    <td class="hub-nowrap">{{ e.at }}</td>
+                    <td>{{ e.source }}</td>
+                    <td>@{{ e.user }}</td>
+                    <td>{{ e.entity_type }}</td>
+                    <td>{{ e.entity_ref }}</td>
+                    <td><span class="hub-badge {{ e.change_class }}">{{ e.change }}</span></td>
+                    <td class="hub-muted">{{ e.before }}</td>
+                    <td class="hub-muted">{{ e.after }}</td>
+                </tr>
+                {% endfor %}
+                {% if event_count == 0 %}
+                <tr>
+                    <td colspan="8" class="hub-empty">Keine Änderungen.</td>
+                </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

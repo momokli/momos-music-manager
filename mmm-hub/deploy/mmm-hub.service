@@ -1,5 +1,5 @@
 [Unit]
-Description=MMM Hub (walking skeleton)
+Description=Spelunke (walking skeleton)
 After=network.target
 
 [Service]

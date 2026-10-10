@@ -1,4 +1,4 @@
-{% extends "base.html" %} {% block title %}Tags — MMM Hub{% endblock %} {% block content
+{% extends "base.html" %} {% block title %}Tags — Spelunke{% endblock %} {% block content
 %}
 <hgroup>
     <h1>Tags</h1>
@@ -12,7 +12,7 @@
 <form
     method="post"
     action="/tags/create"
-    style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center"
+    class="hub-filter"
 >
     <input
         type="text"
@@ -55,7 +55,7 @@
 <form
     method="get"
     action="/tags"
-    style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center"
+    class="hub-filter"
 >
     {% if mine %}<input type="hidden" name="mine" value="1" />{% endif %}
     <input type="hidden" name="groups" id="groups-hidden" value="{{ groups_csv }}" />

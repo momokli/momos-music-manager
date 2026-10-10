@@ -1,4 +1,4 @@
-{% extends "base.html" %} {% block title %}{{ slug }} — MMM Hub{% endblock %} {% block
+{% extends "base.html" %} {% block title %}{{ slug }} — Spelunke{% endblock %} {% block
 content %}
 <nav class="hub-crumbs" aria-label="Brotkrumen">
     <ol>
@@ -13,7 +13,7 @@ content %}
 
 <h2>Playlists</h2>
 {% if playlists.is_empty() %}
-<p class="hub-muted">Keine Playlists.</p>
+<p class="hub-empty">Keine Playlists.</p>
 {% else %}
 <div class="overflow-auto">
     <table>

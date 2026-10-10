@@ -1,0 +1,53 @@
+{% extends "base.html" %} {% block title %}{{ name }} — Spelunke{% endblock %} {% block content
+%}
+<nav class="hub-crumbs" aria-label="Brotkrumen">
+    <ol>
+        <li><a href="/">Übersicht</a></li>
+        <li><a href="/albums">Alben</a></li>
+        <li>{{ name }}</li>
+    </ol>
+</nav>
+
+<div style="display: flex; gap: 0.8rem; align-items: flex-start; margin-bottom: 0.5rem">
+    {% if cover != "" %}<img
+        src="{{ cover }}"
+        alt=""
+        loading="lazy"
+        style="width: 8rem; height: 8rem; object-fit: cover; border-radius: 0.5rem"
+    />{% endif %}
+    <div>
+        <h1 style="margin-bottom: 0.1rem">{{ name }}</h1>
+        <p class="hub-muted" style="margin: 0">
+            {{ track_count }} Tracks ·
+            {% for a in artists %}<a href="{{ a.href }}" class="hub-tag">{{ a.name }}</a
+            >{% endfor %}
+        </p>
+    </div>
+</div>
+
+<div class="overflow-auto hub-scroll-y" style="max-height: 72vh; overflow: auto">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Tracks dieses Albums
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">#</th>
+                <th scope="col">Track</th>
+                <th scope="col">Künstler</th>
+                <th scope="col">Dauer</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in tracks %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td><a href="/track/{{ t.id }}">{{ t.title }}</a></td>
+                <td class="hub-cell-pl"><a href="/artist/{{ t.artists }}">{{ t.artists }}</a></td>
+                <td>{% if t.duration != "" %}{{ t.duration }}{% else %}—{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

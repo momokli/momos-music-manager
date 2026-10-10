@@ -1,4 +1,4 @@
-{% extends "base.html" %} {% block title %}Ähnliche Playlists — MMM Hub{% endblock %} {%
+{% extends "base.html" %} {% block title %}Ähnliche Playlists — Spelunke{% endblock %} {%
 block content %}
 <hgroup>
     <h1>Ähnliche Playlists</h1>
@@ -21,7 +21,7 @@ block content %}
 </nav>
 
 {% if rows.is_empty() %}
-<p class="hub-muted">Keine gemeinsamen Playlist-Namen für diese Auswahl.</p>
+<p class="hub-empty">Keine gemeinsamen Playlist-Namen für diese Auswahl.</p>
 {% else %}
 <div class="overflow-auto hub-scroll-y">
     <table class="hub-dense-table">

@@ -1,4 +1,4 @@
-{% extends "base.html" %} {% block title %}Downloads — MMM Hub{% endblock %} {% block
+{% extends "base.html" %} {% block title %}Downloads — Spelunke{% endblock %} {% block
 content %}
 <nav class="hub-crumbs" aria-label="Brotkrumen">
     <ol>
@@ -98,7 +98,7 @@ content %}
     </form>
 
     {% if rows.is_empty() %}
-    <p class="hub-muted">Keine Tracks für die aktuelle Auswahl.</p>
+    <p class="hub-empty">Keine Tracks für die aktuelle Auswahl.</p>
     {% else %}
     <div class="overflow-auto hub-scroll-y">
         <table class="hub-dense-table">

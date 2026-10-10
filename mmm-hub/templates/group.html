@@ -1,4 +1,4 @@
-{% extends "base.html" %} {% block title %}{{ name }} — MMM Hub{% endblock %} {% block
+{% extends "base.html" %} {% block title %}{{ name }} — Spelunke{% endblock %} {% block
 content %}
 <nav class="hub-crumbs" aria-label="Brotkrumen">
     <ol>
@@ -92,7 +92,7 @@ content %}
     <span class="hub-muted">deine Rolle hier kommt aus dem Collective</span>{% endif %}
 </p>
 {% else %}
-<p class="hub-muted">Keine — diese Gruppe gehört zu keinem Collective.</p>
+<p class="hub-empty">Keine — diese Gruppe gehört zu keinem Collective.</p>
 {% endif %} {% if is_owner %}
 <form
     method="post"

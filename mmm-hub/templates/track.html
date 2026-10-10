@@ -1,4 +1,4 @@
-{% extends "base.html" %} {% block title %}{{ title }} — MMM Hub{% endblock %} {% block
+{% extends "base.html" %} {% block title %}{{ title }} — Spelunke{% endblock %} {% block
 content %}
 <nav class="hub-crumbs" aria-label="Brotkrumen">
     <ol>
@@ -15,6 +15,36 @@ content %}
     >{% if music_api %} · <a href="/track/{{ id }}/download?format=flac">FLAC laden</a> ·
     <a href="/track/{{ id }}/download?format=mp3">MP3 laden</a>{% endif %}
 </p>
+
+{% if can_stream %}
+<div class="hub-player">
+    <button class="hub-playbtn" type="button" aria-label="Abspielen">▶</button>
+    <div class="hub-wave" role="slider" tabindex="0" aria-label="Fortschritt">
+        <div class="hub-wave-fill"></div>
+    </div>
+    <span class="hub-time">0:00 / 0:00</span>
+    <audio preload="none" src="/track/{{ id }}/stream"></audio>
+</div>
+<div class="hub-player-error" hidden>
+    <span>Noch nicht in music-api verfügbar.</span>
+    {% if fetchable %}
+    <form method="post" action="/track/{{ id }}/fetch" style="display: inline">
+        <button class="outline" type="submit">Jetzt holen</button>
+    </form>
+    {% endif %}
+</div>
+{% else if spotify_id != "" %}
+<iframe
+    style="border-radius: 12px; width: 100%"
+    src="https://open.spotify.com/embed/track/{{ spotify_id }}"
+    height="80"
+    frameborder="0"
+    allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+    loading="lazy"
+></iframe>
+{% else %}
+<p class="hub-muted">Kein Player (music-api / ISRC / Spotify-Track fehlt).</p>
+{% endif %}
 
 <div class="hub-dense hub-cols">
     <section>
@@ -61,7 +91,10 @@ content %}
                 </tr>
                 <tr>
                     <th scope="row">Album</th>
-                    <td>{{ album }}</td>
+                    <td>
+                        {% if album != "" %}<a href="/album/{{ album }}">{{ album }}</a>{%
+                        else %}—{% endif %}
+                    </td>
                 </tr>
                 <tr>
                     <th scope="row">Dauer</th>
@@ -125,26 +158,46 @@ content %}
                 <tr>
                     <th scope="row">Tags</th>
                     <td>
-                        {% if tags.is_empty() %}—{% else %}
-                        <ul class="hub-taglist">
-                            {% for t in tags %}
-                            <li>
-                                <a href="/user/{{ t.owner }}" class="hub-muted"
-                                    >@{{ t.owner }}</a
-                                >
-                                <a href="/tag/{{ t.id }}" class="hub-tag hub-tag-own"
-                                    >{{ t.name }}</a
-                                >
-                                {% for g in t.groups %}<a
-                                    href="/groups/{{ g.id }}"
-                                    class="hub-chip"
-                                    title="Gruppe"
-                                    >{{ g.icon }} {{ g.name }}</a
-                                >{% endfor %}
-                            </li>
-                            {% endfor %}
-                        </ul>
-                        {% endif %}
+                        {% include "_partials/tag_clouds.html" %}
+                        <form
+                            method="post"
+                            action="/track/{{ id }}/tag"
+                            style="
+                                display: flex;
+                                gap: 0.3rem;
+                                margin-top: 0.4rem;
+                                align-items: center;
+                            "
+                        >
+                            <input
+                                type="text"
+                                name="name"
+                                list="my-tags"
+                                placeholder="Tag hinzufügen …"
+                                aria-label="Tag"
+                                required
+                            />
+                            <datalist id="my-tags">
+                                {% for t in my_tags %}
+                                <option value="{{ t.1 }}"></option>
+                                {% endfor %}
+                            </datalist>
+                            <input
+                                type="text"
+                                name="group"
+                                list="my-groups"
+                                placeholder="Gruppe (optional)"
+                                aria-label="Gruppe"
+                                style="width: 9rem"
+                            />
+                            <datalist id="my-groups">
+                                {% for g in my_groups %}
+                                <option value="{{ g.name }}"></option>
+                                {% endfor %}
+                            </datalist>
+                            <button type="submit">Taggen</button>
+                        </form>
+                        {% include "_partials/rec_tags.html" %}
                     </td>
                 </tr>
                 <tr>

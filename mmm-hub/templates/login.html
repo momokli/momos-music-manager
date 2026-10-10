@@ -1,6 +1,6 @@
-{% extends "auth.html" %} {% block title %}Login — MMM Hub{% endblock %} {% block content
+{% extends "auth.html" %} {% block title %}Login — Spelunke{% endblock %} {% block content
 %}
-<h1>MMM Hub</h1>
+<h1>Spelunke</h1>
 <p class="hub-muted">Login</p>
 {% if error != "" %}
 <p class="hub-flash-err">{{ error }}</p>
@@ -11,5 +11,5 @@
     <button type="submit">Einloggen</button>
 </form>
 {% if registration_open %}
-<p class="hub-muted">Noch keinen Account? <a href="/signup">Registrieren</a></p>
+<p class="hub-empty">Noch keinen Account? <a href="/signup">Registrieren</a></p>
 {% endif %} {% endblock %}

@@ -2,7 +2,7 @@
 name = "mmm-hub"
 version = "0.1.0"
 edition = "2024"
-description = "MMM Hub — multi-user music ingest + exploration service"
+description = "Spelunke — multi-user music ingest + exploration service"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

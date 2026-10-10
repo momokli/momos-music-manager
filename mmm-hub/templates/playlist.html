@@ -1,4 +1,4 @@
-{% extends "base.html" %} {% block title %}{{ name }} — MMM Hub{% endblock %} {% block
+{% extends "base.html" %} {% block title %}{{ name }} — Spelunke{% endblock %} {% block
 content %}
 <nav class="hub-crumbs" aria-label="Brotkrumen">
     <ol>
@@ -77,7 +77,13 @@ content %}
         <button type="submit">Fehlende ordern (music-api)</button>
     </form>
     <form method="post" action="/playlist/{{ id }}/prioritize">
-        <button type="submit" class="secondary">Priorisieren</button>
+        <button
+            type="submit"
+            class="secondary"
+            title="Alle ISRCs mit hoher Priorität in die music-api-Queue"
+        >
+            Priorisieren
+        </button>
     </form>
     <form method="post" action="/playlist/{{ id }}/refresh">
         <button type="submit" class="secondary outline">Status aktualisieren</button>

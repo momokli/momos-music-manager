@@ -1,0 +1,98 @@
+{% extends "base.html" %} {% block title %}Künstler — Spelunke{% endblock %} {% block content
+%}
+<hgroup>
+    <h1>Künstler</h1>
+    <p class="hub-muted">
+        Aus den Track-Metadaten (<code>hub_tracks.artists</code>) abgeleitet · {{ total }}
+        Künstler. Klick auf einen Namen öffnet das Profil.
+    </p>
+</hgroup>
+
+<form
+    method="get"
+    action="/artists"
+    class="hub-filter"
+>
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Künstler suchen …"
+        aria-label="Künstler suchen"
+    />
+    <select name="sort" aria-label="Sortierung">
+        <option value="name" {% if sort_name %}selected{% endif %}>Name</option>
+        <option value="plays" {% if sort_plays %}selected{% endif %}>Meine Plays</option>
+        <option value="tracks" {% if sort_tracks %}selected{% endif %}>Tracks</option>
+    </select>
+    <label style="margin: 0"
+        ><input type="checkbox" name="plays" value="1" {% if plays_only %}checked{% endif %} />
+        von mir gespielt</label
+    >
+    <label style="margin: 0"
+        ><input type="checkbox" name="tags" value="1" {% if tags_only %}checked{% endif %} />
+        getaggt</label
+    >
+    <label style="margin: 0"
+        ><input type="checkbox" name="pl" value="1" {% if pl_only %}checked{% endif %} /> in
+        Playlists</label
+    >
+    <button type="submit">Filtern</button>
+    <a href="/artists" role="button" class="secondary outline">Zurücksetzen</a>
+</form>
+
+{% if rows.is_empty() %}
+<p class="hub-empty">Keine Künstler für diese Filter.</p>
+{% else %}
+<div class="overflow-auto hub-scroll-y">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Künstler mit Track-, Tag- und Playlist-Zahlen
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Künstler</th>
+                <th scope="col" title="Tracks dieses Künstlers">Tracks</th>
+                <th scope="col" title="Tracks mit mindestens einem Tag">Getaggt</th>
+                <th scope="col" title="Tracks in mindestens einer Playlist">In Pl.</th>
+                <th scope="col" title="Meine Traktor-Plays">Plays (mir)</th>
+                <th scope="col" title="Plays aller Nutzer zusammen">Plays (alle)</th>
+                <th scope="col">Spotify</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for a in rows %}
+            <tr>
+                <td><a href="{{ a.href }}">{{ a.name }}</a></td>
+                <td>{{ a.tracks }}</td>
+                <td>
+                    {% if a.tagged > 0 %}{{ a.tagged }}{% else %}<span class="hub-muted">—</span
+                    >{% endif %}
+                </td>
+                <td>
+                    {% if a.in_playlists > 0 %}{{ a.in_playlists }}{% else %}<span
+                        class="hub-muted"
+                        >—</span
+                    >{% endif %}
+                </td>
+                <td>
+                    {% if a.my_plays > 0 %}{{ a.my_plays }}{% else %}<span class="hub-muted"
+                        >—</span
+                    >{% endif %}
+                </td>
+                <td>
+                    {% if a.all_plays > 0 %}{{ a.all_plays }}{% else %}<span class="hub-muted"
+                        >—</span
+                    >{% endif %}
+                </td>
+                <td>
+                    <a href="{{ a.spotify }}" target="_blank" rel="noopener" title="Auf Spotify suchen"
+                        >↗</a
+                    >
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %} {% endblock %}
