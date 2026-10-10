@@ -5,6 +5,8 @@ use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
 pub struct DeezerArtist {
+    /// Deezer sometimes omits `name` (e.g. for some compilations); default it.
+    #[serde(default)]
     pub name: String,
 }
 
@@ -51,7 +53,13 @@ pub enum Lookup {
         album: String,
     },
     /// Deezer has no such ISRC (or it is not streamable for any account).
-    Absent { reason: String },
+    /// `title`/`artist` may still be present (Deezer knows the track but it is
+    /// not streamable) so a fallback provider can search for it.
+    Absent {
+        reason: String,
+        title: Option<String>,
+        artist: Option<String>,
+    },
 }
 
 /// Resolve a single ISRC against Deezer's public API.
@@ -70,16 +78,24 @@ pub async fn lookup_isrc(http: &reqwest::Client, base: &str, isrc: &str) -> anyh
     if let Some(err) = body.error {
         return Ok(Lookup::Absent {
             reason: format!("deezer error {}: {}", err.code, err.message),
+            title: None,
+            artist: None,
         });
     }
     if body.id == 0 {
         return Ok(Lookup::Absent {
             reason: "no deezer match".to_string(),
+            title: None,
+            artist: None,
         });
     }
     if !body.readable {
+        // Deezer knows the track but it is not streamable — keep the metadata
+        // so the fallback provider can search for it.
         return Ok(Lookup::Absent {
             reason: "not streamable on deezer".to_string(),
+            title: Some(body.title),
+            artist: body.artist.map(|a| a.name),
         });
     }
 
