@@ -248,7 +248,18 @@ struct UserPage {
     slug: String,
     liked_count: i64,
     playlist_count: i64,
+    q: String,
     playlists: Vec<PlaylistRow>,
+    s_name: crate::table::SortHead,
+    s_owner: crate::table::SortHead,
+    s_tracks: crate::table::SortHead,
+}
+
+#[derive(Deserialize, Default)]
+struct UserFilter {
+    q: Option<String>,
+    sort: Option<String>,
+    dir: Option<String>,
 }
 
 struct PlaylistRow {
@@ -262,6 +273,8 @@ struct PlaylistRow {
 async fn user_page(
     State(st): State<AppState>,
     Path(slug): Path<String>,
+    Query(f): Query<UserFilter>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "user").await else {
@@ -287,27 +300,38 @@ async fn user_page(
             .await
             .unwrap_or(0);
 
-    let rows = sqlx::query(
-        "SELECT p.id, p.name,
-                COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS owner_name,
-                p.track_count, p.items_available
+    let q = f.q.unwrap_or_default().trim().to_string();
+    let allowed: &[(&str, &str)] = &[
+        ("name", "name"),
+        ("owner", "owner"),
+        ("tracks", "track_count"),
+    ];
+    let (sort, dir) =
+        crate::table::resolve_sort(f.sort.as_deref(), f.dir.as_deref(), allowed, "name", "asc");
+    let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+        "SELECT * FROM (SELECT p.id AS id, p.name AS name,
+                COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS owner,
+                p.track_count AS track_count, COALESCE(p.items_available, 0) AS items_available
            FROM hub_playlists p
            LEFT JOIN hub_service_accounts a ON a.user_id = p.user_id AND a.service = 'spotify'
-          WHERE p.user_id = ?1
-          ORDER BY p.name",
-    )
-    .bind(user_id)
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default();
+          WHERE p.user_id = ",
+    );
+    qb.push_bind(user_id);
+    qb.push(") WHERE 1 = 1");
+    crate::table::push_fuzzy(&mut qb, &q, &["name", "owner"]);
+    crate::table::order_by(&mut qb, &sort, &dir, allowed, "name");
 
-    let playlists: Vec<PlaylistRow> = rows
+    let playlists: Vec<PlaylistRow> = qb
+        .build()
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default()
         .iter()
         .map(|r| PlaylistRow {
             id: r.get("id"),
             name: r.get::<Option<String>, _>("name").unwrap_or_default(),
             owner: r
-                .get::<Option<String>, _>("owner_name")
+                .get::<Option<String>, _>("owner")
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "—".to_string()),
             track_count: r
@@ -319,6 +343,10 @@ async fn user_page(
         .collect();
 
     let playlist_count = playlists.len() as i64;
+    let rawq = raw.as_deref().unwrap_or("");
+    let s_name = crate::table::sort_head(rawq, "name", "Playlist", &sort, &dir);
+    let s_owner = crate::table::sort_head(rawq, "owner", "Besitzer", &sort, &dir);
+    let s_tracks = crate::table::sort_head(rawq, "tracks", "Tracks", &sort, &dir);
 
     render(&UserPage {
         nav,
@@ -326,7 +354,11 @@ async fn user_page(
         slug,
         liked_count,
         playlist_count,
+        q,
         playlists,
+        s_name,
+        s_owner,
+        s_tracks,
     })
 }
 
@@ -925,6 +957,10 @@ struct DownloadsQuery {
     #[serde(default)]
     page: Option<i64>,
     #[serde(default)]
+    sort: Option<String>,
+    #[serde(default)]
+    dir: Option<String>,
+    #[serde(default)]
     msg: Option<String>,
 }
 
@@ -934,7 +970,18 @@ struct DownloadFilters {
     format: String,
     q: String,
     page: i64,
+    sort: String,
+    dir: String,
 }
+
+/// Whitelisted sort fields for the downloads table (`field -> SQL expr`).
+const DOWNLOAD_SORTS: &[(&str, &str)] = &[
+    ("title", "t.title"),
+    ("artists", "t.artists"),
+    ("isrc", "t.isrc"),
+    ("state", "COALESCE(ms.state, 'unknown')"),
+    ("format", "ms.source_format"),
+];
 
 impl DownloadFilters {
     fn from_query(q: &DownloadsQuery) -> Self {
@@ -950,11 +997,18 @@ impl DownloadFilters {
         };
         let page = q.page.unwrap_or(1).max(1);
         let text = q.q.clone().unwrap_or_default().trim().to_string();
+        let sort = q.sort.clone().unwrap_or_default().trim().to_string();
+        let dir = match q.dir.as_deref() {
+            Some("desc") => "desc".to_string(),
+            _ => "asc".to_string(),
+        };
         Self {
             status,
             format,
             q: text,
             page,
+            sort,
+            dir,
         }
     }
 
@@ -969,6 +1023,10 @@ impl DownloadFilters {
         }
         if !self.q.is_empty() {
             parts.push(format!("q={}", urlencoding::encode(&self.q)));
+        }
+        if !self.sort.is_empty() {
+            parts.push(format!("sort={}", urlencoding::encode(&self.sort)));
+            parts.push(format!("dir={}", urlencoding::encode(&self.dir)));
         }
         parts.join("&")
     }
@@ -1019,14 +1077,17 @@ fn push_download_filters(qb: &mut QueryBuilder<'_, sqlx::Sqlite>, f: &DownloadFi
         }
     }
     if !f.q.is_empty() {
-        let like = format!("%{}%", f.q.to_lowercase());
-        qb.push(" AND (LOWER(COALESCE(t.title, '')) LIKE ")
-            .push_bind(like.clone())
-            .push(" OR LOWER(COALESCE(t.artists, '')) LIKE ")
-            .push_bind(like.clone())
-            .push(" OR LOWER(COALESCE(t.isrc, '')) LIKE ")
-            .push_bind(like)
-            .push(")");
+        crate::table::push_fuzzy(
+            qb,
+            &f.q,
+            &[
+                "t.title",
+                "t.artists",
+                "t.isrc",
+                "ms.state",
+                "ms.source_format",
+            ],
+        );
     }
 }
 
@@ -1057,12 +1118,16 @@ async fn download_rows(
          COALESCE(ms.error, '') AS error{DOWNLOADS_FROM}"
     ));
     push_download_filters(&mut qb, f);
-    qb.push(
-        " ORDER BY CASE COALESCE(ms.state, 'unknown') \
-         WHEN 'unknown' THEN 0 WHEN 'absent' THEN 1 WHEN 'failed' THEN 2 \
-         WHEN 'pending' THEN 3 WHEN 'downloading' THEN 4 WHEN 'ready' THEN 5 ELSE 6 END, \
-         t.artists, t.title, t.isrc",
-    );
+    if f.sort.is_empty() {
+        qb.push(
+            " ORDER BY CASE COALESCE(ms.state, 'unknown') \
+             WHEN 'unknown' THEN 0 WHEN 'absent' THEN 1 WHEN 'failed' THEN 2 \
+             WHEN 'pending' THEN 3 WHEN 'downloading' THEN 4 WHEN 'ready' THEN 5 ELSE 6 END, \
+             t.artists, t.title, t.isrc",
+        );
+    } else {
+        crate::table::order_by(&mut qb, &f.sort, &f.dir, DOWNLOAD_SORTS, "title");
+    }
     qb.push(" LIMIT ").push_bind(DOWNLOADS_PER_PAGE);
     qb.push(" OFFSET ").push_bind(offset);
     qb.build()
@@ -1202,6 +1267,11 @@ struct DownloadsPage {
     has_filters: bool,
     refresh_action: String,
     order_action: String,
+    s_title: crate::table::SortHead,
+    s_artists: crate::table::SortHead,
+    s_isrc: crate::table::SortHead,
+    s_state: crate::table::SortHead,
+    s_format: crate::table::SortHead,
 }
 
 struct QueueItem {
@@ -1243,6 +1313,7 @@ struct FilterOption {
 async fn downloads_page(
     State(st): State<AppState>,
     Query(q): Query<DownloadsQuery>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "downloads").await else {
@@ -1275,6 +1346,12 @@ async fn downloads_page(
     let rows = download_rows(&st.pool, &f, f.page).await;
     let links = page_links(&f, pages);
     let qs = f.query_string();
+    let rawq = raw.as_deref().unwrap_or("");
+    let s_title = crate::table::sort_head(rawq, "title", "Track", &f.sort, &f.dir);
+    let s_artists = crate::table::sort_head(rawq, "artists", "Artists", &f.sort, &f.dir);
+    let s_isrc = crate::table::sort_head(rawq, "isrc", "ISRC", &f.sort, &f.dir);
+    let s_state = crate::table::sort_head(rawq, "state", "Status", &f.sort, &f.dir);
+    let s_format = crate::table::sort_head(rawq, "format", "Format", &f.sort, &f.dir);
 
     render(&DownloadsPage {
         nav,
@@ -1309,6 +1386,11 @@ async fn downloads_page(
         has_filters: f.has_filters(),
         refresh_action: append_qs("/downloads/refresh", &qs),
         order_action: append_qs("/downloads/order-all", &qs),
+        s_title,
+        s_artists,
+        s_isrc,
+        s_state,
+        s_format,
     })
 }
 
@@ -2393,6 +2475,9 @@ async fn overlap_enrich(State(st): State<AppState>, headers: HeaderMap, body: St
 struct SimilarQuery {
     /// `all` | `owned` | `contributed` | `followed`.
     scope: Option<String>,
+    q: Option<String>,
+    sort: Option<String>,
+    dir: Option<String>,
 }
 
 #[derive(Template)]
@@ -2400,9 +2485,13 @@ struct SimilarQuery {
 struct SimilarPage {
     nav: crate::ui::Nav,
     flash: String,
+    q: String,
+    scope: String,
     users: Vec<ColumnUser>,
     rows: Vec<SimilarRow>,
     scopes: Vec<ScopeLink>,
+    s_label: crate::table::SortHead,
+    s_users: crate::table::SortHead,
 }
 
 struct SimilarRow {
@@ -2448,6 +2537,7 @@ struct SimilarEntry {
 async fn similar_page(
     State(st): State<AppState>,
     Query(q): Query<SimilarQuery>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "similar").await else {
@@ -2554,6 +2644,25 @@ async fn similar_page(
             .then_with(|| b.user_count.cmp(&a.user_count))
             .then_with(|| a.label.cmp(&b.label))
     });
+
+    // Fuzzy filter + optional header sort.
+    let fq = q.q.clone().unwrap_or_default().trim().to_string();
+    let toks = crate::table::tokens(&fq);
+    out.retain(|r| crate::table::matches_typo(&r.label.to_lowercase(), &toks));
+    let allowed: &[(&str, &str)] = &[("label", "label"), ("users", "user_count")];
+    let (sort, dir) =
+        crate::table::resolve_sort(q.sort.as_deref(), q.dir.as_deref(), allowed, "", "asc");
+    if !sort.is_empty() {
+        let desc = dir == "desc";
+        out.sort_by(|a, b| {
+            let o = if sort == "users" {
+                a.user_count.cmp(&b.user_count)
+            } else {
+                a.label.cmp(&b.label)
+            };
+            if desc { o.reverse() } else { o }
+        });
+    }
     out.truncate(500);
 
     let scopes = vec![
@@ -2579,15 +2688,22 @@ async fn similar_page(
         },
     ];
 
+    let rawq = raw.as_deref().unwrap_or("");
+    let s_label = crate::table::sort_head(rawq, "label", "Playlist-Name", &sort, &dir);
+    let s_users = crate::table::sort_head(rawq, "users", "Nutzer", &sort, &dir);
     render(&SimilarPage {
         nav,
         flash: String::new(),
+        q: fq,
+        scope: scope.to_string(),
         users: users
             .iter()
             .map(|(_, slug)| ColumnUser { slug: slug.clone() })
             .collect(),
         rows: out,
         scopes,
+        s_label,
+        s_users,
     })
 }
 
@@ -3471,6 +3587,9 @@ struct AdminMsg {
     q: Option<String>,
     sort: Option<String>,
     dir: Option<String>,
+    /// Secondary table sort (pages with two tables, e.g. collective members).
+    msort: Option<String>,
+    mdir: Option<String>,
 }
 
 #[derive(Template)]
@@ -3480,7 +3599,10 @@ struct AdminPage {
     flash: String,
     fields: Vec<AdminField>,
     registration_open: bool,
+    q: String,
     users: Vec<AdminUser>,
+    s_user: crate::table::SortHead,
+    s_admin: crate::table::SortHead,
 }
 
 struct AdminField {
@@ -3512,6 +3634,7 @@ struct AdminUser {
 async fn admin_page(
     State(st): State<AppState>,
     Query(msg): Query<AdminMsg>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "admin").await else {
@@ -3611,8 +3734,18 @@ async fn admin_page(
         })
         .collect();
     let registration_open = crate::settings::registration_open(&st.pool).await;
-    let users =
-        sqlx::query_as::<_, (String, i64)>("SELECT slug, is_admin FROM hub_users ORDER BY slug")
+    let q = msg.q.clone().unwrap_or_default().trim().to_string();
+    let toks = crate::table::tokens(&q);
+    let allowed: &[(&str, &str)] = &[("user", "slug"), ("admin", "is_admin")];
+    let (sort, dir) = crate::table::resolve_sort(
+        msg.sort.as_deref(),
+        msg.dir.as_deref(),
+        allowed,
+        "user",
+        "asc",
+    );
+    let mut users: Vec<AdminUser> =
+        sqlx::query_as::<_, (String, i64)>("SELECT slug, is_admin FROM hub_users")
             .fetch_all(&st.pool)
             .await
             .unwrap_or_default()
@@ -3621,14 +3754,30 @@ async fn admin_page(
                 slug,
                 is_admin: admin == 1,
             })
+            .filter(|u| crate::table::matches_typo(&u.slug.to_lowercase(), &toks))
             .collect();
+    let desc = dir == "desc";
+    users.sort_by(|a, b| {
+        let o = if sort == "admin" {
+            a.is_admin.cmp(&b.is_admin)
+        } else {
+            a.slug.to_lowercase().cmp(&b.slug.to_lowercase())
+        };
+        if desc { o.reverse() } else { o }
+    });
+    let rawq = raw.as_deref().unwrap_or("");
+    let s_user = crate::table::sort_head(rawq, "user", "Nutzer", &sort, &dir);
+    let s_admin = crate::table::sort_head(rawq, "admin", "Admin", &sort, &dir);
 
     render(&AdminPage {
         nav,
         flash: msg.msg.unwrap_or_default(),
         fields,
         registration_open,
+        q,
         users,
+        s_user,
+        s_admin,
     })
 }
 
@@ -4886,12 +5035,16 @@ struct GroupPage {
     tags: Vec<GroupTag>,
     users: Vec<String>,
     icons: Vec<IconOption>,
+    q: String,
+    s_name: crate::table::SortHead,
+    s_owner: crate::table::SortHead,
 }
 
 async fn group_page(
     State(st): State<AppState>,
     Path(id): Path<i64>,
     Query(msg): Query<AdminMsg>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "groups").await else {
@@ -4910,7 +5063,17 @@ async fn group_page(
         .into_iter()
         .map(|(slug, role)| MemberRow { slug, role })
         .collect();
-    let tags = d
+    let q = msg.q.clone().unwrap_or_default().trim().to_string();
+    let toks = crate::table::tokens(&q);
+    let allowed: &[(&str, &str)] = &[("name", "name"), ("owner", "owner")];
+    let (sort, dir) = crate::table::resolve_sort(
+        msg.sort.as_deref(),
+        msg.dir.as_deref(),
+        allowed,
+        "name",
+        "asc",
+    );
+    let mut tags: Vec<GroupTag> = d
         .tags
         .into_iter()
         .map(|(id, name, owner, rank)| GroupTag {
@@ -4921,7 +5084,24 @@ async fn group_page(
                 .map(|r| r.to_string())
                 .unwrap_or_else(|| "—".to_string()),
         })
+        .filter(|t| {
+            crate::table::matches_typo(&format!("{} {}", t.name, t.owner).to_lowercase(), &toks)
+        })
         .collect();
+    {
+        let desc = dir == "desc";
+        tags.sort_by(|a, b| {
+            let o = if sort == "owner" {
+                a.owner
+                    .to_lowercase()
+                    .cmp(&b.owner.to_lowercase())
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            } else {
+                a.name.to_lowercase().cmp(&b.name.to_lowercase())
+            };
+            if desc { o.reverse() } else { o }
+        });
+    }
     let users = sqlx::query_scalar::<_, String>("SELECT slug FROM hub_users ORDER BY slug")
         .fetch_all(&st.pool)
         .await
@@ -4963,6 +5143,15 @@ async fn group_page(
         tags,
         users,
         icons,
+        q,
+        s_name: crate::table::sort_head(raw.as_deref().unwrap_or(""), "name", "Tag", &sort, &dir),
+        s_owner: crate::table::sort_head(
+            raw.as_deref().unwrap_or(""),
+            "owner",
+            "Owner",
+            &sort,
+            &dir,
+        ),
     })
 }
 
@@ -5221,12 +5410,17 @@ struct CollectivePage {
     available_groups: Vec<GroupRef>,
     users: Vec<String>,
     icons: Vec<IconOption>,
+    q: String,
+    s_gname: crate::table::SortHead,
+    s_gtracks: crate::table::SortHead,
+    s_muser: crate::table::SortHead,
 }
 
 async fn collective_page(
     State(st): State<AppState>,
     Path(id): Path<i64>,
     Query(msg): Query<AdminMsg>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "collectives").await else {
@@ -5236,12 +5430,18 @@ async fn collective_page(
         return not_found("Collective nicht gefunden.");
     };
     let member = !d.role.is_empty();
-    let members = d
-        .members
-        .into_iter()
-        .map(|(slug, role)| CollMember { slug, role })
-        .collect();
-    let groups = d
+    let q = msg.q.clone().unwrap_or_default().trim().to_string();
+    let toks = crate::table::tokens(&q);
+    // Groups table: fuzzy on name, sortable by name/track-count.
+    let gallowed: &[(&str, &str)] = &[("name", "name"), ("tracks", "tag_count")];
+    let (gsort, gdir) = crate::table::resolve_sort(
+        msg.sort.as_deref(),
+        msg.dir.as_deref(),
+        gallowed,
+        "name",
+        "asc",
+    );
+    let mut groups: Vec<CollGroup> = d
         .groups
         .into_iter()
         .map(|(id, name, icon, tag_count, weight)| CollGroup {
@@ -5251,7 +5451,40 @@ async fn collective_page(
             tag_count,
             weight,
         })
+        .filter(|g| crate::table::matches_typo(&g.name.to_lowercase(), &toks))
         .collect();
+    {
+        let desc = gdir == "desc";
+        groups.sort_by(|a, b| {
+            let o = if gsort == "tracks" {
+                a.tag_count.cmp(&b.tag_count)
+            } else {
+                a.name.to_lowercase().cmp(&b.name.to_lowercase())
+            };
+            if desc { o.reverse() } else { o }
+        });
+    }
+    // Members table: sortable by user slug.
+    let (msort, mdir) = crate::table::resolve_sort(
+        msg.msort.as_deref(),
+        msg.mdir.as_deref(),
+        &[("user", "slug")],
+        "user",
+        "asc",
+    );
+    let mut members: Vec<CollMember> = d
+        .members
+        .into_iter()
+        .map(|(slug, role)| CollMember { slug, role })
+        .collect();
+    {
+        let desc = mdir == "desc";
+        members.sort_by(|a, b| {
+            let o = a.slug.to_lowercase().cmp(&b.slug.to_lowercase());
+            if desc { o.reverse() } else { o }
+        });
+        let _ = msort;
+    }
     // The owner's own groups not yet in this collective.
     let available_groups: Vec<GroupRef> = if d.is_owner {
         sqlx::query_as::<_, (i64, String, String)>(
@@ -5275,6 +5508,7 @@ async fn collective_page(
         .await
         .unwrap_or_default();
     let icons = icon_options(&d.icon);
+    let rawq = raw.as_deref().unwrap_or("");
     render(&CollectivePage {
         nav,
         flash: msg.msg.unwrap_or_default(),
@@ -5289,6 +5523,10 @@ async fn collective_page(
         available_groups,
         users,
         icons,
+        q,
+        s_gname: crate::table::sort_head(rawq, "name", "Gruppe", &gsort, &gdir),
+        s_gtracks: crate::table::sort_head(rawq, "tracks", "Tags", &gsort, &gdir),
+        s_muser: crate::table::sort_head(rawq, "user", "User", &msort, &mdir),
     })
 }
 

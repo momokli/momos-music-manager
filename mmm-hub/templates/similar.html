@@ -23,6 +23,17 @@ block content %}
 {% if rows.is_empty() %}
 <p class="hub-empty">Keine gemeinsamen Playlist-Namen für diese Auswahl.</p>
 {% else %}
+<form method="get" action="/playlists/similar" class="hub-filter" role="search">
+    <input type="hidden" name="scope" value="{{ scope }}" />
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Suchen (alle Felder, beliebige Reihenfolge) …"
+        aria-label="Playlist-Namen suchen"
+    />
+    <button type="submit">Suchen</button>
+</form>
 <div class="overflow-auto hub-scroll-y">
     <table class="hub-dense-table">
         <caption class="hub-visually-hidden">
@@ -30,7 +41,14 @@ block content %}
         </caption>
         <thead>
             <tr>
-                <th scope="col">Playlist-Name</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_label.href }}"
+                        class="hub-sort{% if s_label.active %} hub-sort-on{% endif %}"
+                        >{{ s_label.label }}{% if s_label.active %} {{ s_label.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
                 {% for u in users %}
                 <th scope="col">@{{ u.slug }}</th>
                 {% endfor %}
@@ -40,8 +58,14 @@ block content %}
             {% for r in rows %}
             <tr>
                 <td class="hub-nowrap">
-                    {{ r.label }} <span class="hub-muted">· {{ r.user_count }}</span> {%
-                    if r.shared %}<span class="hub-badge hub-badge-ok">geteilt</span>{%
+                    {{ r.label }}
+                    <a
+                        href="{{ s_users.href }}"
+                        class="hub-sort{% if s_users.active %} hub-sort-on{% endif %}"
+                        >· {{ r.user_count }}{% if s_users.active %} {{ s_users.arrow }}{%
+                        endif %}</a
+                    >
+                    {% if r.shared %}<span class="hub-badge hub-badge-ok">geteilt</span>{%
                     endif %}
                 </td>
                 {% for c in r.cells %}

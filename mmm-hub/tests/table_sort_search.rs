@@ -164,3 +164,38 @@ async fn tag_detail_track_search_and_sort() {
     let html = get(&app, &cookie, &format!("/tag/{tag}?sort=title&dir=desc")).await;
     assert!(html.contains("sort=title"), "sortable header missing");
 }
+
+/// The remaining pages render sortable headers.
+#[tokio::test]
+async fn remaining_pages_have_sortable_headers() {
+    let app = common::spawn().await;
+    let alice = app.seed.alice;
+    let cookie = app.session_cookie(alice).await;
+    // Give a track an ISRC so the downloads table is non-empty.
+    sqlx::query("UPDATE hub_tracks SET isrc = 'X1' WHERE id = ?1")
+        .bind(app.seed.t_all)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+
+    for path in ["/downloads?sort=title", "/user/alice", "/playlists/similar"] {
+        let html = get(&app, &cookie, path).await;
+        assert!(html.contains("hub-sort"), "{path} has no sortable header");
+    }
+}
+
+#[tokio::test]
+async fn admin_users_table_has_sortable_headers() {
+    let app = common::spawn().await;
+    sqlx::query("UPDATE hub_users SET is_admin = 1 WHERE id = ?1")
+        .bind(app.seed.alice)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let cookie = app.session_cookie(app.seed.alice).await;
+    let html = get(&app, &cookie, "/admin?sort=user").await;
+    assert!(
+        html.contains("hub-sort"),
+        "admin users table has no sortable header"
+    );
+}
