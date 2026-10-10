@@ -69,7 +69,14 @@ content %}
     <table class="hub-dense-table">
         <thead>
             <tr>
-                <th scope="col">User</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_muser.href }}"
+                        class="hub-sort{% if s_muser.active %} hub-sort-on{% endif %}"
+                        >{{ s_muser.label }}{% if s_muser.active %} {{ s_muser.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
                 <th scope="col">Rolle</th>
                 {% if is_owner %}
                 <th scope="col"></th>
@@ -136,6 +143,16 @@ content %}
 <p class="hub-muted">
     <a href="/tags?collective={{ id }}">Alle Tags dieses Collectives ansehen →</a>
 </p>
+<form method="get" action="/collectives/{{ id }}" class="hub-filter" role="search">
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Gruppen suchen …"
+        aria-label="Gruppen suchen"
+    />
+    <button type="submit">Suchen</button>
+</form>
 {% if groups.is_empty() %}
 <p class="hub-empty">Noch keine Gruppen in diesem Collective.</p>
 {% else %}
@@ -143,8 +160,22 @@ content %}
     <table class="hub-dense-table">
         <thead>
             <tr>
-                <th scope="col">Gruppe</th>
-                <th scope="col">Tags</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_gname.href }}"
+                        class="hub-sort{% if s_gname.active %} hub-sort-on{% endif %}"
+                        >{{ s_gname.label }}{% if s_gname.active %} {{ s_gname.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_gtracks.href }}"
+                        class="hub-sort{% if s_gtracks.active %} hub-sort-on{% endif %}"
+                        >{{ s_gtracks.label }}{% if s_gtracks.active %} {{ s_gtracks.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
                 <th scope="col">Gew.</th>
                 {% if member %}
                 <th scope="col">Gewicht / Aktionen</th>

@@ -88,7 +88,7 @@ content %}
                 type="search"
                 name="q"
                 value="{{ q }}"
-                placeholder="Titel, Artist, ISRC"
+                placeholder="Suchen (alle Felder, beliebige Reihenfolge) …"
             />
         </label>
         <button type="submit" class="secondary outline">Filtern</button>
@@ -107,12 +107,47 @@ content %}
             </caption>
             <thead>
                 <tr>
-                    <th scope="col">ISRC</th>
-                    <th scope="col">Titel</th>
-                    <th scope="col">Artists</th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_isrc.href }}"
+                            class="hub-sort{% if s_isrc.active %} hub-sort-on{% endif %}"
+                            >{{ s_isrc.label }}{% if s_isrc.active %} {{ s_isrc.arrow }}{%
+                            endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_title.href }}"
+                            class="hub-sort{% if s_title.active %} hub-sort-on{% endif %}"
+                            >{{ s_title.label }}{% if s_title.active %} {{ s_title.arrow
+                            }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_artists.href }}"
+                            class="hub-sort{% if s_artists.active %} hub-sort-on{% endif %}"
+                            >{{ s_artists.label }}{% if s_artists.active %} {{
+                            s_artists.arrow }}{% endif %}</a
+                        >
+                    </th>
                     <th scope="col">Service</th>
-                    <th scope="col">State</th>
-                    <th scope="col">Format</th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_state.href }}"
+                            class="hub-sort{% if s_state.active %} hub-sort-on{% endif %}"
+                            >{{ s_state.label }}{% if s_state.active %} {{ s_state.arrow
+                            }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_format.href }}"
+                            class="hub-sort{% if s_format.active %} hub-sort-on{% endif %}"
+                            >{{ s_format.label }}{% if s_format.active %} {{
+                            s_format.arrow }}{% endif %}</a
+                        >
+                    </th>
                     <th scope="col">Deezer-ID</th>
                     <th scope="col">Fehler</th>
                 </tr>

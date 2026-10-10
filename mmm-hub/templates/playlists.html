@@ -121,12 +121,33 @@ content %}
         </caption>
         <thead>
             <tr>
-                <th scope="col">Playlist</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_name.href }}"
+                        class="hub-sort{% if s_name.active %} hub-sort-on{% endif %}"
+                        >{{ s_name.label }}{% if s_name.active %} {{ s_name.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
                 <th scope="col">Typ</th>
                 <th scope="col">Nutzer</th>
-                <th scope="col">Besitzer</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_owner.href }}"
+                        class="hub-sort{% if s_owner.active %} hub-sort-on{% endif %}"
+                        >{{ s_owner.label }}{% if s_owner.active %} {{ s_owner.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
                 <th scope="col">Tags</th>
-                <th scope="col">Tracks</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_tracks.href }}"
+                        class="hub-sort{% if s_tracks.active %} hub-sort-on{% endif %}"
+                        >{{ s_tracks.label }}{% if s_tracks.active %} {{ s_tracks.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
                 <th scope="col">Status</th>
                 <th scope="col">Aktionen</th>
             </tr>

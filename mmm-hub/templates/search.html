@@ -10,7 +10,7 @@
         type="search"
         name="q"
         value="{{ q }}"
-        placeholder="Titel, Artist, Album …"
+        placeholder="Suchen (alle Felder, beliebige Reihenfolge) …"
         aria-label="Suche"
     />
     <button type="submit">Suchen</button>
@@ -22,15 +22,36 @@
 <p>Keine Treffer.</p>
 {% else %}
 <div class="overflow-auto">
-    <table>
+    <table class="hub-dense-table">
         <caption class="hub-visually-hidden">
             Suchergebnisse
         </caption>
         <thead>
             <tr>
-                <th scope="col">Titel</th>
-                <th scope="col">Artists</th>
-                <th scope="col">Album</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_title.href }}"
+                        class="hub-sort{% if s_title.active %} hub-sort-on{% endif %}"
+                        >{{ s_title.label }}{% if s_title.active %} {{ s_title.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_artists.href }}"
+                        class="hub-sort{% if s_artists.active %} hub-sort-on{% endif %}"
+                        >{{ s_artists.label }}{% if s_artists.active %} {{ s_artists.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_album.href }}"
+                        class="hub-sort{% if s_album.active %} hub-sort-on{% endif %}"
+                        >{{ s_album.label }}{% if s_album.active %} {{ s_album.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
             </tr>
         </thead>
         <tbody>

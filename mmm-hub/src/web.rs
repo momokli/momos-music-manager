@@ -5,13 +5,13 @@
 
 use askama::Template;
 use axum::Router;
-use axum::extract::{Form, Path, Query, State};
+use axum::extract::{Form, Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
 use serde_json::Value;
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, SqlitePool};
 use std::collections::HashMap;
 
 use crate::api::AppState;
@@ -193,6 +193,9 @@ struct PlaylistsPage {
     count: usize,
     playlists: Vec<PlaylistRow>,
     counts: PlaylistCounts,
+    s_name: crate::table::SortHead,
+    s_owner: crate::table::SortHead,
+    s_tracks: crate::table::SortHead,
 }
 
 /// Per-filter playlist counts for the filter-bar labels.
@@ -279,6 +282,10 @@ struct PlaylistFilterQuery {
     filter: Option<String>,
     q: Option<String>,
     owner: Option<String>,
+    /// Sort field (whitelisted: `name` | `owner` | `tracks`).
+    sort: Option<String>,
+    /// Sort direction (`asc`/`desc`).
+    dir: Option<String>,
 }
 
 /// Whitelist the known filter keys; anything else means `all`.
@@ -359,6 +366,7 @@ async fn playlists_page(
     headers: HeaderMap,
     Query(flash): Query<Flash>,
     Query(pf): Query<PlaylistFilterQuery>,
+    RawQuery(raw): RawQuery,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "playlists").await else {
         return Redirect::to("/login").into_response();
@@ -366,9 +374,25 @@ async fn playlists_page(
     let filter = normalise_filter(pf.filter.as_deref());
     let q = pf.q.unwrap_or_default().trim().to_string();
     let owner = pf.owner.unwrap_or_default().trim().to_string();
-    let playlists = playlist_rows(&st, nav.id, filter, &q, &owner).await;
+    let allowed: &[(&str, &str)] = &[
+        ("name", "name"),
+        ("owner", "owner_name"),
+        ("tracks", "track_count"),
+    ];
+    let (sort, dir) = crate::table::resolve_sort(
+        pf.sort.as_deref(),
+        pf.dir.as_deref(),
+        allowed,
+        "name",
+        "asc",
+    );
+    let playlists = playlist_rows(&st, nav.id, filter, &q, &owner, &sort, &dir).await;
     let counts = playlist_counts(&st, nav.id).await;
     let owner_options = playlist_owners(&st, nav.id, &owner).await;
+    let rawq = raw.as_deref().unwrap_or("");
+    let s_name = crate::table::sort_head(rawq, "name", "Playlist", &sort, &dir);
+    let s_owner = crate::table::sort_head(rawq, "owner", "Besitzer", &sort, &dir);
+    let s_tracks = crate::table::sort_head(rawq, "tracks", "Tracks", &sort, &dir);
     render(&PlaylistsPage {
         nav,
         flash: flash.msg.unwrap_or_default(),
@@ -378,6 +402,9 @@ async fn playlists_page(
         count: playlists.len(),
         playlists,
         counts,
+        s_name,
+        s_owner,
+        s_tracks,
     })
 }
 
@@ -455,40 +482,56 @@ fn map_playlist_row(r: &sqlx::sqlite::SqliteRow) -> PlaylistRow {
 /// The user's playlists (no pagination) as rows for `playlists.html`.
 ///
 /// `filter` is one of the keys returned by [`normalise_filter`]; the matching
-/// `WHERE` fragment is appended before the stable ordering.
+/// `WHERE` fragment is appended before the fuzzy search + whitelisted sort.
 async fn playlist_rows(
     st: &AppState,
     user_id: i64,
     filter: &str,
     q: &str,
     owner: &str,
+    sort: &str,
+    dir: &str,
 ) -> Vec<PlaylistRow> {
-    let sql = format!(
-        "SELECT p.id, p.name, p.is_owned, p.track_count, p.items_available,
-                p.enabled_for_fetch, p.fetch_error,
+    let allowed: &[(&str, &str)] = &[
+        ("name", "name"),
+        ("owner", "owner_name"),
+        ("tracks", "track_count"),
+    ];
+    let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+        "SELECT * FROM (SELECT p.id AS id, p.name AS name, p.is_owned AS is_owned,
+                p.track_count AS track_count, p.items_available AS items_available,
+                p.enabled_for_fetch AS enabled_for_fetch, p.fetch_error AS fetch_error,
                 COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS owner_name,
                 u.slug AS user_slug,
                 (SELECT COUNT(*) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS fetched,
                 (SELECT GROUP_CONCAT(tg.name, ', ') FROM hub_tag_sources s
                    JOIN hub_tags tg ON tg.id = s.tag_id
-                  WHERE s.playlist_id = p.id AND tg.owner_user_id = ?1) AS my_tags
+                  WHERE s.playlist_id = p.id AND tg.owner_user_id = ",
+    );
+    // `?1` in `filter_clause` refers to this first bind (the current user).
+    qb.push_bind(user_id);
+    qb.push(
+        ") AS my_tags
            FROM hub_playlists p
            JOIN hub_users u ON u.id = p.user_id
            LEFT JOIN hub_service_accounts a ON a.user_id = p.user_id AND a.service = 'spotify'
-          WHERE p.user_id = ?1
-            AND (?2 = '' OR lower(p.name) LIKE '%' || lower(?2) || '%')
-            AND (?3 = '' OR COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) = ?3){}
-          ORDER BY p.is_owned DESC, p.name COLLATE NOCASE",
-        filter_clause(filter)
+          WHERE p.user_id = ",
     );
-    let rows = sqlx::query(&sql)
-        .bind(user_id)
-        .bind(q)
-        .bind(owner)
-        .fetch_all(&st.pool)
-        .await
-        .unwrap_or_default();
+    qb.push_bind(user_id);
+    if !owner.is_empty() {
+        qb.push(
+            " AND COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) = ",
+        )
+        .push_bind(owner.to_string());
+    }
+    qb.push(filter_clause(filter));
+    qb.push(") WHERE 1 = 1");
+    // Fuzzy full-text over playlist name + owner (order-independent).
+    crate::table::push_fuzzy(&mut qb, q, &["name", "owner_name"]);
+    crate::table::order_by(&mut qb, sort, dir, allowed, "name");
+    qb.push(" LIMIT 5000");
 
+    let rows = qb.build().fetch_all(&st.pool).await.unwrap_or_default();
     rows.iter().map(map_playlist_row).collect()
 }
 

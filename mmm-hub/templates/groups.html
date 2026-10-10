@@ -12,11 +12,7 @@ content %}
 
 <details>
     <summary>Neue Gruppe anlegen</summary>
-    <form
-        method="post"
-        action="/groups/create"
-        class="hub-filter"
-    >
+    <form method="post" action="/groups/create" class="hub-filter">
         <input type="text" name="name" placeholder="Gruppenname" required />
         <select name="icon" aria-label="Icon">
             {% for i in icons %}
@@ -35,6 +31,17 @@ content %}
     </form>
 </details>
 
+<form method="get" action="/groups" class="hub-filter" role="search">
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Suchen (alle Felder, beliebige Reihenfolge) …"
+        aria-label="Gruppen suchen"
+    />
+    <button type="submit">Suchen</button>
+</form>
+
 <h3>Meine Gruppen ({{ groups.len() }})</h3>
 {% if groups.is_empty() %}
 <p class="hub-empty">Noch keine — leg oben eine an.</p>
@@ -43,12 +50,47 @@ content %}
     <table class="hub-dense-table">
         <thead>
             <tr>
-                <th scope="col">Gruppe</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_name.href }}"
+                        class="hub-sort{% if s_name.active %} hub-sort-on{% endif %}"
+                        >{{ s_name.label }}{% if s_name.active %} {{ s_name.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
                 <th scope="col">Rolle</th>
-                <th scope="col">Owner</th>
-                <th scope="col">Tags</th>
-                <th scope="col">Gew.</th>
-                <th scope="col">Mitglieder</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_owner.href }}"
+                        class="hub-sort{% if s_owner.active %} hub-sort-on{% endif %}"
+                        >{{ s_owner.label }}{% if s_owner.active %} {{ s_owner.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_tags.href }}"
+                        class="hub-sort{% if s_tags.active %} hub-sort-on{% endif %}"
+                        >{{ s_tags.label }}{% if s_tags.active %} {{ s_tags.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_weight.href }}"
+                        class="hub-sort{% if s_weight.active %} hub-sort-on{% endif %}"
+                        >{{ s_weight.label }}{% if s_weight.active %} {{ s_weight.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_members.href }}"
+                        class="hub-sort{% if s_members.active %} hub-sort-on{% endif %}"
+                        >{{ s_members.label }}{% if s_members.active %} {{ s_members.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
             </tr>
         </thead>
         <tbody>

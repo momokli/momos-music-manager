@@ -16,12 +16,12 @@
 
 use askama::Template;
 use axum::Router;
-use axum::extract::{Query, State};
+use axum::extract::{Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use serde::Deserialize;
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, SqlitePool};
 
 use crate::api::AppState;
 
@@ -208,6 +208,14 @@ struct HistoryFilter {
     source: Option<String>,
     /// Exact user slug match (empty = all).
     user: Option<String>,
+    /// Sort field for the runs table (whitelisted; default `started`).
+    rsort: Option<String>,
+    /// Sort direction for the runs table (`asc`/`desc`).
+    rdir: Option<String>,
+    /// Sort field for the events table (whitelisted; default `at`).
+    esort: Option<String>,
+    /// Sort direction for the events table (`asc`/`desc`).
+    edir: Option<String>,
 }
 
 #[derive(Template)]
@@ -222,6 +230,16 @@ struct HistoryPage {
     events: Vec<EventRow>,
     run_count: usize,
     event_count: usize,
+    s_r_source: crate::table::SortHead,
+    s_r_user: crate::table::SortHead,
+    s_r_status: crate::table::SortHead,
+    s_r_started: crate::table::SortHead,
+    s_r_finished: crate::table::SortHead,
+    s_e_at: crate::table::SortHead,
+    s_e_source: crate::table::SortHead,
+    s_e_entity_type: crate::table::SortHead,
+    s_e_entity_ref: crate::table::SortHead,
+    s_e_change: crate::table::SortHead,
 }
 
 struct SourceOption {
@@ -267,6 +285,44 @@ fn status_class(status: &str) -> String {
     }
 }
 
+/// Build a sortable header for a two-table page. `table::sort_head` emits the
+/// generic `sort=`/`dir=` params, so we first drop this table's own
+/// `<prefix>sort`/`<prefix>dir` from the preserved query (the sibling table's
+/// params stay intact), then rewrite the emitted params back to the prefix —
+/// letting the runs (`r`) and events (`e`) tables sort independently.
+fn prefixed_sort_head(
+    raw: &str,
+    prefix: &str,
+    field: &str,
+    label: &str,
+    cur_field: &str,
+    cur_dir: &str,
+) -> crate::table::SortHead {
+    let own_sort = format!("{prefix}sort");
+    let own_dir = format!("{prefix}dir");
+    let cleaned: String = raw
+        .split('&')
+        .filter(|kv| {
+            let k = kv.split('=').next().unwrap_or("");
+            !kv.is_empty() && k != own_sort && k != own_dir
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    let mut head = crate::table::sort_head(&cleaned, field, label, cur_field, cur_dir);
+    let next_dir = if cur_field == field && cur_dir.eq_ignore_ascii_case("asc") {
+        "desc"
+    } else {
+        "asc"
+    };
+    let enc = urlencoding::encode(field);
+    let generic = format!("sort={enc}&dir={next_dir}");
+    let prefixed = format!("{prefix}sort={enc}&{prefix}dir={next_dir}");
+    if let Some(pos) = head.href.rfind(generic.as_str()) {
+        head.href.replace_range(pos..pos + generic.len(), &prefixed);
+    }
+    head
+}
+
 /// Badge class for a change kind.
 fn change_class(change: &str) -> String {
     match change {
@@ -279,6 +335,7 @@ fn change_class(change: &str) -> String {
 async fn history_page(
     State(st): State<AppState>,
     Query(f): Query<HistoryFilter>,
+    RawQuery(raw): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "history").await else {
@@ -318,26 +375,41 @@ async fn history_page(
     .collect();
 
     // Runs. Empty filter strings disable that clause (all binds are always set).
-    let run_rows = sqlx::query(
-        "SELECT r.id, r.source, u.slug AS user_slug, r.status,
-                r.started_at, COALESCE(r.finished_at, '') AS finished_at,
+    let allowed_runs: &[(&str, &str)] = &[
+        ("source", "source"),
+        ("user", "user_slug"),
+        ("status", "status"),
+        ("started", "started_at"),
+        ("finished", "finished_at"),
+    ];
+    let (rsort, rdir) = crate::table::resolve_sort(
+        f.rsort.as_deref(),
+        f.rdir.as_deref(),
+        allowed_runs,
+        "started",
+        "desc",
+    );
+    let mut rq: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+        "SELECT * FROM (SELECT r.id AS id, r.source AS source, u.slug AS user_slug,
+                r.status AS status, r.started_at AS started_at,
+                COALESCE(r.finished_at, '') AS finished_at,
                 COALESCE(r.stats, '') AS stats
            FROM hub_import_runs r
            JOIN hub_users u ON u.id = r.user_id
-          WHERE (?1 = '' OR r.source = ?1)
-            AND (?2 = '' OR u.slug = ?2)
-            AND (?3 = '' OR r.source LIKE '%' || ?3 || '%'
-                        OR u.slug LIKE '%' || ?3 || '%'
-                        OR COALESCE(r.stats, '') LIKE '%' || ?3 || '%')
-          ORDER BY r.started_at DESC, r.id DESC
-          LIMIT 500",
-    )
-    .bind(&source)
-    .bind(&user)
-    .bind(&q)
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default();
+          WHERE 1 = 1",
+    );
+    if !source.is_empty() {
+        rq.push(" AND r.source = ").push_bind(source.clone());
+    }
+    if !user.is_empty() {
+        rq.push(" AND u.slug = ").push_bind(user.clone());
+    }
+    rq.push(") WHERE 1 = 1");
+    // Fuzzy full-text over every visible text column (order-independent).
+    crate::table::push_fuzzy(&mut rq, &q, &["source", "user_slug", "status", "stats"]);
+    crate::table::order_by(&mut rq, &rsort, &rdir, allowed_runs, "started");
+    rq.push(" LIMIT 500");
+    let run_rows = rq.build().fetch_all(&st.pool).await.unwrap_or_default();
     let runs: Vec<RunRow> = run_rows
         .iter()
         .map(|r| {
@@ -356,28 +428,54 @@ async fn history_page(
         .collect();
 
     // Change timeline.
-    let event_rows = sqlx::query(
-        "SELECT e.at, e.source, u.slug AS user_slug, e.entity_type, e.entity_ref,
-                e.change, COALESCE(e.before, '') AS before_val,
+    let allowed_events: &[(&str, &str)] = &[
+        ("at", "at"),
+        ("source", "source"),
+        ("entity_type", "entity_type"),
+        ("entity_ref", "entity_ref"),
+        ("change", "change"),
+    ];
+    let (esort, edir) = crate::table::resolve_sort(
+        f.esort.as_deref(),
+        f.edir.as_deref(),
+        allowed_events,
+        "at",
+        "desc",
+    );
+    let mut eq: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+        "SELECT * FROM (SELECT e.at AS at, e.source AS source, u.slug AS user_slug,
+                e.entity_type AS entity_type, e.entity_ref AS entity_ref,
+                e.change AS change, COALESCE(e.before, '') AS before_val,
                 COALESCE(e.after, '') AS after_val
            FROM hub_import_events e
            JOIN hub_users u ON u.id = e.user_id
-          WHERE (?1 = '' OR e.source = ?1)
-            AND (?2 = '' OR u.slug = ?2)
-            AND (?3 = '' OR e.entity_ref LIKE '%' || ?3 || '%'
-                        OR e.entity_type LIKE '%' || ?3 || '%'
-                        OR e.source LIKE '%' || ?3 || '%'
-                        OR COALESCE(e.before, '') LIKE '%' || ?3 || '%'
-                        OR COALESCE(e.after, '') LIKE '%' || ?3 || '%')
-          ORDER BY e.at DESC, e.id DESC
-          LIMIT 500",
-    )
-    .bind(&source)
-    .bind(&user)
-    .bind(&q)
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default();
+          WHERE 1 = 1",
+    );
+    if !source.is_empty() {
+        eq.push(" AND e.source = ").push_bind(source.clone());
+    }
+    if !user.is_empty() {
+        eq.push(" AND u.slug = ").push_bind(user.clone());
+    }
+    eq.push(") WHERE 1 = 1");
+    // Fuzzy full-text over every visible text column (order-independent).
+    crate::table::push_fuzzy(
+        &mut eq,
+        &q,
+        &[
+            "at",
+            "source",
+            "user_slug",
+            "entity_type",
+            "entity_ref",
+            "change",
+            "before_val",
+            "after_val",
+        ],
+    );
+    crate::table::order_by(&mut eq, &esort, &edir, allowed_events, "at");
+    eq.push(" LIMIT 500");
+    let event_rows = eq.build().fetch_all(&st.pool).await.unwrap_or_default();
     let events: Vec<EventRow> = event_rows
         .iter()
         .map(|r| {
@@ -398,6 +496,18 @@ async fn history_page(
 
     let run_count = runs.len();
     let event_count = events.len();
+
+    let rawq = raw.as_deref().unwrap_or("");
+    let s_r_source = prefixed_sort_head(rawq, "r", "source", "Quelle", &rsort, &rdir);
+    let s_r_user = prefixed_sort_head(rawq, "r", "user", "User", &rsort, &rdir);
+    let s_r_status = prefixed_sort_head(rawq, "r", "status", "Status", &rsort, &rdir);
+    let s_r_started = prefixed_sort_head(rawq, "r", "started", "Start", &rsort, &rdir);
+    let s_r_finished = prefixed_sort_head(rawq, "r", "finished", "Ende", &rsort, &rdir);
+    let s_e_at = prefixed_sort_head(rawq, "e", "at", "Zeit", &esort, &edir);
+    let s_e_source = prefixed_sort_head(rawq, "e", "source", "Quelle", &esort, &edir);
+    let s_e_entity_type = prefixed_sort_head(rawq, "e", "entity_type", "Typ", &esort, &edir);
+    let s_e_entity_ref = prefixed_sort_head(rawq, "e", "entity_ref", "Referenz", &esort, &edir);
+    let s_e_change = prefixed_sort_head(rawq, "e", "change", "Änderung", &esort, &edir);
     render(&HistoryPage {
         nav,
         flash: String::new(),
@@ -408,5 +518,15 @@ async fn history_page(
         events,
         run_count,
         event_count,
+        s_r_source,
+        s_r_user,
+        s_r_status,
+        s_r_started,
+        s_r_finished,
+        s_e_at,
+        s_e_source,
+        s_e_entity_type,
+        s_e_entity_ref,
+        s_e_change,
     })
 }

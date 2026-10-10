@@ -97,6 +97,16 @@
 </form>
 
 <h2>Nutzer</h2>
+<form method="get" action="/admin" class="hub-filter" role="search">
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Nutzer suchen …"
+        aria-label="Nutzer suchen"
+    />
+    <button type="submit">Suchen</button>
+</form>
 <div class="overflow-auto">
     <table class="hub-dense-table">
         <caption class="hub-visually-hidden">
@@ -104,8 +114,22 @@
         </caption>
         <thead>
             <tr>
-                <th scope="col">Nutzer</th>
-                <th scope="col">Admin</th>
+                <th scope="col">
+                    <a
+                        href="{{ s_user.href }}"
+                        class="hub-sort{% if s_user.active %} hub-sort-on{% endif %}"
+                        >{{ s_user.label }}{% if s_user.active %} {{ s_user.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_admin.href }}"
+                        class="hub-sort{% if s_admin.active %} hub-sort-on{% endif %}"
+                        >{{ s_admin.label }}{% if s_admin.active %} {{ s_admin.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
             </tr>
         </thead>
         <tbody>

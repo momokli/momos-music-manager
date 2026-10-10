@@ -1,15 +1,11 @@
-{% extends "base.html" %} {% block title %}Import-Historie — Spelunke{% endblock %} {% block
-content %}
+{% extends "base.html" %} {% block title %}Import-Historie — Spelunke{% endblock %} {%
+block content %}
 <div class="hub-page-head">
     <h1>Import-Historie</h1>
     <span class="hub-muted">{{ run_count }} Läufe · {{ event_count }} Änderungen</span>
 </div>
 
-<form
-    method="get"
-    action="/history"
-    class="hub-filter"
->
+<form method="get" action="/history" class="hub-filter">
     <input
         type="search"
         name="q"
@@ -22,7 +18,9 @@ content %}
         <select name="source" aria-label="Quelle">
             <option value="">alle</option>
             {% for s in sources %}
-            <option value="{{ s.value }}" {% if s.selected %}selected{% endif %}>{{ s.value }}</option>
+            <option value="{{ s.value }}" {% if s.selected %}selected{% endif %}>
+                {{ s.value }}
+            </option>
             {% endfor %}
         </select>
     </label>
@@ -31,7 +29,9 @@ content %}
         <select name="user" aria-label="User">
             <option value="">alle</option>
             {% for u in users %}
-            <option value="{{ u.value }}" {% if u.selected %}selected{% endif %}>@{{ u.value }}</option>
+            <option value="{{ u.value }}" {% if u.selected %}selected{% endif %}>
+                @{{ u.value }}
+            </option>
             {% endfor %}
         </select>
     </label>
@@ -49,7 +49,11 @@ content %}
 >
     <div
         class="hub-scroll-y overflow-auto"
-        style="max-height: 74vh; overflow: auto; border: 1px solid var(--pico-muted-border-color)"
+        style="
+            max-height: 74vh;
+            overflow: auto;
+            border: 1px solid var(--pico-muted-border-color);
+        "
     >
         <table class="hub-dense-table">
             <caption class="hub-visually-hidden">
@@ -58,11 +62,46 @@ content %}
             <thead>
                 <tr>
                     <th scope="col">#</th>
-                    <th scope="col">Quelle</th>
-                    <th scope="col">User</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Start</th>
-                    <th scope="col">Ende</th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_r_source.href }}"
+                            class="hub-sort{% if s_r_source.active %} hub-sort-on{% endif %}"
+                            >{{ s_r_source.label }}{% if s_r_source.active %} {{
+                            s_r_source.arrow }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_r_user.href }}"
+                            class="hub-sort{% if s_r_user.active %} hub-sort-on{% endif %}"
+                            >{{ s_r_user.label }}{% if s_r_user.active %} {{
+                            s_r_user.arrow }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_r_status.href }}"
+                            class="hub-sort{% if s_r_status.active %} hub-sort-on{% endif %}"
+                            >{{ s_r_status.label }}{% if s_r_status.active %} {{
+                            s_r_status.arrow }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_r_started.href }}"
+                            class="hub-sort{% if s_r_started.active %} hub-sort-on{% endif %}"
+                            >{{ s_r_started.label }}{% if s_r_started.active %} {{
+                            s_r_started.arrow }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_r_finished.href }}"
+                            class="hub-sort{% if s_r_finished.active %} hub-sort-on{% endif %}"
+                            >{{ s_r_finished.label }}{% if s_r_finished.active %} {{
+                            s_r_finished.arrow }}{% endif %}</a
+                        >
+                    </th>
                     <th scope="col">Stats</th>
                 </tr>
             </thead>
@@ -72,13 +111,14 @@ content %}
                     <td>{{ r.id }}</td>
                     <td>{{ r.source }}</td>
                     <td>@{{ r.user }}</td>
-                    <td><span class="hub-badge {{ r.status_class }}">{{ r.status }}</span></td>
+                    <td>
+                        <span class="hub-badge {{ r.status_class }}">{{ r.status }}</span>
+                    </td>
                     <td class="hub-nowrap">{{ r.started }}</td>
                     <td class="hub-nowrap">{{ r.finished }}</td>
                     <td class="hub-muted">{{ r.stats }}</td>
                 </tr>
-                {% endfor %}
-                {% if run_count == 0 %}
+                {% endfor %} {% if run_count == 0 %}
                 <tr>
                     <td colspan="7" class="hub-empty">Keine Import-Läufe.</td>
                 </tr>
@@ -89,7 +129,11 @@ content %}
 
     <div
         class="hub-scroll-y overflow-auto"
-        style="max-height: 74vh; overflow: auto; border: 1px solid var(--pico-muted-border-color)"
+        style="
+            max-height: 74vh;
+            overflow: auto;
+            border: 1px solid var(--pico-muted-border-color);
+        "
     >
         <table class="hub-dense-table">
             <caption class="hub-visually-hidden">
@@ -97,12 +141,47 @@ content %}
             </caption>
             <thead>
                 <tr>
-                    <th scope="col">Zeit</th>
-                    <th scope="col">Quelle</th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_e_at.href }}"
+                            class="hub-sort{% if s_e_at.active %} hub-sort-on{% endif %}"
+                            >{{ s_e_at.label }}{% if s_e_at.active %} {{ s_e_at.arrow }}{%
+                            endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_e_source.href }}"
+                            class="hub-sort{% if s_e_source.active %} hub-sort-on{% endif %}"
+                            >{{ s_e_source.label }}{% if s_e_source.active %} {{
+                            s_e_source.arrow }}{% endif %}</a
+                        >
+                    </th>
                     <th scope="col">User</th>
-                    <th scope="col">Typ</th>
-                    <th scope="col">Referenz</th>
-                    <th scope="col">Änderung</th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_e_entity_type.href }}"
+                            class="hub-sort{% if s_e_entity_type.active %} hub-sort-on{% endif %}"
+                            >{{ s_e_entity_type.label }}{% if s_e_entity_type.active %} {{
+                            s_e_entity_type.arrow }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_e_entity_ref.href }}"
+                            class="hub-sort{% if s_e_entity_ref.active %} hub-sort-on{% endif %}"
+                            >{{ s_e_entity_ref.label }}{% if s_e_entity_ref.active %} {{
+                            s_e_entity_ref.arrow }}{% endif %}</a
+                        >
+                    </th>
+                    <th scope="col">
+                        <a
+                            href="{{ s_e_change.href }}"
+                            class="hub-sort{% if s_e_change.active %} hub-sort-on{% endif %}"
+                            >{{ s_e_change.label }}{% if s_e_change.active %} {{
+                            s_e_change.arrow }}{% endif %}</a
+                        >
+                    </th>
                     <th scope="col">vorher</th>
                     <th scope="col">nachher</th>
                 </tr>
@@ -115,12 +194,13 @@ content %}
                     <td>@{{ e.user }}</td>
                     <td>{{ e.entity_type }}</td>
                     <td>{{ e.entity_ref }}</td>
-                    <td><span class="hub-badge {{ e.change_class }}">{{ e.change }}</span></td>
+                    <td>
+                        <span class="hub-badge {{ e.change_class }}">{{ e.change }}</span>
+                    </td>
                     <td class="hub-muted">{{ e.before }}</td>
                     <td class="hub-muted">{{ e.after }}</td>
                 </tr>
-                {% endfor %}
-                {% if event_count == 0 %}
+                {% endfor %} {% if event_count == 0 %}
                 <tr>
                     <td colspan="8" class="hub-empty">Keine Änderungen.</td>
                 </tr>

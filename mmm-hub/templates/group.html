@@ -208,7 +208,20 @@ content %}
         >Rang der Tags in dieser Gruppe (z. B. Phase: start=1 … peak=5).</span
     >
 </form>
-{% endif %} {% if tags.is_empty() %}
+{% endif %}
+
+<form method="get" action="/groups/{{ id }}" class="hub-filter" role="search">
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Suchen (alle Felder, beliebige Reihenfolge) …"
+        aria-label="Tags suchen"
+    />
+    <button type="submit">Suchen</button>
+</form>
+
+{% if tags.is_empty() %}
 <p class="hub-muted">
     Noch keine Tags — öffne einen <a href="/tags">Tag</a> und füge ihn hier hinzu.
 </p>
@@ -217,9 +230,25 @@ content %}
     <table class="hub-dense-table">
         <thead>
             <tr>
-                <th scope="col">{% if ranked %}Rang{% else %}Tag{% endif %}</th>
-                {% if !ranked %}
-                <th scope="col">Besitzer</th>
+                {% if ranked %}
+                <th scope="col">Rang</th>
+                {% else %}
+                <th scope="col">
+                    <a
+                        href="{{ s_name.href }}"
+                        class="hub-sort{% if s_name.active %} hub-sort-on{% endif %}"
+                        >{{ s_name.label }}{% if s_name.active %} {{ s_name.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_owner.href }}"
+                        class="hub-sort{% if s_owner.active %} hub-sort-on{% endif %}"
+                        >{{ s_owner.label }}{% if s_owner.active %} {{ s_owner.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
                 {% endif %} {% if can_edit %}
                 <th scope="col"></th>
                 {% endif %}

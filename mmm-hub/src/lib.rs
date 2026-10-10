@@ -30,6 +30,7 @@ pub mod similar;
 pub mod similarity;
 pub mod soundcloud;
 pub mod spotify;
+pub mod table;
 pub mod tagqueue;
 pub mod tags;
 pub mod traktor;
