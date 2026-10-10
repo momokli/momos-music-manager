@@ -41,7 +41,7 @@
             <tr>
                 <td>{{ loop.index }}</td>
                 <td><a href="/track/{{ p.track_id }}">{{ p.title }}</a></td>
-                <td>{% if p.album != "" %}{{ p.album }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                <td>{% if p.album != "" %}<a href="/album/{{ p.album }}">{{ p.album }}</a>{% else %}<span class="hub-muted">—</span>{% endif %}</td>
                 <td>{{ p.plays }}</td>
                 <td>{% if p.last != "" %}{{ p.last }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
             </tr>
@@ -72,7 +72,7 @@
                 <tr>
                     <td>{{ loop.index }}</td>
                     <td><a href="/track/{{ p.track_id }}">{{ p.title }}</a></td>
-                    <td>{% if p.album != "" %}{{ p.album }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
+                    <td>{% if p.album != "" %}<a href="/album/{{ p.album }}">{{ p.album }}</a>{% else %}<span class="hub-muted">—</span>{% endif %}</td>
                     <td>{{ p.plays }}</td>
                     <td>{% if p.last != "" %}{{ p.last }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
                 </tr>
@@ -264,7 +264,7 @@
             <tbody>
                 {% for a in albums %}
                 <tr>
-                    <td class="hub-cell-pl">{{ a.album }}</td>
+                    <td class="hub-cell-pl"><a href="/album/{{ a.album }}">{{ a.album }}</a></td>
                     <td>{{ a.tracks }}</td>
                     <td class="hub-cell-pl">{% if a.others != "" %}{{ a.others }}{% else %}<span class="hub-muted">—</span>{% endif %}</td>
                 </tr>

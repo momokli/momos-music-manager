@@ -1,0 +1,54 @@
+{% extends "base.html" %} {% block title %}Alben — Spelunke{% endblock %} {% block content
+%}
+<hgroup>
+    <h1>Alben</h1>
+    <p class="hub-muted">
+        Alben aus der Bibliothek — Klick öffnet das Album mit Tracklist und Künstlern
+        (Artist → Album → Track).
+    </p>
+</hgroup>
+
+<form
+    method="get"
+    action="/albums"
+    style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center"
+>
+    <input type="search" name="q" value="{{ q }}" placeholder="Album / Künstler …" />
+    <input type="text" name="artist" value="{{ artist }}" placeholder="Künstler exakt" />
+    <button type="submit">Filtern</button>
+    <span class="hub-muted">{{ total }} Alben</span>
+</form>
+
+<div class="overflow-auto hub-scroll-y" style="max-height: 76vh; overflow: auto">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Alben
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col"></th>
+                <th scope="col">Album</th>
+                <th scope="col">Künstler</th>
+                <th scope="col" title="Tracks insgesamt">Tracks</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for a in rows %}
+            <tr>
+                <td style="width: 2.2rem">
+                    {% if a.cover != "" %}<img
+                        src="{{ a.cover }}"
+                        alt=""
+                        loading="lazy"
+                        style="width: 1.8rem; height: 1.8rem; object-fit: cover; border-radius: 0.25rem"
+                    />{% endif %}
+                </td>
+                <td><a href="{{ a.href }}">{{ a.name }}</a></td>
+                <td class="hub-cell-pl hub-muted">{{ a.artists }}</td>
+                <td>{{ a.tracks }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

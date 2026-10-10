@@ -91,7 +91,7 @@ content %}
                 </tr>
                 <tr>
                     <th scope="row">Album</th>
-                    <td>{{ album }}</td>
+                    <td>{% if album != "" %}<a href="/album/{{ album }}">{{ album }}</a>{% else %}—{% endif %}</td>
                 </tr>
                 <tr>
                     <th scope="row">Dauer</th>

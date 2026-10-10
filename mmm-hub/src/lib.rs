@@ -4,6 +4,7 @@
 //! the router against a temporary DB. The binary (`main.rs`) is a thin CLI on
 //! top of it.
 
+pub mod albums;
 pub mod analyze;
 pub mod analyzer;
 pub mod api;
