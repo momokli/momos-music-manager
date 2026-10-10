@@ -182,10 +182,15 @@ async fn queue_page(
 
 // ── detail panel (htmx partial) ─────────────────────────────────────────────
 
-struct DetailTag {
+struct TagChip {
     name: String,
-    groups: String,
     mine: bool,
+}
+
+struct TagCloud {
+    group: String,
+    icon: String,
+    chips: Vec<TagChip>,
 }
 
 struct DetailGroupTag {
@@ -224,7 +229,7 @@ struct QueueDetail {
     spotify_id: String,
     has_isrc: bool,
     music_api: bool,
-    tags: Vec<DetailTag>,
+    tag_clouds: Vec<TagCloud>,
     playlists: Vec<PlRow>,
     my_tags: Vec<DetailGroupTag>,
 }
@@ -293,32 +298,50 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
             .into_iter()
             .collect();
 
-    // Tags, sorted by their (first) group name, then tag name.
-    let tag_rows = sqlx::query_as::<_, (i64, String, String)>(
+    // Tags, grouped into clouds by their (first) group name.
+    let tag_rows = sqlx::query_as::<_, (i64, String, String, String)>(
         "SELECT t.id, t.name,
-                (SELECT COALESCE(GROUP_CONCAT(g.icon || ' ' || g.name, ' · '), '')
-                   FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
-                  WHERE gt.tag_id = t.id) AS groups,
-                (SELECT COALESCE(MIN(g.name),'')
-                   FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
-                  WHERE gt.tag_id = t.id) AS gsort
+                COALESCE((SELECT g.name FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
+                           WHERE gt.tag_id = t.id ORDER BY g.name LIMIT 1), '') AS gname,
+                COALESCE((SELECT g.icon FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
+                           WHERE gt.tag_id = t.id ORDER BY g.name LIMIT 1), '') AS gicon
            FROM hub_track_resolved_tags rt
            JOIN hub_tags t ON t.id = rt.tag_id
           WHERE rt.track_id = ?1
-          ORDER BY gsort COLLATE NOCASE, t.name COLLATE NOCASE LIMIT 300",
+          ORDER BY gname COLLATE NOCASE, t.name COLLATE NOCASE LIMIT 400",
     )
     .bind(id)
     .fetch_all(&st.pool)
     .await
     .unwrap_or_default();
-    let tags: Vec<DetailTag> = tag_rows
-        .into_iter()
-        .map(|(id, name, groups)| DetailTag {
-            mine: my_tag_ids.contains(&id),
+    let mut map: std::collections::BTreeMap<String, (String, Vec<TagChip>)> =
+        std::collections::BTreeMap::new();
+    for (id, name, gname, gicon) in tag_rows {
+        let key = if gname.trim().is_empty() {
+            "Ohne Gruppe".to_string()
+        } else {
+            gname
+        };
+        let icon = if gicon.trim().is_empty() {
+            "•".to_string()
+        } else {
+            gicon
+        };
+        let e = map.entry(key).or_insert_with(|| (icon, Vec::new()));
+        e.1.push(TagChip {
             name,
-            groups,
-        })
+            mine: my_tag_ids.contains(&id),
+        });
+    }
+    let mut tag_clouds: Vec<TagCloud> = map
+        .into_iter()
+        .map(|(group, (icon, chips))| TagCloud { group, icon, chips })
         .collect();
+    // Push the ungrouped cloud to the end.
+    if let Some(pos) = tag_clouds.iter().position(|c| c.group == "Ohne Gruppe") {
+        let last = tag_clouds.remove(pos);
+        tag_clouds.push(last);
+    }
 
     let playlists: Vec<PlRow> = sqlx::query_as::<_, (String, String, i64)>(
         "SELECT u.slug, COALESCE(hp.name,''), hp.id
@@ -380,7 +403,7 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
         energy: nonnull("energy"),
         genres,
         spotify_id,
-        tags,
+        tag_clouds,
         playlists,
         my_tags,
     })

@@ -86,14 +86,14 @@
     </table>
 
     <h3 style="margin: 0.4rem 0 0.2rem">Tags</h3>
-    {% if tags.is_empty() %}
+    {% if tag_clouds.is_empty() %}
     <p class="hub-muted">Noch keine Tags.</p>
-    {% else %}
-    <div style="display: flex; flex-wrap: wrap; gap: 0.3rem">
-        {% for t in tags %}
+    {% else %} {% for c in tag_clouds %}
+    <h4 class="hub-cloud-h">{{ c.icon }} {{ c.group }}</h4>
+    <div class="hub-cloud">
+        {% for t in c.chips %}
         <span class="hub-chip" title="{% if t.mine %}von dir{% endif %}"
-            >{{ t.name }}{% if t.groups != "" %} · {{ t.groups }}{% endif %}{% if t.mine
-            %}
+            >{{ t.name }}{% if t.mine %}
             <form
                 method="post"
                 action="/tag-queue/{{ id }}/untag"
@@ -109,7 +109,7 @@
         >
         {% endfor %}
     </div>
-    {% endif %}
+    {% endfor %} {% endif %}
 
     <form
         hx-post="/tag-queue/{{ id }}/tag"
