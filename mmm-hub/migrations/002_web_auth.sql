@@ -1,4 +1,4 @@
--- Spelunke — web accounts + sessions (walking skeleton, simple username/password).
+-- MMM Hub — web accounts + sessions (walking skeleton, simple username/password).
 -- Additive to 001: adds a password hash to users and a server-side session table.
 
 ALTER TABLE hub_users ADD COLUMN password_hash TEXT;
