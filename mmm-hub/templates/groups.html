@@ -37,7 +37,7 @@ content %}
 
 <h3>Meine Gruppen ({{ groups.len() }})</h3>
 {% if groups.is_empty() %}
-<p class="hub-muted">Noch keine — leg oben eine an.</p>
+<p class="hub-empty">Noch keine — leg oben eine an.</p>
 {% else %}
 <div class="overflow-auto hub-scroll-y">
     <table class="hub-dense-table">
@@ -72,7 +72,7 @@ content %}
 
 <h3>Entdecken</h3>
 {% if discover.is_empty() %}
-<p class="hub-muted">Keine weiteren Gruppen von anderen.</p>
+<p class="hub-empty">Keine weiteren Gruppen von anderen.</p>
 {% else %}
 <div class="overflow-auto hub-scroll-y">
     <table class="hub-dense-table">

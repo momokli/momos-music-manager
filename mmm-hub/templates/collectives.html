@@ -27,7 +27,7 @@
 
 <h3>Meine Collectives ({{ collectives.len() }})</h3>
 {% if collectives.is_empty() %}
-<p class="hub-muted">Noch keine — leg oben eins an.</p>
+<p class="hub-empty">Noch keine — leg oben eins an.</p>
 {% else %}
 <div class="overflow-auto hub-scroll-y">
     <table class="hub-dense-table">
@@ -57,7 +57,7 @@
 
 <h3>Entdecken</h3>
 {% if discover.is_empty() %}
-<p class="hub-muted">Keine weiteren Collectives.</p>
+<p class="hub-empty">Keine weiteren Collectives.</p>
 {% else %}
 <div class="overflow-auto hub-scroll-y">
     <table class="hub-dense-table">
