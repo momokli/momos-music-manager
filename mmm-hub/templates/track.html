@@ -16,6 +16,26 @@ content %}
     <a href="/track/{{ id }}/download?format=mp3">MP3 laden</a>{% endif %}
 </p>
 
+{% if can_stream %}
+<audio
+    controls
+    preload="none"
+    src="/track/{{ id }}/stream"
+    style="width: 100%; margin: 0.4rem 0"
+></audio>
+{% else if spotify_id != "" %}
+<iframe
+    style="border-radius: 12px; width: 100%"
+    src="https://open.spotify.com/embed/track/{{ spotify_id }}"
+    height="80"
+    frameborder="0"
+    allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+    loading="lazy"
+></iframe>
+{% else %}
+<p class="hub-muted">Kein Player (music-api / ISRC / Spotify-Track fehlt).</p>
+{% endif %}
+
 <div class="hub-dense hub-cols">
     <section>
         <table class="hub-kv">
@@ -125,7 +145,7 @@ content %}
                 <tr>
                     <th scope="row">Tags</th>
                     <td>
-                        {% if tags.is_empty() %}—{% else %}
+                        {% if tags.is_empty() %}<span class="hub-muted">—</span>{% else %}
                         <ul class="hub-taglist">
                             {% for t in tags %}
                             <li>
@@ -140,10 +160,76 @@ content %}
                                     class="hub-chip"
                                     title="Gruppe"
                                     >{{ g.icon }} {{ g.name }}</a
-                                >{% endfor %}
+                                >{% endfor %} {% if t.owner == me %}
+                                <form
+                                    method="post"
+                                    action="/track/{{ id }}/untag"
+                                    style="display: inline"
+                                >
+                                    <input
+                                        type="hidden"
+                                        name="name"
+                                        value="{{ t.name }}"
+                                    />
+                                    <button
+                                        type="submit"
+                                        class="outline"
+                                        style="padding: 0 0.35rem"
+                                        title="Tag entfernen"
+                                    >
+                                        ×
+                                    </button>
+                                </form>
+                                {% endif %}
                             </li>
                             {% endfor %}
                         </ul>
+                        {% endif %}
+                        <form
+                            method="post"
+                            action="/track/{{ id }}/tag"
+                            style="
+                                display: flex;
+                                gap: 0.3rem;
+                                margin-top: 0.4rem;
+                                align-items: center;
+                            "
+                        >
+                            <input
+                                type="text"
+                                name="name"
+                                list="my-tags"
+                                placeholder="Tag hinzufügen …"
+                                aria-label="Tag"
+                                required
+                            />
+                            <datalist id="my-tags">
+                                {% for t in my_tags %}
+                                <option value="{{ t.1 }}"></option>
+                                {% endfor %}
+                            </datalist>
+                            <button type="submit">Taggen</button>
+                        </form>
+                        {% if !recommended.is_empty() %}
+                        <div style="margin-top: 0.4rem">
+                            <span class="hub-muted">Empfohlen (wie andere taggen):</span>
+                            {% for r in recommended %}
+                            <form
+                                method="post"
+                                action="/track/{{ id }}/tag"
+                                style="display: inline"
+                            >
+                                <input type="hidden" name="name" value="{{ r.name }}" />
+                                <button
+                                    type="submit"
+                                    class="hub-chip"
+                                    title="von @{{ r.owner }} · {{ r.score }}× genutzt"
+                                >
+                                    {{ r.name }}
+                                </button>
+                            </form>
+                            {% endfor %}
+                        </div>
                         {% endif %}
                     </td>
                 </tr>

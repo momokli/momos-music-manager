@@ -421,6 +421,46 @@ pub async fn list_user_tags(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String
 /// Ids of tags (any owner) whose name contains `needle`, **plus all of their
 /// descendant tags** (transitively), so filtering by a broad/parent tag also
 /// matches its children (e.g. "house" -> "Beatport Top 100 - Progressive House").
+/// Tags that co-occur with a track's tags ("how others tagged similar tracks"),
+/// excluding tags already on the track. Returns `(tag_id, name, owner, score)`
+/// ordered by co-occurrence count descending.
+pub async fn recommended_tags(
+    pool: &SqlitePool,
+    track_id: i64,
+    limit: i64,
+) -> Vec<(i64, String, String, i64)> {
+    sqlx::query_as::<_, (i64, String, String, i64)>(
+        "SELECT rt2.tag_id, t.name, u.slug, COUNT(DISTINCT rt2.track_id) AS c
+           FROM hub_track_resolved_tags rt1
+           JOIN hub_track_resolved_tags rt2 ON rt2.track_id = rt1.track_id
+           JOIN hub_tags t ON t.id = rt2.tag_id
+           JOIN hub_users u ON u.id = t.owner_user_id
+          WHERE rt1.tag_id IN (SELECT tag_id FROM hub_track_resolved_tags WHERE track_id = ?1)
+            AND rt2.tag_id NOT IN (SELECT tag_id FROM hub_track_resolved_tags WHERE track_id = ?1)
+          GROUP BY rt2.tag_id, t.name, u.slug
+          ORDER BY c DESC, t.name
+          LIMIT ?2",
+    )
+    .bind(track_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
+/// `(id, name)` of every tag this track carries (any owner) — for the tag form.
+pub async fn tags_on_track(pool: &SqlitePool, track_id: i64) -> Vec<(i64, String)> {
+    sqlx::query_as::<_, (i64, String)>(
+        "SELECT t.id, t.name FROM hub_track_resolved_tags rt
+           JOIN hub_tags t ON t.id = rt.tag_id
+          WHERE rt.track_id = ?1 ORDER BY t.name",
+    )
+    .bind(track_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
 pub async fn matching_tag_ids(pool: &SqlitePool, needle: &str) -> HashSet<i64> {
     let like = format!("%{}%", needle.to_lowercase());
     let roots: Vec<i64> = sqlx::query_scalar("SELECT id FROM hub_tags WHERE lower(name) LIKE ?1")
