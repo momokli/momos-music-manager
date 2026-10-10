@@ -68,6 +68,7 @@ async fn harness() -> Harness {
             music_api::store::DEFAULT_MAX_UPLOAD_BYTES,
         ),
         logs: music_api::logbuf::LogBuffer::new(),
+        paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
 
     Harness {

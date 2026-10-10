@@ -66,6 +66,8 @@ pub struct Order {
     pub status: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Higher = processed earlier.
+    pub priority: i64,
 }
 
 /// One ISRC inside an order, joined with its current track state.
@@ -85,6 +87,9 @@ pub struct OrderItem {
 #[derive(Debug, Deserialize)]
 pub struct CreateOrderRequest {
     pub items: Vec<OrderItemRequest>,
+    /// Higher = processed earlier (default 0).
+    #[serde(default)]
+    pub priority: i64,
 }
 
 #[derive(Debug, Deserialize)]

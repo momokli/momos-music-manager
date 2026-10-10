@@ -41,6 +41,8 @@ pub struct AppState {
     pub store: store::Store,
     /// Recent service events (surfaced via `GET /logs`).
     pub logs: logbuf::LogBuffer,
+    /// When set, the worker does not pick up new work.
+    pub paused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Build the fully-stated router: public `/health`, everything else behind the
