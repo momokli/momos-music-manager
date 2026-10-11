@@ -8,6 +8,34 @@ mod common;
 use sqlx::Row;
 
 #[tokio::test]
+async fn now_page_requires_login() {
+    let app = common::spawn().await;
+    let resp = app.client().get(app.url("/now")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers()["location"], "/login");
+}
+
+#[tokio::test]
+async fn now_page_prompts_reconnect_without_scope() {
+    let app = common::spawn().await;
+    let (_, cookie) = app.user_with_password("zoe", "pw").await;
+    let resp = app
+        .client()
+        .get(app.url("/now"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = resp.text().await.unwrap();
+    assert!(html.contains("Now Playing"), "heading missing: {html}");
+    assert!(
+        html.contains("/api/hub/services/spotify/connect"),
+        "connect link missing: {html}"
+    );
+}
+
+#[tokio::test]
 async fn now_playing_requires_login() {
     let app = common::spawn().await;
     let resp = app

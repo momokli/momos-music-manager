@@ -1,0 +1,37 @@
+{% extends "base.html" %} {% block title %}Now Playing — Spelunke{% endblock %} {% block
+content %}
+<h1>Now Playing</h1>
+<p class="hub-muted">
+    <a href="/now">Aktualisieren</a> · der aktuell in Spotify laufende Track.
+</p>
+
+{% if has_external %}
+<div class="hub-now-page">
+    {% if image != "" %}
+    <img class="hub-now-page-art" src="{{ image }}" alt="" width="160" height="160" />
+    {% else %}
+    <span class="hub-now-page-art hub-now-art-ph" aria-hidden="true">♪</span>
+    {% endif %}
+    <div class="hub-now-page-body">
+        <div class="hub-now-page-title">{{ title }}</div>
+        <div class="hub-muted">{{ artists }}</div>
+        <div class="hub-muted">{{ album }}</div>
+        <div
+            class="hub-now-bar"
+            role="progressbar"
+            aria-valuenow="{{ progress_pct }}"
+            aria-valuemin="0"
+            aria-valuemax="100"
+        >
+            <span class="hub-now-bar-fill" style="width: {{ progress_pct }}%"></span>
+        </div>
+        <div class="hub-muted hub-now-meta">{{ progress_disp }} / {{ duration_disp }}</div>
+    </div>
+</div>
+{% endif %}
+
+<p class="hub-muted">{{ message }}</p>
+
+{% if connect_link %}
+<p><a role="button" href="/api/hub/services/spotify/connect">Spotify neu verbinden</a></p>
+{% endif %} {% endblock %}

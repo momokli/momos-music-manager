@@ -861,6 +861,35 @@
         .hub-now-tags { max-width: 100%; }
         .hub-now-tagform input[type="text"] { width: 6rem; }
       }
+      /* ── full-screen Now Playing page (#317) ─────────────────────────── */
+      .hub-now-page {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        flex-wrap: wrap;
+        margin: 0.5rem 0 1rem;
+      }
+      .hub-now-page-art {
+        width: 160px;
+        height: 160px;
+        border-radius: 0.5rem;
+        object-fit: cover;
+        flex: 0 0 auto;
+      }
+      .hub-now-page-body {
+        min-width: 0;
+        flex: 1 1 16rem;
+      }
+      .hub-now-page-title {
+        font-size: 1.6rem;
+        font-weight: 700;
+        line-height: 1.1;
+        margin-bottom: 0.15rem;
+      }
+      @media (max-width: 48rem) {
+        .hub-now-page-art { width: 110px; height: 110px; }
+        .hub-now-page-title { font-size: 1.25rem; }
+      }
     </style>
   </head>
   <body>
@@ -870,6 +899,9 @@
         <li><strong><a href="/">Spelunke</a></strong></li>
         <li>
           <a href="/" {% if nav.active == "dashboard" %}aria-current="page"{% endif %}>Übersicht</a>
+        </li>
+        <li>
+          <a href="/now" {% if nav.active == "now" %}aria-current="page"{% endif %}>Now Playing</a>
         </li>
         <li>
           <details class="dropdown">
