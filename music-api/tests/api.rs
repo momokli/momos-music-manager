@@ -40,6 +40,8 @@ async fn harness() -> Harness {
         deezer_base: "http://127.0.0.1:1".to_string(),
         ffmpeg: "ffmpeg".to_string(),
         ffprobe: "ffprobe".to_string(),
+        ytdlp: "yt-dlp".to_string(),
+        ytdlp_dir: root.join("ytdlp"),
         worker_interval: Duration::from_secs(5),
         download_timeout: Duration::from_secs(60),
         queue_max_attempts: 3,
@@ -204,6 +206,36 @@ async fn create_and_read_order() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn create_soundcloud_order_uses_composite_key() {
+    let h = harness().await;
+    let (status, body) = send(
+        &h.app,
+        authed("POST", "/orders")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [ { "source": "soundcloud", "externalId": "1837565340" } ]
+            })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create soundcloud order failed");
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let order_id = v["orderId"].as_str().unwrap().to_string();
+
+    let (st, b) = send(
+        &h.app,
+        authed("GET", &format!("/orders/{order_id}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let ov: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(ov["items"][0]["isrc"], "soundcloud:1837565340");
+    assert_eq!(ov["items"][0]["state"], "pending");
 }
 
 #[tokio::test]

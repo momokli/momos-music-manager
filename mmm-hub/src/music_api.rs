@@ -165,10 +165,21 @@ pub async fn file_bytes_any(cfg: &Config, isrc: &str, preferred: &str) -> Result
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no audio format available")))
 }
 
+/// Build one `/orders` item from a track key: `source:id` becomes
+/// `{source, externalId}`; a bare ISRC becomes `{isrc}`.
+fn order_item(key: &str) -> serde_json::Value {
+    match key.split_once(':') {
+        Some((src, id)) if !src.is_empty() && !id.is_empty() => {
+            serde_json::json!({ "source": src, "externalId": id })
+        }
+        _ => serde_json::json!({ "isrc": key }),
+    }
+}
+
 /// `POST /orders` — order one or more ISRCs. Returns the order id.
 pub async fn order(cfg: &Config, isrcs: &[String]) -> Result<String> {
     let url = format!("{}/orders", cfg.music_api_base);
-    let items: Vec<_> = isrcs.iter().map(|i| json!({ "isrc": i })).collect();
+    let items: Vec<_> = isrcs.iter().map(|i| order_item(i)).collect();
     let resp = reqwest::Client::new()
         .post(&url)
         .bearer_auth(token(cfg)?)
@@ -184,7 +195,7 @@ pub async fn order(cfg: &Config, isrcs: &[String]) -> Result<String> {
 /// order id. Used by the playlist "Priorisieren" action.
 pub async fn order_with_priority(cfg: &Config, isrcs: &[String], priority: i32) -> Result<String> {
     let url = format!("{}/orders", cfg.music_api_base);
-    let items: Vec<_> = isrcs.iter().map(|i| json!({ "isrc": i })).collect();
+    let items: Vec<_> = isrcs.iter().map(|i| order_item(i)).collect();
     let resp = reqwest::Client::new()
         .post(&url)
         .bearer_auth(token(cfg)?)
@@ -885,4 +896,21 @@ pub async fn metadata_bulk(cfg: &Config, isrcs: &[String]) -> Vec<serde_json::Va
         .ok()
         .and_then(|v| v.get("items").and_then(|x| x.as_array()).cloned())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::order_item;
+
+    #[test]
+    fn order_item_splits_composite_keys() {
+        assert_eq!(
+            order_item("soundcloud:1837565340"),
+            serde_json::json!({ "source": "soundcloud", "externalId": "1837565340" })
+        );
+        assert_eq!(
+            order_item("USQX91201487"),
+            serde_json::json!({ "isrc": "USQX91201487" })
+        );
+    }
 }

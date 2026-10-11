@@ -9,6 +9,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
+use sqlx::Row;
 
 use crate::api::AppState;
 
@@ -412,7 +413,10 @@ async fn order_prioritize(
 struct TrackPanel {
     track_id: i64,
     configured: bool,
-    isrc: String,
+    /// The music-api track key (ISRC or `soundcloud:<id>`), empty when none.
+    key: String,
+    /// `ISRC` | `SoundCloud` | `` — what `key` holds.
+    source_label: String,
     found: bool,
     state: String,
     deezer_id: String,
@@ -424,14 +428,28 @@ struct TrackPanel {
     error: String,
 }
 
-async fn isrc_of(st: &AppState, id: i64) -> String {
-    sqlx::query_scalar::<_, String>("SELECT COALESCE(isrc, '') FROM hub_tracks WHERE id = ?1")
-        .bind(id)
-        .fetch_optional(&st.pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default()
+/// The music-api key for a hub track, plus a short source label. Uses the ISRC
+/// when present, else `soundcloud:<service_track_id>` for SoundCloud tracks.
+async fn key_of(st: &AppState, id: i64) -> Option<(String, String)> {
+    let row = sqlx::query(
+        "SELECT TRIM(COALESCE(isrc, '')) AS isrc, service, service_track_id
+           FROM hub_tracks WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten()?;
+    let isrc: String = row.get("isrc");
+    if !isrc.is_empty() {
+        return Some((isrc, "ISRC".to_string()));
+    }
+    let service: String = row.get("service");
+    let stid: String = row.get("service_track_id");
+    if service == "soundcloud" && !stid.is_empty() {
+        return Some((format!("soundcloud:{stid}"), "SoundCloud".to_string()));
+    }
+    None
 }
 
 async fn track_panel(
@@ -443,11 +461,13 @@ async fn track_panel(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let configured = st.cfg.music_api_token.is_some();
-    let isrc = isrc_of(&st, id).await;
+    let key = key_of(&st, id).await;
+    let (key, source_label) = key.unwrap_or_default();
     let mut p = TrackPanel {
         track_id: id,
         configured,
-        isrc: isrc.clone(),
+        key: key.clone(),
+        source_label,
         found: false,
         state: String::new(),
         deezer_id: String::new(),
@@ -458,8 +478,8 @@ async fn track_panel(
         objects: String::new(),
         error: String::new(),
     };
-    if configured && !isrc.is_empty() {
-        if let Ok(list) = crate::music_api::tracks(&st.cfg, std::slice::from_ref(&isrc)).await {
+    if configured && !key.is_empty() {
+        if let Ok(list) = crate::music_api::tracks(&st.cfg, std::slice::from_ref(&key)).await {
             if let Some(m) = list.into_iter().next() {
                 p.found = !m.unknown;
                 p.state = m.state.clone().unwrap_or_default();
@@ -488,14 +508,13 @@ async fn track_action(st: &AppState, headers: &HeaderMap, id: i64, retry: bool) 
     if st.cfg.music_api_token.is_none() {
         return action_response(headers, "music-api nicht konfiguriert", "err", &back);
     }
-    let isrc = isrc_of(st, id).await;
-    if isrc.is_empty() {
-        return action_response(headers, "Track hat keine ISRC", "err", &back);
-    }
+    let Some((key, _label)) = key_of(st, id).await else {
+        return action_response(headers, "Track hat keine ISRC/Source", "err", &back);
+    };
     let res = if retry {
-        crate::music_api::retry_isrc(&st.cfg, &isrc).await
+        crate::music_api::retry_isrc(&st.cfg, &key).await
     } else {
-        crate::music_api::order(&st.cfg, std::slice::from_ref(&isrc))
+        crate::music_api::order(&st.cfg, std::slice::from_ref(&key))
             .await
             .map(|_| ())
     };

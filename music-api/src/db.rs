@@ -22,6 +22,17 @@ pub fn normalize_isrc(raw: &str) -> String {
         .to_uppercase()
 }
 
+/// Normalise a track key. A bare ISRC is upper-cased/alphanumeric-normalised;
+/// a composite `<source>:<id>` key (e.g. `soundcloud:1837565340`) keeps its
+/// source prefix and trims the id.
+pub fn normalize_key(raw: &str) -> String {
+    let raw = raw.trim();
+    match raw.split_once(':') {
+        Some((s, id)) => format!("{}:{}", s.trim().to_lowercase(), id.trim()),
+        None => normalize_isrc(raw),
+    }
+}
+
 pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     sqlx::query(
         r#"
@@ -123,6 +134,11 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
         .execute(pool)
         .await;
 
+    // Additive: acquisition source (`deezer` default; e.g. `soundcloud`).
+    let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN source TEXT NOT NULL DEFAULT 'deezer'")
+        .execute(pool)
+        .await;
+
     Ok(())
 }
 
@@ -150,11 +166,13 @@ pub async fn create_order(
     .await?;
 
     for isrc in isrcs {
+        let source = crate::models::track_source(isrc);
         sqlx::query(
-            "INSERT OR IGNORE INTO tracks (isrc, state, created_at, updated_at)
-             VALUES (?, 'pending', ?, ?)",
+            "INSERT OR IGNORE INTO tracks (isrc, source, state, created_at, updated_at)
+             VALUES (?, ?, 'pending', ?, ?)",
         )
         .bind(isrc)
+        .bind(source)
         .bind(ts)
         .bind(ts)
         .execute(&mut *tx)

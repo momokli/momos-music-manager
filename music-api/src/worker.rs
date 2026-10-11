@@ -128,6 +128,11 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     };
 
     for track in pending {
+        // Non-Deezer sources (e.g. SoundCloud) are acquired via yt-dlp, not deemix.
+        if track.source() != "deezer" {
+            handle_non_deezer(state, &track, &policy).await?;
+            continue;
+        }
         // Always resolve first: metadata is useful even when we cannot download.
         match deezer::lookup_isrc(&state.http, &state.config.deezer_base, &track.isrc).await {
             Ok(deezer::Lookup::Absent { reason }) => {
@@ -226,6 +231,86 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Acquire a non-Deezer track (SoundCloud) via yt-dlp and store it.
+///
+/// Runs synchronously inside the worker tick; yt-dlp downloads are bounded by
+/// the tool's own behaviour. Failures schedule a retry (bounded attempts).
+async fn handle_non_deezer(
+    state: &Arc<AppState>,
+    track: &Track,
+    policy: &db::RetryPolicy,
+) -> Result<()> {
+    match track.source() {
+        "soundcloud" => {
+            let id = crate::models::track_external_id(&track.isrc);
+            let url = crate::ytdlp::soundcloud_url(id);
+            let safe = track.isrc.replace([':', '/'], "_");
+            match crate::ytdlp::download_audio(
+                &state.config.ytdlp,
+                &url,
+                &state.config.ytdlp_dir,
+                &safe,
+            )
+            .await
+            {
+                Ok(src) => {
+                    if let Err(e) = finalize_soundcloud(state, track, &src).await {
+                        warn!("{}: soundcloud finalize failed: {e:#}", track.isrc);
+                        db::schedule_retry(
+                            &state.pool,
+                            &track.isrc,
+                            &format!("store: {e}"),
+                            policy,
+                            db::now(),
+                        )
+                        .await?;
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("yt-dlp: {e}");
+                    warn!("{}: {msg}", track.isrc);
+                    state.logs.push("warn", format!("{}: {msg}", track.isrc));
+                    db::schedule_retry(&state.pool, &track.isrc, &msg, policy, db::now()).await?;
+                }
+            }
+        }
+        other => {
+            let msg = format!("unsupported source '{other}'");
+            warn!("{}: {msg}", track.isrc);
+            db::mark_terminal(&state.pool, &track.isrc, state::FAILED, &msg).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Transcode a yt-dlp download into our 320/128 store and mark it ready. No
+/// FLAC — the source is lossy.
+async fn finalize_soundcloud(state: &Arc<AppState>, track: &Track, src: &Path) -> Result<()> {
+    let cfg = &state.config;
+    let base = track.isrc.replace([':', '/'], "_");
+    let mp3_320 = cfg.mp3_320_dir().join(format!("{base}.mp3"));
+    let mp3_128 = cfg.mp3_128_dir().join(format!("{base}.mp3"));
+    tokio::fs::create_dir_all(cfg.mp3_320_dir()).await?;
+    tokio::fs::create_dir_all(cfg.mp3_128_dir()).await?;
+    transcode::to_mp3(&cfg.ffmpeg, src, &mp3_320, 320).await?;
+    transcode::to_mp3(&cfg.ffmpeg, src, &mp3_128, 128).await?;
+    db::mark_ready(
+        &state.pool,
+        &track.isrc,
+        "mp3-320",
+        None,
+        Some(&mp3_320.display().to_string()),
+        Some(&mp3_128.display().to_string()),
+    )
+    .await?;
+    info!("{}: ready (soundcloud 320 + 128)", track.isrc);
+    state
+        .logs
+        .push("info", format!("{}: ready (soundcloud)", track.isrc));
+    let _ = tokio::fs::remove_file(src).await;
     Ok(())
 }
 
