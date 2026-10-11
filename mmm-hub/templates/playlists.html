@@ -148,6 +148,22 @@ content %}
                         }}{% endif %}</a
                     >
                 </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_created.href }}"
+                        class="hub-sort{% if s_created.active %} hub-sort-on{% endif %}"
+                        >{{ s_created.label }}{% if s_created.active %} {{ s_created.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_last.href }}"
+                        class="hub-sort{% if s_last.active %} hub-sort-on{% endif %}"
+                        >{{ s_last.label }}{% if s_last.active %} {{ s_last.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
                 <th scope="col">Status</th>
                 <th scope="col">Aktionen</th>
             </tr>
