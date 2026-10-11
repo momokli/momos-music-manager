@@ -25,6 +25,8 @@ pub fn router(state: AppState) -> Router {
         .route("/playlists/similar", get(similar_page))
         .route("/tags", get(tags_page))
         .route("/tags/create", post(tag_create))
+        .route("/tag-search", get(tag_search_page))
+        .route("/revisit", get(revisit_page))
         .route("/tag/{id}", get(tag_detail_page))
         .route("/tag/{id}/rename", post(tag_rename))
         .route("/tag/{id}/type", post(tag_set_type))
@@ -4219,6 +4221,159 @@ async fn tag_create(
         }
     }
     Redirect::to("/tags").into_response()
+}
+
+// ── weighted tag search + revisit (#295, #297) ────────────────────────────────
+
+#[derive(Deserialize, Default)]
+struct TagSearchQuery {
+    /// `name:strength` pairs, comma-separated. Strength optional (default 1).
+    tags: Option<String>,
+    /// Optional seed track ids (comma-separated): their tags become the query.
+    seed: Option<String>,
+    msg: Option<String>,
+}
+
+struct TagSearchRow {
+    id: i64,
+    title: String,
+    artists: String,
+    score: String,
+    matched: i64,
+}
+
+#[derive(Template)]
+#[template(path = "tag_search.html")]
+struct TagSearchPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    tags_input: String,
+    seed_input: String,
+    results: Vec<TagSearchRow>,
+    count: usize,
+    searched: bool,
+}
+
+fn parse_tag_query(raw: &str) -> Vec<(String, f64)> {
+    raw.split(',')
+        .filter_map(|p| {
+            let p = p.trim();
+            if p.is_empty() {
+                return None;
+            }
+            match p.split_once(':') {
+                Some((name, s)) => Some((
+                    name.trim().to_string(),
+                    s.trim().parse::<f64>().unwrap_or(1.0).max(1.0),
+                )),
+                None => Some((p.to_string(), 1.0)),
+            }
+        })
+        .filter(|(n, _)| !n.is_empty())
+        .collect()
+}
+
+async fn tag_search_page(
+    State(st): State<AppState>,
+    Query(q): Query<TagSearchQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tag-search").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let tags_input = q.tags.clone().unwrap_or_default();
+    let seed_input = q.seed.clone().unwrap_or_default();
+    let explicit = parse_tag_query(&tags_input);
+    let seed: Vec<i64> = seed_input
+        .split(&[',', ' '][..])
+        .filter_map(|s| s.trim().parse::<i64>().ok())
+        .collect();
+    let searched = !explicit.is_empty() || !seed.is_empty();
+    let hits = if searched {
+        crate::tagsearch::weighted_search(&st.pool, &explicit, &seed, 500).await
+    } else {
+        Vec::new()
+    };
+    let results: Vec<TagSearchRow> = hits
+        .into_iter()
+        .map(|h| TagSearchRow {
+            id: h.track_id,
+            title: h.title,
+            artists: h.artists,
+            score: format!("{:.2}", h.score),
+            matched: h.matched,
+        })
+        .collect();
+    render(&TagSearchPage {
+        nav,
+        flash: q.msg.unwrap_or_default(),
+        tags_input,
+        seed_input,
+        count: results.len(),
+        results,
+        searched,
+    })
+}
+
+#[derive(Deserialize, Default)]
+struct RevisitQuery {
+    q: Option<String>,
+}
+
+struct RevisitRow {
+    id: i64,
+    title: String,
+    artists: String,
+    last_tagged: String,
+    missed: i64,
+}
+
+#[derive(Template)]
+#[template(path = "revisit.html")]
+struct RevisitPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    q: String,
+    rows: Vec<RevisitRow>,
+    count: usize,
+}
+
+async fn revisit_page(
+    State(st): State<AppState>,
+    Query(f): Query<RevisitQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "revisit").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let q = f.q.unwrap_or_default().trim().to_string();
+    let toks = crate::table::tokens(&q);
+    let rows: Vec<RevisitRow> = crate::tagsearch::revisit(&st.pool, nav.id, 2000)
+        .await
+        .into_iter()
+        .filter(|r| {
+            toks.is_empty()
+                || crate::table::matches_typo(
+                    &format!("{} {}", r.title, r.artists).to_lowercase(),
+                    &toks,
+                )
+        })
+        .take(500)
+        .map(|r| RevisitRow {
+            id: r.track_id,
+            title: r.title,
+            artists: r.artists,
+            last_tagged: r.last_tagged.get(..10).unwrap_or("—").to_string(),
+            missed: r.missed,
+        })
+        .collect();
+    render(&RevisitPage {
+        nav,
+        flash: String::new(),
+        q,
+        count: rows.len(),
+        rows,
+    })
 }
 
 // ── tag detail ───────────────────────────────────────────────────────────────

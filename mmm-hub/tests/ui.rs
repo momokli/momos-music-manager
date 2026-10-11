@@ -264,6 +264,54 @@ async fn additive_type_filter_and_phase_filter() {
 }
 
 #[tokio::test]
+async fn tag_search_and_revisit_render() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+    for path in [
+        "/tag-search",
+        "/tag-search?tags=dark:3,groovy:1",
+        "/revisit",
+    ] {
+        let r = app
+            .client()
+            .get(app.url(path))
+            .header("Cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), reqwest::StatusCode::OK, "GET {path}");
+    }
+}
+
+#[tokio::test]
+async fn weighted_tag_search_scores_matching_track() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // Give t_all a tag and search for it.
+    let tag_id = mmm_hub::tags::ensure_tag(&app.pool, app.seed.alice, "dark")
+        .await
+        .unwrap();
+    mmm_hub::tags::tag_track(&app.pool, app.seed.alice, app.seed.t_all, tag_id)
+        .await
+        .unwrap();
+
+    let r = app
+        .client()
+        .get(app.url("/tag-search?tags=dark:3"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::OK);
+    let html = r.text().await.unwrap();
+    assert!(
+        html.contains(&format!("/track/{}", app.seed.t_all)),
+        "matching track missing from results: {html}"
+    );
+}
+
+#[tokio::test]
 async fn track_page_renders_in_shell() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
