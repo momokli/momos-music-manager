@@ -365,6 +365,77 @@ pub async fn queue(cfg: &Config) -> Result<serde_json::Value> {
         .unwrap_or(serde_json::Value::Array(Vec::new())))
 }
 
+// ── Worker + queue control (durable-queue endpoints, music-api PR for #279) ──
+
+/// `GET /worker` — the worker's global pause state + retry cap. `None` when the
+/// endpoint is unavailable (older music-api), so callers can degrade gracefully.
+pub async fn worker(cfg: &Config) -> Option<serde_json::Value> {
+    let t = token(cfg).ok()?;
+    let url = format!("{}/worker", cfg.music_api_base);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(t)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.json::<serde_json::Value>().await.ok()
+}
+
+/// `POST /worker/{pause|resume}` — pause or resume the whole music-api worker.
+pub async fn set_worker_paused(cfg: &Config, paused: bool) -> Result<()> {
+    let verb = if paused { "pause" } else { "resume" };
+    let url = format!("{}/worker/{verb}", cfg.music_api_base);
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(token(cfg)?)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("music-api /worker/{verb} → {}", resp.status());
+    }
+    Ok(())
+}
+
+/// `POST /isrc/{isrc}/retry` — re-queue a failed/stranded ISRC.
+pub async fn retry_isrc(cfg: &Config, isrc: &str) -> Result<()> {
+    let url = format!(
+        "{}/isrc/{}/retry",
+        cfg.music_api_base,
+        urlencoding::encode(isrc)
+    );
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(token(cfg)?)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("music-api retry → {}", resp.status());
+    }
+    Ok(())
+}
+
+/// `GET /logs?limit=n` — recent music-api service events. Empty when unavailable.
+pub async fn logs(cfg: &Config, limit: usize) -> Vec<serde_json::Value> {
+    let Ok(t) = token(cfg) else {
+        return Vec::new();
+    };
+    let url = format!("{}/logs?limit={limit}", cfg.music_api_base);
+    let resp = match reqwest::Client::new().get(&url).bearer_auth(t).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Vec::new(),
+    };
+    resp.json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| v.get("logs").and_then(|x| x.as_array()).cloned())
+        .unwrap_or_default()
+}
+
 /// ISRCs whose cached state is not `ready` (missing from cache = not ready).
 pub async fn missing_isrcs(pool: &SqlitePool, isrcs: &[String]) -> Vec<String> {
     let mut ready: std::collections::HashSet<String> = std::collections::HashSet::new();

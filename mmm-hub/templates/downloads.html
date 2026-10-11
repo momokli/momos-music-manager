@@ -21,6 +21,18 @@ content %}
             Alles ordern (nicht ready)
         </button>
     </form>
+    {% if worker_ok %} {% if worker_paused %}
+    <form method="post" action="/downloads/worker/resume">
+        <button type="submit">Worker fortsetzen</button>
+    </form>
+    <span class="hub-muted">Worker pausiert</span>
+    {% else %}
+    <form method="post" action="/downloads/worker/pause">
+        <button type="submit" class="secondary outline">Worker pausieren</button>
+    </form>
+    {% endif %} {% if worker_max_attempts > 0 %}
+    <span class="hub-muted">max. Versuche: {{ worker_max_attempts }}</span>
+    {% endif %} {% endif %}
 </section>
 {% else %}
 <p class="hub-muted">
@@ -115,6 +127,7 @@ content %}
                     <th scope="col">Format</th>
                     <th scope="col">Deezer-ID</th>
                     <th scope="col">Fehler</th>
+                    <th scope="col">Aktion</th>
                 </tr>
             </thead>
             <tbody>
@@ -128,6 +141,15 @@ content %}
                     <td>{{ r.source_format }}</td>
                     <td>{{ r.deezer_id }}</td>
                     <td>{{ r.error }}</td>
+                    <td>
+                        {% if r.state == "failed" || r.state == "absent" %}
+                        <form method="post" action="/downloads/retry/{{ r.isrc }}">
+                            <button type="submit" class="secondary outline">
+                                Erneut
+                            </button>
+                        </form>
+                        {% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -156,7 +178,11 @@ content %}
 {% if music_api %}
 <section aria-label="Live-Queue">
     <h2>Live-Queue</h2>
-    {% if !queue_ok %}
+    {% if !queue_counts.is_empty() %}
+    <p class="hub-muted">
+        {% for c in queue_counts %}{{ c.state }}: {{ c.count }} · {% endfor %}
+    </p>
+    {% endif %} {% if !queue_ok %}
     <p class="hub-muted">{{ queue_error }}</p>
     {% else %} {% if queue_items.is_empty() %}
     <p class="hub-muted">Queue ist leer.</p>
@@ -173,6 +199,7 @@ content %}
                     <th scope="col">Artist</th>
                     <th scope="col">State</th>
                     <th scope="col">Priority</th>
+                    <th scope="col">Versuche</th>
                 </tr>
             </thead>
             <tbody>
@@ -183,11 +210,43 @@ content %}
                     <td>{{ q.artist }}</td>
                     <td>{{ q.state }}</td>
                     <td>{{ q.priority }}</td>
+                    <td>{{ q.attempts }}</td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
     </div>
     {% endif %} {% endif %}
+</section>
+
+<section aria-label="Letzte Ereignisse">
+    <h2>Letzte Ereignisse</h2>
+    {% if logs.is_empty() %}
+    <p class="hub-muted">Keine Ereignisse.</p>
+    {% else %}
+    <div class="overflow-auto hub-scroll-y">
+        <table class="hub-dense-table">
+            <caption class="hub-visually-hidden">
+                Letzte music-api-Ereignisse
+            </caption>
+            <thead>
+                <tr>
+                    <th scope="col">Zeit</th>
+                    <th scope="col">Level</th>
+                    <th scope="col">Meldung</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for l in logs %}
+                <tr>
+                    <td><code>{{ l.at }}</code></td>
+                    <td>{{ l.level }}</td>
+                    <td>{{ l.msg }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
 </section>
 {% endif %} {% endblock %}

@@ -520,3 +520,70 @@ async fn order_all_redirects_with_flash_when_unconfigured() {
     );
     assert!(loc.contains("msg="), "should carry a flash message");
 }
+
+// ── worker + retry control (durable-queue endpoints) ────────────────────────
+
+#[tokio::test]
+async fn worker_pause_requires_login() {
+    let app = common::spawn().await;
+    let resp = app
+        .client()
+        .post(app.url("/downloads/worker/pause"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers()["location"], "/login");
+}
+
+#[tokio::test]
+async fn worker_pause_redirects_with_flash_when_unconfigured() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+    let resp = app
+        .client()
+        .post(app.url("/downloads/worker/pause"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    let loc = resp.headers()["location"].to_str().unwrap();
+    assert!(loc.starts_with("/downloads"), "unexpected redirect: {loc}");
+    assert!(loc.contains("msg="), "should carry a flash message");
+}
+
+#[tokio::test]
+async fn retry_requires_login() {
+    let app = common::spawn().await;
+    let resp = app
+        .client()
+        .post(app.url("/downloads/retry/ISRC00000001"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers()["location"], "/login");
+}
+
+#[tokio::test]
+async fn downloads_page_still_renders_without_music_api() {
+    // The control/queue sections are hidden when unconfigured, but the page must
+    // still render the cached overview (proves the template still compiles).
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+    seed_state_error(&app, "ISRC00000001", "failed", "download timeout").await;
+    set_isrc(&app, app.seed.t_all, "ISRC00000001").await;
+
+    let resp = app
+        .client()
+        .get(app.url("/downloads"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = resp.text().await.unwrap();
+    assert!(html.contains("Cache-Übersicht"), "overview missing: {html}");
+    assert!(html.contains("download timeout"), "error reason missing");
+}

@@ -79,6 +79,9 @@ pub fn router(state: AppState) -> Router {
         .route("/downloads", get(downloads_page))
         .route("/downloads/refresh", post(downloads_refresh))
         .route("/downloads/order-all", post(downloads_order_all))
+        .route("/downloads/worker/pause", post(downloads_worker_pause))
+        .route("/downloads/worker/resume", post(downloads_worker_resume))
+        .route("/downloads/retry/{isrc}", post(downloads_retry))
         .with_state(state)
 }
 
@@ -1122,6 +1125,12 @@ struct DownloadsPage {
     has_filters: bool,
     refresh_action: String,
     order_action: String,
+    // Worker control (durable-queue endpoints on music-api).
+    worker_ok: bool,
+    worker_paused: bool,
+    worker_max_attempts: i64,
+    queue_counts: Vec<CountItem>,
+    logs: Vec<LogRow>,
 }
 
 struct QueueItem {
@@ -1130,6 +1139,20 @@ struct QueueItem {
     artist: String,
     priority: String,
     state: String,
+    attempts: String,
+}
+
+/// One `state → count` bucket from the `/queue` `counts` block.
+struct CountItem {
+    state: String,
+    count: i64,
+}
+
+/// One display row from the `/logs` ring buffer.
+struct LogRow {
+    at: String,
+    level: String,
+    msg: String,
 }
 
 /// One row of the all-tracks table.
@@ -1174,14 +1197,26 @@ async fn downloads_page(
     let mut queue_ok = false;
     let mut queue_error = String::new();
     let mut queue_items: Vec<QueueItem> = Vec::new();
+    let mut queue_counts: Vec<CountItem> = Vec::new();
+    let mut worker_ok = false;
+    let mut worker_paused = false;
+    let mut worker_max_attempts = 0i64;
+    let mut logs: Vec<LogRow> = Vec::new();
     if music_api {
         match crate::music_api::queue(&st.cfg).await {
             Ok(v) => {
                 queue_ok = true;
                 queue_items = parse_queue(&v);
+                queue_counts = parse_counts(&v);
             }
             Err(e) => queue_error = format!("music-api nicht erreichbar: {e}"),
         }
+        if let Some(w) = crate::music_api::worker(&st.cfg).await {
+            worker_ok = true;
+            worker_paused = w.get("paused").and_then(|x| x.as_bool()).unwrap_or(false);
+            worker_max_attempts = w.get("maxAttempts").and_then(|x| x.as_i64()).unwrap_or(0);
+        }
+        logs = parse_logs(crate::music_api::logs(&st.cfg, 25).await);
     }
 
     let mut f = DownloadFilters::from_query(&q);
@@ -1229,6 +1264,11 @@ async fn downloads_page(
         has_filters: f.has_filters(),
         refresh_action: append_qs("/downloads/refresh", &qs),
         order_action: append_qs("/downloads/order-all", &qs),
+        worker_ok,
+        worker_paused,
+        worker_max_attempts,
+        queue_counts,
+        logs,
     })
 }
 
@@ -1297,11 +1337,57 @@ async fn downloads_order_all(
     flash_redirect(&target, msg)
 }
 
-/// Best-effort parse of the music-api `/queue` payload. Accepts either a bare
-/// array or an object with an `items`/`queue` array; unknown fields are ignored.
+/// `POST /downloads/worker/pause` — pause the whole music-api worker.
+async fn downloads_worker_pause(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    downloads_worker_set(st, headers, true).await
+}
+
+/// `POST /downloads/worker/resume` — resume the music-api worker.
+async fn downloads_worker_resume(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    downloads_worker_set(st, headers, false).await
+}
+
+async fn downloads_worker_set(st: AppState, headers: HeaderMap, paused: bool) -> Response {
+    if crate::ui::nav(&st, &headers, "downloads").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    if st.cfg.music_api_token.is_none() {
+        return flash_redirect("/downloads", "music-api nicht konfiguriert".to_string());
+    }
+    let msg = match crate::music_api::set_worker_paused(&st.cfg, paused).await {
+        Ok(()) if paused => "Worker pausiert".to_string(),
+        Ok(()) => "Worker läuft wieder".to_string(),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    flash_redirect("/downloads", msg)
+}
+
+/// `POST /downloads/retry/{isrc}` — re-queue a failed/stranded ISRC.
+async fn downloads_retry(
+    State(st): State<AppState>,
+    Path(isrc): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if crate::ui::nav(&st, &headers, "downloads").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    if st.cfg.music_api_token.is_none() {
+        return flash_redirect("/downloads", "music-api nicht konfiguriert".to_string());
+    }
+    let msg = match crate::music_api::retry_isrc(&st.cfg, &isrc).await {
+        Ok(()) => format!("{isrc}: erneut eingeordnet"),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    flash_redirect("/downloads", msg)
+}
+
+/// Best-effort parse of the music-api `/queue` payload. Accepts the current
+/// `{isrc:[…], url:[…]}` shape, a bare array, or an object with an
+/// `items`/`queue` array; unknown fields are ignored.
 fn parse_queue(v: &serde_json::Value) -> Vec<QueueItem> {
     let arr = v
         .as_array()
+        .or_else(|| v.get("isrc").and_then(|x| x.as_array()))
         .or_else(|| v.get("items").and_then(|x| x.as_array()))
         .or_else(|| v.get("queue").and_then(|x| x.as_array()));
     let Some(arr) = arr else {
@@ -1327,15 +1413,101 @@ fn parse_queue(v: &serde_json::Value) -> Vec<QueueItem> {
                     _ => String::new(),
                 })
                 .unwrap_or_default();
+            let attempts = it
+                .get("attempts")
+                .and_then(|a| a.as_i64())
+                .unwrap_or(0)
+                .to_string();
             QueueItem {
-                isrc: str_at(it, &["isrc"]),
+                isrc: str_at(it, &["isrc", "url"]),
                 title: str_at(it, &["title", "name"]),
                 artist: str_at(it, &["artist", "artists"]),
                 priority,
                 state: str_at(it, &["state", "status"]),
+                attempts,
             }
         })
         .collect()
+}
+
+/// Parse the `{counts:{state:n}}` block of the `/queue` payload.
+fn parse_counts(v: &serde_json::Value) -> Vec<CountItem> {
+    let Some(obj) = v.get("counts").and_then(|c| c.as_object()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<CountItem> = obj
+        .iter()
+        .filter_map(|(k, n)| {
+            n.as_i64().map(|count| CountItem {
+                state: k.clone(),
+                count,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.state.cmp(&b.state));
+    out
+}
+
+/// Convert raw `/logs` entries into display rows (newest first, as returned).
+fn parse_logs(entries: Vec<serde_json::Value>) -> Vec<LogRow> {
+    entries
+        .iter()
+        .map(|e| {
+            let at = e.get("at").and_then(|x| x.as_i64()).unwrap_or(0);
+            LogRow {
+                at: chrono::DateTime::from_timestamp(at, 0)
+                    .map(|d| d.format("%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_default(),
+                level: e
+                    .get("level")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("info")
+                    .to_string(),
+                msg: e
+                    .get("msg")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_queue_reads_isrc_array_attempts_and_counts() {
+        let v = json!({
+            "paused": false,
+            "counts": { "pending": 2, "ready": 1 },
+            "isrc": [
+                { "isrc": "AAA", "title": "T", "artist": "A", "state": "pending",
+                  "priority": 0, "attempts": 2 }
+            ],
+            "url": []
+        });
+        let items = parse_queue(&v);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].isrc, "AAA");
+        assert_eq!(items[0].state, "pending");
+        assert_eq!(items[0].attempts, "2");
+        let counts = parse_counts(&v);
+        assert_eq!(counts.len(), 2);
+        assert_eq!(counts[0].state, "pending");
+        assert_eq!(counts[0].count, 2);
+    }
+
+    #[test]
+    fn parse_queue_accepts_legacy_items_shape() {
+        let v = json!({ "items": [{ "isrc": "BBB", "status": "ready" }] });
+        let items = parse_queue(&v);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].state, "ready");
+        assert!(parse_counts(&v).is_empty());
+    }
 }
 
 #[derive(Deserialize)]
