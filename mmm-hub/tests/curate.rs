@@ -192,6 +192,7 @@ async fn create_then_render_detail() {
 struct Captured {
     created: Arc<Mutex<Vec<Value>>>,
     replaced: Arc<Mutex<Vec<Value>>>,
+    added: Arc<Mutex<Vec<Value>>>,
 }
 
 async fn mock_spotify() -> (String, Captured) {
@@ -216,11 +217,19 @@ async fn mock_spotify() -> (String, Captured) {
         cap.replaced.lock().unwrap().push(body);
         Json(json!({}))
     }
+    async fn add_items(
+        State(cap): State<Captured>,
+        Path(_id): Path<String>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        cap.added.lock().unwrap().push(body);
+        Json(json!({ "snapshot_id": "s" }))
+    }
 
     let app = Router::new()
         .route("/me", axum::routing::get(me))
         .route("/users/{id}/playlists", post(create_playlist))
-        .route("/playlists/{id}/items", put(replace_items))
+        .route("/playlists/{id}/items", put(replace_items).post(add_items))
         .with_state(cap.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -420,6 +429,52 @@ async fn push_reuses_existing_spotify_playlist() {
     assert_eq!(res.spotify_playlist_id, "existing");
     assert!(fx.cap.created.lock().unwrap().is_empty(), "no new playlist");
     assert_eq!(fx.cap.replaced.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn add_to_spotify_playlist_writes_to_spotify() {
+    let (base, cap) = mock_spotify().await;
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite:{}/hub.db", dir.path().display());
+    let mut cfg = Config::for_test(url);
+    cfg.spotify_api_base = base;
+    let app = common::spawn_with(dir, cfg).await;
+    let (uid, cookie) = app.user_with_password("zoe", "pw").await;
+    sqlx::query(
+        "INSERT INTO hub_service_accounts
+             (user_id, service, access_token, refresh_token, token_expiry, scopes, authorized_at, connected_at)
+         VALUES (?1, 'spotify', 'tok', 'ref', '2099-01-01T00:00:00+00:00',
+                 'playlist-modify-private', ?2, ?2)",
+    )
+    .bind(uid)
+    .bind(NOW)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    let pl_id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_playlists (user_id, service, playlist_id, name, is_owned)
+         VALUES (?1, 'spotify', 'rem', 'My Rem', 1) RETURNING id",
+    )
+    .bind(uid)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    let tid = track(&app.pool, "spTRK", "T", NOW).await;
+
+    let resp = app
+        .client()
+        .post(app.url(&format!("/track/{tid}/actions/playlist")))
+        .header("Cookie", &cookie)
+        .form(&[("sp_playlist_id", &pl_id.to_string())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let added = cap.added.lock().unwrap().clone();
+    assert_eq!(added.len(), 1, "one POST to Spotify");
+    let uris = added[0]["uris"].as_array().unwrap();
+    assert_eq!(uris[0].as_str().unwrap(), "spotify:track:spTRK");
 }
 
 #[tokio::test]

@@ -1100,12 +1100,15 @@ struct TrackActions {
 #[template(path = "_partials/track_playlist_picker.html")]
 struct TrackPlaylistPicker {
     id: i64,
-    playlists: Vec<PlaylistMini>,
+    curated: Vec<PlaylistMini>,
+    spotify: Vec<PlaylistMini>,
+    write_ready: bool,
 }
 
 struct PlaylistMini {
     id: i64,
     name: String,
+    name_lower: String,
 }
 
 #[derive(Template)]
@@ -1865,16 +1868,44 @@ async fn track_actions_playlist_frag(
     let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let playlists = crate::curate::list_for_user(&st.pool, nav.id)
+    let curated = crate::curate::list_for_user(&st.pool, nav.id)
         .await
         .unwrap_or_default()
         .into_iter()
-        .map(|c| PlaylistMini {
-            id: c.id,
-            name: c.name,
-        })
+        .map(|c| mini(c.id, c.name))
         .collect();
-    render(&TrackPlaylistPicker { id, playlists })
+    // The user's own Spotify playlists — adding to these writes to Spotify.
+    let spotify = sqlx::query(
+        "SELECT id, name FROM hub_playlists
+          WHERE user_id = ?1 AND service = 'spotify' AND is_owned = 1 AND name IS NOT NULL
+          ORDER BY name COLLATE NOCASE LIMIT 500",
+    )
+    .bind(nav.id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| {
+        let name: String = r.get::<Option<String>, _>("name").unwrap_or_default();
+        mini(r.get("id"), name)
+    })
+    .collect();
+    let write_ready = crate::curate::has_write_scope(&st.pool, nav.id).await;
+    render(&TrackPlaylistPicker {
+        id,
+        curated,
+        spotify,
+        write_ready,
+    })
+}
+
+fn mini(id: i64, name: String) -> PlaylistMini {
+    let name_lower = name.to_lowercase();
+    PlaylistMini {
+        id,
+        name,
+        name_lower,
+    }
 }
 
 async fn track_actions_tag_frag(
@@ -1895,6 +1926,8 @@ async fn track_actions_tag_frag(
 struct AddToPlaylistForm {
     #[serde(default)]
     playlist_id: Option<i64>,
+    #[serde(default)]
+    sp_playlist_id: Option<i64>,
     #[serde(default)]
     new_name: Option<String>,
 }
@@ -1935,10 +1968,87 @@ async fn track_actions_playlist_post(
         } else {
             ("Playlist nicht gefunden".to_string(), "err")
         }
+    } else if let Some(sp) = f.sp_playlist_id {
+        match add_to_spotify_playlist(&st, nav.id, sp, id).await {
+            Ok(()) => ("Zu Spotify hinzugefügt".to_string(), "ok"),
+            Err(e) => (format!("Fehler: {e}"), "err"),
+        }
     } else {
         ("Keine Playlist angegeben".to_string(), "err")
     };
     with_toast(render(&TrackActions { id }), &msg, kind)
+}
+
+/// The Spotify track id for a hub track (external id, else the service id).
+async fn track_spotify_id(st: &AppState, track_id: i64) -> Option<String> {
+    let ext: Option<String> = sqlx::query_scalar(
+        "SELECT external_id FROM hub_track_external_ids
+          WHERE track_id = ?1 AND service = 'spotify' LIMIT 1",
+    )
+    .bind(track_id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten();
+    if let Some(e) = ext {
+        if !e.is_empty() {
+            return Some(e);
+        }
+    }
+    sqlx::query_scalar(
+        "SELECT service_track_id FROM hub_tracks
+          WHERE id = ?1 AND service = 'spotify' LIMIT 1",
+    )
+    .bind(track_id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Add a track to one of the user's own Spotify playlists (writes to Spotify).
+async fn add_to_spotify_playlist(
+    st: &AppState,
+    user_id: i64,
+    local_playlist_id: i64,
+    track_id: i64,
+) -> anyhow::Result<()> {
+    use anyhow::{Context, bail};
+    let row = sqlx::query(
+        "SELECT user_id, playlist_id, is_owned FROM hub_playlists
+          WHERE id = ?1 AND service = 'spotify'",
+    )
+    .bind(local_playlist_id)
+    .fetch_optional(&st.pool)
+    .await?
+    .context("Playlist nicht gefunden")?;
+    let owner: i64 = row.get("user_id");
+    let remote: String = row.get("playlist_id");
+    let is_owned: i64 = row.get("is_owned");
+    if owner != user_id || is_owned == 0 {
+        bail!("Playlist gehört dir nicht");
+    }
+    let spotify_id = track_spotify_id(st, track_id)
+        .await
+        .context("Track hat keine Spotify-ID")?;
+    let token = crate::ingest::access_token(&st.pool, &st.cfg, user_id).await?;
+    let url = crate::spotify::api_url(
+        &st.cfg.spotify_api_base,
+        &format!("/playlists/{remote}/items"),
+    );
+    let (status, resp) = crate::spotify::post_json(
+        &token,
+        &url,
+        &serde_json::json!({ "uris": [format!("spotify:track:{spotify_id}")] }),
+    )
+    .await?;
+    if !(200..300).contains(&status) {
+        bail!(
+            "Spotify -> {status}: {}",
+            resp["error"]["message"].as_str().unwrap_or("Fehler")
+        );
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
