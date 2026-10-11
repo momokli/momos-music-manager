@@ -61,14 +61,6 @@ content %}
                 </th>
                 <th scope="col">
                     <a
-                        href="{{ s_groups.href }}"
-                        class="hub-sort{% if s_groups.active %} hub-sort-on{% endif %}"
-                        >{{ s_groups.label }}{% if s_groups.active %} {{ s_groups.arrow
-                        }}{% endif %}</a
-                    >
-                </th>
-                <th scope="col">
-                    <a
                         href="{{ s_members.href }}"
                         class="hub-sort{% if s_members.active %} hub-sort-on{% endif %}"
                         >{{ s_members.label }}{% if s_members.active %} {{ s_members.arrow
@@ -83,7 +75,6 @@ content %}
                 <td><a href="/collectives/{{ c.id }}">{{ c.icon }} {{ c.name }}</a></td>
                 <td>{{ c.role }}</td>
                 <td><a href="/user/{{ c.owner }}">@{{ c.owner }}</a></td>
-                <td>{{ c.groups }}</td>
                 <td>{{ c.members }}</td>
             </tr>
             {% endfor %}
@@ -102,7 +93,6 @@ content %}
             <tr>
                 <th scope="col">Collective</th>
                 <th scope="col">Owner</th>
-                <th scope="col">Gruppen</th>
                 <th scope="col">Mitglieder</th>
                 <th scope="col"></th>
             </tr>
@@ -112,7 +102,6 @@ content %}
             <tr>
                 <td><a href="/collectives/{{ c.id }}">{{ c.icon }} {{ c.name }}</a></td>
                 <td><a href="/user/{{ c.owner }}">@{{ c.owner }}</a></td>
-                <td>{{ c.groups }}</td>
                 <td>{{ c.members }}</td>
                 <td>
                     <form method="post" action="/collectives/{{ c.id }}/join">

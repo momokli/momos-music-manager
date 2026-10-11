@@ -12,7 +12,6 @@ use axum::routing::{get, post};
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::{QueryBuilder, Row, SqlitePool};
-use std::collections::HashMap;
 
 use crate::api::AppState;
 use crate::spotify;
@@ -940,11 +939,11 @@ struct TrackPage {
     untag_action: String,
     tag_action: String,
     htmx: bool,
-    my_groups: Vec<GroupRef>,
+    my_types: Vec<TypeOption>,
 }
 
 struct TagCloudRow {
-    group: String,
+    type_label: String,
     icon: String,
     chips: Vec<TagChipRow>,
 }
@@ -955,15 +954,22 @@ struct TagChipRow {
     mine: bool,
 }
 
-struct GroupRef {
-    id: i64,
-    name: String,
-    icon: String,
+/// A pickable tag type for the "add tag" form.
+struct TypeOption {
+    value: &'static str,
+    label: &'static str,
+}
+
+fn type_options() -> Vec<TypeOption> {
+    crate::tagtypes::options()
+        .into_iter()
+        .map(|(value, label, _icon)| TypeOption { value, label })
+        .collect()
 }
 
 struct RecTag {
     name: String,
-    group: String,
+    type_label: String,
     reason: String,
 }
 
@@ -986,18 +992,13 @@ struct ExternalId {
     url: String,
 }
 
-/// A tag on the track's detail page: owner + the groups it lives in.
+/// A tag on the track's detail page: owner + its type.
 struct TrackTag {
     id: i64,
     name: String,
     owner: String,
-    groups: Vec<TrackTagGroup>,
-}
-
-struct TrackTagGroup {
-    id: i64,
-    name: String,
-    icon: String,
+    type_label: String,
+    type_icon: String,
 }
 
 async fn track_page(
@@ -1165,9 +1166,9 @@ async fn track_page(
     })
     .collect();
 
-    // Resolved tags for this track, with owner and the groups each tag is in.
+    // Resolved tags for this track, with owner and type.
     let tag_rows = sqlx::query(
-        "SELECT t.id AS id, t.name AS name, u.slug AS owner
+        "SELECT t.id AS id, t.name AS name, u.slug AS owner, COALESCE(t.type,'') AS type
            FROM hub_track_resolved_tags rt
            JOIN hub_tags t ON t.id = rt.tag_id
            JOIN hub_users u ON u.id = t.owner_user_id
@@ -1179,40 +1180,17 @@ async fn track_page(
     .await
     .unwrap_or_default();
 
-    let tag_ids: Vec<i64> = tag_rows.iter().map(|r| r.get::<i64, _>("id")).collect();
-    let mut groups_by_tag: HashMap<i64, Vec<TrackTagGroup>> = HashMap::new();
-    if !tag_ids.is_empty() {
-        let mut qb = sqlx::QueryBuilder::new(
-            "SELECT gt.tag_id AS tag_id, g.id AS gid, g.name AS gname,
-                    COALESCE(g.icon, '') AS gicon
-               FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
-              WHERE gt.tag_id IN (",
-        );
-        let mut sep = qb.separated(", ");
-        for tid in &tag_ids {
-            sep.push_bind(*tid);
-        }
-        qb.push(") ORDER BY g.name COLLATE NOCASE");
-        for r in qb.build().fetch_all(&st.pool).await.unwrap_or_default() {
-            groups_by_tag
-                .entry(r.get::<i64, _>("tag_id"))
-                .or_default()
-                .push(TrackTagGroup {
-                    id: r.get("gid"),
-                    name: r.get::<Option<String>, _>("gname").unwrap_or_default(),
-                    icon: r.get::<Option<String>, _>("gicon").unwrap_or_default(),
-                });
-        }
-    }
     let tags: Vec<TrackTag> = tag_rows
         .into_iter()
         .map(|r| {
-            let id: i64 = r.get("id");
+            let ty: String = r.get::<Option<String>, _>("type").unwrap_or_default();
+            let parsed = crate::tagtypes::TagType::parse(&ty);
             TrackTag {
-                groups: groups_by_tag.remove(&id).unwrap_or_default(),
-                id,
+                id: r.get("id"),
                 name: r.get::<Option<String>, _>("name").unwrap_or_default(),
                 owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
+                type_label: parsed.map(|t| t.label().to_string()).unwrap_or_default(),
+                type_icon: parsed.map(|t| t.icon().to_string()).unwrap_or_default(),
             }
         })
         .collect();
@@ -1252,37 +1230,30 @@ async fn track_page(
         .into_iter()
         .map(|r| RecTag {
             reason: r.why(),
-            group: r.group,
+            type_label: r.type_label,
             name: r.name,
         })
         .collect();
     let can_stream = st.cfg.music_api_token.is_some() && !isrc.trim().is_empty();
     let me = nav.slug.clone();
-    // Group the track's tags into clouds by their (first) group.
+    // Bucket the track's tags into clouds by their type.
     let tag_clouds: Vec<TagCloudRow> = {
         let mut map: std::collections::BTreeMap<String, (String, Vec<TagChipRow>)> =
             std::collections::BTreeMap::new();
         for t in &tags {
-            let (gname, gicon) = t
-                .groups
-                .first()
-                .map(|g| {
-                    (
-                        g.name.clone(),
-                        if g.icon.trim().is_empty() {
-                            "•".to_string()
-                        } else {
-                            g.icon.clone()
-                        },
-                    )
-                })
-                .unwrap_or_else(|| ("Ohne Gruppe".to_string(), "•".to_string()));
-            let key = if gname.trim().is_empty() {
-                "Ohne Gruppe".to_string()
+            let (gname, gicon) = if t.type_label.is_empty() {
+                ("Ohne Typ".to_string(), "•".to_string())
             } else {
-                gname
+                (
+                    t.type_label.clone(),
+                    if t.type_icon.trim().is_empty() {
+                        "•".to_string()
+                    } else {
+                        t.type_icon.clone()
+                    },
+                )
             };
-            let e = map.entry(key).or_insert_with(|| (gicon, Vec::new()));
+            let e = map.entry(gname).or_insert_with(|| (gicon, Vec::new()));
             e.1.push(TagChipRow {
                 id: t.id,
                 name: t.name.clone(),
@@ -1291,9 +1262,13 @@ async fn track_page(
         }
         let mut clouds: Vec<TagCloudRow> = map
             .into_iter()
-            .map(|(group, (icon, chips))| TagCloudRow { group, icon, chips })
+            .map(|(type_label, (icon, chips))| TagCloudRow {
+                type_label,
+                icon,
+                chips,
+            })
             .collect();
-        if let Some(pos) = clouds.iter().position(|c| c.group == "Ohne Gruppe") {
+        if let Some(pos) = clouds.iter().position(|c| c.type_label == "Ohne Typ") {
             let last = clouds.remove(pos);
             clouds.push(last);
         }
@@ -1309,11 +1284,7 @@ async fn track_page(
     .flatten()
     .unwrap_or_default();
 
-    let my_groups: Vec<GroupRef> = crate::tags::groups_i_contribute(&st.pool, nav.id)
-        .await
-        .into_iter()
-        .map(|(id, name, icon)| GroupRef { id, name, icon })
-        .collect();
+    let my_types = type_options();
 
     let page = TrackPage {
         nav,
@@ -1351,7 +1322,7 @@ async fn track_page(
         untag_action: format!("/track/{id}/untag"),
         tag_action: format!("/track/{id}/tag"),
         htmx: false,
-        my_groups,
+        my_types,
     };
 
     match page.render() {
@@ -1363,8 +1334,8 @@ async fn track_page(
 #[derive(Deserialize)]
 struct TrackTagForm {
     name: String,
-    #[serde(default)]
-    group: Option<String>,
+    #[serde(default, rename = "type")]
+    tag_type: Option<String>,
 }
 
 /// Directly tag the track (track view = core element).
@@ -1379,10 +1350,12 @@ async fn track_tag(
     };
     if !f.name.trim().is_empty() {
         if let Ok(tag_id) = crate::tags::ensure_tag(&st.pool, nav.id, &f.name).await {
-            if let Some(g) = f.group.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
-                if let Ok(gid) = crate::tags::create_group(&st.pool, nav.id, g, "").await {
-                    let _ = crate::tags::add_tag_to_group(&st.pool, nav.id, tag_id, gid).await;
-                }
+            if let Some(ty) = f
+                .tag_type
+                .as_deref()
+                .and_then(crate::tagtypes::TagType::parse)
+            {
+                let _ = crate::tagtypes::set(&st.pool, nav.id, tag_id, Some(ty)).await;
             }
             let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
         }

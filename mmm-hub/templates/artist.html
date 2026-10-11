@@ -169,21 +169,21 @@ content %}
     {% else %}
     <div class="hub-cols">
         <div>
-            <h3>Verteilung nach Gruppen</h3>
-            {% if tag_groups.is_empty() %}
-            <p class="hub-empty">Keine Gruppen-Zuordnung.</p>
+            <h3>Verteilung nach Typen</h3>
+            {% if tag_types.is_empty() %}
+            <p class="hub-empty">Keine Typ-Zuordnung.</p>
             {% else %}
             <table class="hub-dense-table">
                 <thead>
                     <tr>
-                        <th scope="col">Gruppe</th>
-                        <th scope="col" title="Tracks mit einem Tag dieser Gruppe">
+                        <th scope="col">Typ</th>
+                        <th scope="col" title="Tracks mit einem Tag dieses Typs">
                             Tracks
                         </th>
                     </tr>
                 </thead>
                 <tbody>
-                    {% for g in tag_groups %}
+                    {% for g in tag_types %}
                     <tr>
                         <td>{{ g.icon }} {{ g.name }}</td>
                         <td>{{ g.tracks }}</td>

@@ -4,6 +4,7 @@
 mod common;
 
 use mmm_hub::tags;
+use mmm_hub::tagtypes::{TagType, set as set_type};
 
 /// Adding a `(track, tag)` edge straight into the materialized resolved table.
 async fn resolved(pool: &sqlx::SqlitePool, track: i64, tag: i64) {
@@ -35,10 +36,7 @@ async fn rumpelkiste_playlist_is_ignored_in_digging_cooccurrence() {
     let tag = tags::create_from_playlist(&app.pool, alice, app.seed.pl_alice)
         .await
         .unwrap();
-    let rumpel = tags::create_group(&app.pool, alice, "Rumpelkiste", "")
-        .await
-        .unwrap();
-    tags::add_tag_to_group(&app.pool, alice, tag, rumpel)
+    set_type(&app.pool, alice, tag, Some(TagType::Rumpelkiste))
         .await
         .unwrap();
 
@@ -52,23 +50,21 @@ async fn rumpelkiste_playlist_is_ignored_in_digging_cooccurrence() {
 }
 
 /// `similarity_to_seed` scores candidates that share tags with the seed (batched),
-/// and gives cross-group matches the configured bonus.
+/// and gives cross-type matches the configured bonus.
 #[tokio::test]
-async fn similarity_to_seed_scores_shared_cross_group_tags() {
+async fn similarity_to_seed_scores_shared_cross_type_tags() {
     let app = common::spawn().await;
     let me = app.seed.alice;
-    let mood = tags::create_group(&app.pool, me, "Mood", "").await.unwrap();
-    let vibe = tags::create_group(&app.pool, me, "Vibe", "").await.unwrap();
     let dark = tags::ensure_tag(&app.pool, me, "Dark").await.unwrap();
     let ware = tags::ensure_tag(&app.pool, me, "Warehouse").await.unwrap();
-    tags::add_tag_to_group(&app.pool, me, dark, mood)
+    set_type(&app.pool, me, dark, Some(TagType::Mood))
         .await
         .unwrap();
-    tags::add_tag_to_group(&app.pool, me, ware, vibe)
+    set_type(&app.pool, me, ware, Some(TagType::Vibe))
         .await
         .unwrap();
 
-    // Seed + candidate both tagged {Dark(Mood), Warehouse(Vibe)} -> cross-group pair.
+    // Seed + candidate both tagged {Dark(Mood), Warehouse(Vibe)} -> cross-type pair.
     for tr in [app.seed.t_pl, app.seed.t_all] {
         resolved(&app.pool, tr, dark).await;
         resolved(&app.pool, tr, ware).await;
@@ -100,11 +96,14 @@ async fn similarity_to_seed_scores_shared_cross_group_tags() {
 async fn ripeness_many_matches_single_track_scoring() {
     let app = common::spawn().await;
     let me = app.seed.alice;
-    let g = tags::create_group(&app.pool, me, "Mood", "").await.unwrap();
     let a = tags::ensure_tag(&app.pool, me, "Dark").await.unwrap();
     let b = tags::ensure_tag(&app.pool, me, "Deep").await.unwrap();
-    tags::add_tag_to_group(&app.pool, me, a, g).await.unwrap();
-    tags::add_tag_to_group(&app.pool, me, b, g).await.unwrap();
+    set_type(&app.pool, me, a, Some(TagType::Mood))
+        .await
+        .unwrap();
+    set_type(&app.pool, me, b, Some(TagType::Mood))
+        .await
+        .unwrap();
     resolved(&app.pool, app.seed.t_all, a).await;
     resolved(&app.pool, app.seed.t_all, b).await;
 

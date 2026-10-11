@@ -45,6 +45,16 @@ pub const ENGINE_TAG_POINTS: &str = "engine_tag_points";
 pub const ENGINE_TRAK_PLAYCOUNT_CAP: &str = "engine_trak_playcount_cap";
 pub const ENGINE_TAG_OVERLAP_BASE: &str = "engine_tag_overlap_base";
 pub const ENGINE_CROSS_GROUP_BONUS: &str = "engine_cross_group_bonus";
+
+// Per-tag-type weights (digging/similarity ranking). One knob per semantic type;
+// the five PHASE levels share `engine_w_phase`.
+pub const ENGINE_W_MOOD: &str = "engine_w_mood";
+pub const ENGINE_W_GENRE: &str = "engine_w_genre";
+pub const ENGINE_W_VIBE: &str = "engine_w_vibe";
+pub const ENGINE_W_MERKMAL: &str = "engine_w_merkmal";
+pub const ENGINE_W_PHASE: &str = "engine_w_phase";
+pub const ENGINE_W_SETLIST: &str = "engine_w_setlist";
+pub const ENGINE_W_RUMPELKISTE: &str = "engine_w_rumpelkiste";
 // Digging/overlap ranking (#223): how strongly similarity v2 and ripeness pull.
 pub const ENGINE_SIM_FACTOR: &str = "engine_sim_factor";
 pub const ENGINE_RIPENESS_FACTOR: &str = "engine_ripeness_factor";
@@ -331,6 +341,26 @@ pub const SETTINGS: &[SettingSpec] = &[
         0.0,
         100.0,
     ),
+    // ── Tag-Typ-Gewichte (Digging/Similarity-Ranking) ──────────────────────
+    num(ENGINE_W_MOOD, "Typ-Gewicht: Mood", "1", 0.0, 100.0),
+    num(ENGINE_W_GENRE, "Typ-Gewicht: Genre", "0.9", 0.0, 100.0),
+    num(ENGINE_W_VIBE, "Typ-Gewicht: Vibe", "1", 0.0, 100.0),
+    num(ENGINE_W_MERKMAL, "Typ-Gewicht: Merkmal", "0.8", 0.0, 100.0),
+    num(
+        ENGINE_W_PHASE,
+        "Typ-Gewicht: Phase (alle Stufen)",
+        "0.7",
+        0.0,
+        100.0,
+    ),
+    num(ENGINE_W_SETLIST, "Typ-Gewicht: Setlist", "0.2", 0.0, 100.0),
+    num(
+        ENGINE_W_RUMPELKISTE,
+        "Typ-Gewicht: Rumpelkiste",
+        "0.1",
+        0.0,
+        100.0,
+    ),
     num(
         ENGINE_SIM_FACTOR,
         "Engine: Faktor Similarity v2 (Digging/Overlap)",
@@ -464,6 +494,14 @@ pub struct Engine {
     /// Similarity v2 knobs.
     pub tag_overlap_base: f64,
     pub cross_group_bonus: f64,
+    /// Per-type weights (digging/similarity ranking).
+    pub w_mood: f64,
+    pub w_genre: f64,
+    pub w_vibe: f64,
+    pub w_merkmal: f64,
+    pub w_phase: f64,
+    pub w_setlist: f64,
+    pub w_rumpelkiste: f64,
     /// Digging/overlap ranking: weight of similarity v2 and ripeness signals.
     pub sim_factor: f64,
     pub ripeness_factor: f64,
@@ -501,6 +539,13 @@ impl Default for Engine {
             trak_playcount_cap: 100.0,
             tag_overlap_base: 1.0,
             cross_group_bonus: 1.5,
+            w_mood: 1.0,
+            w_genre: 0.9,
+            w_vibe: 1.0,
+            w_merkmal: 0.8,
+            w_phase: 0.7,
+            w_setlist: 0.2,
+            w_rumpelkiste: 0.1,
             sim_factor: 5.0,
             ripeness_factor: 0.02,
             meta_title: 1.0,
@@ -515,6 +560,23 @@ impl Default for Engine {
             rec_playlist: 1.0,
             rec_artist: 1.0,
             rec_album: 1.0,
+        }
+    }
+}
+
+impl Engine {
+    /// Configured weight for a tag type (by its canonical string value).
+    /// Unknown/`None` -> 0.0.
+    pub fn type_weight(&self, type_value: &str) -> f64 {
+        match type_value.trim().to_ascii_uppercase().as_str() {
+            "MOOD" => self.w_mood,
+            "GENRE" => self.w_genre,
+            "VIBE" => self.w_vibe,
+            "MERKMAL" => self.w_merkmal,
+            "PHASE_1" | "PHASE_2" | "PHASE_3" | "PHASE_4" | "PHASE_5" => self.w_phase,
+            "SETLIST" => self.w_setlist,
+            "RUMPELKISTE" => self.w_rumpelkiste,
+            _ => 0.0,
         }
     }
 }
@@ -555,6 +617,13 @@ pub async fn engine(pool: &SqlitePool) -> Engine {
         trak_playcount_cap: num(ENGINE_TRAK_PLAYCOUNT_CAP, 100.0),
         tag_overlap_base: num(ENGINE_TAG_OVERLAP_BASE, 1.0),
         cross_group_bonus: num(ENGINE_CROSS_GROUP_BONUS, 1.5),
+        w_mood: num(ENGINE_W_MOOD, 1.0),
+        w_genre: num(ENGINE_W_GENRE, 0.9),
+        w_vibe: num(ENGINE_W_VIBE, 1.0),
+        w_merkmal: num(ENGINE_W_MERKMAL, 0.8),
+        w_phase: num(ENGINE_W_PHASE, 0.7),
+        w_setlist: num(ENGINE_W_SETLIST, 0.2),
+        w_rumpelkiste: num(ENGINE_W_RUMPELKISTE, 0.1),
         sim_factor: num(ENGINE_SIM_FACTOR, 5.0),
         ripeness_factor: num(ENGINE_RIPENESS_FACTOR, 0.02),
         meta_title: num(ENGINE_META_TITLE, 1.0),
@@ -632,4 +701,43 @@ pub async fn overlay_config(
         cfg.apply(&k, &v);
     }
     cfg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn type_weight_reads_config() {
+        let mut e = Engine::default();
+        assert_eq!(e.type_weight("MOOD"), 1.0);
+        assert_eq!(e.type_weight("GENRE"), 0.9);
+        assert_eq!(e.type_weight("RUMPELKISTE"), 0.1);
+        assert_eq!(
+            e.type_weight("phase_3"),
+            0.7,
+            "case-insensitive, phase shared"
+        );
+        assert_eq!(e.type_weight("unknown"), 0.0);
+        e.w_mood = 4.2;
+        assert_eq!(e.type_weight("MOOD"), 4.2);
+    }
+
+    #[test]
+    fn type_weight_settings_are_registered() {
+        for key in [
+            ENGINE_W_MOOD,
+            ENGINE_W_GENRE,
+            ENGINE_W_VIBE,
+            ENGINE_W_MERKMAL,
+            ENGINE_W_PHASE,
+            ENGINE_W_SETLIST,
+            ENGINE_W_RUMPELKISTE,
+        ] {
+            assert!(
+                SETTINGS.iter().any(|s| s.key == key),
+                "setting {key} missing from registry"
+            );
+        }
+    }
 }

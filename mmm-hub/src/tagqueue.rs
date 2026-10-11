@@ -189,14 +189,20 @@ struct TagChip {
 
 struct RecChip {
     name: String,
-    group: String,
+    type_label: String,
     reason: String,
 }
 
 struct TagCloud {
-    group: String,
+    type_label: String,
     icon: String,
     chips: Vec<TagChip>,
+}
+
+/// A pickable tag type for the "add tag" form.
+struct TypeOption {
+    value: &'static str,
+    label: &'static str,
 }
 
 struct DetailGroupTag {
@@ -241,7 +247,7 @@ struct QueueDetail {
     htmx: bool,
     playlists: Vec<PlRow>,
     my_tags: Vec<DetailGroupTag>,
-    my_groups: Vec<DetailGroupTag>,
+    my_types: Vec<TypeOption>,
     recommended: Vec<RecChip>,
 }
 
@@ -309,17 +315,13 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
             .into_iter()
             .collect();
 
-    // Tags, grouped into clouds by their (first) group name.
-    let tag_rows = sqlx::query_as::<_, (i64, String, String, String)>(
-        "SELECT t.id, t.name,
-                COALESCE((SELECT g.name FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
-                           WHERE gt.tag_id = t.id ORDER BY g.name LIMIT 1), '') AS gname,
-                COALESCE((SELECT g.icon FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
-                           WHERE gt.tag_id = t.id ORDER BY g.name LIMIT 1), '') AS gicon
+    // Tags, bucketed into clouds by type.
+    let tag_rows = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT t.id, t.name, COALESCE(t.type,'') AS type
            FROM hub_track_resolved_tags rt
            JOIN hub_tags t ON t.id = rt.tag_id
           WHERE rt.track_id = ?1
-          ORDER BY gname COLLATE NOCASE, t.name COLLATE NOCASE LIMIT 400",
+          ORDER BY t.type COLLATE NOCASE, t.name COLLATE NOCASE LIMIT 400",
     )
     .bind(id)
     .fetch_all(&st.pool)
@@ -327,17 +329,14 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
     .unwrap_or_default();
     let mut map: std::collections::BTreeMap<String, (String, Vec<TagChip>)> =
         std::collections::BTreeMap::new();
-    for (id, name, gname, gicon) in tag_rows {
-        let key = if gname.trim().is_empty() {
-            "Ohne Gruppe".to_string()
-        } else {
-            gname
-        };
-        let icon = if gicon.trim().is_empty() {
-            "•".to_string()
-        } else {
-            gicon
-        };
+    for (id, name, ty) in tag_rows {
+        let parsed = crate::tagtypes::TagType::parse(&ty);
+        let key = parsed
+            .map(|t| t.label().to_string())
+            .unwrap_or_else(|| "Ohne Typ".to_string());
+        let icon = parsed
+            .map(|t| t.icon().to_string())
+            .unwrap_or_else(|| "•".to_string());
         let e = map.entry(key).or_insert_with(|| (icon, Vec::new()));
         e.1.push(TagChip {
             id,
@@ -347,10 +346,14 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
     }
     let mut tag_clouds: Vec<TagCloud> = map
         .into_iter()
-        .map(|(group, (icon, chips))| TagCloud { group, icon, chips })
+        .map(|(type_label, (icon, chips))| TagCloud {
+            type_label,
+            icon,
+            chips,
+        })
         .collect();
-    // Push the ungrouped cloud to the end.
-    if let Some(pos) = tag_clouds.iter().position(|c| c.group == "Ohne Gruppe") {
+    // Push the untyped cloud to the end.
+    if let Some(pos) = tag_clouds.iter().position(|c| c.type_label == "Ohne Typ") {
         let last = tag_clouds.remove(pos);
         tag_clouds.push(last);
     }
@@ -379,17 +382,16 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
         .into_iter()
         .map(|(id, name)| DetailGroupTag { id, name })
         .collect();
-    let my_groups: Vec<DetailGroupTag> = crate::tags::groups_i_contribute(&st.pool, me)
-        .await
+    let my_types: Vec<TypeOption> = crate::tagtypes::options()
         .into_iter()
-        .map(|(id, name, _icon)| DetailGroupTag { id, name })
+        .map(|(value, label, _icon)| TypeOption { value, label })
         .collect();
     let recommended: Vec<RecChip> = crate::recommend::recommend_tags(&st.pool, id, 16)
         .await
         .into_iter()
         .map(|r| RecChip {
             reason: r.why(),
-            group: r.group,
+            type_label: r.type_label,
             name: r.name,
         })
         .collect();
@@ -435,7 +437,7 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
         htmx: true,
         playlists,
         my_tags,
-        my_groups,
+        my_types,
         recommended,
     })
 }
@@ -457,9 +459,9 @@ async fn queue_detail(
 #[derive(Deserialize)]
 struct TagForm {
     name: String,
-    /// Optional group (free text) to place the new tag into, e.g. "Mood".
-    #[serde(default)]
-    group: Option<String>,
+    /// Optional tag type (e.g. "MOOD") to apply to the new tag.
+    #[serde(default, rename = "type")]
+    tag_type: Option<String>,
 }
 
 async fn queue_tag(
@@ -473,10 +475,12 @@ async fn queue_tag(
     };
     if !f.name.trim().is_empty() {
         if let Ok(tag_id) = crate::tags::ensure_tag(&st.pool, nav.id, &f.name).await {
-            if let Some(g) = f.group.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
-                if let Ok(gid) = crate::tags::create_group(&st.pool, nav.id, g, "").await {
-                    let _ = crate::tags::add_tag_to_group(&st.pool, nav.id, tag_id, gid).await;
-                }
+            if let Some(ty) = f
+                .tag_type
+                .as_deref()
+                .and_then(crate::tagtypes::TagType::parse)
+            {
+                let _ = crate::tagtypes::set(&st.pool, nav.id, tag_id, Some(ty)).await;
             }
             let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
         }

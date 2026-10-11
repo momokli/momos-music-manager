@@ -44,9 +44,8 @@ pub async fn internal_suggestions(
           WHERE seed.track_id = ?1
             AND seed.playlist_id NOT IN (
                 SELECT ts.playlist_id FROM hub_tag_sources ts
-                  JOIN hub_group_tags gt ON gt.tag_id = ts.tag_id
-                  JOIN hub_tag_groups g ON g.id = gt.group_id
-                 WHERE g.role = 'rumpelkiste')
+                  JOIN hub_tags t ON t.id = ts.tag_id
+                 WHERE t.type = 'RUMPELKISTE')
           GROUP BY hpt2.track_id
           ORDER BY shared DESC, users DESC, t.artists, t.title
           LIMIT ?2",

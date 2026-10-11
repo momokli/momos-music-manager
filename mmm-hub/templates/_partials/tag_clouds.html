@@ -1,13 +1,9 @@
-{#
-  Shared tag-cloud renderer (uniform across track view + tag-queue detail).
-  Expects in context:
-    tag_clouds: [{ group, icon, chips: [{ id, name, mine }] }]
-    untag_action: URL to POST a direct untag (form field `name`)
-    htmx: bool — when true, submit via htmx into #queue-detail
-#}
-{% if tag_clouds.is_empty() %}<span class="hub-muted">—</span>{% else %} {% for c in
-tag_clouds %}
-<h4 class="hub-cloud-h">{{ c.icon }} {{ c.group }}</h4>
+{# Shared tag-cloud renderer (uniform across track view + tag-queue detail). Expects in
+context: tag_clouds: [{ type_label, icon, chips: [{ id, name, mine }] }] untag_action: URL
+to POST a direct untag (form field `name`) htmx: bool — when true, submit via htmx into
+#queue-detail #} {% if tag_clouds.is_empty() %}<span class="hub-muted">—</span>{% else %}
+{% for c in tag_clouds %}
+<h4 class="hub-cloud-h">{{ c.icon }} {{ c.type_label }}</h4>
 <div class="hub-cloud">
     {% for t in c.chips %}
     <span class="hub-chip" title="{% if t.mine %}von dir{% endif %}"
@@ -15,7 +11,15 @@ tag_clouds %}
         <form
             method="post"
             action="{{ untag_action }}"
-            {% if htmx %}hx-post="{{ untag_action }}" hx-target="#queue-detail" hx-swap="innerHTML"{% endif %}
+            {%
+            if
+            htmx
+            %}hx-post="{{ untag_action }}"
+            hx-target="#queue-detail"
+            hx-swap="innerHTML"
+            {%
+            endif
+            %}
             style="display: inline"
         >
             <input type="hidden" name="name" value="{{ t.name }}" />

@@ -42,35 +42,26 @@ content %}
 {% endif %}
 
 <section
-    aria-label="Gruppen"
+    aria-label="Typ"
     style="display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center"
 >
-    <span class="hub-muted">Gruppen:</span>
-    {% if groups.is_empty() %}<span class="hub-muted">—</span>{% endif %} {% for g in
-    groups %}
+    <span class="hub-muted">Typ:</span>
+    {% if type_label != "" %}<span class="hub-chip">{{ type_icon }} {{ type_label }}</span
+    >{% else %}<span class="hub-muted">—</span>{% endif %} {% if is_owner %}
     <form
         method="post"
-        action="/tag/{{ id }}/group/remove"
-        style="display: inline-flex; gap: 0.25rem"
-    >
-        <input type="hidden" name="group_id" value="{{ g.id }}" />
-        <button type="submit" class="hub-tag" title="Aus Gruppe entfernen">
-            {{ g.icon }} {{ g.name }}{% if g.ranked && g.rank_disp != "" %} ({{ g.name
-            }}-Rang {{ g.rank_disp }}){% endif %} ×
-        </button>
-    </form>
-    {% endfor %} {% if !my_groups.is_empty() %}
-    <form
-        method="post"
-        action="/tag/{{ id }}/group/add"
+        action="/tag/{{ id }}/type"
         style="display: inline-flex; gap: 0.25rem; align-items: center"
     >
-        <select name="group_id" aria-label="Gruppe wählen">
-            {% for g in my_groups %}
-            <option value="{{ g.id }}">{{ g.icon }} {{ g.name }}</option>
+        <select name="type" aria-label="Typ wählen">
+            <option value="">kein Typ</option>
+            {% for t in type_options %}
+            <option value="{{ t.value }}" {% if t.selected %}selected{% endif %}>
+                {{ t.icon }} {{ t.label }}
+            </option>
             {% endfor %}
         </select>
-        <button type="submit" class="secondary">Zu Gruppe hinzufügen</button>
+        <button type="submit" class="secondary">Typ setzen</button>
     </form>
     {% endif %}
 </section>
@@ -259,7 +250,7 @@ content %}
             <thead>
                 <tr>
                     <th scope="col">Tag</th>
-                    <th scope="col">Gruppe</th>
+                    <th scope="col">Typ</th>
                     <th scope="col" title="Lift = P(A,B)/(P(A)·P(B))">Lift</th>
                     <th scope="col" title="Tracks mit beiden Tags">Paar</th>
                     <th scope="col" title="Tracks mit dem anderen Tag">Support</th>
@@ -271,7 +262,8 @@ content %}
                 <tr>
                     <td><a href="{{ c.tag_href }}">{{ c.name }}</a></td>
                     <td>
-                        {% if !c.group.is_empty() %}{{ c.group }}{% if c.same_group %}
+                        {% if !c.type_label.is_empty() %}{{ c.type_label }}{% if
+                        c.same_type %}
                         <span class="hub-badge">same</span>{% endif %}{% else %}<span
                             class="hub-muted"
                             >—</span

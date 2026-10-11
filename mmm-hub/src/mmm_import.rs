@@ -1,7 +1,7 @@
 //! One-off importer: seed a hub user's tag library from a Momo's Music Manager
-//! (`library.db`) database — categories (with a mapped icon) and tags. Tags are
-//! also linked to a hub playlist of the same name when one exists, so they get
-//! their tracks.
+//! (`library.db`) database — categories (mapped to a tag **type**) and tags.
+//! Tags are also linked to a hub playlist of the same name when one exists, so
+//! they get their tracks.
 
 use std::collections::HashMap;
 
@@ -9,23 +9,21 @@ use anyhow::{Context, Result, bail};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-/// FontAwesome icon (MMM) → emoji (hub, no FA dependency).
-pub fn map_icon(fa: &str) -> String {
-    let f = fa.to_lowercase();
-    let pick = if f.contains("list") {
-        "🎼" // Setlist (fa-list / fa-list-music)
-    } else if f.contains("layers") || f.contains("bolt") {
-        "⚡" // Phase
-    } else if f.contains("heart") {
-        "💜" // Mood
-    } else if f.contains("rainbow") || f.contains("sparkles") {
-        "🌈" // Vibe
-    } else if f.contains("hashtag") {
-        "#️⃣" // Merkmal
-    } else {
-        ""
-    };
-    pick.to_string()
+use crate::tagtypes::TagType;
+
+/// Map an MMM category name to a hub tag type. Phase categories map to
+/// `PHASE_3` as a base; the concrete energy level is applied per tag below.
+fn type_for_category(name: &str) -> Option<TagType> {
+    match name.trim().to_lowercase().as_str() {
+        "mood" | "moods" => Some(TagType::Mood),
+        "vibe" | "vibes" => Some(TagType::Vibe),
+        "merkmal" | "merkmale" | "attribute" | "attribut" => Some(TagType::Merkmal),
+        "genre" | "genres" => Some(TagType::Genre),
+        "setlist" | "setlists" => Some(TagType::Setlist),
+        "rumpelkiste" | "rumpel" => Some(TagType::Rumpelkiste),
+        "phase" | "phase/energy" | "phase / energy" | "energy" => Some(TagType::Phase3),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Default)]
@@ -65,7 +63,7 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
         .await
         .with_context(|| format!("open MMM db {mmm_db}"))?;
 
-    // Categories.
+    // Categories -> tag types.
     let cats = sqlx::query_as::<_, (i64, String, String)>(
         "SELECT id, name, COALESCE(icon,'') FROM tag_categories ORDER BY sort_order, id",
     )
@@ -73,13 +71,14 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
     .await
     .context("read tag_categories (is this a MMM db?)")?;
 
-    let mut cat_map: HashMap<i64, i64> = HashMap::new();
+    let mut cat_type: HashMap<i64, TagType> = HashMap::new();
     let mut name_to_hub: HashMap<String, i64> = HashMap::new();
     let mut summary = Summary::default();
-    for (mmm_cat_id, name, icon) in cats {
-        let hub_id = crate::tags::create_group(hub, user_id, &name, &map_icon(&icon)).await?;
-        cat_map.insert(mmm_cat_id, hub_id);
-        summary.groups += 1;
+    for (mmm_cat_id, name, _icon) in cats {
+        if let Some(ty) = type_for_category(&name) {
+            cat_type.insert(mmm_cat_id, ty);
+            summary.groups += 1;
+        }
     }
 
     // Tags.
@@ -98,9 +97,9 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
         let tag_id = crate::tags::ensure_tag(hub, user_id, &name).await?;
         name_to_hub.insert(name.trim().to_lowercase(), tag_id);
         summary.tags += 1;
-        // The MMM category maps to a hub group (many-to-many).
-        if let Some(group_id) = cat_map.get(&mmm_cat_id).copied() {
-            let _ = crate::tags::add_tag_to_group(hub, user_id, tag_id, group_id).await;
+        // The MMM category maps to the tag's hub type.
+        if let Some(ty) = cat_type.get(&mmm_cat_id).copied() {
+            let _ = crate::tagtypes::set(hub, user_id, tag_id, Some(ty)).await;
         }
 
         // Link a hub playlist owned by the user with the same name, if any.
@@ -144,8 +143,8 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
         }
     }
 
-    // Energy levels (`tag_energy_levels`, 0..5): mark the category's hub group
-    // as ranked and set each tag's rank within it (e.g. Phase: start=1 … peak=5).
+    // Energy levels (`tag_energy_levels`, 0..5): a phase tag's type becomes
+    // `PHASE_<level>` (clamped to 1..5, default 3 for phase categories).
     let energy_rows = sqlx::query_as::<_, (String, i64, i64)>(
         "SELECT t.name, t.category_id, e.energy_level FROM tag_energy_levels e
            JOIN tags t ON t.id = e.tag_id",
@@ -153,26 +152,23 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
     .fetch_all(&mmm)
     .await
     .unwrap_or_default();
-    let mut ranked_groups: std::collections::HashSet<i64> = std::collections::HashSet::new();
     for (name, mmm_cat_id, level) in energy_rows {
         let tag_id = name_to_hub.get(&name.trim().to_lowercase()).copied();
-        let group_id = cat_map.get(&mmm_cat_id).copied();
-        if let (Some(tag_id), Some(group_id)) = (tag_id, group_id) {
-            sqlx::query("UPDATE hub_group_tags SET rank = ?1 WHERE group_id = ?2 AND tag_id = ?3")
-                .bind(level)
-                .bind(group_id)
-                .bind(tag_id)
-                .execute(hub)
-                .await?;
-            ranked_groups.insert(group_id);
-            summary.ranked += 1;
+        let Some(tag_id) = tag_id else { continue };
+        let ty = if matches!(cat_type.get(&mmm_cat_id), Some(TagType::Phase3)) {
+            let n = level.clamp(1, 5);
+            TagType::parse(&format!("PHASE_{n}"))
+        } else {
+            cat_type.get(&mmm_cat_id).copied()
+        };
+        if let Some(ty) = ty {
+            if crate::tagtypes::set(hub, user_id, tag_id, Some(ty))
+                .await
+                .is_ok()
+            {
+                summary.ranked += 1;
+            }
         }
-    }
-    for gid in ranked_groups {
-        sqlx::query("UPDATE hub_tag_groups SET ranked = 1 WHERE id = ?1")
-            .bind(gid)
-            .execute(hub)
-            .await?;
     }
 
     crate::tags::rebuild(hub).await?;

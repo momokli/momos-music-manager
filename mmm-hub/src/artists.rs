@@ -12,7 +12,7 @@
 //! `hub_tracks.artists` column by splitting on `;`, `,`, `&` and ` feat. `
 //! (case-insensitive). Play counts come from the per-user Traktor ingest
 //! (`hub_traktor_tracks`); tags from the materialized `hub_track_resolved_tags`
-//! joined to `hub_tag_groups` / `hub_tags`.
+//! joined to `hub_tags` (bucketed by tag type).
 //!
 //! Assumptions / limitations (documented in the PR):
 //! * Splitting a comma inside a single artist name (`Earth, Wind & Fire`) is a
@@ -431,7 +431,7 @@ struct ArtistPage {
 
     // AR3
     has_tags: bool,
-    tag_groups: Vec<GroupDist>,
+    tag_types: Vec<TypeDist>,
     top_tags: Vec<TagCount>,
 
     // AR4
@@ -475,7 +475,7 @@ struct OtherUser {
     rows: Vec<PlayRow>,
 }
 
-struct GroupDist {
+struct TypeDist {
     name: String,
     icon: String,
     tracks: i64,
@@ -756,29 +756,36 @@ async fn artist_page(
     let total_plays: i64 = traktor_rows.iter().map(|r| r.2).sum();
 
     // ── AR3: tags of the artist's tracks ─────────────────────────────────────
-    let mut tag_groups: Vec<GroupDist> = Vec::new();
+    let mut tag_types: Vec<TypeDist> = Vec::new();
     let mut top_tags: Vec<TagCount> = Vec::new();
     let mut artist_tag_ids: HashSet<i64> = HashSet::new();
     for chunk in artist_ids.chunks(CHUNK) {
         let mut qb = QueryBuilder::new(
-            "SELECT g.name AS name, g.icon AS icon, COUNT(DISTINCT rt.track_id) AS tracks
+            "SELECT COALESCE(t.type,'') AS type, COUNT(DISTINCT rt.track_id) AS tracks
                FROM hub_track_resolved_tags rt
-               JOIN hub_group_tags gt ON gt.tag_id = rt.tag_id
-               JOIN hub_tag_groups g ON g.id = gt.group_id
-              WHERE rt.track_id IN ",
+               JOIN hub_tags t ON t.id = rt.tag_id
+              WHERE t.type IS NOT NULL AND rt.track_id IN ",
         );
         bind_ids(&mut qb, chunk);
-        qb.push(" GROUP BY g.id ORDER BY tracks DESC, g.name");
-        tag_groups.extend(
+        qb.push(" GROUP BY t.type ORDER BY tracks DESC, type");
+        tag_types.extend(
             qb.build()
                 .fetch_all(&st.pool)
                 .await
                 .unwrap_or_default()
                 .iter()
-                .map(|r| GroupDist {
-                    name: r.get::<Option<String>, _>("name").unwrap_or_default(),
-                    icon: r.get::<Option<String>, _>("icon").unwrap_or_default(),
-                    tracks: r.get::<Option<i64>, _>("tracks").unwrap_or(0),
+                .filter_map(|r| {
+                    let ty: String = r.get("type");
+                    let t = crate::tagtypes::TagType::parse(&ty)?;
+                    // Only types that *describe* a track belong in this view.
+                    if !t.describes() {
+                        return None;
+                    }
+                    Some(TypeDist {
+                        name: t.label().to_string(),
+                        icon: t.icon().to_string(),
+                        tracks: r.get::<Option<i64>, _>("tracks").unwrap_or(0),
+                    })
                 }),
         );
 
@@ -1220,7 +1227,7 @@ async fn artist_page(
         my_plays,
         others,
         has_tags,
-        tag_groups,
+        tag_types,
         top_tags,
         my_playlists,
         other_playlist_groups,
