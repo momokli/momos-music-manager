@@ -12,6 +12,31 @@
 
 use sqlx::{QueryBuilder, Sqlite};
 
+/// Deserializers for optional numeric query parameters.
+///
+/// HTML filter forms submit every field, so empties arrive as `key=`. serde's
+/// default `Option<i64>`/`Option<f64>` rejects that ("cannot parse integer from
+/// empty string") and the whole request 400s. These treat empty/whitespace as
+/// `None`.
+pub mod qnum {
+    use serde::{Deserialize, Deserializer};
+
+    fn clean<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+        let s = Option::<String>::deserialize(d)?;
+        Ok(s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
+    }
+
+    /// `Option<i64>` from a possibly-empty string.
+    pub fn opt_i64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+        Ok(clean(d)?.and_then(|v| v.parse().ok()))
+    }
+
+    /// `Option<f64>` from a possibly-empty string.
+    pub fn opt_f64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+        Ok(clean(d)?.and_then(|v| v.parse().ok()))
+    }
+}
+
 /// Lowercased alphanumeric tokens of a free-text query (punctuation dropped).
 pub fn tokens(q: &str) -> Vec<String> {
     q.split(|c: char| !c.is_alphanumeric())

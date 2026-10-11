@@ -410,6 +410,7 @@ struct PlaylistTableFilter {
     q: Option<String>,
     sort: Option<String>,
     dir: Option<String>,
+    msg: Option<String>,
 }
 
 async fn playlist_page(
@@ -508,7 +509,7 @@ async fn playlist_page(
     let s_title = crate::table::sort_head(rawq, "title", "Titel", &sort, &dir);
     render(&PlaylistPage {
         nav,
-        flash: String::new(),
+        flash: pf.msg.clone().unwrap_or_default(),
         id,
         name: name.unwrap_or_default(),
         owner: owner.unwrap_or_default(),
@@ -954,7 +955,7 @@ struct DownloadsQuery {
     format: Option<String>,
     #[serde(default)]
     q: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
     page: Option<i64>,
     #[serde(default)]
     sort: Option<String>,
@@ -1542,8 +1543,15 @@ async fn playlist_tag(
     let Some((user_id, _slug)) = crate::web::current_user(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
-    let _ = crate::tags::create_from_playlist(&st.pool, user_id, id).await;
-    Redirect::to(&format!("/playlist/{id}")).into_response()
+    match crate::tags::create_from_playlist(&st.pool, user_id, id).await {
+        // Jump straight to the freshly created (or existing) tag.
+        Ok(tag_id) => Redirect::to(&format!("/tag/{tag_id}")).into_response(),
+        Err(e) => Redirect::to(&format!(
+            "/playlist/{id}?msg={}",
+            urlencoding::encode(&format!("Tag anlegen fehlgeschlagen: {e}"))
+        ))
+        .into_response(),
+    }
 }
 
 // ── overlap / discover ──────────────────────────────────────────────────────
@@ -2711,20 +2719,24 @@ async fn similar_page(
 
 #[derive(Deserialize, Default)]
 struct DiggingQuery {
+    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
     seed: Option<i64>,
     mine: Option<String>,
     bpm: Option<String>,
     harm: Option<String>,
+    #[serde(default, deserialize_with = "crate::table::qnum::opt_f64")]
     tol: Option<f64>,
     /// Filter: tag owner slug.
     towner: Option<String>,
     /// Filter: tag group id.
+    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
     tgroup: Option<i64>,
     /// Filter: playlist owner (hub user) slug.
     powner: Option<String>,
     /// Filter: tag name (hierarchy-aware: also matches child tags).
     tag: Option<String>,
     /// Filter: minimum tag weight (group-weight signal).
+    #[serde(default, deserialize_with = "crate::table::qnum::opt_f64")]
     wmin: Option<f64>,
 }
 
@@ -3851,10 +3863,12 @@ struct TagFilter {
     /// "1" = only my tags.
     mine: Option<String>,
     /// Legacy single-group filter (kept for old links).
+    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
     group: Option<i64>,
     /// Multi-group filter, comma-separated group ids (e.g. `groups=3,7`).
     groups: Option<String>,
     /// Filter to tags in any group of this collective.
+    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
     collective: Option<i64>,
     /// Filter to tags owned by this user slug.
     owner: Option<String>,
@@ -4158,6 +4172,7 @@ async fn tags_page(
 struct TagCreateForm {
     name: String,
     /// Optional group to place the new tag into.
+    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
     group: Option<i64>,
 }
 

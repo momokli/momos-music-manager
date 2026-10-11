@@ -124,6 +124,46 @@ async fn playlists_page_shows_created_and_last_columns() {
 }
 
 #[tokio::test]
+async fn tag_filters_tolerate_empty_numeric_params() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // Filter forms submit every field; empties must not 400 the request.
+    for path in [
+        "/tags?groups=&q=dirty&owner=&collective=",
+        "/tags?q=&group=&collective=&sort=name&dir=asc",
+        "/digging?seed=&tol=&tgroup=&wmin=",
+        "/me/playlists?filter=all&sort=last&dir=desc",
+    ] {
+        let resp = app
+            .client()
+            .get(app.url(path))
+            .header("Cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK, "GET {path}");
+    }
+}
+
+#[tokio::test]
+async fn playlist_tag_creation_redirects_to_tag() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let resp = app
+        .client()
+        .post(app.url(&format!("/playlist/{}/tag", app.seed.pl_alice)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    let loc = resp.headers()["location"].to_str().unwrap().to_string();
+    assert!(loc.starts_with("/tag/"), "expected /tag/<id>, got {loc}");
+}
+
+#[tokio::test]
 async fn track_page_renders_in_shell() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
