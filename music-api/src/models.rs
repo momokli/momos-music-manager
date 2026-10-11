@@ -102,3 +102,50 @@ pub struct CreateOrderRequest {
 pub struct OrderItemRequest {
     pub isrc: String,
 }
+
+// ── Per-ISRC metadata (BPM / key authority) ──────────────────────────────────
+
+/// One metadata push for an ISRC (hub / ingest). Non-null fields win on merge.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MetadataItem {
+    pub isrc: String,
+    #[serde(default)]
+    pub bpm: Option<f64>,
+    /// Accepts `key` or `musicalKey` from callers.
+    #[serde(default, alias = "musicalKey")]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub camelot: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub artist: Option<String>,
+    #[serde(default)]
+    pub album: Option<String>,
+    #[serde(default)]
+    pub genre: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// `POST /metadata` body.
+#[derive(Debug, Deserialize)]
+pub struct MetadataPushRequest {
+    pub items: Vec<MetadataItem>,
+}
+
+/// Stored per-ISRC metadata (`GET /metadata`).
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackMetadata {
+    pub isrc: String,
+    pub bpm: Option<f64>,
+    pub musical_key: Option<String>,
+    pub camelot: Option<String>,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub genre: Option<String>,
+    pub source: Option<String>,
+    pub updated_at: i64,
+}

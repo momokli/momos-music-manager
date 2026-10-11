@@ -71,6 +71,26 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    // Per-ISRC metadata (BPM/key authority). Non-null fields win on merge.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS track_metadata (
+            isrc        TEXT PRIMARY KEY,
+            bpm         REAL,
+            musical_key TEXT,
+            camelot     TEXT,
+            title       TEXT,
+            artist      TEXT,
+            album       TEXT,
+            genre       TEXT,
+            source      TEXT,
+            updated_at  INTEGER NOT NULL
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tracks_state ON tracks(state);")
         .execute(pool)
         .await?;
@@ -533,6 +553,86 @@ pub async fn mark_terminal(
     .execute(pool)
     .await?;
     refresh_orders_for_isrc(pool, isrc).await
+}
+
+/// Upsert per-ISRC metadata. Non-null fields win; a null field keeps the stored
+/// value (merge, not replace). Returns how many rows were written.
+pub async fn upsert_metadata(
+    pool: &Pool<Sqlite>,
+    items: &[crate::models::MetadataItem],
+) -> anyhow::Result<usize> {
+    let ts = now();
+    let mut tx = pool.begin().await?;
+    let mut n = 0usize;
+    for it in items {
+        let isrc = normalize_isrc(&it.isrc);
+        if isrc.is_empty() {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO track_metadata
+                (isrc, bpm, musical_key, camelot, title, artist, album, genre, source, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(isrc) DO UPDATE SET
+                bpm         = COALESCE(excluded.bpm, track_metadata.bpm),
+                musical_key = COALESCE(excluded.musical_key, track_metadata.musical_key),
+                camelot     = COALESCE(excluded.camelot, track_metadata.camelot),
+                title       = COALESCE(excluded.title, track_metadata.title),
+                artist      = COALESCE(excluded.artist, track_metadata.artist),
+                album       = COALESCE(excluded.album, track_metadata.album),
+                genre       = COALESCE(excluded.genre, track_metadata.genre),
+                source      = COALESCE(excluded.source, track_metadata.source),
+                updated_at  = excluded.updated_at",
+        )
+        .bind(&isrc)
+        .bind(it.bpm)
+        .bind(&it.key)
+        .bind(&it.camelot)
+        .bind(&it.title)
+        .bind(&it.artist)
+        .bind(&it.album)
+        .bind(&it.genre)
+        .bind(&it.source)
+        .bind(ts)
+        .execute(&mut *tx)
+        .await?;
+        n += 1;
+    }
+    tx.commit().await?;
+    Ok(n)
+}
+
+/// Metadata for a single ISRC (normalised lookup).
+pub async fn get_metadata(
+    pool: &Pool<Sqlite>,
+    isrc: &str,
+) -> anyhow::Result<Option<crate::models::TrackMetadata>> {
+    Ok(sqlx::query_as::<_, crate::models::TrackMetadata>(
+        "SELECT * FROM track_metadata WHERE isrc = ?",
+    )
+    .bind(normalize_isrc(isrc))
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Metadata for a range of ISRCs (already normalised/de-duplicated).
+pub async fn metadata_bulk(
+    pool: &Pool<Sqlite>,
+    isrcs: &[String],
+) -> anyhow::Result<Vec<crate::models::TrackMetadata>> {
+    if isrcs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut qb = sqlx::QueryBuilder::new("SELECT * FROM track_metadata WHERE isrc IN (");
+    let mut sep = qb.separated(", ");
+    for i in isrcs {
+        sep.push_bind(i.clone());
+    }
+    qb.push(")");
+    Ok(qb
+        .build_query_as::<crate::models::TrackMetadata>()
+        .fetch_all(pool)
+        .await?)
 }
 
 #[cfg(test)]

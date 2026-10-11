@@ -79,6 +79,19 @@ lands on whatever the ARL's Deezer tier allows.
 | `GET`  | `/logs?limit=n`           | recent service events, newest first                        |
 | `GET`  | `/tracks?isrcs=a,b,c`     | bulk metadata/state for many ISRCs                         |
 
+### Per-ISRC metadata (BPM/key authority)
+
+The service is also the ISRC → {bpm, key, camelot} authority for a **range** of
+ISRCs (fed by the hub's Traktor/analysis data).
+
+| Method | Path                    | Use                                                              |
+| ------ | ----------------------- | ---------------------------------------------------------------- |
+| `POST` | `/metadata`             | bulk upsert `{items:[{isrc,bpm,key,camelot,…}]}` (non-null wins) |
+| `GET`  | `/metadata?isrcs=a,b,c` | metadata for a range; unknown ISRCs come back in `missing`       |
+| `GET`  | `/metadata/{isrc}`      | metadata for one ISRC (`404` if unknown)                         |
+
+Merge rule: a non-null field wins; a `null` field keeps the stored value.
+
 ## States
 
 | state         | meaning                                                          |
@@ -177,11 +190,12 @@ The tier is a property of the ARL, not of this service.
 cargo test
 ````
 
-29 tests: unit tests for ISRC normalisation, order-status derivation, retry
+31 tests: unit tests for ISRC normalisation, order-status derivation, retry
 backoff, deemix and Deezer payload parsing, constant-time token compare and
 download-file matching; plus integration tests over the real router (auth, order
-create/read/list, `/isrc` status, file delivery, order flipping to `done`, and the
-durable queue: retry, lease recovery, worker status and queue counts).
+create/read/list, `/isrc` status, file delivery, order flipping to `done`, the
+durable queue: retry, lease recovery, worker status and queue counts, and the
+per-ISRC metadata upsert/merge/range read).
 
 ## v1 scope / known limits
 

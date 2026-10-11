@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio_util::io::ReaderStream;
 
-use crate::models::CreateOrderRequest;
+use crate::models::{CreateOrderRequest, MetadataPushRequest};
 use crate::{AppState, db};
 
 /// Public liveness probe (no auth).
@@ -38,6 +38,9 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/worker", get(worker_status))
         .route("/worker/pause", post(worker_pause))
         .route("/worker/resume", post(worker_resume))
+        // Per-ISRC metadata (BPM/key authority).
+        .route("/metadata", post(post_metadata).get(get_metadata_range))
+        .route("/metadata/{isrc}", get(get_metadata_one))
         // Content-addressed object store (Backpack backup / file home).
         .route("/objects", get(crate::store::list))
         .route("/objects/check", post(crate::store::check))
@@ -267,6 +270,75 @@ struct LogsQuery {
 async fn get_logs(State(state): State<Arc<AppState>>, Query(q): Query<LogsQuery>) -> Response {
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
     Json(json!({ "logs": state.logs.recent(limit) })).into_response()
+}
+
+// ── Per-ISRC metadata (BPM/key authority) ────────────────────────────────────
+
+/// `POST /metadata` — bulk upsert ISRC → {bpm, key, camelot, …}.
+async fn post_metadata(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MetadataPushRequest>,
+) -> Response {
+    match db::upsert_metadata(&state.pool, &req.items).await {
+        Ok(n) => Json(json!({ "upserted": n })).into_response(),
+        Err(e) => {
+            tracing::error!("upsert_metadata failed: {e:#}");
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to store metadata",
+            )
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct MetadataQuery {
+    /// Comma-separated ISRCs (range lookup).
+    isrcs: Option<String>,
+    limit: Option<usize>,
+}
+
+/// `GET /metadata?isrcs=a,b,c` — metadata for a range of ISRCs. Unknown ISRCs
+/// come back in `missing` so callers can tell "no data" from "not requested".
+async fn get_metadata_range(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<MetadataQuery>,
+) -> Response {
+    let limit = q.limit.unwrap_or(1000).clamp(1, 2000);
+    let mut isrcs: Vec<String> = q
+        .isrcs
+        .unwrap_or_default()
+        .split(',')
+        .map(db::normalize_isrc)
+        .filter(|s| !s.is_empty())
+        .collect();
+    isrcs.sort();
+    isrcs.dedup();
+    isrcs.truncate(limit);
+    let items = db::metadata_bulk(&state.pool, &isrcs)
+        .await
+        .unwrap_or_default();
+    let found: std::collections::HashSet<&str> = items.iter().map(|m| m.isrc.as_str()).collect();
+    let missing: Vec<&String> = isrcs
+        .iter()
+        .filter(|i| !found.contains(i.as_str()))
+        .collect();
+    Json(json!({ "items": items, "missing": missing })).into_response()
+}
+
+/// `GET /metadata/{isrc}` — metadata for a single ISRC.
+async fn get_metadata_one(
+    State(state): State<Arc<AppState>>,
+    Path(isrc): Path<String>,
+) -> Response {
+    match db::get_metadata(&state.pool, &isrc).await {
+        Ok(Some(m)) => Json(m).into_response(),
+        Ok(None) => error(StatusCode::NOT_FOUND, "unknown ISRC"),
+        Err(e) => {
+            tracing::error!("get_metadata failed: {e:#}");
+            error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read metadata")
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
