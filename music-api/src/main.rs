@@ -43,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     let ytdlp_concurrency = config.ytdlp_concurrency;
+    let transcode_concurrency = config.transcode_concurrency;
     let state = Arc::new(AppState {
         pool,
         config,
@@ -53,6 +54,8 @@ async fn main() -> anyhow::Result<()> {
         logs: music_api::logbuf::LogBuffer::new(),
         paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ytdlp_sem: Arc::new(tokio::sync::Semaphore::new(ytdlp_concurrency)),
+        finalize_sem: Arc::new(tokio::sync::Semaphore::new(transcode_concurrency)),
+        finalizing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
     });
 
     let worker_state = state.clone();

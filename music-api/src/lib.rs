@@ -46,6 +46,10 @@ pub struct AppState {
     pub paused: Arc<std::sync::atomic::AtomicBool>,
     /// Bounds concurrent yt-dlp downloads (non-Deezer sources).
     pub ytdlp_sem: Arc<tokio::sync::Semaphore>,
+    /// Bounds concurrent `finalize` (copy + transcode) jobs.
+    pub finalize_sem: Arc<tokio::sync::Semaphore>,
+    /// ISRCs with a `finalize` task currently in flight (dedupe guard).
+    pub finalizing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Build the fully-stated router: public `/health`, everything else behind the
