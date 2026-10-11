@@ -100,6 +100,11 @@ content %}
 </form>
 
 <div class="hub-actions">
+    <form method="post" action="/api/hub/services/spotify/fetch-playlists">
+        <button type="submit" title="Playlists von der Plattform (neu) einlesen">
+            ⭳ Neue Playlists holen
+        </button>
+    </form>
     <form method="post" action="/api/hub/playlists/enable-all">
         <button type="submit">Alle aktivieren</button>
     </form>
@@ -164,6 +169,7 @@ content %}
                         endif %}</a
                     >
                 </th>
+                <th scope="col">Aktualisiert</th>
                 <th scope="col">Status</th>
                 <th scope="col">Aktionen</th>
             </tr>

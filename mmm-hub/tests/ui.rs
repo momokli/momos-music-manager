@@ -147,6 +147,45 @@ async fn tag_filters_tolerate_empty_numeric_params() {
 }
 
 #[tokio::test]
+async fn playlist_fetch_button_updated_column_and_refetch() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let resp = app
+        .client()
+        .get(app.url("/me/playlists?filter=all"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let html = body(resp).await;
+    assert!(html.contains("Aktualisiert"), "updated column missing");
+    assert!(
+        html.contains("Neue Playlists holen"),
+        "big fetch button missing"
+    );
+
+    // Forcing a re-fetch queues the playlist (items_available = 0) for the worker.
+    let resp = app
+        .client()
+        .post(app.url(&format!("/api/hub/playlists/{}/refetch", app.seed.pl_alice)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    let (items, enabled): (i64, i64) = sqlx::query_as(
+        "SELECT items_available, enabled_for_fetch FROM hub_playlists WHERE id = ?1",
+    )
+    .bind(app.seed.pl_alice)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(items, 0, "refetch should clear items_available");
+    assert_eq!(enabled, 1, "refetch should enable fetching");
+}
+
+#[tokio::test]
 async fn playlist_tag_creation_redirects_to_tag() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;

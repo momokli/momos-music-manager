@@ -38,7 +38,10 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) {
                     .await
                     .unwrap_or(0)
                     > 0;
-                let f = crate::features::sync_once(&pool, &cfg, 50).await.unwrap_or(0) > 0;
+                let f = crate::features::sync_once(&pool, &cfg, 50)
+                    .await
+                    .unwrap_or(0)
+                    > 0;
                 let g = crate::genres::sync_once(&pool, &cfg, 50).await.unwrap_or(0) > 0;
                 let worked = p || f || g;
                 tokio::time::sleep(if worked { BUSY_WAIT } else { IDLE_WAIT }).await;
@@ -111,7 +114,12 @@ async fn sync_likes_jobs(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
                 continue;
             }
         };
-        match paged(&token, &spotify::api_url(&cfg.spotify_api_base, "/me/tracks?limit=50")).await? {
+        match paged(
+            &token,
+            &spotify::api_url(&cfg.spotify_api_base, "/me/tracks?limit=50"),
+        )
+        .await?
+        {
             Outcome::Ok(items) => {
                 let n = ingest::store_likes(pool, user_id, &items).await?;
                 sqlx::query(
@@ -126,7 +134,12 @@ async fn sync_likes_jobs(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
                 tracing::info!("synced {n} liked tracks for {slug}");
             }
             Outcome::Forbidden => {
-                set_likes_error(pool, user_id, "Spotify 403 — Account nicht in der App-Allowlist").await?;
+                set_likes_error(
+                    pool,
+                    user_id,
+                    "Spotify 403 — Account nicht in der App-Allowlist",
+                )
+                .await?;
             }
             Outcome::RateLimited { retry_after } => {
                 backoff(retry_after).await;
@@ -159,13 +172,17 @@ async fn set_likes_error(pool: &SqlitePool, user_id: i64, msg: &str) -> Result<(
 // ── playlist items ──────────────────────────────────────────────────────────
 
 async fn playlist_jobs(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
+    // Fetch never-fetched playlists, plus those whose remote snapshot changed
+    // since the last item fetch (incremental update — minimizes API calls).
     let jobs = sqlx::query_as::<_, (i64, i64, String, String)>(
         "SELECT p.id, p.user_id, p.playlist_id, u.slug
            FROM hub_playlists p
            JOIN hub_users u ON u.id = p.user_id
           WHERE p.service = 'spotify'
             AND p.enabled_for_fetch = 1
-            AND p.items_available = 0
+            AND (p.items_available = 0
+                 OR (p.snapshot_id IS NOT NULL
+                     AND p.snapshot_id <> IFNULL(p.last_synced_snapshot, '')))
           ORDER BY p.id
           LIMIT ?1",
     )
@@ -193,13 +210,17 @@ async fn playlist_jobs(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
             }
         };
 
-        let url = spotify::api_url(&cfg.spotify_api_base, &format!("/playlists/{playlist_id}/items?limit=50"));
+        let url = spotify::api_url(
+            &cfg.spotify_api_base,
+            &format!("/playlists/{playlist_id}/items?limit=50"),
+        );
         match paged(&token, &url).await? {
             Outcome::Ok(items) => {
                 let n = ingest::store_playlist_items(pool, local_id, &items).await?;
                 sqlx::query(
                     "UPDATE hub_playlists
                         SET items_available = 1, fetched_at = ?2,
+                            last_synced_snapshot = snapshot_id,
                             fetch_status = 'done', fetch_error = NULL
                       WHERE id = ?1",
                 )
