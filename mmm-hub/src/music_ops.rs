@@ -21,6 +21,7 @@ pub fn router(state: AppState) -> Router {
         .route("/music-api/worker", get(worker_frag))
         .route("/music-api/refresh", post(refresh))
         .route("/music-api/order-missing", post(order_missing))
+        .route("/music-api/push-metadata", post(push_metadata_action))
         .route("/music-api/worker/pause", post(worker_pause))
         .route("/music-api/worker/resume", post(worker_resume))
         .route("/music-api/order/cancel", post(order_cancel))
@@ -238,7 +239,38 @@ async fn order_missing(State(st): State<AppState>, headers: HeaderMap) -> Respon
     action_response(&headers, &msg, kind, "/music-api")
 }
 
-// ── worker control ───────────────────────────────────────────────────────────
+/// `POST /music-api/push-metadata` — push the hub's BPM/key to music-api, so it
+/// becomes the ISRC→{bpm,key} authority.
+async fn push_metadata_action(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if crate::ui::nav(&st, &headers, "music-api").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    if st.cfg.music_api_token.is_none() {
+        return action_response(
+            &headers,
+            "music-api nicht konfiguriert",
+            "err",
+            "/music-api",
+        );
+    }
+    match crate::music_api::push_analysis(&st.pool, &st.cfg, 50000).await {
+        Ok(0) => action_response(
+            &headers,
+            "Keine BPM/Key-Daten zum Pushen",
+            "info",
+            "/music-api",
+        ),
+        Ok(n) => action_response(
+            &headers,
+            &format!("{n} ISRC-Metadaten gepusht"),
+            "ok",
+            "/music-api",
+        ),
+        Err(e) => action_response(&headers, &format!("Fehler: {e}"), "err", "/music-api"),
+    }
+}
+
+// ── worker control ─────────────────────────────────────────────────────────
 
 #[derive(Template)]
 #[template(path = "_partials/music_worker.html")]

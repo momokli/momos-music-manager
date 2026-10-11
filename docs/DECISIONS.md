@@ -1872,3 +1872,39 @@ aber die Queue selbst hatte keine Retry-/Lease-Semantik.
 - Ein Worker, keine externe Queue/kein Multi-Worker-Claiming (out of scope).
 - Pause bleibt der bestehende In-Memory-Schalter im `AppState` (kein Persist über
   Restart) — bewusst so gelassen, um die Hub-Konsole nicht zu ändern.
+
+---
+
+## ADR-078: music-api als ISRC→{BPM,Key}-Autorität (Range-Read + Hub-Push)
+
+**Date**: 2026-10-11
+**Status**: Accepted (implementiert, `feat/music-api-metadata`)
+**Relates**: ADR-065 (Download-Autorität), ADR-074 (Metadaten-/Objekt-Autorität)
+
+**Context**: Der Hub braucht BPM/Key für **Bereiche von ISRCs** (Harmonic-Matching,
+Digging, Scoring). BPM/Key liegen heute im Hub (`hub_track_analysis` aus Traktor/
+Essentia, `hub_track_features` aus ReccoBeats/FreqBlog) — aber `music-api` hatte
+**keinerlei** BPM/Key. Damit `music-api` die zentrale ISRC-Auskunft wird (wie in
+ADR-074 angelegt), fehlte die Speicher- und Read-Seite.
+
+**Decision**:
+
+- **Neue Tabelle** `track_metadata` (isrc PK, bpm, musical_key, camelot, title,
+  artist, album, genre, source, updated_at) — additiv in `db::init`.
+- **`POST /metadata`** (Bulk-Upsert). **Merge-Regel: non-null gewinnt** — ein Push
+  ohne BPM überschreibt den gespeicherten BPM nicht (`COALESCE(excluded, stored)`).
+- **`GET /metadata?isrcs=a,b,c`** — **Range**-Read; unbekannte ISRCs kommen in
+  `missing` zurück (unterscheidbar von „nicht angefragt“). Plus `GET /metadata/{isrc}`.
+- **Hub pusht** seine Analyse: `mmm-hub push-metadata --limit N` (CLI) bzw. der
+  Button „BPM/Key pushen“ in der `/music-api`-Konsole → `music_api::push_analysis`
+  liest `hub_track_analysis ⋈ hub_tracks.isrc` und ruft `POST /metadata`.
+- Hub-Client: `push_metadata`, `metadata_bulk`, `analysis_metadata`.
+
+**Consequences**:
+
+- `music-api` beantwortet ISRC→{bpm,key,camelot} für Bereiche — jede Consumer-Seite
+  (nicht nur der Hub) kann das nutzen.
+- Der Hub bleibt Produzent (Analyse/Import) und muss aktiv pushen; bis dahin ist
+  music-api leer. Kein automatischer Sync (out of scope).
+- Merge ist monoton: Werte werden ergänzt, nicht gelöscht — ein `null`-Feld im Push
+  bleibt ein No-op.

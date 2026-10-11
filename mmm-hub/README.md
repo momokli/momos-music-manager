@@ -79,18 +79,31 @@ cargo run -- seed-demo                                # deterministic demo data 
 Every page is session-gated and rendered through one shell (`templates/base.html`:
 topbar nav + user menu). The dashboard is `/`.
 
-| Route               | What it shows                                                               |
-| ------------------- | --------------------------------------------------------------------------- |
-| `/`                 | Overview: Spotify status, quick actions, stats, recent tracks               |
-| `/me/playlists`     | Your playlists with fetch toggles + server-side filter (htmx row swap)      |
-| `/overlap`          | Entdecken: shared tracks + pairwise overlaps                                |
-| `/search`           | Track search across the shared catalog                                      |
-| `/track/{id}`       | Per-user playlist presence + per-ISRC availability via internal `music-api` |
-| `/user/{slug}`      | A user's likes + playlists                                                  |
-| `/playlist/{id}`    | One playlist's tracks                                                       |
-| `/settings`         | Account + Spotify connect/sync/disconnect                                   |
-| `/sql`              | Read-only SQL console with presets                                          |
-| `/login`, `/signup` | Minimal auth shell                                                          |
+| Route               | What it shows                                                                    |
+| ------------------- | -------------------------------------------------------------------------------- |
+| `/`                 | Overview: Spotify status, quick actions, stats, recent tracks                    |
+| `/me/playlists`     | Your playlists with fetch toggles + server-side filter (htmx row swap)           |
+| `/overlap`          | Entdecken: shared tracks + pairwise overlaps                                     |
+| `/search`           | Track search across the shared catalog                                           |
+| `/track/{id}`       | Per-user playlist presence + per-ISRC availability via internal `music-api`      |
+| `/music-api`        | Ops console: live queue + ISRC counts, worker pause/resume, events, BPM/key push |
+| `/user/{slug}`      | A user's likes + playlists                                                       |
+| `/playlist/{id}`    | One playlist's tracks                                                            |
+| `/settings`         | Account + Spotify connect/sync/disconnect                                        |
+| `/sql`              | Read-only SQL console with presets                                               |
+| `/login`, `/signup` | Minimal auth shell                                                               |
+
+## music-api metadata (BPM/key authority)
+
+The hub pushes its stored BPM/key (`hub_track_analysis`, from Traktor/analysis) to
+`music-api`, so it can answer ISRC → {bpm, key, camelot} for a **range** of ISRCs:
+
+```bash
+mmm-hub push-metadata --limit 50000     # CLI
+```
+
+or the **„BPM/Key pushen“** button in the `/music-api` console. Read a range back
+with `GET {MUSIC_API_BASE}/metadata?isrcs=a,b,c` (returns `items` + `missing`).
 
 ## JSON API
 

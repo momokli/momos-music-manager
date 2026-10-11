@@ -17,8 +17,8 @@ use tokio::net::TcpListener;
 
 use mmm_hub::config::Config;
 use mmm_hub::{
-    analyze, analyzer, api, audio, db, features, freqblog, genres, ingest, mmm_import, settings,
-    spotify, tags, traktor, worker,
+    analyze, analyzer, api, audio, db, features, freqblog, genres, ingest, mmm_import, music_api,
+    settings, spotify, tags, traktor, worker,
 };
 
 #[derive(Parser)]
@@ -128,6 +128,11 @@ enum Command {
         #[arg(long)]
         file: String,
     },
+    /// Push the hub's stored BPM/key (hub_track_analysis) to music-api.
+    PushMetadata {
+        #[arg(long, default_value_t = 50000)]
+        limit: usize,
+    },
 }
 
 #[tokio::main]
@@ -167,6 +172,7 @@ async fn main() -> Result<()> {
             cmd_soundcloud_ingest(cfg, &user, &profile_url).await
         }
         Command::ImportTraktor { user, file } => cmd_import_traktor(cfg, &user, &file).await,
+        Command::PushMetadata { limit } => cmd_push_metadata(cfg, limit).await,
     }
 }
 
@@ -433,6 +439,24 @@ async fn cmd_import_traktor(cfg: Config, user: &str, file: &str) -> Result<()> {
         "✓ Traktor: {} Einträge, {} gematcht, {} Playlists/Nodes",
         s.entries, s.matched, s.playlists
     );
+    Ok(())
+}
+
+/// Push the hub's stored BPM/key (`hub_track_analysis`) to music-api so it
+/// becomes the ISRC→{bpm,key} authority.
+async fn cmd_push_metadata(cfg: Config, limit: usize) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    let cfg = settings::overlay_config(&pool, cfg).await;
+    if cfg.music_api_token.is_none() {
+        bail!("MUSIC_API_TOKEN nicht gesetzt");
+    }
+    let items = music_api::analysis_metadata(&pool, limit).await?;
+    if items.is_empty() {
+        println!("keine Analyse-Daten (hub_track_analysis) zum Pushen");
+        return Ok(());
+    }
+    let n = music_api::push_metadata(&cfg, &items).await?;
+    println!("✓ {n} ISRC-Metadaten an music-api gepusht");
     Ok(())
 }
 

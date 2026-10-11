@@ -558,3 +558,101 @@ async fn expired_lease_is_requeued() {
         0
     );
 }
+
+// ── Per-ISRC metadata (BPM/key authority) ─────────────────────────────────
+
+#[tokio::test]
+async fn metadata_upsert_and_range_get() {
+    let h = harness().await;
+
+    // Upsert two ISRCs (hyphenated input is normalised; `musicalKey` alias works).
+    let (status, body) = send(
+        &h.app,
+        authed("POST", "/metadata")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [
+                    { "isrc": "deq022280682", "bpm": 128.0, "key": "11m", "camelot": "8A", "source": "traktor" },
+                    { "isrc": "USQX91201487", "bpm": 124.5, "musicalKey": "8A" }
+                ]
+            })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["upserted"], 2);
+
+    // Range lookup returns found items + the missing ISRCs.
+    let (status, body) = send(
+        &h.app,
+        authed(
+            "GET",
+            "/metadata?isrcs=DEQ022280682,USQX91201487,NOTFOUND123",
+        )
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    let missing = v["missing"].as_array().unwrap();
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0], "NOTFOUND123");
+    let deq = items.iter().find(|m| m["isrc"] == "DEQ022280682").unwrap();
+    assert_eq!(deq["bpm"], 128.0);
+    assert_eq!(deq["musicalKey"], "11m");
+    assert_eq!(deq["camelot"], "8A");
+    let usq = items.iter().find(|m| m["isrc"] == "USQX91201487").unwrap();
+    assert_eq!(usq["musicalKey"], "8A");
+}
+
+#[tokio::test]
+async fn metadata_merge_keeps_non_null() {
+    let h = harness().await;
+
+    let _ = send(
+        &h.app,
+        authed("POST", "/metadata")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [{ "isrc": "USQX91201487", "bpm": 124.0, "source": "traktor" }]
+            })))
+            .unwrap(),
+    )
+    .await;
+    // Second push: key only (bpm null) — must not wipe the stored bpm.
+    let _ = send(
+        &h.app,
+        authed("POST", "/metadata")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [{ "isrc": "USQX91201487", "key": "8A", "source": "analysis" }]
+            })))
+            .unwrap(),
+    )
+    .await;
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/metadata/USQX91201487")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["bpm"], 124.0, "bpm must survive a null-field push");
+    assert_eq!(v["musicalKey"], "8A");
+    assert_eq!(v["source"], "analysis");
+
+    // Unknown single ISRC → 404.
+    let (status, _) = send(
+        &h.app,
+        authed("GET", "/metadata/NOPE").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

@@ -782,3 +782,107 @@ pub async fn cached_counts(pool: &SqlitePool, isrcs: &[String]) -> (usize, usize
     }
     (ready, seen)
 }
+
+// ── per-ISRC metadata (BPM/key push + range read) ────────────────────────────
+
+/// One metadata push item for music-api's `POST /metadata`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MetadataPush {
+    pub isrc: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bpm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camelot: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// BPM/key rows from the hub's own analysis, to push to music-api. Pure DB read
+/// (no network) — used by both the CLI and the ops console.
+pub async fn analysis_metadata(pool: &SqlitePool, limit: usize) -> Result<Vec<MetadataPush>> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT t.isrc AS isrc, a.bpm AS bpm, a.key AS key, a.camelot AS camelot, a.source AS source
+           FROM hub_track_analysis a
+           JOIN hub_tracks t ON t.id = a.track_id
+          WHERE t.isrc IS NOT NULL AND TRIM(t.isrc) <> ''
+          ORDER BY a.analyzed_at DESC
+          LIMIT ?1",
+    )
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| MetadataPush {
+            isrc: r.get::<String, _>("isrc"),
+            bpm: r.get::<Option<f64>, _>("bpm"),
+            key: r.get::<Option<String>, _>("key"),
+            camelot: r.get::<Option<String>, _>("camelot"),
+            source: r.get::<Option<String>, _>("source"),
+        })
+        .collect())
+}
+
+#[derive(Deserialize)]
+struct MetadataPushResp {
+    #[serde(default)]
+    upserted: usize,
+}
+
+/// `POST /metadata` — bulk upsert ISRC → {bpm, key, camelot}. Returns the count.
+pub async fn push_metadata(cfg: &Config, items: &[MetadataPush]) -> Result<usize> {
+    let url = format!("{}/metadata", cfg.music_api_base);
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(token(cfg)?)
+        .json(&json!({ "items": items }))
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("music-api /metadata -> {}", resp.status());
+    }
+    Ok(resp
+        .json::<MetadataPushResp>()
+        .await
+        .map(|r| r.upserted)
+        .unwrap_or(items.len()))
+}
+
+/// Push the hub's stored BPM/key to music-api (makes music-api the authority).
+pub async fn push_analysis(pool: &SqlitePool, cfg: &Config, limit: usize) -> Result<usize> {
+    let items = analysis_metadata(pool, limit).await?;
+    if items.is_empty() {
+        return Ok(0);
+    }
+    push_metadata(cfg, &items).await
+}
+
+/// `GET /metadata?isrcs=a,b,c` — metadata for a range of ISRCs (empty on failure).
+pub async fn metadata_bulk(cfg: &Config, isrcs: &[String]) -> Vec<serde_json::Value> {
+    if isrcs.is_empty() {
+        return Vec::new();
+    }
+    let Ok(t) = token(cfg) else {
+        return Vec::new();
+    };
+    let url = format!("{}/metadata", cfg.music_api_base);
+    let resp = match reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(t)
+        .query(&[("isrcs", isrcs.join(","))])
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Vec::new(),
+    };
+    resp.json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| v.get("items").and_then(|x| x.as_array()).cloned())
+        .unwrap_or_default()
+}
