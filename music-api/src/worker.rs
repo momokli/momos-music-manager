@@ -72,14 +72,26 @@ pub async fn run(state: Arc<AppState>) {
 }
 
 async fn tick(state: &Arc<AppState>) -> Result<()> {
+    // Recover rows stranded in `downloading` by a crash/restart before doing work.
+    db::recover_expired_leases(&state.pool, &retry_policy(state), db::now()).await?;
     resolve_pending(state).await?;
     advance_downloads(state).await?;
     Ok(())
 }
 
+/// Retry tuning for the durable queue, from config.
+fn retry_policy(state: &AppState) -> db::RetryPolicy {
+    db::RetryPolicy {
+        max_attempts: state.config.queue_max_attempts,
+        base_secs: state.config.queue_retry_base_secs,
+        max_secs: state.config.queue_retry_max_secs,
+    }
+}
+
 /// Phase A: look each pending ISRC up on Deezer and submit it to deemix.
 async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
-    let pending = db::pending_tracks(&state.pool, 25).await?;
+    let policy = retry_policy(state);
+    let pending = db::due_tracks(&state.pool, 25, db::now()).await?;
     if pending.is_empty() {
         return Ok(());
     }
@@ -165,25 +177,53 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
                         state
                             .logs
                             .push("info", format!("{}: queued at deemix", track.isrc));
-                        db::mark_downloading(&state.pool, &track.isrc, &uuid).await?;
+                        let lease = db::now() + state.config.download_timeout.as_secs() as i64;
+                        db::mark_downloading(&state.pool, &track.isrc, &uuid, lease).await?;
                     }
                     Ok(deemix::AddOutcome::Rejected { errid }) => {
                         let errid = errid.unwrap_or_else(|| "unknown".to_string());
                         // `CantStream` means the track is not available to this
                         // account at any quality — a permanent absence.
-                        let (st, msg) = if errid == "CantStream" {
-                            (state::ABSENT, format!("deemix: {errid} (not streamable)"))
-                        } else {
-                            (state::FAILED, format!("deemix rejected: {errid}"))
-                        };
+                        let msg = format!("deemix rejected: {errid}");
                         warn!("{}: {msg}", track.isrc);
                         state.logs.push("warn", format!("{}: {msg}", track.isrc));
-                        db::mark_terminal(&state.pool, &track.isrc, st, &msg).await?;
+                        if errid == "CantStream" {
+                            db::mark_terminal(
+                                &state.pool,
+                                &track.isrc,
+                                state::ABSENT,
+                                &format!("deemix: {errid} (not streamable)"),
+                            )
+                            .await?;
+                        } else {
+                            db::schedule_retry(&state.pool, &track.isrc, &msg, &policy, db::now())
+                                .await?;
+                        }
                     }
-                    Err(e) => warn!("{}: deemix addToQueue failed: {e:#}", track.isrc),
+                    Err(e) => {
+                        warn!("{}: deemix addToQueue failed: {e:#}", track.isrc);
+                        db::schedule_retry(
+                            &state.pool,
+                            &track.isrc,
+                            &format!("deemix add: {e}"),
+                            &policy,
+                            db::now(),
+                        )
+                        .await?;
+                    }
                 }
             }
-            Err(e) => warn!("{}: deezer lookup failed: {e:#}", track.isrc),
+            Err(e) => {
+                warn!("{}: deezer lookup failed: {e:#}", track.isrc);
+                db::schedule_retry(
+                    &state.pool,
+                    &track.isrc,
+                    &format!("deezer lookup: {e}"),
+                    &policy,
+                    db::now(),
+                )
+                .await?;
+            }
         }
     }
     Ok(())
@@ -204,6 +244,7 @@ async fn advance_downloads(state: &Arc<AppState>) -> Result<()> {
         }
     };
 
+    let policy = retry_policy(state);
     let timeout = state.config.download_timeout.as_secs() as i64;
     for track in inflight {
         let item = track
@@ -221,52 +262,42 @@ async fn advance_downloads(state: &Arc<AppState>) -> Result<()> {
                             item.status,
                             state.config.deemix_download_dir.display()
                         );
-                        db::mark_terminal(
+                        db::schedule_retry(
                             &state.pool,
                             &track.isrc,
-                            state::FAILED,
                             "file not found after download",
+                            &policy,
+                            db::now(),
                         )
                         .await?;
                     }
                 } else {
-                    db::mark_terminal(
+                    db::schedule_retry(
                         &state.pool,
                         &track.isrc,
-                        state::FAILED,
                         &format!("deemix status: {}", item.status),
+                        &policy,
+                        db::now(),
                     )
                     .await?;
                 }
             }
             Some(item) => {
-                // Still downloading — only give up after the timeout.
+                // Still downloading — heartbeat the lease so the reaper leaves it
+                // alone, and log progress.
                 debug!(
                     "{}: downloading {} ({:.0}%)",
                     track.isrc,
                     item.title.as_deref().unwrap_or("?"),
                     item.progress.unwrap_or(0.0)
                 );
-                if db::now() - track.updated_at > timeout {
-                    state
-                        .logs
-                        .push("warn", format!("{}: download timeout", track.isrc));
-                    db::mark_terminal(&state.pool, &track.isrc, state::FAILED, "download timeout")
-                        .await?;
-                }
+                db::renew_lease(&state.pool, &track.isrc, db::now() + timeout).await?;
             }
             None => {
-                // Not in the queue: it may have finished and been evicted, so
-                // try to collect it before declaring a timeout.
-                if !finalize(state, &track).await? && db::now() - track.updated_at > timeout {
-                    db::mark_terminal(
-                        &state.pool,
-                        &track.isrc,
-                        state::FAILED,
-                        "disappeared from deemix queue",
-                    )
-                    .await?;
-                }
+                // Not in the queue: it may have finished and been evicted, so try
+                // to collect it. If it is genuinely gone, the reaper re-queues it
+                // once the lease lapses.
+                let _ = finalize(state, &track).await?;
             }
         }
     }

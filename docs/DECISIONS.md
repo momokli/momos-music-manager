@@ -1830,3 +1830,45 @@ work everywhere and stay server-side (AGENT rule: “server-side filtering”).
 - Fuzzy matching via `instr(...)` cannot use indexes → full scans, acceptable at hub scale
   (tens of thousands of rows); the typo fallback is bounded by `LIMIT`.
 - New list views should reuse `table::*` rather than hand-rolling filters.
+
+---
+
+## ADR-077: music-api — durable Queue-Engine (bounded Retries, Download-Lease, Counts)
+
+**Date**: 2026-10-11
+**Status**: Accepted (implementiert, `feat/music-api-durable-queue`)
+**Relates**: ADR-065 (music-api als Download-Autorität), ADR-075/076 (Hub-Konsole)
+
+**Context**: Die music-api-Queue war implizit — die Spalte `tracks.state` _war_ die
+Queue, ein flacher Worker-Tick schob `pending`-Zeilen weiter. Zwei Lücken blieben:
+(1) `failed` war terminal, ein transienter deemix/Deezer-Aussetzer verlor den Track
+dauerhaft; (2) ein Neustart, während eine Zeile `downloading` war, strandete sie
+(nichts reselektierte sie). Die Hub-Konsole (#258/#259) steuerte zwar Worker/Orders,
+aber die Queue selbst hatte keine Retry-/Lease-Semantik.
+
+**Decision**:
+
+- **Neue Spalten** (additiv, `tracks`): `attempts`, `next_attempt_at`,
+  `lease_expires_at`. Indizes `idx_tracks_due(state, next_attempt_at)`,
+  `idx_tracks_lease(state, lease_expires_at)` und `idx_order_items_isrc`.
+- **Selektion**: `due_tracks` = `state='pending' AND (next_attempt_at IS NULL OR
+<= now)`, sortiert nach Order-Priorität, dann `created_at`.
+- **Bounded Retries + exponentieller Backoff**: `schedule_retry` erhöht `attempts`;
+  bei `QUEUE_MAX_ATTEMPTS` (Std. 3) terminal `failed`, sonst Re-Queue mit
+  `backoff_delay(n)=min(base<<(n-1), max)` (`QUEUE_RETRY_BASE_SECS` 60,
+  `QUEUE_RETRY_MAX_SECS` 1800). `absent`/`CantStream` bleiben terminal.
+- **Lease statt Timeout**: `mark_downloading` setzt die Lease; `advance_downloads`
+  **erneuert** sie, solange deemix Fortschritt meldet. Der neue Reaper
+  `recover_expired_leases` am Tick-Anfang re-queued Zeilen mit abgelaufener Lease
+  (Crash-/Restart-Recovery).
+- **Retry-Endpoint**: `POST /isrc/{isrc}/retry` setzt `attempts`/`next_attempt_at`/
+  `lease` zurück (`409` bei `ready`).
+- **Transparenz**: `GET /queue` liefert zusätzlich `counts` (per-State), `GET /worker`
+  zusätzlich `intervalSecs`/`maxAttempts` (additiv — die Hub-Konsole bleibt intakt).
+
+**Consequences**:
+
+- Transiente Fehler heilen sich selbst; Restarts verlieren keine `downloading`-Zeile.
+- Ein Worker, keine externe Queue/kein Multi-Worker-Claiming (out of scope).
+- Pause bleibt der bestehende In-Memory-Schalter im `AppState` (kein Persist über
+  Restart) — bewusst so gelassen, um die Hub-Konsole nicht zu ändern.
