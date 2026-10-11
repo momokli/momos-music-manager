@@ -514,7 +514,8 @@ async fn track_action(st: &AppState, headers: &HeaderMap, id: i64, retry: bool) 
     let res = if retry {
         crate::music_api::retry_isrc(&st.cfg, &key).await
     } else {
-        crate::music_api::order(&st.cfg, std::slice::from_ref(&key))
+        // An explicit single-track order should not wait behind the bulk backlog.
+        crate::music_api::order_with_priority(&st.cfg, std::slice::from_ref(&key), 50)
             .await
             .map(|_| ())
     };
