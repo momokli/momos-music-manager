@@ -3,8 +3,8 @@
 //! `RIPENESS = tag_weight*TAG_SCORE + meta_weight*META_SCORE + trak_weight*TRAKTOR_SCORE`
 //! with HUMAN-TAGS weighing more than meta (tag_weight > meta_weight by default).
 //!
-//! Tag points are position-based and hang on the **group multiset**, not the
-//! tag: deleting any tag from a group removes the cheapest tier, never the
+//! Tag points are position-based and hang on the **type multiset**, not the
+//! tag: deleting any tag of a type removes the cheapest tier, never the
 //! "100 points" tier. See [`group_points`].
 
 use sqlx::{QueryBuilder, Row, SqlitePool};
@@ -28,7 +28,8 @@ pub struct Ripeness {
     pub meta_score: f64,
     pub traktor_score: f64,
     pub total: f64,
-    /// `(group id, group name, tag count)` per classifying group.
+    /// `(type index, type label, tag count)` per tag type (kept in the former
+    /// `tags_per_group` shape so the JSON API is unchanged).
     pub tags_per_group: Vec<(i64, String, usize)>,
     /// `(field, present)` for the meta-fields checklist.
     pub meta_present: Vec<(String, bool)>,
@@ -38,22 +39,31 @@ pub struct Ripeness {
 pub async fn ripeness(pool: &SqlitePool, track_id: i64, e: &Engine) -> Ripeness {
     let mut out = Ripeness::default();
 
-    // Human tags, grouped.
-    let rows = sqlx::query_as::<_, (i64, String, i64)>(
-        "SELECT g.id, COALESCE(g.name,''), COUNT(*)
+    // Human tags, bucketed by type.
+    let rows = sqlx::query_as::<_, (String, i64)>(
+        "SELECT t.type, COUNT(*)
            FROM hub_track_resolved_tags rt
-           JOIN hub_group_tags gt ON gt.tag_id = rt.tag_id
-           JOIN hub_tag_groups g ON g.id = gt.group_id
-          WHERE rt.track_id = ?1
-          GROUP BY g.id, g.name",
+           JOIN hub_tags t ON t.id = rt.tag_id
+          WHERE rt.track_id = ?1 AND t.type IS NOT NULL
+          GROUP BY t.type",
     )
     .bind(track_id)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
-    for (id, name, cnt) in rows {
+    for (type_name, cnt) in rows {
         let k = cnt.max(0) as usize;
         out.tag_score += group_points(&e.tag_points, k);
+        let ty = crate::tagtypes::TagType::parse(&type_name);
+        let id = ty
+            .and_then(|t| {
+                crate::tagtypes::TYPE_NAMES
+                    .iter()
+                    .position(|n| *n == t.as_str())
+            })
+            .map(|i| i as i64 + 1)
+            .unwrap_or(0);
+        let name = ty.map(|t| t.label().to_string()).unwrap_or_default();
         out.tags_per_group.push((id, name, k));
     }
 
@@ -155,10 +165,10 @@ pub async fn ripeness_many(pool: &SqlitePool, ids: &[i64], e: &Engine) -> HashMa
     let mut tag_score: HashMap<i64, f64> = HashMap::new();
     for chunk in ids.chunks(900) {
         let mut qb = QueryBuilder::new(
-            "SELECT rt.track_id, gt.group_id, COUNT(*)
+            "SELECT rt.track_id, t.type, COUNT(*)
                FROM hub_track_resolved_tags rt
-               JOIN hub_group_tags gt ON gt.tag_id = rt.tag_id
-              WHERE rt.track_id IN (",
+               JOIN hub_tags t ON t.id = rt.tag_id
+              WHERE t.type IS NOT NULL AND rt.track_id IN (",
         );
         {
             let mut sep = qb.separated(", ");
@@ -166,7 +176,7 @@ pub async fn ripeness_many(pool: &SqlitePool, ids: &[i64], e: &Engine) -> HashMa
                 sep.push_bind(*id);
             }
         }
-        qb.push(") GROUP BY rt.track_id, gt.group_id");
+        qb.push(") GROUP BY rt.track_id, t.type");
         for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
             let cnt: i64 = r.get(2);
             *tag_score.entry(r.get(0)).or_insert(0.0) +=
@@ -295,12 +305,13 @@ pub async fn queue(
     sort: &str,
     limit: usize,
 ) -> Vec<QueueRow> {
-    // Tag counts per (track, group) -> position-weighted tag score per track.
-    let tag_rows = sqlx::query_as::<_, (i64, i64, i64)>(
-        "SELECT rt.track_id, gt.group_id, COUNT(*)
+    // Tag counts per (track, type) -> position-weighted tag score per track.
+    let tag_rows = sqlx::query_as::<_, (i64, String, i64)>(
+        "SELECT rt.track_id, t.type, COUNT(*)
            FROM hub_track_resolved_tags rt
-           JOIN hub_group_tags gt ON gt.tag_id = rt.tag_id
-          GROUP BY rt.track_id, gt.group_id",
+           JOIN hub_tags t ON t.id = rt.tag_id
+          WHERE t.type IS NOT NULL
+          GROUP BY rt.track_id, t.type",
     )
     .fetch_all(pool)
     .await

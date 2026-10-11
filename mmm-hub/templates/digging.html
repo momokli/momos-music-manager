@@ -77,9 +77,9 @@ content %}
         </option>
         {% endfor %}
     </select>
-    <select name="tgroup" aria-label="Tag-Gruppe">
-        <option value="0">Tag-Gruppe: alle</option>
-        {% for o in tag_group_opts %}
+    <select name="ttype" aria-label="Tag-Typ">
+        <option value="">Tag-Typ: alle</option>
+        {% for o in tag_type_opts %}
         <option value="{{ o.value }}" {% if o.selected %}selected{% endif %}>
             {{ o.label }}
         </option>
@@ -179,11 +179,9 @@ content %}
                     <div class="hub-dig-tag">
                         <a href="/user/{{ t.owner }}" class="hub-muted">@{{ t.owner }}</a>
                         <span class="hub-tag hub-tag-own">{{ t.name }}</span>
-                        {% for g in t.groups %}<a
-                            href="/groups/{{ g.id }}"
-                            class="hub-chip"
-                            >{{ g.icon }} {{ g.name }}</a
-                        >{% endfor %}
+                        {% if t.type_label != "" %}<span class="hub-chip"
+                            >{{ t.type_icon }} {{ t.type_label }}</span
+                        >{% endif %}
                     </div>
                     {% endfor %} {% endif %}
                 </td>

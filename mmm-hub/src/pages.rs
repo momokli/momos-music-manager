@@ -27,25 +27,11 @@ pub fn router(state: AppState) -> Router {
         .route("/tags/create", post(tag_create))
         .route("/tag/{id}", get(tag_detail_page))
         .route("/tag/{id}/rename", post(tag_rename))
-        .route("/tag/{id}/group/add", post(tag_group_add))
-        .route("/tag/{id}/group/remove", post(tag_group_remove))
+        .route("/tag/{id}/type", post(tag_set_type))
         .route("/tag/{id}/parent/add", post(tag_parent_add))
         .route("/tag/{id}/parent/remove", post(tag_parent_remove))
         .route("/tag/{id}/sync", post(tag_set_sync))
         .route("/tag/{id}/source/keep", post(tag_source_keep))
-        .route("/groups", get(groups_page))
-        .route("/groups/create", post(group_create))
-        .route("/groups/{id}", get(group_page))
-        .route("/groups/{id}/update", post(group_update))
-        .route("/groups/{id}/weight", post(group_set_weight))
-        .route("/groups/{id}/ranked", post(group_set_ranked))
-        .route("/groups/{id}/tag-rank", post(group_tag_rank))
-        .route("/groups/{id}/subscribe", post(group_subscribe))
-        .route("/groups/{id}/unsubscribe", post(group_unsubscribe))
-        .route("/groups/{id}/role", post(group_set_role))
-        .route("/groups/{id}/member/remove", post(group_remove_member))
-        .route("/groups/{id}/collective", post(group_set_collective))
-        .route("/groups/{id}/delete", post(group_delete))
         .route("/collectives", get(collectives_page))
         .route("/collectives/create", post(collective_create))
         .route("/collectives/{id}", get(collective_page))
@@ -120,6 +106,18 @@ fn icon_options(current: &str) -> Vec<IconOption> {
             selected: *i == current,
         })
         .collect()
+}
+
+/// Engine weight of a raw tag-type string (`0.0` for untyped tags), read from
+/// the configurable engine settings.
+fn type_weight(engine: &crate::settings::Engine, type_value: &str) -> f64 {
+    engine.type_weight(type_value)
+}
+
+/// A lightweight parent/child tag reference for templates.
+struct ParentRef {
+    id: i64,
+    name: String,
 }
 
 // ── search ──────────────────────────────────────────────────────────────────
@@ -2728,9 +2726,8 @@ struct DiggingQuery {
     tol: Option<f64>,
     /// Filter: tag owner slug.
     towner: Option<String>,
-    /// Filter: tag group id.
-    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
-    tgroup: Option<i64>,
+    /// Filter: tag type (e.g. `MOOD`).
+    ttype: Option<String>,
     /// Filter: playlist owner (hub user) slug.
     powner: Option<String>,
     /// Filter: tag name (hierarchy-aware: also matches child tags).
@@ -2765,7 +2762,7 @@ struct DiggingPage {
     filters: Vec<ScopeLink>,
     bpm_opts: Vec<ScopeLink>,
     tag_owner_opts: Vec<SelOpt>,
-    tag_group_opts: Vec<SelOpt>,
+    tag_type_opts: Vec<SelOpt>,
     pl_owner_opts: Vec<SelOpt>,
     tag: String,
     wmin: f64,
@@ -2826,15 +2823,10 @@ struct DigTag {
     id: i64,
     name: String,
     owner: String,
-    groups: Vec<DigGroup>,
-}
-
-#[derive(Clone)]
-struct DigGroup {
-    id: i64,
-    icon: String,
-    name: String,
-    weight: f64,
+    /// Raw type string (for the `ttype` filter).
+    type_value: String,
+    type_label: String,
+    type_icon: String,
 }
 
 /// Merge a (possibly external) candidate into the session map: dedupe by hub
@@ -2974,51 +2966,36 @@ async fn dig_details(
             }
         }
 
-        // Resolved tags + their groups (LEFT JOIN, so a tag can repeat per group).
+        // Resolved tags + their type.
         let mut qb = QueryBuilder::new(
             "SELECT rt.track_id AS tid, t.id AS tag_id, t.name AS tag, u.slug AS owner,
-                    g.id AS gid, g.name AS gname, COALESCE(g.icon, '') AS gicon,
-                    COALESCE(g.weight, 0) AS gweight
+                    COALESCE(t.type, '') AS type
                FROM hub_track_resolved_tags rt
                JOIN hub_tags t ON t.id = rt.tag_id
                JOIN hub_users u ON u.id = t.owner_user_id
-               LEFT JOIN hub_group_tags gt ON gt.tag_id = t.id
-               LEFT JOIN hub_tag_groups g ON g.id = gt.group_id
               WHERE rt.track_id IN (",
         );
         let mut sep = qb.separated(", ");
         for id in chunk {
             sep.push_bind(*id);
         }
-        qb.push(") ORDER BY u.slug, t.name COLLATE NOCASE, g.name COLLATE NOCASE");
+        qb.push(") ORDER BY u.slug, t.name COLLATE NOCASE");
         for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
             let tid: i64 = r.get("tid");
             let tag_id: i64 = r.get("tag_id");
             let tag: String = r.get::<Option<String>, _>("tag").unwrap_or_default();
             let owner: String = r.get::<Option<String>, _>("owner").unwrap_or_default();
-            let gid: Option<i64> = r.get("gid");
-            let gname: String = r.get::<Option<String>, _>("gname").unwrap_or_default();
-            let gicon: String = r.get::<Option<String>, _>("gicon").unwrap_or_default();
-            let gweight: f64 = r.get::<Option<f64>, _>("gweight").unwrap_or(0.0);
+            let ty: String = r.get::<Option<String>, _>("type").unwrap_or_default();
+            let parsed = crate::tagtypes::TagType::parse(&ty);
             let list = tags.entry(tid).or_default();
-            let t = match list.iter().position(|x| x.id == tag_id) {
-                Some(i) => &mut list[i],
-                None => {
-                    list.push(DigTag {
-                        id: tag_id,
-                        name: tag,
-                        owner,
-                        groups: Vec::new(),
-                    });
-                    list.last_mut().unwrap()
-                }
-            };
-            if gid.is_some() && !t.groups.iter().any(|g| g.name == gname) {
-                t.groups.push(DigGroup {
-                    id: gid.unwrap_or(0),
-                    icon: gicon,
-                    name: gname,
-                    weight: gweight,
+            if list.iter().all(|x| x.id != tag_id) {
+                list.push(DigTag {
+                    id: tag_id,
+                    name: tag,
+                    owner,
+                    type_value: if parsed.is_some() { ty } else { String::new() },
+                    type_label: parsed.map(|t| t.label().to_string()).unwrap_or_default(),
+                    type_icon: parsed.map(|t| t.icon().to_string()).unwrap_or_default(),
                 });
             }
         }
@@ -3202,19 +3179,19 @@ async fn digging_page(
                 .map(|u| (u.owned.len() + u.followed.len()) as i64)
                 .sum();
             r.likes = r.presence.iter().filter(|u| u.liked).count() as i64;
-            // Scoring-engine signal: importance of the track's tags = the max
-            // group weight over each tag's groups, summed over the track's tags.
+            // Scoring-engine signal: importance of the track's tags = the type
+            // weight of each tag, summed over the track's tags.
             r.tag_weight = r
                 .tags
                 .iter()
-                .map(|t| t.groups.iter().map(|g| g.weight).fold(0.0_f64, f64::max))
+                .map(|t| type_weight(&engine, &t.type_value))
                 .sum();
             // Seed↔candidate agreement: only tags the seed also has.
             r.shared_weight = r
                 .tags
                 .iter()
                 .filter(|t| seed_tag_ids.contains(&t.id))
-                .map(|t| t.groups.iter().map(|g| g.weight).fold(0.0_f64, f64::max))
+                .map(|t| type_weight(&engine, &t.type_value))
                 .sum();
         }
 
@@ -3292,7 +3269,12 @@ async fn digging_page(
     let bpm_only = q.bpm.as_deref() == Some("1");
     let harm_only = q.harm.as_deref() == Some("1");
     let towner = q.towner.clone().unwrap_or_default().trim().to_string();
-    let tgroup = q.tgroup.filter(|t| *t > 0).unwrap_or(0);
+    let ttype = q
+        .ttype
+        .clone()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_uppercase();
     let powner = q.powner.clone().unwrap_or_default().trim().to_string();
     let tag = q.tag.clone().unwrap_or_default().trim().to_string();
     let wmin = q.wmin.filter(|w| *w > 0.0).unwrap_or(0.0);
@@ -3326,15 +3308,15 @@ async fn digging_page(
         if harm_only && !crate::features::camelot_compatible(&seed_camelot, &r.camelot) {
             return false;
         }
-        // Tag owner, tag group, playlist owner.
+        // Tag owner, tag type, playlist owner.
         if !towner.is_empty() && !r.tags.iter().any(|t| t.owner.eq_ignore_ascii_case(&towner)) {
             return false;
         }
-        if tgroup != 0
+        if !ttype.is_empty()
             && !r
                 .tags
                 .iter()
-                .any(|t| t.groups.iter().any(|g| g.id == tgroup))
+                .any(|t| t.type_value.eq_ignore_ascii_case(&ttype))
         {
             return false;
         }
@@ -3417,8 +3399,8 @@ async fn digging_page(
         if !towner.is_empty() {
             s.push_str(&format!("&towner={}", urlencoding::encode(&towner)));
         }
-        if tgroup != 0 {
-            s.push_str(&format!("&tgroup={tgroup}"));
+        if ttype != "" {
+            s.push_str(&format!("&ttype={}", urlencoding::encode(&ttype)));
         }
         if !powner.is_empty() {
             s.push_str(&format!("&powner={}", urlencoding::encode(&powner)));
@@ -3486,28 +3468,14 @@ async fn digging_page(
         value: slug,
     })
     .collect();
-    let tag_group_opts: Vec<SelOpt> = sqlx::query(
-        "SELECT id, COALESCE(icon, '') AS icon, name FROM hub_tag_groups ORDER BY name COLLATE NOCASE",
-    )
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|r| {
-        let id: i64 = r.get("id");
-        SelOpt {
-            value: id.to_string(),
-            label: format!(
-                "{} {}",
-                r.get::<Option<String>, _>("icon").unwrap_or_default(),
-                r.get::<Option<String>, _>("name").unwrap_or_default()
-            )
-            .trim()
-            .to_string(),
-            selected: id == tgroup,
-        }
-    })
-    .collect();
+    let tag_type_opts: Vec<SelOpt> = crate::tagtypes::options()
+        .into_iter()
+        .map(|(value, label, icon)| SelOpt {
+            selected: value.eq_ignore_ascii_case(&ttype),
+            value: value.to_string(),
+            label: format!("{icon} {label}").trim().to_string(),
+        })
+        .collect();
     let pl_owner_opts: Vec<SelOpt> =
         sqlx::query_scalar::<_, String>("SELECT slug FROM hub_users ORDER BY slug")
             .fetch_all(&st.pool)
@@ -3551,7 +3519,7 @@ async fn digging_page(
         filters,
         bpm_opts,
         tag_owner_opts,
-        tag_group_opts,
+        tag_type_opts,
         pl_owner_opts,
         tag,
         wmin,
@@ -3862,12 +3830,9 @@ struct TagFilter {
     q: Option<String>,
     /// "1" = only my tags.
     mine: Option<String>,
-    /// Legacy single-group filter (kept for old links).
-    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
-    group: Option<i64>,
-    /// Multi-group filter, comma-separated group ids (e.g. `groups=3,7`).
-    groups: Option<String>,
-    /// Filter to tags in any group of this collective.
+    /// Multi-type filter, comma-separated type names (e.g. `types=MOOD,VIBE`).
+    types: Option<String>,
+    /// Filter to tags owned by a member of this collective.
     #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
     collective: Option<i64>,
     /// Filter to tags owned by this user slug.
@@ -3884,51 +3849,33 @@ struct TagsPage {
     flash: String,
     q: String,
     mine: bool,
-    group_options: Vec<GroupOption>,
-    groups_csv: String,
-    groups_label: String,
-    collective_id: i64,
-    owner: String,
+    type_options: Vec<TypeOption>,
+    types_csv: String,
+    types_label: String,
     owner_options: Vec<OwnerOption>,
     collective_options: Vec<ParentOption>,
     tags: Vec<TagRow>,
     s_name: crate::table::SortHead,
     s_owner: crate::table::SortHead,
-    s_groups: crate::table::SortHead,
+    s_type: crate::table::SortHead,
     s_parents: crate::table::SortHead,
     s_tracks: crate::table::SortHead,
     s_sources: crate::table::SortHead,
 }
 
-/// A selectable group in the tag-page group filter.
-struct GroupOption {
-    id: i64,
-    name: String,
-    icon: String,
+/// A selectable tag type in the tag-page type filter.
+struct TypeOption {
+    value: &'static str,
+    label: &'static str,
+    icon: &'static str,
     selected: bool,
-}
-
-/// A lightweight group reference for templates.
-struct GroupRef {
-    id: i64,
-    name: String,
-    icon: String,
-}
-
-/// A tag's membership in a group, for the tag detail page.
-struct TagGroup {
-    id: i64,
-    name: String,
-    icon: String,
-    rank_disp: String,
-    ranked: bool,
 }
 
 struct TagRow {
     id: i64,
     name: String,
     owner: String,
-    groups: String,
+    type_label: String,
     parents: String,
     track_count: i64,
     source_count: i64,
@@ -3942,7 +3889,7 @@ async fn run_tags(
     mine: bool,
     owner: &str,
     collective_id: i64,
-    group_ids: &[i64],
+    type_values: &[String],
     sort: &str,
     dir: &str,
     allowed: &[(&str, &str)],
@@ -3951,9 +3898,7 @@ async fn run_tags(
 ) -> Vec<TagRow> {
     let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
         "SELECT * FROM (SELECT t.id AS id, t.name AS name, u.slug AS owner,
-                (SELECT GROUP_CONCAT(g.icon || ' ' || g.name, ' · ')
-                   FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
-                  WHERE gt.tag_id = t.id) AS groups,
+                COALESCE(t.type,'') AS type_name,
                 (SELECT GROUP_CONCAT(p.name, ' · ')
                    FROM hub_tag_parents tp JOIN hub_tags p ON p.id = tp.parent_tag_id
                   WHERE tp.tag_id = t.id) AS parents,
@@ -3973,29 +3918,25 @@ async fn run_tags(
     }
     if collective_id != 0 {
         qb.push(
-            " AND EXISTS (SELECT 1 FROM hub_group_tags gt3
-                           JOIN hub_tag_groups g3 ON g3.id = gt3.group_id
-                          WHERE gt3.tag_id = t.id AND g3.collective_id = ",
+            " AND t.owner_user_id IN (SELECT user_id FROM hub_collective_members
+                                       WHERE collective_id = ",
         )
         .push_bind(collective_id)
         .push(")");
     }
-    if !group_ids.is_empty() {
-        qb.push(
-            " AND EXISTS (SELECT 1 FROM hub_group_tags gt2
-                          WHERE gt2.tag_id = t.id AND gt2.group_id IN (",
-        );
+    if !type_values.is_empty() {
+        qb.push(" AND t.type IN (");
         {
             let mut sep = qb.separated(", ");
-            for gid in group_ids {
-                sep.push_bind(*gid);
+            for tv in type_values {
+                sep.push_bind(tv.clone());
             }
         }
-        qb.push("))");
+        qb.push(")");
     }
     qb.push(") WHERE 1 = 1");
     if strict {
-        crate::table::push_fuzzy(&mut qb, q, &["name", "owner", "groups", "parents"]);
+        crate::table::push_fuzzy(&mut qb, q, &["name", "owner", "type_name", "parents"]);
     }
     crate::table::order_by(&mut qb, sort, dir, allowed, "name");
     qb.push(" LIMIT ").push_bind(limit);
@@ -4004,14 +3945,20 @@ async fn run_tags(
         .await
         .unwrap_or_default()
         .iter()
-        .map(|r| TagRow {
-            id: r.get::<i64, _>("id"),
-            name: r.get::<Option<String>, _>("name").unwrap_or_default(),
-            owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
-            groups: r.get::<Option<String>, _>("groups").unwrap_or_default(),
-            parents: r.get::<Option<String>, _>("parents").unwrap_or_default(),
-            track_count: r.get::<Option<i64>, _>("track_count").unwrap_or(0),
-            source_count: r.get::<Option<i64>, _>("source_count").unwrap_or(0),
+        .map(|r| {
+            let ty: String = r.get::<Option<String>, _>("type_name").unwrap_or_default();
+            let type_label = crate::tagtypes::TagType::parse(&ty)
+                .map(|t| format!("{} {}", t.icon(), t.label()))
+                .unwrap_or_default();
+            TagRow {
+                id: r.get::<i64, _>("id"),
+                name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+                owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
+                type_label,
+                parents: r.get::<Option<String>, _>("parents").unwrap_or_default(),
+                track_count: r.get::<Option<i64>, _>("track_count").unwrap_or(0),
+                source_count: r.get::<Option<i64>, _>("source_count").unwrap_or(0),
+            }
         })
         .collect()
 }
@@ -4028,19 +3975,16 @@ async fn tags_page(
     let q = f.q.unwrap_or_default().trim().to_string();
     let mine = f.mine.as_deref() == Some("1");
     let me = nav.id;
-    // Multi-group selection: legacy `group` plus comma-separated `groups`.
-    let mut group_ids: Vec<i64> = Vec::new();
-    if let Some(g) = f.group {
-        if g != 0 {
-            group_ids.push(g);
-        }
-    }
-    if let Some(csv) = f.groups.as_deref() {
+    // Multi-type selection: comma-separated names.
+    let mut type_values: Vec<String> = Vec::new();
+    if let Some(csv) = f.types.as_deref() {
         for part in csv.split(',') {
-            if let Ok(v) = part.trim().parse::<i64>() {
-                if v != 0 && !group_ids.contains(&v) {
-                    group_ids.push(v);
-                }
+            let v = part.trim().to_ascii_uppercase();
+            if !v.is_empty()
+                && crate::tagtypes::TagType::parse(&v).is_some()
+                && !type_values.contains(&v)
+            {
+                type_values.push(v);
             }
         }
     }
@@ -4050,7 +3994,7 @@ async fn tags_page(
     let allowed: &[(&str, &str)] = &[
         ("name", "name"),
         ("owner", "owner"),
-        ("groups", "groups"),
+        ("type", "type_name"),
         ("parents", "parents"),
         ("tracks", "track_count"),
         ("sources", "source_count"),
@@ -4066,7 +4010,7 @@ async fn tags_page(
         mine,
         &owner,
         collective_id,
-        &group_ids,
+        &type_values,
         &sort,
         &dir,
         allowed,
@@ -4083,7 +4027,7 @@ async fn tags_page(
             mine,
             &owner,
             collective_id,
-            &group_ids,
+            &type_values,
             &sort,
             &dir,
             allowed,
@@ -4093,7 +4037,7 @@ async fn tags_page(
         .await;
         tags.retain(|t| {
             crate::table::matches_typo(
-                &format!("{} {} {} {}", t.name, t.owner, t.groups, t.parents).to_lowercase(),
+                &format!("{} {} {} {}", t.name, t.owner, t.type_label, t.parents).to_lowercase(),
                 &toks,
             )
         });
@@ -4118,31 +4062,26 @@ async fn tags_page(
             icon,
         })
         .collect();
-    let group_options: Vec<GroupOption> = crate::tags::list_groups_for(&st.pool, me)
-        .await
+    let type_options: Vec<TypeOption> = crate::tagtypes::options()
         .into_iter()
-        .map(|g| GroupOption {
-            selected: group_ids.contains(&g.id),
-            id: g.id,
-            name: g.name,
-            icon: g.icon,
+        .map(|(value, label, icon)| TypeOption {
+            value,
+            label,
+            icon,
+            selected: type_values.iter().any(|v| v.eq_ignore_ascii_case(value)),
         })
         .collect();
-    let groups_csv = group_ids
+    let types_csv = type_values.join(",");
+    let types_label = type_options
         .iter()
-        .map(|i| i.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    let groups_label = group_options
-        .iter()
-        .filter(|g| g.selected)
-        .map(|g| format!("{} {}", g.icon, g.name).trim().to_string())
+        .filter(|t| t.selected)
+        .map(|t| format!("{} {}", t.icon, t.label).trim().to_string())
         .collect::<Vec<_>>()
         .join(" · ");
     let rawq = raw.as_deref().unwrap_or("");
     let s_name = crate::table::sort_head(rawq, "name", "Tag", &sort, &dir);
     let s_owner = crate::table::sort_head(rawq, "owner", "Besitzer", &sort, &dir);
-    let s_groups = crate::table::sort_head(rawq, "groups", "Gruppen", &sort, &dir);
+    let s_type = crate::table::sort_head(rawq, "type", "Typ", &sort, &dir);
     let s_parents = crate::table::sort_head(rawq, "parents", "Parent-Tags", &sort, &dir);
     let s_tracks = crate::table::sort_head(rawq, "tracks", "Tracks", &sort, &dir);
     let s_sources = crate::table::sort_head(rawq, "sources", "Quellen", &sort, &dir);
@@ -4151,17 +4090,15 @@ async fn tags_page(
         flash: String::new(),
         q,
         mine,
-        group_options,
-        groups_csv,
-        groups_label,
-        collective_id,
-        owner,
+        type_options,
+        types_csv,
+        types_label,
         owner_options,
         collective_options,
         tags,
         s_name,
         s_owner,
-        s_groups,
+        s_type,
         s_parents,
         s_tracks,
         s_sources,
@@ -4171,9 +4108,9 @@ async fn tags_page(
 #[derive(Deserialize)]
 struct TagCreateForm {
     name: String,
-    /// Optional group to place the new tag into.
-    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
-    group: Option<i64>,
+    /// Optional tag type to apply to the new tag.
+    #[serde(default, rename = "type")]
+    tag_type: Option<String>,
 }
 
 /// Issue #206: create a tag directly from the tag page (owner = current user).
@@ -4189,11 +4126,13 @@ async fn tag_create(
         return Redirect::to("/tags").into_response();
     }
     if let Ok(tag_id) = crate::tags::ensure_tag(&st.pool, nav.id, &f.name).await {
-        if let Some(g) = f.group {
-            if g != 0 {
-                // Best-effort: the tag is created regardless of group rights.
-                let _ = crate::tags::add_tag_to_group(&st.pool, nav.id, tag_id, g).await;
-            }
+        if let Some(ty) = f
+            .tag_type
+            .as_deref()
+            .and_then(crate::tagtypes::TagType::parse)
+        {
+            // Best-effort: the tag is created regardless.
+            let _ = crate::tagtypes::set(&st.pool, nav.id, tag_id, Some(ty)).await;
         }
     }
     Redirect::to("/tags").into_response()
@@ -4228,8 +4167,8 @@ struct TopArtist {
 /// One row of the tag co-occurrence table (pre-formatted metric + links).
 struct CooccurRow {
     name: String,
-    group: String,
-    same_group: bool,
+    type_label: String,
+    same_type: bool,
     lift: String,
     both: i64,
     support: i64,
@@ -4247,11 +4186,13 @@ struct TagDetailPage {
     name: String,
     owner: String,
     is_owner: bool,
-    groups: Vec<TagGroup>,
-    my_groups: Vec<GroupRef>,
-    parents: Vec<GroupRef>,
-    children: Vec<GroupRef>,
-    /// True when the tag lives in a group with the `genre` role.
+    /// Human label of the tag's type (empty when untyped).
+    type_label: String,
+    type_icon: String,
+    type_options: Vec<TypeOption>,
+    parents: Vec<ParentRef>,
+    children: Vec<ParentRef>,
+    /// True when the tag has the `GENRE` type.
     genre_mode: bool,
     source_count: i64,
     /// Source playlists feeding this tag, with their keep-on-remove policy.
@@ -4282,21 +4223,17 @@ async fn tag_detail_page(
     let Some(d) = crate::tags::tag_detail(&st.pool, id).await else {
         return not_found("Tag nicht gefunden.");
     };
-    let groups: Vec<TagGroup> = d
-        .groups
+    let parsed = crate::tagtypes::TagType::parse(&d.type_name);
+    let type_label = parsed.map(|t| t.label().to_string()).unwrap_or_default();
+    let type_icon = parsed.map(|t| t.icon().to_string()).unwrap_or_default();
+    let type_options: Vec<TypeOption> = crate::tagtypes::options()
         .into_iter()
-        .map(|(id, name, icon, rank, ranked)| TagGroup {
-            id,
-            name,
+        .map(|(value, label, icon)| TypeOption {
+            selected: d.type_name.eq_ignore_ascii_case(value),
+            value,
+            label,
             icon,
-            ranked,
-            rank_disp: rank.map(|r| r.to_string()).unwrap_or_default(),
         })
-        .collect();
-    let my_groups: Vec<GroupRef> = crate::tags::groups_i_contribute(&st.pool, nav.id)
-        .await
-        .into_iter()
-        .map(|(id, name, icon)| GroupRef { id, name, icon })
         .collect();
     let q = msg.q.clone().unwrap_or_default().trim().to_string();
     let allowed: &[(&str, &str)] = &[("title", "title"), ("artists", "artists")];
@@ -4342,23 +4279,15 @@ async fn tag_detail_page(
     .unwrap_or_default();
     let total = isrcs.len();
     let (ready, _) = crate::music_api::cached_counts(&st.pool, &isrcs).await;
-    let parents: Vec<GroupRef> = crate::tags::tag_parents_of(&st.pool, id)
+    let parents: Vec<ParentRef> = crate::tags::tag_parents_of(&st.pool, id)
         .await
         .into_iter()
-        .map(|(id, name)| GroupRef {
-            id,
-            name,
-            icon: String::new(),
-        })
+        .map(|(id, name)| ParentRef { id, name })
         .collect();
-    let children: Vec<GroupRef> = crate::tags::tag_children_of(&st.pool, id)
+    let children: Vec<ParentRef> = crate::tags::tag_children_of(&st.pool, id)
         .await
         .into_iter()
-        .map(|(id, name)| GroupRef {
-            id,
-            name,
-            icon: String::new(),
-        })
+        .map(|(id, name)| ParentRef { id, name })
         .collect();
     let top_artists: Vec<TopArtist> = crate::tags::tag_top_artists(&st.pool, id)
         .await
@@ -4391,8 +4320,8 @@ async fn tag_detail_page(
             overlap_href: format!("/overlap?tag={}", urlencoding::encode(&c.name)),
             digging_href: format!("/digging?seed={}", c.sample_track_id),
             name: c.name,
-            group: c.group,
-            same_group: c.same_group,
+            type_label: c.type_label,
+            same_type: c.same_type,
             lift: format!("{:.2}", c.lift),
             both: c.both,
             support: c.support,
@@ -4428,6 +4357,7 @@ async fn tag_detail_page(
     .flatten()
     .unwrap_or(0)
         != 0;
+    let genre_mode = d.type_name == "GENRE";
     render(&TagDetailPage {
         nav,
         flash: msg.msg.unwrap_or_default(),
@@ -4435,11 +4365,12 @@ async fn tag_detail_page(
         name: d.name,
         owner: d.owner,
         is_owner,
-        groups,
-        my_groups,
+        type_label,
+        type_icon,
+        type_options,
         parents,
         children,
-        genre_mode: crate::tags::tag_is_genre(&st.pool, id).await,
+        genre_mode,
         source_count: d.source_count,
         sources,
         sync,
@@ -4490,6 +4421,35 @@ async fn tag_rename(
     };
     let msg = match crate::tags::rename_tag(&st.pool, uid, id, &f.name).await {
         Ok(()) => "Tag umbenannt".to_string(),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    flash_redirect(&format!("/tag/{id}"), msg)
+}
+
+#[derive(Deserialize)]
+struct TagTypeForm {
+    #[serde(default, rename = "type")]
+    tag_type: Option<String>,
+}
+
+/// Owner-only: set (or clear) the tag's type.
+async fn tag_set_type(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<TagTypeForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let ty = f
+        .tag_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(crate::tagtypes::TagType::parse);
+    let msg = match crate::tagtypes::set(&st.pool, uid, id, ty).await {
+        Ok(()) => "Typ gespeichert".to_string(),
         Err(e) => format!("Fehler: {e}"),
     };
     flash_redirect(&format!("/tag/{id}"), msg)
@@ -4639,372 +4599,6 @@ async fn tag_parent_remove(
     flash_redirect(&format!("/tag/{id}"), msg)
 }
 
-#[derive(Deserialize)]
-struct GroupIdForm {
-    group_id: i64,
-}
-
-async fn tag_group_add(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-    Form(f): Form<GroupIdForm>,
-) -> Response {
-    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
-        return Redirect::to("/login").into_response();
-    };
-    let _ = crate::tags::add_tag_to_group(&st.pool, uid, id, f.group_id).await;
-    Redirect::to(&format!("/tag/{id}")).into_response()
-}
-
-async fn tag_group_remove(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-    Form(f): Form<GroupIdForm>,
-) -> Response {
-    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
-        return Redirect::to("/login").into_response();
-    };
-    let _ = crate::tags::remove_tag_from_group(&st.pool, uid, id, f.group_id).await;
-    Redirect::to(&format!("/tag/{id}")).into_response()
-}
-
-// ── groups ───────────────────────────────────────────────────────────────────
-
-struct GroupRow {
-    id: i64,
-    name: String,
-    icon: String,
-    owner: String,
-    role: String,
-    inherited: bool,
-    tag_count: i64,
-    members: i64,
-    weight: f64,
-}
-
-fn group_row(g: crate::tags::Group) -> GroupRow {
-    GroupRow {
-        id: g.id,
-        name: g.name,
-        icon: g.icon,
-        owner: g.owner,
-        role: g.role,
-        inherited: g.inherited,
-        tag_count: g.tag_count,
-        members: g.members,
-        weight: g.weight,
-    }
-}
-
-#[derive(Template)]
-#[template(path = "groups.html")]
-struct GroupsPage {
-    nav: crate::ui::Nav,
-    flash: String,
-    q: String,
-    groups: Vec<GroupRow>,
-    discover: Vec<GroupRow>,
-    icons: &'static [&'static str],
-    collective_options: Vec<GroupRef>,
-    s_name: crate::table::SortHead,
-    s_owner: crate::table::SortHead,
-    s_tags: crate::table::SortHead,
-    s_weight: crate::table::SortHead,
-    s_members: crate::table::SortHead,
-}
-
-#[derive(Deserialize, Default)]
-struct GroupFilter {
-    q: Option<String>,
-    sort: Option<String>,
-    dir: Option<String>,
-}
-
-async fn groups_page(
-    State(st): State<AppState>,
-    Query(f): Query<GroupFilter>,
-    RawQuery(raw): RawQuery,
-    headers: HeaderMap,
-) -> Response {
-    let Some(nav) = crate::ui::nav(&st, &headers, "groups").await else {
-        return Redirect::to("/login").into_response();
-    };
-    let q = f.q.unwrap_or_default().trim().to_string();
-    let allowed: &[(&str, &str)] = &[
-        ("name", "name"),
-        ("owner", "owner"),
-        ("tags", "tag_count"),
-        ("weight", "weight"),
-        ("members", "members"),
-    ];
-    let (sort, dir) =
-        crate::table::resolve_sort(f.sort.as_deref(), f.dir.as_deref(), allowed, "name", "asc");
-    let toks = crate::table::tokens(&q);
-    let mut groups: Vec<GroupRow> = crate::tags::list_groups_for(&st.pool, nav.id)
-        .await
-        .into_iter()
-        .map(group_row)
-        .filter(|g| {
-            crate::table::matches_typo(
-                &format!("{} {} {}", g.name, g.owner, g.role).to_lowercase(),
-                &toks,
-            )
-        })
-        .collect();
-    let desc = dir == "desc";
-    groups.sort_by(|a, b| {
-        let o = match sort.as_str() {
-            "owner" => a.owner.to_lowercase().cmp(&b.owner.to_lowercase()),
-            "tags" => a.tag_count.cmp(&b.tag_count),
-            "weight" => a
-                .weight
-                .partial_cmp(&b.weight)
-                .unwrap_or(std::cmp::Ordering::Equal),
-            "members" => a.members.cmp(&b.members),
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        };
-        if desc { o.reverse() } else { o }
-    });
-    let discover = crate::tags::list_discover_groups(&st.pool, nav.id)
-        .await
-        .into_iter()
-        .map(group_row)
-        .collect();
-    let collective_options: Vec<GroupRef> = crate::tags::collectives_i_belong(&st.pool, nav.id)
-        .await
-        .into_iter()
-        .map(|(id, name, icon)| GroupRef { id, name, icon })
-        .collect();
-    let rawq = raw.as_deref().unwrap_or("");
-    let s_name = crate::table::sort_head(rawq, "name", "Gruppe", &sort, &dir);
-    let s_owner = crate::table::sort_head(rawq, "owner", "Owner", &sort, &dir);
-    let s_tags = crate::table::sort_head(rawq, "tags", "Tags", &sort, &dir);
-    let s_weight = crate::table::sort_head(rawq, "weight", "Gew.", &sort, &dir);
-    let s_members = crate::table::sort_head(rawq, "members", "Mitglieder", &sort, &dir);
-    render(&GroupsPage {
-        nav,
-        flash: String::new(),
-        q,
-        groups,
-        discover,
-        icons: crate::tags::ICONS,
-        collective_options,
-        s_name,
-        s_owner,
-        s_tags,
-        s_weight,
-        s_members,
-    })
-}
-
-#[derive(Deserialize)]
-struct GroupForm {
-    name: String,
-    icon: Option<String>,
-    collective_id: Option<String>,
-}
-
-async fn group_create(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Form(f): Form<GroupForm>,
-) -> Response {
-    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
-        return Redirect::to("/login").into_response();
-    };
-    if let Ok(gid) =
-        crate::tags::create_group(&st.pool, uid, &f.name, f.icon.as_deref().unwrap_or("")).await
-    {
-        let cid = f
-            .collective_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .and_then(|s| s.parse::<i64>().ok());
-        if let Some(cid) = cid {
-            let _ = crate::tags::set_group_collective(&st.pool, uid, gid, Some(cid)).await;
-        }
-    }
-    Redirect::to("/groups").into_response()
-}
-
-async fn group_subscribe(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-) -> Response {
-    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
-        return Redirect::to("/login").into_response();
-    };
-    let _ = crate::tags::subscribe(&st.pool, uid, id).await;
-    Redirect::to("/groups").into_response()
-}
-
-async fn group_unsubscribe(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-) -> Response {
-    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
-        return Redirect::to("/login").into_response();
-    };
-    let _ = crate::tags::unsubscribe(&st.pool, uid, id).await;
-    Redirect::to("/groups").into_response()
-}
-
-#[derive(Deserialize)]
-struct RoleForm {
-    slug: String,
-    role: String,
-}
-
-async fn group_set_role(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-    Form(f): Form<RoleForm>,
-) -> Response {
-    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
-        return Redirect::to("/login").into_response();
-    };
-    let _ = crate::tags::set_member_role(&st.pool, uid, id, &f.slug, &f.role).await;
-    Redirect::to(&format!("/groups/{id}")).into_response()
-}
-
-#[derive(Deserialize)]
-struct SlugForm {
-    slug: String,
-}
-
-async fn group_remove_member(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-    Form(f): Form<SlugForm>,
-) -> Response {
-    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
-        return Redirect::to("/login").into_response();
-    };
-    let _ = crate::tags::remove_member(&st.pool, uid, id, &f.slug).await;
-    Redirect::to(&format!("/groups/{id}")).into_response()
-}
-
-async fn group_delete(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-) -> Response {
-    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
-        return Redirect::to("/login").into_response();
-    };
-    let _ = crate::tags::delete_group(&st.pool, uid, id).await;
-    Redirect::to("/groups").into_response()
-}
-
-async fn group_update(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-    Form(f): Form<UpdateNameForm>,
-) -> Response {
-    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
-        return Redirect::to("/login").into_response();
-    };
-    let icon = f.icon.as_deref().unwrap_or("").trim().to_string();
-    let msg = match crate::tags::update_group(&st.pool, uid, id, &f.name, &icon).await {
-        Ok(()) => "Gruppe gespeichert".to_string(),
-        Err(e) => format!("Fehler: {e}"),
-    };
-    flash_redirect(&format!("/groups/{id}"), msg)
-}
-
-#[derive(Deserialize)]
-struct WeightForm {
-    weight: f64,
-    #[serde(default)]
-    back: Option<String>,
-}
-
-async fn group_set_weight(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-    Form(f): Form<WeightForm>,
-) -> Response {
-    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
-        return Redirect::to("/login").into_response();
-    };
-    let msg = match crate::tags::set_group_weight(&st.pool, uid, id, f.weight).await {
-        Ok(()) => format!("Gewichtung: {:.1}", f.weight),
-        Err(e) => format!("Fehler: {e}"),
-    };
-    let back = f
-        .back
-        .filter(|b| b.starts_with('/'))
-        .unwrap_or_else(|| format!("/groups/{id}"));
-    flash_redirect(&back, msg)
-}
-
-#[derive(Deserialize)]
-struct RankedForm {
-    #[serde(default)]
-    ranked: Option<String>,
-    #[serde(default)]
-    back: Option<String>,
-}
-
-async fn group_set_ranked(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-    Form(f): Form<RankedForm>,
-) -> Response {
-    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
-        return Redirect::to("/login").into_response();
-    };
-    let ranked = matches!(f.ranked.as_deref(), Some("1") | Some("on") | Some("true"));
-    let msg = match crate::tags::set_group_ranked(&st.pool, uid, id, ranked).await {
-        Ok(()) => format!("Ranked-Gruppe: {}", if ranked { "an" } else { "aus" }),
-        Err(e) => format!("Fehler: {e}"),
-    };
-    let back = f
-        .back
-        .filter(|b| b.starts_with('/'))
-        .unwrap_or_else(|| format!("/groups/{id}"));
-    flash_redirect(&back, msg)
-}
-
-#[derive(Deserialize)]
-struct TagRankForm {
-    tag_id: i64,
-    #[serde(default)]
-    rank: Option<i64>,
-    #[serde(default)]
-    back: Option<String>,
-}
-
-async fn group_tag_rank(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-    Form(f): Form<TagRankForm>,
-) -> Response {
-    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
-        return Redirect::to("/login").into_response();
-    };
-    let msg = match crate::tags::set_group_tag_rank(&st.pool, uid, id, f.tag_id, f.rank).await {
-        Ok(()) => "Rang gesetzt".to_string(),
-        Err(e) => format!("Fehler: {e}"),
-    };
-    let back = f
-        .back
-        .filter(|b| b.starts_with('/'))
-        .unwrap_or_else(|| format!("/groups/{id}"));
-    flash_redirect(&back, msg)
-}
-
 struct ParentOption {
     id: i64,
     name: String,
@@ -5017,181 +4611,15 @@ struct OwnerOption {
     selected: bool,
 }
 
-struct MemberRow {
+#[derive(Deserialize)]
+struct RoleForm {
     slug: String,
     role: String,
 }
 
-struct GroupTag {
-    id: i64,
-    name: String,
-    owner: String,
-    rank_disp: String,
-}
-
-#[derive(Template)]
-#[template(path = "group.html")]
-struct GroupPage {
-    nav: crate::ui::Nav,
-    flash: String,
-    id: i64,
-    name: String,
-    icon: String,
-    owner: String,
-    is_owner: bool,
-    can_edit: bool,
-    ranked: bool,
-    role_inherited: bool,
-    collective_id: i64,
-    collective_label: String,
-    weight: f64,
-    collective_options: Vec<ParentOption>,
-    members: Vec<MemberRow>,
-    tags: Vec<GroupTag>,
-    users: Vec<String>,
-    icons: Vec<IconOption>,
-    q: String,
-    s_name: crate::table::SortHead,
-    s_owner: crate::table::SortHead,
-}
-
-async fn group_page(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    Query(msg): Query<AdminMsg>,
-    RawQuery(raw): RawQuery,
-    headers: HeaderMap,
-) -> Response {
-    let Some(nav) = crate::ui::nav(&st, &headers, "groups").await else {
-        return Redirect::to("/login").into_response();
-    };
-    let Some(d) = crate::tags::group_detail(&st.pool, nav.id, id).await else {
-        return not_found("Gruppe nicht gefunden.");
-    };
-    let is_owner = d.role == crate::tags::ROLE_OWNER;
-    let can_edit = matches!(
-        d.role.as_str(),
-        crate::tags::ROLE_OWNER | crate::tags::ROLE_CONTRIBUTOR
-    );
-    let members = d
-        .members
-        .into_iter()
-        .map(|(slug, role)| MemberRow { slug, role })
-        .collect();
-    let q = msg.q.clone().unwrap_or_default().trim().to_string();
-    let toks = crate::table::tokens(&q);
-    let allowed: &[(&str, &str)] = &[("name", "name"), ("owner", "owner")];
-    let (sort, dir) = crate::table::resolve_sort(
-        msg.sort.as_deref(),
-        msg.dir.as_deref(),
-        allowed,
-        "name",
-        "asc",
-    );
-    let mut tags: Vec<GroupTag> = d
-        .tags
-        .into_iter()
-        .map(|(id, name, owner, rank)| GroupTag {
-            id,
-            name,
-            owner,
-            rank_disp: rank
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| "—".to_string()),
-        })
-        .filter(|t| {
-            crate::table::matches_typo(&format!("{} {}", t.name, t.owner).to_lowercase(), &toks)
-        })
-        .collect();
-    {
-        let desc = dir == "desc";
-        tags.sort_by(|a, b| {
-            let o = if sort == "owner" {
-                a.owner
-                    .to_lowercase()
-                    .cmp(&b.owner.to_lowercase())
-                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            } else {
-                a.name.to_lowercase().cmp(&b.name.to_lowercase())
-            };
-            if desc { o.reverse() } else { o }
-        });
-    }
-    let users = sqlx::query_scalar::<_, String>("SELECT slug FROM hub_users ORDER BY slug")
-        .fetch_all(&st.pool)
-        .await
-        .unwrap_or_default();
-    let collective_label = if d.collective_id != 0 {
-        format!("{} {}", d.collective_icon, d.collective_name)
-            .trim()
-            .to_string()
-    } else {
-        String::new()
-    };
-    let icons = icon_options(&d.icon);
-    let collective_options: Vec<ParentOption> = crate::tags::collectives_i_belong(&st.pool, nav.id)
-        .await
-        .into_iter()
-        .map(|(id, name, icon)| ParentOption {
-            selected: id == d.collective_id,
-            id,
-            name,
-            icon,
-        })
-        .collect();
-    render(&GroupPage {
-        nav,
-        flash: msg.msg.unwrap_or_default(),
-        id: d.id,
-        name: d.name,
-        icon: d.icon,
-        owner: d.owner,
-        is_owner,
-        can_edit,
-        ranked: d.ranked,
-        role_inherited: d.role_inherited,
-        collective_id: d.collective_id,
-        collective_label,
-        weight: d.weight,
-        collective_options,
-        members,
-        tags,
-        users,
-        icons,
-        q,
-        s_name: crate::table::sort_head(raw.as_deref().unwrap_or(""), "name", "Tag", &sort, &dir),
-        s_owner: crate::table::sort_head(
-            raw.as_deref().unwrap_or(""),
-            "owner",
-            "Owner",
-            &sort,
-            &dir,
-        ),
-    })
-}
-
 #[derive(Deserialize)]
-struct CollectiveIdForm {
-    collective_id: String,
-}
-
-async fn group_set_collective(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-    Form(f): Form<CollectiveIdForm>,
-) -> Response {
-    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
-        return Redirect::to("/login").into_response();
-    };
-    let cid = f
-        .collective_id
-        .trim()
-        .parse::<i64>()
-        .ok()
-        .filter(|p| *p != 0);
-    let _ = crate::tags::set_group_collective(&st.pool, uid, id, cid).await;
-    Redirect::to(&format!("/groups/{id}")).into_response()
+struct SlugForm {
+    slug: String,
 }
 
 // ── collectives ──────────────────────────────────────────────────────────────
@@ -5202,7 +4630,6 @@ struct CollRow {
     icon: String,
     owner: String,
     role: String,
-    groups: i64,
     members: i64,
 }
 
@@ -5213,7 +4640,6 @@ fn coll_row(c: crate::tags::Collective) -> CollRow {
         icon: c.icon,
         owner: c.owner,
         role: c.role,
-        groups: c.groups,
         members: c.members,
     }
 }
@@ -5229,7 +4655,6 @@ struct CollectivesPage {
     icons: &'static [&'static str],
     s_name: crate::table::SortHead,
     s_owner: crate::table::SortHead,
-    s_groups: crate::table::SortHead,
     s_members: crate::table::SortHead,
 }
 
@@ -5250,12 +4675,7 @@ async fn collectives_page(
         return Redirect::to("/login").into_response();
     };
     let q = f.q.unwrap_or_default().trim().to_string();
-    let allowed: &[(&str, &str)] = &[
-        ("name", "name"),
-        ("owner", "owner"),
-        ("groups", "groups"),
-        ("members", "members"),
-    ];
+    let allowed: &[(&str, &str)] = &[("name", "name"), ("owner", "owner"), ("members", "members")];
     let (sort, dir) =
         crate::table::resolve_sort(f.sort.as_deref(), f.dir.as_deref(), allowed, "name", "asc");
     let toks = crate::table::tokens(&q);
@@ -5274,7 +4694,6 @@ async fn collectives_page(
     collectives.sort_by(|a, b| {
         let o = match sort.as_str() {
             "owner" => a.owner.to_lowercase().cmp(&b.owner.to_lowercase()),
-            "groups" => a.groups.cmp(&b.groups),
             "members" => a.members.cmp(&b.members),
             _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         };
@@ -5288,7 +4707,6 @@ async fn collectives_page(
     let rawq = raw.as_deref().unwrap_or("");
     let s_name = crate::table::sort_head(rawq, "name", "Collective", &sort, &dir);
     let s_owner = crate::table::sort_head(rawq, "owner", "Owner", &sort, &dir);
-    let s_groups = crate::table::sort_head(rawq, "groups", "Gruppen", &sort, &dir);
     let s_members = crate::table::sort_head(rawq, "members", "Mitglieder", &sort, &dir);
     render(&CollectivesPage {
         nav,
@@ -5299,7 +4717,6 @@ async fn collectives_page(
         icons: crate::tags::ICONS,
         s_name,
         s_owner,
-        s_groups,
         s_members,
     })
 }
@@ -5307,7 +4724,7 @@ async fn collectives_page(
 async fn collective_create(
     State(st): State<AppState>,
     headers: HeaderMap,
-    Form(f): Form<GroupForm>,
+    Form(f): Form<UpdateNameForm>,
 ) -> Response {
     let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
         return Redirect::to("/login").into_response();
@@ -5401,14 +4818,6 @@ struct CollMember {
     role: String,
 }
 
-struct CollGroup {
-    id: i64,
-    name: String,
-    icon: String,
-    tag_count: i64,
-    weight: f64,
-}
-
 #[derive(Template)]
 #[template(path = "collective.html")]
 struct CollectivePage {
@@ -5421,13 +4830,8 @@ struct CollectivePage {
     is_owner: bool,
     member: bool,
     members: Vec<CollMember>,
-    groups: Vec<CollGroup>,
-    available_groups: Vec<GroupRef>,
     users: Vec<String>,
     icons: Vec<IconOption>,
-    q: String,
-    s_gname: crate::table::SortHead,
-    s_gtracks: crate::table::SortHead,
     s_muser: crate::table::SortHead,
 }
 
@@ -5445,40 +4849,6 @@ async fn collective_page(
         return not_found("Collective nicht gefunden.");
     };
     let member = !d.role.is_empty();
-    let q = msg.q.clone().unwrap_or_default().trim().to_string();
-    let toks = crate::table::tokens(&q);
-    // Groups table: fuzzy on name, sortable by name/track-count.
-    let gallowed: &[(&str, &str)] = &[("name", "name"), ("tracks", "tag_count")];
-    let (gsort, gdir) = crate::table::resolve_sort(
-        msg.sort.as_deref(),
-        msg.dir.as_deref(),
-        gallowed,
-        "name",
-        "asc",
-    );
-    let mut groups: Vec<CollGroup> = d
-        .groups
-        .into_iter()
-        .map(|(id, name, icon, tag_count, weight)| CollGroup {
-            id,
-            name,
-            icon,
-            tag_count,
-            weight,
-        })
-        .filter(|g| crate::table::matches_typo(&g.name.to_lowercase(), &toks))
-        .collect();
-    {
-        let desc = gdir == "desc";
-        groups.sort_by(|a, b| {
-            let o = if gsort == "tracks" {
-                a.tag_count.cmp(&b.tag_count)
-            } else {
-                a.name.to_lowercase().cmp(&b.name.to_lowercase())
-            };
-            if desc { o.reverse() } else { o }
-        });
-    }
     // Members table: sortable by user slug.
     let (msort, mdir) = crate::table::resolve_sort(
         msg.msort.as_deref(),
@@ -5500,24 +4870,6 @@ async fn collective_page(
         });
         let _ = msort;
     }
-    // The owner's own groups not yet in this collective.
-    let available_groups: Vec<GroupRef> = if d.is_owner {
-        sqlx::query_as::<_, (i64, String, String)>(
-            "SELECT id, name, COALESCE(icon,'') FROM hub_tag_groups
-              WHERE owner_user_id = ?1 AND (collective_id IS NULL OR collective_id <> ?2)
-              ORDER BY name",
-        )
-        .bind(nav.id)
-        .bind(id)
-        .fetch_all(&st.pool)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(id, name, icon)| GroupRef { id, name, icon })
-        .collect()
-    } else {
-        Vec::new()
-    };
     let users = sqlx::query_scalar::<_, String>("SELECT slug FROM hub_users ORDER BY slug")
         .fetch_all(&st.pool)
         .await
@@ -5534,13 +4886,8 @@ async fn collective_page(
         is_owner: d.is_owner,
         member,
         members,
-        groups,
-        available_groups,
         users,
         icons,
-        q,
-        s_gname: crate::table::sort_head(rawq, "name", "Gruppe", &gsort, &gdir),
-        s_gtracks: crate::table::sort_head(rawq, "tracks", "Tags", &gsort, &gdir),
         s_muser: crate::table::sort_head(rawq, "user", "User", &msort, &mdir),
     })
 }

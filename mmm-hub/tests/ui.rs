@@ -130,9 +130,9 @@ async fn tag_filters_tolerate_empty_numeric_params() {
 
     // Filter forms submit every field; empties must not 400 the request.
     for path in [
-        "/tags?groups=&q=dirty&owner=&collective=",
-        "/tags?q=&group=&collective=&sort=name&dir=asc",
-        "/digging?seed=&tol=&tgroup=&wmin=",
+        "/tags?types=&q=dirty&owner=&collective=",
+        "/tags?q=&types=&collective=&sort=name&dir=asc",
+        "/digging?seed=&tol=&ttype=&wmin=",
         "/me/playlists?filter=all&sort=last&dir=desc",
     ] {
         let resp = app
@@ -745,23 +745,22 @@ async fn tag_hierarchy_is_used_in_filters() {
 }
 
 #[tokio::test]
-async fn group_weight_drives_digging_score_and_parents_visible() {
+async fn tag_type_weight_drives_digging_score_and_parents_visible() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
 
-    // Tag (from alice's playlist, has t_all) in a group with weight 5.
+    // Tag (from alice's playlist, has t_all) with the Mood type (weight 1.0).
     let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
         .await
         .unwrap();
-    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Mood", "💜")
-        .await
-        .unwrap();
-    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, tag, g)
-        .await
-        .unwrap();
-    mmm_hub::tags::set_group_weight(&app.pool, app.seed.alice, g, 5.0)
-        .await
-        .unwrap();
+    mmm_hub::tagtypes::set(
+        &app.pool,
+        app.seed.alice,
+        tag,
+        Some(mmm_hub::tagtypes::TagType::Mood),
+    )
+    .await
+    .unwrap();
 
     // /tags shows the Parent-Tags column.
     let tags_html = app
@@ -773,11 +772,11 @@ async fn group_weight_drives_digging_score_and_parents_visible() {
         .unwrap();
     assert!(body(tags_html).await.contains("Parent-Tags"));
 
-    // Digging: the candidate carries a tag-weight of 5 -> wmin 5 keeps it, 10 drops it.
+    // Digging: the candidate carries tag weight 1.0 -> wmin 1 keeps it, 2 drops it.
     let seed = app.seed.t_pl;
     let keeps = app
         .client()
-        .get(app.url(&format!("/digging?seed={seed}&wmin=5")))
+        .get(app.url(&format!("/digging?seed={seed}&wmin=1")))
         .header("Cookie", &cookie)
         .send()
         .await
@@ -788,22 +787,22 @@ async fn group_weight_drives_digging_score_and_parents_visible() {
     assert!(keeps_html.contains("Seed-Match"));
     let drops = app
         .client()
-        .get(app.url(&format!("/digging?seed={seed}&wmin=10")))
+        .get(app.url(&format!("/digging?seed={seed}&wmin=2")))
         .header("Cookie", &cookie)
         .send()
         .await
         .unwrap();
     assert!(!body(drops).await.contains("Shared Anthem"));
 
-    // The group page exposes the weight control (owner).
-    let gp = app
+    // The tag page shows the type.
+    let tp = app
         .client()
-        .get(app.url(&format!("/groups/{g}")))
+        .get(app.url(&format!("/tag/{tag}")))
         .header("Cookie", &cookie)
         .send()
         .await
         .unwrap();
-    assert!(body(gp).await.contains("Gewichtung / Ranking"));
+    assert!(body(tp).await.contains("Mood"));
 }
 
 #[tokio::test]
@@ -847,61 +846,36 @@ async fn ranking_engine_is_settings_driven() {
 }
 
 #[tokio::test]
-async fn ranked_group_orders_tags_and_shows_rank() {
+async fn tag_type_set_and_shown_over_http() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
 
-    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Phase", "⚡")
+    let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
         .await
         .unwrap();
-    let start = mmm_hub::tags::ensure_tag(&app.pool, app.seed.alice, "start")
-        .await
-        .unwrap();
-    let peak = mmm_hub::tags::ensure_tag(&app.pool, app.seed.alice, "peak")
-        .await
-        .unwrap();
-    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, start, g)
-        .await
-        .unwrap();
-    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, peak, g)
-        .await
-        .unwrap();
-    mmm_hub::tags::set_group_ranked(&app.pool, app.seed.alice, g, true)
-        .await
-        .unwrap();
-    mmm_hub::tags::set_group_tag_rank(&app.pool, app.seed.alice, g, start, Some(1))
-        .await
-        .unwrap();
-    mmm_hub::tags::set_group_tag_rank(&app.pool, app.seed.alice, g, peak, Some(5))
-        .await
-        .unwrap();
-
-    // Group page: ranked control + rank badges, ordered 1..5.
-    let gp = app
+    let resp = app
         .client()
-        .get(app.url(&format!("/groups/{g}")))
+        .post(app.url(&format!("/tag/{tag}/type")))
         .header("Cookie", &cookie)
+        .form(&[("type", "VIBE")])
         .send()
         .await
         .unwrap();
-    let html = body(gp).await;
-    assert!(html.contains("Ranked-Gruppe"));
-    let i_start = html.find("start").unwrap();
-    let i_peak = html.find("peak").unwrap();
-    assert!(
-        i_start < i_peak,
-        "rank 1 (start) sorts before rank 5 (peak)"
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    assert_eq!(
+        mmm_hub::tagtypes::get(&app.pool, tag).await,
+        Some(mmm_hub::tagtypes::TagType::Vibe)
     );
 
-    // Tag page shows the rank.
+    // The tag page shows the type.
     let tp = app
         .client()
-        .get(app.url(&format!("/tag/{start}")))
+        .get(app.url(&format!("/tag/{tag}")))
         .header("Cookie", &cookie)
         .send()
         .await
         .unwrap();
-    assert!(body(tp).await.contains("Rang 1"));
+    assert!(body(tp).await.contains("Vibe"));
 }
 
 #[tokio::test]
@@ -1182,97 +1156,72 @@ async fn similar_scope_contributed_keeps_only_collaborative() {
 }
 
 #[tokio::test]
-async fn collective_members_are_contributors() {
+async fn collective_membership_is_recorded() {
     let app = common::spawn().await;
     let col = mmm_hub::tags::create_collective(&app.pool, app.seed.alice, "Crew", "🤝")
         .await
         .unwrap();
-    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Mood", "💜")
+
+    let d = mmm_hub::tags::collective_detail(&app.pool, app.seed.alice, col)
         .await
         .unwrap();
-    mmm_hub::tags::set_group_collective(&app.pool, app.seed.alice, g, Some(col))
-        .await
-        .unwrap();
+    assert!(d.is_owner);
+    assert!(d.members.iter().any(|(s, r)| s == "alice" && r == "owner"));
 
-    // Bob isn't in the collective yet -> no role on the group.
-    assert!(
-        mmm_hub::tags::effective_role_of(&app.pool, app.seed.bob, g)
-            .await
-            .is_none()
-    );
-
-    // Add him to the *collective* -> contributor on the group.
+    // Add bob as a member; he now belongs to the collective.
     mmm_hub::tags::set_collective_member(&app.pool, app.seed.alice, col, "bob", "member")
         .await
         .unwrap();
-    assert_eq!(
-        mmm_hub::tags::effective_role_of(&app.pool, app.seed.bob, g)
-            .await
-            .as_deref(),
-        Some("contributor")
-    );
-    assert!(mmm_hub::tags::can_contribute(&app.pool, app.seed.bob, g).await);
+    let d = mmm_hub::tags::collective_detail(&app.pool, app.seed.bob, col)
+        .await
+        .unwrap();
+    assert!(!d.is_owner);
+    assert!(d.members.iter().any(|(s, r)| s == "bob" && r == "member"));
     assert!(
-        mmm_hub::tags::list_groups_for(&app.pool, app.seed.bob)
+        mmm_hub::tags::collectives_i_belong(&app.pool, app.seed.bob)
             .await
             .iter()
-            .any(|x| x.id == g && x.inherited)
+            .any(|(id, _, _)| *id == col)
+    );
+
+    // Leaving removes the membership.
+    mmm_hub::tags::leave_collective(&app.pool, app.seed.bob, col)
+        .await
+        .unwrap();
+    assert!(
+        !mmm_hub::tags::collectives_i_belong(&app.pool, app.seed.bob)
+            .await
+            .iter()
+            .any(|(id, _, _)| *id == col)
     );
 }
 
 #[tokio::test]
-async fn groups_have_roles_and_hold_tags() {
+async fn tag_type_can_be_set_changed_and_cleared() {
+    use mmm_hub::tagtypes::{TagType, get as get_type, set as set_type};
     let app = common::spawn().await;
 
-    // Alice creates a group and puts a tag in it.
-    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Mood", "💜")
-        .await
-        .unwrap();
     let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
         .await
         .unwrap();
-    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, tag, g)
-        .await
-        .unwrap();
-    assert!(
-        mmm_hub::tags::groups_for_tag(&app.pool, tag)
-            .await
-            .iter()
-            .any(|(id, _, _, _, _)| *id == g)
-    );
+    assert_eq!(get_type(&app.pool, tag).await, None);
 
-    // Bob isn't a member -> it shows up in discover; he subscribes.
-    assert!(
-        mmm_hub::tags::list_discover_groups(&app.pool, app.seed.bob)
-            .await
-            .iter()
-            .any(|x| x.id == g)
-    );
-    mmm_hub::tags::subscribe(&app.pool, app.seed.bob, g)
+    set_type(&app.pool, app.seed.alice, tag, Some(TagType::Mood))
         .await
         .unwrap();
-    assert!(
-        mmm_hub::tags::list_groups_for(&app.pool, app.seed.bob)
-            .await
-            .iter()
-            .any(|x| x.id == g && x.role == "subscriber")
-    );
+    assert_eq!(get_type(&app.pool, tag).await, Some(TagType::Mood));
 
-    // Subscribers can't contribute; the owner promotes him to contributor.
-    assert!(!mmm_hub::tags::can_contribute(&app.pool, app.seed.bob, g).await);
-    mmm_hub::tags::set_member_role(&app.pool, app.seed.alice, g, "bob", "contributor")
+    // Change to a different type.
+    set_type(&app.pool, app.seed.alice, tag, Some(TagType::Vibe))
         .await
         .unwrap();
-    assert!(mmm_hub::tags::can_contribute(&app.pool, app.seed.bob, g).await);
+    assert_eq!(get_type(&app.pool, tag).await, Some(TagType::Vibe));
 
-    // Many-to-many: the same tag can join a second group.
-    let g2 = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Vibe", "🌈")
+    // Clear it.
+    set_type(&app.pool, app.seed.alice, tag, None)
         .await
         .unwrap();
-    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, tag, g2)
-        .await
-        .unwrap();
-    assert_eq!(mmm_hub::tags::groups_for_tag(&app.pool, tag).await.len(), 2);
+    assert_eq!(get_type(&app.pool, tag).await, None);
 }
 
 #[tokio::test]
@@ -1306,20 +1255,22 @@ async fn tags_are_explicit_and_per_user() {
 }
 
 #[tokio::test]
-async fn track_page_shows_tags_with_groups() {
+async fn track_page_shows_tags_with_types() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
 
-    // Tag from alice's playlist (which contains t_all) + a group with an icon.
+    // Tag from alice's playlist (which contains t_all) with the Mood type.
     let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
         .await
         .unwrap();
-    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Mood", "💜")
-        .await
-        .unwrap();
-    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, tag, g)
-        .await
-        .unwrap();
+    mmm_hub::tagtypes::set(
+        &app.pool,
+        app.seed.alice,
+        tag,
+        Some(mmm_hub::tagtypes::TagType::Mood),
+    )
+    .await
+    .unwrap();
 
     let resp = app
         .client()
@@ -1333,8 +1284,8 @@ async fn track_page_shows_tags_with_groups() {
     // Tag name (== playlist name) links to the tag page.
     assert!(html.contains(&format!("/tag/{tag}")));
     assert!(html.contains("Deep House"));
-    // Uniform grouped tag cloud: group header (icon + name) is rendered.
-    assert!(html.contains("💜 Mood"), "group icon + name must be shown");
+    // Uniform grouped tag cloud: type header (icon + name) is rendered.
+    assert!(html.contains("💜 Mood"), "type icon + name must be shown");
     assert!(html.contains("hub-cloud-h"), "grouped cloud header missing");
 }
 
@@ -1421,16 +1372,18 @@ async fn digging_shows_playlists_and_tags_per_track() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
 
-    // Promote alice's playlist (contains t_all) to a tag and put it in a group.
+    // Promote alice's playlist (contains t_all) to a tag and give it a type.
     let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
         .await
         .unwrap();
-    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Mood", "💜")
-        .await
-        .unwrap();
-    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, tag, g)
-        .await
-        .unwrap();
+    mmm_hub::tagtypes::set(
+        &app.pool,
+        app.seed.alice,
+        tag,
+        Some(mmm_hub::tagtypes::TagType::Mood),
+    )
+    .await
+    .unwrap();
 
     // Seed t_pl co-occurs with t_all in alice's playlist.
     let resp = app
@@ -1448,9 +1401,8 @@ async fn digging_shows_playlists_and_tags_per_track() {
     // The candidate's owning playlist is linked, per user.
     assert!(html.contains(&format!("/playlist/{}", app.seed.pl_alice)));
     assert!(html.contains("@alice"));
-    // Tag with its group icon + name.
+    // Tag with its type icon + name.
     assert!(html.contains("💜 Mood"));
-    assert!(html.contains(&format!("/groups/{g}")));
 }
 
 #[tokio::test]
@@ -1470,16 +1422,18 @@ async fn digging_filters_by_tag_owner_group_and_playlist_owner() {
         body(resp).await
     }
 
-    // alice's playlist (has t_all) becomes a tag in a group.
+    // alice's playlist (has t_all) becomes a Mood tag.
     let tag = mmm_hub::tags::create_from_playlist(&app.pool, app.seed.alice, app.seed.pl_alice)
         .await
         .unwrap();
-    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Mood", "💜")
-        .await
-        .unwrap();
-    mmm_hub::tags::add_tag_to_group(&app.pool, app.seed.alice, tag, g)
-        .await
-        .unwrap();
+    mmm_hub::tagtypes::set(
+        &app.pool,
+        app.seed.alice,
+        tag,
+        Some(mmm_hub::tagtypes::TagType::Mood),
+    )
+    .await
+    .unwrap();
 
     let seed = app.seed.t_pl;
     // Tag owner filter.
@@ -1497,9 +1451,9 @@ async fn digging_filters_by_tag_owner_group_and_playlist_owner() {
         .await
         .contains("Shared Anthem")
     );
-    // Tag group filter.
+    // Tag type filter.
     assert!(
-        fetch(&app, &cookie, &format!("/digging?seed={seed}&tgroup={g}"))
+        fetch(&app, &cookie, &format!("/digging?seed={seed}&ttype=MOOD"))
             .await
             .contains("Shared Anthem")
     );
@@ -1518,7 +1472,7 @@ async fn digging_filters_by_tag_owner_group_and_playlist_owner() {
     // The filter selects are rendered.
     let html = fetch(&app, &cookie, &format!("/digging?seed={seed}")).await;
     assert!(html.contains("name=\"towner\""));
-    assert!(html.contains("name=\"tgroup\""));
+    assert!(html.contains("name=\"ttype\""));
     assert!(html.contains("name=\"powner\""));
 }
 
@@ -1606,7 +1560,7 @@ async fn admin_can_save_settings() {
 }
 
 #[tokio::test]
-async fn tags_groups_collectives_are_renameable() {
+async fn tags_and_collectives_are_renameable() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
 
@@ -1625,31 +1579,6 @@ async fn tags_groups_collectives_are_renameable() {
             .is_err(),
         "a non-owner must not be able to rename"
     );
-
-    // Group rename + icon over HTTP (owner).
-    let g = mmm_hub::tags::create_group(&app.pool, app.seed.alice, "Mood", "💜")
-        .await
-        .unwrap();
-    let resp = app
-        .client()
-        .post(app.url(&format!("/groups/{g}/update")))
-        .header("Cookie", &cookie)
-        .form(&[("name", "Vibe"), ("icon", "🌈")])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-    let html = body(
-        app.client()
-            .get(app.url(&format!("/groups/{g}")))
-            .header("Cookie", &cookie)
-            .send()
-            .await
-            .unwrap(),
-    )
-    .await;
-    assert!(html.contains("Vibe"), "renamed group must be shown");
-    assert!(html.contains("🌈"), "new icon must be shown");
 
     // Collective rename + icon (owner) + ownership guard.
     let col = mmm_hub::tags::create_collective(&app.pool, app.seed.alice, "Crew", "🤝")

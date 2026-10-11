@@ -4,8 +4,8 @@
     <h1>Tags</h1>
     <p class="hub-muted">
         Tags sind <strong>pro User</strong> und entstehen, wenn ihr sie anlegt — z. B. auf
-        einer Playlist „als Tag anlegen". Ein Tag kann aus mehreren Playlists bestehen und
-        in mehreren <a href="/groups">Gruppen</a> liegen.
+        einer Playlist „als Tag anlegen". Jeder Tag hat genau einen <strong>Typ</strong>
+        (Mood, Genre, Vibe, Phase, …), der in die Playlist einfließt.
     </p>
 </hgroup>
 
@@ -17,14 +17,12 @@
         aria-label="Neuer Tag"
         required
     />
-    {% if !group_options.is_empty() %}
-    <select name="group" aria-label="Gruppe (optional)">
-        <option value="0">Gruppe: keine</option>
-        {% for g in group_options %}
-        <option value="{{ g.id }}">{{ g.icon }} {{ g.name }}</option>
+    <select name="type" aria-label="Typ (optional)">
+        <option value="">Typ: keiner</option>
+        {% for t in type_options %}
+        <option value="{{ t.value }}">{{ t.icon }} {{ t.label }}</option>
         {% endfor %}
     </select>
-    {% endif %}
     <button type="submit">Tag anlegen</button>
 </form>
 
@@ -41,16 +39,16 @@
     </ul>
 </nav>
 
-{% if groups_label != "" %}
+{% if types_label != "" %}
 <p class="hub-muted">
-    Gruppen: {{ groups_label }} ·
+    Typen: {{ types_label }} ·
     <a href="/tags{% if mine %}?mine=1{% endif %}">Filter entfernen</a>
 </p>
 {% endif %}
 
 <form method="get" action="/tags" class="hub-filter">
     {% if mine %}<input type="hidden" name="mine" value="1" />{% endif %}
-    <input type="hidden" name="groups" id="groups-hidden" value="{{ groups_csv }}" />
+    <input type="hidden" name="types" id="types-hidden" value="{{ types_csv }}" />
     <input
         type="search"
         name="q"
@@ -58,21 +56,19 @@
         placeholder="Suchen (alle Felder, beliebige Reihenfolge) …"
         aria-label="Tag suchen"
     />
-    {% if !group_options.is_empty() %}
     <select
-        id="groups-select"
+        id="types-select"
         multiple
         size="1"
-        aria-label="Tag-Gruppen (Mehrfachauswahl)"
-        title="Tag-Gruppen (Mehrfachauswahl)"
+        aria-label="Tag-Typen (Mehrfachauswahl)"
+        title="Tag-Typen (Mehrfachauswahl)"
     >
-        {% for g in group_options %}
-        <option value="{{ g.id }}" {% if g.selected %}selected{% endif %}>
-            {{ g.icon }} {{ g.name }}
+        {% for t in type_options %}
+        <option value="{{ t.value }}" {% if t.selected %}selected{% endif %}>
+            {{ t.icon }} {{ t.label }}
         </option>
         {% endfor %}
     </select>
-    {% endif %}
     <select name="owner" aria-label="Besitzer">
         <option value="">Besitzer: alle</option>
         {% for o in owner_options %}
@@ -95,8 +91,8 @@
 </form>
 <script>
     (function () {
-        var sel = document.getElementById("groups-select");
-        var hid = document.getElementById("groups-hidden");
+        var sel = document.getElementById("types-select");
+        var hid = document.getElementById("types-hidden");
         if (!sel || !hid) return;
         var sync = function () {
             hid.value = Array.from(sel.selectedOptions)
@@ -119,7 +115,7 @@
 <div class="overflow-auto hub-scroll-y">
     <table class="hub-dense-table">
         <caption class="hub-visually-hidden">
-            Tags mit Gruppen, Besitzer und Anzahl
+            Tags mit Typ, Besitzer und Anzahl
         </caption>
         <thead>
             <tr>
@@ -141,10 +137,10 @@
                 </th>
                 <th scope="col">
                     <a
-                        href="{{ s_groups.href }}"
-                        class="hub-sort{% if s_groups.active %} hub-sort-on{% endif %}"
-                        >{{ s_groups.label }}{% if s_groups.active %} {{ s_groups.arrow
-                        }}{% endif %}</a
+                        href="{{ s_type.href }}"
+                        class="hub-sort{% if s_type.active %} hub-sort-on{% endif %}"
+                        >{{ s_type.label }}{% if s_type.active %} {{ s_type.arrow }}{%
+                        endif %}</a
                     >
                 </th>
                 <th scope="col">
@@ -178,7 +174,9 @@
             <tr>
                 <td><a href="/tag/{{ t.id }}">{{ t.name }}</a></td>
                 <td>{% if t.parents != "" %}{{ t.parents }}{% else %}—{% endif %}</td>
-                <td>{% if t.groups != "" %}{{ t.groups }}{% else %}—{% endif %}</td>
+                <td>
+                    {% if t.type_label != "" %}{{ t.type_label }}{% else %}—{% endif %}
+                </td>
                 <td><a href="/user/{{ t.owner }}">@{{ t.owner }}</a></td>
                 <td>{{ t.track_count }}</td>
                 <td>{{ t.source_count }}</td>

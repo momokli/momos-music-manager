@@ -113,19 +113,12 @@
             <option value="{{ t.name }}"></option>
             {% endfor %}
         </datalist>
-        <input
-            type="text"
-            name="group"
-            list="my-groups"
-            placeholder="Gruppe (optional)"
-            aria-label="Gruppe"
-            style="width: 9rem"
-        />
-        <datalist id="my-groups">
-            {% for g in my_groups %}
-            <option value="{{ g.name }}"></option>
+        <select name="type" aria-label="Typ (optional)" style="width: 9rem">
+            <option value="">Typ: keiner</option>
+            {% for t in my_types %}
+            <option value="{{ t.value }}">{{ t.label }}</option>
             {% endfor %}
-        </datalist>
+        </select>
         <button type="submit">Taggen</button>
     </form>
 

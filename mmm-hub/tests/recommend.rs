@@ -1,12 +1,13 @@
 //! Integration tests for the tag recommendation engine (`src/recommend.rs`).
 //!
-//! Focus: the UI needs *context* for every suggestion — the tag's group and a
-//! human-readable reason — and sort/role-excluded groups (Setlist/Rumpelkiste)
-//! must never be suggested.
+//! Focus: the UI needs *context* for every suggestion — the tag's type and a
+//! human-readable reason — and sort types (Setlist/Rumpelkiste) must never be
+//! suggested.
 
 mod common;
 
 use mmm_hub::tags;
+use mmm_hub::tagtypes::{TagType, set as set_type};
 
 async fn insert_track(
     pool: &sqlx::SqlitePool,
@@ -38,30 +39,22 @@ async fn link(pool: &sqlx::SqlitePool, track_id: i64, tag_id: i64) {
         .unwrap();
 }
 
-/// A candidate tag carries its group name, and Setlist/Rumpelkiste tags are
+/// A candidate tag carries its type label, and Setlist/Rumpelkiste tags are
 /// never suggested even when a co-tagged track would otherwise surface them.
 #[tokio::test]
-async fn recommendations_carry_group_and_exclude_sort_roles() {
+async fn recommendations_carry_type_and_exclude_sort_types() {
     let app = common::spawn().await;
     let alice = app.seed.alice;
-
-    // Mood is a classification group; Setlist is a sort group (role=setlist).
-    let mood = tags::create_group(&app.pool, alice, "Mood", "")
-        .await
-        .unwrap();
-    let setlist = tags::create_group(&app.pool, alice, "Setlist", "")
-        .await
-        .unwrap();
 
     let shared = tags::ensure_tag(&app.pool, alice, "shared-tag")
         .await
         .unwrap();
     let dark = tags::ensure_tag(&app.pool, alice, "Dark").await.unwrap();
     let peak = tags::ensure_tag(&app.pool, alice, "Peak").await.unwrap();
-    tags::add_tag_to_group(&app.pool, alice, dark, mood)
+    set_type(&app.pool, alice, dark, Some(TagType::Mood))
         .await
         .unwrap();
-    tags::add_tag_to_group(&app.pool, alice, peak, setlist)
+    set_type(&app.pool, alice, peak, Some(TagType::Setlist))
         .await
         .unwrap();
 
@@ -105,7 +98,10 @@ async fn recommendations_carry_group_and_exclude_sort_roles() {
     );
 
     let dark_rec = recs.iter().find(|r| r.name == "Dark").unwrap();
-    assert_eq!(dark_rec.group, "Mood", "group context must be populated");
+    assert_eq!(
+        dark_rec.type_label, "Mood",
+        "type context must be populated"
+    );
     assert!(
         !dark_rec.why().is_empty(),
         "every recommendation needs an explanation"

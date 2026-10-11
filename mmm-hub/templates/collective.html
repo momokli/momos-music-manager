@@ -11,7 +11,7 @@ content %}
     <h1>{{ icon }} {{ name }}</h1>
     <p class="hub-muted">
         Owner <a href="/user/{{ owner }}">@{{ owner }}</a> · {{ members.len() }}
-        Mitglieder · {{ groups.len() }} Gruppen
+        Mitglieder
     </p>
 </hgroup>
 
@@ -137,102 +137,4 @@ content %}
     </select>
     <button type="submit">Mitglied hinzufügen / setzen</button>
 </form>
-{% endif %}
-
-<h3>Gruppen ({{ groups.len() }})</h3>
-<p class="hub-muted">
-    <a href="/tags?collective={{ id }}">Alle Tags dieses Collectives ansehen →</a>
-</p>
-<form method="get" action="/collectives/{{ id }}" class="hub-filter" role="search">
-    <input
-        type="search"
-        name="q"
-        value="{{ q }}"
-        placeholder="Gruppen suchen …"
-        aria-label="Gruppen suchen"
-    />
-    <button type="submit">Suchen</button>
-</form>
-{% if groups.is_empty() %}
-<p class="hub-empty">Noch keine Gruppen in diesem Collective.</p>
-{% else %}
-<div class="overflow-auto hub-scroll-y">
-    <table class="hub-dense-table">
-        <thead>
-            <tr>
-                <th scope="col">
-                    <a
-                        href="{{ s_gname.href }}"
-                        class="hub-sort{% if s_gname.active %} hub-sort-on{% endif %}"
-                        >{{ s_gname.label }}{% if s_gname.active %} {{ s_gname.arrow }}{%
-                        endif %}</a
-                    >
-                </th>
-                <th scope="col">
-                    <a
-                        href="{{ s_gtracks.href }}"
-                        class="hub-sort{% if s_gtracks.active %} hub-sort-on{% endif %}"
-                        >{{ s_gtracks.label }}{% if s_gtracks.active %} {{ s_gtracks.arrow
-                        }}{% endif %}</a
-                    >
-                </th>
-                <th scope="col">Gew.</th>
-                {% if member %}
-                <th scope="col">Gewicht / Aktionen</th>
-                {% endif %}
-            </tr>
-        </thead>
-        <tbody>
-            {% for g in groups %}
-            <tr>
-                <td><a href="/groups/{{ g.id }}">{{ g.icon }} {{ g.name }}</a></td>
-                <td>{{ g.tag_count }}</td>
-                <td>{{ g.weight }}</td>
-                {% if member %}
-                <td>
-                    <form
-                        method="post"
-                        action="/groups/{{ g.id }}/weight"
-                        style="display: inline-flex; gap: 0.25rem; align-items: center"
-                    >
-                        <input type="hidden" name="back" value="/collectives/{{ id }}" />
-                        <input
-                            type="number"
-                            name="weight"
-                            value="{{ g.weight }}"
-                            min="0"
-                            max="100"
-                            step="0.5"
-                            aria-label="Gewichtung"
-                            style="width: 4.5rem"
-                        />
-                        <button type="submit" class="secondary">setzen</button>
-                    </form>
-                    <form
-                        method="post"
-                        action="/groups/{{ g.id }}/collective"
-                        style="display: inline"
-                    >
-                        <input type="hidden" name="collective_id" value="0" />
-                        <button type="submit" title="Aus dem Collective lösen">×</button>
-                    </form>
-                </td>
-                {% endif %}
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</div>
-{% endif %} {% if is_owner && !available_groups.is_empty() %}
-<h4>Gruppen hinzufügen</h4>
-<div style="display: flex; flex-wrap: wrap; gap: 0.4rem">
-    {% for g in available_groups %}
-    <form method="post" action="/groups/{{ g.id }}/collective" style="display: inline">
-        <input type="hidden" name="collective_id" value="{{ id }}" />
-        <button type="submit" class="secondary outline">
-            {{ g.icon }} {{ g.name }} +
-        </button>
-    </form>
-    {% endfor %}
-</div>
 {% endif %} {% endblock %}

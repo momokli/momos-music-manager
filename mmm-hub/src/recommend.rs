@@ -32,7 +32,8 @@ pub struct Recommendation {
     pub tag_id: i64,
     pub name: String,
     pub owner: String,
-    pub group: String,
+    /// The candidate tag's type label (for context in the UI).
+    pub type_label: String,
     pub score: i64,
     pub reasons: Vec<Reason>,
 }
@@ -113,9 +114,7 @@ pub async fn recommend_tags(pool: &SqlitePool, track_id: i64, limit: usize) -> V
            JOIN hub_users u ON u.id = t.owner_user_id
           WHERE x.tag_id NOT IN (SELECT tag_id FROM seed_tags)
             AND x.tag_id NOT IN (
-                 SELECT gt.tag_id FROM hub_group_tags gt
-                   JOIN hub_tag_groups g ON g.id = gt.group_id
-                  WHERE g.role IN ('setlist', 'rumpelkiste') OR g.kind = 'sort')
+                 SELECT id FROM hub_tags WHERE type IN ('SETLIST', 'RUMPELKISTE'))
           GROUP BY x.tag_id, t.name, u.slug, x.kind",
     )
     .bind(track_id)
@@ -129,7 +128,7 @@ pub async fn recommend_tags(pool: &SqlitePool, track_id: i64, limit: usize) -> V
             tag_id,
             name,
             owner,
-            group: String::new(),
+            type_label: String::new(),
             score: 0,
             reasons: Vec::new(),
         });
@@ -142,27 +141,28 @@ pub async fn recommend_tags(pool: &SqlitePool, track_id: i64, limit: usize) -> V
         });
     }
 
-    // Attach each tag's (first) group name, for context in the UI.
+    // Attach each tag's type label, for context in the UI.
     if !map.is_empty() {
         let ids: Vec<i64> = map.keys().copied().collect();
-        let mut qb = sqlx::QueryBuilder::new(
-            "SELECT gt.tag_id, MIN(g.name) FROM hub_group_tags gt
-               JOIN hub_tag_groups g ON g.id = gt.group_id WHERE gt.tag_id IN (",
-        );
+        let mut qb =
+            sqlx::QueryBuilder::new("SELECT id, COALESCE(type,'') FROM hub_tags WHERE id IN (");
         {
             let mut sep = qb.separated(", ");
             for id in &ids {
                 sep.push_bind(*id);
             }
         }
-        qb.push(") GROUP BY gt.tag_id");
+        qb.push(")");
         if let Ok(grows) = qb.build().fetch_all(pool).await {
             use sqlx::Row;
             for r in grows {
                 let tid: i64 = r.get(0);
-                let gname: String = r.get::<Option<String>, _>(1).unwrap_or_default();
+                let ty: String = r.get::<Option<String>, _>(1).unwrap_or_default();
+                let label = crate::tagtypes::TagType::parse(&ty)
+                    .map(|t| t.label().to_string())
+                    .unwrap_or_default();
                 if let Some(rec) = map.get_mut(&tid) {
-                    rec.group = gname;
+                    rec.type_label = label;
                 }
             }
         }

@@ -115,19 +115,13 @@ async fn seed_artists(app: &common::TestApp) -> (i64, i64, i64) {
         .unwrap();
     }
 
-    // Tags + groups.
-    let phase = mmm_hub::tags::create_group(p, alice, "Phase", "")
-        .await
-        .unwrap();
-    let mood = mmm_hub::tags::create_group(p, alice, "Mood", "")
-        .await
-        .unwrap();
+    // Tags + types.
     let peak = mmm_hub::tags::ensure_tag(p, alice, "Peak").await.unwrap();
     let dark = mmm_hub::tags::ensure_tag(p, alice, "Dark").await.unwrap();
-    mmm_hub::tags::add_tag_to_group(p, alice, peak, phase)
+    mmm_hub::tagtypes::set(p, alice, peak, Some(mmm_hub::tagtypes::TagType::Phase5))
         .await
         .unwrap();
-    mmm_hub::tags::add_tag_to_group(p, alice, dark, mood)
+    mmm_hub::tagtypes::set(p, alice, dark, Some(mmm_hub::tagtypes::TagType::Mood))
         .await
         .unwrap();
     tag_track(p, 70001, peak).await;
@@ -280,8 +274,8 @@ async fn artist_profile_tags_playlists_collabs_b2b_albums() {
         .unwrap();
 
     // AR3 tag distribution + top tags.
-    assert!(html.contains("Verteilung nach Gruppen"));
-    assert!(html.contains("Phase"), "group distribution missing");
+    assert!(html.contains("Verteilung nach Typen"));
+    assert!(html.contains("Phase"), "type distribution missing");
     assert!(html.contains("Peak"), "top tag missing");
     // AR4 playlists (mine).
     assert!(html.contains("Deep House"), "my playlist missing");

@@ -1,8 +1,10 @@
-//! Integration tests for the tagging/group foundation (issue #204):
-//! `hub_tag_groups.kind` + `role`, their backfill/inference, and exposure
-//! through `list_groups_for` and `group_detail`.
+//! Integration tests for the tagging/type foundation (issue #204):
+//! a tag's hard-wired `type` (via `crate::tagtypes`) and its exposure through
+//! `tags::tag_detail` and the `/tags` page filter.
 
 mod common;
+
+use mmm_hub::tagtypes::{TagType, set as set_type};
 
 async fn get(app: &common::TestApp, path: &str, cookie: &str) -> String {
     app.client()
@@ -40,116 +42,63 @@ async fn link(pool: &sqlx::SqlitePool, track_id: i64, tag_id: i64) {
 }
 
 #[tokio::test]
-async fn group_kind_and_semantic_role_are_exposed() {
+async fn tag_type_is_settable_and_exposed() {
     let app = common::spawn().await;
     let alice = app.seed.alice;
 
-    // Known names get an inferred (kind, role) at creation time.
-    let rumpel = mmm_hub::tags::create_group(&app.pool, alice, "Rumpelkiste", "")
+    let tag = mmm_hub::tags::ensure_tag(&app.pool, alice, "Rumpelkiste")
         .await
         .unwrap();
-    let setlist = mmm_hub::tags::create_group(&app.pool, alice, "Setlist", "")
-        .await
-        .unwrap();
-    let mood = mmm_hub::tags::create_group(&app.pool, alice, "Mood", "")
+    set_type(&app.pool, alice, tag, Some(TagType::Rumpelkiste))
         .await
         .unwrap();
 
-    let groups = mmm_hub::tags::list_groups_for(&app.pool, alice).await;
-    let find = |id: i64| groups.iter().find(|g| g.id == id).expect("group present");
+    let got = mmm_hub::tagtypes::get(&app.pool, tag).await;
+    assert_eq!(got, Some(TagType::Rumpelkiste));
+    assert!(!TagType::Rumpelkiste.describes());
 
-    let g = find(rumpel);
-    assert_eq!(g.kind, "sort");
-    assert_eq!(g.semantic_role, "rumpelkiste");
+    let d = mmm_hub::tags::tag_detail(&app.pool, tag).await.unwrap();
+    assert_eq!(d.type_name, "RUMPELKISTE");
 
-    let g = find(setlist);
-    assert_eq!(g.kind, "sort");
-    assert_eq!(g.semantic_role, "setlist");
-
-    let g = find(mood);
-    assert_eq!(g.kind, "class");
-    assert_eq!(g.semantic_role, "");
-
-    // `group_detail` exposes the same fields.
-    let d = mmm_hub::tags::group_detail(&app.pool, alice, mood)
-        .await
-        .expect("mood detail");
-    assert_eq!(d.kind, "class");
-    assert_eq!(d.semantic_role, "");
+    // A non-owner may not change it.
+    assert!(
+        set_type(&app.pool, app.seed.bob, tag, Some(TagType::Mood))
+            .await
+            .is_err()
+    );
 }
 
+/// Issue #205: `/tags` filters server-side by one or several tag types.
 #[tokio::test]
-async fn set_group_kind_role_updates_and_validates() {
-    let app = common::spawn().await;
-    let alice = app.seed.alice;
-    let g = mmm_hub::tags::create_group(&app.pool, alice, "Mood", "")
-        .await
-        .unwrap();
-
-    mmm_hub::tags::set_group_kind_role(&app.pool, alice, g, "sort", "setlist")
-        .await
-        .unwrap();
-    let d = mmm_hub::tags::group_detail(&app.pool, alice, g)
-        .await
-        .unwrap();
-    assert_eq!(d.kind, "sort");
-    assert_eq!(d.semantic_role, "setlist");
-
-    // Unknown kind/role fall back to safe defaults.
-    mmm_hub::tags::set_group_kind_role(&app.pool, alice, g, "nonsense", "bogus")
-        .await
-        .unwrap();
-    let d = mmm_hub::tags::group_detail(&app.pool, alice, g)
-        .await
-        .unwrap();
-    assert_eq!(d.kind, "class");
-    assert_eq!(d.semantic_role, "");
-}
-
-/// Issue #205: `/tags` filters server-side by one or several tag groups.
-#[tokio::test]
-async fn tags_page_filters_by_multiple_groups() {
+async fn tags_page_filters_by_multiple_types() {
     use mmm_hub::tags;
     let app = common::spawn().await;
     let alice = app.seed.alice;
 
-    let mood = tags::create_group(&app.pool, alice, "Mood", "")
-        .await
-        .unwrap();
-    let genre = tags::create_group(&app.pool, alice, "Genre", "")
-        .await
-        .unwrap();
     let dark = tags::ensure_tag(&app.pool, alice, "Dark").await.unwrap();
     let house = tags::ensure_tag(&app.pool, alice, "Housey").await.unwrap();
-    tags::add_tag_to_group(&app.pool, alice, dark, mood)
+    set_type(&app.pool, alice, dark, Some(TagType::Mood))
         .await
         .unwrap();
-    tags::add_tag_to_group(&app.pool, alice, house, genre)
+    set_type(&app.pool, alice, house, Some(TagType::Genre))
         .await
         .unwrap();
 
     let cookie = app.session_cookie(alice).await;
 
-    // Single group only shows its tag.
-    let html = get(&app, &format!("/tags?groups={mood}"), &cookie).await;
+    // Single type only shows its tag.
+    let html = get(&app, "/tags?types=MOOD", &cookie).await;
     assert!(html.contains("Dark"), "mood tag missing");
     assert!(
         !html.contains("Housey"),
         "genre tag leaked into mood filter"
     );
 
-    // Two groups union their tags.
-    let html = get(&app, &format!("/tags?groups={mood},{genre}"), &cookie).await;
+    // Two types union their tags.
+    let html = get(&app, "/tags?types=MOOD,GENRE", &cookie).await;
     assert!(
         html.contains("Dark") && html.contains("Housey"),
         "union missing"
-    );
-
-    // Legacy single `group` param still works.
-    let html = get(&app, &format!("/tags?group={genre}"), &cookie).await;
-    assert!(
-        html.contains("Housey") && !html.contains("Dark"),
-        "legacy filter"
     );
 }
 
@@ -164,7 +113,7 @@ async fn tag_create_from_tag_page() {
         .client()
         .post(app.url("/tags/create"))
         .header("Cookie", &cookie)
-        .form(&[("name", "Brandneu"), ("group", "0")])
+        .form(&[("name", "Brandneu"), ("type", "MOOD")])
         .send()
         .await
         .unwrap();
@@ -173,15 +122,16 @@ async fn tag_create_from_tag_page() {
     let html = get(&app, "/tags", &cookie).await;
     assert!(html.contains("Brandneu"), "new tag not listed");
 
-    // It belongs to the current user.
-    let owner: String = sqlx::query_scalar(
-        "SELECT u.slug FROM hub_tags t JOIN hub_users u ON u.id = t.owner_user_id
+    // It belongs to the current user and carries the chosen type.
+    let (owner, ty): (String, Option<String>) = sqlx::query_as(
+        "SELECT u.slug, t.type FROM hub_tags t JOIN hub_users u ON u.id = t.owner_user_id
           WHERE t.name = 'Brandneu'",
     )
     .fetch_one(&app.pool)
     .await
     .unwrap();
     assert_eq!(owner, "alice");
+    assert_eq!(ty.as_deref(), Some("MOOD"));
 }
 
 /// Issue #207: genre variation -> main direction (Hauptrichtung) via parent link.
@@ -190,16 +140,13 @@ async fn genre_variation_sets_main_direction() {
     use mmm_hub::tags;
     let app = common::spawn().await;
     let alice = app.seed.alice;
-    let genre = tags::create_group(&app.pool, alice, "Genre", "")
-        .await
-        .unwrap();
     let psy = tags::ensure_tag(&app.pool, alice, "Psy").await.unwrap();
-    tags::add_tag_to_group(&app.pool, alice, psy, genre)
+    set_type(&app.pool, alice, psy, Some(TagType::Genre))
         .await
         .unwrap();
     assert!(
         tags::tag_is_genre(&app.pool, psy).await,
-        "Psy is in a genre group"
+        "Psy is a genre tag"
     );
 
     let cookie = app.session_cookie(alice).await;
@@ -265,20 +212,13 @@ async fn tag_detail_shows_top_artists() {
     assert!(html.contains("60.0%"), "artist share (3/5) missing");
 }
 
-/// Issues #209 (T2-2) + #210 (T2-3): co-occurrence within _and_ across groups,
+/// Issues #209 (T2-2) + #210 (T2-3): co-occurrence within _and_ across types,
 /// with a min-support cut and jump/discover links.
 #[tokio::test]
 async fn tag_detail_shows_cooccurrence_and_jump_links() {
     use mmm_hub::tags;
     let app = common::spawn().await;
     let alice = app.seed.alice;
-
-    let mood_group = tags::create_group(&app.pool, alice, "Mood", "")
-        .await
-        .unwrap();
-    let vibe_group = tags::create_group(&app.pool, alice, "Vibe", "")
-        .await
-        .unwrap();
 
     let dark = tags::ensure_tag(&app.pool, alice, "Dark").await.unwrap();
     let moody = tags::ensure_tag(&app.pool, alice, "Moody").await.unwrap();
@@ -287,13 +227,13 @@ async fn tag_detail_shows_cooccurrence_and_jump_links() {
         .unwrap();
     let rare = tags::ensure_tag(&app.pool, alice, "Rare").await.unwrap();
 
-    tags::add_tag_to_group(&app.pool, alice, dark, mood_group)
+    set_type(&app.pool, alice, dark, Some(TagType::Mood))
         .await
         .unwrap();
-    tags::add_tag_to_group(&app.pool, alice, moody, mood_group)
+    set_type(&app.pool, alice, moody, Some(TagType::Mood))
         .await
         .unwrap();
-    tags::add_tag_to_group(&app.pool, alice, warehouse, vibe_group)
+    set_type(&app.pool, alice, warehouse, Some(TagType::Vibe))
         .await
         .unwrap();
 
@@ -304,14 +244,14 @@ async fn tag_detail_shows_cooccurrence_and_jump_links() {
         link(&app.pool, id, dark).await;
         dark_tracks.push(id);
     }
-    // Moody (same group): shares t0..t3 (both=4) + one extra → support 5.
+    // Moody (same type): shares t0..t3 (both=4) + one extra → support 5.
     for id in dark_tracks.iter().take(4) {
         link(&app.pool, *id, moody).await;
     }
     let m_extra = insert_track(&app.pool, "m9", "B").await;
     link(&app.pool, m_extra, moody).await;
 
-    // Warehouse (cross group): shares t0..t2 (both=3) + three extra → support 6.
+    // Warehouse (cross type): shares t0..t2 (both=3) + three extra → support 6.
     for id in dark_tracks.iter().take(3) {
         link(&app.pool, *id, warehouse).await;
     }
@@ -332,16 +272,16 @@ async fn tag_detail_shows_cooccurrence_and_jump_links() {
     assert_eq!(co[0].name, "Moody");
     assert_eq!(co[0].both, 4);
     assert_eq!(co[0].support, 5);
-    assert!(co[0].same_group, "Moody shares the Mood group");
-    assert_eq!(co[0].group, "Mood");
+    assert!(co[0].same_type, "Moody shares the Mood type");
+    assert_eq!(co[0].type_label, "Mood");
     assert!((co[0].lift - 1.8).abs() < 1e-6, "lift = 4*18/(8*5) = 1.8");
     assert_eq!(co[0].sample_track_id, dark_tracks[0]);
 
     assert_eq!(co[1].name, "Warehouse");
     assert_eq!(co[1].both, 3);
     assert_eq!(co[1].support, 6);
-    assert!(!co[1].same_group, "Warehouse is only cross-group");
-    assert_eq!(co[1].group, "Vibe");
+    assert!(!co[1].same_type, "Warehouse is only cross-type");
+    assert_eq!(co[1].type_label, "Vibe");
     assert!(
         (co[1].lift - 1.125).abs() < 1e-6,
         "lift = 3*18/(8*6) = 1.125"
@@ -360,6 +300,6 @@ async fn tag_detail_shows_cooccurrence_and_jump_links() {
         html.contains(&format!("/digging?seed={}", dark_tracks[0])),
         "digging link missing"
     );
-    assert!(html.contains(">same<"), "same-group badge missing");
+    assert!(html.contains(">same<"), "same-type badge missing");
     assert!(!html.contains("Rare"), "below-min-support tag leaked");
 }

@@ -2,18 +2,7 @@
 
 mod common;
 
-async fn group(pool: &sqlx::SqlitePool, me: i64, name: &str, role: &str) -> i64 {
-    let g = mmm_hub::tags::create_group(pool, me, name, "")
-        .await
-        .unwrap();
-    if !role.is_empty() {
-        // set_semantic_role via kind/role: role-only marker.
-        mmm_hub::tags::set_group_kind_role(pool, me, g, "class", role)
-            .await
-            .unwrap();
-    }
-    g
-}
+use mmm_hub::tagtypes::{TagType, set as set_type};
 
 async fn resolved(pool: &sqlx::SqlitePool, track: i64, tag: i64) {
     sqlx::query("INSERT OR IGNORE INTO hub_track_resolved_tags (track_id, tag_id) VALUES (?1, ?2)")
@@ -25,24 +14,28 @@ async fn resolved(pool: &sqlx::SqlitePool, track: i64, tag: i64) {
 }
 
 #[tokio::test]
-async fn cross_group_matches_score_higher_than_same_group() {
+async fn cross_type_matches_score_higher_than_same_type() {
     use mmm_hub::tags;
     let app = common::spawn().await;
     let me = app.seed.alice;
-    let g1 = group(&app.pool, me, "Mood", "").await;
-    let g2 = group(&app.pool, me, "Vibe", "").await;
 
     let t1 = tags::ensure_tag(&app.pool, me, "Dark").await.unwrap();
     let t2 = tags::ensure_tag(&app.pool, me, "Warehouse").await.unwrap();
     let t3 = tags::ensure_tag(&app.pool, me, "Melancholisch")
         .await
         .unwrap();
-    tags::add_tag_to_group(&app.pool, me, t1, g1).await.unwrap();
-    tags::add_tag_to_group(&app.pool, me, t2, g2).await.unwrap();
-    tags::add_tag_to_group(&app.pool, me, t3, g1).await.unwrap();
+    set_type(&app.pool, me, t1, Some(TagType::Mood))
+        .await
+        .unwrap();
+    set_type(&app.pool, me, t2, Some(TagType::Vibe))
+        .await
+        .unwrap();
+    set_type(&app.pool, me, t3, Some(TagType::Mood))
+        .await
+        .unwrap();
 
-    // a,b share {Dark(Mood), Warehouse(Vibe)} -> cross-group.
-    // c,d share {Dark(Mood), Melancholisch(Mood)} -> same group.
+    // a,b share {Dark(Mood), Warehouse(Vibe)} -> cross-type.
+    // c,d share {Dark(Mood), Melancholisch(Mood)} -> same type.
     for (track, tags_) in [
         (app.seed.t_all, vec![t1, t2]),
         (app.seed.t_two, vec![t1, t2]),
@@ -61,19 +54,18 @@ async fn cross_group_matches_score_higher_than_same_group() {
         mmm_hub::similarity::tag_similarity(&app.pool, app.seed.t_pl, app.seed.t_alice, &e).await;
     assert!(
         cross > same,
-        "cross-group {cross} should beat same-group {same}"
+        "cross-type {cross} should beat same-type {same}"
     );
     assert!(cross > 0.0);
 }
 
 #[tokio::test]
-async fn rumpelkiste_helpers_find_the_group() {
+async fn rumpelkiste_helpers_find_the_tags() {
     use mmm_hub::tags;
     let app = common::spawn().await;
     let me = app.seed.alice;
-    let rumpel = group(&app.pool, me, "Rumpelkiste", "rumpelkiste").await;
     let t = tags::ensure_tag(&app.pool, me, "Sketches").await.unwrap();
-    tags::add_tag_to_group(&app.pool, me, t, rumpel)
+    set_type(&app.pool, me, t, Some(TagType::Rumpelkiste))
         .await
         .unwrap();
 

@@ -1,14 +1,12 @@
-//! Tag layer + groups.
+//! Tag layer + collectives.
 //!
 //! Tags are an explicit, **per-user** layer above playlists: a tag exists only
 //! once a user creates it (usually by promoting a playlist), and can aggregate
-//! several source playlists.
+//! several source playlists. Every tag has exactly one **type**
+//! ([`crate::tagtypes`]) — the fixed classification that replaced the former
+//! flexible group subsystem.
 //!
-//! **Groups** (formerly "categories") are per-user collections that any tag can
-//! be put into — a tag can be in several groups (many-to-many). Groups have
-//! membership **roles**: `owner` (created it), `contributor` (may add/remove
-//! its tags), `subscriber` (just follows it). Groups are for granular sorting
-//! and filtering.
+//! **Collectives** are sets of users that collaborate on tags.
 
 use anyhow::{Result, bail};
 use sqlx::{QueryBuilder, Row, SqlitePool};
@@ -703,16 +701,13 @@ pub async fn find_tag_id_by_name(pool: &SqlitePool, name: &str) -> Option<i64> {
     .flatten()
 }
 
-/// True when the tag sits in at least one group with semantic role `genre`.
+/// True when the tag has the `GENRE` type.
 pub async fn tag_is_genre(pool: &SqlitePool, tag_id: i64) -> bool {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
-          WHERE gt.tag_id = ?1 AND g.role = 'genre'",
-    )
-    .bind(tag_id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0)
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM hub_tags WHERE id = ?1 AND type = 'GENRE'")
+        .bind(tag_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0)
         > 0
 }
 
@@ -744,61 +739,11 @@ pub async fn tags_feeding_playlist(
     .unwrap_or_default()
 }
 
-// ── groups ───────────────────────────────────────────────────────────────────
-
-pub const ROLE_OWNER: &str = "owner";
-pub const ROLE_CONTRIBUTOR: &str = "contributor";
-pub const ROLE_SUBSCRIBER: &str = "subscriber";
-
-/// Pickable group icons (emoji — no FontAwesome dependency).
+/// Pickable collective icons (emoji — no FontAwesome dependency).
 pub const ICONS: &[&str] = &[
     "🎧", "🎵", "🔥", "💜", "✨", "#️⃣", "🌙", "⚡", "🌊", "🕺", "🎚️", "🚀", "🧊", "🌶️", "🪩", "🎯",
     "🌅", "🌈", "🧭", "🛸",
 ];
-
-#[derive(Debug, Clone)]
-pub struct Group {
-    pub id: i64,
-    pub name: String,
-    pub icon: String,
-    pub owner: String,
-    /// The caller's effective role in the group, or "" if none.
-    pub role: String,
-    /// True when the role comes from a parent (contributor) group.
-    pub inherited: bool,
-    pub tag_count: i64,
-    pub members: i64,
-    /// Importance weight (used by the scoring engine).
-    pub weight: f64,
-    /// `class` (classifying) or `sort` (sorting) group kind.
-    pub kind: String,
-    /// Semantic role (`""`, `rumpelkiste`, `setlist`, `genre`, `phase`).
-    pub semantic_role: String,
-}
-
-#[derive(Debug)]
-pub struct GroupDetail {
-    pub id: i64,
-    pub name: String,
-    pub icon: String,
-    pub owner: String,
-    /// The caller's effective role (own or via the collective).
-    pub role: String,
-    /// True when `role` comes from a collective membership.
-    pub role_inherited: bool,
-    pub collective_id: i64,
-    pub collective_name: String,
-    pub collective_icon: String,
-    pub weight: f64,
-    pub ranked: bool,
-    /// `class` (classifying) or `sort` (sorting) group kind.
-    pub kind: String,
-    /// Semantic role (`""`, `rumpelkiste`, `setlist`, `genre`, `phase`).
-    pub semantic_role: String,
-    pub members: Vec<(String, String)>,
-    /// `(tag_id, tag name, tag owner slug, rank)`.
-    pub tags: Vec<(i64, String, String, Option<i64>)>,
-}
 
 #[derive(Debug, Clone)]
 pub struct Collective {
@@ -807,7 +752,6 @@ pub struct Collective {
     pub icon: String,
     pub owner: String,
     pub role: String,
-    pub groups: i64,
     pub members: i64,
 }
 
@@ -820,618 +764,6 @@ pub struct CollectiveDetail {
     pub role: String,
     pub is_owner: bool,
     pub members: Vec<(String, String)>,
-    /// `(group_id, group name, group icon, tag count, weight)`.
-    pub groups: Vec<(i64, String, String, i64, f64)>,
-}
-
-/// Infer `(kind, semantic_role)` from a well-known group name (case-insensitive).
-pub fn infer_group_kind_role(name: &str) -> (&'static str, &'static str) {
-    match name.trim().to_lowercase().as_str() {
-        "rumpelkiste" | "rumpel" => ("sort", "rumpelkiste"),
-        "setlist" | "setlists" => ("sort", "setlist"),
-        "genre" | "genres" => ("class", "genre"),
-        "phase" | "phase/energy" | "phase / energy" | "energy" => ("class", "phase"),
-        _ => ("class", ""),
-    }
-}
-
-/// Create a group owned by `owner_user_id` (idempotent on the slug); the owner
-/// becomes its `owner` member.
-pub async fn create_group(
-    pool: &SqlitePool,
-    owner_user_id: i64,
-    name: &str,
-    icon: &str,
-) -> Result<i64> {
-    let name = name.trim();
-    if name.is_empty() {
-        bail!("group name required");
-    }
-    let slug = normalize_name(name);
-    if slug.is_empty() {
-        bail!("group name has no usable characters");
-    }
-    let (kind, role) = infer_group_kind_role(name);
-    let now = chrono::Utc::now().to_rfc3339();
-    let id: i64 = sqlx::query_scalar(
-        "INSERT INTO hub_tag_groups (owner_user_id, name, slug, icon, sort_order, created_at, kind, role)
-         VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)
-         ON CONFLICT(owner_user_id, slug) DO UPDATE SET name = excluded.name, icon = excluded.icon
-         RETURNING id",
-    )
-    .bind(owner_user_id)
-    .bind(name)
-    .bind(&slug)
-    .bind(icon)
-    .bind(&now)
-    .bind(kind)
-    .bind(role)
-    .fetch_one(pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO hub_group_members (group_id, user_id, role, created_at)
-         VALUES (?1, ?2, 'owner', ?3)
-         ON CONFLICT(group_id, user_id) DO UPDATE SET role = 'owner'",
-    )
-    .bind(id)
-    .bind(owner_user_id)
-    .bind(&now)
-    .execute(pool)
-    .await?;
-    Ok(id)
-}
-
-pub async fn delete_group(pool: &SqlitePool, actor_user_id: i64, group_id: i64) -> Result<()> {
-    sqlx::query("DELETE FROM hub_tag_groups WHERE id = ?1 AND owner_user_id = ?2")
-        .bind(group_id)
-        .bind(actor_user_id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// Rename a group and/or set its icon (owner only).
-pub async fn update_group(
-    pool: &SqlitePool,
-    owner_user_id: i64,
-    group_id: i64,
-    name: &str,
-    icon: &str,
-) -> Result<()> {
-    let name = name.trim();
-    if name.is_empty() {
-        bail!("group name required");
-    }
-    let slug = normalize_name(name);
-    if slug.is_empty() {
-        bail!("group name has no usable characters");
-    }
-    let clash = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM hub_tag_groups WHERE owner_user_id = ?1 AND slug = ?2 AND id <> ?3",
-    )
-    .bind(owner_user_id)
-    .bind(&slug)
-    .bind(group_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
-    if clash.is_some() {
-        bail!("es gibt schon eine Gruppe mit diesem Namen");
-    }
-    let rows = sqlx::query(
-        "UPDATE hub_tag_groups SET name = ?1, slug = ?2, icon = ?3\n          WHERE id = ?4 AND owner_user_id = ?5",
-    )
-    .bind(name)
-    .bind(&slug)
-    .bind(icon)
-    .bind(group_id)
-    .bind(owner_user_id)
-    .execute(pool)
-    .await?
-    .rows_affected();
-    if rows == 0 {
-        bail!("group not found or not yours");
-    }
-    Ok(())
-}
-
-/// The user's role *in this group only* (no inheritance).
-async fn own_role_of(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<String> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT role FROM hub_group_members WHERE group_id = ?1 AND user_id = ?2",
-    )
-    .bind(group_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-}
-
-/// The user's **effective** role in a group: their own role on the group, or —
-/// if the group belongs to a collective the user is a member of — `contributor`.
-pub async fn effective_role_of(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<String> {
-    if let Some(r) = own_role_of(pool, user_id, group_id).await {
-        return Some(r);
-    }
-    let in_collective = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM hub_tag_groups g\n           JOIN hub_collective_members cm ON cm.collective_id = g.collective_id\n          WHERE g.id = ?1 AND cm.user_id = ?2 LIMIT 1",
-    )
-    .bind(group_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
-    in_collective.map(|_| ROLE_CONTRIBUTOR.to_string())
-}
-
-pub async fn can_contribute(pool: &SqlitePool, user_id: i64, group_id: i64) -> bool {
-    matches!(
-        effective_role_of(pool, user_id, group_id).await.as_deref(),
-        Some(ROLE_OWNER) | Some(ROLE_CONTRIBUTOR)
-    )
-}
-
-/// Groups the user can see as *theirs* — own membership plus everything
-/// inherited from a parent (contributor) group.
-pub async fn list_groups_for(pool: &SqlitePool, user_id: i64) -> Vec<Group> {
-    let rows = sqlx::query(
-        "SELECT g.id, g.name, g.icon, u.slug AS owner, g.weight,
-                COALESCE(g.kind,'class') AS kind, COALESCE(g.role,'') AS semantic_role,
-                (SELECT COUNT(*) FROM hub_group_tags gt WHERE gt.group_id = g.id) AS tag_count,
-                (SELECT COUNT(*) FROM hub_group_members mm WHERE mm.group_id = g.id) AS members
-           FROM hub_tag_groups g
-           JOIN hub_users u ON u.id = g.owner_user_id
-          ORDER BY g.name",
-    )
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
-    let mut out = Vec::new();
-    for r in &rows {
-        let id: i64 = r.get("id");
-        if let Some(role) = effective_role_of(pool, user_id, id).await {
-            let inherited = own_role_of(pool, user_id, id).await.is_none();
-            out.push(Group {
-                id,
-                name: r.get("name"),
-                icon: r.get::<Option<String>, _>("icon").unwrap_or_default(),
-                owner: r.get("owner"),
-                role,
-                inherited,
-                tag_count: r.get::<Option<i64>, _>("tag_count").unwrap_or(0),
-                members: r.get::<Option<i64>, _>("members").unwrap_or(0),
-                weight: r.get::<Option<f64>, _>("weight").unwrap_or(0.0),
-                kind: r
-                    .get::<Option<String>, _>("kind")
-                    .unwrap_or_else(|| "class".into()),
-                semantic_role: r
-                    .get::<Option<String>, _>("semantic_role")
-                    .unwrap_or_default(),
-            });
-        }
-    }
-    out
-}
-
-/// Groups the user is *not* a member of (to discover / subscribe to).
-pub async fn list_discover_groups(pool: &SqlitePool, user_id: i64) -> Vec<Group> {
-    let rows = sqlx::query(
-        "SELECT g.id, g.name, g.icon, u.slug AS owner, g.weight,
-                COALESCE(g.kind,'class') AS kind, COALESCE(g.role,'') AS semantic_role,
-                (SELECT COUNT(*) FROM hub_group_tags gt WHERE gt.group_id = g.id) AS tag_count,
-                (SELECT COUNT(*) FROM hub_group_members mm WHERE mm.group_id = g.id) AS members
-           FROM hub_tag_groups g
-           JOIN hub_users u ON u.id = g.owner_user_id
-          WHERE NOT EXISTS (SELECT 1 FROM hub_group_members m
-                             WHERE m.group_id = g.id AND m.user_id = ?1)
-          ORDER BY u.slug, g.name",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
-    rows.iter()
-        .map(|r| Group {
-            id: r.get("id"),
-            name: r.get("name"),
-            icon: r.get::<Option<String>, _>("icon").unwrap_or_default(),
-            owner: r.get("owner"),
-            role: String::new(),
-            inherited: false,
-            tag_count: r.get::<Option<i64>, _>("tag_count").unwrap_or(0),
-            members: r.get::<Option<i64>, _>("members").unwrap_or(0),
-            weight: r.get::<Option<f64>, _>("weight").unwrap_or(0.0),
-            kind: r
-                .get::<Option<String>, _>("kind")
-                .unwrap_or_else(|| "class".into()),
-            semantic_role: r
-                .get::<Option<String>, _>("semantic_role")
-                .unwrap_or_default(),
-        })
-        .collect()
-}
-
-/// Subscribe (join as `subscriber`). No-op if already a member.
-pub async fn subscribe(pool: &SqlitePool, user_id: i64, group_id: i64) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO hub_group_members (group_id, user_id, role, created_at)
-         VALUES (?1, ?2, 'subscriber', ?3)
-         ON CONFLICT(group_id, user_id) DO NOTHING",
-    )
-    .bind(group_id)
-    .bind(user_id)
-    .bind(chrono::Utc::now().to_rfc3339())
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// Leave a group (only if a plain subscriber — owners/contributors can't drop out).
-pub async fn unsubscribe(pool: &SqlitePool, user_id: i64, group_id: i64) -> Result<()> {
-    sqlx::query(
-        "DELETE FROM hub_group_members
-          WHERE group_id = ?1 AND user_id = ?2 AND role = 'subscriber'",
-    )
-    .bind(group_id)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// Owner adds/promotes/demotes a member (role = contributor|subscriber).
-pub async fn set_member_role(
-    pool: &SqlitePool,
-    actor_user_id: i64,
-    group_id: i64,
-    target_slug: &str,
-    role: &str,
-) -> Result<()> {
-    if role != ROLE_CONTRIBUTOR && role != ROLE_SUBSCRIBER {
-        bail!("invalid role");
-    }
-    let owner = sqlx::query_scalar::<_, i64>(
-        "SELECT id FROM hub_tag_groups WHERE id = ?1 AND owner_user_id = ?2",
-    )
-    .bind(group_id)
-    .bind(actor_user_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
-    if owner.is_none() {
-        bail!("only the group owner can manage members");
-    }
-    let target: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM hub_users WHERE slug = ?1 COLLATE NOCASE LIMIT 1")
-            .bind(target_slug.trim())
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
-    let Some(target) = target else {
-        bail!("user '{target_slug}' not found");
-    };
-    sqlx::query(
-        "INSERT INTO hub_group_members (group_id, user_id, role, created_at)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(group_id, user_id) DO UPDATE SET role = excluded.role
-           WHERE hub_group_members.role <> 'owner'",
-    )
-    .bind(group_id)
-    .bind(target)
-    .bind(role)
-    .bind(chrono::Utc::now().to_rfc3339())
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// Remove a member (owner only; can't remove the owner).
-pub async fn remove_member(
-    pool: &SqlitePool,
-    actor_user_id: i64,
-    group_id: i64,
-    target_slug: &str,
-) -> Result<()> {
-    let owner = sqlx::query_scalar::<_, i64>(
-        "SELECT id FROM hub_tag_groups WHERE id = ?1 AND owner_user_id = ?2",
-    )
-    .bind(group_id)
-    .bind(actor_user_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
-    if owner.is_none() {
-        bail!("only the group owner can manage members");
-    }
-    sqlx::query(
-        "DELETE FROM hub_group_members
-          WHERE group_id = ?1 AND role <> 'owner'
-            AND user_id = (SELECT id FROM hub_users WHERE slug = ?2 COLLATE NOCASE LIMIT 1)",
-    )
-    .bind(group_id)
-    .bind(target_slug.trim())
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// Groups the user may add tags to (owner or contributor): `(id, name, icon)`.
-pub async fn groups_i_contribute(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String, String)> {
-    sqlx::query_as::<_, (i64, String, String)>(
-        "SELECT g.id, g.name, COALESCE(g.icon,'')
-           FROM hub_tag_groups g
-           JOIN hub_group_members m ON m.group_id = g.id
-          WHERE m.user_id = ?1 AND m.role IN ('owner','contributor')
-          ORDER BY g.name",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default()
-}
-
-/// Put a tag into a group (actor must be owner/contributor of the group).
-pub async fn add_tag_to_group(
-    pool: &SqlitePool,
-    actor_user_id: i64,
-    tag_id: i64,
-    group_id: i64,
-) -> Result<()> {
-    if !can_contribute(pool, actor_user_id, group_id).await {
-        bail!("you can't contribute to this group");
-    }
-    sqlx::query(
-        "INSERT INTO hub_group_tags (tag_id, group_id) VALUES (?1, ?2)
-         ON CONFLICT(tag_id, group_id) DO NOTHING",
-    )
-    .bind(tag_id)
-    .bind(group_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// Remove a tag from a group (actor must be owner/contributor of the group).
-pub async fn remove_tag_from_group(
-    pool: &SqlitePool,
-    actor_user_id: i64,
-    tag_id: i64,
-    group_id: i64,
-) -> Result<()> {
-    if !can_contribute(pool, actor_user_id, group_id).await {
-        bail!("you can't contribute to this group");
-    }
-    sqlx::query("DELETE FROM hub_group_tags WHERE tag_id = ?1 AND group_id = ?2")
-        .bind(tag_id)
-        .bind(group_id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// Groups a tag belongs to: `(id, name, icon)`.
-pub async fn groups_for_tag(
-    pool: &SqlitePool,
-    tag_id: i64,
-) -> Vec<(i64, String, String, Option<i64>, bool)> {
-    sqlx::query_as::<_, (i64, String, String, Option<i64>, bool)>(
-        "SELECT g.id, g.name, COALESCE(g.icon,''), gt.rank, COALESCE(g.ranked,0) AS ranked
-           FROM hub_group_tags gt JOIN hub_tag_groups g ON g.id = gt.group_id
-          WHERE gt.tag_id = ?1 ORDER BY g.name",
-    )
-    .bind(tag_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default()
-}
-
-pub async fn group_detail(pool: &SqlitePool, user_id: i64, group_id: i64) -> Option<GroupDetail> {
-    let row = sqlx::query(
-        "SELECT g.id, g.name, COALESCE(g.icon,'') AS icon, u.slug AS owner,
-                COALESCE(g.collective_id, 0) AS collective_id, g.weight,
-                COALESCE(g.ranked, 0) AS ranked,
-                COALESCE(g.kind,'class') AS kind, COALESCE(g.role,'') AS semantic_role
-           FROM hub_tag_groups g JOIN hub_users u ON u.id = g.owner_user_id
-          WHERE g.id = ?1",
-    )
-    .bind(group_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()?;
-    let role = effective_role_of(pool, user_id, group_id)
-        .await
-        .unwrap_or_default();
-    let role_inherited = !role.is_empty() && own_role_of(pool, user_id, group_id).await.is_none();
-    let collective_id: i64 = row.get("collective_id");
-    let (collective_name, collective_icon) = if collective_id != 0 {
-        sqlx::query_as::<_, (String, String)>(
-            "SELECT name, COALESCE(icon,'') FROM hub_collectives WHERE id = ?1",
-        )
-        .bind(collective_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-    } else {
-        (String::new(), String::new())
-    };
-    let members = sqlx::query_as::<_, (String, String)>(
-        "SELECT u.slug, m.role FROM hub_group_members m JOIN hub_users u ON u.id = m.user_id
-          WHERE m.group_id = ?1 ORDER BY (m.role <> 'owner'), m.role, u.slug",
-    )
-    .bind(group_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
-    let tags = sqlx::query_as::<_, (i64, String, String, Option<i64>)>(
-        "SELECT t.id, t.name, u.slug, gt.rank FROM hub_group_tags gt
-           JOIN hub_tags t ON t.id = gt.tag_id
-           JOIN hub_users u ON u.id = t.owner_user_id
-          WHERE gt.group_id = ?1 ORDER BY (gt.rank IS NULL), gt.rank, t.name",
-    )
-    .bind(group_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
-    Some(GroupDetail {
-        id: row.get("id"),
-        name: row.get("name"),
-        icon: row.get("icon"),
-        owner: row.get("owner"),
-        role,
-        role_inherited,
-        collective_id,
-        collective_name,
-        collective_icon,
-        weight: row.get::<Option<f64>, _>("weight").unwrap_or(0.0),
-        ranked: row.get::<Option<i64>, _>("ranked").unwrap_or(0) == 1,
-        kind: row
-            .get::<Option<String>, _>("kind")
-            .unwrap_or_else(|| "class".into()),
-        semantic_role: row
-            .get::<Option<String>, _>("semantic_role")
-            .unwrap_or_default(),
-        members,
-        tags,
-    })
-}
-
-/// Semantic group roles recognized by the engine (`""` = none).
-pub const GROUP_ROLES: &[&str] = &["", "rumpelkiste", "setlist", "genre", "phase"];
-
-/// Update a group's kind (`class`|`sort`) and semantic role.
-pub async fn set_group_kind_role(
-    pool: &SqlitePool,
-    actor_user_id: i64,
-    group_id: i64,
-    kind: &str,
-    role: &str,
-) -> Result<()> {
-    if !can_contribute(pool, actor_user_id, group_id).await {
-        bail!("you can't change this group");
-    }
-    let kind = if kind == "sort" { "sort" } else { "class" };
-    let role = if GROUP_ROLES.contains(&role) {
-        role
-    } else {
-        ""
-    };
-    sqlx::query("UPDATE hub_tag_groups SET kind = ?1, role = ?2 WHERE id = ?3")
-        .bind(kind)
-        .bind(role)
-        .bind(group_id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// Mark/unmark a group as "ranked" (its tags can be ordered 1..5).
-pub async fn set_group_ranked(
-    pool: &SqlitePool,
-    actor_user_id: i64,
-    group_id: i64,
-    ranked: bool,
-) -> Result<()> {
-    if !can_contribute(pool, actor_user_id, group_id).await {
-        bail!("you can't change this group");
-    }
-    sqlx::query("UPDATE hub_tag_groups SET ranked = ?1 WHERE id = ?2")
-        .bind(ranked as i64)
-        .bind(group_id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// Set (or clear, with `None`) a tag's rank within a ranked group (0..5).
-pub async fn set_group_tag_rank(
-    pool: &SqlitePool,
-    actor_user_id: i64,
-    group_id: i64,
-    tag_id: i64,
-    rank: Option<i64>,
-) -> Result<()> {
-    if !can_contribute(pool, actor_user_id, group_id).await {
-        bail!("you can't change this group");
-    }
-    let rank = rank.filter(|r| (0..=5).contains(r));
-    sqlx::query("UPDATE hub_group_tags SET rank = ?1 WHERE group_id = ?2 AND tag_id = ?3")
-        .bind(rank)
-        .bind(group_id)
-        .bind(tag_id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// Set a group's importance weight. Any contributor (owner or collective
-/// member) may do this, so a collective can rank its groups.
-pub async fn set_group_weight(
-    pool: &SqlitePool,
-    actor_user_id: i64,
-    group_id: i64,
-    weight: f64,
-) -> Result<()> {
-    if !can_contribute(pool, actor_user_id, group_id).await {
-        bail!("you can't change this group's weight");
-    }
-    let weight = weight.clamp(0.0, 100.0);
-    sqlx::query("UPDATE hub_tag_groups SET weight = ?1 WHERE id = ?2")
-        .bind(weight)
-        .bind(group_id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// Set (or clear) the collective a group belongs to. The group's owner may do
-/// this, and must be a member of the chosen collective.
-pub async fn set_group_collective(
-    pool: &SqlitePool,
-    actor_user_id: i64,
-    group_id: i64,
-    collective_id: Option<i64>,
-) -> Result<()> {
-    let owner = sqlx::query_scalar::<_, i64>(
-        "SELECT id FROM hub_tag_groups WHERE id = ?1 AND owner_user_id = ?2",
-    )
-    .bind(group_id)
-    .bind(actor_user_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
-    if owner.is_none() {
-        bail!("only the group owner can set its collective");
-    }
-    if let Some(cid) = collective_id {
-        let member = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM hub_collective_members WHERE collective_id = ?1 AND user_id = ?2",
-        )
-        .bind(cid)
-        .bind(actor_user_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
-        if member.is_none() {
-            bail!("you are not a member of that collective");
-        }
-    }
-    sqlx::query("UPDATE hub_tag_groups SET collective_id = ?1 WHERE id = ?2")
-        .bind(collective_id)
-        .bind(group_id)
-        .execute(pool)
-        .await?;
-    Ok(())
 }
 
 // ── collectives ──────────────────────────────────────────────────────────────
@@ -1500,7 +832,6 @@ fn collective_from_row(r: &sqlx::sqlite::SqliteRow, role: String) -> Collective 
         icon: r.get::<Option<String>, _>("icon").unwrap_or_default(),
         owner: r.get("owner"),
         role,
-        groups: r.get::<Option<i64>, _>("groups").unwrap_or(0),
         members: r.get::<Option<i64>, _>("members").unwrap_or(0),
     }
 }
@@ -1508,7 +839,6 @@ fn collective_from_row(r: &sqlx::sqlite::SqliteRow, role: String) -> Collective 
 pub async fn list_collectives_for(pool: &SqlitePool, user_id: i64) -> Vec<Collective> {
     let rows = sqlx::query(
         "SELECT c.id, c.name, c.icon, u.slug AS owner, m.role,
-                (SELECT COUNT(*) FROM hub_tag_groups g WHERE g.collective_id = c.id) AS groups,
                 (SELECT COUNT(*) FROM hub_collective_members mm WHERE mm.collective_id = c.id) AS members
            FROM hub_collectives c
            JOIN hub_collective_members m ON m.collective_id = c.id AND m.user_id = ?1
@@ -1527,7 +857,6 @@ pub async fn list_collectives_for(pool: &SqlitePool, user_id: i64) -> Vec<Collec
 pub async fn list_discover_collectives(pool: &SqlitePool, user_id: i64) -> Vec<Collective> {
     let rows = sqlx::query(
         "SELECT c.id, c.name, c.icon, u.slug AS owner,
-                (SELECT COUNT(*) FROM hub_tag_groups g WHERE g.collective_id = c.id) AS groups,
                 (SELECT COUNT(*) FROM hub_collective_members mm WHERE mm.collective_id = c.id) AS members
            FROM hub_collectives c
            JOIN hub_users u ON u.id = c.owner_user_id
@@ -1723,15 +1052,6 @@ pub async fn collective_detail(
     .fetch_all(pool)
     .await
     .unwrap_or_default();
-    let groups = sqlx::query_as::<_, (i64, String, String, i64, f64)>(
-        "SELECT g.id, g.name, COALESCE(g.icon,''),
-                (SELECT COUNT(*) FROM hub_group_tags gt WHERE gt.group_id = g.id), g.weight
-           FROM hub_tag_groups g WHERE g.collective_id = ?1 ORDER BY g.name",
-    )
-    .bind(id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
     Some(CollectiveDetail {
         id: row.get("id"),
         name: row.get("name"),
@@ -1740,7 +1060,6 @@ pub async fn collective_detail(
         role,
         is_owner,
         members,
-        groups,
     })
 }
 
@@ -1750,15 +1069,15 @@ pub struct TagDetail {
     pub id: i64,
     pub name: String,
     pub owner: String,
-    /// `(group_id, group name, group icon, rank, group_ranked)`.
-    pub groups: Vec<(i64, String, String, Option<i64>, bool)>,
+    /// The tag's type string (`MOOD`, `GENRE`, …, or empty when untyped).
+    pub type_name: String,
     pub source_count: i64,
     pub tracks: Vec<(i64, String, String)>,
 }
 
 pub async fn tag_detail(pool: &SqlitePool, tag_id: i64) -> Option<TagDetail> {
     let row = sqlx::query(
-        "SELECT t.id, t.name, u.slug AS owner,
+        "SELECT t.id, t.name, u.slug AS owner, COALESCE(t.type,'') AS type_name,
                 (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count
            FROM hub_tags t JOIN hub_users u ON u.id = t.owner_user_id
           WHERE t.id = ?1",
@@ -1781,7 +1100,9 @@ pub async fn tag_detail(pool: &SqlitePool, tag_id: i64) -> Option<TagDetail> {
         id: row.get("id"),
         name: row.get("name"),
         owner: row.get("owner"),
-        groups: groups_for_tag(pool, tag_id).await,
+        type_name: row
+            .get::<Option<String>, _>("type_name")
+            .unwrap_or_default(),
         source_count: row.get("source_count"),
         tracks,
     })
@@ -1792,10 +1113,10 @@ pub async fn tag_detail(pool: &SqlitePool, tag_id: i64) -> Option<TagDetail> {
 pub struct TagCooccurrence {
     pub tag_id: i64,
     pub name: String,
-    /// A group of the other tag (a group shared with the seed tag if one exists).
-    pub group: String,
-    /// True when the other tag shares at least one group with the seed tag.
-    pub same_group: bool,
+    /// The other tag's type label (a type shared with the seed tag if one exists).
+    pub type_label: String,
+    /// True when the other tag has the same type as the seed tag.
+    pub same_type: bool,
     /// Lift = P(A,B) / (P(A)·P(B)).
     pub lift: f64,
     /// Jaccard = |A∩B| / |A∪B| over the tracks carrying either tag.
@@ -1847,7 +1168,7 @@ pub async fn tag_top_artists(pool: &SqlitePool, tag_id: i64) -> Vec<(String, i64
 }
 
 /// Tags that co-occur with `tag_id` on the same tracks, within and across
-/// groups. Lift = P(A,B) / (P(A)·P(B)); restricted to other tags carrying at
+/// types. Lift = P(A,B) / (P(A)·P(B)); restricted to other tags carrying at
 /// least `min_support` tracks. At most 40 rows are returned (the caller trims
 /// further); they are ranked by the configured co-occurrence metric
 /// (`engine_cooc_metric`, default `lift`).
@@ -1906,41 +1227,33 @@ pub async fn tag_cooccurrence(
 
     let ids: Vec<i64> = pairs.iter().map(|p| p.0).collect();
 
-    // Groups of the seed tag.
-    let seed_groups: std::collections::HashSet<i64> =
-        sqlx::query_scalar("SELECT group_id FROM hub_group_tags WHERE tag_id = ?1")
+    // Type of the seed tag.
+    let seed_type: String =
+        sqlx::query_scalar::<_, Option<String>>("SELECT type FROM hub_tags WHERE id = ?1")
             .bind(tag_id)
-            .fetch_all(pool)
+            .fetch_optional(pool)
             .await
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+            .ok()
+            .flatten()
+            .flatten()
+            .unwrap_or_default();
 
-    // Groups of the candidate tags (batched).
-    let mut qb = QueryBuilder::new("SELECT tag_id, group_id FROM hub_group_tags WHERE tag_id IN (");
+    // Types of the candidate tags (batched).
+    let mut cand_types: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
     {
-        let mut sep = qb.separated(", ");
-        for id in &ids {
-            sep.push_bind(*id);
+        let mut qb = QueryBuilder::new("SELECT id, COALESCE(type,'') FROM hub_tags WHERE id IN (");
+        {
+            let mut sep = qb.separated(", ");
+            for id in &ids {
+                sep.push_bind(*id);
+            }
         }
-    }
-    qb.push(")");
-    let mut cand_groups: std::collections::HashMap<i64, Vec<i64>> =
-        std::collections::HashMap::new();
-    for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
-        let tid: i64 = r.get("tag_id");
-        let gid: i64 = r.get("group_id");
-        cand_groups.entry(tid).or_default().push(gid);
-    }
-
-    // Group names.
-    let mut gnames: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
-    for r in sqlx::query("SELECT id, name FROM hub_tag_groups")
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default()
-    {
-        gnames.insert(r.get("id"), r.get("name"));
+        qb.push(")");
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            let tid: i64 = r.get(0);
+            let ty: String = r.get(1);
+            cand_types.insert(tid, ty);
+        }
     }
 
     // One shared track per candidate (batched).
@@ -1964,29 +1277,20 @@ pub async fn tag_cooccurrence(
         samples.insert(r.get("other"), r.get("sample"));
     }
 
-    let empty: Vec<i64> = Vec::new();
     let mut out: Vec<TagCooccurrence> = pairs
         .into_iter()
         .map(|(other_id, name, both, support, lift)| {
-            let cgroups = cand_groups.get(&other_id).unwrap_or(&empty);
-            let shared: Vec<i64> = cgroups
-                .iter()
-                .copied()
-                .filter(|g| seed_groups.contains(g))
-                .collect();
-            let (same_group, group) = if let Some(&g) = shared.iter().min() {
-                (true, gnames.get(&g).cloned().unwrap_or_default())
-            } else if let Some(&g) = cgroups.iter().min() {
-                (false, gnames.get(&g).cloned().unwrap_or_default())
-            } else {
-                (false, String::new())
-            };
+            let ctype = cand_types.get(&other_id).cloned().unwrap_or_default();
+            let same_type = !ctype.is_empty() && ctype == seed_type;
+            let type_label = crate::tagtypes::TagType::parse(&ctype)
+                .map(|t| t.label().to_string())
+                .unwrap_or_default();
             let union = (with_tag + support - both).max(1) as f64;
             TagCooccurrence {
                 tag_id: other_id,
                 name,
-                group,
-                same_group,
+                type_label,
+                same_type,
                 lift,
                 jaccard: both as f64 / union,
                 both,

@@ -106,7 +106,7 @@ async fn recommended_tags_appear_from_cooccurrence() {
 }
 
 #[tokio::test]
-async fn tagging_with_a_group_places_the_tag_in_it() {
+async fn tagging_with_a_type_sets_the_type() {
     let app = common::spawn().await;
     let alice = app.seed.alice;
     let track = app.seed.t_all;
@@ -116,22 +116,17 @@ async fn tagging_with_a_group_places_the_tag_in_it() {
         .client()
         .post(app.url(&format!("/track/{track}/tag")))
         .header("Cookie", &cookie)
-        .form(&[("name", "Dark"), ("group", "Mood")])
+        .form(&[("name", "Dark"), ("type", "MOOD")])
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
 
-    let n: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM hub_group_tags gt
-           JOIN hub_tags t ON t.id = gt.tag_id
-           JOIN hub_tag_groups g ON g.id = gt.group_id
-          WHERE t.name = 'Dark' AND g.name = 'Mood'",
-    )
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
-    assert_eq!(n, 1, "tag placed in the Mood group");
+    let ty: Option<String> = sqlx::query_scalar("SELECT type FROM hub_tags WHERE name = 'Dark'")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(ty.as_deref(), Some("MOOD"), "tag gets the Mood type");
 }
 
 #[tokio::test]
@@ -170,6 +165,7 @@ async fn recommendations_use_relationship_signals() {
 #[tokio::test]
 async fn recommendations_exclude_setlist_and_rumpelkiste() {
     use mmm_hub::tags;
+    use mmm_hub::tagtypes::{TagType, set as set_type};
     let app = common::spawn().await;
     let me = app.seed.alice;
 
@@ -182,16 +178,14 @@ async fn recommendations_exclude_setlist_and_rumpelkiste() {
     .await
     .unwrap();
 
-    let setlist = tags::create_group(&app.pool, me, "Setlist", "").await.unwrap();
-    tags::set_group_kind_role(&app.pool, me, setlist, "sort", "setlist")
-        .await
-        .unwrap();
-    let mood = tags::create_group(&app.pool, me, "Mood", "").await.unwrap();
-
     let s_tag = tags::ensure_tag(&app.pool, me, "setlist25").await.unwrap();
     let h_tag = tags::ensure_tag(&app.pool, me, "House").await.unwrap();
-    tags::add_tag_to_group(&app.pool, me, s_tag, setlist).await.unwrap();
-    tags::add_tag_to_group(&app.pool, me, h_tag, mood).await.unwrap();
+    set_type(&app.pool, me, s_tag, Some(TagType::Setlist))
+        .await
+        .unwrap();
+    set_type(&app.pool, me, h_tag, Some(TagType::Mood))
+        .await
+        .unwrap();
 
     // Related track (same artist) carries both tags.
     tags::tag_track(&app.pool, me, 81002, s_tag).await.unwrap();
@@ -199,7 +193,10 @@ async fn recommendations_exclude_setlist_and_rumpelkiste() {
 
     let recs = mmm_hub::recommend::recommend_tags(&app.pool, 81001, 20).await;
     let names: Vec<&str> = recs.iter().map(|r| r.name.as_str()).collect();
-    assert!(names.contains(&"House"), "Mood tag should be recommended: {names:?}");
+    assert!(
+        names.contains(&"House"),
+        "Mood tag should be recommended: {names:?}"
+    );
     assert!(
         !names.contains(&"setlist25"),
         "setlist tag must NOT be recommended: {names:?}"
