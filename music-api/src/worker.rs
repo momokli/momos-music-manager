@@ -92,6 +92,7 @@ fn retry_policy(state: &AppState) -> db::RetryPolicy {
 async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     let policy = retry_policy(state);
     let pending = db::due_tracks(&state.pool, 25, db::now()).await?;
+    debug!("resolve_pending: {} due", pending.len());
     if pending.is_empty() {
         return Ok(());
     }
@@ -345,22 +346,9 @@ async fn advance_downloads(state: &Arc<AppState>) -> Result<()> {
         match item {
             Some(item) if deemix::is_terminal_status(&item.status) => {
                 if deemix::is_success_status(&item.status) {
-                    if !finalize(state, &track).await? {
-                        warn!(
-                            "{}: deemix reported '{}' but no file was found in {}",
-                            track.isrc,
-                            item.status,
-                            state.config.deemix_download_dir.display()
-                        );
-                        db::schedule_retry(
-                            &state.pool,
-                            &track.isrc,
-                            "file not found after download",
-                            &policy,
-                            db::now(),
-                        )
-                        .await?;
-                    }
+                    // Collect + transcode off the tick loop so new orders are
+                    // picked up promptly (#311).
+                    spawn_finalize(state.clone(), track, true);
                 } else {
                     db::schedule_retry(
                         &state.pool,
@@ -387,11 +375,56 @@ async fn advance_downloads(state: &Arc<AppState>) -> Result<()> {
                 // Not in the queue: it may have finished and been evicted, so try
                 // to collect it. If it is genuinely gone, the reaper re-queues it
                 // once the lease lapses.
-                let _ = finalize(state, &track).await?;
+                spawn_finalize(state.clone(), track, false);
             }
         }
     }
     Ok(())
+}
+
+/// Run `finalize` (file copy + transcode) on a background task so the worker's
+/// tick loop stays responsive (#311). Concurrency is bounded by
+/// `finalize_sem`; a per-ISRC guard prevents double work while a job is live.
+///
+/// `retry_if_missing` schedules a retry when deemix already reported success but
+/// the file is not (yet) on disk.
+fn spawn_finalize(state: Arc<AppState>, track: Track, retry_if_missing: bool) {
+    {
+        let mut live = state.finalizing.lock().expect("finalizing mutex");
+        if !live.insert(track.isrc.clone()) {
+            return; // already being finalized
+        }
+    }
+    tokio::spawn(async move {
+        let _permit = state.finalize_sem.acquire().await.ok();
+        match finalize(&state, &track).await {
+            Ok(true) => {}
+            Ok(false) => {
+                if retry_if_missing {
+                    warn!(
+                        "{}: deemix reported success but no file was found in {}",
+                        track.isrc,
+                        state.config.deemix_download_dir.display()
+                    );
+                    let policy = retry_policy(&state);
+                    let _ = db::schedule_retry(
+                        &state.pool,
+                        &track.isrc,
+                        "file not found after download",
+                        &policy,
+                        db::now(),
+                    )
+                    .await;
+                }
+            }
+            Err(e) => warn!("{}: finalize failed: {e:#}", track.isrc),
+        }
+        state
+            .finalizing
+            .lock()
+            .expect("finalizing mutex")
+            .remove(&track.isrc);
+    });
 }
 
 /// Collect a finished download into our store, transcode the lossy variants and

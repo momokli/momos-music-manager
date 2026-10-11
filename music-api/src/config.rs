@@ -35,6 +35,9 @@ pub struct Config {
     pub ytdlp_dir: PathBuf,
     /// How many yt-dlp downloads may run concurrently.
     pub ytdlp_concurrency: usize,
+    /// How many background `finalize` (copy + transcode) jobs may run
+    /// concurrently.
+    pub transcode_concurrency: usize,
     /// How often the worker advances the pipeline.
     pub worker_interval: Duration,
     /// How long to wait for a single deemix download before giving up.
@@ -94,7 +97,8 @@ impl Config {
             ffprobe: std::env::var("FFPROBE").unwrap_or_else(|_| "ffprobe".to_string()),
             ytdlp: std::env::var("YTDLP_BIN").unwrap_or_else(|_| "yt-dlp".to_string()),
             ytdlp_dir,
-            ytdlp_concurrency: env_parse("YTDLP_CONCURRENCY", 2usize).max(1),
+            ytdlp_concurrency: env_parse("YTDLP_CONCURRENCY", 2usize),
+            transcode_concurrency: env_parse("TRANSCODE_CONCURRENCY", 4usize),
             worker_interval: Duration::from_secs(env_parse("WORKER_INTERVAL_SECS", 5u64)),
             download_timeout: Duration::from_secs(env_parse("DOWNLOAD_TIMEOUT_SECS", 900u64)),
             queue_max_attempts: env_parse("QUEUE_MAX_ATTEMPTS", 3u32).max(1),
