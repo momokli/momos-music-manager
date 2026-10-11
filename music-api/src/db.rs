@@ -86,6 +86,13 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
+    // The worker's `pending_tracks` query orders by `MAX(priority)` over
+    // `order_items`; without this index the correlated subquery scans the whole
+    // table per pending track (~98 s on 20k pending rows).
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_order_items_isrc ON order_items(isrc);")
+        .execute(pool)
+        .await?;
+
     // ── URL-based orders (YouTube / SoundCloud via yt-dlp) ────────────────────
     //
     // Separate from the ISRC-keyed `tracks` table: these rows have no ISRC, so
