@@ -1,0 +1,103 @@
+{% extends "base.html" %} {% block title %}Gehört — Spelunke{% endblock %} {% block content %}
+<div class="hub-page-head">
+    <h1>Gehört</h1>
+    <span class="hub-muted">Was im Hub gehört wurde (Spotify Now-Playing).</span>
+</div>
+
+<nav class="hub-filter" aria-label="Umfang">
+    <ul>
+        <li>
+            <a href="/listening" {% if scope == "me" %}aria-current="page"{% endif %}>Meine</a>
+        </li>
+        <li>
+            <a href="/listening?scope=all" {% if scope == "all" %}aria-current="page"{% endif %}
+                >Alle</a
+            >
+        </li>
+    </ul>
+</nav>
+
+<h3>Zuletzt gehört</h3>
+{% if recent.is_empty() %}
+<p class="hub-empty">Noch nichts erfasst. Sobald du in Spotify hörst, erscheint es hier.</p>
+{% else %}
+<table class="hub-dense-table">
+    <thead>
+        <tr>
+            <th>Zeit</th>
+            {% if scope == "all" %}<th>Wer</th>{% endif %}
+            <th>Track</th>
+            <th>Künstler</th>
+            <th>Album</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for r in recent %}
+        <tr>
+            <td class="hub-nowrap hub-muted">{{ r.when }}</td>
+            {% if scope == "all" %}<td>@{{ r.who }}</td>{% endif %}
+            <td><a href="/track/{{ r.track_id }}">{{ r.title }}</a></td>
+            <td>{{ r.artists }}</td>
+            <td class="hub-muted">{{ r.album }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+<div class="hub-cols">
+    <div>
+        <h3>Top-Tracks</h3>
+        {% if top_tracks.is_empty() %}
+        <p class="hub-empty">—</p>
+        {% else %}
+        <table class="hub-dense-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Track</th>
+                    <th>Plays</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in top_tracks %}
+                <tr>
+                    <td class="hub-muted">{{ loop.index }}</td>
+                    <td>
+                        <a href="/track/{{ t.track_id }}">{{ t.label }}</a>
+                        <span class="hub-muted">{{ t.sub }}</span>
+                    </td>
+                    <td>{{ t.count }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </div>
+    <div>
+        <h3>Top-Künstler</h3>
+        {% if top_artists.is_empty() %}
+        <p class="hub-empty">—</p>
+        {% else %}
+        <table class="hub-dense-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Künstler</th>
+                    <th>Plays</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for a in top_artists %}
+                <tr>
+                    <td class="hub-muted">{{ loop.index }}</td>
+                    <td>{{ a.label }}</td>
+                    <td>{{ a.count }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
