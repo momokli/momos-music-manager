@@ -66,16 +66,53 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) {
     }
 
     // Spotify loop: likes + playlist items (may back off on quota).
+    {
+        let pool = pool.clone();
+        let cfg = cfg.clone();
+        tokio::spawn(async move {
+            loop {
+                let worked = match run_once(&pool, &cfg).await {
+                    Ok(worked) => worked,
+                    Err(e) => {
+                        tracing::warn!("worker pass failed: {e}");
+                        false
+                    }
+                };
+                tokio::time::sleep(if worked { BUSY_WAIT } else { IDLE_WAIT }).await;
+            }
+        });
+    }
+
+    // Curation loop: push daily curated playlists to Spotify (#316). Checks
+    // every 30 min; `daily_due` gates each playlist to at most once per 20 h.
     tokio::spawn(async move {
         loop {
-            let worked = match run_once(&pool, &cfg).await {
-                Ok(worked) => worked,
-                Err(e) => {
-                    tracing::warn!("worker pass failed: {e}");
-                    false
+            let cutoff = (chrono::Utc::now() - chrono::Duration::hours(20)).to_rfc3339();
+            match crate::curate::daily_due(&pool, &cutoff).await {
+                Ok(due) => {
+                    for cp in due {
+                        match crate::curate::push(&pool, &cfg, &cp).await {
+                            Ok(r) => {
+                                tracing::info!("daily push '{}' -> {} tracks", cp.name, r.pushed)
+                            }
+                            Err(e) => {
+                                tracing::warn!("daily push '{}' failed: {e}", cp.name);
+                                let _ = sqlx::query(
+                                    "UPDATE hub_curated_playlists
+                                        SET last_push_status = 'error', last_push_error = ?2
+                                      WHERE id = ?1",
+                                )
+                                .bind(cp.id)
+                                .bind(e.to_string())
+                                .execute(&pool)
+                                .await;
+                            }
+                        }
+                    }
                 }
-            };
-            tokio::time::sleep(if worked { BUSY_WAIT } else { IDLE_WAIT }).await;
+                Err(e) => tracing::warn!("curation loop: {e}"),
+            }
+            tokio::time::sleep(Duration::from_secs(1800)).await;
         }
     });
 }

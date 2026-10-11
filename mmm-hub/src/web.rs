@@ -42,6 +42,11 @@ pub fn router(state: AppState) -> Router {
         .route("/now-playing", get(now_playing_frag))
         .route("/now-playing/tag", post(now_tag))
         .route("/now", get(now_page))
+        .route("/curate", get(curate_page).post(curate_create))
+        .route("/curate/{id}", get(curate_detail))
+        .route("/curate/{id}/update", post(curate_update))
+        .route("/curate/{id}/push", post(curate_push))
+        .route("/curate/{id}/delete", post(curate_delete))
         .route("/api/hub/playlists/enable-all", post(enable_all))
         .route("/api/hub/playlists/disable-all", post(disable_all))
         .route("/api/hub/services/{service}/callback", get(callback))
@@ -1745,6 +1750,451 @@ fn now_external(nav: crate::ui::Nav, n: &crate::nowplaying::Now, _known: bool) -
         progress_disp: n.progress_disp(),
         duration_disp: n.duration_disp(),
     }
+}
+
+// ── curated playlists (#316) ────────────────────────────────────────────────
+
+/// A `<select>` option with a precomputed `selected` flag.
+struct Opt {
+    value: String,
+    label: String,
+    selected: bool,
+}
+
+struct CurateRow {
+    id: i64,
+    name: String,
+    mode_label: String,
+    source: String,
+    limit: i64,
+    daily: bool,
+    spotify: bool,
+    last_push: String,
+    status: String,
+    status_class: String,
+}
+
+struct CurateTrackRow {
+    id: i64,
+    title: String,
+    artists: String,
+    spotify: bool,
+}
+
+#[derive(Template)]
+#[template(path = "curate.html")]
+struct CuratePage {
+    nav: crate::ui::Nav,
+    flash: String,
+    rows: Vec<CurateRow>,
+    modes: Vec<Opt>,
+    tags: Vec<Opt>,
+    lenses: Vec<Opt>,
+    spotify_ready: bool,
+    default_limit: i64,
+}
+
+#[derive(Template)]
+#[template(path = "curate_detail.html")]
+struct CurateDetailPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    id: i64,
+    name: String,
+    description: String,
+    is_public: bool,
+    daily: bool,
+    fill_limit: i64,
+    modes: Vec<Opt>,
+    tags: Vec<Opt>,
+    lenses: Vec<Opt>,
+    spotify: bool,
+    spotify_playlist_id: String,
+    last_push: String,
+    status: String,
+    status_class: String,
+    preview: Vec<CurateTrackRow>,
+    preview_total: i64,
+    preview_pushable: i64,
+}
+
+fn mode_label(mode: &str) -> &'static str {
+    match mode {
+        "tag" => "Tag",
+        "lens" => "Linse",
+        _ => "Manuell",
+    }
+}
+
+fn mode_opts(selected: &str) -> Vec<Opt> {
+    ["manual", "tag", "lens"]
+        .iter()
+        .map(|m| Opt {
+            value: m.to_string(),
+            label: mode_label(m).to_string(),
+            selected: *m == selected,
+        })
+        .collect()
+}
+
+fn lens_opts(selected: Option<&str>) -> Vec<Opt> {
+    crate::curate::LENSES
+        .iter()
+        .map(|(k, l)| Opt {
+            value: k.to_string(),
+            label: l.to_string(),
+            selected: selected == Some(*k),
+        })
+        .collect()
+}
+
+fn tag_opts(tags: &[(i64, String)], selected: Option<i64>) -> Vec<Opt> {
+    tags.iter()
+        .map(|(id, name)| Opt {
+            value: id.to_string(),
+            label: name.clone(),
+            selected: selected == Some(*id),
+        })
+        .collect()
+}
+
+fn fmt_date_opt(ts: Option<&str>) -> String {
+    match ts {
+        Some(s) if s.len() >= 16 => s[..16].replace('T', " "),
+        Some(s) if s.len() >= 10 => s[..10].to_string(),
+        _ => "—".to_string(),
+    }
+}
+
+fn status_class(status: Option<&str>) -> &'static str {
+    match status {
+        Some("ok") => "hub-badge hub-badge-ok",
+        Some("error") => "hub-badge hub-badge-no",
+        _ => "hub-badge",
+    }
+}
+
+#[derive(Deserialize)]
+struct CurateForm {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    fill_mode: Option<String>,
+    #[serde(default)]
+    fill_tag_id: Option<i64>,
+    #[serde(default)]
+    fill_lens: Option<String>,
+    #[serde(default)]
+    fill_limit: Option<i64>,
+    #[serde(default)]
+    is_public: Option<String>,
+    #[serde(default)]
+    daily: Option<String>,
+}
+
+struct ParsedCurate {
+    name: String,
+    description: String,
+    is_public: i64,
+    daily: i64,
+    fill_mode: String,
+    fill_tag_id: Option<i64>,
+    fill_lens: Option<String>,
+    fill_limit: i64,
+}
+
+fn parse_curate(f: &CurateForm) -> ParsedCurate {
+    let mode = match f.fill_mode.as_deref() {
+        Some("tag") => "tag",
+        Some("lens") => "lens",
+        _ => "manual",
+    }
+    .to_string();
+    ParsedCurate {
+        name: f.name.trim().to_string(),
+        description: f.description.trim().to_string(),
+        is_public: if f.is_public.is_some() { 1 } else { 0 },
+        daily: if f.daily.is_some() { 1 } else { 0 },
+        fill_tag_id: if mode == "tag" { f.fill_tag_id } else { None },
+        fill_lens: if mode == "lens" {
+            f.fill_lens.clone().filter(|s| !s.is_empty())
+        } else {
+            None
+        },
+        fill_mode: mode,
+        fill_limit: f.fill_limit.unwrap_or(50).clamp(1, 500),
+    }
+}
+
+async fn curate_page(
+    State(st): State<AppState>,
+    Query(flash): Query<Flash>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "curate").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let cps = crate::curate::list_for_user(&st.pool, nav.id)
+        .await
+        .unwrap_or_default();
+
+    // Tag names for display.
+    let tag_names: std::collections::HashMap<i64, String> =
+        crate::tags::list_user_tags(&st.pool, nav.id)
+            .await
+            .into_iter()
+            .collect();
+
+    let rows: Vec<CurateRow> = cps
+        .iter()
+        .map(|cp| CurateRow {
+            id: cp.id,
+            name: cp.name.clone(),
+            mode_label: mode_label(&cp.fill_mode).to_string(),
+            source: match cp.fill_mode.as_str() {
+                "tag" => cp
+                    .fill_tag_id
+                    .and_then(|t| tag_names.get(&t).cloned())
+                    .unwrap_or_else(|| "(kein Tag)".to_string()),
+                "lens" => {
+                    crate::curate::lens_label(cp.fill_lens.as_deref().unwrap_or("")).to_string()
+                }
+                _ => "—".to_string(),
+            },
+            limit: cp.fill_limit,
+            daily: cp.daily(),
+            spotify: cp.pushed_to_spotify(),
+            last_push: fmt_date_opt(cp.last_push_at.as_deref()),
+            status: cp
+                .last_push_status
+                .clone()
+                .unwrap_or_else(|| "—".to_string()),
+            status_class: status_class(cp.last_push_status.as_deref()).to_string(),
+        })
+        .collect();
+
+    let tags = crate::tags::list_user_tags(&st.pool, nav.id).await;
+    let spotify_ready = crate::curate::has_write_scope(&st.pool, nav.id).await;
+    render(&CuratePage {
+        nav,
+        flash: flash.msg.unwrap_or_default(),
+        rows,
+        modes: mode_opts("manual"),
+        tags: tag_opts(&tags, None),
+        lenses: lens_opts(None),
+        spotify_ready,
+        default_limit: 50,
+    })
+}
+
+async fn curate_create(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<CurateForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "curate").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let p = parse_curate(&f);
+    if p.name.is_empty() {
+        return Redirect::to("/curate").into_response();
+    }
+    let now = now_iso();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_curated_playlists
+            (user_id, name, description, is_public, fill_mode, fill_tag_id, fill_lens,
+             fill_limit, daily, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+         RETURNING id",
+    )
+    .bind(nav.id)
+    .bind(&p.name)
+    .bind(&p.description)
+    .bind(p.is_public)
+    .bind(&p.fill_mode)
+    .bind(p.fill_tag_id)
+    .bind(&p.fill_lens)
+    .bind(p.fill_limit)
+    .bind(p.daily)
+    .bind(&now)
+    .fetch_one(&st.pool)
+    .await
+    .unwrap_or(0);
+    Redirect::to(&format!("/curate/{id}")).into_response()
+}
+
+async fn curate_update(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<CurateForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "curate").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let p = parse_curate(&f);
+    let now = now_iso();
+    let _ = sqlx::query(
+        "UPDATE hub_curated_playlists
+            SET name = ?3, description = ?4, is_public = ?5, fill_mode = ?6,
+                fill_tag_id = ?7, fill_lens = ?8, fill_limit = ?9, daily = ?10,
+                updated_at = ?11
+          WHERE id = ?1 AND user_id = ?2",
+    )
+    .bind(id)
+    .bind(nav.id)
+    .bind(&p.name)
+    .bind(&p.description)
+    .bind(p.is_public)
+    .bind(&p.fill_mode)
+    .bind(p.fill_tag_id)
+    .bind(&p.fill_lens)
+    .bind(p.fill_limit)
+    .bind(p.daily)
+    .bind(&now)
+    .execute(&st.pool)
+    .await;
+    Redirect::to(&format!("/curate/{id}")).into_response()
+}
+
+async fn curate_detail(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Query(flash): Query<Flash>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "curate").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(cp) = crate::curate::get(&st.pool, id).await.ok().flatten() else {
+        return track_not_found();
+    };
+    if cp.user_id != nav.id {
+        return track_not_found();
+    }
+    let ids = crate::curate::resolve_track_ids(&st.pool, &cp)
+        .await
+        .unwrap_or_default();
+    let total = ids.len() as i64;
+
+    // Title/artists + Spotify availability for the preview (capped at 200).
+    let mut preview = Vec::new();
+    let mut pushable = 0i64;
+    for chunk in ids.chunks(200) {
+        let mut qb = sqlx::QueryBuilder::new(
+            "SELECT t.id, t.title, t.artists,
+                    EXISTS(SELECT 1 FROM hub_track_external_ids e
+                            WHERE e.track_id = t.id AND e.service = 'spotify') AS sp
+               FROM hub_tracks t WHERE t.id IN (",
+        );
+        let mut sep = qb.separated(", ");
+        for tid in chunk {
+            sep.push_bind(*tid);
+        }
+        sep.push_unseparated(") ");
+        let order: std::collections::HashMap<i64, usize> =
+            chunk.iter().enumerate().map(|(i, t)| (*t, i)).collect();
+        let mut got: Vec<CurateTrackRow> = qb
+            .build()
+            .fetch_all(&st.pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| {
+                let sp: i64 = r.try_get("sp").unwrap_or(0);
+                if sp != 0 {
+                    pushable += 1;
+                }
+                CurateTrackRow {
+                    id: r.try_get("id").unwrap_or(0),
+                    title: r
+                        .try_get::<Option<String>, _>("title")
+                        .unwrap_or_default()
+                        .unwrap_or_default(),
+                    artists: r
+                        .try_get::<Option<String>, _>("artists")
+                        .unwrap_or_default()
+                        .unwrap_or_default(),
+                    spotify: sp != 0,
+                }
+            })
+            .collect();
+        got.sort_by_key(|r| order.get(&r.id).copied().unwrap_or(usize::MAX));
+        preview.extend(got);
+    }
+
+    let tags = crate::tags::list_user_tags(&st.pool, nav.id).await;
+    render(&CurateDetailPage {
+        nav,
+        flash: flash.msg.unwrap_or_default(),
+        id: cp.id,
+        name: cp.name.clone(),
+        description: cp.description.clone(),
+        is_public: cp.is_public(),
+        daily: cp.daily(),
+        fill_limit: cp.fill_limit,
+        modes: mode_opts(&cp.fill_mode),
+        tags: tag_opts(&tags, cp.fill_tag_id),
+        lenses: lens_opts(cp.fill_lens.as_deref()),
+        spotify: cp.pushed_to_spotify(),
+        spotify_playlist_id: cp.spotify_playlist_id.clone().unwrap_or_default(),
+        last_push: fmt_date_opt(cp.last_push_at.as_deref()),
+        status: cp
+            .last_push_status
+            .clone()
+            .unwrap_or_else(|| "—".to_string()),
+        status_class: status_class(cp.last_push_status.as_deref()).to_string(),
+        preview,
+        preview_total: total,
+        preview_pushable: pushable,
+    })
+}
+
+async fn curate_push(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "curate").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(cp) = crate::curate::get(&st.pool, id).await.ok().flatten() else {
+        return track_not_found();
+    };
+    if cp.user_id != nav.id {
+        return track_not_found();
+    }
+    let msg = match crate::curate::push(&st.pool, &st.cfg, &cp).await {
+        Ok(r) => format!("Zu Spotify gepusht: {} Tracks", r.pushed),
+        Err(e) => {
+            let _ = sqlx::query(
+                "UPDATE hub_curated_playlists SET last_push_status='error', last_push_error=?2 WHERE id=?1",
+            )
+            .bind(cp.id)
+            .bind(e.to_string())
+            .execute(&st.pool)
+            .await;
+            format!("Push-Fehler: {e}")
+        }
+    };
+    Redirect::to(&format!("/curate/{id}?msg={}", urlencoding::encode(&msg))).into_response()
+}
+
+async fn curate_delete(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "curate").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = sqlx::query("DELETE FROM hub_curated_playlists WHERE id = ?1 AND user_id = ?2")
+        .bind(id)
+        .bind(nav.id)
+        .execute(&st.pool)
+        .await;
+    Redirect::to("/curate").into_response()
 }
 
 /// A few recently seen tracks for the dashboard.

@@ -12,7 +12,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub const SCOPES: &str = "user-read-private user-library-read playlist-read-private playlist-read-collaborative \
-     user-read-currently-playing user-read-playback-state user-modify-playback-state";
+     user-read-currently-playing user-read-playback-state user-modify-playback-state \
+     playlist-modify-private playlist-modify-public";
 
 const AUTHORIZE_URL: &str = "https://accounts.spotify.com/authorize";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
@@ -136,6 +137,46 @@ pub async fn get_json(access_token: &str, url: &str) -> Result<(u16, Value)> {
 
 pub async fn api_get(base: &str, access_token: &str, path: &str) -> Result<(u16, Value)> {
     get_json(access_token, &api_url(base, path)).await
+}
+
+/// POST a JSON body to a Spotify API URL. Returns `(status, parsed body)`.
+pub async fn post_json(access_token: &str, url: &str, body: &Value) -> Result<(u16, Value)> {
+    request_json(reqwest::Method::POST, access_token, url, Some(body), None).await
+}
+
+/// PUT a JSON body to a Spotify API URL. Returns `(status, parsed body)`.
+pub async fn put_json(access_token: &str, url: &str, body: &Value) -> Result<(u16, Value)> {
+    request_json(reqwest::Method::PUT, access_token, url, Some(body), None).await
+}
+
+/// PUT with a query string but no body (e.g. add/remove playlist items).
+pub async fn put_query(
+    access_token: &str,
+    url: &str,
+    query: &[(&str, &str)],
+) -> Result<(u16, Value)> {
+    request_json(reqwest::Method::PUT, access_token, url, None, Some(query)).await
+}
+
+async fn request_json(
+    method: reqwest::Method,
+    access_token: &str,
+    url: &str,
+    body: Option<&Value>,
+    query: Option<&[(&str, &str)]>,
+) -> Result<(u16, Value)> {
+    let client = reqwest::Client::new();
+    let mut req = client.request(method, url).bearer_auth(access_token);
+    if let Some(q) = query {
+        req = req.query(q);
+    }
+    if let Some(b) = body {
+        req = req.json(b);
+    }
+    let resp = req.send().await.with_context(|| format!("request {url}"))?;
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    Ok((status, body))
 }
 
 pub fn api_url(base: &str, path: &str) -> String {
