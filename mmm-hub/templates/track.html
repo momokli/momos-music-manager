@@ -16,7 +16,7 @@ content %}
     <a href="/track/{{ id }}/download?format=mp3">MP3 laden</a>{% endif %}
 </p>
 
-{% if can_stream %}
+{% include "_partials/track_actions.html" %} {% if can_stream %}
 <div class="hub-player">
     <button class="hub-playbtn" type="button" aria-label="Abspielen">▶</button>
     <div class="hub-wave" role="slider" tabindex="0" aria-label="Fortschritt">

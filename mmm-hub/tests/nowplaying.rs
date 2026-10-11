@@ -5,7 +5,81 @@
 
 mod common;
 
+use serde_json::json;
 use sqlx::Row;
+
+fn now_item(sid: &str) -> serde_json::Value {
+    json!({
+        "id": sid,
+        "name": "Heal Me",
+        "artists": [{ "name": "Rodriguez Jr." }],
+        "album": { "name": "Baobab", "images": [{ "url": "http://img/x" }] },
+        "duration_ms": 374000,
+        "explicit": false,
+        "external_ids": { "isrc": "GB-AAA-19-00001" }
+    })
+}
+
+#[tokio::test]
+async fn ingest_spotify_item_creates_track_and_external_id() {
+    let app = common::spawn().await;
+    let id = mmm_hub::ingest::ingest_spotify_item(&app.pool, &now_item("unknown-1"))
+        .await
+        .unwrap()
+        .expect("track created");
+    let row = sqlx::query("SELECT title, artists, album, isrc FROM hub_tracks WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<String, _>("title"), "Heal Me");
+    assert_eq!(row.get::<String, _>("artists"), "Rodriguez Jr.");
+    assert_eq!(row.get::<String, _>("album"), "Baobab");
+    assert_eq!(row.get::<String, _>("isrc"), "GB-AAA-19-00001");
+    let ext: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_track_external_ids WHERE track_id = ?1 AND service = 'spotify'",
+    )
+    .bind(id)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(ext, 1);
+}
+
+#[tokio::test]
+async fn record_listen_coalesces_a_session() {
+    let app = common::spawn().await;
+    let (uid, _) = app.user_with_password("zoe", "pw").await;
+    let t = app.seed.t_all;
+    let other = app.seed.t_two;
+
+    mmm_hub::nowplaying::record_listen(&app.pool, uid, t, 1000, 180000)
+        .await
+        .unwrap();
+    mmm_hub::nowplaying::record_listen(&app.pool, uid, t, 21000, 180000)
+        .await
+        .unwrap();
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_listening_history WHERE user_id = ?1 AND track_id = ?2",
+    )
+    .bind(uid)
+    .bind(t)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1, "same track within a session coalesces");
+
+    mmm_hub::nowplaying::record_listen(&app.pool, uid, other, 0, 120000)
+        .await
+        .unwrap();
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM hub_listening_history WHERE user_id = ?1")
+            .bind(uid)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(total, 2, "a different track starts a new row");
+}
 
 #[tokio::test]
 async fn now_page_requires_login() {

@@ -139,6 +139,7 @@ content %}
                 <th scope="col">BPM</th>
                 <th scope="col">Key</th>
                 <th scope="col">Score</th>
+                <th scope="col">Aktion</th>
             </tr>
         </thead>
         <tbody>
@@ -192,6 +193,12 @@ content %}
                 <td>{{ r.bpm_disp }}</td>
                 <td>{% if r.camelot != "" %}{{ r.camelot }}{% else %}—{% endif %}</td>
                 <td>{{ r.score }}</td>
+                <td>
+                    {% if r.matched %}{% let id = r.track_id %}{% include
+                    "_partials/track_actions.html" %}{% else %}<span class="hub-muted"
+                        >—</span
+                    >{% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>

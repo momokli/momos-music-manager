@@ -1,0 +1,37 @@
+{# Playlist picker: add the track to an existing curated playlist or create a
+   new one (#318). Loaded into `.hub-ta` on click. Each choice htmx-posts and the
+   server swaps the group back. #}
+<div class="hub-ta hub-ta-open">
+    {% for p in playlists %}
+    <form
+        hx-post="/track/{{ id }}/actions/playlist"
+        hx-target="closest .hub-ta"
+        hx-swap="innerHTML"
+        style="display: inline"
+    >
+        <input type="hidden" name="playlist_id" value="{{ p.id }}" />
+        <button type="submit" class="hub-ta-btn">{{ p.name }}</button>
+    </form>
+    {% endfor %} {% if playlists.is_empty() %}
+    <span class="hub-ta-hint">Noch keine Playlist — leg eine an:</span>
+    {% endif %}
+    <form
+        hx-post="/track/{{ id }}/actions/playlist"
+        hx-target="closest .hub-ta"
+        hx-swap="innerHTML"
+        class="hub-ta-new"
+    >
+        <input type="text" name="new_name" placeholder="Neue Playlist…" autocomplete="off" />
+        <button type="submit" class="hub-ta-btn hub-ta-primary">＋ Neu</button>
+    </form>
+    <button
+        type="button"
+        class="hub-ta-btn hub-ta-cancel"
+        hx-get="/track/{{ id }}/actions"
+        hx-target="closest .hub-ta"
+        hx-swap="innerHTML"
+        aria-label="Abbrechen"
+    >
+        ×
+    </button>
+</div>

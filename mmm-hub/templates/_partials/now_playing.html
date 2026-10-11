@@ -50,7 +50,8 @@ playing in Spotify and lets them tag it in place. Keep all conditionals as eleme
             <span class="hub-now-bar-fill" style="width: {{ progress_pct }}%"></span>
         </div>
         <div class="hub-now-meta hub-muted">
-            {{ progress_disp }} / {{ duration_disp }} · {{ album }}
+            {{ progress_disp }} / {{ duration_disp }} · {{ bpm }} BPM · {{ music_key }} ·
+            {{ album }}
         </div>
     </div>
 
@@ -65,31 +66,7 @@ playing in Spotify and lets them tag it in place. Keep all conditionals as eleme
         >
         {% endfor %}
     </div>
-    {% endif %}
-    <form
-        class="hub-now-tagform"
-        method="post"
-        action="/now-playing/tag"
-        hx-post="/now-playing/tag"
-        hx-target="#hub-now-host"
-        hx-swap="innerHTML"
-    >
-        <input type="hidden" name="track_id" value="{{ hub_track_id }}" />
-        <input
-            type="text"
-            name="name"
-            placeholder="Tag hinzufügen…"
-            autocomplete="off"
-            required
-        />
-        <select name="type" aria-label="Tag-Typ">
-            <option value="">Typ…</option>
-            {% for t in my_types %}
-            <option value="{{ t.value }}">{{ t.label }}</option>
-            {% endfor %}
-        </select>
-        <button type="submit" class="hub-now-tagbtn">+ Tag</button>
-    </form>
+    {% endif %} {% let id = hub_track_id %} {% include "_partials/track_actions.html" %}
     {% else %}
     <span class="hub-now-sub hub-muted"
         >Noch nicht im Hub — erscheint nach dem nächsten Sync.</span

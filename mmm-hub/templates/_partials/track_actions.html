@@ -1,0 +1,26 @@
+{#
+    Uniform per-track action group (#318). Rendered wherever a hub track appears
+    (track page, digging, tag-queue, now-playing). Clicking a button lazily loads
+    the playlist picker / tag form into this container via htmx, so pages need no
+    extra server data. `id` = hub track id.
+#}
+<div class="hub-ta">
+    <button
+        type="button"
+        class="hub-ta-btn"
+        hx-get="/track/{{ id }}/actions/playlist"
+        hx-target="closest .hub-ta"
+        hx-swap="innerHTML"
+    >
+        ＋ Playlist
+    </button>
+    <button
+        type="button"
+        class="hub-ta-btn"
+        hx-get="/track/{{ id }}/actions/tag"
+        hx-target="closest .hub-ta"
+        hx-swap="innerHTML"
+    >
+        ＋ Tag
+    </button>
+</div>

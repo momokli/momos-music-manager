@@ -586,6 +586,29 @@ async fn upsert_track(pool: &SqlitePool, t: &Value) -> Result<Option<i64>> {
 
 // ── YouTube ingest ──
 
+/// Upsert a single Spotify track object (the shape used by `/me/player/*` and
+/// playlist items), recording its external id too. Used to ingest an unknown
+/// track on the fly from the now-playing poll (#319).
+pub async fn ingest_spotify_item(pool: &SqlitePool, item: &Value) -> Result<Option<i64>> {
+    let Some(id) = upsert_track(pool, item).await? else {
+        return Ok(None);
+    };
+    if let Some(sid) = item["id"].as_str().filter(|s| !s.is_empty()) {
+        sqlx::query(
+            "INSERT OR IGNORE INTO hub_track_external_ids
+                 (track_id, service, external_id, url, source, fetched_at)
+             VALUES (?1, 'spotify', ?2, ?3, 'nowplaying', ?4)",
+        )
+        .bind(id)
+        .bind(sid)
+        .bind(format!("https://open.spotify.com/track/{sid}"))
+        .bind(now_iso())
+        .execute(pool)
+        .await?;
+    }
+    Ok(Some(id))
+}
+
 /// Upsert a track from yt-dlp JSON into hub_tracks, returning its local id.
 async fn upsert_track_from_ytdlp(
     pool: &SqlitePool,
