@@ -17,6 +17,135 @@ const NOW: &str = "2026-01-01T00:00:00+00:00";
 mod common;
 
 #[tokio::test]
+async fn track_actions_require_login() {
+    let app = common::spawn().await;
+    let resp = app
+        .client()
+        .get(app.url(&format!("/track/{}/actions", app.seed.t_all)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn add_to_new_playlist_creates_playlist_and_item() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("zoe", "pw").await;
+    let track = app.seed.t_all;
+
+    let resp = app
+        .client()
+        .post(app.url(&format!("/track/{track}/actions/playlist")))
+        .header("Cookie", &cookie)
+        .form(&[("new_name", "Digs")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert!(resp.headers().contains_key("HX-Trigger"));
+
+    let pid: i64 = sqlx::query_scalar(
+        "SELECT id FROM hub_curated_playlists WHERE user_id = ?1 AND name = 'Digs'",
+    )
+    .bind(uid)
+    .fetch_one(&app.pool)
+    .await
+    .expect("playlist created");
+    let linked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_curated_items WHERE playlist_id = ?1 AND track_id = ?2",
+    )
+    .bind(pid)
+    .bind(track)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, 1);
+}
+
+#[tokio::test]
+async fn add_to_existing_playlist_links_item() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("zoe", "pw").await;
+    let track = app.seed.t_all;
+    let pid = curate::create_manual(&app.pool, uid, "Existing")
+        .await
+        .unwrap();
+
+    let resp = app
+        .client()
+        .post(app.url(&format!("/track/{track}/actions/playlist")))
+        .header("Cookie", &cookie)
+        .form(&[("playlist_id", &pid.to_string())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let linked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_curated_items WHERE playlist_id = ?1 AND track_id = ?2",
+    )
+    .bind(pid)
+    .bind(track)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, 1);
+}
+
+#[tokio::test]
+async fn add_tag_creates_and_links_tag() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("zoe", "pw").await;
+    let track = app.seed.t_all;
+
+    let resp = app
+        .client()
+        .post(app.url(&format!("/track/{track}/actions/tag")))
+        .header("Cookie", &cookie)
+        .form(&[("name", "peak"), ("type", "PHASE_5")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let tag_id: i64 =
+        sqlx::query_scalar("SELECT id FROM hub_tags WHERE owner_user_id = ?1 AND name = 'peak'")
+            .bind(uid)
+            .fetch_one(&app.pool)
+            .await
+            .expect("tag created");
+    let linked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_track_tag_manual WHERE track_id = ?1 AND tag_id = ?2",
+    )
+    .bind(track)
+    .bind(tag_id)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, 1);
+}
+
+#[tokio::test]
+async fn picker_lists_playlists() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("zoe", "pw").await;
+    curate::create_manual(&app.pool, uid, "Meine Liste")
+        .await
+        .unwrap();
+
+    let resp = app
+        .client()
+        .get(app.url(&format!("/track/{}/actions/playlist", app.seed.t_all)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = resp.text().await.unwrap();
+    assert!(html.contains("Meine Liste"), "picker should list playlist");
+}
+
+#[tokio::test]
 async fn curate_requires_login() {
     let app = common::spawn().await;
     let resp = app.client().get(app.url("/curate")).send().await.unwrap();

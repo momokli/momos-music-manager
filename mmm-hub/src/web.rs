@@ -31,6 +31,15 @@ pub fn router(state: AppState) -> Router {
         .route("/track/{id}/fetch", post(track_fetch))
         .route("/track/{id}/tag", post(track_tag))
         .route("/track/{id}/untag", post(track_untag))
+        .route("/track/{id}/actions", get(track_actions_frag))
+        .route(
+            "/track/{id}/actions/playlist",
+            get(track_actions_playlist_frag).post(track_actions_playlist_post),
+        )
+        .route(
+            "/track/{id}/actions/tag",
+            get(track_actions_tag_frag).post(track_actions_tag_post),
+        )
         .route("/api/hub/services/{service}/connect", get(connect))
         .route(
             "/api/hub/services/{service}/fetch-playlists",
@@ -1075,7 +1084,34 @@ struct NowPlaying {
     progress_pct: i64,
     progress_disp: String,
     duration_disp: String,
+    bpm: String,
+    music_key: String,
     tag_clouds: Vec<TagCloudRow>,
+}
+
+/// Uniform per-track action group (#318) + its lazily-loaded forms.
+#[derive(Template)]
+#[template(path = "_partials/track_actions.html")]
+struct TrackActions {
+    id: i64,
+}
+
+#[derive(Template)]
+#[template(path = "_partials/track_playlist_picker.html")]
+struct TrackPlaylistPicker {
+    id: i64,
+    playlists: Vec<PlaylistMini>,
+}
+
+struct PlaylistMini {
+    id: i64,
+    name: String,
+}
+
+#[derive(Template)]
+#[template(path = "_partials/track_tag_form.html")]
+struct TrackTagFormPartial {
+    id: i64,
     my_types: Vec<TypeOption>,
 }
 
@@ -1571,13 +1607,24 @@ async fn render_now(st: &AppState, nav: &crate::ui::Nav) -> Response {
         }),
         Ok(Some(n)) => {
             let has_track = n.hub_track_id.is_some();
-            let (tag_clouds, hub_track_id, track_url) = match n.hub_track_id {
-                Some(tid) => (
-                    now_tag_clouds(st, tid, &nav.slug).await,
-                    tid,
-                    format!("/track/{tid}"),
+            let (tag_clouds, hub_track_id, track_url, bpm, music_key) = match n.hub_track_id {
+                Some(tid) => {
+                    let (b, k) = track_bpm_key(st, tid).await;
+                    (
+                        now_tag_clouds(st, tid, &nav.slug).await,
+                        tid,
+                        format!("/track/{tid}"),
+                        b,
+                        k,
+                    )
+                }
+                None => (
+                    Vec::new(),
+                    0,
+                    String::new(),
+                    "—".to_string(),
+                    "—".to_string(),
                 ),
-                None => (Vec::new(), 0, String::new()),
             };
             render(&NowPlaying {
                 logged_in: true,
@@ -1594,8 +1641,9 @@ async fn render_now(st: &AppState, nav: &crate::ui::Nav) -> Response {
                 progress_pct: n.progress_pct(),
                 progress_disp: n.progress_disp(),
                 duration_disp: n.duration_disp(),
+                bpm,
+                music_key,
                 tag_clouds,
-                my_types: type_options(),
                 error: String::new(),
             })
         }
@@ -1750,6 +1798,186 @@ fn now_external(nav: crate::ui::Nav, n: &crate::nowplaying::Now, _known: bool) -
         progress_disp: n.progress_disp(),
         duration_disp: n.duration_disp(),
     }
+}
+
+// ── uniform track actions (#318) ────────────────────────────────
+
+/// Add an `HX-Trigger` toast header to a response.
+fn with_toast(mut resp: Response, msg: &str, kind: &str) -> Response {
+    let trigger = format!(
+        "{{\"toast\":{{\"msg\":{},\"kind\":\"{}\"}}}}",
+        serde_json::to_string(msg).unwrap_or_else(|_| "\"\"".into()),
+        kind
+    );
+    if let Ok(v) = HeaderValue::from_str(&trigger) {
+        resp.headers_mut().insert("HX-Trigger", v);
+    }
+    resp
+}
+
+/// BPM + Camelot key for a hub track, preferring ReccoBeats over Traktor.
+async fn track_bpm_key(st: &AppState, track_id: i64) -> (String, String) {
+    let row = sqlx::query(
+        "SELECT f.bpm AS fbpm, f.camelot AS fcam, v.bpm AS tbpm, v.camelot AS tcam
+           FROM hub_tracks t
+           LEFT JOIN hub_track_features f ON f.track_id = t.id
+           LEFT JOIN hub_v_track_traktor v ON v.track_id = t.id
+          WHERE t.id = ?1",
+    )
+    .bind(track_id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten();
+    match row {
+        Some(r) => {
+            let bpm: Option<f64> = r
+                .get::<Option<f64>, _>("fbpm")
+                .or(r.get::<Option<f64>, _>("tbpm"));
+            let key = r
+                .get::<Option<String>, _>("fcam")
+                .or(r.get::<Option<String>, _>("tcam"));
+            (
+                bpm.map(|b| format!("{b:.0}")).unwrap_or_else(|| "—".into()),
+                key.unwrap_or_else(|| "—".into()),
+            )
+        }
+        None => ("—".to_string(), "—".to_string()),
+    }
+}
+
+async fn track_actions_frag(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    if current_user(&st, &headers).await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    render(&TrackActions { id })
+}
+
+async fn track_actions_playlist_frag(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let playlists = crate::curate::list_for_user(&st.pool, nav.id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| PlaylistMini {
+            id: c.id,
+            name: c.name,
+        })
+        .collect();
+    render(&TrackPlaylistPicker { id, playlists })
+}
+
+async fn track_actions_tag_frag(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    if crate::ui::nav(&st, &headers, "track").await.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    render(&TrackTagFormPartial {
+        id,
+        my_types: type_options(),
+    })
+}
+
+#[derive(Deserialize)]
+struct AddToPlaylistForm {
+    #[serde(default)]
+    playlist_id: Option<i64>,
+    #[serde(default)]
+    new_name: Option<String>,
+}
+
+async fn track_actions_playlist_post(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<AddToPlaylistForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let (msg, kind) = if let Some(name) = f
+        .new_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        match crate::curate::create_manual(&st.pool, nav.id, name).await {
+            Ok(pid) => match crate::curate::add_item(&st.pool, pid, id).await {
+                Ok(_) => (format!("In neue Playlist „{name}“ gelegt"), "ok"),
+                Err(e) => (format!("Fehler: {e}"), "err"),
+            },
+            Err(e) => (format!("Fehler: {e}"), "err"),
+        }
+    } else if let Some(pid) = f.playlist_id {
+        let owner = crate::curate::get(&st.pool, pid)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.user_id);
+        if owner == Some(nav.id) {
+            match crate::curate::add_item(&st.pool, pid, id).await {
+                Ok(_) => ("Zur Playlist hinzugefügt".to_string(), "ok"),
+                Err(e) => (format!("Fehler: {e}"), "err"),
+            }
+        } else {
+            ("Playlist nicht gefunden".to_string(), "err")
+        }
+    } else {
+        ("Keine Playlist angegeben".to_string(), "err")
+    };
+    with_toast(render(&TrackActions { id }), &msg, kind)
+}
+
+#[derive(Deserialize)]
+struct AddTagForm {
+    name: String,
+    #[serde(default, rename = "type")]
+    tag_type: Option<String>,
+}
+
+async fn track_actions_tag_post(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<AddTagForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let (msg, kind) = if f.name.trim().is_empty() {
+        ("Kein Tag-Name angegeben".to_string(), "err")
+    } else {
+        match crate::tags::ensure_tag(&st.pool, nav.id, &f.name).await {
+            Ok(tag_id) => {
+                if let Some(ty) = f
+                    .tag_type
+                    .as_deref()
+                    .and_then(crate::tagtypes::TagType::parse)
+                {
+                    let _ = crate::tagtypes::set(&st.pool, nav.id, tag_id, Some(ty)).await;
+                }
+                match crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await {
+                    Ok(_) => (format!("Tag „{}“ hinzugefügt", f.name.trim()), "ok"),
+                    Err(e) => (format!("Fehler: {e}"), "err"),
+                }
+            }
+            Err(e) => (format!("Fehler: {e}"), "err"),
+        }
+    };
+    with_toast(render(&TrackActions { id }), &msg, kind)
 }
 
 // ── curated playlists (#316) ────────────────────────────────────────────────

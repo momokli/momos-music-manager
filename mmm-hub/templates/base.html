@@ -911,6 +911,57 @@
         gap: 0.4rem;
         padding-bottom: 0.4rem;
       }
+      /* ── uniform track actions (#318) ────────────────────────────────── */
+      .hub-ta {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        flex-wrap: wrap;
+      }
+      .hub-ta-btn {
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-size: 0.8rem !important;
+        font-weight: 700;
+        padding: 0.45rem 0.85rem !important;
+        border-radius: 0.2rem;
+        background: var(--pico-primary);
+        border: 1px solid var(--pico-primary);
+        color: var(--pico-primary-inverse, #0b0f14) !important;
+        cursor: pointer;
+        line-height: 1;
+      }
+      .hub-ta-primary {
+        background: var(--pico-primary);
+      }
+      .hub-ta-cancel {
+        background: transparent;
+        color: var(--hub-fg, #e6edf3) !important;
+        border-color: var(--pico-muted-border-color);
+        padding: 0.45rem 0.6rem !important;
+      }
+      .hub-ta-open {
+        border: 1px dashed var(--pico-muted-border-color);
+        border-radius: 0.25rem;
+        padding: 0.3rem;
+      }
+      .hub-ta-hint {
+        font-size: 0.8rem;
+        color: var(--pico-muted-color);
+      }
+      .hub-ta-new input[type="text"],
+      .hub-ta-tagform input[type="text"] {
+        width: 10rem;
+        padding: 0.4rem 0.55rem !important;
+        margin: 0 !important;
+        font-size: 0.8rem !important;
+      }
+      .hub-ta-tagform select {
+        width: auto;
+        padding: 0.4rem 0.5rem !important;
+        margin: 0 !important;
+        font-size: 0.8rem !important;
+      }
     </style>
   </head>
   <body>

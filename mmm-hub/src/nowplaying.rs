@@ -99,8 +99,31 @@ pub async fn current(pool: &SqlitePool, cfg: &Config, user_id: i64) -> Result<Op
         .flatten(),
         None => None,
     };
+    // Unknown track: ingest it (with artist/album/cover/isrc) on the fly (#319).
+    let hub_track_id = match hub_track_id {
+        Some(id) => Some(id),
+        None if track_id.is_some() => crate::ingest::ingest_spotify_item(pool, item)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    // Record a listening event (coalesced per session) when the track is playing.
+    let playing = v["is_playing"].as_bool().unwrap_or(false);
+    if playing {
+        if let Some(tid) = hub_track_id {
+            let _ = record_listen(
+                pool,
+                user_id,
+                tid,
+                v["progress_ms"].as_i64().unwrap_or(0),
+                item["duration_ms"].as_i64().unwrap_or(0),
+            )
+            .await;
+        }
+    }
     Ok(Some(Now {
-        playing: v["is_playing"].as_bool().unwrap_or(false),
+        playing,
         hub_track_id,
         title: item["name"].as_str().unwrap_or("").to_string(),
         artists,
@@ -114,4 +137,64 @@ pub async fn current(pool: &SqlitePool, cfg: &Config, user_id: i64) -> Result<Op
         progress_ms: v["progress_ms"].as_i64().unwrap_or(0),
         duration_ms: item["duration_ms"].as_i64().unwrap_or(0),
     }))
+}
+
+/// Record a listening event, coalescing consecutive polls of the same track
+/// into a single row (a "session", extended while it keeps playing) so the
+/// 20 s polling does not flood the table (#319).
+pub async fn record_listen(
+    pool: &SqlitePool,
+    user_id: i64,
+    track_id: i64,
+    progress_ms: i64,
+    duration_ms: i64,
+) -> Result<()> {
+    let now = chrono::Utc::now();
+    let now_iso = now.to_rfc3339();
+    let last: Option<(i64, i64, String)> = sqlx::query_as(
+        "SELECT id, track_id, played_at FROM hub_listening_history
+          WHERE user_id = ?1 ORDER BY played_at DESC, id DESC LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some((id, tid, ts)) = last {
+        if tid == track_id && within_session(&ts, &now) {
+            sqlx::query(
+                "UPDATE hub_listening_history SET played_at = ?2, progress_ms = ?3 WHERE id = ?1",
+            )
+            .bind(id)
+            .bind(&now_iso)
+            .bind(progress_ms)
+            .execute(pool)
+            .await?;
+            return Ok(());
+        }
+    }
+    sqlx::query(
+        "INSERT INTO hub_listening_history
+             (user_id, track_id, played_at, progress_ms, duration_ms, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'spotify')",
+    )
+    .bind(user_id)
+    .bind(track_id)
+    .bind(&now_iso)
+    .bind(progress_ms)
+    .bind(duration_ms)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Whether a stored `played_at` is close enough in time to extend the same
+/// listening session (within 15 minutes).
+fn within_session(ts: &str, now: &chrono::DateTime<chrono::Utc>) -> bool {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|t| {
+            now.signed_duration_since(t.with_timezone(&chrono::Utc))
+                .num_minutes()
+                .unsigned_abs()
+                < 15
+        })
+        .unwrap_or(false)
 }

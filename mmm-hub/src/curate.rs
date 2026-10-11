@@ -102,12 +102,22 @@ pub async fn has_write_scope(pool: &SqlitePool, user_id: i64) -> bool {
 }
 
 /// Resolve a curated playlist to an ordered list of hub track ids.
+/// `manual` items are always included (and listed first); the tag/lens set is
+/// appended, so hand-added tracks survive alongside a smart source.
 pub async fn resolve_track_ids(pool: &SqlitePool, cp: &CuratedPlaylist) -> Result<Vec<i64>> {
     let limit = cp.fill_limit.clamp(1, 500);
-    let ids: Vec<i64> = match cp.fill_mode.as_str() {
+    let manual: Vec<i64> = sqlx::query_scalar(
+        "SELECT track_id FROM hub_curated_items
+          WHERE playlist_id = ?1 ORDER BY position, added_at",
+    )
+    .bind(cp.id)
+    .fetch_all(pool)
+    .await?;
+
+    let derived: Vec<i64> = match cp.fill_mode.as_str() {
         "tag" => {
             let Some(tag_id) = cp.fill_tag_id else {
-                return Ok(Vec::new());
+                return Ok(manual);
             };
             sqlx::query_scalar(
                 "SELECT rt.track_id
@@ -158,18 +168,56 @@ pub async fn resolve_track_ids(pool: &SqlitePool, cp: &CuratedPlaylist) -> Resul
                 .await?
             }
         },
-        // manual (and unknown modes): hand-picked items.
-        _ => {
-            sqlx::query_scalar(
-                "SELECT track_id FROM hub_curated_items
-                  WHERE playlist_id = ?1 ORDER BY position, added_at",
-            )
-            .bind(cp.id)
-            .fetch_all(pool)
-            .await?
-        }
+        // manual mode: hand-picked items are the whole set.
+        _ => return Ok(manual),
     };
-    Ok(ids)
+
+    let mut out = manual;
+    for id in derived {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    Ok(out)
+}
+
+/// Add a track to a curated playlist (idempotent), bumping `updated_at`.
+pub async fn add_item(pool: &SqlitePool, playlist_id: i64, track_id: i64) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT OR IGNORE INTO hub_curated_items (playlist_id, track_id, position, added_at)
+         VALUES (?1, ?2,
+                 (SELECT COALESCE(MAX(position), 0) + 1 FROM hub_curated_items WHERE playlist_id = ?1),
+                 ?3)",
+    )
+    .bind(playlist_id)
+    .bind(track_id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE hub_curated_playlists SET updated_at = ?2 WHERE id = ?1")
+        .bind(playlist_id)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Create a `manual` curated playlist and return its id.
+pub async fn create_manual(pool: &SqlitePool, user_id: i64, name: &str) -> Result<i64> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_curated_playlists
+            (user_id, name, description, is_public, fill_mode, fill_limit, daily, created_at, updated_at)
+         VALUES (?1, ?2, '', 0, 'manual', 50, 0, ?3, ?3)
+         RETURNING id",
+    )
+    .bind(user_id)
+    .bind(name)
+    .bind(&now)
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
 }
 
 /// Map hub track ids to Spotify track ids (order preserved, duplicates dropped).

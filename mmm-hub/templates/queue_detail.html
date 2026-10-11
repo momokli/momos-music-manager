@@ -22,7 +22,7 @@
         >
     </div>
 
-    {% if music_api && has_isrc %}
+    {% include "_partials/track_actions.html" %} {% if music_api && has_isrc %}
     <div class="hub-player">
         <button class="hub-playbtn" type="button" aria-label="Abspielen">▶</button>
         <div class="hub-wave" role="slider" tabindex="0" aria-label="Fortschritt">
