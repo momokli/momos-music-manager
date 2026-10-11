@@ -39,6 +39,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hub/services/{service}/sync-html", post(sync_html))
         .route("/api/hub/playlists/{id}/toggle", post(toggle_playlist))
         .route("/api/hub/playlists/{id}/refetch", post(refetch_playlist))
+        .route("/now-playing", get(now_playing_frag))
+        .route("/now-playing/tag", post(now_tag))
         .route("/api/hub/playlists/enable-all", post(enable_all))
         .route("/api/hub/playlists/disable-all", post(disable_all))
         .route("/api/hub/services/{service}/callback", get(callback))
@@ -1048,6 +1050,29 @@ struct TrackTag {
     type_icon: String,
 }
 
+/// The `_partials/now_playing.html` widget (issue #293/#294).
+#[derive(Template, Default)]
+#[template(path = "_partials/now_playing.html")]
+struct NowPlaying {
+    logged_in: bool,
+    connected: bool,
+    error: String,
+    playing: bool,
+    has_track: bool,
+    hub_track_id: i64,
+    track_url: String,
+    play_state: String,
+    title: String,
+    artists: String,
+    album: String,
+    image: String,
+    progress_pct: i64,
+    progress_disp: String,
+    duration_disp: String,
+    tag_clouds: Vec<TagCloudRow>,
+    my_types: Vec<TypeOption>,
+}
+
 async fn track_page(
     State(st): State<AppState>,
     Path(id): Path<i64>,
@@ -1424,6 +1449,178 @@ async fn track_untag(
         let _ = crate::tags::untag_track(&st.pool, nav.id, id, tag_id).await;
     }
     Redirect::to(&format!("/track/{id}")).into_response()
+}
+
+// ── now playing (issue #293/#294) ───────────────────────────────────────────
+
+/// Build the track's tag clouds (grouped by tag type) for the widget.
+async fn now_tag_clouds(st: &AppState, track_id: i64, me: &str) -> Vec<TagCloudRow> {
+    let rows = sqlx::query(
+        "SELECT t.id AS id, t.name AS name, u.slug AS owner, COALESCE(t.type,'') AS type
+           FROM hub_track_resolved_tags rt
+           JOIN hub_tags t ON t.id = rt.tag_id
+           JOIN hub_users u ON u.id = t.owner_user_id
+          WHERE rt.track_id = ?1
+          ORDER BY u.slug, t.name",
+    )
+    .bind(track_id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
+    let mut map: std::collections::BTreeMap<String, (String, Vec<TagChipRow>)> =
+        std::collections::BTreeMap::new();
+    for r in rows {
+        let ty: String = r.get::<Option<String>, _>("type").unwrap_or_default();
+        let owner: String = r.get::<Option<String>, _>("owner").unwrap_or_default();
+        let (label, icon) = match crate::tagtypes::TagType::parse(&ty) {
+            Some(t) => {
+                let i = t.icon().to_string();
+                (
+                    t.label().to_string(),
+                    if i.trim().is_empty() {
+                        "•".to_string()
+                    } else {
+                        i
+                    },
+                )
+            }
+            None => ("Ohne Typ".to_string(), "•".to_string()),
+        };
+        let e = map.entry(label).or_insert_with(|| (icon, Vec::new()));
+        e.1.push(TagChipRow {
+            id: r.get("id"),
+            name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+            mine: owner.eq_ignore_ascii_case(me),
+        });
+    }
+    let mut clouds: Vec<TagCloudRow> = map
+        .into_iter()
+        .map(|(type_label, (icon, chips))| TagCloudRow {
+            type_label,
+            icon,
+            chips,
+        })
+        .collect();
+    if let Some(pos) = clouds.iter().position(|c| c.type_label == "Ohne Typ") {
+        let last = clouds.remove(pos);
+        clouds.push(last);
+    }
+    clouds
+}
+
+/// Render the now-playing widget for `nav`'s user.
+async fn render_now(st: &AppState, nav: &crate::ui::Nav) -> Response {
+    if !crate::nowplaying::has_scope(&st.pool, nav.id).await {
+        return render(&NowPlaying {
+            logged_in: true,
+            connected: false,
+            ..Default::default()
+        });
+    }
+    match crate::nowplaying::current(&st.pool, &st.cfg, nav.id).await {
+        Ok(None) => render(&NowPlaying {
+            logged_in: true,
+            connected: true,
+            ..Default::default()
+        }),
+        Ok(Some(n)) => {
+            let has_track = n.hub_track_id.is_some();
+            let (tag_clouds, hub_track_id, track_url) = match n.hub_track_id {
+                Some(tid) => (
+                    now_tag_clouds(st, tid, &nav.slug).await,
+                    tid,
+                    format!("/track/{tid}"),
+                ),
+                None => (Vec::new(), 0, String::new()),
+            };
+            render(&NowPlaying {
+                logged_in: true,
+                connected: true,
+                playing: true,
+                has_track,
+                hub_track_id,
+                track_url,
+                play_state: if n.playing { "Läuft" } else { "Pausiert" }.to_string(),
+                title: n.title.clone(),
+                artists: n.artists.clone(),
+                album: n.album.clone(),
+                image: n.image.clone(),
+                progress_pct: n.progress_pct(),
+                progress_disp: n.progress_disp(),
+                duration_disp: n.duration_disp(),
+                tag_clouds,
+                my_types: type_options(),
+                error: String::new(),
+            })
+        }
+        Err(e) => render(&NowPlaying {
+            logged_in: true,
+            connected: true,
+            error: format!("Spotify-Fehler: {e}"),
+            ..Default::default()
+        }),
+    }
+}
+
+/// htmx fragment: the current Spotify track + inline tagging (#293/#294).
+async fn now_playing_frag(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "now").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    render_now(&st, &nav).await
+}
+
+#[derive(Deserialize)]
+struct NowTagForm {
+    track_id: i64,
+    name: String,
+    #[serde(default, rename = "type")]
+    tag_type: Option<String>,
+}
+
+/// Tag the currently-playing track in place (htmx; returns the refreshed widget).
+async fn now_tag(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<NowTagForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "now").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let (msg, kind) = if f.track_id == 0 {
+        ("Track noch nicht im Hub.".to_string(), "err")
+    } else if f.name.trim().is_empty() {
+        ("Kein Tag-Name angegeben.".to_string(), "err")
+    } else {
+        match crate::tags::ensure_tag(&st.pool, nav.id, &f.name).await {
+            Ok(tag_id) => {
+                if let Some(ty) = f
+                    .tag_type
+                    .as_deref()
+                    .and_then(crate::tagtypes::TagType::parse)
+                {
+                    let _ = crate::tagtypes::set(&st.pool, nav.id, tag_id, Some(ty)).await;
+                }
+                match crate::tags::tag_track(&st.pool, nav.id, f.track_id, tag_id).await {
+                    Ok(_) => (format!("Tag „{}“ hinzugefügt", f.name.trim()), "ok"),
+                    Err(e) => (format!("Fehler: {e}"), "err"),
+                }
+            }
+            Err(e) => (format!("Fehler: {e}"), "err"),
+        }
+    };
+
+    let mut resp = render_now(&st, &nav).await;
+    let trigger = format!(
+        "{{\"toast\":{{\"msg\":{},\"kind\":\"{}\"}}}}",
+        serde_json::to_string(&msg).unwrap_or_else(|_| "\"\"".into()),
+        kind
+    );
+    if let Ok(v) = HeaderValue::from_str(&trigger) {
+        resp.headers_mut().insert("HX-Trigger", v);
+    }
+    resp
 }
 
 /// A few recently seen tracks for the dashboard.
