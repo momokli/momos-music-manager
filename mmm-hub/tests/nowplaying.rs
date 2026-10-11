@@ -21,6 +21,39 @@ fn now_item(sid: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn listening_page_requires_login() {
+    let app = common::spawn().await;
+    let resp = app
+        .client()
+        .get(app.url("/listening"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers()["location"], "/login");
+}
+
+#[tokio::test]
+async fn listening_page_shows_recorded_listen() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("zoe", "pw").await;
+    mmm_hub::nowplaying::record_listen(&app.pool, uid, app.seed.t_all, 0, 180000)
+        .await
+        .unwrap();
+    let resp = app
+        .client()
+        .get(app.url("/listening"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = resp.text().await.unwrap();
+    assert!(html.contains("Gehört"), "heading missing");
+    assert!(html.contains("Top-Tracks"), "top tracks section missing");
+}
+
+#[tokio::test]
 async fn ingest_spotify_item_creates_track_and_external_id() {
     let app = common::spawn().await;
     let id = mmm_hub::ingest::ingest_spotify_item(&app.pool, &now_item("unknown-1"))

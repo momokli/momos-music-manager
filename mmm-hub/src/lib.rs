@@ -21,6 +21,7 @@ pub mod genres;
 pub mod history;
 pub mod ingest;
 pub mod lastfm;
+pub mod listening;
 pub mod mmm_import;
 pub mod music_api;
 pub mod music_ops;
