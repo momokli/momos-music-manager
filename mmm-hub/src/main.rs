@@ -17,8 +17,8 @@ use tokio::net::TcpListener;
 
 use mmm_hub::config::Config;
 use mmm_hub::{
-    analyze, analyzer, api, audio, db, features, freqblog, genres, ingest, mmm_import, pages,
-    settings, spotify, tags, traktor, web, worker,
+    analyze, analyzer, api, audio, db, features, freqblog, genres, ingest, mmm_import, settings,
+    spotify, tags, traktor, worker,
 };
 
 #[derive(Parser)]
@@ -183,9 +183,7 @@ async fn cmd_serve(cfg: Config, host: Option<String>, port: Option<u16>) -> Resu
         cfg: Arc::new(cfg.clone()),
         oauth_states: Arc::new(Mutex::new(HashMap::new())),
     };
-    let app = api::router(state.clone())
-        .merge(web::router(state.clone()))
-        .merge(pages::router(state.clone()));
+    let app = api::app(state.clone());
     worker::spawn(state.pool.clone(), state.cfg.clone());
 
     let listener = TcpListener::bind((host.as_str(), port)).await?;

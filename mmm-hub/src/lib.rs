@@ -37,6 +37,7 @@ pub mod tags;
 pub mod tagtypes;
 pub mod traktor;
 pub mod ui;
+pub mod viewstate;
 pub mod web;
 pub mod worker;
 pub mod ytdlp;

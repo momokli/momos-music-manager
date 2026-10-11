@@ -203,6 +203,67 @@ async fn playlist_tag_creation_redirects_to_tag() {
 }
 
 #[tokio::test]
+async fn view_state_restores_filters() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // Visiting with filters saves them as the view's work settings.
+    let r = app
+        .client()
+        .get(app.url("/tags?types=MOOD"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::OK);
+
+    // A later bare visit restores them via a redirect.
+    let r = app
+        .client()
+        .get(app.url("/tags"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::SEE_OTHER);
+    let loc = r.headers()["location"].to_str().unwrap().to_string();
+    assert!(
+        loc.starts_with("/tags?"),
+        "expected restore redirect: {loc}"
+    );
+    assert!(
+        loc.contains("types=MOOD"),
+        "remembered filter missing: {loc}"
+    );
+}
+
+#[tokio::test]
+async fn additive_type_filter_and_phase_filter() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    // Additive type filter: repeated params (checkboxes) must all count.
+    let r = app
+        .client()
+        .get(app.url("/tags?types=MOOD&types=VIBE"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::OK);
+
+    // Phase/energy scale filter on the overlap table.
+    let r = app
+        .client()
+        .get(app.url("/overlap?phase_min=3&phase_max=5"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
 async fn track_page_renders_in_shell() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
