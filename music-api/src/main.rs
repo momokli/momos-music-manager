@@ -42,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_secs(60))
         .build()?;
 
+    let ytdlp_concurrency = config.ytdlp_concurrency;
     let state = Arc::new(AppState {
         pool,
         config,
@@ -51,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
         store,
         logs: music_api::logbuf::LogBuffer::new(),
         paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ytdlp_sem: Arc::new(tokio::sync::Semaphore::new(ytdlp_concurrency)),
     });
 
     let worker_state = state.clone();
