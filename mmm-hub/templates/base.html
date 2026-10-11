@@ -714,6 +714,153 @@
         font-size: 0.85rem;
         margin: 0.5rem 0;
       }
+      /* ── now playing widget (#293/#294) ─────────────────────────────── */
+      #hub-now-host:empty {
+        display: none;
+      }
+      #hub-now-host {
+        position: sticky;
+        top: 0;
+        z-index: 40;
+      }
+      .hub-now {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        flex-wrap: wrap;
+        padding: 0.35rem 0.6rem;
+        margin: 0 0 0.6rem;
+        border: 1px solid var(--pico-muted-border-color);
+        border-left: 3px solid var(--pico-primary);
+        border-radius: 0.4rem;
+        background: var(--pico-card-background-color, var(--pico-background-color));
+        font-size: 0.82rem;
+        line-height: 1.25;
+      }
+      .hub-now-idle,
+      .hub-now-err {
+        color: var(--pico-muted-color);
+      }
+      .hub-now-err {
+        border-left-color: var(--pico-del-color, #c0392b);
+      }
+      .hub-now-art {
+        width: 40px;
+        height: 40px;
+        border-radius: 0.3rem;
+        object-fit: cover;
+        flex: 0 0 auto;
+      }
+      .hub-now-art-ph {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--pico-muted-border-color);
+        font-size: 1.1rem;
+      }
+      .hub-now-wave {
+        font-size: 1rem;
+      }
+      .hub-now-main {
+        min-width: 0;
+        flex: 1 1 12rem;
+      }
+      .hub-now-line {
+        display: flex;
+        align-items: baseline;
+        gap: 0.4rem;
+        min-width: 0;
+      }
+      .hub-now-dot {
+        width: 0.5rem;
+        height: 0.5rem;
+        border-radius: 50%;
+        background: var(--pico-primary);
+        align-self: center;
+        flex: 0 0 auto;
+        animation: hub-pulse 1.6s ease-in-out infinite;
+      }
+      @keyframes hub-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.35; }
+      }
+      .hub-now-title {
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 22rem;
+      }
+      .hub-now-artists {
+        color: var(--pico-muted-color);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-width: 0;
+      }
+      .hub-now-bar {
+        height: 3px;
+        margin: 0.3rem 0 0.15rem;
+        background: var(--pico-muted-border-color);
+        border-radius: 2px;
+        overflow: hidden;
+      }
+      .hub-now-bar-fill {
+        display: block;
+        height: 100%;
+        background: var(--pico-primary);
+      }
+      .hub-now-meta {
+        font-size: 0.72rem;
+        font-variant-numeric: tabular-nums;
+      }
+      .hub-now-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        max-width: 22rem;
+      }
+      .hub-now-cloud {
+        display: inline-flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.25rem;
+      }
+      .hub-now-cloud-h {
+        font-size: 0.68rem;
+        color: var(--pico-muted-color);
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+      }
+      .hub-now-tagform {
+        display: flex;
+        gap: 0.3rem;
+        align-items: center;
+        margin: 0;
+        flex: 0 0 auto;
+      }
+      .hub-now-tagform input[type="text"] {
+        width: 9rem;
+        padding: 0.2rem 0.4rem;
+        font-size: 0.78rem;
+        margin: 0;
+      }
+      .hub-now-tagform select {
+        width: auto;
+        padding: 0.2rem 0.4rem;
+        font-size: 0.78rem;
+        margin: 0;
+      }
+      .hub-now-tagbtn {
+        padding: 0.2rem 0.5rem;
+        font-size: 0.78rem;
+        margin: 0;
+      }
+      @media (max-width: 48rem) {
+        .hub-now-title { max-width: 10rem; }
+        .hub-now-tags { max-width: 100%; }
+        .hub-now-tagform input[type="text"] { width: 6rem; }
+      }
     </style>
   </head>
   <body>
@@ -783,6 +930,13 @@
     </nav>
 
     <main class="container-fluid" id="main">
+      <div
+        id="hub-now-host"
+        hx-get="/now-playing"
+        hx-trigger="load, every 20s"
+        hx-swap="innerHTML"
+        aria-label="Now Playing"
+      ></div>
       {% block flash %} {% if flash != "" %}
       <div id="hub-flash-init" data-msg="{{ flash }}" hidden></div>
       {% endif %} {% endblock %} {% block content %}{% endblock %}

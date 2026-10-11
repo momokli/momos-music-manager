@@ -11,8 +11,8 @@ use rand::RngCore;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-pub const SCOPES: &str =
-    "user-read-private user-library-read playlist-read-private playlist-read-collaborative";
+pub const SCOPES: &str = "user-read-private user-library-read playlist-read-private playlist-read-collaborative \
+     user-read-currently-playing user-read-playback-state user-modify-playback-state";
 
 const AUTHORIZE_URL: &str = "https://accounts.spotify.com/authorize";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
