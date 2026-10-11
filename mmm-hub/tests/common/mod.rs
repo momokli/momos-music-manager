@@ -82,6 +82,14 @@ impl TestApp {
 pub async fn spawn() -> TestApp {
     let dir = tempfile::tempdir().expect("tempdir");
     let url = format!("sqlite:{}/hub.db", dir.path().display());
+    let cfg = Config::for_test(url);
+    spawn_with(dir, cfg).await
+}
+
+/// Boot a hub instance with a caller-supplied config (e.g. a mock Spotify
+/// base) and seeded fixtures.
+pub async fn spawn_with(dir: tempfile::TempDir, cfg: Config) -> TestApp {
+    let url = cfg.database_url.clone();
 
     let pool = mmm_hub::db::connect(&url).await.expect("connect + migrate");
     let ro_pool = mmm_hub::db::connect_readonly(&url)
@@ -91,7 +99,7 @@ pub async fn spawn() -> TestApp {
         .await
         .expect("seed fixtures");
 
-    let cfg = Arc::new(Config::for_test(url.clone()));
+    let cfg = Arc::new(cfg);
     let state = AppState {
         pool: pool.clone(),
         ro_pool,

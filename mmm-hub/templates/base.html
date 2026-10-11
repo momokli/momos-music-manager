@@ -962,6 +962,39 @@
         margin: 0 !important;
         font-size: 0.8rem !important;
       }
+      .hub-ta-picker {
+        flex-direction: column;
+        align-items: stretch;
+        flex-wrap: nowrap;
+        max-width: 44rem;
+      }
+      .hub-ta-search {
+        width: 100%;
+        margin: 0 0 0.4rem !important;
+        padding: 0.4rem 0.55rem !important;
+        font-size: 0.85rem !important;
+      }
+      .hub-ta-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.3rem;
+        max-height: 16rem;
+        overflow-y: auto;
+        align-content: flex-start;
+      }
+      .hub-ta-list form {
+        margin: 0;
+      }
+      .hub-ta-foot {
+        display: flex;
+        gap: 0.35rem;
+        align-items: center;
+        margin-top: 0.4rem;
+        flex-wrap: wrap;
+      }
+      .hub-ta-foot .hub-ta-hint {
+        margin-right: auto;
+      }
     </style>
   </head>
   <body>
@@ -1074,6 +1107,15 @@
         var fi = document.getElementById("hub-flash-init");
         if (fi && fi.dataset.msg) window.hubToast(fi.dataset.msg, "ok");
       })();
+      // Filter the (potentially ~500-item) playlist picker client-side.
+      window.hubFilterList = function (inp) {
+        var q = (inp.value || "").toLowerCase().trim();
+        var list = inp.parentElement.querySelector(".hub-ta-list");
+        if (!list) return;
+        list.querySelectorAll("form[data-name]").forEach(function (f) {
+          f.style.display = !q || f.dataset.name.indexOf(q) >= 0 ? "" : "none";
+        });
+      };
     </script>
     <script>
       (function () {
