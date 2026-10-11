@@ -55,6 +55,7 @@ async fn health() -> Json<Value> {
 #[derive(Deserialize)]
 struct SimilarQuery {
     track: i64,
+    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
     limit: Option<i64>,
 }
 
