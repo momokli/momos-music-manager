@@ -42,6 +42,9 @@ async fn harness() -> Harness {
         ffprobe: "ffprobe".to_string(),
         worker_interval: Duration::from_secs(5),
         download_timeout: Duration::from_secs(60),
+        queue_max_attempts: 3,
+        queue_retry_base_secs: 60,
+        queue_retry_max_secs: 1800,
     };
 
     for dir in [
@@ -466,4 +469,92 @@ async fn object_store_rejects_a_wrong_digest() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ── Durable queue: retries, lease recovery, counts ──────────────────────────
+
+#[tokio::test]
+async fn worker_status_reports_retry_cap() {
+    let h = harness().await;
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/worker").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["paused"], false);
+    assert_eq!(v["maxAttempts"], 3);
+}
+
+#[tokio::test]
+async fn queue_reports_state_counts() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146", "USQX91201487"]).await;
+    let (status, body) = send(&h.app, authed("GET", "/queue").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["counts"]["pending"], 2);
+}
+
+#[tokio::test]
+async fn retry_resets_a_failed_track() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+    db::mark_terminal(&h.state.pool, "AEA0D1846146", "failed", "boom")
+        .await
+        .unwrap();
+
+    let (status, body) = send(
+        &h.app,
+        authed("POST", "/isrc/aea0d1846146/retry")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["state"], "pending");
+
+    let t = db::get_track(&h.state.pool, "AEA0D1846146")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.state, "pending");
+    assert_eq!(t.attempts, 0);
+}
+
+#[tokio::test]
+async fn expired_lease_is_requeued() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+    // Stranded in `downloading` with a lease already in the past (dead process).
+    db::mark_downloading(&h.state.pool, "AEA0D1846146", "uuid-1", 0)
+        .await
+        .unwrap();
+
+    let policy = db::RetryPolicy {
+        max_attempts: 3,
+        base_secs: 60,
+        max_secs: 1800,
+    };
+    let recovered = db::recover_expired_leases(&h.state.pool, &policy, db::now())
+        .await
+        .unwrap();
+    assert_eq!(recovered, 1);
+
+    let t = db::get_track(&h.state.pool, "AEA0D1846146")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.state, "pending");
+    assert_eq!(t.attempts, 1);
+    // The backoff window pushes it out of the due set until it elapses.
+    assert_eq!(
+        db::due_tracks(&h.state.pool, 10, db::now())
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
 }

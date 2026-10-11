@@ -28,6 +28,12 @@ pub struct Track {
     pub path_320: Option<String>,
     pub path_128: Option<String>,
     pub error: Option<String>,
+    /// Transient failures so far (bounded retries).
+    pub attempts: i64,
+    /// `pending` rows become due at this epoch; `NULL` = due now.
+    pub next_attempt_at: Option<i64>,
+    /// Set while `downloading`, refreshed as a heartbeat; drives the reaper.
+    pub lease_expires_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }

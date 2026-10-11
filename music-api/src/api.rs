@@ -151,10 +151,15 @@ async fn retry_isrc(State(state): State<Arc<AppState>>, Path(isrc): Path<String>
     }
 }
 
-/// `GET /worker` — whether the worker is currently paused.
+/// `GET /worker` — worker pause state plus the retry cap and cadence.
 async fn worker_status(State(state): State<Arc<AppState>>) -> Response {
     use std::sync::atomic::Ordering;
-    Json(json!({ "paused": state.paused.load(Ordering::Relaxed) })).into_response()
+    Json(json!({
+        "paused": state.paused.load(Ordering::Relaxed),
+        "intervalSecs": state.config.worker_interval.as_secs(),
+        "maxAttempts": state.config.queue_max_attempts,
+    }))
+    .into_response()
 }
 
 /// `POST /worker/pause` — stop the worker from picking up new work.
@@ -229,8 +234,9 @@ async fn get_tracks(State(state): State<Arc<AppState>>, Query(q): Query<TracksQu
     Json(json!({ "tracks": out })).into_response()
 }
 
-/// `GET /queue` — the live deemix queue (bounded to what deemix returns).
+/// `GET /queue` — the live deemix queue plus per-state ISRC counts.
 async fn get_queue(State(state): State<Arc<AppState>>) -> Response {
+    let counts = db::queue_counts(&state.pool).await.unwrap_or_default();
     match crate::deemix::queue(&state.http, &state.config.deemix_url).await {
         Ok(q) => {
             let items: Vec<serde_json::Value> = q
@@ -244,9 +250,11 @@ async fn get_queue(State(state): State<Arc<AppState>>) -> Response {
                     })
                 })
                 .collect();
-            Json(json!({ "items": items })).into_response()
+            Json(json!({ "items": items, "counts": counts })).into_response()
         }
-        Err(e) => Json(json!({ "items": [], "error": e.to_string() })).into_response(),
+        Err(e) => {
+            Json(json!({ "items": [], "counts": counts, "error": e.to_string() })).into_response()
+        }
     }
 }
 
