@@ -1,0 +1,51 @@
+{% extends "base.html" %} {% block title %}Wiedervorlage — Spelunke{% endblock %} {% block
+content %}
+<hgroup>
+    <h1>Wiedervorlage</h1>
+    <p class="hub-muted">
+        Tracks, deren letztes Tagging länger zurückliegt als die meisten deiner seither
+        erstellten Tags — Kandidaten zum Nach-Taggen. Sortiert nach verpassten Tags.
+    </p>
+</hgroup>
+
+<form method="get" action="/revisit" role="search" class="hub-filter">
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Track / Artists filtern …"
+        aria-label="Filtern"
+    />
+    <button type="submit">Filtern</button>
+</form>
+
+{% if rows.is_empty() %}
+<p class="hub-muted">Nichts zu tun — alles aktuell getaggt. 🎉</p>
+{% else %}
+<p class="hub-muted">{{ count }} Tracks</p>
+<div class="overflow-auto hub-scroll-y">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Wiedervorlage
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Track</th>
+                <th scope="col">Zuletzt getaggt</th>
+                <th scope="col">Verpasste Tags</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in rows %}
+            <tr>
+                <td class="hub-cell-track">
+                    <a href="/track/{{ r.id }}">{{ r.artists }} — {{ r.title }}</a>
+                </td>
+                <td class="hub-nowrap hub-muted">{{ r.last_tagged }}</td>
+                <td class="hub-nowrap">{{ r.missed }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %} {% endblock %}

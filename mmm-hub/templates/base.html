@@ -726,20 +726,22 @@
         </li>
         <li>
           <details class="dropdown">
-            <summary {% if nav.active == "playlists" || nav.active == "queue" || nav.active == "tags" || nav.active == "collectives" || nav.active == "playlist" || nav.active == "tag" %}aria-current="page"{% endif %}>Bibliothek</summary>
+            <summary {% if nav.active == "playlists" || nav.active == "queue" || nav.active == "tags" || nav.active == "revisit" || nav.active == "collectives" || nav.active == "playlist" || nav.active == "tag" %}aria-current="page"{% endif %}>Bibliothek</summary>
             <ul>
               <li><a href="/me/playlists">Playlists</a></li>
               <li><a href="/tag-queue">Tag-Queue</a></li>
               <li><a href="/tags">Tags</a></li>
+              <li><a href="/revisit">Wiedervorlage</a></li>
               <li><a href="/collectives">Collectives</a></li>
             </ul>
           </details>
         </li>
         <li>
           <details class="dropdown">
-            <summary {% if nav.active == "search" || nav.active == "artists" || nav.active == "albums" || nav.active == "overlap" || nav.active == "similar" || nav.active == "digging" || nav.active == "artist" || nav.active == "album" %}aria-current="page"{% endif %}>Entdecken</summary>
+            <summary {% if nav.active == "search" || nav.active == "tag-search" || nav.active == "artists" || nav.active == "albums" || nav.active == "overlap" || nav.active == "similar" || nav.active == "digging" || nav.active == "artist" || nav.active == "album" %}aria-current="page"{% endif %}>Entdecken</summary>
             <ul>
               <li><a href="/search">Suche</a></li>
+              <li><a href="/tag-search">Tag-Suche</a></li>
               <li><a href="/artists">Künstler</a></li>
               <li><a href="/albums">Alben</a></li>
               <li><a href="/overlap">Overlap</a></li>

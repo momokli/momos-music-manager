@@ -110,6 +110,7 @@ pub async fn tag_track(pool: &SqlitePool, user_id: i64, track_id: i64, tag_id: i
     if owned.is_none() {
         bail!("tag not owned by user");
     }
+    let now = chrono::Utc::now().to_rfc3339();
     sqlx::query(
         "INSERT OR IGNORE INTO hub_track_tag_manual (track_id, tag_id, user_id, created_at)
          VALUES (?1, ?2, ?3, ?4)",
@@ -117,9 +118,26 @@ pub async fn tag_track(pool: &SqlitePool, user_id: i64, track_id: i64, tag_id: i
     .bind(track_id)
     .bind(tag_id)
     .bind(user_id)
-    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(&now)
     .execute(pool)
     .await?;
+    // History (#296): open a membership interval if none is open.
+    sqlx::query(
+        "INSERT INTO hub_tag_membership_history (track_id, tag_id, added_at, removed_at)
+         SELECT ?1, ?2, ?3, NULL
+          WHERE NOT EXISTS (SELECT 1 FROM hub_tag_membership_history
+                             WHERE track_id = ?1 AND tag_id = ?2 AND removed_at IS NULL)",
+    )
+    .bind(track_id)
+    .bind(tag_id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE hub_tracks SET last_tagged_at = ?2 WHERE id = ?1")
+        .bind(track_id)
+        .bind(&now)
+        .execute(pool)
+        .await?;
     rebuild(pool).await?;
     // Bi-way: mirror the tag onto opted-in (owned) source playlists.
     let _ = sync_tag_to_playlists(pool, user_id, tag_id, track_id).await;
@@ -139,6 +157,15 @@ pub async fn untag_track(
     .bind(track_id)
     .bind(tag_id)
     .bind(user_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE hub_tag_membership_history SET removed_at = ?3
+          WHERE track_id = ?1 AND tag_id = ?2 AND removed_at IS NULL",
+    )
+    .bind(track_id)
+    .bind(tag_id)
+    .bind(chrono::Utc::now().to_rfc3339())
     .execute(pool)
     .await?;
     rebuild(pool).await?;

@@ -21,6 +21,8 @@ pub fn known_view(path: &str) -> Option<&'static str> {
         "/albums" => "albums",
         "/overlap" => "overlap",
         "/tag-queue" => "tag-queue",
+        "/tag-search" => "tag-search",
+        "/revisit" => "revisit",
         "/me/playlists" => "me-playlists",
         "/playlists/similar" => "playlists-similar",
         "/history" => "history",

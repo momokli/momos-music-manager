@@ -34,6 +34,7 @@ pub mod spotify;
 pub mod table;
 pub mod tagqueue;
 pub mod tags;
+pub mod tagsearch;
 pub mod tagtypes;
 pub mod traktor;
 pub mod ui;
