@@ -1,4 +1,5 @@
-{% extends "base.html" %} {% block title %}Import — Spelunke{% endblock %} {% block content %}
+{% extends "base.html" %} {% block title %}Import — Spelunke{% endblock %} {% block
+content %}
 <hgroup>
     <h1>Import</h1>
     <p>Öffentliche YouTube- oder SoundCloud-Playlists in den Hub holen.</p>
@@ -11,7 +12,9 @@
             Dienst
             <select name="service">
                 {% for o in services %}
-                <option value="{{ o.value }}" {% if o.selected %}selected{% endif %}>{{ o.label }}</option>
+                <option value="{{ o.value }}" {% if o.selected %}selected{% endif %}>
+                    {{ o.label }}
+                </option>
                 {% endfor %}
             </select>
         </label>
@@ -31,6 +34,16 @@
 <p class="hub-muted">
     Beispiele: <code>https://www.youtube.com/@iMontouch/playlists</code> ·
     <code>https://soundcloud.com/momokli/sets/discover</code>
+</p>
+
+<h2>Traktor-Import (collection.nml)</h2>
+<form method="post" action="/import/traktor" enctype="multipart/form-data">
+    <input type="file" name="file" accept=".nml,.xml,text/xml" required />
+    <button type="submit">Hochladen</button>
+</form>
+<p class="hub-muted">
+    Liest pro Track Play Count, Last Played, Rating, BPM und Key (Camelot) und
+    historisiert den Lauf. Playlists & Sessions werden mit übernommen.
 </p>
 
 <h2>Importierte Playlists</h2>

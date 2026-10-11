@@ -17,6 +17,8 @@ pub struct Stats {
     pub entries: usize,
     pub matched: usize,
     pub playlists: usize,
+    pub with_bpm: usize,
+    pub with_key: usize,
 }
 
 struct Entry {
@@ -25,6 +27,26 @@ struct Entry {
     play_count: i64,
     last_played: Option<String>,
     rating: Option<i64>,
+    bpm: Option<f64>,
+    /// Camelot notation (e.g. "8A"), derived from the Traktor KEY attribute.
+    camelot: Option<String>,
+}
+
+/// Map a Traktor `KEY` attribute to Camelot notation. Traktor uses the Camelot
+/// wheel numbering with `m`=minor(A)/`d`=dur=major(B): "8m" -> "8A", "8d" -> "8B".
+fn traktor_key_to_camelot(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.len() < 2 {
+        return None;
+    }
+    let (num, mode) = s.split_at(s.len() - 1);
+    let letter = match mode.to_ascii_lowercase().as_str() {
+        "m" => 'A',
+        "d" => 'B',
+        _ => return None,
+    };
+    let n: i64 = num.parse().ok()?;
+    (1..=12).contains(&n).then(|| format!("{n}{letter}"))
 }
 
 /// Import a `collection.nml` file from disk for `user_id`.
@@ -68,6 +90,16 @@ pub async fn import_str(pool: &SqlitePool, user_id: i64, xml: &str) -> Result<St
                 .and_then(|l| l.attribute("FILE"))
                 .unwrap_or("")
                 .to_string();
+            // BPM from <TEMPO BPM="...">, key from <INFO KEY="8m">.
+            let bpm = e
+                .children()
+                .find(|n| n.has_tag_name("TEMPO"))
+                .and_then(|t| t.attribute("BPM"))
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|b| *b > 0.0);
+            let camelot = info
+                .and_then(|i| i.attribute("KEY"))
+                .and_then(traktor_key_to_camelot);
             if !file.is_empty() {
                 by_file.insert(file.clone(), entries.len());
             }
@@ -77,10 +109,14 @@ pub async fn import_str(pool: &SqlitePool, user_id: i64, xml: &str) -> Result<St
                 play_count,
                 last_played,
                 rating,
+                bpm,
+                camelot,
             });
         }
     }
     let stats_entries = entries.len();
+    let with_bpm = entries.iter().filter(|e| e.bpm.is_some()).count();
+    let with_key = entries.iter().filter(|e| e.camelot.is_some()).count();
 
     // ── resolve + upsert per-track meta ─────────────────────────────────────
     let mut track_of: Vec<Option<i64>> = Vec::with_capacity(entries.len());
@@ -110,14 +146,16 @@ pub async fn import_str(pool: &SqlitePool, user_id: i64, xml: &str) -> Result<St
         let Some(track_id) = id else { continue };
         sqlx::query(
             "INSERT INTO hub_traktor_tracks
-                 (user_id, track_id, play_count, last_played, rating, imported_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (user_id, track_id, play_count, last_played, rating, bpm, camelot, imported_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )
         .bind(user_id)
         .bind(track_id)
         .bind(en.play_count)
         .bind(&en.last_played)
         .bind(en.rating)
+        .bind(en.bpm)
+        .bind(&en.camelot)
         .bind(&now)
         .execute(pool)
         .await?;
@@ -166,12 +204,16 @@ pub async fn import_str(pool: &SqlitePool, user_id: i64, xml: &str) -> Result<St
         entries: stats_entries,
         matched,
         playlists: playlist_count,
+        with_bpm,
+        with_key,
     };
     if let Some(rid) = run_id {
         let js = serde_json::json!({
             "entries": stats.entries,
             "matched": stats.matched,
             "playlists": stats.playlists,
+            "with_bpm": stats.with_bpm,
+            "with_key": stats.with_key,
         });
         let _ = crate::history::finish_run(pool, rid, "ok", &js).await;
     }
@@ -265,4 +307,22 @@ async fn insert_membership(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::traktor_key_to_camelot;
+
+    #[test]
+    fn traktor_key_maps_to_camelot() {
+        assert_eq!(traktor_key_to_camelot("8m").as_deref(), Some("8A"));
+        assert_eq!(traktor_key_to_camelot("8d").as_deref(), Some("8B"));
+        assert_eq!(traktor_key_to_camelot("12M").as_deref(), Some("12A"));
+        assert_eq!(traktor_key_to_camelot("1d").as_deref(), Some("1B"));
+        assert_eq!(traktor_key_to_camelot(""), None);
+        assert_eq!(traktor_key_to_camelot("9"), None);
+        assert_eq!(traktor_key_to_camelot("0m"), None);
+        assert_eq!(traktor_key_to_camelot("13m"), None);
+        assert_eq!(traktor_key_to_camelot("xm"), None);
+    }
 }

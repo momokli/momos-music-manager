@@ -11,7 +11,8 @@ const NML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?>
    <LOCATION DIR="/Music/" FILE="a.mp3" VOLUME="Mac"/>
    <TITLE>Alpha</TITLE>
    <ARTIST>Artist A</ARTIST>
-   <INFO PLAYCOUNT="7" LAST_PLAY="2024/3/1" RATING="255"/>
+   <INFO PLAYCOUNT="7" LAST_PLAY="2024/3/1" RATING="255" KEY="8m"/>
+   <TEMPO BPM="124.0"/>
   </ENTRY>
   <ENTRY>
    <LOCATION DIR="/Music/" FILE="b.mp3" VOLUME="Mac"/>
@@ -90,6 +91,19 @@ async fn traktor_import_stores_meta_and_playlists() {
     assert_eq!(pc, 7);
     assert_eq!(lp.as_deref(), Some("2024/3/1"));
     assert_eq!(rating, Some(5), "255 -> 5 stars");
+
+    // BPM + Camelot key (#traktor bpm/key).
+    let (bpm, camelot): (Option<f64>, Option<String>) = sqlx::query_as(
+        "SELECT bpm, camelot FROM hub_traktor_tracks WHERE user_id = ?1 AND track_id = 9001",
+    )
+    .bind(alice)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(bpm, Some(124.0));
+    assert_eq!(camelot.as_deref(), Some("8A"), "Traktor 8m -> Camelot 8A");
+    assert_eq!(stats.with_bpm, 1, "one entry carries BPM");
+    assert_eq!(stats.with_key, 1, "one entry carries a key");
 
     let rating_b: Option<i64> = sqlx::query_scalar(
         "SELECT rating FROM hub_traktor_tracks WHERE user_id = ?1 AND track_id = 9002",

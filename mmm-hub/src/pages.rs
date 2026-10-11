@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use askama::Template;
 use axum::Router;
-use axum::extract::{Form, Path, Query, RawQuery, State};
+use axum::extract::{Form, Multipart, Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -51,6 +51,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin", get(admin_page).post(admin_save))
         .route("/settings", get(settings_page))
         .route("/import", get(import_page).post(import_submit))
+        .route("/import/traktor", post(import_traktor_submit))
         .route("/user/{slug}", get(user_page))
         .route("/playlist/{id}", get(playlist_page))
         .route("/playlist/{id}/tag", post(playlist_tag))
@@ -5278,4 +5279,34 @@ async fn import_submit(
         Err(e) => format!("Import fehlgeschlagen: {e:#}"),
     };
     flash_redirect("/import", msg)
+}
+
+/// Upload a Traktor `collection.nml` (multipart) for the current user.
+async fn import_traktor_submit(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "import").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let mut xml: Option<String> = None;
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() == Some("file") {
+            xml = field.text().await.ok();
+        }
+    }
+    let Some(xml) = xml.filter(|x| !x.trim().is_empty()) else {
+        return flash_redirect("/import", "Keine NML-Datei empfangen.".to_string());
+    };
+    match crate::traktor::import_str(&st.pool, nav.id, &xml).await {
+        Ok(s) => flash_redirect(
+            "/import",
+            format!(
+                "Traktor-Import: {} Einträge, {} gematcht, {} Playlists, {} mit BPM, {} mit Key.",
+                s.entries, s.matched, s.playlists, s.with_bpm, s.with_key
+            ),
+        ),
+        Err(e) => flash_redirect("/import", format!("Traktor-Import fehlgeschlagen: {e:#}")),
+    }
 }
