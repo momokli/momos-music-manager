@@ -196,6 +196,8 @@ struct PlaylistsPage {
     s_name: crate::table::SortHead,
     s_owner: crate::table::SortHead,
     s_tracks: crate::table::SortHead,
+    s_created: crate::table::SortHead,
+    s_last: crate::table::SortHead,
 }
 
 /// Per-filter playlist counts for the filter-bar labels.
@@ -228,6 +230,20 @@ struct PlaylistRow {
     enabled: bool,
     /// Names of the current user's tags fed by this playlist (comma-joined).
     tags: String,
+    /// Earliest known track `added_at` — Spotify exposes no playlist creation
+    /// date, so this is the closest proxy (date only, or "—").
+    created: String,
+    /// Latest track `added_at` (date only, or "—" when nothing is fetched).
+    last_added: String,
+}
+
+/// Format a Spotify ISO-8601 timestamp (`YYYY-MM-DDThh:mm:ssZ`) as a plain
+/// date. Empty/`None`/non-ISO values yield `—`.
+fn fmt_date(ts: Option<String>) -> String {
+    match ts {
+        Some(s) if s.len() >= 10 => s[..10].to_string(),
+        _ => "\u{2014}".to_string(),
+    }
 }
 
 /// A single `<tr>` for the htmx out-of-band row swap (see `toggle_playlist`).
@@ -378,6 +394,8 @@ async fn playlists_page(
         ("name", "name"),
         ("owner", "owner_name"),
         ("tracks", "track_count"),
+        ("created", "first_added"),
+        ("last", "last_added"),
     ];
     let (sort, dir) = crate::table::resolve_sort(
         pf.sort.as_deref(),
@@ -393,6 +411,8 @@ async fn playlists_page(
     let s_name = crate::table::sort_head(rawq, "name", "Playlist", &sort, &dir);
     let s_owner = crate::table::sort_head(rawq, "owner", "Besitzer", &sort, &dir);
     let s_tracks = crate::table::sort_head(rawq, "tracks", "Tracks", &sort, &dir);
+    let s_created = crate::table::sort_head(rawq, "created", "Angelegt", &sort, &dir);
+    let s_last = crate::table::sort_head(rawq, "last", "Letzte Änderung", &sort, &dir);
     render(&PlaylistsPage {
         nav,
         flash: flash.msg.unwrap_or_default(),
@@ -405,6 +425,8 @@ async fn playlists_page(
         s_name,
         s_owner,
         s_tracks,
+        s_created,
+        s_last,
     })
 }
 
@@ -476,6 +498,8 @@ fn map_playlist_row(r: &sqlx::sqlite::SqliteRow) -> PlaylistRow {
         status_class,
         enabled: enabled == 1,
         tags: r.get::<Option<String>, _>("my_tags").unwrap_or_default(),
+        created: fmt_date(r.get::<Option<String>, _>("first_added")),
+        last_added: fmt_date(r.get::<Option<String>, _>("last_added")),
     }
 }
 
@@ -496,6 +520,8 @@ async fn playlist_rows(
         ("name", "name"),
         ("owner", "owner_name"),
         ("tracks", "track_count"),
+        ("created", "first_added"),
+        ("last", "last_added"),
     ];
     let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
         "SELECT * FROM (SELECT p.id AS id, p.name AS name, p.is_owned AS is_owned,
@@ -504,6 +530,8 @@ async fn playlist_rows(
                 COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS owner_name,
                 u.slug AS user_slug,
                 (SELECT COUNT(*) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS fetched,
+                (SELECT MIN(t.added_at) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS first_added,
+                (SELECT MAX(t.added_at) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS last_added,
                 (SELECT GROUP_CONCAT(tg.name, ', ') FROM hub_tag_sources s
                    JOIN hub_tags tg ON tg.id = s.tag_id
                   WHERE s.playlist_id = p.id AND tg.owner_user_id = ",
@@ -565,6 +593,8 @@ async fn playlist_row(st: &AppState, user_id: i64, id: i64) -> Option<PlaylistRo
                 COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS owner_name,
                 u.slug AS user_slug,
                 (SELECT COUNT(*) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS fetched,
+                (SELECT MIN(t.added_at) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS first_added,
+                (SELECT MAX(t.added_at) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS last_added,
                 (SELECT GROUP_CONCAT(tg.name, ', ') FROM hub_tag_sources s
                    JOIN hub_tags tg ON tg.id = s.tag_id
                   WHERE s.playlist_id = p.id AND tg.owner_user_id = ?1) AS my_tags

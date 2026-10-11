@@ -83,6 +83,47 @@ async fn playlists_page_renders() {
 }
 
 #[tokio::test]
+async fn playlists_page_shows_created_and_last_columns() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let resp = app
+        .client()
+        .get(app.url("/me/playlists?filter=all"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = body(resp).await;
+    assert!(html.contains("Angelegt"), "created column header missing");
+    assert!(
+        html.contains("Letzte Änderung"),
+        "last-added column header missing"
+    );
+    // The seeded membership carries a known added_at -> both columns render it
+    // (date only, ISO-8601 prefix).
+    assert!(html.contains("2026-01-01"), "derived date missing");
+
+    // Both new columns are sortable.
+    for sort in ["created", "last"] {
+        let resp = app
+            .client()
+            .get(app.url(&format!("/me/playlists?filter=all&sort={sort}&dir=desc")))
+            .header("Cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK, "sort={sort}");
+        let html = body(resp).await;
+        assert!(
+            html.contains("Meine Playlists"),
+            "sort={sort} should render"
+        );
+    }
+}
+
+#[tokio::test]
 async fn track_page_renders_in_shell() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
