@@ -152,10 +152,15 @@ impl MusicApiClient {
         #[derive(Serialize)]
         struct Request<'a> {
             items: Vec<Item<'a>>,
+            /// The bulk library demand is background work: a negative priority
+            /// keeps it behind user-requested orders (priority 0+), so a fresh
+            /// "Bestellen" never waits behind the ~20k backlog.
+            priority: i32,
         }
 
         let body = Request {
             items: isrcs.iter().map(|s| Item { isrc: s }).collect(),
+            priority: -1,
         };
         let resp = self
             .http
