@@ -12,6 +12,7 @@ pub mod artists;
 pub mod audio;
 pub mod config;
 pub mod cosine;
+pub mod curate;
 pub mod db;
 pub mod digging;
 pub mod features;
