@@ -478,11 +478,13 @@ pub async fn cancel_order(pool: &Pool<Sqlite>, order_id: &str) -> anyhow::Result
 }
 
 pub async fn downloading_tracks(pool: &Pool<Sqlite>) -> anyhow::Result<Vec<Track>> {
-    Ok(
-        sqlx::query_as::<_, Track>("SELECT * FROM tracks WHERE state = 'downloading'")
-            .fetch_all(pool)
-            .await?,
+    // Only Deezer rows are polled against deemix; non-Deezer (yt-dlp) downloads
+    // run on their own background tasks.
+    Ok(sqlx::query_as::<_, Track>(
+        "SELECT * FROM tracks WHERE state = 'downloading' AND source = 'deezer'",
     )
+    .fetch_all(pool)
+    .await?)
 }
 
 pub async fn mark_resolved(

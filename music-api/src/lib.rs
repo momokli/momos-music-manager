@@ -44,6 +44,8 @@ pub struct AppState {
     pub logs: logbuf::LogBuffer,
     /// When set, the worker does not pick up new work.
     pub paused: Arc<std::sync::atomic::AtomicBool>,
+    /// Bounds concurrent yt-dlp downloads (non-Deezer sources).
+    pub ytdlp_sem: Arc<tokio::sync::Semaphore>,
 }
 
 /// Build the fully-stated router: public `/health`, everything else behind the

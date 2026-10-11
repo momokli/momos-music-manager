@@ -42,6 +42,7 @@ async fn harness() -> Harness {
         ffprobe: "ffprobe".to_string(),
         ytdlp: "yt-dlp".to_string(),
         ytdlp_dir: root.join("ytdlp"),
+        ytdlp_concurrency: 2,
         worker_interval: Duration::from_secs(5),
         download_timeout: Duration::from_secs(60),
         queue_max_attempts: 3,
@@ -62,6 +63,7 @@ async fn harness() -> Harness {
     let pool = connect_db(&config).await.unwrap();
     db::init(&pool).await.unwrap();
 
+    let ytdlp_concurrency = config.ytdlp_concurrency;
     let state = Arc::new(AppState {
         pool,
         config,
@@ -74,6 +76,7 @@ async fn harness() -> Harness {
         ),
         logs: music_api::logbuf::LogBuffer::new(),
         paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ytdlp_sem: Arc::new(tokio::sync::Semaphore::new(ytdlp_concurrency)),
     });
 
     Harness {
