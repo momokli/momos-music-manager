@@ -11,6 +11,7 @@ pub mod db;
 pub mod deemix;
 pub mod deezer;
 pub mod ingest;
+pub mod logbuf;
 pub mod metadata;
 pub mod models;
 pub mod spotdl;
@@ -43,6 +44,8 @@ pub struct AppState {
     pub deemix_login: worker::LoginBackoff,
     /// Content-addressed object store.
     pub store: store::Store,
+    /// Recent service events (transparency: `GET /logs`).
+    pub logs: logbuf::LogBuffer,
 }
 
 /// Build the fully-stated router: public `/health`, everything else behind the

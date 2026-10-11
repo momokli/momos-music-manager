@@ -39,6 +39,14 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/metadata/track", get(metadata_track))
         .route("/metadata/playlist", get(metadata_playlist))
         .route("/queue", get(get_queue))
+        .route("/logs", get(get_logs))
+        // Worker + queue control (the hub's transparent control surface): pause /
+        // resume the whole worker, retry a single stranded or failed track.
+        .route("/worker", get(worker_status))
+        .route("/worker/pause", post(worker_pause))
+        .route("/worker/resume", post(worker_resume))
+        .route("/isrc/{isrc}/retry", post(retry_isrc))
+        .route("/url-tracks/{id}/retry", post(retry_url_track))
         // Content-addressed object store (Backpack backup / file home).
         // `POST /objects` is the multipart upload (Part B); the body limit is
         // disabled here because the handler enforces `STORE_MAX_UPLOAD_BYTES`.
@@ -95,6 +103,14 @@ async fn create_order(
 
     // Wake the worker so a fresh order starts immediately instead of on the
     // next tick.
+    state.logs.push(
+        "info",
+        format!(
+            "order {order_id}: {} ISRC(s) (prio {})",
+            isrcs.len(),
+            req.priority
+        ),
+    );
     state.notify.notify_one();
 
     Json(json!({ "orderId": order_id, "status": "open", "count": isrcs.len() })).into_response()
@@ -253,6 +269,10 @@ async fn create_url_order(
         return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to create order");
     }
     state.notify.notify_one();
+    state.logs.push(
+        "info",
+        format!("url-order {order_id}: {} URL(s)", urls.len()),
+    );
     Json(json!({ "orderId": order_id, "status": "open", "count": urls.len() })).into_response()
 }
 
@@ -314,7 +334,10 @@ async fn prioritize_url_order(
     Json(body): Json<PriorityBody>,
 ) -> Response {
     match db::set_url_order_priority(&state.pool, &id, body.priority).await {
-        Ok(()) => Json(json!({ "orderId": id, "priority": body.priority })).into_response(),
+        Ok(()) => {
+            state.notify.notify_one();
+            Json(json!({ "orderId": id, "priority": body.priority })).into_response()
+        }
         Err(e) => {
             tracing::error!("prioritize_url_order failed: {e:#}");
             error(StatusCode::INTERNAL_SERVER_ERROR, "failed to set priority")
@@ -340,7 +363,13 @@ async fn set_url_order_status(
         );
     }
     match db::set_url_order_status(&state.pool, &id, &body.status).await {
-        Ok(()) => Json(json!({ "orderId": id, "status": body.status })).into_response(),
+        Ok(()) => {
+            state
+                .logs
+                .push("info", format!("url-order {id}: {}", body.status));
+            state.notify.notify_one();
+            Json(json!({ "orderId": id, "status": body.status })).into_response()
+        }
         Err(e) => {
             tracing::error!("set_url_order_status failed: {e:#}");
             error(StatusCode::INTERNAL_SERVER_ERROR, "failed to set status")
@@ -440,7 +469,10 @@ async fn prioritize_order(
     Json(body): Json<PriorityBody>,
 ) -> Response {
     match db::set_order_priority(&state.pool, &id, body.priority).await {
-        Ok(()) => Json(json!({ "orderId": id, "priority": body.priority })).into_response(),
+        Ok(()) => {
+            state.notify.notify_one();
+            Json(json!({ "orderId": id, "priority": body.priority })).into_response()
+        }
         Err(e) => {
             tracing::error!("prioritize_order failed: {e:#}");
             error(StatusCode::INTERNAL_SERVER_ERROR, "failed to set priority")
@@ -461,7 +493,13 @@ async fn set_order_status(
         );
     }
     match db::set_order_status(&state.pool, &id, &body.status).await {
-        Ok(()) => Json(json!({ "orderId": id, "status": body.status })).into_response(),
+        Ok(()) => {
+            state
+                .logs
+                .push("info", format!("order {id}: {}", body.status));
+            state.notify.notify_one();
+            Json(json!({ "orderId": id, "status": body.status })).into_response()
+        }
         Err(e) => {
             tracing::error!("set_order_status failed: {e:#}");
             error(StatusCode::INTERNAL_SERVER_ERROR, "failed to set status")
@@ -469,23 +507,123 @@ async fn set_order_status(
     }
 }
 
-/// `GET /queue` — current pending/downloading work, highest priority first.
+/// `GET /queue` — the work the worker will act on next (highest priority first),
+/// plus per-state counts and the global pause flag. The hub's queue view.
 async fn get_queue(State(state): State<Arc<AppState>>) -> Response {
-    let isrc_pending = db::pending_tracks(&state.pool, 100)
+    let now = db::now();
+    let isrc_pending = db::due_tracks(&state.pool, 100, now)
         .await
         .unwrap_or_default();
-    let url_pending = db::pending_url_tracks(&state.pool, 100)
+    let url_pending = db::due_url_tracks(&state.pool, 100, now)
         .await
         .unwrap_or_default();
+    let counts = db::queue_counts(&state.pool).await.unwrap_or_default();
+    let paused = db::queue_paused(&state.pool).await.unwrap_or(false);
     Json(json!({
+        "paused": paused,
+        "counts": counts,
         "isrc": isrc_pending.iter().map(|t| json!({
             "isrc": t.isrc, "state": t.state, "title": t.title, "artist": t.artist,
-            "priority": t.priority,
+            "priority": t.priority, "attempts": t.attempts, "nextAttemptAt": t.next_attempt_at,
         })).collect::<Vec<_>>(),
         "url": url_pending.iter().map(|t| json!({
             "url": t.url, "provider": t.provider, "state": t.state,
             "title": t.title, "artist": t.artist, "priority": t.priority,
+            "attempts": t.attempts, "nextAttemptAt": t.next_attempt_at,
         })).collect::<Vec<_>>(),
     }))
     .into_response()
+}
+
+// ── Worker + per-track control ───────────────────────────────────────────────
+
+/// `GET /worker` — global pause state, cadence and retry cap (hub control).
+async fn worker_status(State(state): State<Arc<AppState>>) -> Response {
+    let paused = db::queue_paused(&state.pool).await.unwrap_or(false);
+    Json(json!({
+        "paused": paused,
+        "intervalSecs": state.config.worker_interval.as_secs(),
+        "maxAttempts": state.config.queue_max_attempts,
+    }))
+    .into_response()
+}
+
+/// `POST /worker/pause` — stop the worker from picking up new work.
+async fn worker_pause(State(state): State<Arc<AppState>>) -> Response {
+    set_worker_paused(&state, true).await
+}
+
+/// `POST /worker/resume` — resume the worker.
+async fn worker_resume(State(state): State<Arc<AppState>>) -> Response {
+    set_worker_paused(&state, false).await
+}
+
+async fn set_worker_paused(state: &Arc<AppState>, paused: bool) -> Response {
+    match db::set_queue_paused(&state.pool, paused).await {
+        Ok(()) => {
+            state.logs.push(
+                "info",
+                if paused {
+                    "worker paused"
+                } else {
+                    "worker resumed"
+                },
+            );
+            state.notify.notify_one();
+            Json(json!({ "paused": paused })).into_response()
+        }
+        Err(e) => {
+            tracing::error!("set_queue_paused failed: {e:#}");
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to set worker state",
+            )
+        }
+    }
+}
+
+/// `POST /isrc/{isrc}/retry` — reset a failed/stranded ISRC onto the queue.
+async fn retry_isrc(State(state): State<Arc<AppState>>, Path(isrc): Path<String>) -> Response {
+    let isrc = db::normalize_isrc(&isrc);
+    match db::retry_isrc(&state.pool, &isrc).await {
+        Ok(true) => {
+            state.logs.push("info", format!("{isrc}: retry queued"));
+            state.notify.notify_one();
+            Json(json!({ "isrc": isrc, "state": "pending" })).into_response()
+        }
+        Ok(false) => error(StatusCode::NOT_FOUND, "unknown or already-ready ISRC"),
+        Err(e) => {
+            tracing::error!("retry_isrc failed: {e:#}");
+            error(StatusCode::INTERNAL_SERVER_ERROR, "failed to retry")
+        }
+    }
+}
+
+/// `POST /url-tracks/{id}/retry` — reset a failed/stranded URL track.
+async fn retry_url_track(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
+    match db::retry_url_track(&state.pool, id).await {
+        Ok(true) => {
+            state
+                .logs
+                .push("info", format!("url-track {id}: retry queued"));
+            state.notify.notify_one();
+            Json(json!({ "id": id, "state": "pending" })).into_response()
+        }
+        Ok(false) => error(StatusCode::NOT_FOUND, "unknown or already-ready URL track"),
+        Err(e) => {
+            tracing::error!("retry_url_track failed: {e:#}");
+            error(StatusCode::INTERNAL_SERVER_ERROR, "failed to retry")
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LogsQuery {
+    limit: Option<usize>,
+}
+
+/// `GET /logs?limit=n` — recent service events, newest first (transparency).
+async fn get_logs(State(state): State<Arc<AppState>>, Query(q): Query<LogsQuery>) -> Response {
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    Json(json!({ "logs": state.logs.recent(limit) })).into_response()
 }

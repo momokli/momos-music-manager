@@ -43,6 +43,9 @@ async fn harness() -> Harness {
         ffprobe: "ffprobe".to_string(),
         worker_interval: Duration::from_secs(5),
         download_timeout: Duration::from_secs(60),
+        queue_max_attempts: 3,
+        queue_retry_base_secs: 60,
+        queue_retry_max_secs: 1800,
         ssh_sources: Vec::new(),
         ssh_ingest_interval: Duration::from_secs(0),
     };
@@ -70,6 +73,7 @@ async fn harness() -> Harness {
             root.join("objects"),
             music_api::store::DEFAULT_MAX_UPLOAD_BYTES,
         ),
+        logs: Default::default(),
     });
 
     Harness {

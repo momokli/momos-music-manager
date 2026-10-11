@@ -35,6 +35,12 @@ pub struct Config {
     pub worker_interval: Duration,
     /// How long to wait for a single deemix download before giving up.
     pub download_timeout: Duration,
+    /// Bounded retries: a transient failure becomes terminal after this many attempts.
+    pub queue_max_attempts: u32,
+    /// Base delay for the exponential retry backoff (seconds).
+    pub queue_retry_base_secs: i64,
+    /// Upper bound on the retry backoff (seconds).
+    pub queue_retry_max_secs: i64,
     /// Configured SSH pull sources (Part A). Empty = feature off.
     pub ssh_sources: Vec<crate::ssh_ingest::SshSource>,
     /// Background SSH-ingest interval; zero disables the tick.
@@ -98,6 +104,9 @@ impl Config {
             ffprobe: std::env::var("FFPROBE").unwrap_or_else(|_| "ffprobe".to_string()),
             worker_interval: Duration::from_secs(env_parse("WORKER_INTERVAL_SECS", 5u64)),
             download_timeout: Duration::from_secs(env_parse("DOWNLOAD_TIMEOUT_SECS", 900u64)),
+            queue_max_attempts: env_parse("QUEUE_MAX_ATTEMPTS", 3u32).max(1),
+            queue_retry_base_secs: env_parse("QUEUE_RETRY_BASE_SECS", 60i64).max(1),
+            queue_retry_max_secs: env_parse("QUEUE_RETRY_MAX_SECS", 1800i64).max(1),
             ssh_sources,
             ssh_ingest_interval,
         })

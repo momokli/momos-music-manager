@@ -1,6 +1,6 @@
 # Active Plans
 
-**56 done** · **0 in progress** · **21 proposed**
+**56 done** · **0 in progress** · **22 proposed**
 
 ## Proposed
 
@@ -26,6 +26,7 @@
 - [laboratory-analysis-pipeline](proposed/laboratory-analysis-pipeline.md) — `feat/laboratory-analysis`
 - [fix-deemix-auto-download-retry](proposed/fix-deemix-auto-download-retry.md) — `fix/deemix-auto-download-retry`
 - [music-api-ingest](proposed/music-api-ingest.md) — `feat/music-api-ingest` (server-side SSH pull-ingest + HTTP upload into the `.200` store)
+- [music-api-queue-engine](proposed/music-api-queue-engine.md) — `feat/music-api-queue-engine` (durable queue: attempts + backoff, bounded retries, download lease, pause/resume, retry endpoint; transparent `/queue`, `/worker`, `/logs`)
 
 ## Done
 

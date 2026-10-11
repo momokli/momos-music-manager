@@ -68,6 +68,20 @@ lands on whatever the ARL's Deezer tier allows.
 
 ### `GET /isrc/{isrc}/{flac|320|128}` — stream the file.
 
+### Queue control (transparent, hub-facing)
+
+| Method | Path                      | Use                                              |
+| ------ | ------------------------- | ------------------------------------------------ |
+| `GET`  | `/queue`                  | due work + per-state `counts` + `paused`         |
+| `GET`  | `/worker`                 | `{paused, intervalSecs, maxAttempts}`            |
+| `POST` | `/worker/pause` `/resume` | global gate (persisted; survives a restart)      |
+| `POST` | `/isrc/{isrc}/retry`      | re-queue a failed/stranded ISRC (`404` if ready) |
+| `POST` | `/url-tracks/{id}/retry`  | re-queue a failed/stranded URL track             |
+| `GET`  | `/logs?limit=n`           | recent service events, newest first              |
+
+`POST /orders/{id}/status` accepts `open` / `paused` / `cancelled`; a non-`open`
+status holds the order's tracks so the worker skips them until resumed.
+
 ## States
 
 | state         | meaning                                                          |
@@ -81,15 +95,25 @@ lands on whatever the ARL's Deezer tier allows.
 Order status is derived: `open` while any item is pending/downloading, `done`
 when all are `ready`, otherwise `partial`.
 
+Transient failures are retried with exponential backoff up to `QUEUE_MAX_ATTEMPTS`
+(default 3); only then does a row become `failed`. `absent` (no streamable match)
+stays terminal. A row in `downloading` holds a **lease** that the worker refreshes
+while deemix reports progress; if the lease lapses (dead process, evicted item) the
+row is re-queued by the reaper.
+
 ## Pipeline (one worker, no external queue)
 
-The `tracks.state` column _is_ the queue; the worker runs a flat two-phase tick:
+The `tracks.state` / `url_tracks.state` column _is_ the queue; the worker runs a
+flat tick. Each tick is a no-op while the worker is globally paused:
 
-1. **resolve+enqueue** — for each `pending` ISRC: look it up on Deezer, then
-   submit `https://www.deezer.com/track/<id>` to deemix at `DEEMIX_BITRATE`.
-   `CantStream` → `absent`; other rejections → `failed`.
+0. **reap** — re-queue any `downloading` row whose lease lapsed (crash/restart recovery).
+1. **resolve+enqueue** — for each _due_ `pending` ISRC (past its backoff window and
+   not held by a paused order): look it up on Deezer, then submit
+   `https://www.deezer.com/track/<id>` to deemix at `DEEMIX_BITRATE`. `CantStream`
+   → `absent`; other rejections become a bounded, backoff retry.
 2. **advance** — poll the deemix queue for the in-flight UUIDs; on a terminal
-   success status, locate the file, copy it into the store and transcode.
+   success status, locate the file, copy it into the store and transcode. While the
+   item is still downloading its lease is refreshed.
 
 Lossless source → `flac/` + `320/` + `128/`. When deemix had to fall back to
 MP3 (no lossless master, or a Deezer tier that caps quality), the delivered file
@@ -150,6 +174,10 @@ See [`.env.example`](.env.example). Everything is env-driven; `MUSIC_API_TOKEN`
 and `DEEMIX_ARL` are the only required secrets. Response bodies from
 `loginArl` are never logged — deemix echoes the ARL back.
 
+Queue tuning: `QUEUE_MAX_ATTEMPTS` (default `3`), `QUEUE_RETRY_BASE_SECS` (`60`)
+and `QUEUE_RETRY_MAX_SECS` (`1800`) shape the bounded retry backoff. The download
+lease reuses `DOWNLOAD_TIMEOUT_SECS` (refreshed as a heartbeat).
+
 ## Deploy
 
 Build (a static Linux binary; the target host has no Rust toolchain):
@@ -199,10 +227,12 @@ The tier is a property of the ARL, not of this service.
 cargo test
 ````
 
-17 tests: unit tests for ISRC normalisation, order-status derivation, deemix and
-Deezer payload parsing, constant-time token compare and download-file matching;
-plus integration tests over the real router (auth, order create/read/list,
-`/isrc` status, file delivery, order flipping to `done`).
+57 tests: unit tests for ISRC normalisation, order-status derivation, retry
+backoff, deemix and Deezer payload parsing, constant-time token compare and
+download-file matching; plus integration tests over the real router (auth, order
+create/read/list, `/isrc` status, file delivery, order flipping to `done`, URL
+orders, and the durable queue: pause/resume, retry, pause-holds-order and lease
+recovery).
 
 ## v1 scope / known limits
 
@@ -211,7 +241,7 @@ plus integration tests over the real router (auth, order create/read/list,
 - The MP3 fallback is classified by an ffprobe bit-rate read; a container that
   reports none is treated as 320.
 - No on-disk garbage collection; a track is stored once (keyed by ISRC) and kept.
-- The worker holds no per-track retry counter — `failed` is terminal. Re-order
-  the ISRC (after clearing the row) to retry.
+- Terminal rows (`failed`/`absent`) are retried only via `POST /isrc/{isrc}/retry`
+  (or `/url-tracks/{id}/retry`); a plain re-order is still a cheap no-op.
 - MMM-side consumption (order the Backpack's ISRCs, then link delivered files)
   is the next step and not part of this crate.

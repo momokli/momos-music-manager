@@ -29,6 +29,14 @@ pub struct Track {
     pub path_128: Option<String>,
     pub error: Option<String>,
     pub priority: i64,
+    /// Transient failures so far (bounded retries).
+    pub attempts: i64,
+    /// `pending` rows become due at this epoch; `None` = due now.
+    pub next_attempt_at: Option<i64>,
+    /// Set while `downloading`, refreshed as a heartbeat; drives the reaper.
+    pub lease_expires_at: Option<i64>,
+    /// Order-driven hold: `1` while an owning order is paused/cancelled.
+    pub paused: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -118,6 +126,14 @@ pub struct UrlTrack {
     pub path_128: Option<String>,
     pub error: Option<String>,
     pub priority: i64,
+    /// Transient failures so far (bounded retries).
+    pub attempts: i64,
+    /// `pending` rows become due at this epoch; `None` = due now.
+    pub next_attempt_at: Option<i64>,
+    /// Set while `downloading`, refreshed as a heartbeat; drives the reaper.
+    pub lease_expires_at: Option<i64>,
+    /// Order-driven hold: `1` while an owning order is paused/cancelled.
+    pub paused: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }

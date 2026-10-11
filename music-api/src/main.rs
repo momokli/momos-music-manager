@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
         notify: Arc::new(Notify::new()),
         deemix_login: Default::default(),
         store,
+        logs: Default::default(),
     });
 
     let worker_state = state.clone();

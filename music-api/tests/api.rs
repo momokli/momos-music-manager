@@ -42,6 +42,9 @@ async fn harness() -> Harness {
         ffprobe: "ffprobe".to_string(),
         worker_interval: Duration::from_secs(5),
         download_timeout: Duration::from_secs(60),
+        queue_max_attempts: 3,
+        queue_retry_base_secs: 60,
+        queue_retry_max_secs: 1800,
         ssh_sources: Vec::new(),
         ssh_ingest_interval: Duration::from_secs(0),
     };
@@ -72,6 +75,7 @@ async fn harness() -> Harness {
         notify: Arc::new(tokio::sync::Notify::new()),
         deemix_login: Default::default(),
         store,
+        logs: Default::default(),
     });
 
     Harness {
@@ -774,4 +778,191 @@ async fn upload_rejects_non_audio() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ── Durable queue: pause/resume, retry, lease recovery ───────────────────────
+
+#[tokio::test]
+async fn worker_pause_resume_control() {
+    let h = harness().await;
+
+    let (status, body) = send(
+        &h.app,
+        authed("POST", "/worker/pause").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["paused"], true);
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/worker").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["paused"], true);
+    assert_eq!(v["maxAttempts"], 3);
+
+    let (status, body) = send(
+        &h.app,
+        authed("POST", "/worker/resume")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["paused"], false);
+    assert!(!db::queue_paused(&h.state.pool).await.unwrap());
+
+    // The control events are transparent via `/logs` (newest first).
+    let (status, body) = send(&h.app, authed("GET", "/logs").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let logs = v["logs"].as_array().unwrap();
+    assert!(logs.iter().any(|l| l["msg"] == "worker paused"));
+    assert!(logs.iter().any(|l| l["msg"] == "worker resumed"));
+}
+
+#[tokio::test]
+async fn retry_resets_a_failed_track() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+
+    // Simulate a terminal failure (bounded retries exhausted).
+    db::mark_terminal(&h.state.pool, "AEA0D1846146", "failed", "boom")
+        .await
+        .unwrap();
+
+    // Unknown ISRC → 404.
+    let (status, _) = send(
+        &h.app,
+        authed("POST", "/isrc/NOPE/retry")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A real ISRC is reset onto the queue.
+    let (status, body) = send(
+        &h.app,
+        authed("POST", "/isrc/aea0d1846146/retry")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["state"], "pending");
+
+    let track = db::get_track(&h.state.pool, "AEA0D1846146")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(track.state, "pending");
+    assert_eq!(track.attempts, 0);
+}
+
+#[tokio::test]
+async fn pausing_an_order_holds_its_tracks() {
+    let h = harness().await;
+    let order_id = create_order(&h.app, &["AEA0D1846146"]).await;
+
+    // Due now.
+    assert_eq!(
+        db::due_tracks(&h.state.pool, 10, db::now())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let (status, _) = send(
+        &h.app,
+        authed("POST", &format!("/orders/{order_id}/status"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({ "status": "paused" })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        db::due_tracks(&h.state.pool, 10, db::now())
+            .await
+            .unwrap()
+            .len(),
+        0,
+        "a paused order must hold its tracks"
+    );
+
+    // Resume releases the hold.
+    let (status, _) = send(
+        &h.app,
+        authed("POST", &format!("/orders/{order_id}/status"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({ "status": "open" })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        db::due_tracks(&h.state.pool, 10, db::now())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn expired_lease_is_requeued() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+
+    // Stranded in `downloading` with a lease already in the past (dead process).
+    db::mark_downloading(&h.state.pool, "AEA0D1846146", "uuid-1", 0)
+        .await
+        .unwrap();
+
+    let policy = db::RetryPolicy {
+        max_attempts: 3,
+        base_secs: 60,
+        max_secs: 1800,
+    };
+    let recovered = db::recover_expired_leases(&h.state.pool, &policy, db::now())
+        .await
+        .unwrap();
+    assert_eq!(recovered, 1);
+
+    let track = db::get_track(&h.state.pool, "AEA0D1846146")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(track.state, "pending");
+    assert_eq!(track.attempts, 1);
+    // The backoff window pushes it out of the due set until it elapses.
+    assert_eq!(
+        db::due_tracks(&h.state.pool, 10, db::now())
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn queue_reports_counts() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146", "USQX91201487"]).await;
+
+    let (status, body) = send(&h.app, authed("GET", "/queue").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["paused"], false);
+    assert_eq!(v["counts"]["pending"], 2);
+    assert_eq!(v["isrc"].as_array().unwrap().len(), 2);
+    assert_eq!(v["isrc"][0]["attempts"], 0);
 }

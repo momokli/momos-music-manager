@@ -52,6 +52,17 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
         .execute(pool)
         .await;
 
+    // Durable-queue columns (additive): bounded retries, backoff scheduling, a
+    // download lease (visibility timeout) and an order-driven pause hold.
+    for sql in [
+        "ALTER TABLE tracks ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE tracks ADD COLUMN next_attempt_at INTEGER",
+        "ALTER TABLE tracks ADD COLUMN lease_expires_at INTEGER",
+        "ALTER TABLE tracks ADD COLUMN paused INTEGER NOT NULL DEFAULT 0",
+    ] {
+        let _ = sqlx::query(sql).execute(pool).await;
+    }
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS orders (
@@ -83,6 +94,17 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     .await?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tracks_state ON tracks(state);")
+        .execute(pool)
+        .await?;
+
+    // Durable-queue hot paths: due-selection (state+paused+next_attempt_at) and
+    // the lease reaper (state+lease_expires_at). Both stay index-only.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_tracks_due ON tracks(state, paused, next_attempt_at);",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tracks_lease ON tracks(state, lease_expires_at);")
         .execute(pool)
         .await?;
 
@@ -124,6 +146,16 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    // Durable-queue columns for URL tracks (mirror of `tracks`).
+    for sql in [
+        "ALTER TABLE url_tracks ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE url_tracks ADD COLUMN next_attempt_at INTEGER",
+        "ALTER TABLE url_tracks ADD COLUMN lease_expires_at INTEGER",
+        "ALTER TABLE url_tracks ADD COLUMN paused INTEGER NOT NULL DEFAULT 0",
+    ] {
+        let _ = sqlx::query(sql).execute(pool).await;
+    }
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS url_orders (
@@ -153,6 +185,16 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_url_tracks_state ON url_tracks(state);")
         .execute(pool)
         .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_url_tracks_due ON url_tracks(state, paused, next_attempt_at);",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_url_tracks_lease ON url_tracks(state, lease_expires_at);",
+    )
+    .execute(pool)
+    .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_url_tracks_priority ON url_tracks(priority DESC, created_at);")
         .execute(pool)
         .await?;
@@ -178,6 +220,23 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     )
     .execute(pool)
     .await?;
+
+    // Global worker gate (persisted, so a pause survives a restart).
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS queue_control (
+            id         INTEGER PRIMARY KEY CHECK (id = 1),
+            paused     INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("INSERT OR IGNORE INTO queue_control (id, paused, updated_at) VALUES (1, 0, ?)")
+        .bind(now())
+        .execute(pool)
+        .await?;
 
     // Per-ISRC metadata (Part C) — merged from stem tags and hub pushes.
     sqlx::query(
@@ -322,9 +381,10 @@ pub async fn create_order(
         .bind(ts)
         .execute(&mut *tx)
         .await?;
-        // A re-order with a higher priority should bump an existing pending row.
+        // A re-order with a higher priority should bump an existing pending row,
+        // and clears any pause hold (a fresh order means "process this now").
         sqlx::query(
-            "UPDATE tracks SET priority = MAX(priority, ?), updated_at = ?
+            "UPDATE tracks SET priority = MAX(priority, ?), paused = 0, updated_at = ?
               WHERE isrc = ? AND state = 'pending'",
         )
         .bind(priority)
@@ -464,14 +524,175 @@ pub async fn get_track(pool: &Pool<Sqlite>, isrc: &str) -> anyhow::Result<Option
     )
 }
 
-pub async fn pending_tracks(pool: &Pool<Sqlite>, limit: i64) -> anyhow::Result<Vec<Track>> {
+/// Due ISRC tracks: `pending`, not paused, and past their backoff window —
+/// highest priority first, then oldest. Served by `idx_tracks_due`.
+pub async fn due_tracks(pool: &Pool<Sqlite>, limit: i64, now: i64) -> anyhow::Result<Vec<Track>> {
     Ok(sqlx::query_as::<_, Track>(
-        "SELECT * FROM tracks WHERE state = 'pending'
+        "SELECT * FROM tracks
+          WHERE state = 'pending' AND paused = 0
+            AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
           ORDER BY priority DESC, created_at ASC LIMIT ?",
     )
+    .bind(now)
     .bind(limit)
     .fetch_all(pool)
     .await?)
+}
+
+/// Retry tuning for the durable queue.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    pub base_secs: i64,
+    pub max_secs: i64,
+}
+
+/// Exponential backoff for the `attempts`-th transient failure (1-based), capped
+/// at `max`. Pure — unit-tested below.
+pub fn backoff_delay(attempts: u32, base: i64, max: i64) -> i64 {
+    let shift = attempts.saturating_sub(1).min(20);
+    base.saturating_mul(1i64 << shift).min(max)
+}
+
+/// Record a transient failure for an ISRC: re-queue with a backoff delay, or go
+/// terminal (`failed`) once `max_attempts` is reached. Returns `true` while the
+/// row is still retryable.
+pub async fn schedule_retry(
+    pool: &Pool<Sqlite>,
+    isrc: &str,
+    error: &str,
+    policy: &RetryPolicy,
+    now: i64,
+) -> anyhow::Result<bool> {
+    sqlx::query("UPDATE tracks SET attempts = attempts + 1, updated_at = ? WHERE isrc = ?")
+        .bind(now)
+        .bind(isrc)
+        .execute(pool)
+        .await?;
+    let attempts: i64 = sqlx::query_scalar("SELECT attempts FROM tracks WHERE isrc = ?")
+        .bind(isrc)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or(0);
+    if attempts as u32 >= policy.max_attempts {
+        mark_terminal(pool, isrc, state::FAILED, error).await?;
+        return Ok(false);
+    }
+    let next = now + backoff_delay(attempts as u32, policy.base_secs, policy.max_secs);
+    sqlx::query(
+        "UPDATE tracks SET state = 'pending', error = ?, next_attempt_at = ?,
+                lease_expires_at = NULL, updated_at = ?
+          WHERE isrc = ?",
+    )
+    .bind(error)
+    .bind(next)
+    .bind(now)
+    .bind(isrc)
+    .execute(pool)
+    .await?;
+    refresh_orders_for_isrc(pool, isrc).await?;
+    Ok(true)
+}
+
+/// Push a downloading row's lease further out (heartbeat). Called while deemix
+/// still reports progress, so only truly-stuck rows fall to the reaper.
+pub async fn renew_lease(pool: &Pool<Sqlite>, isrc: &str, until: i64) -> anyhow::Result<()> {
+    sqlx::query("UPDATE tracks SET lease_expires_at = ? WHERE isrc = ?")
+        .bind(until)
+        .bind(isrc)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Re-queue rows stranded in `downloading` whose lease lapsed (dead process,
+/// evicted item) across both ISRC and URL tracks. Returns how many recovered.
+pub async fn recover_expired_leases(
+    pool: &Pool<Sqlite>,
+    policy: &RetryPolicy,
+    now: i64,
+) -> anyhow::Result<usize> {
+    let isrcs: Vec<String> = sqlx::query_scalar(
+        "SELECT isrc FROM tracks
+          WHERE state = 'downloading'
+            AND (lease_expires_at IS NULL OR lease_expires_at <= ?)",
+    )
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+    for isrc in &isrcs {
+        schedule_retry(pool, isrc, "download lease expired", policy, now).await?;
+    }
+    let urls: Vec<String> = sqlx::query_scalar(
+        "SELECT url FROM url_tracks
+          WHERE state = 'downloading'
+            AND (lease_expires_at IS NULL OR lease_expires_at <= ?)",
+    )
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+    for url in &urls {
+        schedule_url_retry(pool, url, "download lease expired", policy, now).await?;
+    }
+    Ok(isrcs.len() + urls.len())
+}
+
+/// Reset a terminal (or stranded) ISRC back onto the queue. `ready` rows are
+/// left untouched (a re-download would be wasteful). Returns `true` if reset.
+pub async fn retry_isrc(pool: &Pool<Sqlite>, isrc: &str) -> anyhow::Result<bool> {
+    let res = sqlx::query(
+        "UPDATE tracks
+            SET state = 'pending', attempts = 0, next_attempt_at = NULL,
+                lease_expires_at = NULL, error = NULL, updated_at = ?
+          WHERE isrc = ? AND state != 'ready'",
+    )
+    .bind(now())
+    .bind(isrc)
+    .execute(pool)
+    .await?;
+    if res.rows_affected() > 0 {
+        refresh_orders_for_isrc(pool, isrc).await?;
+    }
+    Ok(res.rows_affected() > 0)
+}
+
+/// Per-state counts across ISRC and URL tracks (for `GET /queue`).
+pub async fn queue_counts(
+    pool: &Pool<Sqlite>,
+) -> anyhow::Result<std::collections::BTreeMap<String, i64>> {
+    let mut out = std::collections::BTreeMap::new();
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT state, COUNT(*) FROM tracks GROUP BY state")
+            .fetch_all(pool)
+            .await?;
+    for (state, n) in rows {
+        *out.entry(state).or_insert(0) += n;
+    }
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT state, COUNT(*) FROM url_tracks GROUP BY state")
+            .fetch_all(pool)
+            .await?;
+    for (state, n) in rows {
+        *out.entry(state).or_insert(0) += n;
+    }
+    Ok(out)
+}
+
+/// Whether the worker is globally paused.
+pub async fn queue_paused(pool: &Pool<Sqlite>) -> anyhow::Result<bool> {
+    let v: Option<i64> = sqlx::query_scalar("SELECT paused FROM queue_control WHERE id = 1")
+        .fetch_optional(pool)
+        .await?;
+    Ok(v.unwrap_or(0) != 0)
+}
+
+pub async fn set_queue_paused(pool: &Pool<Sqlite>, paused: bool) -> anyhow::Result<()> {
+    sqlx::query("UPDATE queue_control SET paused = ?, updated_at = ? WHERE id = 1")
+        .bind(if paused { 1 } else { 0 })
+        .bind(now())
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn downloading_tracks(pool: &Pool<Sqlite>) -> anyhow::Result<Vec<Track>> {
@@ -509,12 +730,15 @@ pub async fn mark_downloading(
     pool: &Pool<Sqlite>,
     isrc: &str,
     deemix_uuid: &str,
+    lease_until: i64,
 ) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE tracks SET state = 'downloading', deemix_uuid = ?, error = NULL, updated_at = ?
+        "UPDATE tracks SET state = 'downloading', deemix_uuid = ?, error = NULL,
+                lease_expires_at = ?, updated_at = ?
           WHERE isrc = ?",
     )
     .bind(deemix_uuid)
+    .bind(lease_until)
     .bind(now())
     .bind(isrc)
     .execute(pool)
@@ -533,7 +757,7 @@ pub async fn mark_ready(
     sqlx::query(
         "UPDATE tracks
             SET state = 'ready', source_format = ?, path_flac = ?, path_320 = ?, path_128 = ?,
-                error = NULL, updated_at = ?
+                error = NULL, lease_expires_at = NULL, next_attempt_at = NULL, updated_at = ?
           WHERE isrc = ?",
     )
     .bind(source_format)
@@ -553,13 +777,17 @@ pub async fn mark_terminal(
     new_state: &str,
     error: &str,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE tracks SET state = ?, error = ?, updated_at = ? WHERE isrc = ?")
-        .bind(new_state)
-        .bind(error)
-        .bind(now())
-        .bind(isrc)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE tracks SET state = ?, error = ?, lease_expires_at = NULL,
+                next_attempt_at = NULL, updated_at = ?
+          WHERE isrc = ?",
+    )
+    .bind(new_state)
+    .bind(error)
+    .bind(now())
+    .bind(isrc)
+    .execute(pool)
+    .await?;
     refresh_orders_for_isrc(pool, isrc).await
 }
 
@@ -714,15 +942,94 @@ pub async fn get_url_track(pool: &Pool<Sqlite>, url: &str) -> anyhow::Result<Opt
     )
 }
 
-/// Pending URL tracks, highest priority first, then oldest.
-pub async fn pending_url_tracks(pool: &Pool<Sqlite>, limit: i64) -> anyhow::Result<Vec<UrlTrack>> {
+/// Due URL tracks: `pending`, not paused, past their backoff window.
+pub async fn due_url_tracks(
+    pool: &Pool<Sqlite>,
+    limit: i64,
+    now: i64,
+) -> anyhow::Result<Vec<UrlTrack>> {
     Ok(sqlx::query_as::<_, UrlTrack>(
-        "SELECT * FROM url_tracks WHERE state = 'pending'
+        "SELECT * FROM url_tracks
+          WHERE state = 'pending' AND paused = 0
+            AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
           ORDER BY priority DESC, created_at ASC LIMIT ?",
     )
+    .bind(now)
     .bind(limit)
     .fetch_all(pool)
     .await?)
+}
+
+/// Record a transient failure for a URL track (mirror of `schedule_retry`).
+pub async fn schedule_url_retry(
+    pool: &Pool<Sqlite>,
+    url: &str,
+    error: &str,
+    policy: &RetryPolicy,
+    now: i64,
+) -> anyhow::Result<bool> {
+    sqlx::query("UPDATE url_tracks SET attempts = attempts + 1, updated_at = ? WHERE url = ?")
+        .bind(now)
+        .bind(url)
+        .execute(pool)
+        .await?;
+    let attempts: i64 = sqlx::query_scalar("SELECT attempts FROM url_tracks WHERE url = ?")
+        .bind(url)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or(0);
+    if attempts as u32 >= policy.max_attempts {
+        mark_url_terminal(pool, url, state::FAILED, error).await?;
+        return Ok(false);
+    }
+    let next = now + backoff_delay(attempts as u32, policy.base_secs, policy.max_secs);
+    sqlx::query(
+        "UPDATE url_tracks SET state = 'pending', error = ?, next_attempt_at = ?,
+                lease_expires_at = NULL, updated_at = ?
+          WHERE url = ?",
+    )
+    .bind(error)
+    .bind(next)
+    .bind(now)
+    .bind(url)
+    .execute(pool)
+    .await?;
+    refresh_url_orders_for_url(pool, url).await?;
+    Ok(true)
+}
+
+/// Heartbeat for an in-flight URL download.
+pub async fn renew_url_lease(pool: &Pool<Sqlite>, url: &str, until: i64) -> anyhow::Result<()> {
+    sqlx::query("UPDATE url_tracks SET lease_expires_at = ? WHERE url = ?")
+        .bind(until)
+        .bind(url)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Reset a terminal (or stranded) URL track back onto the queue, by row id.
+pub async fn retry_url_track(pool: &Pool<Sqlite>, id: i64) -> anyhow::Result<bool> {
+    let url: Option<String> =
+        sqlx::query_scalar("SELECT url FROM url_tracks WHERE id = ? AND state != 'ready'")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    let Some(url) = url else {
+        return Ok(false);
+    };
+    sqlx::query(
+        "UPDATE url_tracks
+            SET state = 'pending', attempts = 0, next_attempt_at = NULL,
+                lease_expires_at = NULL, error = NULL, updated_at = ?
+          WHERE id = ?",
+    )
+    .bind(now())
+    .bind(id)
+    .execute(pool)
+    .await?;
+    refresh_url_orders_for_url(pool, &url).await?;
+    Ok(true)
 }
 
 pub async fn downloading_url_tracks(pool: &Pool<Sqlite>) -> anyhow::Result<Vec<UrlTrack>> {
@@ -756,10 +1063,17 @@ pub async fn mark_url_resolved(
     Ok(())
 }
 
-pub async fn mark_url_downloading(pool: &Pool<Sqlite>, url: &str) -> anyhow::Result<()> {
+pub async fn mark_url_downloading(
+    pool: &Pool<Sqlite>,
+    url: &str,
+    lease_until: i64,
+) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE url_tracks SET state = 'downloading', error = NULL, updated_at = ? WHERE url = ?",
+        "UPDATE url_tracks SET state = 'downloading', error = NULL, lease_expires_at = ?,
+                updated_at = ?
+          WHERE url = ?",
     )
+    .bind(lease_until)
     .bind(now())
     .bind(url)
     .execute(pool)
@@ -778,7 +1092,7 @@ pub async fn mark_url_ready(
     sqlx::query(
         "UPDATE url_tracks
             SET state = 'ready', source_format = ?, path_flac = ?, path_320 = ?, path_128 = ?,
-                error = NULL, updated_at = ?
+                error = NULL, lease_expires_at = NULL, next_attempt_at = NULL, updated_at = ?
           WHERE url = ?",
     )
     .bind(source_format)
@@ -798,13 +1112,17 @@ pub async fn mark_url_terminal(
     new_state: &str,
     error: &str,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE url_tracks SET state = ?, error = ?, updated_at = ? WHERE url = ?")
-        .bind(new_state)
-        .bind(error)
-        .bind(now())
-        .bind(url)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE url_tracks SET state = ?, error = ?, lease_expires_at = NULL,
+                next_attempt_at = NULL, updated_at = ?
+          WHERE url = ?",
+    )
+    .bind(new_state)
+    .bind(error)
+    .bind(now())
+    .bind(url)
+    .execute(pool)
+    .await?;
     refresh_url_orders_for_url(pool, url).await
 }
 
@@ -833,18 +1151,30 @@ pub async fn set_url_order_priority(
     Ok(())
 }
 
-/// Set the status of a URL order (`open`, `paused`, `cancelled`).
+/// Set the status of a URL order (`open`, `paused`, `cancelled`) and hold or
+/// release its tracks accordingly.
 pub async fn set_url_order_status(
     pool: &Pool<Sqlite>,
     order_id: &str,
     status: &str,
 ) -> anyhow::Result<()> {
+    let ts = now();
     sqlx::query("UPDATE url_orders SET status = ?, updated_at = ? WHERE id = ?")
         .bind(status)
-        .bind(now())
+        .bind(ts)
         .bind(order_id)
         .execute(pool)
         .await?;
+    let paused: i64 = if status == "open" { 0 } else { 1 };
+    sqlx::query(
+        "UPDATE url_tracks SET paused = ?, updated_at = ?
+          WHERE url IN (SELECT url FROM url_order_items WHERE order_id = ?)",
+    )
+    .bind(paused)
+    .bind(ts)
+    .bind(order_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -897,18 +1227,31 @@ pub async fn set_order_priority(
     Ok(())
 }
 
-/// Set the status of an ISRC order (`open`, `paused`, `cancelled`).
+/// Set the status of an ISRC order (`open`, `paused`, `cancelled`) and hold or
+/// release its tracks accordingly, so pausing actually stops the worker.
 pub async fn set_order_status(
     pool: &Pool<Sqlite>,
     order_id: &str,
     status: &str,
 ) -> anyhow::Result<()> {
+    let ts = now();
     sqlx::query("UPDATE orders SET status = ?, updated_at = ? WHERE id = ?")
         .bind(status)
-        .bind(now())
+        .bind(ts)
         .bind(order_id)
         .execute(pool)
         .await?;
+    // `open` releases the hold; `paused`/`cancelled` hold the order's tracks.
+    let paused: i64 = if status == "open" { 0 } else { 1 };
+    sqlx::query(
+        "UPDATE tracks SET paused = ?, updated_at = ?
+          WHERE isrc IN (SELECT isrc FROM order_items WHERE order_id = ?)",
+    )
+    .bind(paused)
+    .bind(ts)
+    .bind(order_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -941,5 +1284,16 @@ mod tests {
             "partial"
         );
         assert_eq!(derive_order_status(&[]), "open");
+    }
+
+    #[test]
+    fn backoff_delay_grows_and_caps() {
+        assert_eq!(backoff_delay(1, 60, 1800), 60);
+        assert_eq!(backoff_delay(2, 60, 1800), 120);
+        assert_eq!(backoff_delay(3, 60, 1800), 240);
+        // Capped at the maximum.
+        assert_eq!(backoff_delay(10, 60, 1800), 1800);
+        // Defensive: attempts = 0 behaves like the first attempt.
+        assert_eq!(backoff_delay(0, 60, 1800), 60);
     }
 }

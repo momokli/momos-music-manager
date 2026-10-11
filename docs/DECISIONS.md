@@ -1778,3 +1778,56 @@ für eine ISRC BPM und Key ab. Key kommt aus den Stem-Tags; BPM hält der Hub (T
   serverseitig (ein Browser kann das nicht), damit dieselbe Audio dedupliziert.
   Der Hub hat eine `/upload`-Seite (`hub_uploads`, Migration 034) und
   `music_api::upload_object`.
+
+---
+
+## ADR-075: music-api — durable, transparent Queue-Engine (Retries, Lease, Pause/Resume)
+
+**Date**: 2026-10-11
+**Status**: Accepted (implementiert, `feat/music-api-queue-engine`)
+**Relates**: ADR-065 (music-api als Download-Autorität), ADR-074 (Metadaten/Objekt-Autorität)
+
+**Context**: Die music-api-Queue war implizit — die Spalte `tracks.state` (bzw.
+`url_tracks.state`) _war_ die Queue, ein flacher Worker-Tick schob `pending`-Zeilen
+weiter. Das hatte drei Lücken: (1) `failed` war terminal, ein transienter
+deemix/Deezer-Aussetzer verlor den Track dauerhaft; (2) ein Neustart, während eine
+Zeile `downloading` war, strandete sie (nichts reselektierte sie); (3) `POST
+/orders/{id}/status` nahm `paused`/`cancelled` entgegen, schrieb aber nur
+`orders.status` — die Selektion ignorierte den Order-Status, **Pause war wirkungslos**.
+Zugleich muss der Hub die Queue _transparent steuern_ können (Status, Pause, Retry),
+und Performance ist tragend: die `pending_tracks`-Subquery lief erst nach
+`idx_order_items_isrc` (98 s → ms).
+
+**Decision**:
+
+- **Neue Spalten** (additiv, `tracks` + `url_tracks`): `attempts`, `next_attempt_at`,
+  `lease_expires_at`, `paused`. Indizes `idx_tracks_due(state, paused,
+next_attempt_at)` und `idx_tracks_lease(state, lease_expires_at)` (+ URL-Spiegel).
+- **Selektion**: `due_tracks`/`due_url_tracks` = `state='pending' AND paused=0 AND
+(next_attempt_at IS NULL OR <= now)`, sortiert `priority DESC, created_at ASC`.
+- **Bounded Retries + exponentieller Backoff**: `schedule_retry` erhöht `attempts`;
+  bei `QUEUE_MAX_ATTEMPTS` (Std. 3) terminal `failed`, sonst Re-Queue mit
+  `backoff_delay(n)=min(base<<(n-1), max)` (`QUEUE_RETRY_BASE_SECS` 60,
+  `QUEUE_RETRY_MAX_SECS` 1800). `absent`/`CantStream` bleiben terminal.
+- **Lease statt Timeout**: `mark_downloading` setzt die Lease; `advance_downloads`
+  **erneuert** sie, solange deemix Fortschritt meldet (Heartbeat). Ein neuer Reaper
+  (`recover_expired_leases`) am Tick-Anfang re-queued Zeilen mit abgelaufener Lease
+  — Crash-/Restart-Recovery.
+- **Pause**: globales, persistiertes Gate (`queue_control`-Tabelle, überlebt
+  Restart) am Tick-Anfang; per-Order hält `set_order_status`/`set_url_order_status`
+  die Tracks (`paused`).
+- **Kontroll-Fläche** (Hub): `GET /queue` (due + per-State `counts` + `paused`),
+  `GET /worker`, `POST /worker/pause|resume`, `POST /isrc/{isrc}/retry`,
+  `POST /url-tracks/{id}/retry`, `GET /logs` (In-Memory-Ringpuffer, `logbuf.rs`).
+
+**Consequences**:
+
+- Transiente Fehler heilen sich selbst; Restarts verlieren keine `downloading`-Zeile mehr.
+- Der Hub hat eine **transparente** Steuerfläche (Status, Counts, Events, Pause, Retry).
+- `failed`/`absent` sind nur noch manuell (Retry-Endpoint) wiederbelebbar; ein
+  einfaches Re-Order bleibt ein No-op.
+- **Last-writer-wins** beim `paused`-Flag: ein Track in mehreren Orders folgt dem
+  letzten Statuswechsel (Single-User akzeptabel; Join-Alternative bewusst verworfen).
+- Weiterhin **ein** Worker, keine externe Queue/kein Multi-Worker-Claiming (out of scope).
+- Die URL-Adoptions-Zeilen setzen die Lease ebenfalls; inline yt-dlp-Downloads werden
+  bei Prozess-Tod vom Reaper re-queued.
