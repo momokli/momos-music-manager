@@ -492,10 +492,12 @@ struct QueueResp {
     items: Vec<QueueEntry>,
     #[serde(default)]
     error: Option<String>,
+    #[serde(default)]
+    counts: std::collections::BTreeMap<String, i64>,
 }
 
-/// `GET /queue` — typed live queue (empty on failure).
-pub async fn live_queue(cfg: &Config) -> (Vec<QueueEntry>, Option<String>) {
+/// `GET /queue` — typed live queue + per-state ISRC counts (empty on failure).
+pub async fn live_queue(cfg: &Config) -> (Vec<QueueEntry>, Option<String>, Vec<(String, i64)>) {
     let url = format!("{}/queue", cfg.music_api_base);
     let resp = match reqwest::Client::new()
         .get(&url)
@@ -504,11 +506,30 @@ pub async fn live_queue(cfg: &Config) -> (Vec<QueueEntry>, Option<String>) {
         .await
     {
         Ok(r) if r.status().is_success() => r,
-        _ => return (Vec::new(), None),
+        _ => return (Vec::new(), None, Vec::new()),
     };
     match resp.json::<QueueResp>().await {
-        Ok(b) => (b.items, b.error),
-        Err(_) => (Vec::new(), None),
+        Ok(b) => (b.items, b.error, b.counts.into_iter().collect()),
+        Err(_) => (Vec::new(), None, Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod queue_parse_tests {
+    use super::QueueResp;
+
+    #[test]
+    fn parses_counts_from_queue_payload() {
+        let v: QueueResp =
+            serde_json::from_str(r#"{"items":[],"counts":{"pending":2,"ready":1}}"#).unwrap();
+        assert_eq!(v.counts.get("pending"), Some(&2));
+        assert_eq!(v.counts.get("ready"), Some(&1));
+    }
+
+    #[test]
+    fn tolerates_missing_counts() {
+        let v: QueueResp = serde_json::from_str(r#"{"items":[]}"#).unwrap();
+        assert!(v.counts.is_empty());
     }
 }
 
@@ -563,6 +584,42 @@ pub async fn worker_paused(cfg: &Config) -> bool {
             .and_then(|v| v["paused"].as_bool())
             .unwrap_or(false),
         _ => false,
+    }
+}
+
+/// Worker state + retry/cadence config (from `GET /worker`).
+pub struct WorkerInfo {
+    pub ok: bool,
+    pub paused: bool,
+    pub interval_secs: u64,
+    pub max_attempts: i64,
+}
+
+/// `GET /worker` — pause state, cadence and retry cap (defaults when unavailable).
+pub async fn worker_info(cfg: &Config) -> WorkerInfo {
+    let url = format!("{}/worker", cfg.music_api_base);
+    let v = match reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(token(cfg).unwrap_or_default())
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
+        _ => None,
+    };
+    match v {
+        Some(v) => WorkerInfo {
+            ok: true,
+            paused: v["paused"].as_bool().unwrap_or(false),
+            interval_secs: v["intervalSecs"].as_u64().unwrap_or(0),
+            max_attempts: v["maxAttempts"].as_i64().unwrap_or(0),
+        },
+        None => WorkerInfo {
+            ok: false,
+            paused: false,
+            interval_secs: 0,
+            max_attempts: 0,
+        },
     }
 }
 
