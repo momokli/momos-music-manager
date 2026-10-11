@@ -1565,6 +1565,9 @@ struct CompareQuery {
     bpm_max: Option<String>,
     /// Camelot key filter, e.g. `8A`.
     key: Option<String>,
+    /// Phase/energy scale filter (1..5), derived from PHASE_n tags.
+    phase_min: Option<String>,
+    phase_max: Option<String>,
     /// `1`/`on` = include harmonically compatible keys, not just the exact key.
     key_harmonic: Option<String>,
     /// Sort field: `present` (default) | `bpm` | `key` | `energy`.
@@ -1588,6 +1591,8 @@ struct OverlapFilters {
     bpm_max: String,
     key: String,
     key_harmonic: bool,
+    phase_min: String,
+    phase_max: String,
     sort: String,
     dir: String,
     pl: Vec<i64>,
@@ -1617,6 +1622,18 @@ impl OverlapFilters {
         }
         if self.key_harmonic {
             url.push_str("&key_harmonic=1");
+        }
+        if !self.phase_min.is_empty() {
+            url.push_str(&format!(
+                "&phase_min={}",
+                urlencoding::encode(&self.phase_min)
+            ));
+        }
+        if !self.phase_max.is_empty() {
+            url.push_str(&format!(
+                "&phase_max={}",
+                urlencoding::encode(&self.phase_max)
+            ));
         }
         if self.sort != "present" {
             url.push_str(&format!("&sort={}", self.sort));
@@ -1695,6 +1712,8 @@ struct OverlapPage {
     bpm_max: String,
     key_harmonic: bool,
     key_options: Vec<KeyOption>,
+    phase_min: String,
+    phase_max: String,
     has_audio: bool,
     /// Sort headers for the table columns.
     sort_present: SortLink,
@@ -1756,6 +1775,8 @@ struct CompareRow {
     bpm: String,
     key: String,
     energy: String,
+    /// Phase/energy level 1..5 (from PHASE_n tags), display form.
+    phase: String,
     bpm_num: Option<f64>,
     energy_num: Option<f64>,
     present_count: i64,
@@ -1959,6 +1980,11 @@ async fn overlap_page(
     );
     let bpm_min = bpm_min_raw.parse::<f64>().ok();
     let bpm_max = bpm_max_raw.parse::<f64>().ok();
+    // Phase/energy scale filter (1..5).
+    let phase_min_raw = q.phase_min.clone().unwrap_or_default().trim().to_string();
+    let phase_max_raw = q.phase_max.clone().unwrap_or_default().trim().to_string();
+    let phase_min = phase_min_raw.parse::<i64>().ok();
+    let phase_max = phase_max_raw.parse::<i64>().ok();
     let q_text = q.q.clone().unwrap_or_default().trim().to_string();
     let tag = q.tag.clone().unwrap_or_default().trim().to_string();
 
@@ -2002,6 +2028,8 @@ async fn overlap_page(
         bpm_max: bpm_max_raw.clone(),
         key: key.clone(),
         key_harmonic,
+        phase_min: phase_min_raw.clone(),
+        phase_max: phase_max_raw.clone(),
         sort: sort.to_string(),
         dir: dir.to_string(),
         pl: pl_ids.clone(),
@@ -2061,6 +2089,33 @@ async fn overlap_page(
         }
     }
 
+    // Phase/energy level 1..5 per track, from its PHASE_n tags (empty = none).
+    let mut phases: HashMap<i64, i64> = HashMap::new();
+    if !acc.is_empty() {
+        let ids: Vec<i64> = acc.keys().copied().collect();
+        for chunk in ids.chunks(900) {
+            let mut qb = QueryBuilder::new(
+                "SELECT rt.track_id AS track_id,
+                        MAX(CASE t.type
+                              WHEN 'PHASE_1' THEN 1 WHEN 'PHASE_2' THEN 2 WHEN 'PHASE_3' THEN 3
+                              WHEN 'PHASE_4' THEN 4 WHEN 'PHASE_5' THEN 5 END) AS phase
+                   FROM hub_track_resolved_tags rt
+                   JOIN hub_tags t ON t.id = rt.tag_id
+                  WHERE rt.track_id IN (",
+            );
+            let mut sep = qb.separated(", ");
+            for id in chunk {
+                sep.push_bind(*id);
+            }
+            qb.push(") GROUP BY rt.track_id");
+            for r in qb.build().fetch_all(&st.pool).await.unwrap_or_default() {
+                if let Some(p) = r.get::<Option<i64>, _>("phase") {
+                    phases.insert(r.get("track_id"), p);
+                }
+            }
+        }
+    }
+
     // Assemble rows: keep tracks present for >= 2 of the selected users.
     let mut rows: Vec<CompareRow> = Vec::new();
     let mut pair_counts: HashMap<(i64, i64), i64> = HashMap::new();
@@ -2093,6 +2148,21 @@ async fn overlap_page(
             };
             if !ok {
                 continue;
+            }
+        }
+        // Phase/energy scale filter: a set range excludes tracks without a phase.
+        let phase_opt = phases.get(&tid).copied();
+        if phase_min.is_some() || phase_max.is_some() {
+            match phase_opt {
+                Some(p) => {
+                    if phase_min.is_some_and(|m| p < m) {
+                        continue;
+                    }
+                    if phase_max.is_some_and(|m| p > m) {
+                        continue;
+                    }
+                }
+                None => continue,
             }
         }
         // Full-text (title + artists) and tag filters.
@@ -2152,6 +2222,9 @@ async fn overlap_page(
             },
             energy: energy_opt
                 .map(|e| format!("{e:.2}"))
+                .unwrap_or_else(|| "—".into()),
+            phase: phase_opt
+                .map(|p| p.to_string())
                 .unwrap_or_else(|| "—".into()),
             bpm_num: bpm_opt,
             energy_num: energy_opt,
@@ -2350,6 +2423,8 @@ async fn overlap_page(
         bpm_max: bpm_max_raw,
         key_harmonic,
         key_options,
+        phase_min: phase_min_raw,
+        phase_max: phase_max_raw,
         has_audio,
         sort_present: sort_link("present"),
         sort_bpm: sort_link("bpm"),
@@ -2462,6 +2537,8 @@ async fn overlap_enrich(State(st): State<AppState>, headers: HeaderMap, body: St
         bpm_max: get("bpm_max"),
         key: get("key"),
         key_harmonic: matches!(get("key_harmonic").as_str(), "1" | "on" | "true"),
+        phase_min: get("phase_min"),
+        phase_max: get("phase_max"),
         sort: sort.to_string(),
         dir: dir.to_string(),
         pl: pl_ids,
@@ -3830,8 +3907,8 @@ struct TagFilter {
     q: Option<String>,
     /// "1" = only my tags.
     mine: Option<String>,
-    /// Multi-type filter, comma-separated type names (e.g. `types=MOOD,VIBE`).
-    types: Option<String>,
+    // NOTE: `types` (additive, possibly repeated) is read from the raw query in
+    // `tags_page` — a duplicate-key field here would make serde reject `?types=A&types=B`.
     /// Filter to tags owned by a member of this collective.
     #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
     collective: Option<i64>,
@@ -3850,7 +3927,6 @@ struct TagsPage {
     q: String,
     mine: bool,
     type_options: Vec<TypeOption>,
-    types_csv: String,
     types_label: String,
     owner_options: Vec<OwnerOption>,
     collective_options: Vec<ParentOption>,
@@ -3975,16 +4051,25 @@ async fn tags_page(
     let q = f.q.unwrap_or_default().trim().to_string();
     let mine = f.mine.as_deref() == Some("1");
     let me = nav.id;
-    // Multi-type selection: comma-separated names.
+    // Multi-type selection, additive: accept both `types=MOOD,VIBE` and repeated
+    // `types=MOOD&types=VIBE` (plain checkboxes). Collected from the raw query.
     let mut type_values: Vec<String> = Vec::new();
-    if let Some(csv) = f.types.as_deref() {
-        for part in csv.split(',') {
-            let v = part.trim().to_ascii_uppercase();
-            if !v.is_empty()
-                && crate::tagtypes::TagType::parse(&v).is_some()
-                && !type_values.contains(&v)
+    for (k, v) in raw
+        .as_deref()
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+    {
+        if k != "types" {
+            continue;
+        }
+        for part in v.split(',') {
+            let val = part.trim().to_ascii_uppercase();
+            if !val.is_empty()
+                && crate::tagtypes::TagType::parse(&val).is_some()
+                && !type_values.contains(&val)
             {
-                type_values.push(v);
+                type_values.push(val);
             }
         }
     }
@@ -4071,7 +4156,6 @@ async fn tags_page(
             selected: type_values.iter().any(|v| v.eq_ignore_ascii_case(value)),
         })
         .collect();
-    let types_csv = type_values.join(",");
     let types_label = type_options
         .iter()
         .filter(|t| t.selected)
@@ -4091,7 +4175,6 @@ async fn tags_page(
         q,
         mine,
         type_options,
-        types_csv,
         types_label,
         owner_options,
         collective_options,

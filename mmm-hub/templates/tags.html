@@ -48,7 +48,6 @@
 
 <form method="get" action="/tags" class="hub-filter">
     {% if mine %}<input type="hidden" name="mine" value="1" />{% endif %}
-    <input type="hidden" name="types" id="types-hidden" value="{{ types_csv }}" />
     <input
         type="search"
         name="q"
@@ -56,19 +55,25 @@
         placeholder="Suchen (alle Felder, beliebige Reihenfolge) …"
         aria-label="Tag suchen"
     />
-    <select
-        id="types-select"
-        multiple
-        size="1"
-        aria-label="Tag-Typen (Mehrfachauswahl)"
-        title="Tag-Typen (Mehrfachauswahl)"
-    >
+    <fieldset class="hub-chipset" aria-label="Tag-Typen (additiv)">
+        <legend class="hub-visually-hidden">Tag-Typen</legend>
         {% for t in type_options %}
-        <option value="{{ t.value }}" {% if t.selected %}selected{% endif %}>
-            {{ t.icon }} {{ t.label }}
-        </option>
+        <label class="hub-chip"
+            ><input
+                type="checkbox"
+                name="types"
+                value="{{ t.value }}"
+                {%
+                if
+                t.selected
+                %}checked{%
+                endif
+                %}
+            />
+            {{ t.icon }} {{ t.label }}</label
+        >
         {% endfor %}
-    </select>
+    </fieldset>
     <select name="owner" aria-label="Besitzer">
         <option value="">Besitzer: alle</option>
         {% for o in owner_options %}
@@ -89,22 +94,6 @@
     {% endif %}
     <button type="submit">Filtern</button>
 </form>
-<script>
-    (function () {
-        var sel = document.getElementById("types-select");
-        var hid = document.getElementById("types-hidden");
-        if (!sel || !hid) return;
-        var sync = function () {
-            hid.value = Array.from(sel.selectedOptions)
-                .map(function (o) {
-                    return o.value;
-                })
-                .join(",");
-        };
-        sel.addEventListener("change", sync);
-        if (sel.form) sel.form.addEventListener("submit", sync);
-    })();
-</script>
 
 {% if tags.is_empty() %}
 <p class="hub-muted">

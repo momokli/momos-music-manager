@@ -67,6 +67,30 @@ content %}
         style="width: 6.5rem"
     />
     <input
+        type="number"
+        name="phase_min"
+        value="{{ phase_min }}"
+        min="1"
+        max="5"
+        step="1"
+        placeholder="Energy min"
+        aria-label="Phase/Energy min"
+        title="Phase-Energy 1..5 (min)"
+        style="width: 6.5rem"
+    />
+    <input
+        type="number"
+        name="phase_max"
+        value="{{ phase_max }}"
+        min="1"
+        max="5"
+        step="1"
+        placeholder="Energy max"
+        aria-label="Phase/Energy max"
+        title="Phase-Energy 1..5 (max)"
+        style="width: 6.5rem"
+    />
+    <input
         type="search"
         name="q"
         value="{{ q }}"
@@ -206,6 +230,7 @@ content %}
                         %}</a
                     >
                 </th>
+                <th scope="col" title="Phase-Energy 1..5">Phase</th>
                 <th scope="col">
                     <a
                         href="{{ sort_ripeness.href }}"
@@ -234,6 +259,7 @@ content %}
                 <td class="hub-nowrap">{{ r.bpm }}</td>
                 <td class="hub-nowrap">{{ r.key }}</td>
                 <td class="hub-nowrap">{{ r.energy }}</td>
+                <td class="hub-nowrap">{{ r.phase }}</td>
                 <td class="hub-nowrap">{{ r.ripeness_disp }}</td>
                 {% for cell in r.cells %}
                 <td class="hub-cell-pl">

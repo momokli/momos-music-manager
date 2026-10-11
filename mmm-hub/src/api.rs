@@ -42,6 +42,18 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::tagqueue::router(state))
 }
 
+/// The full application: JSON API + web + pages, with the per-view filter-state
+/// middleware layered on top (single entry point so it can't be forgotten).
+pub fn app(state: AppState) -> Router {
+    router(state.clone())
+        .merge(crate::web::router(state.clone()))
+        .merge(crate::pages::router(state.clone()))
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::viewstate::middleware,
+        ))
+}
+
 type ApiError = (StatusCode, Json<Value>);
 
 fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {

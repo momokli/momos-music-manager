@@ -58,7 +58,6 @@ struct QueuePage {
     max: String,
     untagged: bool,
     mine: bool,
-    sort: String,
     sort_opts: Vec<SortOpt>,
     rows: Vec<QueueRowView>,
     total_shown: usize,
@@ -74,9 +73,7 @@ struct QueueRowView {
     id: i64,
     title: String,
     artists: String,
-    album: String,
     total: i64,
-    tag_score: i64,
     meta_score: i64,
     traktor: String,
     tag_count: i64,
@@ -133,9 +130,7 @@ async fn queue_page(
             id: r.track_id,
             title: r.title,
             artists: r.artists,
-            album: r.album,
             total: r.total.round() as i64,
-            tag_score: r.tag_score.round() as i64,
             meta_score: r.meta_score.round() as i64,
             traktor: format!("{:.1}", r.traktor_score),
             tag_count: r.tag_count,
@@ -172,7 +167,6 @@ async fn queue_page(
             .to_string(),
         untagged,
         mine,
-        sort,
         sort_opts,
         rows,
         total_shown,
@@ -206,7 +200,6 @@ struct TypeOption {
 }
 
 struct DetailGroupTag {
-    id: i64,
     name: String,
 }
 
@@ -380,7 +373,7 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
     let my_tags: Vec<DetailGroupTag> = crate::tags::list_user_tags(&st.pool, me)
         .await
         .into_iter()
-        .map(|(id, name)| DetailGroupTag { id, name })
+        .map(|(_, name)| DetailGroupTag { name })
         .collect();
     let my_types: Vec<TypeOption> = crate::tagtypes::options()
         .into_iter()

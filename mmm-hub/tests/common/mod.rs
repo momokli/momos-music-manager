@@ -99,9 +99,7 @@ pub async fn spawn() -> TestApp {
         oauth_states: Arc::new(Mutex::new(HashMap::new())),
     };
 
-    let app = mmm_hub::api::router(state.clone())
-        .merge(mmm_hub::web::router(state.clone()))
-        .merge(mmm_hub::pages::router(state.clone()));
+    let app = mmm_hub::api::app(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
