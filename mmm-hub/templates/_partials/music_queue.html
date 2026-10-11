@@ -1,5 +1,10 @@
 {% if !error.is_empty() %}
 <p class="hub-flash hub-flash-err">{{ error }}</p>
+{% endif %} {% if !counts.is_empty() %}
+<p class="hub-muted">
+    ISRC-Queue: {% for c in counts %}{{ c.state }} {{ c.count }}{% if !loop.last %} · {%
+    endif %}{% endfor %}
+</p>
 {% endif %} {% if items.is_empty() %}
 <p class="hub-muted">Queue leer.</p>
 {% else %}

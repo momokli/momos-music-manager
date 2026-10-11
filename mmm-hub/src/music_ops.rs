@@ -112,10 +112,17 @@ struct QueueRow {
     progress: String,
 }
 
+/// One `state → count` bucket from music-api's ISRC queue.
+struct CountRow {
+    state: String,
+    count: i64,
+}
+
 #[derive(Template)]
 #[template(path = "_partials/music_queue.html")]
 struct QueueFrag {
     items: Vec<QueueRow>,
+    counts: Vec<CountRow>,
     error: String,
 }
 
@@ -123,7 +130,7 @@ async fn queue_frag(State(st): State<AppState>, headers: HeaderMap) -> Response 
     if crate::ui::nav(&st, &headers, "music-api").await.is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let (items, error) = crate::music_api::live_queue(&st.cfg).await;
+    let (items, error, counts) = crate::music_api::live_queue(&st.cfg).await;
     let items = items
         .into_iter()
         .map(|q| QueueRow {
@@ -132,8 +139,13 @@ async fn queue_frag(State(st): State<AppState>, headers: HeaderMap) -> Response 
             progress: q.progress.map(|p| format!("{p:.0}%")).unwrap_or_default(),
         })
         .collect();
+    let counts = counts
+        .into_iter()
+        .map(|(state, count)| CountRow { state, count })
+        .collect();
     render(&QueueFrag {
         items,
+        counts,
         error: error.unwrap_or_default(),
     })
 }
@@ -231,15 +243,23 @@ async fn order_missing(State(st): State<AppState>, headers: HeaderMap) -> Respon
 #[derive(Template)]
 #[template(path = "_partials/music_worker.html")]
 struct WorkerFrag {
+    ok: bool,
     paused: bool,
+    interval_secs: u64,
+    max_attempts: i64,
 }
 
 async fn worker_frag(State(st): State<AppState>, headers: HeaderMap) -> Response {
     if crate::ui::nav(&st, &headers, "music-api").await.is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let paused = crate::music_api::worker_paused(&st.cfg).await;
-    render(&WorkerFrag { paused })
+    let w = crate::music_api::worker_info(&st.cfg).await;
+    render(&WorkerFrag {
+        ok: w.ok,
+        paused: w.paused,
+        interval_secs: w.interval_secs,
+        max_attempts: w.max_attempts,
+    })
 }
 
 async fn set_worker(st: &AppState, headers: &HeaderMap, paused: bool) -> Response {
