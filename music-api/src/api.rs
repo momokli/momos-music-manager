@@ -61,12 +61,7 @@ async fn create_order(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateOrderRequest>,
 ) -> Response {
-    let mut isrcs: Vec<String> = req
-        .items
-        .iter()
-        .map(|i| db::normalize_isrc(&i.isrc))
-        .filter(|s| !s.is_empty())
-        .collect();
+    let mut isrcs: Vec<String> = req.items.iter().filter_map(|i| i.key()).collect();
     isrcs.sort();
     isrcs.dedup();
 
@@ -136,7 +131,7 @@ async fn set_priority(
 
 /// `POST /isrc/{isrc}/retry` — reset a non-ready track to pending.
 async fn retry_isrc(State(state): State<Arc<AppState>>, Path(isrc): Path<String>) -> Response {
-    let isrc = db::normalize_isrc(&isrc);
+    let isrc = db::normalize_key(&isrc);
     match db::reset_track_to_pending(&state.pool, &isrc).await {
         Ok(true) => {
             state.logs.push("info", format!("{isrc}: retry queued"));
@@ -197,7 +192,7 @@ async fn get_tracks(State(state): State<Arc<AppState>>, Query(q): Query<TracksQu
     let raw = q.isrcs.unwrap_or_default();
     let mut isrcs: Vec<String> = raw
         .split(',')
-        .map(db::normalize_isrc)
+        .map(db::normalize_key)
         .filter(|s| !s.is_empty())
         .collect();
     isrcs.sort();
@@ -309,7 +304,7 @@ async fn get_metadata_range(
         .isrcs
         .unwrap_or_default()
         .split(',')
-        .map(db::normalize_isrc)
+        .map(db::normalize_key)
         .filter(|s| !s.is_empty())
         .collect();
     isrcs.sort();
@@ -392,7 +387,7 @@ async fn get_order(State(state): State<Arc<AppState>>, Path(id): Path<String>) -
 
 /// `GET /isrc/{isrc}` — current state of a single ISRC.
 async fn get_isrc(State(state): State<Arc<AppState>>, Path(isrc): Path<String>) -> Response {
-    let isrc = db::normalize_isrc(&isrc);
+    let isrc = db::normalize_key(&isrc);
     match db::get_track(&state.pool, &isrc).await {
         Ok(Some(track)) => Json(json!({
             "isrc": track.isrc,
@@ -419,7 +414,7 @@ async fn get_file(
     State(state): State<Arc<AppState>>,
     Path((isrc, format)): Path<(String, String)>,
 ) -> Response {
-    let isrc = db::normalize_isrc(&isrc);
+    let isrc = db::normalize_key(&isrc);
     let format = format.to_lowercase();
     if !matches!(format.as_str(), "flac" | "320" | "128") {
         return error(StatusCode::BAD_REQUEST, "format must be flac, 320 or 128");

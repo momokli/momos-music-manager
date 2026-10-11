@@ -11,11 +11,16 @@ pub mod state {
     pub const FAILED: &str = "failed";
 }
 
-/// A track row keyed by ISRC (the primary key of the whole system).
+/// A track row keyed by `isrc` (the primary key of the whole system). For
+/// non-Deezer sources the key is `<source>:<external_id>` (e.g.
+/// `soundcloud:1837565340`).
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Track {
     pub isrc: String,
+    /// `deezer` | `soundcloud` | …
+    #[serde(default)]
+    pub source: String,
     pub deezer_id: Option<String>,
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -39,6 +44,15 @@ pub struct Track {
 }
 
 impl Track {
+    /// Acquisition source of this track (from its key, fallback to the column).
+    pub fn source(&self) -> &str {
+        if self.source.is_empty() {
+            track_source(&self.isrc)
+        } else {
+            &self.source
+        }
+    }
+
     /// Formats that can currently be served for this track.
     pub fn formats(&self) -> Vec<&'static str> {
         let mut v = Vec::new();
@@ -100,7 +114,49 @@ pub struct CreateOrderRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct OrderItemRequest {
-    pub isrc: String,
+    /// Deezer/ISRC path (kept optional so non-Deezer sources can omit it).
+    #[serde(default)]
+    pub isrc: Option<String>,
+    /// Non-Deezer source, e.g. `soundcloud`.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// External id within that source (alias `externalId`).
+    #[serde(default, alias = "externalId")]
+    pub external_id: Option<String>,
+}
+
+impl OrderItemRequest {
+    /// The universal track key: a bare ISRC for Deezer, `<source>:<id>` else.
+    pub fn key(&self) -> Option<String> {
+        match (self.source.as_deref(), self.external_id.as_deref()) {
+            (Some(s), Some(id)) if !s.trim().is_empty() && !s.eq_ignore_ascii_case("deezer") => {
+                let id = id.trim();
+                (!id.is_empty()).then(|| format!("{}:{id}", s.trim().to_lowercase()))
+            }
+            _ => self
+                .isrc
+                .as_deref()
+                .map(crate::db::normalize_key)
+                .filter(|s| !s.is_empty()),
+        }
+    }
+}
+
+/// Acquisition source encoded in a track key (`deezer` when there is no
+/// non-Deezer prefix).
+pub fn track_source(key: &str) -> &str {
+    match key.split_once(':') {
+        Some((s, _)) if !s.is_empty() && !s.eq_ignore_ascii_case("deezer") => s,
+        _ => "deezer",
+    }
+}
+
+/// The external id part of a track key (the whole key for a bare ISRC).
+pub fn track_external_id(key: &str) -> &str {
+    match key.split_once(':') {
+        Some((_, id)) if !id.is_empty() => id,
+        _ => key,
+    }
 }
 
 // ── Per-ISRC metadata (BPM / key authority) ──────────────────────────────────

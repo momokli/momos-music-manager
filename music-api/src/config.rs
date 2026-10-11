@@ -29,6 +29,10 @@ pub struct Config {
     pub ffmpeg: String,
     /// ffprobe binary used to classify the delivered lossy file.
     pub ffprobe: String,
+    /// yt-dlp binary, used to acquire non-Deezer sources (e.g. SoundCloud).
+    pub ytdlp: String,
+    /// Scratch dir yt-dlp downloads into (below `data_dir` by default).
+    pub ytdlp_dir: PathBuf,
     /// How often the worker advances the pipeline.
     pub worker_interval: Duration,
     /// How long to wait for a single deemix download before giving up.
@@ -56,6 +60,10 @@ impl Config {
             std::env::var("STORE_ROOT")
                 .unwrap_or_else(|_| data_dir.join("objects").display().to_string()),
         );
+        let ytdlp_dir = PathBuf::from(
+            std::env::var("YTDLP_DIR")
+                .unwrap_or_else(|_| data_dir.join("ytdlp").display().to_string()),
+        );
 
         Ok(Self {
             token,
@@ -82,6 +90,8 @@ impl Config {
                 .to_string(),
             ffmpeg: std::env::var("FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string()),
             ffprobe: std::env::var("FFPROBE").unwrap_or_else(|_| "ffprobe".to_string()),
+            ytdlp: std::env::var("YTDLP_BIN").unwrap_or_else(|_| "yt-dlp".to_string()),
+            ytdlp_dir,
             worker_interval: Duration::from_secs(env_parse("WORKER_INTERVAL_SECS", 5u64)),
             download_timeout: Duration::from_secs(env_parse("DOWNLOAD_TIMEOUT_SECS", 900u64)),
             queue_max_attempts: env_parse("QUEUE_MAX_ATTEMPTS", 3u32).max(1),

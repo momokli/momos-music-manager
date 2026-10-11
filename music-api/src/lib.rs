@@ -15,6 +15,7 @@ pub mod models;
 pub mod store;
 pub mod transcode;
 pub mod worker;
+pub mod ytdlp;
 
 use std::path::PathBuf;
 use std::sync::Arc;
