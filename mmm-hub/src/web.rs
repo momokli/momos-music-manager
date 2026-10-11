@@ -38,6 +38,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/hub/services/{service}/sync-html", post(sync_html))
         .route("/api/hub/playlists/{id}/toggle", post(toggle_playlist))
+        .route("/api/hub/playlists/{id}/refetch", post(refetch_playlist))
         .route("/api/hub/playlists/enable-all", post(enable_all))
         .route("/api/hub/playlists/disable-all", post(disable_all))
         .route("/api/hub/services/{service}/callback", get(callback))
@@ -234,6 +235,10 @@ struct PlaylistRow {
     created: String,
     /// Latest track `added_at` (date only, or "—" when nothing is fetched).
     last_added: String,
+    /// When the playlist's items were last fetched (`fetched_at`, date only).
+    updated: String,
+    /// True when the remote snapshot changed since the last item fetch.
+    changed: bool,
 }
 
 /// Format a Spotify ISO-8601 timestamp (`YYYY-MM-DDThh:mm:ssZ`) as a plain
@@ -466,6 +471,12 @@ fn map_playlist_row(r: &sqlx::sqlite::SqliteRow) -> PlaylistRow {
     let enabled: i64 = r.get("enabled_for_fetch");
     let err: Option<String> = r.get("fetch_error");
     let fetched: i64 = r.get("fetched");
+    let snapshot_id: Option<String> = r.get("snapshot_id");
+    let last_synced: Option<String> = r.get("last_synced_snapshot");
+    // Changed = we have items but the remote snapshot moved since we last fetched.
+    let changed = items_available == 1
+        && snapshot_id.as_deref().is_some_and(|s| !s.is_empty())
+        && snapshot_id != last_synced;
 
     let (status, status_class) = if let Some(e) = err {
         (format!("Fehler: {e}"), "hub-flash-err".to_string())
@@ -499,6 +510,8 @@ fn map_playlist_row(r: &sqlx::sqlite::SqliteRow) -> PlaylistRow {
         tags: r.get::<Option<String>, _>("my_tags").unwrap_or_default(),
         created: fmt_date(r.get::<Option<String>, _>("first_added")),
         last_added: fmt_date(r.get::<Option<String>, _>("last_added")),
+        updated: fmt_date(r.get::<Option<String>, _>("fetched_at")),
+        changed,
     }
 }
 
@@ -526,6 +539,8 @@ async fn playlist_rows(
         "SELECT * FROM (SELECT p.id AS id, p.name AS name, p.is_owned AS is_owned,
                 p.track_count AS track_count, p.items_available AS items_available,
                 p.enabled_for_fetch AS enabled_for_fetch, p.fetch_error AS fetch_error,
+                p.snapshot_id AS snapshot_id, p.last_synced_snapshot AS last_synced_snapshot,
+                p.fetched_at AS fetched_at,
                 COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS owner_name,
                 u.slug AS user_slug,
                 (SELECT COUNT(*) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS fetched,
@@ -589,6 +604,8 @@ async fn playlist_row(st: &AppState, user_id: i64, id: i64) -> Option<PlaylistRo
     let row = sqlx::query(
         "SELECT p.id, p.name, p.is_owned, p.track_count, p.items_available,
                 p.enabled_for_fetch, p.fetch_error,
+                p.snapshot_id AS snapshot_id, p.last_synced_snapshot AS last_synced_snapshot,
+                p.fetched_at AS fetched_at,
                 COALESCE(NULLIF(p.owner_name, ''), CASE WHEN p.is_owned = 1 THEN a.display_name END) AS owner_name,
                 u.slug AS user_slug,
                 (SELECT COUNT(*) FROM hub_playlist_tracks t WHERE t.playlist_id = p.id) AS fetched,
@@ -706,6 +723,36 @@ async fn toggle_playlist(
         };
     }
 
+    Redirect::to("/me/playlists").into_response()
+}
+
+/// Force a single playlist to be re-fetched by the worker (429-safe backend task).
+/// Clears the sync marker so the incremental job picks it up again.
+async fn refetch_playlist(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some((uid, _)) = current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = sqlx::query(
+        "UPDATE hub_playlists
+            SET enabled_for_fetch = 1, items_available = 0,
+                last_synced_snapshot = NULL, fetch_status = 'queued', fetch_error = NULL
+          WHERE id = ?1 AND user_id = ?2",
+    )
+    .bind(id)
+    .bind(uid)
+    .execute(&st.pool)
+    .await;
+
+    if headers.get("hx-request").is_some() {
+        return match playlist_row(&st, uid, id).await {
+            Some(p) => render(&PlaylistRowPartial { p }),
+            None => error_page("Playlist nicht gefunden."),
+        };
+    }
     Redirect::to("/me/playlists").into_response()
 }
 

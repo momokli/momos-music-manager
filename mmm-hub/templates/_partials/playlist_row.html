@@ -17,8 +17,25 @@
     <td>{{ p.tracks }}</td>
     <td class="hub-nowrap hub-muted">{{ p.created }}</td>
     <td class="hub-nowrap hub-muted">{{ p.last_added }}</td>
+    <td class="hub-nowrap hub-muted">
+        {% if p.changed %}<span
+            class="hub-badge hub-badge-no"
+            title="Snapshot geändert — neu holen"
+            >⟳</span
+        >
+        {% endif %}{{ p.updated }}
+    </td>
     <td class="{{ p.status_class }}">{{ p.status }}</td>
     <td class="hub-row-actions">
+        <form
+            method="post"
+            action="/api/hub/playlists/{{ p.id }}/refetch"
+            hx-post="/api/hub/playlists/{{ p.id }}/refetch"
+            hx-target="closest tr"
+            hx-swap="outerHTML"
+        >
+            <button class="outline" type="submit" title="Jetzt neu holen">⭳</button>
+        </form>
         <form
             method="post"
             action="/api/hub/playlists/{{ p.id }}/toggle"
