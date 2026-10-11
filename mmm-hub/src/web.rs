@@ -41,6 +41,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hub/playlists/{id}/refetch", post(refetch_playlist))
         .route("/now-playing", get(now_playing_frag))
         .route("/now-playing/tag", post(now_tag))
+        .route("/now", get(now_page))
         .route("/api/hub/playlists/enable-all", post(enable_all))
         .route("/api/hub/playlists/disable-all", post(disable_all))
         .route("/api/hub/services/{service}/callback", get(callback))
@@ -1073,6 +1074,26 @@ struct NowPlaying {
     my_types: Vec<TypeOption>,
 }
 
+/// Full-screen "Now Playing" page (`/now`), rendered when the current track has
+/// no hub counterpart (or nothing is playing). Known tracks render the real
+/// track page instead.
+#[derive(Template)]
+#[template(path = "now.html")]
+struct NowPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    message: String,
+    connect_link: bool,
+    has_external: bool,
+    title: String,
+    artists: String,
+    album: String,
+    image: String,
+    progress_pct: i64,
+    progress_disp: String,
+    duration_disp: String,
+}
+
 async fn track_page(
     State(st): State<AppState>,
     Path(id): Path<i64>,
@@ -1082,7 +1103,20 @@ async fn track_page(
     let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
         return Redirect::to("/login").into_response();
     };
+    match build_track_page(&st, nav, id, flash.msg.unwrap_or_default()).await {
+        Some(page) => render_track(page),
+        None => track_not_found(),
+    }
+}
 
+/// Build the full track-detail page model, or `None` when the track is unknown.
+/// Shared by the track page and the Now Playing page.
+async fn build_track_page(
+    st: &AppState,
+    nav: crate::ui::Nav,
+    id: i64,
+    flash: String,
+) -> Option<TrackPage> {
     let row = sqlx::query(
         "SELECT id, title, artists, album, duration_ms, isrc, service, service_track_id,
                 image_url, explicit
@@ -1094,13 +1128,7 @@ async fn track_page(
     .ok()
     .flatten();
     let Some(row) = row else {
-        return (
-            StatusCode::NOT_FOUND,
-            render(&ErrorPage {
-                message: "Track nicht gefunden.".to_string(),
-            }),
-        )
-            .into_response();
+        return None;
     };
 
     // Presence grouped by user, split into own vs. followed playlists.
@@ -1358,7 +1386,7 @@ async fn track_page(
 
     let my_types = type_options();
 
-    let page = TrackPage {
+    Some(TrackPage {
         nav,
         id,
         title: row.get::<Option<String>, _>("title").unwrap_or_default(),
@@ -1378,7 +1406,7 @@ async fn track_page(
         external_ids,
         tags,
         genres,
-        flash: flash.msg.unwrap_or_default(),
+        flash,
         music_api: st.cfg.music_api_token.is_some(),
         ripeness_total: rip.total.round() as i64,
         ripeness_tag: rip.tag_score.round() as i64,
@@ -1395,12 +1423,24 @@ async fn track_page(
         tag_action: format!("/track/{id}/tag"),
         htmx: false,
         my_types,
-    };
+    })
+}
 
+fn render_track(page: TrackPage) -> Response {
     match page.render() {
         Ok(html) => Html(html).into_response(),
         Err(e) => error_page(&format!("Template-Fehler: {e}")),
     }
+}
+
+fn track_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        render(&ErrorPage {
+            message: "Track nicht gefunden.".to_string(),
+        }),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -1621,6 +1661,90 @@ async fn now_tag(
         resp.headers_mut().insert("HX-Trigger", v);
     }
     resp
+}
+
+/// Full-screen Now Playing page (`/now`): renders the live track's real track
+/// view when we have it, otherwise a compact fallback.
+async fn now_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "now").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if !crate::nowplaying::has_scope(&st.pool, nav.id).await {
+        return render(&NowPage {
+            nav,
+            flash: String::new(),
+            message: "Spotify ist ohne Now-Playing-Berechtigung verbunden.".to_string(),
+            connect_link: true,
+            has_external: false,
+            title: String::new(),
+            artists: String::new(),
+            album: String::new(),
+            image: String::new(),
+            progress_pct: 0,
+            progress_disp: String::new(),
+            duration_disp: String::new(),
+        });
+    }
+    match crate::nowplaying::current(&st.pool, &st.cfg, nav.id).await {
+        Ok(Some(n)) => match n.hub_track_id {
+            Some(id) => {
+                match build_track_page(&st, nav.clone(), id, "Jetzt läuft in Spotify".to_string())
+                    .await
+                {
+                    Some(page) => render_track(page),
+                    None => render(&now_external(nav, &n, true)),
+                }
+            }
+            None => render(&now_external(nav, &n, false)),
+        },
+        Ok(None) => render(&NowPage {
+            nav,
+            flash: String::new(),
+            message: "Gerade läuft nichts in Spotify.".to_string(),
+            connect_link: false,
+            has_external: false,
+            title: String::new(),
+            artists: String::new(),
+            album: String::new(),
+            image: String::new(),
+            progress_pct: 0,
+            progress_disp: String::new(),
+            duration_disp: String::new(),
+        }),
+        Err(e) => render(&NowPage {
+            nav,
+            flash: String::new(),
+            message: format!("Spotify-Fehler: {e}"),
+            connect_link: false,
+            has_external: false,
+            title: String::new(),
+            artists: String::new(),
+            album: String::new(),
+            image: String::new(),
+            progress_pct: 0,
+            progress_disp: String::new(),
+            duration_disp: String::new(),
+        }),
+    }
+}
+
+/// Build the fallback `NowPage` for a track that has no hub counterpart.
+fn now_external(nav: crate::ui::Nav, n: &crate::nowplaying::Now, _known: bool) -> NowPage {
+    NowPage {
+        nav,
+        flash: String::new(),
+        message: "Dieser Track ist noch nicht im Hub — er erscheint nach dem nächsten Sync."
+            .to_string(),
+        connect_link: false,
+        has_external: true,
+        title: n.title.clone(),
+        artists: n.artists.clone(),
+        album: n.album.clone(),
+        image: n.image.clone(),
+        progress_pct: n.progress_pct(),
+        progress_disp: n.progress_disp(),
+        duration_disp: n.duration_disp(),
+    }
 }
 
 /// A few recently seen tracks for the dashboard.
