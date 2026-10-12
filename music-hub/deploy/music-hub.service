@@ -1,5 +1,5 @@
 [Unit]
-Description=Spelunke (walking skeleton)
+Description=Spelunke - music hub (web app)
 After=network.target
 
 [Service]
