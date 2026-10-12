@@ -10,6 +10,7 @@ pub mod analyzer;
 pub mod api;
 pub mod artists;
 pub mod audio;
+pub mod clusters;
 pub mod config;
 pub mod cosine;
 pub mod curate;
