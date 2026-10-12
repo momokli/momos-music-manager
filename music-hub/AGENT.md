@@ -52,8 +52,10 @@ Users (all admins): `momo`, `Mctoastus`, `ANKD`.
 > 1. Sync the new tree into the **old** dir (so script + unit are present):
 >    ```bash
 >    tar czf - -C music-hub --exclude target --exclude 'hub.db*' --exclude .env . \
->      | ssh music-catalog 'tar xzf - -C ~/mmm-hub'
+>      | ssh music-catalog 'tar xzf - -C ~/mmm-hub && find ~/mmm-hub -name "._*" -delete'
 >    ```
+>    (The `find … -name "._*" -delete` strips macOS AppleDouble junk — without it,
+>    `sqlx::migrate!` fails at build: _error parsing migration filename ".*NNN*_.sql"\*.)
 > 2. Run the rename (stops the unit, moves the dir, fixes `.env` paths, installs
 >    `music-hub.service`, verifies):
 >    ```bash
@@ -63,6 +65,12 @@ Users (all admins): `momo`, `Mctoastus`, `ANKD`.
 > Afterwards the deploy loop below (`→ ~/music-hub`, unit `music-hub`) is literal.
 > Also check Caddy (path-independent) and any Datasette/backup cron that hardcodes
 > `/home/momo/mmm-hub`.
+>
+> **⚠️ Never edit an applied hub migration** (`music-hub/migrations/*`) — SQLx
+> checksums the whole file, comments included, and the service then refuses to
+> boot with _migration N was previously applied but has been modified_. The
+> 2026-10-12 rename changed a comment in `001_hub_schema.sql` via a global
+> search/replace and broke prod — keep renames away from `music-hub/migrations/`.
 
 Login for smoke tests: `Mctoastus` / `1234` (also `momo`, `ANKD`; passwords may differ).
 

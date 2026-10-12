@@ -1,5 +1,5 @@
 -- MMM Hub — skeleton schema (walking skeleton).
--- Table/view names match plans/music-hub/00-interface.md so this converges with
+-- Table/view names match plans/mmm-hub/00-interface.md so this converges with
 -- the planned M1/M2/M3. Deviations for the skeleton are additive only:
 --   * hub_users.slug — CLI-addressable local user handle (OIDC comes in M2).
 --   * hub_playlists.items_available — 0 for followed playlists (metadata only).
