@@ -1,10 +1,11 @@
 # Active Plans
 
-**56 done** · **0 in progress** · **22 proposed**
+**56 done** · **0 in progress** · **23 proposed**
 
 ## Proposed
 
-- [mmm-hub](proposed/mmm-hub.md) — `feat/mmm-hub` (M1–M4 largely done: schema, local accounts/sessions, per-user Spotify ingest, background worker and exploration UI/API implemented; tests/docs in progress)
+- [hub-crawl-everything](proposed/hub-crawl-everything.md) — `feat/music-api-catalogue` + `feat/hub-catalogue-client` (music-api as authority: permanent request log + idle catalogue growth + default BPM/key analysis; hub orders & reads; now-playing shows BPM/key; needs decisions in §12)
+- [music-hub](proposed/music-hub.md) — `feat/music-hub` (M1–M4 largely done: schema, local accounts/sessions, per-user Spotify ingest, background worker and exploration UI/API implemented; tests/docs in progress)
 - [rediscovery-engine](proposed/rediscovery-engine.md) — `feat/rediscovery-engine` (M1–M5)
 - [liked-songs-sync](proposed/liked-songs-sync.md) — `feat/liked-songs-sync` (Rediscovery M1)
 

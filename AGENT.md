@@ -1,14 +1,43 @@
-# Momo's Music Manager — Agent Guidance
+# Repo — Agent Guidance
 
-> **Last Updated**: 2026-09-24 — v1.13.0 (music-api owns downloads, object store + prune, Backpack transport removed; ADRs 061–068)
+> **Scope change 2026-10-12.** This repository is the **music stack**, not a single
+> app: the always-on servers **music-hub** + **music-api**, and the local companion
+> **kellner**. **Momo's Music Manager (MMM) is sunset** — it still runs on the Mac
+> during the migration, but it is no longer the centre of gravity. See
+> [`README.md`](README.md) and [`docs/ROADMAP.md`](docs/ROADMAP.md).
+>
+> **Last Updated**: 2026-10-12
+
+## Repo map (authoritative)
+
+| Project                             | Path                                                                  | Read before touching                         |
+| ----------------------------------- | --------------------------------------------------------------------- | -------------------------------------------- |
+| **music-hub** (codename _spelunke_) | `music-hub/`                                                          | [`music-hub/AGENT.md`](music-hub/AGENT.md)   |
+| **music-api**                       | `music-api/`                                                          | [`music-api/README.md`](music-api/README.md) |
+| **kellner**                         | `kellner/`                                                            | [`kellner/AGENT.md`](kellner/AGENT.md)       |
+| **MMM** (legacy)                    | `legacy/mmm/` (`src/`, `frontend/`, `migrations/`, `tests/`, `site/`) | **this file, below**                         |
+
+**Rules of engagement**
+
+- Repo-wide: `main` clean; one feature branch per change (`feat/…` / `fix/…`); one
+  issue = one branch = one PR (Conventional-Commit title, `Closes #<n>`, squash);
+  **additive migrations only**.
+- **The per-project AGENT/README wins for its subtree** — `music-hub/AGENT.md` and
+  `music-api/README.md` carry their own tests, deploy loops and gotchas.
+- Plans: one file per plan under [`plans/`](plans/); index + lifecycle in
+  [`plans/README.md`](plans/README.md).
+- Stack architecture plan: [`plans/proposed/hub-crawl-everything.md`](plans/proposed/hub-crawl-everything.md).
 
 ---
 
-# Section 1: Agent Reference
+## Legacy app: Momo's Music Manager — **sunset**
 
-This section is **static** — it's the system prompt for any agent working on this project.
+> Everything **below** describes the **legacy MMM app** (now at `legacy/mmm/`). It
+> is decommissioned: treat it as read-only unless a fix is needed to keep it
+> running through the migration to the hub. Archived README:
+> [`docs/legacy/mmm-README.md`](docs/legacy/mmm-README.md).
 
----
+> **Last Updated (MMM)**: 2026-09-24 — v1.13.0 (music-api owns downloads, object store + prune, Backpack transport removed; ADRs 061–068)
 
 ## Project Context
 
@@ -56,14 +85,14 @@ When bundling features for a release:
    milestone is code-complete). There is no staging branch any more: `main` is
    the state.
 2. **Consolidate migrations** — merge same-release migration files into the earliest new one. Only one net-new migration per release.
-3. **Write CHANGELOG** — create/update `CHANGELOG.md` from the PRs merged since the
+3. **Write CHANGELOG** — create/update `legacy/mmm/CHANGELOG.md` from the PRs merged since the
    last tag (`git log --oneline <last-tag>..main`). Group by Added / Changed / Fixed.
 4. **Update ADRs** — add an ADR per feature in `docs/DECISIONS.md` (ADR-### format, date, status, context, decision, consequences).
 5. **Update README** — new pages, new endpoints, new migrations, updated project structure.
 6. **Update plans** — move completed plans to `plans/done/`, update `plans/README.md`, bump AGENT.md "Last Updated" date.
 7. **Verify** — `cargo build` must pass. Delete `app.db*` and test migrations from scratch.
 8. **Release PR** — branch `release/<version>` from `main`, carrying the changelog
-   and the version bump (`Cargo.toml`, `site/index.html`). It is labelled
+   and the version bump (`legacy/mmm/Cargo.toml`, `legacy/mmm/site/index.html`). It is labelled
    `release:human-merge` and is **never** merged automatically.
 9. **Merge + Tag** — merge the release PR, then push `git tag v0.X.0` on `main`.
    The tag push builds the release assets and rolls out via the autoupdater.
@@ -80,7 +109,7 @@ When bundling features for a release:
 13. **Sync State**: In-memory `TaskManager` — tasks auto-pruned 5 min after completion
 14. **Config Priority** (highest wins): Env vars > `~/.config/momos-music-manager/config.toml` > built-in defaults
 15. **Server-Side Filtering**: All filters must be server-side on paginated pages. Client-side filtering after pagination breaks page counts.
-16. **Testing**: ~1120 tests (755 lib + ~365 integration/binary). Every endpoint tested, every query param covered. Line-coverage goal: ≥75%. See `tests/README.md`.
+16. **Testing**: ~1120 tests (755 lib + ~365 integration/binary). Every endpoint tested, every query param covered. Line-coverage goal: ≥75%. See `legacy/mmm/tests/README.md`.
 
 ---
 
@@ -131,10 +160,10 @@ sqlite3 /tmp/agent_app.db ".schema" | head -200
 kill %1 2>/dev/null; rm -f /tmp/agent_app.db
 
 # 3. List actual source modules (not what this doc says)
-ls src/*.rs src/*/mod.rs | sort
+ls legacy/mmm/src/*.rs legacy/mmm/src/*/mod.rs | sort
 
 # 4. List actual frontend pages (the PAGE_MAP in app.js is authoritative)
-ls frontend/pages/*.js | sort
+ls legacy/mmm/frontend/pages/*.js | sort
 
 # 5. Check current git branch + dirty state
 git branch --show-current && git status --short | head -20
@@ -154,9 +183,9 @@ git branch --show-current && git status --short | head -20
 
 ### Frontend Rules
 
-- The `PAGE_MAP` object in `frontend/app.js` is the **authoritative** list of pages.
+- The `PAGE_MAP` object in `legacy/mmm/frontend/app.js` is the **authoritative** list of pages.
   If a page isn't there, it won't load. The table below is a convenience reference only.
-- The `NAV_SECTIONS` and `TOOLS_ITEMS` arrays in `frontend/shared/nav.js` control
+- The `NAV_SECTIONS` and `TOOLS_ITEMS` arrays in `legacy/mmm/frontend/shared/nav.js` control
   what shows in the nav bar. New pages must be added to both app.js and nav.js.
 
 ---
@@ -175,15 +204,15 @@ Testing is **not optional**. Every feature must be validated at both the backend
   include "add/update integration test" as an acceptance criterion.**
 - **Coverage threshold**: ≥75% line coverage (via `cargo llvm-cov`). Run
   `cargo llvm-cov --fail-under-lines 75` before merging.
-- **~1120 tests**: 755 lib + ~365 integration/binary. See `tests/README.md` for
+- **~1120 tests**: 755 lib + ~365 integration/binary. See `legacy/mmm/tests/README.md` for
   the full breakdown.
 - **Unit tests** go in `#[cfg(test)] mod tests` within the source file for pure
-  functions. Integration tests go in `tests/api_*.rs` files.
+  functions. Integration tests go in `legacy/mmm/tests/api_*.rs` files.
 - **Integration tests use a self-contained SQLite DB.** Each test creates a
   fresh in-memory DB, runs all migrations, seeds hand-crafted data, hits the API,
   and asserts exact results (row counts, field values, response shapes).
-- **Test files mirror API structure.** `tests/api_files.rs` → `/api/files*`,
-  `tests/api_tracks.rs` → `/api/tracks*`, etc.
+- **Test files mirror API structure.** `legacy/mmm/tests/api_files.rs` → `/api/files*`,
+  `legacy/mmm/tests/api_tracks.rs` → `/api/tracks*`, etc.
 - **Migration integrity is tested.** A dedicated test creates a fresh DB and
   runs all migrations end-to-end.
 
@@ -194,17 +223,17 @@ Testing is **not optional**. Every feature must be validated at both the backend
   acceptance tests.
 - **Every plan that modifies a frontend page or adds a new one MUST include
   "add/update Playwright tests" as an acceptance criterion.**
-- Test files live in `frontend/tests/` — one file per page:
+- Test files live in `legacy/mmm/frontend/tests/` — one file per page:
   `smoke.spec.js`, `files.spec.js`, `tracks.spec.js`, etc.
 - **Tests are self-contained**: Playwright auto-starts the Rust server with an
   isolated test DB (`test-playwright.db`), runs tests, then kills the server.
-  One command: `cd frontend && npx playwright test`.
+  One command: `cd legacy/mmm/frontend && npx playwright test`.
 - **Every test seeds its own data** via `POST /api/testing/seed` in `beforeEach`.
   Available scenarios: `basic`, `files_filter`, `digging`, `wav_variants`.
   The seed endpoint guarantees deterministic state — no flaky tests.
-- **New seed scenarios** needed by tests go in `src/db/testing.rs` and are
+- **New seed scenarios** needed by tests go in `legacy/mmm/src/db/testing.rs` and are
   registered in the `testing_seed_handler` match block in
-  `src/api/infrastructure.rs`.
+  `legacy/mmm/src/api/infrastructure.rs`.
 - **Selectors**: use `#id` or `[data-*]` attributes from the page's HTML.
   Never rely on CSS class order or nth-child selectors — those change.
 - **Page errors**: every smoke test MUST listen for `pageerror` events and
@@ -220,20 +249,20 @@ cargo build
 cargo test
 
 # 3. All frontend tests pass (auto-starts server, seeds DB, runs tests, kills server)
-cd frontend && npx playwright test
+cd legacy/mmm/frontend && npx playwright test
 ```
 
 #### When to Extend Tests
 
-| Change                     | Action                                                                   |
-| -------------------------- | ------------------------------------------------------------------------ |
-| New API endpoint           | Add integration test in `tests/api_*.rs`                                 |
-| New API filter param       | Add test case in existing test file                                      |
-| New frontend page          | Create `frontend/tests/{page}.spec.js` + register in `app.js` + `nav.js` |
-| New frontend filter/button | Add Playwright test that clicks it and asserts result                    |
-| Changed frontend behavior  | Update existing Playwright test to match new behavior                    |
-| New seed data shape needed | Add scenario to `src/db/testing.rs` + register in seed handler           |
-| Bug fix                    | Write a failing test FIRST, then fix. The test proves the bug is dead.   |
+| Change                     | Action                                                                              |
+| -------------------------- | ----------------------------------------------------------------------------------- |
+| New API endpoint           | Add integration test in `legacy/mmm/tests/api_*.rs`                                 |
+| New API filter param       | Add test case in existing test file                                                 |
+| New frontend page          | Create `legacy/mmm/frontend/tests/{page}.spec.js` + register in `app.js` + `nav.js` |
+| New frontend filter/button | Add Playwright test that clicks it and asserts result                               |
+| Changed frontend behavior  | Update existing Playwright test to match new behavior                               |
+| New seed data shape needed | Add scenario to `legacy/mmm/src/db/testing.rs` + register in seed handler           |
+| Bug fix                    | Write a failing test FIRST, then fix. The test proves the bug is dead.              |
 
 ## Dev Commands
 
@@ -242,7 +271,7 @@ cd frontend && npx playwright test
 cargo run -- serve --host 127.0.0.1 --port 3000
 
 # Start frontend (separate terminal)
-cd frontend && python3 -m http.server 8000
+cd legacy/mmm/frontend && python3 -m http.server 8000
 
 # Kill everything
 ./kill-all.sh
@@ -260,19 +289,19 @@ cargo test --test api_files
 cargo test files_filter_is_local_true
 
 # Run all frontend Playwright tests (auto-starts server, seeds DB, runs tests)
-cd frontend && npx playwright test
+cd legacy/mmm/frontend && npx playwright test
 
 # Run tests for a specific page
-cd frontend && npx playwright test tests/files.spec.js
+cd legacy/mmm/frontend && npx playwright test tests/files.spec.js
 
 # Run with browser visible (debugging)
-cd frontend && npx playwright test --headed
+cd legacy/mmm/frontend && npx playwright test --headed
 
 # Debug a failed test (interactive trace viewer)
-cd frontend && npx playwright show-trace test-results/.../trace.zip
+cd legacy/mmm/frontend && npx playwright show-trace test-results/.../trace.zip
 
 # Smoke test against a running server (legacy, light use only)
-./test.sh
+legacy/mmm/test.sh
 
 # Scan single file for metadata debugging
 cargo run -- scan-file /path/to/file.stem.m4a
@@ -345,9 +374,9 @@ Use this as a quick index. For actual SQL, query the live DB with `sqlite3 app.d
 - **Migrations are additive** — never edit `001_initial_schema.sql`. Create a new migration file instead.
 - **To reset a dirty migration state**: delete `app.db` and re-run — all 16 migrations run sequentially from scratch.
 - **Schema truth is in the DB, not the migration files.** Migrations recreate views and tables, so earlier files contain stale SQL. Always query `sqlite3 app.db ".schema"` for the current schema.
-- **Frontend is an SPA** — modular vanilla JS with ES modules in `frontend/`. Hash-based router (`app.js`), shared modules in `shared/`, pages in `pages/`. Serve embedded via `rust-embed`, no separate dev server needed.
+- **Frontend is an SPA** — modular vanilla JS with ES modules in `legacy/mmm/frontend/`. Hash-based router (`app.js`), shared modules in `shared/`, pages in `pages/`. Serve embedded via `rust-embed`, no separate dev server needed.
 - **`digging.html`** is a standalone HTML page (not part of the SPA) for the digging/curation workflow.
-- **The `#digging` SPA page** (`frontend/pages/digging.js`) is a different interface — the full-featured Digging Curator with multi-seed suggestions and audio players.
+- **The `#digging` SPA page** (`legacy/mmm/frontend/pages/digging.js`) is a different interface — the full-featured Digging Curator with multi-seed suggestions and audio players.
 - **Playlist subscriptions** poll every 30s in the background — managed in `poller.rs`.
 - **Global playlist poller** checks ALL Spotify playlists every 15 min via snapshot-based detection — managed in `global_poller.rs`.
 - **No SoundCloud/YouTube OAuth yet** — framework is ready, actual flow not implemented.
@@ -369,10 +398,10 @@ Use this as a quick index. For actual SQL, query the live DB with `sqlite3 app.d
 
 ## Source Modules
 
-> Run `ls src/*.rs src/*/mod.rs | sort` for the authoritative list.
+> Run `ls legacy/mmm/src/*.rs legacy/mmm/src/*/mod.rs | sort` for the authoritative list.
 
 ```
-src/
+legacy/mmm/src/
 ├── main.rs              # CLI, router, server start
 ├── api.rs               # All API endpoints
 ├── audio_extensions.rs  # AudioExtension enum
@@ -406,42 +435,42 @@ src/
 
 ## Frontend Pages (SPA)
 
-> **Authoritative source**: `PAGE_MAP` in `frontend/app.js`. Run `ls frontend/pages/*.js | sort` to verify.
-> Nav visibility is controlled by `NAV_SECTIONS` + `TOOLS_ITEMS` in `frontend/shared/nav.js`.
+> **Authoritative source**: `PAGE_MAP` in `legacy/mmm/frontend/app.js`. Run `ls legacy/mmm/frontend/pages/*.js | sort` to verify.
+> Nav visibility is controlled by `NAV_SECTIONS` + `TOOLS_ITEMS` in `legacy/mmm/frontend/shared/nav.js`.
 
-| Route              | Module                              | Nav Section | Description                                                      |
-| ------------------ | ----------------------------------- | ----------- | ---------------------------------------------------------------- |
-| `#dashboard`       | `frontend/pages/dashboard.js`       | Overview    | Stats cards + recent activity                                    |
-| `#files`           | `frontend/pages/files.js`           | Library     | Local files table + comment status                               |
-| `#tracks`          | `frontend/pages/tracks.js`          | Library     | Service tracks table                                             |
-| `#playlists`       | `frontend/pages/playlists.js`       | Library     | All playlists                                                    |
-| `#tags`            | `frontend/pages/tags.js`            | Library     | Tags table                                                       |
-| `#tag-categories`  | `frontend/pages/tag-categories.js`  | Library     | Tag categories                                                   |
-| `#services`        | `frontend/pages/services.js`        | Services    | Service status/config                                            |
-| `#tasks`           | `frontend/pages/tasks.js`           | Services    | Task manager UI                                                  |
-| `#folders`         | `frontend/pages/folders.js`         | Services    | Folder management                                                |
-| `#deemix-queue`    | `frontend/pages/deemix-queue.js`    | Services    | Deemix download queue                                            |
-| `#traktor`         | `frontend/pages/traktor-import.js`  | Services    | Traktor collection import                                        |
-| `#tag-curation`    | `frontend/pages/tag-curation.js`    | Tools       | Tag parent curation workflow                                     |
-| `#auto-categorize` | `frontend/pages/auto-categorize.js` | Tools       | AI tag categorization wizard                                     |
-| `#digging`         | `frontend/pages/digging.js`         | Tools       | Digging Curator (multi-seed suggestions, audio players, staging) |
-| `#data`            | `frontend/pages/data.js`            | Tools       | Import/export database                                           |
-| `#key-comparison`  | `frontend/pages/key-comparison.js`  | Tools       | Traktor vs Spotify BPM/Key comparison                            |
-| `#track-detail`    | `frontend/pages/track-detail.js`    | (linked)    | Single track metadata detail                                     |
-| `#file-detail`     | `frontend/pages/file-detail.js`     | (linked)    | Single file metadata detail                                      |
-| `digging.html`     | (standalone HTML)                   | —           | Legacy curator/session-builder page                              |
+| Route              | Module                                         | Nav Section | Description                                                      |
+| ------------------ | ---------------------------------------------- | ----------- | ---------------------------------------------------------------- |
+| `#dashboard`       | `legacy/mmm/frontend/pages/dashboard.js`       | Overview    | Stats cards + recent activity                                    |
+| `#files`           | `legacy/mmm/frontend/pages/files.js`           | Library     | Local files table + comment status                               |
+| `#tracks`          | `legacy/mmm/frontend/pages/tracks.js`          | Library     | Service tracks table                                             |
+| `#playlists`       | `legacy/mmm/frontend/pages/playlists.js`       | Library     | All playlists                                                    |
+| `#tags`            | `legacy/mmm/frontend/pages/tags.js`            | Library     | Tags table                                                       |
+| `#tag-categories`  | `legacy/mmm/frontend/pages/tag-categories.js`  | Library     | Tag categories                                                   |
+| `#services`        | `legacy/mmm/frontend/pages/services.js`        | Services    | Service status/config                                            |
+| `#tasks`           | `legacy/mmm/frontend/pages/tasks.js`           | Services    | Task manager UI                                                  |
+| `#folders`         | `legacy/mmm/frontend/pages/folders.js`         | Services    | Folder management                                                |
+| `#deemix-queue`    | `legacy/mmm/frontend/pages/deemix-queue.js`    | Services    | Deemix download queue                                            |
+| `#traktor`         | `legacy/mmm/frontend/pages/traktor-import.js`  | Services    | Traktor collection import                                        |
+| `#tag-curation`    | `legacy/mmm/frontend/pages/tag-curation.js`    | Tools       | Tag parent curation workflow                                     |
+| `#auto-categorize` | `legacy/mmm/frontend/pages/auto-categorize.js` | Tools       | AI tag categorization wizard                                     |
+| `#digging`         | `legacy/mmm/frontend/pages/digging.js`         | Tools       | Digging Curator (multi-seed suggestions, audio players, staging) |
+| `#data`            | `legacy/mmm/frontend/pages/data.js`            | Tools       | Import/export database                                           |
+| `#key-comparison`  | `legacy/mmm/frontend/pages/key-comparison.js`  | Tools       | Traktor vs Spotify BPM/Key comparison                            |
+| `#track-detail`    | `legacy/mmm/frontend/pages/track-detail.js`    | (linked)    | Single track metadata detail                                     |
+| `#file-detail`     | `legacy/mmm/frontend/pages/file-detail.js`     | (linked)    | Single file metadata detail                                      |
+| `digging.html`     | (standalone HTML)                              | —           | Legacy curator/session-builder page                              |
 
 ---
 
 ## Docs
 
-- `docs/ARCHITECTURE.md` — System design
-- `docs/DECISIONS.md` — ADRs
+- `docs/legacy/ARCHITECTURE.md` — MMM system design (legacy)
+- `docs/DECISIONS.md` — ADRs (stack-wide; earliest are MMM-era)
 - `docs/COMMENT_SYSTEM.md` — Comment format spec
 - `docs/TASK_MANAGER.md` — Task manager details
 - `docs/FRONTEND_BUILD_PLAN.md` — SPA migration history (mostly historical, some details outdated)
 - `docs/FRONTEND_NEXT_PLAN.md` — Remaining frontend work (partially done)
-- `CHANGELOG.md` — Release changelog
+- `legacy/mmm/CHANGELOG.md` — Release changelog
 
 ---
 
@@ -451,7 +480,7 @@ src/
 2. Leave TODO comments in code
 3. Run `cargo build` — must pass
 4. Run `cargo test` — all 659+ tests must pass
-5. Run `cd frontend && npx playwright test` — all frontend tests must pass
+5. Run `cd legacy/mmm/frontend && npx playwright test` — all frontend tests must pass
 6. If you added a new endpoint, verify with `curl` first
 
 ---
@@ -466,4 +495,4 @@ Plans live in [`plans/`](plans/) — one file per plan. See [`plans/README.md`](
 
 **To create a plan**: Copy [`plans/_TEMPLATE.md`](plans/_TEMPLATE.md), fill it in, and add it to the index in `plans/README.md`.
 
-**Quick stats**: 56 done · 0 in progress · 17 proposed
+**Quick stats**: 56 done · 0 in progress · 21 proposed
