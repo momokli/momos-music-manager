@@ -44,13 +44,25 @@ Users (all admins): `momo`, `Mctoastus`, `ANKD`.
 | Audio analyzer    | Essentia service on `.200:8711` (`deploy/analyzer/`)                                 |
 | Git remote        | `github` → `github.com:momokli/momos-music-manager.git`                              |
 
-> ⚠️ **Rename pending on the server.** The repo directory was renamed
-> `mmm-hub/` → `music-hub/` (2026-10-12), but the **live server still uses the old
-> names**: app dir `/home/momo/mmm-hub`, systemd unit `mmm-hub`, DB at
-> `/home/momo/mmm-hub/hub.db`. Until the server is renamed, the deploy commands
-> below must target `~/mmm-hub` / `mmm-hub` on the remote (the local source dir is
-> `music-hub/`). Rename server-side first (dir + unit + paths), then this section
-> becomes literal.
+> **⚠️ Server rename (one-time, `mmm-hub` → `music-hub`).** The repo dir is now
+> `music-hub/`, but the live server still runs from `/home/momo/mmm-hub`
+> (systemd unit `mmm-hub`, DB `/home/momo/mmm-hub/hub.db`). Do this **once** on the
+> host before the deploy loop below works as written:
+>
+> 1. Sync the new tree into the **old** dir (so script + unit are present):
+>    ```bash
+>    tar czf - -C music-hub --exclude target --exclude 'hub.db*' --exclude .env . \
+>      | ssh music-catalog 'tar xzf - -C ~/mmm-hub'
+>    ```
+> 2. Run the rename (stops the unit, moves the dir, fixes `.env` paths, installs
+>    `music-hub.service`, verifies):
+>    ```bash
+>    ssh music-catalog '~/mmm-hub/deploy/rename-music-hub.sh'
+>    ```
+>
+> Afterwards the deploy loop below (`→ ~/music-hub`, unit `music-hub`) is literal.
+> Also check Caddy (path-independent) and any Datasette/backup cron that hardcodes
+> `/home/momo/mmm-hub`.
 
 Login for smoke tests: `Mctoastus` / `1234` (also `momo`, `ANKD`; passwords may differ).
 
