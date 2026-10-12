@@ -161,6 +161,103 @@ pub async fn list_sources(pool: &SqlitePool, backpack_id: i64) -> Result<Vec<Bac
     .await?)
 }
 
+/// All backpacks owned by `user_id`, ordered by creation (`created_at, id`, a
+/// stable total order). Foreign backpacks are never returned; an unknown user
+/// yields `Ok(vec![])`.
+pub async fn list_backpacks(pool: &SqlitePool, user_id: i64) -> Result<Vec<Backpack>> {
+    Ok(sqlx::query_as::<_, Backpack>(
+        "SELECT id, user_id, name, is_active, created_at, updated_at
+           FROM hub_backpacks
+          WHERE user_id = ?1
+          ORDER BY created_at, id",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// One backpack source as shown in the view: its kind literal, a plain-text
+/// label, and its append position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceView {
+    pub kind: String,
+    pub label: String,
+    pub position: i64,
+}
+
+/// The backpack's sources enriched with human-readable labels, in append order
+/// (`position, id`).
+///
+/// Label resolution never fails on a missing/unknown reference: tag -> tag name
+/// (fallback `#id`), playlist -> playlist name (fallback `#id`), lens ->
+/// [`crate::curate::lens_label`], track -> `"title — artists"` (fallback
+/// `#id`). An unknown backpack yields `Ok(vec![])`.
+pub async fn list_source_views(pool: &SqlitePool, backpack_id: i64) -> Result<Vec<SourceView>> {
+    let items = list_sources(pool, backpack_id).await?;
+    let mut views = Vec::with_capacity(items.len());
+    for item in items {
+        let label = match item.source_kind.as_str() {
+            "tag" => match item.source_tag_id {
+                Some(id) => sqlx::query_scalar::<_, String>("SELECT name FROM hub_tags WHERE id = ?1")
+                    .bind(id)
+                    .fetch_optional(pool)
+                    .await?
+                    .unwrap_or_else(|| format!("#{id}")),
+                None => "—".to_string(),
+            },
+            "playlist" => match item.source_playlist_id {
+                Some(id) => sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT name FROM hub_playlists WHERE id = ?1",
+                )
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+                .flatten()
+                .unwrap_or_else(|| format!("#{id}")),
+                None => "—".to_string(),
+            },
+            "lens" => crate::curate::lens_label(item.source_lens.as_deref().unwrap_or("")).to_string(),
+            "track" => match item.source_track_id {
+                Some(id) => {
+                    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+                        "SELECT title, artists FROM hub_tracks WHERE id = ?1",
+                    )
+                    .bind(id)
+                    .fetch_optional(pool)
+                    .await?;
+                    match row {
+                        Some((Some(title), Some(artists))) if !title.is_empty() => {
+                            if artists.is_empty() {
+                                title
+                            } else {
+                                format!("{title} — {artists}")
+                            }
+                        }
+                        Some((Some(title), _)) if !title.is_empty() => title,
+                        _ => format!("#{id}"),
+                    }
+                }
+                None => "—".to_string(),
+            },
+            // The DB CHECK forbids any other kind; fall back defensively.
+            other => other.to_string(),
+        };
+        views.push(SourceView {
+            kind: item.source_kind,
+            label,
+            position: item.position,
+        });
+    }
+    Ok(views)
+}
+
+/// Live track count of a backpack, resolved **without** the 1..=500 clamp of
+/// [`resolve`] so a large source is counted in full. An empty/unknown backpack
+/// yields `0`.
+pub async fn resolve_count(pool: &SqlitePool, backpack_id: i64) -> Result<usize> {
+    Ok(resolve_unbounded(pool, backpack_id).await?.len())
+}
+
 /// Remove one item by id. Returns `true` when a row was deleted. Bumps the
 /// owning backpack's `updated_at` (a no-op bump when nothing was deleted).
 pub async fn remove_source(pool: &SqlitePool, item_id: i64) -> Result<bool> {
