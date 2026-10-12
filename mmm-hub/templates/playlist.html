@@ -1,0 +1,163 @@
+{% extends "base.html" %} {% block title %}{{ name }} — Spelunke{% endblock %} {% block
+content %}
+<nav class="hub-crumbs" aria-label="Brotkrumen">
+    <ol>
+        <li><a href="/">Übersicht</a></li>
+        <li><a href="/me/playlists">Playlists</a></li>
+        <li>{{ name }}</li>
+    </ol>
+</nav>
+<hgroup>
+    <h1>{{ name }}</h1>
+    <p>
+        im Hub von <a href="/user/{{ owner }}">@{{ owner }}</a>{% if owner_name != "" %} ·
+        Spotify-Besitzer: {{ owner_name }}{% endif %}
+    </p>
+</hgroup>
+
+<section
+    class="hub-actions"
+    aria-label="Tags"
+    style="display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center"
+>
+    {% if !feeds.is_empty() %}
+    <div>
+        <span class="hub-muted">Zählt als Tag:</span>
+        {% for f in feeds %}
+        <form
+            method="post"
+            action="/playlist/{{ id }}/tag/remove"
+            style="
+                display: inline-flex;
+                gap: 0.25rem;
+                align-items: center;
+                margin: 0.15rem;
+            "
+        >
+            <input type="hidden" name="tag_id" value="{{ f.id }}" />
+            <button type="submit" class="hub-tag" title="Von diesem Tag entfernen">
+                {{ f.name }} <span class="hub-muted">@{{ f.owner }} ×</span>
+            </button>
+        </form>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <form
+        method="post"
+        action="/playlist/{{ id }}/tag"
+        style="display: inline-flex; gap: 0.25rem; align-items: center; margin: 0.15rem"
+    >
+        <button type="submit" class="secondary outline">+ neuen Tag anlegen</button>
+    </form>
+
+    {% if !my_tags.is_empty() %}
+    <form
+        method="post"
+        action="/playlist/{{ id }}/tag/add"
+        style="display: inline-flex; gap: 0.25rem; align-items: center; margin: 0.15rem"
+    >
+        <select name="tag_id" aria-label="Bestehenden Tag wählen">
+            {% for t in my_tags %}
+            <option value="{{ t.id }}">{{ t.name }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit" class="secondary">Zu Tag hinzufügen</button>
+    </form>
+    {% endif %}
+</section>
+
+{% if music_api %}
+<section
+    class="hub-actions"
+    aria-label="music-api"
+    style="display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center"
+>
+    <form method="post" action="/playlist/{{ id }}/order">
+        <button type="submit">Fehlende ordern (music-api)</button>
+    </form>
+    <form method="post" action="/playlist/{{ id }}/prioritize">
+        <button
+            type="submit"
+            class="secondary"
+            title="Alle ISRCs mit hoher Priorität in die music-api-Queue"
+        >
+            Priorisieren
+        </button>
+    </form>
+    <form method="post" action="/playlist/{{ id }}/refresh">
+        <button type="submit" class="secondary outline">Status aktualisieren</button>
+    </form>
+    <form
+        method="get"
+        action="/playlist/{{ id }}/download"
+        style="display: inline-flex; gap: 0.3rem; align-items: center"
+    >
+        <select name="format" aria-label="Format">
+            <option value="flac">flac</option>
+            <option value="mp3">mp3</option>
+            <option value="wav">wav</option>
+            <option value="m4a">m4a</option>
+        </select>
+        <button type="submit" class="secondary">Playlist als ZIP laden</button>
+    </form>
+    <span
+        class="hub-badge hub-badge-ok"
+        hx-get="/playlist/{{ id }}/progress"
+        hx-trigger="every 10s"
+        hx-swap="innerHTML"
+        >{{ ready }}/{{ total }} bereit</span
+    >
+</section>
+{% endif %}
+
+<form method="get" action="/playlist/{{ id }}" class="hub-filter" role="search">
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Suchen (alle Felder, beliebige Reihenfolge) …"
+        aria-label="Tracks suchen"
+    />
+    <button type="submit">Suchen</button>
+</form>
+
+{% if tracks.is_empty() %}
+<p>Keine Tracks in dieser Playlist.</p>
+{% else %}
+<div class="overflow-auto">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Tracks dieser Playlist
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">
+                    <a
+                        href="{{ s_pos.href }}"
+                        class="hub-sort{% if s_pos.active %} hub-sort-on{% endif %}"
+                        >{{ s_pos.label }}{% if s_pos.active %} {{ s_pos.arrow }}{% endif
+                        %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_title.href }}"
+                        class="hub-sort{% if s_title.active %} hub-sort-on{% endif %}"
+                        >{{ s_title.label }}{% if s_title.active %} {{ s_title.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in tracks %}
+            <tr>
+                <td>{{ t.position }}</td>
+                <td><a href="/track/{{ t.id }}">{{ t.artists }} - {{ t.title }}</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %} {% endblock %}

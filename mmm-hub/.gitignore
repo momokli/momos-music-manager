@@ -1,0 +1,6 @@
+/target/
+hub.db
+hub.db-shm
+hub.db-wal
+.env
+serve.log

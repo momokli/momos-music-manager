@@ -1,0 +1,95 @@
+{% extends "base.html" %} {% block title %}Kuratieren — Spelunke{% endblock %} {% block
+content %}
+<hgroup>
+    <h1>Kuratieren</h1>
+    <p class="hub-muted">
+        Playlists aus Tags oder Smart-Linsen bauen und nach Spotify pushen.
+    </p>
+</hgroup>
+
+{% if !spotify_ready %}
+<p>
+    <span class="hub-badge hub-badge-no">Spotify-Schreibrechte fehlen</span>
+    <a href="/api/hub/services/spotify/connect">Spotify neu verbinden</a>
+</p>
+{% endif %}
+
+<article>
+    <h3>Neue kuratierte Playlist</h3>
+    <form method="post" action="/curate" class="hub-curate-form">
+        <div class="hub-curate-grid">
+            <label>Name <input type="text" name="name" required /></label>
+            <label
+                >Quelle
+                <select name="fill_mode">
+                    {% for m in modes %}
+                    <option value="{{ m.value }}">{{ m.label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label
+                >Tag
+                <select name="fill_tag_id">
+                    <option value="">—</option>
+                    {% for t in tags %}
+                    <option value="{{ t.value }}">{{ t.label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label
+                >Linse
+                <select name="fill_lens">
+                    <option value="">—</option>
+                    {% for l in lenses %}
+                    <option value="{{ l.value }}">{{ l.label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>Limit <input type="number" name="fill_limit" min="1" max="500" value="{{ default_limit }}" /></label>
+            <label class="hub-check"><input type="checkbox" name="is_public" /> öffentlich</label>
+            <label class="hub-check"><input type="checkbox" name="daily" /> täglich pushen</label>
+        </div>
+        <label>Beschreibung <input type="text" name="description" /></label>
+        <button type="submit">Anlegen</button>
+    </form>
+</article>
+
+{% if rows.is_empty() %}
+<p class="hub-empty">Noch keine kuratierten Playlists.</p>
+{% else %}
+<table class="hub-dense-table">
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Quelle</th>
+            <th>Limit</th>
+            <th>Täglich</th>
+            <th>Spotify</th>
+            <th>Letzter Push</th>
+            <th>Status</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for r in rows %}
+        <tr>
+            <td><a href="/curate/{{ r.id }}">{{ r.name }}</a></td>
+            <td>{{ r.mode_label }} · {{ r.source }}</td>
+            <td>{{ r.limit }}</td>
+            <td>{% if r.daily %}✓{% else %}—{% endif %}</td>
+            <td>{% if r.spotify %}✓{% else %}—{% endif %}</td>
+            <td>{{ r.last_push }}</td>
+            <td><span class="{{ r.status_class }}">{{ r.status }}</span></td>
+            <td class="hub-row-actions">
+                <form method="post" action="/curate/{{ r.id }}/push" style="display: inline">
+                    <button type="submit" class="outline">Push</button>
+                </form>
+                <form method="post" action="/curate/{{ r.id }}/delete" style="display: inline">
+                    <button type="submit" class="outline secondary">Löschen</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %} {% endblock %}

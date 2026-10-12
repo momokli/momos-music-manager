@@ -6,6 +6,56 @@ All notable changes to Momo's Music Manager.
 
 ## [Unreleased]
 
+### Added
+
+- **MMM Hub (`mmm-hub/`) — multi-user Spotify ingest + exploration** _(tracked on branch
+  `feat/mmm-hub`, not yet released to `main`)_: a separate crate that pulls several DJs'
+  Spotify likes and owned/collaborative playlists into one shared SQLite DB with a
+  per-row user dimension, so overlap can be explored via SQL and a small read surface.
+  - **Local accounts + sessions** (not OIDC): username + bcrypt password in `hub_users`
+    (case-insensitive `slug COLLATE NOCASE`), server-side sessions in `hub_web_sessions`
+    with a `hub_session` cookie (HttpOnly, `SameSite=Lax`, 30-day TTL).
+  - **Per-user Spotify connect** via the public HTTPS redirect
+    `https://hub.zukkafabrik.de/api/hub/services/spotify/callback` (loopback via
+    `mmm-hub auth` for one-time local grabs); tokens per user in `hub_service_accounts`.
+  - **Background sync worker** (`src/worker.rs`): staggered, one request stream at a time,
+    **429/QUOTA_EXCEEDED-aware**; syncs likes + playlist items, triggered by UI toggles,
+    `mmm-hub backfill`, or `POST /api/hub/services/{service}/sync`.
+  - **Migrated schema `001`–`006`**: `hub_users`, `hub_service_accounts`, `hub_tracks`,
+    `hub_playlists`, `hub_playlist_tracks`, `hub_liked_tracks`, `hub_web_sessions`,
+    `hub_track_external_ids`, plus the overlap views `hub_v_track_presence`,
+    `hub_v_track_playlists`, `hub_v_shared_tracks`, `hub_v_user_overlap`.
+  - **Exploration surface**: dashboard, SQL console `/sql`, `/track/{id}` (per-user
+    playlist presence + per-ISRC availability via internal `music-api`), `/search`,
+    `/user/{slug}`, `/playlist/{id}`; JSON API `/api/hub/health`, `/api/hub/users`,
+    `/api/hub/me`, `/api/hub/tracks/{id}`, `/api/hub/overlap`, `/api/hub/playlists`,
+    `/api/hub/query`, plus the sync endpoint.
+  - **CLI**: `serve`, `auth`, `ingest`, `fetch-playlists`, `set-password`, `backfill`,
+    `query`, `users`, `seed-demo`.
+  - **Deployment**: LAN host `music-catalog` / `192.168.178.200`, behind Caddy on `lan` at
+    `https://hub.zukkafabrik.de`; sibling read-only Datasette (`data.zukkafabrik.de`) and
+    SchemaSpy (`schema.zukkafabrik.de`) over a sanitized copy `hub-public.db`.
+  - **Tagging & Spelunking layer** (see ADR-075): per-user **tags** created from playlists
+    (or by hand), bundled into **groups** (`kind` class/sort + roles setlist/rumpelkiste/
+    genre/phase/attribute) and **collectives** (users owning groups); tag insights on
+    `/tag/{id}` (top artists, co-occurrence within/across groups, jump to digging/overlap);
+    tag-queue, direct track tagging, grouped tag clouds, and a SoundCloud-style audio player.
+  - **Scoring & similarity engine** (see ADR-076): **ripeness** (tags > meta > traktor, with
+    per-meta weights and position-weighted tag points per group) and **similarity v2**
+    (shared tags + cross-group bonus, Rumpelkiste-aware) drive **digging** and **overlap**
+    ranking; a **typed settings registry** (`settings::SETTINGS`) makes every weight
+    configurable at `/admin` with defaults, ranges and validation — nothing hardcoded.
+  - **Unified table UX** (see ADR-077): every list table gets **server-side sortable
+    headers** (whitelisted, asc/desc, filters preserved) and **tokenised, order-independent,
+    typo-tolerant** full-text search across all visible fields (`src/table.rs`).
+  - **Digging & discovery**: seed-driven suggestions from hub-internal co-occurrence plus
+    last.fm, ReccoBeats, cosine.club, FreqBlog (BPM/key, quota-guarded) and local audio
+    embeddings; BPM/key/harmonic filters; artist explorer with profile insights.
+  - **Ingest**: Spotify (likes + owned/collaborative playlists), SoundCloud (api-v2 sets +
+    likes), YouTube, Traktor `collection.nml`, and the MMM tag library import; all sources
+    write an **import history** ledger and per-track **archive** (keep/drop on removal).
+  - **Downloads**: music-api integration — per-track format, whole-playlist and per-tag
+    **ZIP download**, order-only-missing, prioritize, and a `/downloads` status table.
 ---
 
 ## [1.15.2] — 2026-10-08

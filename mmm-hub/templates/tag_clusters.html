@@ -1,0 +1,80 @@
+{% extends "base.html" %} {% block title %}Tag-Cluster — Spelunke{% endblock %} {% block content %}
+<div class="hub-page-head">
+    <h1>Tag-Cluster</h1>
+    <span class="hub-muted"
+        >{{ cluster_count }} Cluster · {{ unclustered }} Tags ohne Cluster</span
+    >
+</div>
+
+<p class="hub-muted">
+    Semantisch verwandte Tags desselben Typs gruppiert (z.&nbsp;B. Mood „dark" = dark,
+    düster, …).
+</p>
+
+<nav class="hub-filter" aria-label="Typ">
+    <ul>
+        {% for t in types %}
+        <li>
+            <a
+                href="/tag-clusters?type={{ t.value }}&scope={{ scope }}"
+                {% if t.selected %}aria-current="page"{% endif %}
+                >{{ t.label }}</a
+            >
+        </li>
+        {% endfor %}
+    </ul>
+</nav>
+
+<div class="hub-actions">
+    <form method="post" action="/tag-clusters/rebuild" style="display: inline-flex; gap: 0.3rem">
+        <input type="hidden" name="type" value="{{ current_type }}" />
+        <button type="submit">Cluster neu berechnen</button>
+    </form>
+    <span class="hub-filter" style="display: inline-flex; gap: 0.3rem; margin: 0">
+        <a href="/tag-clusters?type={{ current_type }}&scope=mine" {% if scope == "mine" %}aria-current="page"{% endif %}>Meine Tags</a>
+        <a href="/tag-clusters?type={{ current_type }}&scope=all" {% if scope == "all" %}aria-current="page"{% endif %}>Alle</a>
+    </span>
+</div>
+
+{% if cards.is_empty() %}
+<p class="hub-empty">
+    Keine Cluster. „Cluster neu berechnen" für diesen Typ ausführen.
+</p>
+{% else %} {% for c in cards %}
+<article class="hub-cluster">
+    <div class="hub-cluster-head">
+        <form method="post" action="/tag-clusters/{{ c.id }}/rename" class="hub-cluster-rename">
+            <input type="text" name="label" value="{{ c.label }}" aria-label="Cluster-Name" />
+            <button type="submit" class="outline">Rename</button>
+        </form>
+        <form method="post" action="/tag-clusters/{{ c.id }}/delete" style="display: inline">
+            <button type="submit" class="outline secondary hub-x">×</button>
+        </form>
+    </div>
+    <div class="hub-cloud">
+        {% for m in c.members %}
+        <form
+            method="post"
+            action="/tag-clusters/{{ c.id }}/member/remove"
+            style="display: inline"
+        >
+            <input type="hidden" name="tag_id" value="{{ m.tag_id }}" />
+            <span class="hub-chip" title="{{ m.owner }}"
+                ><a href="/tag/{{ m.tag_id }}">{{ m.name }}</a>
+                <button type="submit" class="hub-x" title="Aus Cluster entfernen">×</button></span
+            >
+        </form>
+        {% endfor %}
+    </div>
+    {% if !c.addable.is_empty() %}
+    <form method="post" action="/tag-clusters/{{ c.id }}/member/add" class="hub-cluster-add">
+        <select name="tag_id" aria-label="Tag hinzufügen">
+            {% for a in c.addable %}
+            <option value="{{ a.tag_id }}">{{ a.name }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit" class="outline">＋ Tag</button>
+    </form>
+    {% endif %}
+</article>
+{% endfor %} {% endif %} {% endblock %}

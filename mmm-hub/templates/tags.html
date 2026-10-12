@@ -1,0 +1,177 @@
+{% extends "base.html" %} {% block title %}Tags — Spelunke{% endblock %} {% block content
+%}
+<hgroup>
+    <h1>Tags</h1>
+    <p class="hub-muted">
+        Tags sind <strong>pro User</strong> und entstehen, wenn ihr sie anlegt — z. B. auf
+        einer Playlist „als Tag anlegen". Jeder Tag hat genau einen <strong>Typ</strong>
+        (Mood, Genre, Vibe, Phase, …), der in die Playlist einfließt.
+    </p>
+</hgroup>
+
+<form method="post" action="/tags/create" class="hub-filter">
+    <input
+        type="text"
+        name="name"
+        placeholder="Neuer Tag …"
+        aria-label="Neuer Tag"
+        required
+    />
+    <select name="type" aria-label="Typ (optional)">
+        <option value="">Typ: keiner</option>
+        {% for t in type_options %}
+        <option value="{{ t.value }}">{{ t.icon }} {{ t.label }}</option>
+        {% endfor %}
+    </select>
+    <button type="submit">Tag anlegen</button>
+</form>
+
+<nav aria-label="Filter">
+    <ul>
+        <li>
+            <a href="/tags?mine=1" {% if mine %}aria-current="page" {% endif %}
+                >Meine Tags</a
+            >
+        </li>
+        <li>
+            <a href="/tags" {% if !mine %}aria-current="page" {% endif %}>Alle Tags</a>
+        </li>
+    </ul>
+</nav>
+
+{% if types_label != "" %}
+<p class="hub-muted">
+    Typen: {{ types_label }} ·
+    <a href="/tags{% if mine %}?mine=1{% endif %}">Filter entfernen</a>
+</p>
+{% endif %}
+
+<form method="get" action="/tags" class="hub-filter">
+    {% if mine %}<input type="hidden" name="mine" value="1" />{% endif %}
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Suchen (alle Felder, beliebige Reihenfolge) …"
+        aria-label="Tag suchen"
+    />
+    <fieldset class="hub-chipset" aria-label="Tag-Typen (additiv)">
+        <legend class="hub-visually-hidden">Tag-Typen</legend>
+        {% for t in type_options %}
+        <label class="hub-chip"
+            ><input
+                type="checkbox"
+                name="types"
+                value="{{ t.value }}"
+                {%
+                if
+                t.selected
+                %}checked{%
+                endif
+                %}
+            />
+            {{ t.icon }} {{ t.label }}</label
+        >
+        {% endfor %}
+    </fieldset>
+    <select name="owner" aria-label="Besitzer">
+        <option value="">Besitzer: alle</option>
+        {% for o in owner_options %}
+        <option value="{{ o.slug }}" {% if o.selected %}selected{% endif %}>
+            @{{ o.slug }}
+        </option>
+        {% endfor %}
+    </select>
+    {% if !collective_options.is_empty() %}
+    <select name="collective" aria-label="Collective">
+        <option value="">Collective: alle</option>
+        {% for c in collective_options %}
+        <option value="{{ c.id }}" {% if c.selected %}selected{% endif %}>
+            {{ c.icon }} {{ c.name }}
+        </option>
+        {% endfor %}
+    </select>
+    {% endif %}
+    <button type="submit">Filtern</button>
+</form>
+
+{% if tags.is_empty() %}
+<p class="hub-muted">
+    Keine Tags. Öffne eine <a href="/me/playlists">Playlist</a> und klicke „als Tag
+    anlegen".
+</p>
+{% else %}
+<div class="overflow-auto hub-scroll-y">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Tags mit Typ, Besitzer und Anzahl
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">
+                    <a
+                        href="{{ s_name.href }}"
+                        class="hub-sort{% if s_name.active %} hub-sort-on{% endif %}"
+                        >{{ s_name.label }}{% if s_name.active %} {{ s_name.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_parents.href }}"
+                        class="hub-sort{% if s_parents.active %} hub-sort-on{% endif %}"
+                        >{{ s_parents.label }}{% if s_parents.active %} {{ s_parents.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_type.href }}"
+                        class="hub-sort{% if s_type.active %} hub-sort-on{% endif %}"
+                        >{{ s_type.label }}{% if s_type.active %} {{ s_type.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_owner.href }}"
+                        class="hub-sort{% if s_owner.active %} hub-sort-on{% endif %}"
+                        >{{ s_owner.label }}{% if s_owner.active %} {{ s_owner.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_tracks.href }}"
+                        class="hub-sort{% if s_tracks.active %} hub-sort-on{% endif %}"
+                        >{{ s_tracks.label }}{% if s_tracks.active %} {{ s_tracks.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_sources.href }}"
+                        class="hub-sort{% if s_sources.active %} hub-sort-on{% endif %}"
+                        >{{ s_sources.label }}{% if s_sources.active %} {{ s_sources.arrow
+                        }}{% endif %}</a
+                    >
+                </th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in tags %}
+            <tr>
+                <td><a href="/tag/{{ t.id }}">{{ t.name }}</a></td>
+                <td>{% if t.parents != "" %}{{ t.parents }}{% else %}—{% endif %}</td>
+                <td>
+                    {% if t.type_label != "" %}{{ t.type_label }}{% else %}—{% endif %}
+                </td>
+                <td><a href="/user/{{ t.owner }}">@{{ t.owner }}</a></td>
+                <td>{{ t.track_count }}</td>
+                <td>{{ t.source_count }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %} {% endblock %}

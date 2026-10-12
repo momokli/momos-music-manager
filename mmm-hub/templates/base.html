@@ -1,0 +1,1212 @@
+<!doctype html>
+<html lang="de" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}Spelunke{% endblock %}</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css"
+    />
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <style>
+      :root {
+        --pico-spacing: 0.45rem;
+        --pico-typography-spacing-vertical: 0.35rem;
+        --pico-form-element-spacing-vertical: 0.3rem;
+        --pico-form-element-spacing-horizontal: 0.5rem;
+        --pico-border-radius: 0.35rem;
+        --pico-block-spacing-vertical: 0.6rem;
+        --pico-block-spacing-horizontal: 0.6rem;
+      }
+      body {
+        font-size: 0.86rem;
+        line-height: 1.4;
+      }
+      /* ── terminal aesthetic ─────────────────────────────────────────── */
+      :root {
+        --pico-font-family: ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, Consolas,
+          monospace;
+        --pico-primary: #7ee787;
+        --pico-primary-hover: #9ff0a6;
+        --pico-primary-focus: rgba(126, 231, 135, 0.3);
+        --pico-primary-inverse: #04120a;
+        --pico-border-radius: 0.15rem;
+      }
+      ::selection {
+        background: #7ee787;
+        color: #04120a;
+      }
+      a {
+        text-decoration: none;
+      }
+      a:hover {
+        color: var(--pico-primary);
+        text-decoration: underline;
+      }
+      /* mechanical buttons: crisp, uppercase, press-down feedback */
+      button,
+      [type="submit"],
+      [type="button"],
+      input[type="submit"],
+      .button {
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        font-size: 0.72rem !important;
+        font-weight: 700;
+        padding: 0.22rem 0.6rem !important;
+        border-radius: 0.15rem;
+        border-width: 1px;
+        box-shadow:
+          inset 0 -2px 0 rgba(0, 0, 0, 0.45),
+          0 1px 0 rgba(0, 0, 0, 0.4);
+        transition:
+          transform 0.04s ease,
+          filter 0.08s ease,
+          box-shadow 0.08s ease;
+      }
+      button:hover,
+      [type="submit"]:hover,
+      input[type="submit"]:hover {
+        filter: brightness(1.15);
+      }
+      button:active,
+      [type="submit"]:active,
+      input[type="submit"]:active {
+        transform: translateY(1px);
+        box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.5);
+      }
+      button:focus-visible,
+      a:focus-visible,
+      input:focus-visible,
+      select:focus-visible,
+      [type="submit"]:focus-visible {
+        outline: 2px solid var(--pico-primary);
+        outline-offset: 1px;
+      }
+      /* tiny icon/remove button (use class="hub-x") */
+      .hub-x {
+        padding: 0 0.32rem !important;
+        min-width: 1.3rem;
+        height: 1.35rem;
+        line-height: 1;
+        font-size: 0.7rem !important;
+        letter-spacing: 0;
+        border-radius: 0.15rem;
+        vertical-align: middle;
+      }
+      /* chips / inline tags */
+      .hub-chip,
+      .hub-tag,
+      button.hub-chip {
+        padding: 0.05rem 0.42rem;
+        border-radius: 0.15rem;
+        font-size: 0.72rem;
+        line-height: 1.55;
+        border: 1px solid var(--pico-muted-border-color);
+        background: transparent;
+        color: var(--hub-fg, #e6edf3) !important;
+        text-transform: none;
+        letter-spacing: 0;
+        box-shadow: none;
+      }
+      a.hub-tag:hover,
+      button.hub-chip:hover {
+        border-color: var(--pico-primary);
+        color: var(--pico-primary) !important;
+      }
+      /* recommended-tag chips: readable name + why */
+      .hub-rec {
+        display: inline-flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.02rem;
+        line-height: 1.25;
+        font-size: 0.78rem;
+        padding: 0.14rem 0.5rem;
+      }
+      .hub-rec-name {
+        color: var(--hub-fg, #e6edf3);
+        font-weight: 600;
+        text-transform: none;
+        letter-spacing: 0;
+      }
+      .hub-rec-why {
+        color: #9aa4af;
+        font-size: 0.68rem;
+        letter-spacing: 0;
+        text-transform: none;
+      }
+      .hub-rec:hover .hub-rec-why {
+        color: var(--pico-primary);
+      }
+      .hub-cloud-h {
+        margin: 0.35rem 0 0.05rem;
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--pico-muted-color);
+        font-weight: 700;
+      }
+      /* shared filter bar — uniform across list pages */
+      .hub-filter {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        align-items: center;
+        margin-bottom: 0.5rem;
+      }
+      .hub-filter input,
+      .hub-filter select {
+        margin: 0;
+      }
+      .hub-filter > .hub-filter-end {
+        margin-left: auto;
+      }
+      .hub-empty {
+        color: var(--pico-muted-color);
+        font-size: 0.85rem;
+        font-style: italic;
+        border-left: 2px solid var(--pico-muted-border-color);
+        padding: 0.15rem 0 0.15rem 0.5rem;
+        margin: 0.3rem 0;
+      }
+      input,
+      select,
+      textarea {
+        border-radius: 0.15rem;
+      }
+      article {
+        padding: 0.6rem 0.75rem;
+        margin-bottom: 0.6rem;
+      }
+      hgroup {
+        margin-bottom: 0.45rem;
+      }
+      h1 {
+        font-size: 1.35rem;
+        margin-bottom: 0.3rem;
+      }
+      h2 {
+        font-size: 1rem;
+        margin-bottom: 0.3rem;
+      }
+      h3 {
+        font-size: 0.92rem;
+        margin-bottom: 0.25rem;
+      }
+      p,
+      ul,
+      ol,
+      table,
+      form {
+        margin-bottom: 0.5rem;
+      }
+      /* Compact, sticky top nav */
+      nav.container-fluid {
+        padding-inline: 0.6rem;
+      }
+      nav.hub-nav {
+        border-bottom: 1px solid var(--pico-muted-border-color);
+        position: sticky;
+        top: 0;
+        z-index: 50;
+        background: var(--pico-background-color);
+        padding-block: 0.15rem;
+      }
+      nav.hub-nav ul {
+        margin: 0;
+        gap: 0;
+      }
+      nav.hub-nav li > a {
+        display: inline-block;
+        padding: 0.25rem 0.5rem;
+        font-size: 0.85rem;
+        line-height: 1.2;
+        border-radius: 0.3rem;
+      }
+      nav.hub-nav li > a:hover {
+        background: var(--pico-secondary-background);
+        text-decoration: none;
+      }
+      nav.hub-nav a[aria-current="page"] {
+        font-weight: 700;
+        color: var(--pico-primary);
+        background: var(--pico-secondary-background);
+      }
+      nav.hub-nav button {
+        padding: 0.2rem 0.5rem;
+        font-size: 0.8rem;
+        margin: 0;
+      }
+      nav.hub-nav form {
+        margin: 0;
+      }
+      main.container-fluid {
+        padding-inline: 0.6rem;
+        padding-block: 0.6rem;
+      }
+      .hub-badge {
+        display: inline-block;
+        font-size: 0.68rem;
+        padding: 0.05rem 0.4rem;
+        border-radius: 1rem;
+        vertical-align: middle;
+        line-height: 1.3;
+        white-space: nowrap;
+      }
+      .hub-badge-ok {
+        background: #123c22;
+        color: #5fe08a;
+      }
+      .hub-badge-no {
+        background: #3a1f22;
+        color: #ff9a9a;
+      }
+      .hub-flash {
+        padding: 0.4rem 0.6rem;
+        border-radius: 0.4rem;
+        margin-bottom: 0.6rem;
+        font-size: 0.85rem;
+      }
+      .hub-flash-ok {
+        background: #123c22;
+        color: #5fe08a;
+      }
+      .hub-flash-err {
+        background: #3a1f22;
+        color: #ff9a9a;
+      }
+      /* Toasts: transient, stacked bottom-right */
+      #hub-toasts {
+        position: fixed;
+        right: 1rem;
+        bottom: 1rem;
+        z-index: 1000;
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+        align-items: flex-end;
+      }
+      .hub-toast {
+        padding: 0.45rem 0.7rem;
+        border-radius: 0.4rem;
+        font-size: 0.82rem;
+        max-width: 26rem;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+        animation: hub-toast-in 0.12s ease-out;
+      }
+      .hub-toast-ok {
+        background: #123c22;
+        color: #5fe08a;
+      }
+      .hub-toast-err {
+        background: #3a1f22;
+        color: #ff9a9a;
+      }
+      .hub-toast-info {
+        background: #1c2b3a;
+        color: #9ecbff;
+      }
+      @keyframes hub-toast-in {
+        from {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      .hub-muted {
+        color: var(--pico-muted-color);
+      }
+      .hub-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        align-items: center;
+      }
+      .hub-actions button,
+      .hub-actions a[role="button"] {
+        margin: 0;
+      }
+      .hub-actions form {
+        margin: 0;
+      }
+      .hub-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+        gap: 0.6rem;
+      }
+      .hub-stat {
+        margin: 0;
+        text-align: center;
+      }
+      .hub-stat h2 {
+        margin: 0;
+        font-size: 1.5rem;
+      }
+      .hub-stat p {
+        margin: 0.15rem 0 0;
+        font-size: 0.78rem;
+      }
+      .hub-row-actions form {
+        display: inline;
+        margin: 0;
+      }
+      .hub-visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      .hub-skip {
+        position: absolute;
+        left: -9999px;
+      }
+      .hub-skip:focus {
+        left: 1rem;
+        top: 1rem;
+        z-index: 100;
+        background: var(--pico-background-color);
+        padding: 0.5rem 1rem;
+        border-radius: 0.5rem;
+      }
+      .hub-crumbs {
+        font-size: 0.82rem;
+        margin-bottom: 0.35rem;
+      }
+      .hub-crumbs ol {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.3rem;
+      }
+      .hub-crumbs li + li::before {
+        content: "›";
+        margin-right: 0.4rem;
+        color: var(--pico-muted-color);
+      }
+      /* Compact / technical tables */
+      .hub-cols {
+        display: grid;
+        grid-template-columns: minmax(15rem, 20rem) 1fr;
+        gap: 0.8rem;
+        align-items: start;
+      }
+      @media (max-width: 48rem) {
+        .hub-cols {
+          grid-template-columns: 1fr;
+        }
+      }
+      .hub-dense table {
+        font-size: 0.8rem;
+      }
+      .hub-kv {
+        width: 100%;
+        font-size: 0.8rem;
+      }
+      .hub-kv th {
+        text-align: left;
+        color: var(--pico-muted-color);
+        font-weight: 600;
+        white-space: nowrap;
+        padding: 0.1rem 0.5rem 0.1rem 0;
+        vertical-align: top;
+      }
+      .hub-kv td {
+        padding: 0.1rem 0;
+      }
+      .hub-dense table th,
+      .hub-dense table td {
+        padding: 0.18rem 0.4rem;
+      }
+      /* Class form (templates use `class="hub-dense-table"`) */
+      table.hub-dense-table {
+        font-size: 0.78rem;
+      }
+      table.hub-dense-table th,
+      table.hub-dense-table td {
+        padding: 0.12rem 0.35rem;
+        line-height: 1.25;
+        vertical-align: top;
+      }
+      table.hub-dense-table thead th {
+        padding-block: 0.15rem;
+      }
+      main table {
+        width: 100%;
+        font-size: 0.82rem;
+      }
+      main table th,
+      main table td {
+        padding: 0.22rem 0.45rem;
+      }
+      main table td {
+        overflow-wrap: anywhere;
+      }
+      /* Head row: compact page title + subtree of actions */
+      .hub-page-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 0.3rem 0.6rem;
+        margin-bottom: 0.4rem;
+      }
+      .hub-page-head h1 {
+        margin: 0;
+      }
+      /* Filter bar: one consistent box on top of every table */
+      nav.hub-filter {
+        display: inline-block;
+        border: 1px solid var(--pico-muted-border-color);
+        border-radius: 0.4rem;
+        padding: 0.1rem 0.5rem;
+        margin: 0 0.3rem 0.4rem 0;
+        font-size: 0.82rem;
+      }
+      nav.hub-filter ul {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      /* Cell values: quiet inline text, not boxy chips */
+      .hub-tag {
+        display: inline;
+        font-size: 0.74rem;
+        padding: 0;
+        margin: 0 0.45rem 0 0;
+        border: 0;
+        background: none;
+        white-space: nowrap;
+        text-decoration: none;
+      }
+      .hub-tag-own {
+        color: #7fe0a0;
+      }
+      .hub-tag-follow {
+        color: var(--pico-muted-color);
+      }
+      .hub-tag-collab {
+        color: #e0c86a;
+      }
+      /* Filter picker chips (deliberately boxy) */
+      .hub-chip {
+        display: inline-block;
+        font-size: 0.74rem;
+        padding: 0.02rem 0.45rem;
+        border-radius: 1rem;
+        border: 1px solid var(--pico-muted-border-color);
+        text-decoration: none;
+        line-height: 1.3;
+      }
+      .hub-chip-on {
+        border-color: #1e6b3a;
+        background: #123c22;
+        color: #7fe0a0;
+      }
+      /* Overlap: allow long content to wrap so horizontal scrolling is never needed */
+      .hub-cell-track {
+        overflow-wrap: anywhere;
+      }
+      .hub-cell-pl {
+        overflow-wrap: anywhere;
+        white-space: normal;
+      }
+      .hub-cell-pl .hub-tag {
+        display: block;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        margin: 0 0 0.1rem;
+      }
+      /* Sortable column headers */
+      .hub-sort {
+        text-decoration: none;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .hub-sort-on {
+        color: var(--pico-primary);
+      }
+      /* Playlist include picker */
+      details.hub-plpicker {
+        flex-basis: 100%;
+      }
+      .hub-plpick {
+        max-height: 18rem;
+        overflow-y: auto;
+        border: 1px solid var(--pico-muted-border-color);
+        border-radius: 0.35rem;
+        padding: 0.3rem 0.55rem;
+        margin-top: 0.35rem;
+        columns: 2 20rem;
+      }
+      .hub-plpick-item {
+        display: flex;
+        gap: 0.35rem;
+        align-items: baseline;
+        font-size: 0.8rem;
+        margin: 0;
+        break-inside: avoid;
+      }
+      /* Tag list on the track detail page */
+      .hub-taglist {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      .hub-taglist li {
+        margin: 0 0 0.15rem;
+        overflow-wrap: anywhere;
+      }
+      .hub-taglist .hub-chip {
+        margin-left: 0.15rem;
+      }
+      /* Digging: per-track detail cells */
+      .hub-dig-track {
+        overflow-wrap: anywhere;
+      }
+      .hub-dig-users,
+      .hub-dig-tags {
+        overflow-wrap: anywhere;
+      }
+      .hub-dig-user,
+      .hub-dig-tag {
+        margin: 0 0 0.1rem;
+        line-height: 1.3;
+      }
+      /* Never force horizontal scroll: let the playlist/tag chips wrap. */
+      .hub-dig-users .hub-tag,
+      .hub-dig-tags .hub-tag,
+      .hub-dig-tag .hub-chip {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        margin-left: 0.1rem;
+      }
+      .hub-nowrap {
+        white-space: nowrap;
+      }
+      .hub-scroll-y {
+        max-height: 78vh;
+        overflow-y: auto;
+      }
+      .hub-filter ul {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        list-style: none;
+        padding: 0;
+        margin: 0 0 0.6rem;
+      }
+      /* Form controls: dense but still touch-friendly */
+      input:not([type="checkbox"]):not([type="radio"]),
+      select,
+      textarea {
+        padding-block: 0.3rem;
+        padding-inline: 0.5rem;
+      }
+      label {
+        font-size: 0.82rem;
+        margin-bottom: 0.2rem;
+      }
+      fieldset {
+        padding: 0.4rem 0.6rem;
+        margin-bottom: 0.5rem;
+      }
+
+      /* SoundCloud-style player */
+      .hub-player {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.45rem 0.6rem;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(0, 0, 0, 0.06));
+        border: 1px solid var(--pico-muted-border-color);
+        border-radius: 0.6rem;
+        margin: 0.5rem 0;
+      }
+      .hub-playbtn {
+        flex: 0 0 auto;
+        width: 2.6rem;
+        height: 2.6rem;
+        border-radius: 50%;
+        border: none;
+        background: var(--pico-primary);
+        color: var(--pico-primary-inverse, #fff);
+        font-size: 1rem;
+        line-height: 1;
+        cursor: pointer;
+        display: grid;
+        place-items: center;
+        transition: transform 0.08s ease;
+        margin: 0;
+        padding: 0;
+      }
+      .hub-playbtn:hover {
+        transform: scale(1.06);
+      }
+      .hub-wave {
+        position: relative;
+        flex: 1 1 auto;
+        height: 2.2rem;
+        cursor: pointer;
+        border-radius: 0.3rem;
+        overflow: hidden;
+        background-image: repeating-linear-gradient(
+          90deg,
+          var(--pico-muted-color) 0,
+          var(--pico-muted-color) 2px,
+          transparent 2px,
+          transparent 4px
+        );
+        opacity: 0.55;
+        -webkit-mask: repeating-linear-gradient(
+          90deg,
+          #000 0,
+          #000 2px,
+          transparent 2px,
+          transparent 4px
+        );
+        mask: repeating-linear-gradient(
+          90deg,
+          #000 0,
+          #000 2px,
+          transparent 2px,
+          transparent 4px
+        );
+      }
+      .hub-wave-fill {
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 0;
+        background: var(--pico-primary);
+        opacity: 0.85;
+        pointer-events: none;
+      }
+      .hub-time {
+        flex: 0 0 auto;
+        font-variant-numeric: tabular-nums;
+        font-size: 0.78rem;
+        color: var(--pico-muted-color);
+        min-width: 5.5rem;
+        text-align: right;
+      }
+      .hub-player-error {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        padding: 0.5rem 0.6rem;
+        border: 1px dashed var(--pico-muted-border-color);
+        border-radius: 0.5rem;
+        color: var(--pico-muted-color);
+        font-size: 0.85rem;
+        margin: 0.5rem 0;
+      }
+      /* ── now playing widget (#293/#294) ─────────────────────────────── */
+      #hub-now-host:empty {
+        display: none;
+      }
+      #hub-now-host {
+        position: sticky;
+        top: 0;
+        z-index: 40;
+      }
+      .hub-now {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        flex-wrap: wrap;
+        padding: 0.35rem 0.6rem;
+        margin: 0 0 0.6rem;
+        border: 1px solid var(--pico-muted-border-color);
+        border-left: 3px solid var(--pico-primary);
+        border-radius: 0.4rem;
+        background: var(--pico-card-background-color, var(--pico-background-color));
+        font-size: 0.82rem;
+        line-height: 1.25;
+      }
+      .hub-now-idle,
+      .hub-now-err {
+        color: var(--pico-muted-color);
+      }
+      .hub-now-err {
+        border-left-color: var(--pico-del-color, #c0392b);
+      }
+      .hub-now-art {
+        width: 40px;
+        height: 40px;
+        border-radius: 0.3rem;
+        object-fit: cover;
+        flex: 0 0 auto;
+      }
+      .hub-now-art-ph {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--pico-muted-border-color);
+        font-size: 1.1rem;
+      }
+      .hub-now-wave {
+        font-size: 1rem;
+      }
+      .hub-now-main {
+        min-width: 0;
+        flex: 1 1 12rem;
+      }
+      .hub-now-line {
+        display: flex;
+        align-items: baseline;
+        gap: 0.4rem;
+        min-width: 0;
+      }
+      .hub-now-dot {
+        width: 0.5rem;
+        height: 0.5rem;
+        border-radius: 50%;
+        background: var(--pico-primary);
+        align-self: center;
+        flex: 0 0 auto;
+        animation: hub-pulse 1.6s ease-in-out infinite;
+      }
+      @keyframes hub-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.35; }
+      }
+      .hub-now-title {
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 22rem;
+      }
+      .hub-now-artists {
+        color: var(--pico-muted-color);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-width: 0;
+      }
+      .hub-now-bar {
+        height: 3px;
+        margin: 0.3rem 0 0.15rem;
+        background: var(--pico-muted-border-color);
+        border-radius: 2px;
+        overflow: hidden;
+      }
+      .hub-now-bar-fill {
+        display: block;
+        height: 100%;
+        background: var(--pico-primary);
+      }
+      .hub-now-meta {
+        font-size: 0.72rem;
+        font-variant-numeric: tabular-nums;
+      }
+      .hub-now-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        max-width: 22rem;
+      }
+      .hub-now-cloud {
+        display: inline-flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.25rem;
+      }
+      .hub-now-cloud-h {
+        font-size: 0.68rem;
+        color: var(--pico-muted-color);
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+      }
+      .hub-now-tagform {
+        display: flex;
+        gap: 0.3rem;
+        align-items: center;
+        margin: 0;
+        flex: 0 0 auto;
+      }
+      .hub-now-tagform input[type="text"] {
+        width: 9rem;
+        padding: 0.2rem 0.4rem;
+        font-size: 0.78rem;
+        margin: 0;
+      }
+      .hub-now-tagform select {
+        width: auto;
+        padding: 0.2rem 0.4rem;
+        font-size: 0.78rem;
+        margin: 0;
+      }
+      .hub-now-tagbtn {
+        padding: 0.2rem 0.5rem;
+        font-size: 0.78rem;
+        margin: 0;
+      }
+      @media (max-width: 48rem) {
+        .hub-now-title { max-width: 10rem; }
+        .hub-now-tags { max-width: 100%; }
+        .hub-now-tagform input[type="text"] { width: 6rem; }
+      }
+      /* ── full-screen Now Playing page (#317) ─────────────────────────── */
+      .hub-now-page {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        flex-wrap: wrap;
+        margin: 0.5rem 0 1rem;
+      }
+      .hub-now-page-art {
+        width: 160px;
+        height: 160px;
+        border-radius: 0.5rem;
+        object-fit: cover;
+        flex: 0 0 auto;
+      }
+      .hub-now-page-body {
+        min-width: 0;
+        flex: 1 1 16rem;
+      }
+      .hub-now-page-title {
+        font-size: 1.6rem;
+        font-weight: 700;
+        line-height: 1.1;
+        margin-bottom: 0.15rem;
+      }
+      @media (max-width: 48rem) {
+        .hub-now-page-art { width: 110px; height: 110px; }
+        .hub-now-page-title { font-size: 1.25rem; }
+      }
+      /* ── curated playlists (#316) ────────────────────────────────────── */
+      .hub-curate-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+        gap: 0.6rem;
+        align-items: end;
+      }
+      .hub-curate-grid label,
+      .hub-curate-form > label {
+        margin: 0;
+      }
+      .hub-curate-grid input,
+      .hub-curate-grid select {
+        margin-bottom: 0;
+      }
+      .hub-check {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding-bottom: 0.4rem;
+      }
+      /* ── uniform track actions (#318) ────────────────────────────────── */
+      .hub-ta {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        flex-wrap: wrap;
+      }
+      .hub-ta-btn {
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-size: 0.8rem !important;
+        font-weight: 700;
+        padding: 0.45rem 0.85rem !important;
+        border-radius: 0.2rem;
+        background: var(--pico-primary);
+        border: 1px solid var(--pico-primary);
+        color: var(--pico-primary-inverse, #0b0f14) !important;
+        cursor: pointer;
+        line-height: 1;
+      }
+      .hub-ta-primary {
+        background: var(--pico-primary);
+      }
+      .hub-ta-cancel {
+        background: transparent;
+        color: var(--hub-fg, #e6edf3) !important;
+        border-color: var(--pico-muted-border-color);
+        padding: 0.45rem 0.6rem !important;
+      }
+      .hub-ta-open {
+        border: 1px dashed var(--pico-muted-border-color);
+        border-radius: 0.25rem;
+        padding: 0.3rem;
+      }
+      .hub-ta-hint {
+        font-size: 0.8rem;
+        color: var(--pico-muted-color);
+      }
+      .hub-ta-new input[type="text"],
+      .hub-ta-tagform input[type="text"] {
+        width: 10rem;
+        padding: 0.4rem 0.55rem !important;
+        margin: 0 !important;
+        font-size: 0.8rem !important;
+      }
+      .hub-ta-tagform select {
+        width: auto;
+        padding: 0.4rem 0.5rem !important;
+        margin: 0 !important;
+        font-size: 0.8rem !important;
+      }
+      .hub-ta-picker {
+        flex-direction: column;
+        align-items: stretch;
+        flex-wrap: nowrap;
+        max-width: 44rem;
+      }
+      .hub-ta-search {
+        width: 100%;
+        margin: 0 0 0.4rem !important;
+        padding: 0.4rem 0.55rem !important;
+        font-size: 0.85rem !important;
+      }
+      .hub-ta-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.3rem;
+        max-height: 16rem;
+        overflow-y: auto;
+        align-content: flex-start;
+      }
+      .hub-ta-list form {
+        margin: 0;
+      }
+      .hub-ta-foot {
+        display: flex;
+        gap: 0.35rem;
+        align-items: center;
+        margin-top: 0.4rem;
+        flex-wrap: wrap;
+      }
+      .hub-ta-foot .hub-ta-hint {
+        margin-right: auto;
+      }
+      /* ── tag clusters (#261–#268) ────────────────────────────────────── */
+      .hub-cluster {
+        padding: 0.5rem 0.6rem;
+        margin-bottom: 0.5rem;
+      }
+      .hub-cluster-head {
+        display: flex;
+        gap: 0.4rem;
+        align-items: center;
+        margin-bottom: 0.3rem;
+      }
+      .hub-cluster-rename {
+        display: flex;
+        gap: 0.3rem;
+        align-items: center;
+        flex: 1;
+        margin: 0;
+      }
+      .hub-cluster-rename input[type="text"] {
+        margin: 0 !important;
+        padding: 0.3rem 0.5rem !important;
+        font-size: 0.85rem !important;
+      }
+      .hub-cluster-add {
+        display: inline-flex;
+        gap: 0.3rem;
+        align-items: center;
+        margin-top: 0.4rem;
+      }
+      .hub-cluster-add select {
+        margin: 0 !important;
+        width: auto;
+        padding: 0.25rem 0.5rem !important;
+        font-size: 0.8rem !important;
+      }
+    </style>
+  </head>
+  <body>
+    <a href="#main" class="hub-skip">Zum Inhalt springen</a>
+    <nav class="container-fluid hub-nav" aria-label="Hauptnavigation">
+      <ul>
+        <li><strong><a href="/">Spelunke</a></strong></li>
+        <li>
+          <a href="/" {% if nav.active == "dashboard" %}aria-current="page"{% endif %}>Übersicht</a>
+        </li>
+        <li>
+          <a href="/now" {% if nav.active == "now" %}aria-current="page"{% endif %}>Now Playing</a>
+        </li>
+        <li>
+          <details class="dropdown">
+            <summary {% if nav.active == "playlists" || nav.active == "queue" || nav.active == "tags" || nav.active == "revisit" || nav.active == "collectives" || nav.active == "playlist" || nav.active == "tag" || nav.active == "curate" || nav.active == "listening" || nav.active == "clusters" %}aria-current="page"{% endif %}>Bibliothek</summary>
+            <ul>
+              <li><a href="/me/playlists">Playlists</a></li>
+              <li><a href="/tag-queue">Tag-Queue</a></li>
+              <li><a href="/tags">Tags</a></li>
+              <li><a href="/tag-clusters">Cluster</a></li>
+              <li><a href="/curate">Kuratieren</a></li>
+              <li><a href="/listening">Gehört</a></li>
+              <li><a href="/revisit">Wiedervorlage</a></li>
+              <li><a href="/collectives">Collectives</a></li>
+            </ul>
+          </details>
+        </li>
+        <li>
+          <details class="dropdown">
+            <summary {% if nav.active == "search" || nav.active == "tag-search" || nav.active == "artists" || nav.active == "albums" || nav.active == "overlap" || nav.active == "similar" || nav.active == "digging" || nav.active == "artist" || nav.active == "album" %}aria-current="page"{% endif %}>Entdecken</summary>
+            <ul>
+              <li><a href="/search">Suche</a></li>
+              <li><a href="/tag-search">Tag-Suche</a></li>
+              <li><a href="/artists">Künstler</a></li>
+              <li><a href="/albums">Alben</a></li>
+              <li><a href="/overlap">Overlap</a></li>
+              <li><a href="/playlists/similar">Ähnliche Playlists</a></li>
+              <li><a href="/digging">Digging</a></li>
+            </ul>
+          </details>
+        </li>
+        <li>
+          <details class="dropdown">
+            <summary {% if nav.active == "import" || nav.active == "downloads" || nav.active == "history" || nav.active == "sql" %}aria-current="page"{% endif %}>Daten</summary>
+            <ul>
+              <li><a href="/import">Import</a></li>
+              <li><a href="/downloads">Downloads</a></li>
+              <li><a href="/history">Historie</a></li>
+              <li><a href="/music-api">music-api</a></li>
+              <li><a href="/sql">SQL</a></li>
+            </ul>
+          </details>
+        </li>
+      </ul>
+      <ul>
+        <li>
+          {% if nav.spotify_connected %}
+          <span class="hub-badge hub-badge-ok" title="{% if nav.spotify_label != "" %}{{ nav.spotify_label }}{% endif %}">Spotify verbunden</span>
+          {% else %}
+          <a href="/api/hub/services/spotify/connect"><span class="hub-badge hub-badge-no">Spotify verbinden</span></a>
+          {% endif %}
+        </li>
+        <li><a href="/user/{{ nav.slug }}">@{{ nav.slug }}</a></li>
+        {% if nav.is_admin %}<li><a href="/admin" {% if nav.active == "admin" %}aria-current="page"{% endif %}>Admin</a></li>{% endif %}
+        <li><a href="/settings" {% if nav.active == "settings" %}aria-current="page"{% endif %}>Einstellungen</a></li>
+        <li>
+          <form method="post" action="/logout">
+            <button class="outline secondary" type="submit">Logout</button>
+          </form>
+        </li>
+      </ul>
+    </nav>
+
+    <main class="container-fluid" id="main">
+      <div
+        id="hub-now-host"
+        hx-get="/now-playing"
+        hx-trigger="load, every 20s"
+        hx-swap="innerHTML"
+        aria-label="Now Playing"
+      ></div>
+      {% block flash %} {% if flash != "" %}
+      <div id="hub-flash-init" data-msg="{{ flash }}" hidden></div>
+      {% endif %} {% endblock %} {% block content %}{% endblock %}
+    </main>
+    <div id="hub-toasts" aria-live="polite"></div>
+    <script>
+      // Toast helper: hubToast(msg, kind) where kind ∈ ok|err|info.
+      window.hubToast = function (msg, kind) {
+        var box = document.getElementById("hub-toasts");
+        if (!box) return;
+        var el = document.createElement("div");
+        el.className = "hub-toast hub-toast-" + (kind || "info");
+        el.textContent = msg;
+        box.appendChild(el);
+        setTimeout(function () {
+          el.style.transition = "opacity .3s";
+          el.style.opacity = "0";
+          setTimeout(function () {
+            el.remove();
+          }, 320);
+        }, 4000);
+      };
+      // htmx responses may carry `HX-Trigger: {"toast":{"msg":"…","kind":"ok"}}`.
+      document.body.addEventListener("toast", function (e) {
+        var d = e.detail || {};
+        if (d.msg) window.hubToast(d.msg, d.kind || "info");
+      });
+      // Server-rendered flash -> toast on load.
+      (function () {
+        var fi = document.getElementById("hub-flash-init");
+        if (fi && fi.dataset.msg) window.hubToast(fi.dataset.msg, "ok");
+      })();
+      // Filter the (potentially ~500-item) playlist picker client-side.
+      window.hubFilterList = function (inp) {
+        var q = (inp.value || "").toLowerCase().trim();
+        var list = inp.parentElement.querySelector(".hub-ta-list");
+        if (!list) return;
+        list.querySelectorAll("form[data-name]").forEach(function (f) {
+          f.style.display = !q || f.dataset.name.indexOf(q) >= 0 ? "" : "none";
+        });
+      };
+    </script>
+    <script>
+      (function () {
+        function fmt(s) {
+          s = Math.floor(s || 0);
+          return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+        }
+        function init(p) {
+          if (p.dataset.playerInit) return;
+          p.dataset.playerInit = "1";
+          var a = p.querySelector("audio");
+          var btn = p.querySelector(".hub-playbtn");
+          var wave = p.querySelector(".hub-wave");
+          var fill = p.querySelector(".hub-wave-fill");
+          var time = p.querySelector(".hub-time");
+          var wrap = p.parentElement;
+          var err = wrap ? wrap.querySelector(".hub-player-error") : null;
+          function fail() {
+            p.style.display = "none";
+            if (err) err.hidden = false;
+          }
+          btn.addEventListener("click", function () {
+            if (a.paused) a.play().catch(fail);
+            else a.pause();
+          });
+          a.addEventListener("play", function () {
+            btn.textContent = "\u275A\u275A";
+          });
+          a.addEventListener("pause", function () {
+            btn.textContent = "\u25B6";
+          });
+          a.addEventListener("timeupdate", function () {
+            var d = a.duration || 0;
+            fill.style.width = (d ? (a.currentTime / d) * 100 : 0) + "%";
+            time.textContent = fmt(a.currentTime) + " / " + fmt(d);
+          });
+          a.addEventListener("loadedmetadata", function () {
+            time.textContent = "0:00 / " + fmt(a.duration);
+          });
+          a.addEventListener("error", fail);
+          wave.addEventListener("click", function (e) {
+            var r = wave.getBoundingClientRect();
+            var ratio = (e.clientX - r.left) / r.width;
+            if (a.duration) a.currentTime = ratio * a.duration;
+          });
+        }
+        document.querySelectorAll(".hub-player").forEach(init);
+        if (window.htmx && htmx.onLoad) {
+          htmx.onLoad(function (root) {
+            if (root && root.querySelectorAll)
+              root.querySelectorAll(".hub-player").forEach(init);
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,27 @@
+{% if rows.is_empty() %}
+<p class="hub-muted">Keine Ereignisse.</p>
+{% else %}
+<div class="overflow-auto hub-scroll-y">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            music-api Ereignisse
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Zeit</th>
+                <th scope="col">Level</th>
+                <th scope="col">Ereignis</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for l in rows %}
+            <tr>
+                <td>{{ l.time }}</td>
+                <td>{{ l.level }}</td>
+                <td>{{ l.msg }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}

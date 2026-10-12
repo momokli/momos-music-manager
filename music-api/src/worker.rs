@@ -58,8 +58,11 @@ impl LoginBackoff {
 /// Run forever, waking on the configured interval or when nudged by a new order.
 pub async fn run(state: Arc<AppState>) {
     loop {
-        if let Err(e) = tick(&state).await {
-            warn!("worker tick failed: {e:#}");
+        // When paused, do no work — but keep listening for a resume notify.
+        if !state.paused.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Err(e) = tick(&state).await {
+                warn!("worker tick failed: {e:#}");
+            }
         }
         tokio::select! {
             _ = tokio::time::sleep(state.config.worker_interval) => {}
@@ -69,14 +72,27 @@ pub async fn run(state: Arc<AppState>) {
 }
 
 async fn tick(state: &Arc<AppState>) -> Result<()> {
+    // Recover rows stranded in `downloading` by a crash/restart before doing work.
+    db::recover_expired_leases(&state.pool, &retry_policy(state), db::now()).await?;
     resolve_pending(state).await?;
     advance_downloads(state).await?;
     Ok(())
 }
 
+/// Retry tuning for the durable queue, from config.
+fn retry_policy(state: &AppState) -> db::RetryPolicy {
+    db::RetryPolicy {
+        max_attempts: state.config.queue_max_attempts,
+        base_secs: state.config.queue_retry_base_secs,
+        max_secs: state.config.queue_retry_max_secs,
+    }
+}
+
 /// Phase A: look each pending ISRC up on Deezer and submit it to deemix.
 async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
-    let pending = db::pending_tracks(&state.pool, 25).await?;
+    let policy = retry_policy(state);
+    let pending = db::due_tracks(&state.pool, 25, db::now()).await?;
+    debug!("resolve_pending: {} due", pending.len());
     if pending.is_empty() {
         return Ok(());
     }
@@ -93,7 +109,13 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     } else if state.deemix_login.blocked(now) {
         false
     } else {
-        match deemix::login(&state.http, &state.config.deemix_url, &state.config.deemix_arl).await {
+        match deemix::login(
+            &state.http,
+            &state.config.deemix_url,
+            &state.config.deemix_arl,
+        )
+        .await
+        {
             Ok(()) => {
                 state.deemix_login.note_success();
                 true
@@ -107,10 +129,26 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     };
 
     for track in pending {
+        // Non-Deezer sources (e.g. SoundCloud) are dispatched to a bounded
+        // background task so the tick never blocks on a download.
+        if track.source() != "deezer" {
+            let lease = db::now() + state.config.download_timeout.as_secs() as i64;
+            let uuid = format!("ytdlp:{}", track.isrc);
+            if let Err(e) = db::mark_downloading(&state.pool, &track.isrc, &uuid, lease).await {
+                warn!("{}: mark downloading failed: {e:#}", track.isrc);
+                continue;
+            }
+            spawn_non_deezer(state.clone(), track);
+            continue;
+        }
         // Always resolve first: metadata is useful even when we cannot download.
         match deezer::lookup_isrc(&state.http, &state.config.deezer_base, &track.isrc).await {
             Ok(deezer::Lookup::Absent { reason }) => {
                 info!("{}: absent on Deezer ({reason})", track.isrc);
+                state.logs.push(
+                    "warn",
+                    format!("{}: absent on Deezer ({reason})", track.isrc),
+                );
                 db::mark_terminal(&state.pool, &track.isrc, state::ABSENT, &reason).await?;
             }
             Ok(deezer::Lookup::Found {
@@ -119,8 +157,19 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
                 artist,
                 album,
             }) => {
-                db::mark_resolved(&state.pool, &track.isrc, &deezer_id, &title, &artist, &album)
-                    .await?;
+                db::mark_resolved(
+                    &state.pool,
+                    &track.isrc,
+                    &deezer_id,
+                    &title,
+                    &artist,
+                    &album,
+                )
+                .await?;
+                state.logs.push(
+                    "info",
+                    format!("{}: resolved — {title} / {artist}", track.isrc),
+                );
 
                 if !deemix_ready {
                     continue;
@@ -138,26 +187,136 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
                     Ok(deemix::AddOutcome::Queued { uuid }) => {
                         let uuid = uuid.unwrap_or_else(|| format!("track_{deezer_id}_1"));
                         debug!("{}: queued at deemix as {uuid}", track.isrc);
-                        db::mark_downloading(&state.pool, &track.isrc, &uuid).await?;
+                        state
+                            .logs
+                            .push("info", format!("{}: queued at deemix", track.isrc));
+                        let lease = db::now() + state.config.download_timeout.as_secs() as i64;
+                        db::mark_downloading(&state.pool, &track.isrc, &uuid, lease).await?;
                     }
                     Ok(deemix::AddOutcome::Rejected { errid }) => {
                         let errid = errid.unwrap_or_else(|| "unknown".to_string());
                         // `CantStream` means the track is not available to this
                         // account at any quality — a permanent absence.
-                        let (st, msg) = if errid == "CantStream" {
-                            (state::ABSENT, format!("deemix: {errid} (not streamable)"))
-                        } else {
-                            (state::FAILED, format!("deemix rejected: {errid}"))
-                        };
+                        let msg = format!("deemix rejected: {errid}");
                         warn!("{}: {msg}", track.isrc);
-                        db::mark_terminal(&state.pool, &track.isrc, st, &msg).await?;
+                        state.logs.push("warn", format!("{}: {msg}", track.isrc));
+                        if errid == "CantStream" {
+                            db::mark_terminal(
+                                &state.pool,
+                                &track.isrc,
+                                state::ABSENT,
+                                &format!("deemix: {errid} (not streamable)"),
+                            )
+                            .await?;
+                        } else {
+                            db::schedule_retry(&state.pool, &track.isrc, &msg, &policy, db::now())
+                                .await?;
+                        }
                     }
-                    Err(e) => warn!("{}: deemix addToQueue failed: {e:#}", track.isrc),
+                    Err(e) => {
+                        warn!("{}: deemix addToQueue failed: {e:#}", track.isrc);
+                        db::schedule_retry(
+                            &state.pool,
+                            &track.isrc,
+                            &format!("deemix add: {e}"),
+                            &policy,
+                            db::now(),
+                        )
+                        .await?;
+                    }
                 }
             }
-            Err(e) => warn!("{}: deezer lookup failed: {e:#}", track.isrc),
+            Err(e) => {
+                warn!("{}: deezer lookup failed: {e:#}", track.isrc);
+                db::schedule_retry(
+                    &state.pool,
+                    &track.isrc,
+                    &format!("deezer lookup: {e}"),
+                    &policy,
+                    db::now(),
+                )
+                .await?;
+            }
         }
     }
+    Ok(())
+}
+
+/// Dispatch a non-Deezer (SoundCloud) download onto a bounded background task.
+///
+/// The caller has already marked the row `downloading` with a lease, so it has
+/// left the due set. Concurrency is capped by a shared semaphore; the reaper
+/// re-queues the row if the lease ever lapses (crash safety).
+fn spawn_non_deezer(state: Arc<AppState>, track: Track) {
+    tokio::spawn(async move {
+        let key = track.isrc.clone();
+        // Wait for a download slot (bounded parallelism).
+        let permit = match state.ytdlp_sem.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        // Refresh the lease now that we actually start (we may have queued).
+        let timeout = state.config.download_timeout.as_secs() as i64;
+        let _ = db::renew_lease(&state.pool, &key, db::now() + timeout).await;
+
+        let outcome = run_non_deezer(&state, &track).await;
+        if let Err(e) = outcome {
+            warn!("{key}: {e:#}");
+            state.logs.push("warn", format!("{key}: {e}"));
+            let policy = retry_policy(&state);
+            let _ =
+                db::schedule_retry(&state.pool, &key, &format!("{e}"), &policy, db::now()).await;
+        }
+        drop(permit);
+    });
+}
+
+/// The actual non-Deezer acquisition, run on the background task.
+async fn run_non_deezer(state: &Arc<AppState>, track: &Track) -> Result<()> {
+    match track.source() {
+        "soundcloud" => {
+            let id = crate::models::track_external_id(&track.isrc);
+            let url = crate::ytdlp::soundcloud_url(id);
+            let safe = track.isrc.replace([':', '/'], "_");
+            let src = crate::ytdlp::download_audio(
+                &state.config.ytdlp,
+                &url,
+                &state.config.ytdlp_dir,
+                &safe,
+            )
+            .await?;
+            finalize_soundcloud(state, track, &src).await?;
+            Ok(())
+        }
+        other => anyhow::bail!("unsupported source '{other}'"),
+    }
+}
+
+/// Transcode a yt-dlp download into our 320/128 store and mark it ready. No
+/// FLAC — the source is lossy.
+async fn finalize_soundcloud(state: &Arc<AppState>, track: &Track, src: &Path) -> Result<()> {
+    let cfg = &state.config;
+    let base = track.isrc.replace([':', '/'], "_");
+    let mp3_320 = cfg.mp3_320_dir().join(format!("{base}.mp3"));
+    let mp3_128 = cfg.mp3_128_dir().join(format!("{base}.mp3"));
+    tokio::fs::create_dir_all(cfg.mp3_320_dir()).await?;
+    tokio::fs::create_dir_all(cfg.mp3_128_dir()).await?;
+    transcode::to_mp3(&cfg.ffmpeg, src, &mp3_320, 320).await?;
+    transcode::to_mp3(&cfg.ffmpeg, src, &mp3_128, 128).await?;
+    db::mark_ready(
+        &state.pool,
+        &track.isrc,
+        "mp3-320",
+        None,
+        Some(&mp3_320.display().to_string()),
+        Some(&mp3_128.display().to_string()),
+    )
+    .await?;
+    info!("{}: ready (soundcloud 320 + 128)", track.isrc);
+    state
+        .logs
+        .push("info", format!("{}: ready (soundcloud)", track.isrc));
+    let _ = tokio::fs::remove_file(src).await;
     Ok(())
 }
 
@@ -176,6 +335,7 @@ async fn advance_downloads(state: &Arc<AppState>) -> Result<()> {
         }
     };
 
+    let policy = retry_policy(state);
     let timeout = state.config.download_timeout.as_secs() as i64;
     for track in inflight {
         let item = track
@@ -186,62 +346,85 @@ async fn advance_downloads(state: &Arc<AppState>) -> Result<()> {
         match item {
             Some(item) if deemix::is_terminal_status(&item.status) => {
                 if deemix::is_success_status(&item.status) {
-                    if !finalize(state, &track).await? {
-                        warn!(
-                            "{}: deemix reported '{}' but no file was found in {}",
-                            track.isrc,
-                            item.status,
-                            state.config.deemix_download_dir.display()
-                        );
-                        db::mark_terminal(
-                            &state.pool,
-                            &track.isrc,
-                            state::FAILED,
-                            "file not found after download",
-                        )
-                        .await?;
-                    }
+                    // Collect + transcode off the tick loop so new orders are
+                    // picked up promptly (#311).
+                    spawn_finalize(state.clone(), track, true);
                 } else {
-                    db::mark_terminal(
+                    db::schedule_retry(
                         &state.pool,
                         &track.isrc,
-                        state::FAILED,
                         &format!("deemix status: {}", item.status),
+                        &policy,
+                        db::now(),
                     )
                     .await?;
                 }
             }
             Some(item) => {
-                // Still downloading — only give up after the timeout.
+                // Still downloading — heartbeat the lease so the reaper leaves it
+                // alone, and log progress.
                 debug!(
                     "{}: downloading {} ({:.0}%)",
                     track.isrc,
                     item.title.as_deref().unwrap_or("?"),
                     item.progress.unwrap_or(0.0)
                 );
-                if db::now() - track.updated_at > timeout {
-                    db::mark_terminal(&state.pool, &track.isrc, state::FAILED, "download timeout")
-                        .await?;
-                }
+                db::renew_lease(&state.pool, &track.isrc, db::now() + timeout).await?;
             }
             None => {
-                // Not in the queue: it may have finished and been evicted, so
-                // try to collect it before declaring a timeout.
-                if !finalize(state, &track).await?
-                    && db::now() - track.updated_at > timeout
-                {
-                    db::mark_terminal(
-                        &state.pool,
-                        &track.isrc,
-                        state::FAILED,
-                        "disappeared from deemix queue",
-                    )
-                    .await?;
-                }
+                // Not in the queue: it may have finished and been evicted, so try
+                // to collect it. If it is genuinely gone, the reaper re-queues it
+                // once the lease lapses.
+                spawn_finalize(state.clone(), track, false);
             }
         }
     }
     Ok(())
+}
+
+/// Run `finalize` (file copy + transcode) on a background task so the worker's
+/// tick loop stays responsive (#311). Concurrency is bounded by
+/// `finalize_sem`; a per-ISRC guard prevents double work while a job is live.
+///
+/// `retry_if_missing` schedules a retry when deemix already reported success but
+/// the file is not (yet) on disk.
+fn spawn_finalize(state: Arc<AppState>, track: Track, retry_if_missing: bool) {
+    {
+        let mut live = state.finalizing.lock().expect("finalizing mutex");
+        if !live.insert(track.isrc.clone()) {
+            return; // already being finalized
+        }
+    }
+    tokio::spawn(async move {
+        let _permit = state.finalize_sem.acquire().await.ok();
+        match finalize(&state, &track).await {
+            Ok(true) => {}
+            Ok(false) => {
+                if retry_if_missing {
+                    warn!(
+                        "{}: deemix reported success but no file was found in {}",
+                        track.isrc,
+                        state.config.deemix_download_dir.display()
+                    );
+                    let policy = retry_policy(&state);
+                    let _ = db::schedule_retry(
+                        &state.pool,
+                        &track.isrc,
+                        "file not found after download",
+                        &policy,
+                        db::now(),
+                    )
+                    .await;
+                }
+            }
+            Err(e) => warn!("{}: finalize failed: {e:#}", track.isrc),
+        }
+        state
+            .finalizing
+            .lock()
+            .expect("finalizing mutex")
+            .remove(&track.isrc);
+    });
 }
 
 /// Collect a finished download into our store, transcode the lossy variants and
@@ -285,6 +468,9 @@ async fn finalize(state: &Arc<AppState>, track: &Track) -> Result<bool> {
         )
         .await?;
         info!("{}: ready (flac + 320 + 128)", track.isrc);
+        state
+            .logs
+            .push("info", format!("{}: ready (flac)", track.isrc));
     } else {
         // deemix fell back (no lossless available). The delivered MP3 may be
         // 320 *or* 128 — the ARL's Deezer tier decides — so classify it by what

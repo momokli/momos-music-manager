@@ -1719,3 +1719,248 @@ of the (configurable) display name, so renames don't create duplicates.
   remainder for the next idempotent run. When `enabled`, a sync is auto-enqueued after
   folder scans / Traktor imports and coalesced via the conflict key; the optional schedule
   is off by default (`public = false` → private playlists).
+---
+
+## ADR-074: MMM Hub — multi-user ingest as a separate crate with local accounts (not OIDC)
+
+**Date**: 2026-10-09
+**Status**: Accepted (implemented on `feat/mmm-hub`)
+**Relates**: ADR-014 (single-user client / modular SPA), ADR-065 (music-api as download authority)
+
+**Context**: Several DJs share overlapping tastes and want to explore the overlap —
+"who already has this track, who liked it, and in which playlists does it sit?" The
+single-user client core has **no user dimension**: its `files`/`service_*` tables and
+`service_config` are built around one connection. Bolting `user_id` onto 23 tables and
+12 views would be a deep, risky rewrite of working code, and the desired shape differs
+anyway — global track identity shared across users, per-user service tokens, and
+overlap views. Precedent already exists in the repo: `music-api/` is an independent
+crate with its own `Cargo.toml`, not part of the root build. The original plan assumed
+generic accounts via **OIDC / Pocket ID** (see `plans/mmm-hub/auth.md`); that would add
+an external IdP, discovery/JWKS handling, and an issuer dependency for a ≤ handful of
+trusted friends on the LAN.
+
+**Decision**:
+
+- **Separate crate** `mmm-hub/` — its own `Cargo.toml`, its own additive migration
+  chain (`mmm-hub/migrations/001…006`), its own `tests/`. The root `cargo build`/CI is
+  untouched. Same stack as the client (axum + sqlx + SQLite).
+- **One shared SQLite DB** (`hub.db`) with a **user dimension**: every provenance row
+  (`hub_playlists`, `hub_playlist_tracks`, `hub_liked_tracks`, `hub_service_accounts`)
+  carries a `user_id`; global identity lives once in `hub_tracks` (unique on
+  `(service, service_track_id)`; ISRC is a nullable attribute, never a key).
+- **Own local accounts, not OIDC**: username + bcrypt password in `hub_users`, case-
+  insensitive usernames (`slug COLLATE NOCASE`), and **server-side sessions** in
+  `hub_web_sessions` with a `hub_session` cookie (HttpOnly, `SameSite=Lax`, 30-day TTL).
+  This deliberately drops Pocket ID / OIDC from the v1 build.
+- **Per-user Spotify OAuth**: each user links their own account; tokens live per user
+  in `hub_service_accounts`. The web flow uses the public HTTPS redirect
+  `https://hub.zukkafabrik.de/api/hub/services/spotify/callback`; `mmm-hub auth` keeps a
+  loopback redirect for one-time local grabs.
+- **Background worker** (`src/worker.rs`) is the only place that calls Spotify for sync.
+  It is driven purely by DB flags (`likes_status`, `enabled_for_fetch`/`items_available`),
+  runs one request stream at a time, and is staggered and 429/QUOTA_EXCEEDED-aware.
+  Triggered by UI toggles, `mmm-hub backfill`, or `POST /api/hub/services/{service}/sync`.
+- **Read-only exploration** over four overlap views (`hub_v_track_presence`,
+  `hub_v_track_playlists`, `hub_v_shared_tracks`, `hub_v_user_overlap`) plus a
+  session-gated `<SELECT|WITH>`-only SQL console.
+
+**Consequences**:
+
+- **No SSO** — accounts are per-hub and email-less; a new user needs a `set-password` /
+  signup step, and there is no central identity provider to revoke against. Accepted for
+  a trusted LAN-sized group.
+- **Tokens are per user**, so a revoked/expired Spotify grant affects only that user.
+  Spotify refresh tokens expire ~**6 months** after the original authorization; the API
+  surfaces `needsReconnect` (computed in `api::needs_reconnect`) and the user re-runs
+  `auth` / reconnects in the UI.
+- **Followed playlists yield metadata only** (post-Feb-2026 Spotify API), so overlap is
+  computed from likes + owned/collaborative playlists. Not a hub limitation.
+- **Sanitized public copy**: read-only sibling tools (Datasette, SchemaSpy) serve a
+  sanitized `hub-public.db`, never the live DB, so credentials/tokens never leave the
+  hub. The public surface is intentionally separate from the authenticated hub.
+- The published plan docs (`plans/mmm-hub/auth.md`) still describe the OIDC design; this
+  ADR supersedes that part — the shipped auth is local accounts + server-side sessions.
+
+---
+
+## ADR-075: Spelunke — per-user tag layer over playlists (tags → groups → collectives)
+
+**Date**: 2026-10-10
+**Status**: Accepted (implemented on `feat/mmm-hub` / `feat/hub-music-status`)
+**Relates**: ADR-074 (hub as a crate), `plans/mmm-hub/tagging-spelunking.md`
+
+**Context**: Raw playlists are a weak signal: names drift, the same track sits in many
+lists, and there is no shared vocabulary for “mood”, “phase”, “vibe”. The hub needed a
+curated layer to compare tracks and to hang scoring/similarity/digging off.
+
+**Decision**:
+
+- **Tags are the curated layer above playlists.** A tag is created _from_ a playlist
+  (or by hand) and can be sourced by several playlists; the materialized
+  `hub_track_resolved_tags` table maps tracks → tags and is rebuilt on mutation
+  (ADR-071 spirit). Tags are **per user** (owner + visibility), but resolvable across all
+  users for comparison.
+- **Groups** (`hub_tag_groups`) bundle tags and carry a `kind`
+  (`class`/`sort`) + semantic `role` (`setlist`, `rumpelkiste`, `genre`, `phase`) and a
+  ranking weight; a tag may be in several groups. Ranked groups order their tags 1–5
+  (energy).
+- **Collectives** are a set of users who jointly own groups; every member is a
+  contributor to the collective’s groups.
+- **Insights** on `/tag/{id}` (top artists, co-occurrence within/across groups, jump to
+  digging/overlap) are derived, not stored.
+
+**Consequences**:
+
+- Comparison/scoring/digging read the tag layer, not raw playlists — reproducible and
+  explainable. Rebuilding resolved tags on mutation keeps filters current.
+- The tag layer is a _second_ interpretation of playlists; playlists that are “meta”
+  (e.g. liked, discovery) are excluded from tag creation.
+- Manual curation cost is real — offset by importing the MMM tag library and by
+  recommendations (ADR-076).
+
+---
+
+## ADR-076: Spelunke — one configurable engine (ripeness + similarity v2) behind a typed settings registry
+
+**Date**: 2026-10-10
+**Status**: Accepted (implemented on `feat/hub-music-status`)
+**Relates**: ADR-075 (tag layer), `#214/#215/#217/#221/#222/#223`
+
+**Context**: Ranking in the hub (tag-queue order, digging suggestions, overlap ordering)
+combined several ad-hoc signals with hardcoded factors, which made results opaque and
+untunable.
+
+**Decision**:
+
+- **Ripeness** (“how complete is a track’s data?”) = `tag_weight·TAG_SCORE +
+meta_weight·META_SCORE + trak_weight·TRAKTOR_SCORE`, with per-meta-field weights
+  (title/artist/album/cover/bpm/key/genre) and position-weighted tag points per group
+  (`100,50,25,10,5,1,…`, hanging on the group, not the tag).
+- **Similarity v2** between two tracks = shared tags (base) + a bonus for shared-tag
+  pairs in _different_ groups; **Rumpelkiste** tags/playlists are excluded.
+- **Digging and Overlap rank with ripeness + similarity** (`engine_sim_factor`,
+  `engine_ripeness_factor`), not just raw counts.
+- **Every knob is a typed setting** in `settings::SETTINGS` (`Num`/`Bool`/`Text`/`Csv`/
+  `Enum`) with default + range, validated on write and editable at `/admin`; the engine
+  is resolved from settings (env/default fallback). No engine constant is hardcoded.
+
+**Consequences**:
+
+- Results are tunable from the UI without redeploy; the registry is the single source of
+  truth and is unit-tested for defaults/ranges.
+- Dropping a tag no longer removes “the 100-point tag” — it removes the group’s cheapest
+  tier (deterministic, group-scoped).
+- Per-collective override of engine values is specified but **not yet implemented** (TODO).
+
+---
+
+## ADR-077: Spelunke — unified table UX: server-side sortable headers + tokenised fuzzy/typo search
+
+**Date**: 2026-10-10
+**Status**: Accepted (implemented on `feat/hub-music-status`)
+**Relates**: ADR-074/075/076
+
+**Context**: Every list view had its own filter/search behaviour; some had no search, some
+matched a single substring, and none were sortable by header. The same interaction should
+work everywhere and stay server-side (AGENT rule: “server-side filtering”).
+
+**Decision**:
+
+- **One shared module `src/table.rs`** provides `tokens`, `push_fuzzy`/`matches`,
+  `matches_typo`/`levenshtein`, `sort_head`/`resolve_sort`/`order_by`.
+- **Search is tokenised, order-independent and typo-tolerant**: a row matches when every
+  query token is a case-insensitive substring of _some_ visible field, or within edit
+  distance ≤ 1 of one of its words (short tokens stay strict). SQL pages run a strict
+  pass first and fall back to a bounded unfiltered scan re-filtered in Rust.
+- **Sorting is whitelisted per view** (`field → SQL expression`, never interpolated),
+  server-side, with clickable headers that toggle asc/desc and preserve all other query
+  parameters (including pagination).
+- **Rolled out to every data table**: `/search`, `/album`, `/artist`, `/tags`,
+  `/tag/{id}`, `/groups(/{id})`, `/collectives(/{id})`, `/me/playlists`, `/playlist/{id}`,
+  `/user/{slug}`, `/overlap`, `/playlists/similar`, `/tag-queue`, `/downloads`,
+  `/history`, `/admin`.
+
+**Consequences**:
+
+- Uniform, predictable interaction; no client-side filtering (page counts stay correct).
+- Fuzzy matching via `instr(...)` cannot use indexes → full scans, acceptable at hub scale
+  (tens of thousands of rows); the typo fallback is bounded by `LIMIT`.
+- New list views should reuse `table::*` rather than hand-rolling filters.
+
+---
+
+## ADR-078: music-api — durable Queue-Engine (bounded Retries, Download-Lease, Counts)
+
+**Date**: 2026-10-11
+**Status**: Accepted (implementiert, `feat/music-api-durable-queue`)
+**Relates**: ADR-065 (music-api als Download-Autorität), ADR-076/077 (Hub-Konsole)
+
+**Context**: Die music-api-Queue war implizit — die Spalte `tracks.state` _war_ die
+Queue, ein flacher Worker-Tick schob `pending`-Zeilen weiter. Zwei Lücken blieben:
+(1) `failed` war terminal, ein transienter deemix/Deezer-Aussetzer verlor den Track
+dauerhaft; (2) ein Neustart, während eine Zeile `downloading` war, strandete sie
+(nichts reselektierte sie). Die Hub-Konsole (#258/#259) steuerte zwar Worker/Orders,
+aber die Queue selbst hatte keine Retry-/Lease-Semantik.
+
+**Decision**:
+
+- **Neue Spalten** (additiv, `tracks`): `attempts`, `next_attempt_at`,
+  `lease_expires_at`. Indizes `idx_tracks_due(state, next_attempt_at)`,
+  `idx_tracks_lease(state, lease_expires_at)` und `idx_order_items_isrc`.
+- **Selektion**: `due_tracks` = `state='pending' AND (next_attempt_at IS NULL OR
+<= now)`, sortiert nach Order-Priorität, dann `created_at`.
+- **Bounded Retries + exponentieller Backoff**: `schedule_retry` erhöht `attempts`;
+  bei `QUEUE_MAX_ATTEMPTS` (Std. 3) terminal `failed`, sonst Re-Queue mit
+  `backoff_delay(n)=min(base<<(n-1), max)` (`QUEUE_RETRY_BASE_SECS` 60,
+  `QUEUE_RETRY_MAX_SECS` 1800). `absent`/`CantStream` bleiben terminal.
+- **Lease statt Timeout**: `mark_downloading` setzt die Lease; `advance_downloads`
+  **erneuert** sie, solange deemix Fortschritt meldet. Der neue Reaper
+  `recover_expired_leases` am Tick-Anfang re-queued Zeilen mit abgelaufener Lease
+  (Crash-/Restart-Recovery).
+- **Retry-Endpoint**: `POST /isrc/{isrc}/retry` setzt `attempts`/`next_attempt_at`/
+  `lease` zurück (`409` bei `ready`).
+- **Transparenz**: `GET /queue` liefert zusätzlich `counts` (per-State), `GET /worker`
+  zusätzlich `intervalSecs`/`maxAttempts` (additiv — die Hub-Konsole bleibt intakt).
+
+**Consequences**:
+
+- Transiente Fehler heilen sich selbst; Restarts verlieren keine `downloading`-Zeile.
+- Ein Worker, keine externe Queue/kein Multi-Worker-Claiming (out of scope).
+- Pause bleibt der bestehende In-Memory-Schalter im `AppState` (kein Persist über
+  Restart) — bewusst so gelassen, um die Hub-Konsole nicht zu ändern.
+
+---
+
+## ADR-079: music-api als ISRC→{BPM,Key}-Autorität (Range-Read + Hub-Push)
+
+**Date**: 2026-10-11
+**Status**: Accepted (implementiert, `feat/music-api-metadata`)
+**Relates**: ADR-065 (Download-Autorität), ADR-075 (Metadaten-/Objekt-Autorität)
+
+**Context**: Der Hub braucht BPM/Key für **Bereiche von ISRCs** (Harmonic-Matching,
+Digging, Scoring). BPM/Key liegen heute im Hub (`hub_track_analysis` aus Traktor/
+Essentia, `hub_track_features` aus ReccoBeats/FreqBlog) — aber `music-api` hatte
+**keinerlei** BPM/Key. Damit `music-api` die zentrale ISRC-Auskunft wird (wie in
+ADR-075 angelegt), fehlte die Speicher- und Read-Seite.
+
+**Decision**:
+
+- **Neue Tabelle** `track_metadata` (isrc PK, bpm, musical_key, camelot, title,
+  artist, album, genre, source, updated_at) — additiv in `db::init`.
+- **`POST /metadata`** (Bulk-Upsert). **Merge-Regel: non-null gewinnt** — ein Push
+  ohne BPM überschreibt den gespeicherten BPM nicht (`COALESCE(excluded, stored)`).
+- **`GET /metadata?isrcs=a,b,c`** — **Range**-Read; unbekannte ISRCs kommen in
+  `missing` zurück (unterscheidbar von „nicht angefragt“). Plus `GET /metadata/{isrc}`.
+- **Hub pusht** seine Analyse: `mmm-hub push-metadata --limit N` (CLI) bzw. der
+  Button „BPM/Key pushen“ in der `/music-api`-Konsole → `music_api::push_analysis`
+  liest `hub_track_analysis ⋈ hub_tracks.isrc` und ruft `POST /metadata`.
+- Hub-Client: `push_metadata`, `metadata_bulk`, `analysis_metadata`.
+
+**Consequences**:
+
+- `music-api` beantwortet ISRC→{bpm,key,camelot} für Bereiche — jede Consumer-Seite
+  (nicht nur der Hub) kann das nutzen.
+- Der Hub bleibt Produzent (Analyse/Import) und muss aktiv pushen; bis dahin ist
+  music-api leer. Kein automatischer Sync (out of scope).
+- Merge ist monoton: Werte werden ergänzt, nicht gelöscht — ein `null`-Feld im Push
+  bleibt ein No-op.
