@@ -39,12 +39,24 @@ fn artist_href(name: &str) -> String {
     format!("/artist/{}", urlencoding::encode(name))
 }
 
-/// Push a scope id set as a comma-separated bind list into a query builder.
-fn push_scope_ids(qb: &mut QueryBuilder<'_, Sqlite>, scope: &HashSet<i64>) {
-    let mut sep = qb.separated(", ");
-    for id in scope {
-        sep.push_bind(*id);
+/// Append a #331 scope predicate `{lhs} IN (ids...)` to `qb`.
+///
+/// An empty scope yields the always-false `1 = 0`: SQLite rejects a bare
+/// `IN ()` with a syntax error, so an active backpack that resolves no tracks
+/// must hide everything instead of breaking the `/albums` query.
+fn push_scope_ids(qb: &mut QueryBuilder<'_, Sqlite>, lhs: &str, scope: &HashSet<i64>) {
+    if scope.is_empty() {
+        qb.push("1 = 0");
+        return;
     }
+    qb.push(lhs).push(" IN (");
+    {
+        let mut sep = qb.separated(", ");
+        for id in scope {
+            sep.push_bind(*id);
+        }
+    }
+    qb.push(")");
 }
 
 #[derive(Deserialize, Default)]
@@ -129,9 +141,8 @@ async fn albums_page(
     // Scope filter: an album is listed only when >= 1 of its tracks is in the
     // active backpack's scope; `COUNT(*)` then reflects the scoped set.
     if let Some(scope) = &scope {
-        qb.push(" AND id IN (");
-        push_scope_ids(&mut qb, scope);
-        qb.push(")");
+        qb.push(" AND ");
+        push_scope_ids(&mut qb, "id", scope);
     }
     qb.push(" GROUP BY album");
     if !a_needle.is_empty() {
@@ -311,4 +322,25 @@ async fn album_page(
         s_artists,
         s_duration,
     })
+}
+
+#[cfg(test)]
+mod scope_sql_tests {
+    use super::*;
+    use sqlx::Execute;
+
+    #[test]
+    fn empty_scope_predicate_never_emits_in_empty() {
+        let mut qb: QueryBuilder<'_, Sqlite> = QueryBuilder::new("SELECT 1 FROM hub_tracks WHERE ");
+        push_scope_ids(&mut qb, "id", &HashSet::new());
+        let sql = qb.build().sql().to_string();
+        assert!(
+            !sql.contains("IN ()"),
+            "empty scope must not emit invalid `IN ()`: {sql}"
+        );
+        assert!(
+            sql.contains("1 = 0"),
+            "empty scope must become the always-false predicate: {sql}"
+        );
+    }
 }

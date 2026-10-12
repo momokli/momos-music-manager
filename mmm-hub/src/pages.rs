@@ -3961,13 +3961,24 @@ struct TagRow {
     source_count: i64,
 }
 
-/// Push a scope id set as a comma-separated bind list into a query builder.
-/// Used by the #331 scope filters (never called with an empty set).
-fn push_scope_ids(qb: &mut QueryBuilder<'_, sqlx::Sqlite>, scope: &HashSet<i64>) {
-    let mut sep = qb.separated(", ");
-    for id in scope {
-        sep.push_bind(*id);
+/// Append a #331 scope predicate `{lhs} IN (ids...)` to `qb`.
+///
+/// An empty scope yields the always-false `1 = 0`: SQLite rejects a bare
+/// `IN ()` with a syntax error, so an active backpack that resolves no tracks
+/// must hide everything instead of breaking the `/tags` / `/albums` query.
+fn push_scope_ids(qb: &mut QueryBuilder<'_, sqlx::Sqlite>, lhs: &str, scope: &HashSet<i64>) {
+    if scope.is_empty() {
+        qb.push("1 = 0");
+        return;
     }
+    qb.push(lhs).push(" IN (");
+    {
+        let mut sep = qb.separated(", ");
+        for id in scope {
+            sep.push_bind(*id);
+        }
+    }
+    qb.push(")");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3995,11 +4006,9 @@ async fn run_tags(
     );
     // Track count reflects the active scope when one is set (honest numbers).
     if let Some(scope) = scope {
-        qb.push(
-            "(SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id AND r.track_id IN (",
-        );
-        push_scope_ids(&mut qb, scope);
-        qb.push(")) AS track_count,");
+        qb.push("(SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id AND ");
+        push_scope_ids(&mut qb, "r.track_id", scope);
+        qb.push(") AS track_count,");
     } else {
         qb.push(
             "(SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id) AS track_count,",
@@ -4040,11 +4049,9 @@ async fn run_tags(
     // Scope filter (#331): a tag is listed only when >= 1 of its tracks is in
     // the active backpack's scope. No active backpack -> no extra condition.
     if let Some(scope) = scope {
-        qb.push(
-            " AND EXISTS (SELECT 1 FROM hub_track_resolved_tags r WHERE r.tag_id = t.id AND r.track_id IN (",
-        );
-        push_scope_ids(&mut qb, scope);
-        qb.push("))");
+        qb.push(" AND EXISTS (SELECT 1 FROM hub_track_resolved_tags r WHERE r.tag_id = t.id AND ");
+        push_scope_ids(&mut qb, "r.track_id", scope);
+        qb.push(")");
     }
     qb.push(") WHERE 1 = 1");
     if strict {
@@ -5380,5 +5387,38 @@ async fn import_traktor_submit(
             ),
         ),
         Err(e) => flash_redirect("/import", format!("Traktor-Import fehlgeschlagen: {e:#}")),
+    }
+}
+
+#[cfg(test)]
+mod scope_sql_tests {
+    use super::*;
+    use sqlx::Execute;
+
+    #[test]
+    fn empty_scope_predicate_never_emits_in_empty() {
+        let mut qb: QueryBuilder<'_, sqlx::Sqlite> =
+            QueryBuilder::new("SELECT 1 FROM hub_tracks WHERE ");
+        push_scope_ids(&mut qb, "id", &HashSet::new());
+        let sql = qb.build().sql().to_string();
+        assert!(
+            !sql.contains("IN ()"),
+            "empty scope must not emit invalid `IN ()`: {sql}"
+        );
+        assert!(
+            sql.contains("1 = 0"),
+            "empty scope must become the always-false predicate: {sql}"
+        );
+    }
+
+    #[test]
+    fn nonempty_scope_predicate_binds_an_in_list() {
+        let ids: HashSet<i64> = [1_i64, 2, 3].into_iter().collect();
+        let mut qb: QueryBuilder<'_, sqlx::Sqlite> =
+            QueryBuilder::new("SELECT 1 FROM hub_tracks WHERE ");
+        push_scope_ids(&mut qb, "id", &ids);
+        let sql = qb.build().sql().to_string();
+        assert!(sql.contains("id IN ("), "expects an IN list: {sql}");
+        assert!(!sql.contains("1 = 0"), "non-empty scope keeps the IN list: {sql}");
     }
 }

@@ -264,6 +264,39 @@ async fn views_are_scoped_and_clear_restores_unscoped() {
 }
 
 #[tokio::test]
+async fn empty_active_scope_yields_200_and_empty_lists() {
+    let app = common::spawn().await;
+    let (owner, cookie) = app.user_with_password("empty-scoper", "pw").await;
+
+    // Content that an *unscoped* view would happily show.
+    let tag = insert_tag(&app.pool, owner, "lonely-tag").await;
+    insert_resolved_tag(&app.pool, tag, app.seed.t_all).await;
+    sqlx::query("UPDATE hub_tracks SET album = 'Solo' WHERE id = ?1")
+        .bind(app.seed.t_all)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+
+    // An active backpack with *no sources* resolves no tracks: Some(empty set),
+    // not None. This is the scope the list views must survive.
+    let bp = insert_backpack(&app.pool, owner, "empty-bp", 0).await;
+    backpacks::set_active(&app.pool, owner, bp).await.unwrap();
+
+    let scope = backpacks::active_scope_track_ids(&app.pool, owner).await.unwrap();
+    assert_eq!(
+        scope,
+        Some(HashSet::<i64>::new()),
+        "active backpack without resolving tracks -> Some(empty set)"
+    );
+
+    // Empty scope must yield an empty (200) list, never a 500 from `IN ()`.
+    let tags = get(&app, "/tags", &cookie).await;
+    assert!(!tags.contains("lonely-tag"), "empty scope hides every tag");
+    let albums = get(&app, "/albums", &cookie).await;
+    assert!(!albums.contains("Solo"), "empty scope hides every album");
+}
+
+#[tokio::test]
 async fn clear_without_referer_falls_back_to_tags() {
     let app = common::spawn().await;
     let (_owner, cookie) = app.user_with_password("scoper2", "pw").await;
