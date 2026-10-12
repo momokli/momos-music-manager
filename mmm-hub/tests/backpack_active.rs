@@ -297,6 +297,31 @@ async fn empty_active_scope_yields_200_and_empty_lists() {
 }
 
 #[tokio::test]
+async fn clear_rejects_protocol_relative_referer() {
+    let app = common::spawn().await;
+    let (_owner, cookie) = app.user_with_password("scoper3", "pw").await;
+
+    // A protocol-relative Referer (`//evil.test/x`) must not be reflected into
+    // the Location header; fall back to the internal `/tags` instead.
+    for referer in ["//evil.test/x", "/\\evil.test/x"] {
+        let resp = app
+            .client()
+            .post(app.url("/backpacks/active/clear"))
+            .header("Cookie", &cookie)
+            .header("Referer", referer)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+        assert_eq!(
+            resp.headers().get("location").and_then(|v| v.to_str().ok()),
+            Some("/tags"),
+            "open-redirect vector {referer:?} must fall back to /tags"
+        );
+    }
+}
+
+#[tokio::test]
 async fn clear_without_referer_falls_back_to_tags() {
     let app = common::spawn().await;
     let (_owner, cookie) = app.user_with_password("scoper2", "pw").await;

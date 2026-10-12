@@ -4285,11 +4285,17 @@ fn referer_path(headers: &HeaderMap) -> Option<String> {
         }
         None => r,
     };
-    if path.starts_with('/') {
-        Some(path.to_string())
-    } else {
-        None
+    // Only accept a genuine single-slash-rooted path. Reject protocol-relative
+    // (`//evil.test/x`) and backslash (`/\evil.test`) vectors so the value can
+    // never be reflected into a `Location` header as an open redirect.
+    let mut chars = path.chars();
+    if chars.next() != Some('/') {
+        return None;
     }
+    if matches!(chars.next(), Some('/') | Some('\\')) {
+        return None;
+    }
+    Some(path.to_string())
 }
 
 /// POST `/backpacks/active/clear` (#331): deactivate the caller's active
