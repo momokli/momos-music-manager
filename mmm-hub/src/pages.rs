@@ -3961,7 +3961,15 @@ struct TagRow {
     source_count: i64,
 }
 
-/// Append a #331 scope predicate `{lhs} IN (ids...)` to `qb`.
+/// Append a #331 scope predicate `{lhs} IN (SELECT value FROM json_each(?))`
+/// to `qb`.
+///
+/// The scope is bound as **one** JSON array, so the number of SQL variables is
+/// constant regardless of the backpack size. A bound literal `IN (?, ?, …)`
+/// list would grow one variable per scoped track and could exceed SQLite's
+/// `SQLITE_MAX_VARIABLE_NUMBER` (and in `/tags` the predicate is emitted twice,
+/// doubling the count) — `json_each` is the temp-table/JOIN-style solution,
+/// without needing a per-request temp table and its connection pinning.
 ///
 /// An empty scope yields the always-false `1 = 0`: SQLite rejects a bare
 /// `IN ()` with a syntax error, so an active backpack that resolves no tracks
@@ -3971,14 +3979,12 @@ fn push_scope_ids(qb: &mut QueryBuilder<'_, sqlx::Sqlite>, lhs: &str, scope: &Ha
         qb.push("1 = 0");
         return;
     }
-    qb.push(lhs).push(" IN (");
-    {
-        let mut sep = qb.separated(", ");
-        for id in scope {
-            sep.push_bind(*id);
-        }
-    }
-    qb.push(")");
+    let json = serde_json::to_string(&scope.iter().copied().collect::<Vec<i64>>())
+        .expect("serialize scope ids");
+    qb.push(lhs)
+        .push(" IN (SELECT value FROM json_each(")
+        .push_bind(json)
+        .push("))");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4131,10 +4137,7 @@ async fn tags_page(
         crate::table::resolve_sort(f.sort.as_deref(), f.dir.as_deref(), allowed, "name", "asc");
 
     // Active-scope filter (#331): loaded once per request; `None` = unscoped.
-    let scope = crate::backpacks::active_scope_track_ids(&st.pool, me)
-        .await
-        .ok()
-        .flatten();
+    let scope = crate::backpacks::active_scope_for_views(&st.pool, me).await;
 
     // Strict token match first; on no hits, a broad pass + one-edit typo tolerance.
     let mut tags = run_tags(
@@ -5418,13 +5421,21 @@ mod scope_sql_tests {
     }
 
     #[test]
-    fn nonempty_scope_predicate_binds_an_in_list() {
-        let ids: HashSet<i64> = [1_i64, 2, 3].into_iter().collect();
+    fn nonempty_scope_predicate_binds_a_single_json_array() {
+        let ids: HashSet<i64> = (1_i64..=1500).collect();
         let mut qb: QueryBuilder<'_, sqlx::Sqlite> =
             QueryBuilder::new("SELECT 1 FROM hub_tracks WHERE ");
         push_scope_ids(&mut qb, "id", &ids);
         let sql = qb.build().sql().to_string();
-        assert!(sql.contains("id IN ("), "expects an IN list: {sql}");
-        assert!(!sql.contains("1 = 0"), "non-empty scope keeps the IN list: {sql}");
+        assert!(
+            sql.contains("id IN (SELECT value FROM json_each(?))"),
+            "expects the json_each predicate: {sql}"
+        );
+        assert!(!sql.contains("1 = 0"), "non-empty scope keeps the predicate: {sql}");
+        assert_eq!(
+            sql.matches('?').count(),
+            1,
+            "scope must bind exactly one variable regardless of size: {sql}"
+        );
     }
 }

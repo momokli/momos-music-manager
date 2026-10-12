@@ -286,6 +286,28 @@ pub async fn active_scope_track_ids(
     Ok(Some(tracks.into_iter().map(|t| t.track_id).collect()))
 }
 
+/// Scope for the hub list views (#331): `None` = unscoped, `Some` = active
+/// backpack's resolved track set.
+///
+/// This is the single error policy shared by `/tags`, `/albums` and `/artists`:
+/// a resolver failure (or any DB hiccup while loading the scope) degrades to
+/// **unscoped** and is logged, instead of silently emptying the library. The
+/// helper therefore never returns an error — an availability-preserving,
+/// fail-open choice documented here so the three views cannot drift apart.
+///
+/// An active backpack that resolves to **no** tracks is *not* an error: it
+/// yields `Some(empty)` and the list views then hide everything (the scope is
+/// genuinely empty).
+pub async fn active_scope_for_views(pool: &SqlitePool, user_id: i64) -> Option<HashSet<i64>> {
+    match active_scope_track_ids(pool, user_id).await {
+        Ok(scope) => scope,
+        Err(e) => {
+            tracing::warn!("active backpack scope load failed for user {user_id}: {e:#}; falling back to unscoped");
+            None
+        }
+    }
+}
+
 // ── Resolver (#330) ───────────────────────────────────────────────────────────
 
 /// One resolved track: its hub id, relevance score, and the distinct backpack

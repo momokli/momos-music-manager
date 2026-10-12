@@ -39,7 +39,12 @@ fn artist_href(name: &str) -> String {
     format!("/artist/{}", urlencoding::encode(name))
 }
 
-/// Append a #331 scope predicate `{lhs} IN (ids...)` to `qb`.
+/// Append a #331 scope predicate `{lhs} IN (SELECT value FROM json_each(?))`
+/// to `qb`.
+///
+/// The scope is bound as **one** JSON array, so the number of SQL variables is
+/// constant regardless of the backpack size (a literal `IN (?, ?, …)` list
+/// would grow one variable per track and risk `SQLITE_MAX_VARIABLE_NUMBER`).
 ///
 /// An empty scope yields the always-false `1 = 0`: SQLite rejects a bare
 /// `IN ()` with a syntax error, so an active backpack that resolves no tracks
@@ -49,14 +54,12 @@ fn push_scope_ids(qb: &mut QueryBuilder<'_, Sqlite>, lhs: &str, scope: &HashSet<
         qb.push("1 = 0");
         return;
     }
-    qb.push(lhs).push(" IN (");
-    {
-        let mut sep = qb.separated(", ");
-        for id in scope {
-            sep.push_bind(*id);
-        }
-    }
-    qb.push(")");
+    let json = serde_json::to_string(&scope.iter().copied().collect::<Vec<i64>>())
+        .expect("serialize scope ids");
+    qb.push(lhs)
+        .push(" IN (SELECT value FROM json_each(")
+        .push_bind(json)
+        .push("))");
 }
 
 #[derive(Deserialize, Default)]
@@ -124,10 +127,7 @@ async fn albums_page(
         crate::table::resolve_sort(f.sort.as_deref(), f.dir.as_deref(), allowed, "album", "asc");
 
     // Active-scope filter (#331): loaded once per request; `None` = unscoped.
-    let scope = crate::backpacks::active_scope_track_ids(&st.pool, nav.id)
-        .await
-        .ok()
-        .flatten();
+    let scope = crate::backpacks::active_scope_for_views(&st.pool, nav.id).await;
 
     // Wrapped so the derived-table aliases can be fuzzy-searched and sorted.
     let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(

@@ -260,10 +260,7 @@ async fn artists_page(
 
     // Active-scope filter (#331): keep only tracks in the active backpack's
     // scope before folding artists, so aggregates reflect the scoped set.
-    let scope = crate::backpacks::active_scope_track_ids(&st.pool, me)
-        .await
-        .ok()
-        .flatten();
+    let scope = crate::backpacks::active_scope_for_views(&st.pool, me).await;
     let tracks: Vec<TrackInfo> = match &scope {
         Some(set) => tracks.into_iter().filter(|t| set.contains(&t.id)).collect(),
         None => tracks,

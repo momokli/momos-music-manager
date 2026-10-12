@@ -338,3 +338,47 @@ async fn clear_without_referer_falls_back_to_tags() {
         Some("/tags")
     );
 }
+
+/// A scope far larger than the old `resolve` clamp (500) must still filter the
+/// SQL views: the predicate binds the scope as one `json_each` array, so no
+/// per-track SQL variable is emitted. `lens("newest")` resolves to every hub
+/// track, giving us a >500-element scope without one backpack item per track.
+#[tokio::test]
+async fn large_scope_filters_views_without_variable_explosion() {
+    let app = common::spawn().await;
+    let (owner, cookie) = app.user_with_password("big-scoper", "pw").await;
+
+    // 1200 extra tracks (> the old 500-row clamp and beyond a literal 999-var
+    // `IN` list); attach a tag to the first so the scoped view has a marker.
+    let mut first_new: Option<i64> = None;
+    for i in 0..1200 {
+        let t = insert_track(&app.pool, &format!("bulk-{i}")).await;
+        if first_new.is_none() {
+            first_new = Some(t);
+        }
+    }
+    let marker = first_new.unwrap();
+    let tag = insert_tag(&app.pool, owner, "bulk-tag").await;
+    insert_resolved_tag(&app.pool, tag, marker).await;
+    let empty_tag = insert_tag(&app.pool, owner, "no-track-tag").await;
+    let _ = empty_tag;
+
+    let bp = insert_backpack(&app.pool, owner, "big-bp", 0).await;
+    backpacks::add_source(&app.pool, bp, SourceRef::Lens("newest".to_string()))
+        .await
+        .unwrap();
+    backpacks::set_active(&app.pool, owner, bp).await.unwrap();
+
+    let scope = backpacks::active_scope_track_ids(&app.pool, owner)
+        .await
+        .unwrap()
+        .expect("some");
+    assert!(scope.len() > 500, "scope exceeds the old clamp: {}", scope.len());
+
+    // Must be a 200 (no SQLITE_MAX_VARIABLE_NUMBER error), with in-scope tags
+    // listed and a tag without tracks hidden.
+    let tags = get(&app, "/tags", &cookie).await;
+    assert!(tags.contains("bulk-tag"), "in-scope tag is listed");
+    assert!(!tags.contains("no-track-tag"), "tag without scoped tracks is hidden");
+    get(&app, "/albums", &cookie).await;
+}
