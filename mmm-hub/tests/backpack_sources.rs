@@ -338,3 +338,197 @@ async fn list_sources_empty_for_unknown_backpack() {
     let items = backpacks::list_sources(&pool, 999).await.unwrap();
     assert!(items.is_empty());
 }
+
+// --- Edge cases beyond the plan's AC 1-7 -------------------------------------
+
+/// All three `curate::LENSES` keys (not just one) must be accepted and persisted.
+#[tokio::test]
+async fn all_known_lens_keys_are_accepted() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let bp = insert_backpack(&pool, user, "B", 0).await;
+
+    for key in ["newest", "liked", "unheard"] {
+        let id = backpacks::add_source(&pool, bp, SourceRef::Lens(key.into()))
+            .await
+            .unwrap_or_else(|e| panic!("lens {key} must be accepted: {e}"));
+        let (_kind, _tag, _pl, lens, _tr) = source_columns(&pool, id).await;
+        assert_eq!(lens.as_deref(), Some(key));
+    }
+    assert_eq!(count_items(&pool, bp).await, 3);
+}
+
+/// A rejected lens key writes **no** row *and* leaves the backpack timestamp alone.
+#[tokio::test]
+async fn unknown_lens_writes_no_row_and_does_not_bump_updated_at() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let bp = insert_backpack(&pool, user, "B", 0).await;
+
+    let before = backpack_updated_at(&pool, bp).await;
+    assert!(
+        backpacks::add_source(&pool, bp, SourceRef::Lens("bogus".into())).await.is_err()
+    );
+    assert_eq!(count_items(&pool, bp).await, 0);
+    assert_eq!(
+        backpack_updated_at(&pool, bp).await,
+        before,
+        "a failed add_source must not bump updated_at"
+    );
+}
+
+/// Positions are numbered independently per backpack, and an append after a delete
+/// takes `MAX+1` (no compaction / no position reuse).
+#[tokio::test]
+async fn position_is_per_backpack_and_monotonic_after_delete() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let a = insert_backpack(&pool, user, "A", 0).await;
+    let b = insert_backpack(&pool, user, "B", 0).await;
+    let t1 = insert_tag(&pool, user, "one").await;
+    let t2 = insert_tag(&pool, user, "two").await;
+
+    backpacks::add_source(&pool, a, SourceRef::Tag(t1)).await.unwrap();
+    backpacks::add_source(&pool, b, SourceRef::Tag(t1)).await.unwrap();
+    backpacks::add_source(&pool, b, SourceRef::Tag(t2)).await.unwrap();
+
+    let pos_a: Vec<i64> = backpacks::list_sources(&pool, a)
+        .await
+        .unwrap()
+        .iter()
+        .map(|i| i.position)
+        .collect();
+    let pos_b: Vec<i64> = backpacks::list_sources(&pool, b)
+        .await
+        .unwrap()
+        .iter()
+        .map(|i| i.position)
+        .collect();
+    assert_eq!(pos_a, vec![1], "each backpack numbers its sources independently");
+    assert_eq!(pos_b, vec![1, 2]);
+
+    // Delete the *first* item: the surviving item keeps position 2 (no compaction)
+    // and a fresh append takes MAX+1 = 3.
+    let first = backpacks::list_sources(&pool, b).await.unwrap().remove(0);
+    assert!(backpacks::remove_source(&pool, first.id).await.unwrap());
+    backpacks::add_source(&pool, b, SourceRef::Tag(t1)).await.unwrap();
+
+    let pos_b2: Vec<i64> = backpacks::list_sources(&pool, b)
+        .await
+        .unwrap()
+        .iter()
+        .map(|i| i.position)
+        .collect();
+    assert_eq!(pos_b2, vec![2, 3], "append uses MAX+1; existing positions are not compacted");
+}
+
+/// `clear_sources` returns 0 for an empty backpack and only touches its target.
+#[tokio::test]
+async fn clear_sources_empty_and_isolated_to_target_backpack() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let a = insert_backpack(&pool, user, "A", 0).await;
+    let b = insert_backpack(&pool, user, "B", 0).await;
+    let tag = insert_tag(&pool, user, "dark").await;
+
+    assert_eq!(
+        backpacks::clear_sources(&pool, a).await.unwrap(),
+        0,
+        "clearing an empty backpack deletes nothing"
+    );
+
+    backpacks::add_source(&pool, a, SourceRef::Tag(tag)).await.unwrap();
+    backpacks::add_source(&pool, b, SourceRef::Tag(tag)).await.unwrap();
+
+    assert_eq!(backpacks::clear_sources(&pool, a).await.unwrap(), 1);
+    assert_eq!(count_items(&pool, a).await, 0);
+    assert_eq!(count_items(&pool, b).await, 1, "sibling backpack untouched");
+}
+
+/// Deleting a referenced playlist or track cascades to its backpack item too.
+#[tokio::test]
+async fn cascade_deletes_playlist_and_track_items() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let bp = insert_backpack(&pool, user, "B", 0).await;
+    let pl = insert_playlist(&pool, user, "pl-9").await;
+    let tr = insert_track(&pool, "t-9").await;
+
+    backpacks::add_source(&pool, bp, SourceRef::Playlist(pl)).await.unwrap();
+    backpacks::add_source(&pool, bp, SourceRef::Track(tr)).await.unwrap();
+    assert_eq!(count_items(&pool, bp).await, 2);
+
+    sqlx::query("DELETE FROM hub_playlists WHERE id = ?1")
+        .bind(pl)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count_items(&pool, bp).await, 1, "playlist delete cascades to item");
+
+    sqlx::query("DELETE FROM hub_tracks WHERE id = ?1")
+        .bind(tr)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count_items(&pool, bp).await, 0, "track delete cascades to item");
+}
+
+/// Removing a non-existent item returns false and must not bump any timestamp.
+#[tokio::test]
+async fn remove_unknown_item_is_false_without_bump() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let bp = insert_backpack(&pool, user, "B", 0).await;
+    let before = backpack_updated_at(&pool, bp).await;
+
+    assert!(!backpacks::remove_source(&pool, 424242).await.unwrap());
+    assert_eq!(
+        backpack_updated_at(&pool, bp).await,
+        before,
+        "a no-op remove must not bump updated_at"
+    );
+}
+
+/// Foreign keys are enforced: unknown tag or backpack ids fail and write nothing.
+#[tokio::test]
+async fn add_source_with_unknown_reference_fails_and_writes_nothing() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let bp = insert_backpack(&pool, user, "B", 0).await;
+    let tr = insert_track(&pool, "t-1").await;
+
+    assert!(
+        backpacks::add_source(&pool, bp, SourceRef::Tag(9999)).await.is_err(),
+        "unknown tag id must violate the FK"
+    );
+    assert_eq!(count_items(&pool, bp).await, 0);
+
+    assert!(
+        backpacks::add_source(&pool, 8888, SourceRef::Track(tr)).await.is_err(),
+        "unknown backpack id must violate the FK"
+    );
+}
+
+/// Defence in depth: the DB CHECK still rejects a row with two source columns.
+#[tokio::test]
+async fn db_check_rejects_two_source_columns() {
+    let (_dir, pool) = setup().await;
+    let user = insert_user(&pool, "alice").await;
+    let bp = insert_backpack(&pool, user, "B", 0).await;
+    let tag = insert_tag(&pool, user, "dark").await;
+    let tr = insert_track(&pool, "t-1").await;
+
+    let res = sqlx::query(
+        "INSERT INTO hub_backpack_items
+            (backpack_id, source_kind, source_tag_id, source_track_id, position, added_at)
+         VALUES (?1, 'tag', ?2, ?3, 1, ?4)",
+    )
+    .bind(bp)
+    .bind(tag)
+    .bind(tr)
+    .bind(TS)
+    .execute(&pool)
+    .await;
+    assert!(res.is_err(), "the exactly-one-source CHECK must reject two columns");
+    assert_eq!(count_items(&pool, bp).await, 0);
+}
