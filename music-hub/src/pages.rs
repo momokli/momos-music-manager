@@ -26,6 +26,10 @@ pub fn router(state: AppState) -> Router {
         .route("/tags", get(tags_page))
         .route("/backpacks", get(backpacks_page))
         .route("/backpacks/active/clear", post(backpack_active_clear))
+        .route("/backpacks/create", post(backpack_create))
+        .route("/backpacks/{id}/rename", post(backpack_rename))
+        .route("/backpacks/{id}/delete", post(backpack_delete))
+        .route("/backpacks/{id}/active", post(backpack_toggle_active))
         .route("/tags/create", post(tag_create))
         .route("/tag-search", get(tag_search_page))
         .route("/revisit", get(revisit_page))
@@ -4310,6 +4314,7 @@ struct SourceRow {
 
 /// One backpack card of the `/backpacks` view.
 struct BackpackCard {
+    id: i64,
     name: String,
     is_active: bool,
     source_count: usize,
@@ -4327,8 +4332,13 @@ struct BackpacksPage {
 
 /// GET `/backpacks` (#332): read-only overview of the caller's backpacks, each
 /// with its source count, live track count (unclamped resolve) and labelled
-/// sources. No session -> `/login`.
-async fn backpacks_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+/// sources. No session -> `/login`. Reads the optional `?msg=` flash set by the
+/// mutating handlers (#328).
+async fn backpacks_page(
+    State(st): State<AppState>,
+    Query(msg): Query<AdminMsg>,
+    headers: HeaderMap,
+) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "backpacks").await else {
         return Redirect::to("/login").into_response();
     };
@@ -4351,6 +4361,7 @@ async fn backpacks_page(State(st): State<AppState>, headers: HeaderMap) -> Respo
             .await
             .unwrap_or(0);
         cards.push(BackpackCard {
+            id: bp.id,
             name: bp.name,
             is_active: bp.is_active != 0,
             source_count: views.len(),
@@ -4367,7 +4378,7 @@ async fn backpacks_page(State(st): State<AppState>, headers: HeaderMap) -> Respo
 
     render(&BackpacksPage {
         nav,
-        flash: String::new(),
+        flash: msg.msg.unwrap_or_default(),
         cards,
     })
 }
@@ -4381,6 +4392,98 @@ async fn backpack_active_clear(State(st): State<AppState>, headers: HeaderMap) -
     let _ = crate::backpacks::clear_active(&st.pool, nav.id).await;
     let back = referer_path(&headers).unwrap_or_else(|| "/tags".to_string());
     Redirect::to(&back).into_response()
+}
+
+// ── backpack CRUD (#328) ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct BackpackCreateForm {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct BackpackRenameForm {
+    name: String,
+}
+
+/// POST `/backpacks/create` (#328): create a backpack for the caller, then
+/// redirect back to `/backpacks`. Errors (empty/duplicate name) become a
+/// `?msg=`-flash, never a 500.
+async fn backpack_create(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<BackpackCreateForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "backpacks").await else {
+        return Redirect::to("/login").into_response();
+    };
+    match crate::backpacks::create_backpack(&st.pool, nav.id, &f.name).await {
+        Ok(_) => Redirect::to("/backpacks").into_response(),
+        Err(e) => flash_redirect("/backpacks", format!("Fehler: {e}")),
+    }
+}
+
+/// POST `/backpacks/{id}/rename` (#328): rename one of the caller's backpacks.
+/// Foreign/missing targets and empty/duplicate names become a `?msg=`-flash.
+async fn backpack_rename(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<BackpackRenameForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "backpacks").await else {
+        return Redirect::to("/login").into_response();
+    };
+    match crate::backpacks::rename_backpack(&st.pool, nav.id, id, &f.name).await {
+        Ok(()) => Redirect::to("/backpacks").into_response(),
+        Err(e) => flash_redirect("/backpacks", format!("Fehler: {e}")),
+    }
+}
+
+/// POST `/backpacks/{id}/delete` (#328): delete one of the caller's backpacks
+/// (items go via CASCADE). Foreign/missing targets become a `?msg=`-flash.
+async fn backpack_delete(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "backpacks").await else {
+        return Redirect::to("/login").into_response();
+    };
+    match crate::backpacks::delete_backpack(&st.pool, nav.id, id).await {
+        Ok(true) => Redirect::to("/backpacks").into_response(),
+        Ok(false) => flash_redirect("/backpacks", "Backpack nicht gefunden".to_string()),
+        Err(e) => flash_redirect("/backpacks", format!("Fehler: {e}")),
+    }
+}
+
+/// POST `/backpacks/{id}/active` (#328): toggle the caller's active backpack.
+/// Activates a currently inactive target (via [`backpacks::set_active`], which
+/// enforces ownership and shifts the single active row) or deactivates an
+/// already active one (via [`backpacks::clear_active`]). A foreign backpack is a
+/// flash error; the "at most one active" invariant is left to the existing
+/// helpers.
+async fn backpack_toggle_active(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "backpacks").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let is_active = match crate::backpacks::active_backpack(&st.pool, nav.id).await {
+        Ok(active) => active.map(|bp| bp.id == id).unwrap_or(false),
+        Err(e) => return flash_redirect("/backpacks", format!("Fehler: {e}")),
+    };
+    let result = if is_active {
+        crate::backpacks::clear_active(&st.pool, nav.id).await.map(|_| ())
+    } else {
+        crate::backpacks::set_active(&st.pool, nav.id, id).await
+    };
+    match result {
+        Ok(()) => Redirect::to("/backpacks").into_response(),
+        Err(e) => flash_redirect("/backpacks", format!("Fehler: {e}")),
+    }
 }
 
 // ── weighted tag search + revisit (#295, #297) ────────────────────────────────

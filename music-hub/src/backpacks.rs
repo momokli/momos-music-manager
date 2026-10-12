@@ -296,6 +296,116 @@ pub async fn clear_sources(pool: &SqlitePool, backpack_id: i64) -> Result<u64> {
     Ok(res.rows_affected())
 }
 
+// ── CRUD (#328) ───────────────────────────────────────────────────────────────
+
+/// Create a new backpack owned by `user_id`.
+///
+/// The name is trimmed; an empty (or whitespace-only) name is an error and
+/// writes nothing. Names are unique per user case-insensitively
+/// (`idx_hub_backpacks_user_name`), so a clash — including one that differs only
+/// by case — is rejected with a user-facing error *before* the insert (never a
+/// raw `UNIQUE` constraint failure). A name already used by *another* user is
+/// allowed. The new row starts inactive (`is_active = 0`) with
+/// `created_at = updated_at = now`. Returns the new backpack id.
+pub async fn create_backpack(pool: &SqlitePool, user_id: i64, name: &str) -> Result<i64> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("backpack name required");
+    }
+
+    let clash = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM hub_backpacks WHERE user_id = ?1 AND name = ?2 COLLATE NOCASE",
+    )
+    .bind(user_id)
+    .bind(name)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    if clash.is_some() {
+        bail!("es gibt schon ein Backpack mit diesem Namen");
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_backpacks (user_id, name, is_active, created_at, updated_at)
+         VALUES (?1, ?2, 0, ?3, ?3)
+         RETURNING id",
+    )
+    .bind(user_id)
+    .bind(name)
+    .bind(&now)
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
+}
+
+/// Rename an existing backpack (owner only).
+///
+/// Trims the name (empty -> error), rejects a case-insensitive name clash with
+/// the user's *other* backpacks (`id <> ?`, so renaming to the same name is
+/// fine), and bumps `updated_at`. A missing or foreign `backpack_id` is an error
+/// and writes nothing (no silent cross-user access).
+pub async fn rename_backpack(
+    pool: &SqlitePool,
+    user_id: i64,
+    backpack_id: i64,
+    name: &str,
+) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("backpack name required");
+    }
+
+    let clash = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM hub_backpacks
+          WHERE user_id = ?1 AND name = ?2 COLLATE NOCASE AND id <> ?3",
+    )
+    .bind(user_id)
+    .bind(name)
+    .bind(backpack_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    if clash.is_some() {
+        bail!("es gibt schon ein Backpack mit diesem Namen");
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let rows = sqlx::query(
+        "UPDATE hub_backpacks SET name = ?1, updated_at = ?2
+          WHERE id = ?3 AND user_id = ?4",
+    )
+    .bind(name)
+    .bind(&now)
+    .bind(backpack_id)
+    .bind(user_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if rows == 0 {
+        bail!("backpack not found or not yours");
+    }
+    Ok(())
+}
+
+/// Delete a backpack (owner only). Returns `true` when a row was removed.
+///
+/// Items vanish via `ON DELETE CASCADE` — no manual item cleanup. A foreign or
+/// missing `backpack_id` deletes nothing and yields `Ok(false)`. Deleting the
+/// user's active backpack simply leaves the user with no active backpack (the
+/// partial UNIQUE index permits zero active rows).
+pub async fn delete_backpack(pool: &SqlitePool, user_id: i64, backpack_id: i64) -> Result<bool> {
+    let rows = sqlx::query("DELETE FROM hub_backpacks WHERE id = ?1 AND user_id = ?2")
+        .bind(backpack_id)
+        .bind(user_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(rows > 0)
+}
+
 // ── Active scope (#331) ──────────────────────────────────────────────────────
 
 /// The user's active backpack, if any.
