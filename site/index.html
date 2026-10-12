@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Spelunke — music stack</title>
+    <meta
+      name="description"
+      content="Spelunke: music-hub (Hub-Web-App), music-api (Download- & Metadaten-Authority), kellner (lokaler Companion)."
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0d0f13;
+        --panel: #161a21;
+        --line: #262c36;
+        --fg: #e7ebf0;
+        --muted: #93a0b4;
+        --accent: #7bd88f;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      main { max-width: 900px; margin: 0 auto; padding: 4rem 1.25rem 3rem; }
+      header { margin-bottom: 2.5rem; }
+      h1 { font-size: 2.4rem; margin: 0 0 0.35rem; letter-spacing: -0.02em; }
+      header p { color: var(--muted); margin: 0; }
+      .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+      article {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1.25rem 1.35rem;
+      }
+      article h2 { font-size: 1.05rem; margin: 0 0 0.5rem; }
+      article p { color: var(--muted); font-size: 0.92rem; margin: 0 0 0.9rem; }
+      article a { color: var(--accent); text-decoration: none; font-weight: 600; }
+      article a:hover { text-decoration: underline; }
+      .tag {
+        display: inline-block;
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 0.1rem 0.55rem;
+        margin-bottom: 0.6rem;
+      }
+      footer { margin-top: 2.5rem; color: var(--muted); font-size: 0.85rem; }
+      footer a { color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Spelunke</h1>
+        <p>music stack — two always-on servers and a local companion.</p>
+      </header>
+
+      <div class="grid">
+        <article>
+          <span class="tag">web</span>
+          <h2>music-hub</h2>
+          <p>
+            Multi-user web app over Spotify / SoundCloud / YouTube / Traktor:
+            tags, playlists, collectives, digging, discovery, now-playing.
+          </p>
+          <a href="https://hub.zukkafabrik.de">hub.zukkafabrik.de →</a>
+        </article>
+
+        <article>
+          <span class="tag">authority</span>
+          <h2>music-api</h2>
+          <p>
+            Download- und Metadaten-Authority: ISRC/Order → Deezer / deemix /
+            yt-dlp / spotDL, Object-Store und BPM/Key-Katalog.
+          </p>
+        </article>
+
+        <article>
+          <span class="tag">local</span>
+          <h2>kellner</h2>
+          <p>
+            Lokaler, cross-platform Companion: Backpack-Upkeep, Backups der
+            Library → music-api, Traktor-<code>collection.nml</code>-Upload.
+          </p>
+        </article>
+      </div>
+
+      <footer>
+        Repo: <a href="https://github.com/momokli/momos-music-manager">github.com/momokli/momos-music-manager</a>
+      </footer>
+    </main>
+  </body>
+</html>
