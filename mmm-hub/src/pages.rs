@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .route("/overlap/enrich", post(overlap_enrich))
         .route("/playlists/similar", get(similar_page))
         .route("/tags", get(tags_page))
+        .route("/backpacks/active/clear", post(backpack_active_clear))
         .route("/tags/create", post(tag_create))
         .route("/tag-search", get(tag_search_page))
         .route("/revisit", get(revisit_page))
@@ -3960,6 +3961,15 @@ struct TagRow {
     source_count: i64,
 }
 
+/// Push a scope id set as a comma-separated bind list into a query builder.
+/// Used by the #331 scope filters (never called with an empty set).
+fn push_scope_ids(qb: &mut QueryBuilder<'_, sqlx::Sqlite>, scope: &HashSet<i64>) {
+    let mut sep = qb.separated(", ");
+    for id in scope {
+        sep.push_bind(*id);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_tags(
     pool: &sqlx::SqlitePool,
@@ -3974,15 +3984,29 @@ async fn run_tags(
     allowed: &[(&str, &str)],
     strict: bool,
     limit: i64,
+    scope: Option<&HashSet<i64>>,
 ) -> Vec<TagRow> {
     let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
         "SELECT * FROM (SELECT t.id AS id, t.name AS name, u.slug AS owner,
                 COALESCE(t.type,'') AS type_name,
                 (SELECT GROUP_CONCAT(p.name, ' · ')
                    FROM hub_tag_parents tp JOIN hub_tags p ON p.id = tp.parent_tag_id
-                  WHERE tp.tag_id = t.id) AS parents,
-                (SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id) AS track_count,
-                (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count
+                  WHERE tp.tag_id = t.id) AS parents,",
+    );
+    // Track count reflects the active scope when one is set (honest numbers).
+    if let Some(scope) = scope {
+        qb.push(
+            "(SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id AND r.track_id IN (",
+        );
+        push_scope_ids(&mut qb, scope);
+        qb.push(")) AS track_count,");
+    } else {
+        qb.push(
+            "(SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id) AS track_count,",
+        );
+    }
+    qb.push(
+        "(SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count
            FROM hub_tags t
            JOIN hub_users u ON u.id = t.owner_user_id
           WHERE 1 = 1",
@@ -4012,6 +4036,15 @@ async fn run_tags(
             }
         }
         qb.push(")");
+    }
+    // Scope filter (#331): a tag is listed only when >= 1 of its tracks is in
+    // the active backpack's scope. No active backpack -> no extra condition.
+    if let Some(scope) = scope {
+        qb.push(
+            " AND EXISTS (SELECT 1 FROM hub_track_resolved_tags r WHERE r.tag_id = t.id AND r.track_id IN (",
+        );
+        push_scope_ids(&mut qb, scope);
+        qb.push("))");
     }
     qb.push(") WHERE 1 = 1");
     if strict {
@@ -4090,6 +4123,12 @@ async fn tags_page(
     let (sort, dir) =
         crate::table::resolve_sort(f.sort.as_deref(), f.dir.as_deref(), allowed, "name", "asc");
 
+    // Active-scope filter (#331): loaded once per request; `None` = unscoped.
+    let scope = crate::backpacks::active_scope_track_ids(&st.pool, me)
+        .await
+        .ok()
+        .flatten();
+
     // Strict token match first; on no hits, a broad pass + one-edit typo tolerance.
     let mut tags = run_tags(
         &st.pool,
@@ -4104,6 +4143,7 @@ async fn tags_page(
         allowed,
         true,
         1000,
+        scope.as_ref(),
     )
     .await;
     if tags.is_empty() && !q.is_empty() {
@@ -4121,6 +4161,7 @@ async fn tags_page(
             allowed,
             false,
             3000,
+            scope.as_ref(),
         )
         .await;
         tags.retain(|t| {
@@ -4222,6 +4263,37 @@ async fn tag_create(
         }
     }
     Redirect::to("/tags").into_response()
+}
+
+/// Extract the path portion of a `Referer` header (absolute or relative).
+fn referer_path(headers: &HeaderMap) -> Option<String> {
+    let r = headers.get(axum::http::header::REFERER)?.to_str().ok()?;
+    let path = match r.find("://") {
+        Some(i) => {
+            let after = &r[i + 3..];
+            match after.find('/') {
+                Some(j) => &after[j..],
+                None => return None,
+            }
+        }
+        None => r,
+    };
+    if path.starts_with('/') {
+        Some(path.to_string())
+    } else {
+        None
+    }
+}
+
+/// POST `/backpacks/active/clear` (#331): deactivate the caller's active
+/// backpack scope, then redirect back to the referring view (or `/tags`).
+async fn backpack_active_clear(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::backpacks::clear_active(&st.pool, nav.id).await;
+    let back = referer_path(&headers).unwrap_or_else(|| "/tags".to_string());
+    Redirect::to(&back).into_response()
 }
 
 // ── weighted tag search + revisit (#295, #297) ────────────────────────────────

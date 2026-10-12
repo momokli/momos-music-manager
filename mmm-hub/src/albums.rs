@@ -11,6 +11,7 @@ use serde::Deserialize;
 use sqlx::{QueryBuilder, Row, Sqlite};
 
 use crate::api::AppState;
+use std::collections::HashSet;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -36,6 +37,14 @@ fn album_href(name: &str) -> String {
 
 fn artist_href(name: &str) -> String {
     format!("/artist/{}", urlencoding::encode(name))
+}
+
+/// Push a scope id set as a comma-separated bind list into a query builder.
+fn push_scope_ids(qb: &mut QueryBuilder<'_, Sqlite>, scope: &HashSet<i64>) {
+    let mut sep = qb.separated(", ");
+    for id in scope {
+        sep.push_bind(*id);
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -102,6 +111,12 @@ async fn albums_page(
     let (sort, dir) =
         crate::table::resolve_sort(f.sort.as_deref(), f.dir.as_deref(), allowed, "album", "asc");
 
+    // Active-scope filter (#331): loaded once per request; `None` = unscoped.
+    let scope = crate::backpacks::active_scope_track_ids(&st.pool, nav.id)
+        .await
+        .ok()
+        .flatten();
+
     // Wrapped so the derived-table aliases can be fuzzy-searched and sorted.
     let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
         "SELECT * FROM (SELECT album AS album,
@@ -109,9 +124,16 @@ async fn albums_page(
                 MAX(artists) AS artists,
                 MAX(image_url) AS cover
            FROM hub_tracks
-          WHERE album IS NOT NULL AND TRIM(album) <> ''
-          GROUP BY album",
+          WHERE album IS NOT NULL AND TRIM(album) <> ''",
     );
+    // Scope filter: an album is listed only when >= 1 of its tracks is in the
+    // active backpack's scope; `COUNT(*)` then reflects the scoped set.
+    if let Some(scope) = &scope {
+        qb.push(" AND id IN (");
+        push_scope_ids(&mut qb, scope);
+        qb.push(")");
+    }
+    qb.push(" GROUP BY album");
     if !a_needle.is_empty() {
         qb.push(" HAVING instr(lower(COALESCE(MAX(artists), '')), ")
             .push_bind(a_needle.clone())

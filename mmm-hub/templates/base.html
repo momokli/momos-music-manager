@@ -1086,6 +1086,16 @@
         </li>
       </ul>
       <ul>
+        {% match nav.active_backpack %}
+        {% when Some with (name) %}
+        <li>
+          <span class="hub-badge" title="Globaler Backpack-Scope aktiv">Scope: {{ name }}</span>
+          <form method="post" action="/backpacks/active/clear">
+            <button class="outline secondary" type="submit">Scope aufheben</button>
+          </form>
+        </li>
+        {% when None %}
+        {% endmatch %}
         <li>
           {% if nav.spotify_connected %}
           <span class="hub-badge hub-badge-ok" title="{% if nav.spotify_label != "" %}{{ nav.spotify_label }}{% endif %}">Spotify verbunden</span>
