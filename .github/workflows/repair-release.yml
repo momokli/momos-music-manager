@@ -1,5 +1,7 @@
 name: Repair release assets
 
+# MMM sunset 2026-10; Pipeline retired (code moved to legacy/mmm)
+
 # One-shot repair for a mislabeled tag release: renames the versioned assets
 # from the old (embedded) version to the tag version, regenerates per-asset
 # checksums + the aggregate SHA256SUMS, re-signs the manifest and removes the

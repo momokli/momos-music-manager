@@ -1,688 +1,80 @@
-# momo's music manager
+# Music stack — `music-hub` · `music-api` · `kellner`
 
-> Multi-service music library management for DJs — local files + Spotify streaming with harmonic matching, tag organization, and Traktor integration.
-
----
-
-## Quick Start
-
-```bash
-# Start the server (frontend embedded, one binary)
-cargo run -- serve
-
-# Open in browser
-open http://localhost:3000
-```
+> **Scope change (2026-10-12).** This repository is no longer "one app". It is the
+> monorepo for a **music stack**: two always-on servers and a local companion.
+> **Momo's Music Manager (MMM)** — the original single-user Mac app — is
+> **decommissioned / sunset**; its code lives under `legacy/mmm/`
+> (see [Legacy](#legacy-mmm--sunset)).
 
 ---
 
-## Website / Landing Page
+## The stack
 
-The project has a static landing page (features, screenshots, download button)
-deployed to GitHub Pages:
+| Project                             | Path                                                                  | Role                                                                                                                                               | Runs on          | Docs                                                                             |
+| ----------------------------------- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | -------------------------------------------------------------------------------- |
+| **music-hub** (codename _spelunke_) | [`music-hub/`](music-hub/)                                            | Multi-user web UI + DB over Spotify / SoundCloud / YouTube / Traktor. Tags, playlists, collectives, digging, discovery, now-playing.               | always-on server | [`music-hub/AGENT.md`](music-hub/AGENT.md)                                       |
+| **music-api**                       | [`music-api/`](music-api/)                                            | The **authority**: ISRC/order → download service (Deezer / deemix / yt-dlp / spotDL), object store, and the **BPM/key/metadata catalogue**.        | always-on server | [`music-api/README.md`](music-api/README.md)                                     |
+| **kellner**                         | [`kellner/`](kellner/)                                                | Local **cross-platform companion**: Backpack upkeep, **backups of the music library → music-api**, Traktor `collection.nml` **upload**, downloads. | each Mac / PC    | [`kellner/AGENT.md`](kellner/AGENT.md)                                           |
+| ~~MMM~~                             | `legacy/mmm/` (`src/`, `frontend/`, `migrations/`, `tests/`, `site/`) | The original single-user Mac app. **Sunset.**                                                                                                      | —                | [`docs/legacy/mmm-README.md`](docs/legacy/mmm-README.md), [`AGENT.md`](AGENT.md) |
 
-- **URL:** <https://momokli.github.io/momos-music-manager/>
-- **Source:** [`site/`](site/) — plain HTML/CSS, no build step
-- **Deploy:** [`.github/workflows/pages.yml`](.github/workflows/pages.yml) —
-  runs on every push to `main` that touches `site/**`
-
-The landing page now has **download buttons for all supported platforms**
-(macOS universal DMG, Windows x64 + arm64 zip, Linux x64 + arm64 tar.gz),
-each with a SHA256 checksum link and verification instructions, pointing at
-**stable asset names** on the rolling `latest-main` pre-release (the CI
-uploads e.g. `momos-music-manager-latest-linux-x64.tar.gz` under that stable
-name on every main build):
-
-- <https://github.com/momokli/momos-music-manager/releases/tag/latest-main>
-- <https://github.com/momokli/momos-music-manager/releases/download/latest-main/SHA256SUMS>
-
-The `latest-main` release carries **Linux (x64 + arm64) tar.gz and
-Windows (x64 + arm64) zip** artifacts with checksums — see
-[docs/PLATFORM-SUPPORT.md](docs/PLATFORM-SUPPORT.md) for the full matrix and
-[docs/RELEASE-ROADMAP.md](docs/RELEASE-ROADMAP.md) for the iterative next
-steps (versioned releases, code signing, notarization, AppImage).
-
-A custom domain (e.g. `mmm.simonklimke.de`) is intentionally **not** configured
-— the DNS entry is managed by the home `home_domains.txt` script on the
-Fritz!Box and would collide with it. It can be added later via a `CNAME` file
-plus a DNS exception.
+**How they relate:** the hub _orders_ and _reads_; **music-api downloads, analyses,
+remembers and expands**; kellner keeps the local machines in sync with music-api.
+Architecture plan: [`plans/proposed/hub-crawl-everything.md`](plans/proposed/hub-crawl-everything.md).
 
 ---
 
-### Prerequisites
+## Repo layout
 
-- Rust 1.85+ (and Cargo) — the project uses the Rust 2024 edition
-- Spotify Developer Account (optional, only for sync features)
-
-SQLite is compiled in (sqlx `bundled`) and TLS uses rustls — **no system
-SQLite/OpenSSL development packages needed** on any platform.
-
-No Python, Node.js, or separate dev server needed. The entire frontend is embedded in the binary via `rust-embed`.
-
----
-
-## Configuration
-
-Configuration sources (highest priority wins):
-
-1. **Environment variables** — set directly or via `.env` file
-2. **`~/.config/momos-music-manager/config.toml`** — persistent config
-3. **Built-in defaults**
-
-### config.toml
-
-```toml
-[database]
-url = "sqlite:~/.local/share/momos-music-manager/library.db"
-
-[server]
-host = "127.0.0.1"
-port = 3000
-# public_url = "https://mmm.mydomain.de"   # optional, for OAuth behind reverse proxy
-
-[spotify]
-client_id     = "your_spotify_client_id"
-client_secret = "your_spotify_client_secret"
-redirect_uri  = "http://localhost:3000/callback"
-
-[soundcloud]
-api_key  = "your_soundcloud_api_key"
-user_id  = "your_soundcloud_user_id"
-
-[youtube]
-api_key      = "your_youtube_api_key"
-playlist_id  = "your_youtube_playlist_id"
-
-[music_api]
-# ISRC order API in front of deemix (download authority since v1.13.0).
-enabled       = true
-base_url      = "http://192.168.178.200:8710"
-token         = "your_music_api_token"
-batch_size    = 200   # ISRCs ordered per consumer cycle
-interval_secs = 300   # seconds between cycles
-
-[store]
-# Remote content-addressed object store. Files are uploaded here and pruned
-# locally once present; the Backpack set is never pruned.
-enabled  = true
-base_url = "http://192.168.178.200:8710"
-token    = "your_store_token"
-
-[autoupdate]
-enabled = true
-# base_url = "https://github.com/momokli/momos-music-manager/releases/download/latest-main"
-# health_grace_secs = 60
 ```
-
-### Environment variables (override config.toml)
-
-| Variable                             | Description                                                                                                                                                                                                         |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                       | Database URL, e.g. `sqlite:~/.../library.db`                                                                                                                                                                        |
-| `SPOTIFY_CLIENT_ID`                  | Spotify OAuth client ID                                                                                                                                                                                             |
-| `SPOTIFY_CLIENT_SECRET`              | Spotify OAuth client secret                                                                                                                                                                                         |
-| `SPOTIFY_REDIRECT_URI`               | Spotify OAuth redirect URI                                                                                                                                                                                          |
-| `PUBLIC_URL`                         | Public URL for OAuth callbacks behind reverse proxy                                                                                                                                                                 |
-| `HOST`                               | Server bind address                                                                                                                                                                                                 |
-| `PORT`                               | Server port                                                                                                                                                                                                         |
-| `MUSIC_API_URL`                      | `music-api` base URL (ISRC orders + file delivery)                                                                                                                                                                  |
-| `MUSIC_API_TOKEN`                    | `music-api` bearer token                                                                                                                                                                                            |
-| `MUSIC_API_ENABLED`                  | Enable the music-api consumer (`true`/`false`)                                                                                                                                                                      |
-| `MUSIC_API_BATCH_SIZE`               | ISRCs ordered per cycle (default `100`)                                                                                                                                                                             |
-| `MUSIC_API_INTERVAL_SECS`            | Seconds between consumer cycles (default `900`)                                                                                                                                                                     |
-| `STORE_URL`                          | Object-store base URL                                                                                                                                                                                               |
-| `STORE_TOKEN`                        | Object-store bearer token                                                                                                                                                                                           |
-| `STORE_ENABLED`                      | Enable the object store (`true`/`false`)                                                                                                                                                                            |
-| `RUST_LOG`                           | Log level (debug, info, warn, error)                                                                                                                                                                                |
-| `MOMOS_AUTOUPDATE_ENABLED`           | Enable the startup update check + the periodic auto-apply loop (`true`/`false`, default `true`)                                                                                                                     |
-| `MOMOS_AUTOUPDATE_CHANNEL`           | Update channel (`release`/`rolling`; default = channel of the running build — dev → `rolling`, release → `release`; see [docs/versioning.md](docs/versioning.md))                                                   |
-| `MOMOS_AUTOUPDATE_BASE_URL`          | Autoupdate source base URL override (default follows the selected channel: `rolling` → `latest-main`, `release` → `releases/latest`; see [docs/versioning.md](docs/versioning.md))                                  |
-| `MOMOS_AUTOUPDATE_HEALTH_GRACE_SECS` | Seconds the new binary must stay healthy before an update is committed (default `60`)                                                                                                                               |
-| `MOMOS_AUTOUPDATE_INTERVAL_SECS`     | Seconds between two automatic check+apply cycles (`0` = off — startup check only; default `14400` = 4 h; UI setting has precedence over this only when unset here, see [docs/versioning.md](docs/versioning.md) §7) |
-| `MOMOS_AUTOUPDATE_APP_DIR`           | macOS only: directory whose `Momo's Music Manager.app` the DMG self-install replaces (default `/Applications`)                                                                                                      |
-
----
-
-## Installation
-
-### macOS (DMG)
-
-Download the latest `Momo's-Music-Manager-v*.dmg` from
-[GitHub Releases](https://github.com/momo/momos-music-manager/releases).
-
-1. Open the DMG
-2. Drag **momo's music manager** to the **Applications** folder
-3. Double-click the app — the server starts and your browser opens to the dashboard
-
-> **First launch**: macOS Gatekeeper may block unsigned apps. Right-click the app
-> and select **Open**, then click **Open** in the dialog.
-
-#### Latest main (rolling build)
-
-Every push to `main` triggers a CI build that packages the current state for
-**all platforms** (Linux x64/arm64, Windows x64/arm64, macOS universal) and
-publishes them as a rolling pre-release:
-
-- **Download:** <https://github.com/momokli/momos-music-manager/releases/tag/latest-main>
-- **Naming:** versioned `momos-music-manager-<version>-<os-arch>.<ext>` (dev builds:
-  `<cargo-version>-dev+<sha8>`, the short commit SHA identifies the exact state) plus
-  stable `momos-music-manager-latest-<os-arch>.<ext>` names, each with a `.sha256`
-  file; aggregate `SHA256SUMS` + `SHA256SUMS.minisig`. Full schema, channels and the
-  release process: [docs/versioning.md](docs/versioning.md).
-
-Same caveat as the tagged releases: macOS builds are **ad-hoc signed, not
-notarized**, so Gatekeeper may block them on first launch — right-click the app
-and select **Open**. Windows builds are unsigned (SmartScreen warning possible).
-Artifacts are also attached to the workflow run (`mmm-<os>-<arch>`).
-
-The server runs in the background (no dock icon). Re-opening the app just brings
-back the browser. To stop the server, use Activity Monitor or `pkill momos-music-manager`.
-
-Logs: `~/Library/Logs/momos-music-manager/`
-Config: `~/.config/momos-music-manager/config.toml`
-Database: `~/.local/share/momos-music-manager/library.db`
-
-#### CLI access (Terminal)
-
-An `.app` install has no CLI on `PATH` — the binary lives inside the bundle at
-`…/Momo's Music Manager.app/Contents/MacOS/momos-music-manager`. The app
-**automatically keeps a `momos-music-manager` symlink in a PATH directory** so
-the terminal commands work out of the box:
-
-```bash
-momos-music-manager --version
-momos-music-manager telemetry push
-momos-music-manager update check
-momos-music-manager serve --host 0.0.0.0 --port 3000 --no-browser
-```
-
-The symlink is created at the **first app launch** (after dragging the app into
-`/Applications`) and refreshed after every **self-update** (the DMG install path
-re-ensures it). It points at the stable bundle path, so in-place updates never
-break it. Where it goes — the first **writable** directory of:
-
-1. `/usr/local/bin` — on the default macOS/Linux `PATH` (dev machines where it
-   is user-writable get the CLI with zero setup)
-2. `/opt/homebrew/bin` — Apple-Silicon Homebrew prefix (when present)
-3. `~/.local/bin` — per-user XDG dir (created on demand, no admin rights)
-
-> **`~/.local/bin` is not on the default macOS `PATH`.** When the app had to
-> fall back to it, add one line to `~/.zprofile` (the Settings page → _CLI
-> access_ card shows the exact command):
->
-> ```bash
-> export PATH="$HOME/.local/bin:$PATH"
-> ```
-
-No writable candidate at all? The app logs the reason at startup and the
-Settings page shows it — you can always link manually, e.g.:
-
-```bash
-ln -sf "/Applications/Momo's Music Manager.app/Contents/MacOS/momos-music-manager" /usr/local/bin/momos-music-manager
-```
-
-### Linux (tar.gz)
-
-Grab `momos-music-manager-<version>-linux-x64.tar.gz` (or `-linux-arm64` for
-ARM — Raspberry Pi, NAS, ARM servers) from
-[GitHub Releases](https://github.com/momokli/momos-music-manager/releases/tag/latest-main),
-verify the checksum, unpack and run — the binary is fully self-contained
-(SQLite and TLS compiled in, no system libs beyond the base OS):
-
-```bash
-curl -LO https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-x64.tar.gz
-curl -LO https://github.com/momokli/momos-music-manager/releases/download/latest-main/momos-music-manager-latest-linux-x64.tar.gz.sha256
-sha256sum -c momos-music-manager-latest-linux-x64.tar.gz.sha256
-tar -xzf momos-music-manager-latest-linux-x64.tar.gz
-```
-
-Run the server (headless — no GUI, no tray on Linux):
-
-```bash
-./momos-music-manager serve --host 0.0.0.0 --port 3000 --no-browser
-# open http://<host>:3000 in any browser
-```
-
-#### Build from source on Linux
-
-```bash
-# Debian/Ubuntu: nothing extra needed (SQLite bundled, TLS via rustls)
-cargo build --release
-target/release/momos-music-manager serve --host 127.0.0.1 --port 3000 --no-browser
-```
-
-Cross-build for ARM64 (needs the cross C compiler):
-
-```bash
-sudo apt-get install gcc-aarch64-linux-gnu
-CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
-CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ \
-  cargo build --release --target aarch64-unknown-linux-gnu
-```
-
-#### Systemd (server mode, auto-start)
-
-The package ships a systemd unit (`deploy/momos-music-manager.service`, also in
-the tar.gz under `deploy/`) for running the headless server as a service:
-
-```bash
-sudo install -m 0644 deploy/momos-music-manager.service /etc/systemd/system/
-sudo systemctl edit momos-music-manager   # set User + secrets (SPOTIFY_*, etc.)
-sudo systemctl daemon-reload
-sudo systemctl enable --now momos-music-manager
-sudo systemctl status momos-music-manager
-```
-
-### Windows (zip)
-
-Download `momos-music-manager-<version>-windows-x64.zip` (or `-windows-arm64`)
-from the [latest-main release](https://github.com/momokli/momos-music-manager/releases/tag/latest-main),
-unzip, and run from a terminal:
-
-```powershell
-.\momos-music-manager.exe serve --host 0.0.0.0 --port 3000 --no-browser
-# open http://<host>:3000
-```
-
-> Note: builds are unsigned — SmartScreen may show a warning ("More info → Run
-> yet"). For background operation use Task Scheduler or NSSM.
-
-### From Source
-
-```bash
-# Start the server (frontend embedded, one binary)
-cargo run -- serve
-
-# Open in browser
-open http://localhost:3000
-```
-
-## Deployment
-
-### Auto-Updates (M6)
-
-The app can update itself. Two update channels exist, selectable in the
-Settings page (`release` | `rolling`; default = channel of the running
-build):
-
-- **Rolling** (`rolling`) — dev builds of `main` (`<version>-dev+<sha8>`)
-  from the `latest-main` pre-release; every push to `main` is offered as an
-  update (detected via the commit SHA in the version).
-- **Release** (`release`) — stable semver releases (tagged `v*`) via
-  `releases/latest`.
-
-An explicit channel switch (dropdown with confirm modal) is **not** an
-error: `check`/`apply` run against the selected channel, and `Update now`
-may install the other channel type's binary. The channel guard
-(`ChannelMismatch`) only fires when the update source serves the _other_
-channel than selected (e.g. a `base_url` override pointing at the wrong
-feed).
-
-Updates are **never installed silently**: the startup check only reports, and
-the actual install is explicit (`momos-music-manager update apply`).
-
-Verification chain (nothing is installed unless every step passes):
-
-1. Download `SHA256SUMS` + `SHA256SUMS.minisig` over HTTPS (rustls).
-2. Verify the **Ed25519 signature** (minisign format) of the manifest with the
-   public key embedded in the binary (`src/autoupdate/keys.rs`, mirrored in
-   `scripts/minisign.pub`).
-3. Resolve the platform artifact by its **versioned** name
-   (`momos-music-manager-<version>-<os-arch>.<ext>`) and compare versions
-   (semver) against the running build; if the source serves the _other_
-   channel than selected, the update is refused (`ChannelMismatch`).
-4. On `update apply`: download the artifact, verify its **SHA256** against the
-   signed manifest, extract the binary — and only then swap.
-
-Swap safety (Linux/Windows): the previous binary is kept as
-`momos-music-manager.bak` next to the new one, with an `update-state.json`
-marker. On the next start the new binary must survive a health grace period
-(default 60 s, with a self-probe of `/api/health`); then the update is
-committed (`.bak` removed). If the new binary repeatedly fails to become
-healthy, the updater **auto-rolls back** to the previous version. Manual
-rollback is always available:
-
-```bash
-# check for updates (verifies the signed manifest, no download)
-momos-music-manager update check
-
-# download + verify + install (restart the server afterwards)
-momos-music-manager update apply
-
-# restore the previous binary from .bak
-momos-music-manager update rollback
-
-# current version, channel (base URL), pending update state
-momos-music-manager update status
-```
-
-Opt-out: `--no-autoupdate` on `serve`, or `MOMOS_AUTOUPDATE_ENABLED=false`
-(env / `[autoupdate] enabled = false` in config.toml). Channel override:
-`MOMOS_AUTOUPDATE_CHANNEL=release|rolling` or `[autoupdate] channel` in
-config.toml (Settings page otherwise). The update check also runs
-automatically on `serve` startup (10 s after boot) and logs the result.
-
-**Automatic updates (auto-apply + self-restart)**: with auto-update enabled
-(default), the server checks for and **installs** updates every
-`MOMOS_AUTOUPDATE_INTERVAL_SECS` (default 4 h; `0` = periodic loop off,
-startup check still runs) and restarts itself afterwards. Configure the
-interval in the Settings page or via env/`[autoupdate] interval_secs`
-(precedence Env > UI > TOML > default; see [docs/versioning.md](docs/versioning.md)
-§7). Restart behaviour: under systemd the service manager restarts the unit
-(`Restart=always`); otherwise a detached relauncher starts the new binary.
-Repeatedly failing versions are blacklisted by a crash-loop breaker — an
-update that never becomes healthy is rolled back once and then skipped until
-a newer version is published. Manual "Update now" stays available anytime.
-
-> **macOS**: the updater downloads, verifies and **self-installs** the
-> universal DMG: it mounts the image, atomically replaces
-> `Momo's Music Manager.app` in `/Applications` (configurable via
-> `MOMOS_AUTOUPDATE_APP_DIR` / `[autoupdate] app_dir`) and unmounts again;
-> the previous version stays as `Momo's Music Manager.app.updater-bak` for
-> manual recovery. The server restarts itself after the install (the app
-> bundle is relaunched via LaunchServices). If the self-install fails, the
-> verified DMG is kept in `~/Downloads` for manual installation.
->
-> **Windows**: replacing a _running_ executable is not allowed — stop the
-> server before `update apply` (the error message tells you). Automatic
-> updates therefore require the service manager to perform the restart.
->
-> **Signing key**: the manifest is signed in CI with the `MINISIGN_SECRET_KEY`
-> secret (base64 of the `minisign.key` file, see
-> [`docs/RELEASE-ROADMAP.md`](docs/RELEASE-ROADMAP.md) M6 for generation &
-> rotation). If the secret is not configured, artifacts stay unsigned and the
-> updater **refuses** them (safe default).
-
-### Database path
-
-By default, the database is stored at `~/.local/share/momos-music-manager/library.db`.
-Override via `[database].url` in config.toml or the `DATABASE_URL` env var.
-
-### macOS Launch Agent (auto-start)
-
-Install a launchd agent to start the server automatically on login:
-
-```bash
-# Install (creates plist + loads into launchd)
-cargo run -- install-launch-agent
-
-# Check status
-cargo run -- service-status
-
-# Uninstall
-cargo run -- uninstall-launch-agent
-```
-
-### macOS Launch Agent (auto-start on login)
-
-Install a launchd agent to start the server automatically on login:
-
-```bash
-# Install (creates plist + loads into launchd)
-cargo run -- install-launch-agent
-
-# Check status
-cargo run -- service-status
-
-# Uninstall
-cargo run -- uninstall-launch-agent
-```
-
-The agent will:
-
-- Start on login (`RunAtLoad`)
-- Restart on crash (`KeepAlive`)
-- Log to `~/Library/Logs/momos-music-manager/`
-
-### Reverse proxy (optional)
-
-When running behind a reverse proxy (nginx, Caddy, etc.), use the `--public-url` flag
-so Spotify OAuth callbacks redirect correctly:
-
-```bash
-cargo run -- serve --public-url https://mmm.mydomain.de
+.
+├── music-hub/          # music-hub  — web app (axum + askama + sqlx/SQLite)
+├── music-api/          # music-api  — order/download + metadata catalogue
+├── kellner/            # local companion (skeleton)
+├── docs/
+│   ├── ROADMAP.md      # milestones + sequencing (source of truth: GitHub)
+│   ├── ARCHITECTURE.md # stack-level architecture
+│   └── legacy/         # MMM-era docs (ARCHITECTURE, DECISIONS, mmm-README)
+├── plans/              # one file per plan; index in plans/README.md
+├── legacy/
+│   ├── mmm/            # legacy MMM app (sunset)
+│   └── download-service/  # legacy download service
+└── AGENT.md            # repo-wide agent guidance + legacy MMM
 ```
 
 ---
 
-## CLI
+## Status
 
-```bash
-# Start server
-cargo run -- serve [--host 127.0.0.1] [--port 3000] [--public-url URL] [--no-autoupdate]
+- **music-hub** — active (primary). Live at <https://hub.zukkafabrik.de>.
+- **music-api** — active. Metadata/BPM authority; download service.
+- **kellner** — **new**; skeleton only (stubbed CLI).
+- **MMM** — **sunset**. Feature freeze; data migrates to the hub. Still runs on the
+  Mac until the migration completes.
 
-# Self-update (M6)
-cargo run -- update check
-cargo run -- update apply
-cargo run -- update rollback
-cargo run -- update status
-
-# Database management
-cargo run -- db-status
-cargo run -- dump [--output FILE]
-cargo run -- restore [--input FILE]
-
-# File operations
-cargo run -- scan-file /path/to/file.stem.m4a
-cargo run -- scan /path/to/music
-
-# macOS launch agent
-cargo run -- install-launch-agent
-cargo run -- uninstall-launch-agent
-cargo run -- service-status
-
-# Version
-cargo run -- --version
-```
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for milestones and sequencing.
 
 ---
 
-## Development
+## Working in this repo
 
-```bash
-# Run the test suite (some tests shell out to external tools)
-# Debian/Ubuntu: sudo apt-get install flac exiftool ffmpeg
-cargo test
-# Clean DB (for schema changes)
-rm -f app.db && cargo run -- serve
-
-# Spotify API caching (record/replay — no API calls during replay)
-SPOTIFY_API_CACHE=record cargo run -- serve
-SPOTIFY_API_CACHE=replay cargo run -- serve
-rm -rf dev-data/spotify-api
-
-# Folder scan caching
-SCAN_CACHE=record cargo run -- serve
-SCAN_CACHE=replay cargo run -- serve
-rm -rf dev-data/scan-cache
-
-# DB dump/restore (save state before deleting app.db)
-cargo run -- dump
-cargo run -- restore
-```
+- **Repo-wide rules** (branches, PRs, conventional commits, release): [`AGENT.md`](AGENT.md).
+- **Per-project rules win for their subtree** — read `music-hub/AGENT.md` /
+  `music-api/README.md` / `kellner/AGENT.md` before touching those crates.
+- **Plans**: one file per plan under [`plans/`](plans/); index + lifecycle in
+  [`plans/README.md`](plans/README.md).
+- **Deploy**: each server has its own runbook (see `music-hub/AGENT.md` for the hub's
+  rsync loop; music-api's is in its README).
 
 ---
 
-## DJ Workflow
+## Legacy: MMM — sunset
 
-```mermaid
-flowchart LR
-    Spotify -->|Download| FLAC
-    FLAC -->|NUO-STEMS| STEMS
-    STEMS -->|Taggen| Kommentiert
-    Kommentiert -->|Consistency Check| Traktor
-```
+The original **Momo's Music Manager** (single-user, local files + Spotify, Traktor)
+was the starting point of everything above. It is **decommissioned**:
 
-### 1. Spotify → FLAC download
+- code: `legacy/mmm/` (`src/`, `frontend/`, `migrations/`, `tests/`, `site/`)
+- docs: [`docs/legacy/mmm-README.md`](docs/legacy/mmm-README.md), [`AGENT.md`](AGENT.md)
+- migration target: **music-hub** (+ **music-api** for downloads/metadata)
 
-Copy a Spotify playlist URL → add to download queue → FLACs land in `~/Music/flacs/`
-
-### 2. FLAC → STEMS convert
-
-Open NUO-STEMS → add `~/Music/flacs` folder → "Skip duplicates?" → Start → STEM files appear in `~/Music/stems/`
-
-### 3. Tag metadata (write comment)
-
-The server writes playlist information into the ID3 comment on sync:
-
-```
-[{Phase}{Mood}{Vibe}] {tags} {source_id}
-```
-
-Example: `[PMV] build jazzy warehouse sp:1WSF0LJGwJkYejuMtyJVuA`
-
-### 4. Import into Traktor
-
-Open Traktor → run "Consistency Check" over all tracks → Comments visible → Smart Lists possible
-
----
-
-## SPA Pages
-
-| Route              | Module                     | Description                                            |
-| ------------------ | -------------------------- | ------------------------------------------------------ |
-| `#dashboard`       | `pages/dashboard.js`       | Stats + Services dashboard                             |
-| `#files`           | `pages/files.js`           | Local files with BPM/Key, comment status, STEMS filter |
-| `#tracks`          | `pages/tracks.js`          | Service tracks, playlist/tag/PMV filter                |
-| `#playlists`       | `pages/playlists.js`       | All service playlists                                  |
-| `#tags`            | `pages/tags.js`            | Tags (paginated list)                                  |
-| `#tag-categories`  | `pages/tag-categories.js`  | Tag categories                                         |
-| `#services`        | `pages/services.js`        | Service status + OAuth/Sync                            |
-| `#folders`         | `pages/folders.js`         | Managed folder configuration                           |
-| `#tasks`           | `pages/tasks.js`           | Task manager (sync/write-comment jobs)                 |
-| `#auto-categorize` | `pages/auto-categorize.js` | AI tag categorization wizard                           |
-| `#traktor-import`  | `pages/traktor-import.js`  | Traktor collection import                              |
-| `#digging`         | `pages/digging.js`         | Digging curator — chain-based sessions                 |
-| `#data`            | `pages/data.js`            | Import/Export database                                 |
-| `#tag-curation`    | `pages/tag-curation.js`    | Tag parent curation workflow                           |
-| `#backpack`        | `pages/backpack.js`        | Backpack tags + Spotify transport playlist             |
-| `#rediscovery`     | `pages/rediscovery.js`     | Resurfacing queue — facets, live preview, reason chips |
-
----
-
-## API Endpoints
-
-| Group       | Base Path                                                                        |
-| ----------- | -------------------------------------------------------------------------------- |
-| Files       | `GET/POST /api/files`                                                            |
-| Tracks      | `GET /api/tracks`                                                                |
-| Playlists   | `GET /api/playlists`                                                             |
-| Tags        | `CRUD /api/tags`, `/api/tag-categories`                                          |
-| Folders     | `CRUD /api/folders`                                                              |
-| Services    | `GET/POST /api/services/{service}/...`                                           |
-| Tasks       | `GET/DELETE /api/tasks`                                                          |
-| Data        | `GET /api/dump`, `POST /api/restore`                                             |
-| Curation    | `GET /api/tags/curation-queue`                                                   |
-| Version     | `GET /api/version`                                                               |
-| Parents     | `GET/PUT /api/tags/{id}/parents`                                                 |
-| Corrections | `GET/PUT /api/files/{id}/track-corrections`, `/api/tracks/{id}/file-corrections` |
-| Digging     | `GET/POST /api/digging/...`                                                      |
-| Backpack    | `GET /api/backpack`, `POST /api/backpack/push`                                   |
-| Health      | `GET /api/health`                                                                |
-
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
-
----
-
-## Documentation
-
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — System design
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) — Architectural Decision Records
-- [`docs/COMMENT_SYSTEM.md`](docs/COMMENT_SYSTEM.md) — Comment format specification
-- [`docs/TASK_MANAGER.md`](docs/TASK_MANAGER.md) — Task manager design
-- [`docs/USER_STORY.md`](docs/USER_STORY.md) — Core user story
-
----
-
-## Project Structure
-
-```
-momos-music-manager/
-├── src/                    # Rust Backend
-│   ├── main.rs             # CLI, Router, embedded Frontend
-│   ├── api.rs              # All API endpoints
-│   ├── db.rs               # DB queries, scanning, comment computation
-│   ├── comment.rs          # Comment parsing/generation
-│   ├── config.rs           # Config.toml + env var loading
-│   ├── embeddings.rs       # Semantic tag embeddings (candle/ML)
-│   ├── digging.rs          # Curator/session-builder
-│   ├── audio_extensions.rs # AudioExtension enum
-│   ├── scan_cache.rs       # File scan caching (record/replay)
-│   ├── dump.rs             # DB dump/restore (JSON)
-│   ├── poller.rs           # Playlist subscription poller
-│   ├── traktor.rs          # Traktor collection.nml parser
-│   ├── watch.rs            # Folder watcher (optional)
-│   ├── download_guarantor.rs # Auto-remediation for 100% file coverage
-│   ├── external_tools.rs   # Resolve metaflac/exiftool/ffmpeg/ffprobe paths
-│   ├── global_poller.rs    # Global playlist poller
-│   ├── tray.rs             # macOS menu bar tray icon
-│   ├── telemetry/          # HTTPS telemetry push + receiver
-│   ├── spotify/            # Spotify OAuth + Sync
-│   │   ├── client.rs
-│   │   ├── models.rs
-│   │   ├── replay.rs
-│   │   └── sync_worker.rs
-│   └── tasks/              # TaskManager + workers
-│       └── mod.rs
-├── download-service/       # Python download pipeline (deemix + spotDL)
-├── scripts/                # Packaging: macOS DMG, Linux tar.gz, Windows zip
-├── frontend/               # SPA (embedded via rust-embed)
-│   ├── index.html          # Shell
-│   ├── app.js              # Hash router
-│   ├── style.css           # Styles
-│   ├── fontawesome/        # Local Font Awesome bundle
-│   ├── shared/             # Reusable modules
-│   │   ├── api.js
-│   │   ├── components.js
-│   │   ├── format.js
-│   │   ├── nav.js
-│   │   └── search-filter.js
-│   └── pages/              # One JS module per route
-│       ├── dashboard.js
-│       ├── files.js
-│       ├── tracks.js
-│       ├── playlists.js
-│       ├── tags.js
-│       ├── tag-categories.js
-│       ├── tag-curation.js
-│       ├── services.js
-│       ├── tasks.js
-│       ├── folders.js
-│       ├── data.js
-│       ├── auto-categorize.js
-│       ├── digging.js
-│       ├── storage.js
-│       ├── backpack.js
-│       └── traktor-import.js
-├── migrations/
-│   ├── 001_initial_schema.sql             # Initial schema
-│   ├── ...                                # 002 … 025
-│   ├── 026_name_match_indexes.sql         # Playlist↔tag name-match indexes
-│   ├── 027_music_api_imports.sql          # Per-ISRC state for music-api orders
-│   ├── 028_file_content_hash.sql          # files.content_hash (store dedup)
-│   ├── 029_dynamic_bundle_limits.sql      # Bundle top-N + Camelot key balance
-│   └── 030_music_api_attempts.sql         # Bounded retries for failed imports
-└── docs/
-    ├── ARCHITECTURE.md     # System architecture
-    ├── COMMENT_SYSTEM.md   # Comment format spec
-    ├── DECISIONS.md        # Architectural Decision Records
-    └── TASK_MANAGER.md     # Task manager design
-```
-
----
-
-## Important
-
-- **Delete old DB files** after schema changes: `rm -f app.db*`
-- **Column config**: uses `columnConfig_v2_` localStorage key (pixel-based); old percentage-based config is ignored
-- Migrations are additive (`001_initial_schema.sql` through `030_music_api_attempts.sql`). Never edit an applied migration — SQLx verifies its checksum and refuses to start on a mismatch; add a new file instead.
-- SoundCloud and YouTube OAuth are not yet implemented
-- Playlist subscriptions poll every 30 seconds in the background; the maintainer runs every hour (store sync + auto-prune)
-- The digging page (`digging.html`) is a standalone page, not part of the SPA
-
----
-
-## License & Repo
-
-Fork of Spotify Mirror.  
-`git@git.sr.ht:~momoy/momos-music-manager`
+Treat MMM as read-only unless a fix is needed to keep it running through the
+transition.

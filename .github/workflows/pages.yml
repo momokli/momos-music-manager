@@ -1,11 +1,8 @@
 name: Deploy Landing Page to GitHub Pages
 
+# MMM sunset 2026-10; Pipeline retired (code moved to legacy/mmm)
+
 on:
-  push:
-    branches: [main]
-    paths:
-      - "site/**"
-      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 # Allow only one concurrent deployment, skipping runs queued between the run
