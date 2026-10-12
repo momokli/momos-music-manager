@@ -7,7 +7,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use mmm_hub::backpacks::{self, ResolvedSource, ResolvedTrack, SourceRef};
+use music_hub::backpacks::{self, ResolvedSource, ResolvedTrack, SourceRef};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 

@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::time::Duration;
 
-use mmm_hub::backpacks::{self, SourceRef};
+use music_hub::backpacks::{self, SourceRef};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
