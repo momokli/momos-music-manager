@@ -22,11 +22,7 @@ use music_hub::{
 };
 
 #[derive(Parser)]
-#[command(
-    name = "music-hub",
-    version,
-    about = "Spelunke — multi-user music ingest + exploration"
-)]
+#[command(name = "music-hub", version = music_hub::VERSION, long_version = music_hub::LONG_VERSION, about = "Spelunke — multi-user music ingest + exploration")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -144,6 +140,13 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+
+    tracing::info!(
+        version = music_hub::VERSION,
+        git_sha = music_hub::GIT_SHA,
+        git_describe = music_hub::GIT_DESCRIBE,
+        "starting music-hub"
+    );
 
     let cfg = Config::from_env();
     let cli = Cli::parse();

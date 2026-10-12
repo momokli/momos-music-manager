@@ -18,6 +18,18 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-V")
+    {
+        println!(
+            "music-api {} ({})",
+            music_api::VERSION,
+            music_api::GIT_DESCRIBE
+        );
+        return Ok(());
+    }
+
     let config = Config::from_env()?;
 
     for dir in [
@@ -63,6 +75,8 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&state.config.bind).await?;
     info!(
+        version = music_api::VERSION,
+        git_sha = music_api::GIT_SHA,
         "music-api listening on {} (deemix {}, download dir {})",
         state.config.bind,
         state.config.deemix_url,

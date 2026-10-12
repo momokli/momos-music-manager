@@ -7,10 +7,14 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-/// Local companion for the music stack: Backpack upkeep, library backups to
-/// music-api, Traktor `collection.nml` upload, and downloads.
 #[derive(Debug, Parser)]
-#[command(name = "kellner", version, about, long_about = None)]
+#[command(
+    name = "kellner",
+    version = env!("BUILD_VERSION"),
+    long_version = concat!(env!("BUILD_VERSION"), " (", env!("BUILD_GIT_DESCRIBE"), ")"),
+    about = "Local companion for the music stack",
+    long_about = None,
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

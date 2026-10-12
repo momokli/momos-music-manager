@@ -4,6 +4,16 @@
 //! the router against a temporary DB. The binary (`main.rs`) is a thin CLI on
 //! top of it.
 
+/// Full build version (git-derived). Set by `build.rs`.
+pub const VERSION: &str = env!("BUILD_VERSION");
+/// Short git SHA of the build, or `unknown`.
+pub const GIT_SHA: &str = env!("BUILD_GIT_SHA");
+/// `git describe --tags --always --dirty` of the build, or `unknown`.
+pub const GIT_DESCRIBE: &str = env!("BUILD_GIT_DESCRIBE");
+/// `VERSION (GIT_DESCRIBE)` — for `--version --verbose` style output.
+pub const LONG_VERSION: &str =
+    concat!(env!("BUILD_VERSION"), " (", env!("BUILD_GIT_DESCRIBE"), ")");
+
 pub mod albums;
 pub mod analyze;
 pub mod analyzer;
