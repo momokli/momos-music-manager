@@ -1,0 +1,41 @@
+{% extends "base.html" %} {% block title %}Backpacks — Spelunke{% endblock %} {% block
+content %}
+<hgroup>
+    <h1>Backpacks</h1>
+    <p class="hub-muted">
+        Sammlungen aus Tags, Playlists, Linsen und Tracks — die Live-Zahl zeigt,
+        wie viele Tracks aktuell über alle Quellen auflösen.
+    </p>
+</hgroup>
+
+{% if cards.is_empty() %}
+<p class="hub-empty">Noch keine Backpacks. Lege Quellen an, um hier eine Ansicht zu sehen.</p>
+{% else %}
+<div class="hub-backpack-grid">
+    {% for c in cards %}
+    <article class="hub-backpack-card">
+        <header>
+            <h3>
+                {{ c.name }}
+                {% if c.is_active %}<span class="hub-badge hub-badge-ok">Aktiv</span>{% endif %}
+            </h3>
+            <p class="hub-muted">
+                {{ c.source_count }} Quellen · {{ c.track_count }} Tracks (live)
+            </p>
+        </header>
+        {% if c.sources.is_empty() %}
+        <p class="hub-muted">Keine Quellen.</p>
+        {% else %}
+        <ul class="hub-backpack-sources">
+            {% for s in c.sources %}
+            <li>
+                <span class="hub-badge">{{ s.kind }}</span>
+                {{ s.label }}
+            </li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </article>
+    {% endfor %}
+</div>
+{% endif %} {% endblock %}

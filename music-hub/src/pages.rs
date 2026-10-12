@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .route("/overlap/enrich", post(overlap_enrich))
         .route("/playlists/similar", get(similar_page))
         .route("/tags", get(tags_page))
+        .route("/backpacks", get(backpacks_page))
         .route("/backpacks/active/clear", post(backpack_active_clear))
         .route("/tags/create", post(tag_create))
         .route("/tag-search", get(tag_search_page))
@@ -4299,6 +4300,76 @@ fn referer_path(headers: &HeaderMap) -> Option<String> {
         return None;
     }
     Some(path.to_string())
+}
+
+/// One source row inside a backpack card: kind literal + plain-text label.
+struct SourceRow {
+    kind: String,
+    label: String,
+}
+
+/// One backpack card of the `/backpacks` view.
+struct BackpackCard {
+    name: String,
+    is_active: bool,
+    source_count: usize,
+    track_count: usize,
+    sources: Vec<SourceRow>,
+}
+
+#[derive(Template)]
+#[template(path = "backpacks.html")]
+struct BackpacksPage {
+    nav: crate::ui::Nav,
+    flash: String,
+    cards: Vec<BackpackCard>,
+}
+
+/// GET `/backpacks` (#332): read-only overview of the caller's backpacks, each
+/// with its source count, live track count (unclamped resolve) and labelled
+/// sources. No session -> `/login`.
+async fn backpacks_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "backpacks").await else {
+        return Redirect::to("/login").into_response();
+    };
+
+    let backpacks = match crate::backpacks::list_backpacks(&st.pool, nav.id).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("backpacks list failed for user {}: {e:#}", nav.id);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Backpacks konnten nicht geladen werden")
+                .into_response();
+        }
+    };
+
+    let mut cards = Vec::with_capacity(backpacks.len());
+    for bp in backpacks {
+        let views = crate::backpacks::list_source_views(&st.pool, bp.id)
+            .await
+            .unwrap_or_default();
+        let track_count = crate::backpacks::resolve_count(&st.pool, bp.id)
+            .await
+            .unwrap_or(0);
+        cards.push(BackpackCard {
+            name: bp.name,
+            is_active: bp.is_active != 0,
+            source_count: views.len(),
+            track_count,
+            sources: views
+                .into_iter()
+                .map(|v| SourceRow {
+                    kind: v.kind,
+                    label: v.label,
+                })
+                .collect(),
+        });
+    }
+
+    render(&BackpacksPage {
+        nav,
+        flash: String::new(),
+        cards,
+    })
 }
 
 /// POST `/backpacks/active/clear` (#331): deactivate the caller's active
