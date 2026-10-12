@@ -2,9 +2,10 @@
 //! source of one of four kinds (tag / playlist / lens / track) to a backpack.
 //!
 //! Schema lives in `044_hub_backpacks.sql` (#327). This module hosts the
-//! *sources layer* (#329) and the *resolver* (#330): [`resolve`] unions the
-//! tracks of a backpack's sources, dedups and score-sorts them. No UI (#328)
-//! and no active-scope logic (#331) here.
+//! *sources layer* (#329), the *resolver* (#330, [`resolve`] unions the tracks of
+//! a backpack's sources, dedups and score-sorts them) and the *active-scope*
+//! layer (#331, [`active_backpack`] / [`set_active`] / [`clear_active`] /
+//! [`active_scope_track_ids`]). No UI (#328) here.
 //!
 //! Conventions mirror `curate.rs`: `anyhow` results, `chrono::Utc::now()`
 //! RFC3339 timestamps, and every write bumps the parent `hub_backpacks.updated_at`.
@@ -48,6 +49,17 @@ impl FromStr for SourceKind {
             other => bail!("unknown source kind: {other}"),
         }
     }
+}
+
+/// Typed view of one `hub_backpacks` row.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Backpack {
+    pub id: i64,
+    pub user_id: i64,
+    pub name: String,
+    pub is_active: i64,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Typed view of one `hub_backpack_items` row.
@@ -187,6 +199,115 @@ pub async fn clear_sources(pool: &SqlitePool, backpack_id: i64) -> Result<u64> {
     Ok(res.rows_affected())
 }
 
+// ── Active scope (#331) ──────────────────────────────────────────────────────
+
+/// The user's active backpack, if any.
+///
+/// The partial UNIQUE index `idx_hub_backpacks_active_user` guarantees at most
+/// one active backpack per user, so this returns `None` or exactly one row.
+/// An unknown `user_id` yields `Ok(None)`.
+pub async fn active_backpack(pool: &SqlitePool, user_id: i64) -> Result<Option<Backpack>> {
+    Ok(sqlx::query_as::<_, Backpack>(
+        "SELECT id, user_id, name, is_active, created_at, updated_at
+           FROM hub_backpacks
+          WHERE user_id = ?1 AND is_active = 1
+          LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Make `backpack_id` the user's single active backpack (deactivating any other).
+///
+/// Runs in a transaction: first clears `is_active` on every backpack of the
+/// user, then sets the target to `1`. The `updated_at` of every touched row is
+/// bumped. A `backpack_id` that does not belong to `user_id` is an error and
+/// writes nothing (no silent cross-user access).
+pub async fn set_active(pool: &SqlitePool, user_id: i64, backpack_id: i64) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let owned: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM hub_backpacks WHERE id = ?1 AND user_id = ?2")
+            .bind(backpack_id)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some(id) = owned else {
+        bail!("backpack {backpack_id} not found for user {user_id}");
+    };
+
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "UPDATE hub_backpacks SET is_active = 0, updated_at = ?2
+          WHERE user_id = ?1 AND is_active = 1",
+    )
+    .bind(user_id)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE hub_backpacks SET is_active = 1, updated_at = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Deactivate every backpack of the user, returning the number of rows that
+/// were active (and thus changed). An `updated_at` is bumped on those rows.
+pub async fn clear_active(pool: &SqlitePool, user_id: i64) -> Result<u64> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let res = sqlx::query(
+        "UPDATE hub_backpacks SET is_active = 0, updated_at = ?2
+          WHERE user_id = ?1 AND is_active = 1",
+    )
+    .bind(user_id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// The track-id scope of the user's active backpack.
+///
+/// `Ok(None)` means **no active backpack** (list views stay unscoped);
+/// `Ok(Some(set))` is the backpack's resolved track set, resolved **without**
+/// the 500-row clamp of [`resolve`] so a scope filter never truncates.
+pub async fn active_scope_track_ids(
+    pool: &SqlitePool,
+    user_id: i64,
+) -> Result<Option<HashSet<i64>>> {
+    let Some(bp) = active_backpack(pool, user_id).await? else {
+        return Ok(None);
+    };
+    let tracks = resolve_unbounded(pool, bp.id).await?;
+    Ok(Some(tracks.into_iter().map(|t| t.track_id).collect()))
+}
+
+/// Scope for the hub list views (#331): `None` = unscoped, `Some` = active
+/// backpack's resolved track set.
+///
+/// This is the single error policy shared by `/tags`, `/albums` and `/artists`:
+/// a resolver failure (or any DB hiccup while loading the scope) degrades to
+/// **unscoped** and is logged, instead of silently emptying the library. The
+/// helper therefore never returns an error — an availability-preserving,
+/// fail-open choice documented here so the three views cannot drift apart.
+///
+/// An active backpack that resolves to **no** tracks is *not* an error: it
+/// yields `Some(empty)` and the list views then hide everything (the scope is
+/// genuinely empty).
+pub async fn active_scope_for_views(pool: &SqlitePool, user_id: i64) -> Option<HashSet<i64>> {
+    match active_scope_track_ids(pool, user_id).await {
+        Ok(scope) => scope,
+        Err(e) => {
+            tracing::warn!("active backpack scope load failed for user {user_id}: {e:#}; falling back to unscoped");
+            None
+        }
+    }
+}
+
 // ── Resolver (#330) ───────────────────────────────────────────────────────────
 
 /// One resolved track: its hub id, relevance score, and the distinct backpack
@@ -235,8 +356,22 @@ pub async fn resolve(
     backpack_id: i64,
     limit: i64,
 ) -> Result<Vec<ResolvedTrack>> {
-    let limit = limit.clamp(1, 500);
+    resolve_with_limit(pool, backpack_id, limit.clamp(1, 500)).await
+}
 
+/// Resolve a backpack's full track set without the 1..=500 clamp of [`resolve`].
+///
+/// Used by the active-scope filter (#331), which must see every scoped track.
+/// Semantics (union / dedup / scoring / ordering) are identical to [`resolve`].
+pub async fn resolve_unbounded(pool: &SqlitePool, backpack_id: i64) -> Result<Vec<ResolvedTrack>> {
+    resolve_with_limit(pool, backpack_id, i64::MAX).await
+}
+
+async fn resolve_with_limit(
+    pool: &SqlitePool,
+    backpack_id: i64,
+    limit: i64,
+) -> Result<Vec<ResolvedTrack>> {
     let user_id: Option<i64> =
         sqlx::query_scalar("SELECT user_id FROM hub_backpacks WHERE id = ?1")
             .bind(backpack_id)

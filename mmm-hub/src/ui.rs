@@ -20,6 +20,8 @@ pub struct Nav {
     pub spotify_connected: bool,
     pub spotify_label: String,
     pub is_admin: bool,
+    /// Name of the active backpack scope, if any (#331). `None` = unscoped.
+    pub active_backpack: Option<String>,
 }
 
 impl Nav {
@@ -61,5 +63,10 @@ pub async fn nav(st: &AppState, headers: &HeaderMap, active: &str) -> Option<Nav
         spotify_connected,
         spotify_label,
         is_admin: crate::settings::is_admin(st, user_id).await,
+        active_backpack: crate::backpacks::active_backpack(&st.pool, user_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|b| b.name),
     })
 }

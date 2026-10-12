@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .route("/overlap/enrich", post(overlap_enrich))
         .route("/playlists/similar", get(similar_page))
         .route("/tags", get(tags_page))
+        .route("/backpacks/active/clear", post(backpack_active_clear))
         .route("/tags/create", post(tag_create))
         .route("/tag-search", get(tag_search_page))
         .route("/revisit", get(revisit_page))
@@ -3960,6 +3961,32 @@ struct TagRow {
     source_count: i64,
 }
 
+/// Append a #331 scope predicate `{lhs} IN (SELECT value FROM json_each(?))`
+/// to `qb`.
+///
+/// The scope is bound as **one** JSON array, so the number of SQL variables is
+/// constant regardless of the backpack size. A bound literal `IN (?, ?, …)`
+/// list would grow one variable per scoped track and could exceed SQLite's
+/// `SQLITE_MAX_VARIABLE_NUMBER` (and in `/tags` the predicate is emitted twice,
+/// doubling the count) — `json_each` is the temp-table/JOIN-style solution,
+/// without needing a per-request temp table and its connection pinning.
+///
+/// An empty scope yields the always-false `1 = 0`: SQLite rejects a bare
+/// `IN ()` with a syntax error, so an active backpack that resolves no tracks
+/// must hide everything instead of breaking the `/tags` / `/albums` query.
+fn push_scope_ids(qb: &mut QueryBuilder<'_, sqlx::Sqlite>, lhs: &str, scope: &HashSet<i64>) {
+    if scope.is_empty() {
+        qb.push("1 = 0");
+        return;
+    }
+    let json = serde_json::to_string(&scope.iter().copied().collect::<Vec<i64>>())
+        .expect("serialize scope ids");
+    qb.push(lhs)
+        .push(" IN (SELECT value FROM json_each(")
+        .push_bind(json)
+        .push("))");
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_tags(
     pool: &sqlx::SqlitePool,
@@ -3974,15 +4001,27 @@ async fn run_tags(
     allowed: &[(&str, &str)],
     strict: bool,
     limit: i64,
+    scope: Option<&HashSet<i64>>,
 ) -> Vec<TagRow> {
     let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
         "SELECT * FROM (SELECT t.id AS id, t.name AS name, u.slug AS owner,
                 COALESCE(t.type,'') AS type_name,
                 (SELECT GROUP_CONCAT(p.name, ' · ')
                    FROM hub_tag_parents tp JOIN hub_tags p ON p.id = tp.parent_tag_id
-                  WHERE tp.tag_id = t.id) AS parents,
-                (SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id) AS track_count,
-                (SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count
+                  WHERE tp.tag_id = t.id) AS parents,",
+    );
+    // Track count reflects the active scope when one is set (honest numbers).
+    if let Some(scope) = scope {
+        qb.push("(SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id AND ");
+        push_scope_ids(&mut qb, "r.track_id", scope);
+        qb.push(") AS track_count,");
+    } else {
+        qb.push(
+            "(SELECT COUNT(*) FROM hub_track_resolved_tags r WHERE r.tag_id = t.id) AS track_count,",
+        );
+    }
+    qb.push(
+        "(SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count
            FROM hub_tags t
            JOIN hub_users u ON u.id = t.owner_user_id
           WHERE 1 = 1",
@@ -4011,6 +4050,13 @@ async fn run_tags(
                 sep.push_bind(tv.clone());
             }
         }
+        qb.push(")");
+    }
+    // Scope filter (#331): a tag is listed only when >= 1 of its tracks is in
+    // the active backpack's scope. No active backpack -> no extra condition.
+    if let Some(scope) = scope {
+        qb.push(" AND EXISTS (SELECT 1 FROM hub_track_resolved_tags r WHERE r.tag_id = t.id AND ");
+        push_scope_ids(&mut qb, "r.track_id", scope);
         qb.push(")");
     }
     qb.push(") WHERE 1 = 1");
@@ -4090,6 +4136,9 @@ async fn tags_page(
     let (sort, dir) =
         crate::table::resolve_sort(f.sort.as_deref(), f.dir.as_deref(), allowed, "name", "asc");
 
+    // Active-scope filter (#331): loaded once per request; `None` = unscoped.
+    let scope = crate::backpacks::active_scope_for_views(&st.pool, me).await;
+
     // Strict token match first; on no hits, a broad pass + one-edit typo tolerance.
     let mut tags = run_tags(
         &st.pool,
@@ -4104,6 +4153,7 @@ async fn tags_page(
         allowed,
         true,
         1000,
+        scope.as_ref(),
     )
     .await;
     if tags.is_empty() && !q.is_empty() {
@@ -4121,6 +4171,7 @@ async fn tags_page(
             allowed,
             false,
             3000,
+            scope.as_ref(),
         )
         .await;
         tags.retain(|t| {
@@ -4222,6 +4273,43 @@ async fn tag_create(
         }
     }
     Redirect::to("/tags").into_response()
+}
+
+/// Extract the path portion of a `Referer` header (absolute or relative).
+fn referer_path(headers: &HeaderMap) -> Option<String> {
+    let r = headers.get(axum::http::header::REFERER)?.to_str().ok()?;
+    let path = match r.find("://") {
+        Some(i) => {
+            let after = &r[i + 3..];
+            match after.find('/') {
+                Some(j) => &after[j..],
+                None => return None,
+            }
+        }
+        None => r,
+    };
+    // Only accept a genuine single-slash-rooted path. Reject protocol-relative
+    // (`//evil.test/x`) and backslash (`/\evil.test`) vectors so the value can
+    // never be reflected into a `Location` header as an open redirect.
+    let mut chars = path.chars();
+    if chars.next() != Some('/') {
+        return None;
+    }
+    if matches!(chars.next(), Some('/') | Some('\\')) {
+        return None;
+    }
+    Some(path.to_string())
+}
+
+/// POST `/backpacks/active/clear` (#331): deactivate the caller's active
+/// backpack scope, then redirect back to the referring view (or `/tags`).
+async fn backpack_active_clear(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let _ = crate::backpacks::clear_active(&st.pool, nav.id).await;
+    let back = referer_path(&headers).unwrap_or_else(|| "/tags".to_string());
+    Redirect::to(&back).into_response()
 }
 
 // ── weighted tag search + revisit (#295, #297) ────────────────────────────────
@@ -5308,5 +5396,46 @@ async fn import_traktor_submit(
             ),
         ),
         Err(e) => flash_redirect("/import", format!("Traktor-Import fehlgeschlagen: {e:#}")),
+    }
+}
+
+#[cfg(test)]
+mod scope_sql_tests {
+    use super::*;
+    use sqlx::Execute;
+
+    #[test]
+    fn empty_scope_predicate_never_emits_in_empty() {
+        let mut qb: QueryBuilder<'_, sqlx::Sqlite> =
+            QueryBuilder::new("SELECT 1 FROM hub_tracks WHERE ");
+        push_scope_ids(&mut qb, "id", &HashSet::new());
+        let sql = qb.build().sql().to_string();
+        assert!(
+            !sql.contains("IN ()"),
+            "empty scope must not emit invalid `IN ()`: {sql}"
+        );
+        assert!(
+            sql.contains("1 = 0"),
+            "empty scope must become the always-false predicate: {sql}"
+        );
+    }
+
+    #[test]
+    fn nonempty_scope_predicate_binds_a_single_json_array() {
+        let ids: HashSet<i64> = (1_i64..=1500).collect();
+        let mut qb: QueryBuilder<'_, sqlx::Sqlite> =
+            QueryBuilder::new("SELECT 1 FROM hub_tracks WHERE ");
+        push_scope_ids(&mut qb, "id", &ids);
+        let sql = qb.build().sql().to_string();
+        assert!(
+            sql.contains("id IN (SELECT value FROM json_each(?))"),
+            "expects the json_each predicate: {sql}"
+        );
+        assert!(!sql.contains("1 = 0"), "non-empty scope keeps the predicate: {sql}");
+        assert_eq!(
+            sql.matches('?').count(),
+            1,
+            "scope must bind exactly one variable regardless of size: {sql}"
+        );
     }
 }
