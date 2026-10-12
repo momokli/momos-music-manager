@@ -1,5 +1,7 @@
-name: Deploy Landing Page to GitHub Pages
+name: Deploy stack landing to GitHub Pages
 
+# The old MMM landing (and its Pages deploy) was retired with the MMM sunset
+# (2026-10-12); this deploys the new stack landing from `site/`.
 on:
   push:
     branches: [main]
@@ -8,8 +10,7 @@ on:
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
-# Allow only one concurrent deployment, skipping runs queued between the run
-# in-progress and the latest queued.
+# Allow only one concurrent deployment.
 concurrency:
   group: pages
   cancel-in-progress: true
@@ -20,27 +21,16 @@ permissions:
   id-token: write
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload site artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
   deploy:
-    needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

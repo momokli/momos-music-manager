@@ -1,0 +1,11 @@
+[workspace]
+
+[package]
+name = "kellner"
+version = "0.1.0"
+edition = "2024"
+description = "Local cross-platform companion for the music stack — Backpack upkeep, library backups to music-api, Traktor collection.nml upload, downloads"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }

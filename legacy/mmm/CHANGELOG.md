@@ -1,0 +1,1065 @@
+# Changelog
+
+All notable changes to Momo's Music Manager.
+
+---
+
+## [Unreleased]
+
+### Added
+
+- **MMM Hub (`music-hub/`) — multi-user Spotify ingest + exploration** _(tracked on branch
+  `feat/music-hub`, not yet released to `main`)_: a separate crate that pulls several DJs'
+  Spotify likes and owned/collaborative playlists into one shared SQLite DB with a
+  per-row user dimension, so overlap can be explored via SQL and a small read surface.
+  - **Local accounts + sessions** (not OIDC): username + bcrypt password in `hub_users`
+    (case-insensitive `slug COLLATE NOCASE`), server-side sessions in `hub_web_sessions`
+    with a `hub_session` cookie (HttpOnly, `SameSite=Lax`, 30-day TTL).
+  - **Per-user Spotify connect** via the public HTTPS redirect
+    `https://hub.zukkafabrik.de/api/hub/services/spotify/callback` (loopback via
+    `music-hub auth` for one-time local grabs); tokens per user in `hub_service_accounts`.
+  - **Background sync worker** (`src/worker.rs`): staggered, one request stream at a time,
+    **429/QUOTA_EXCEEDED-aware**; syncs likes + playlist items, triggered by UI toggles,
+    `music-hub backfill`, or `POST /api/hub/services/{service}/sync`.
+  - **Migrated schema `001`–`006`**: `hub_users`, `hub_service_accounts`, `hub_tracks`,
+    `hub_playlists`, `hub_playlist_tracks`, `hub_liked_tracks`, `hub_web_sessions`,
+    `hub_track_external_ids`, plus the overlap views `hub_v_track_presence`,
+    `hub_v_track_playlists`, `hub_v_shared_tracks`, `hub_v_user_overlap`.
+  - **Exploration surface**: dashboard, SQL console `/sql`, `/track/{id}` (per-user
+    playlist presence + per-ISRC availability via internal `music-api`), `/search`,
+    `/user/{slug}`, `/playlist/{id}`; JSON API `/api/hub/health`, `/api/hub/users`,
+    `/api/hub/me`, `/api/hub/tracks/{id}`, `/api/hub/overlap`, `/api/hub/playlists`,
+    `/api/hub/query`, plus the sync endpoint.
+  - **CLI**: `serve`, `auth`, `ingest`, `fetch-playlists`, `set-password`, `backfill`,
+    `query`, `users`, `seed-demo`.
+  - **Deployment**: LAN host `music-catalog` / `192.168.178.200`, behind Caddy on `lan` at
+    `https://hub.zukkafabrik.de`; sibling read-only Datasette (`data.zukkafabrik.de`) and
+    SchemaSpy (`schema.zukkafabrik.de`) over a sanitized copy `hub-public.db`.
+  - **Tagging & Spelunking layer** (see ADR-075): per-user **tags** created from playlists
+    (or by hand), bundled into **groups** (`kind` class/sort + roles setlist/rumpelkiste/
+    genre/phase/attribute) and **collectives** (users owning groups); tag insights on
+    `/tag/{id}` (top artists, co-occurrence within/across groups, jump to digging/overlap);
+    tag-queue, direct track tagging, grouped tag clouds, and a SoundCloud-style audio player.
+  - **Scoring & similarity engine** (see ADR-076): **ripeness** (tags > meta > traktor, with
+    per-meta weights and position-weighted tag points per group) and **similarity v2**
+    (shared tags + cross-group bonus, Rumpelkiste-aware) drive **digging** and **overlap**
+    ranking; a **typed settings registry** (`settings::SETTINGS`) makes every weight
+    configurable at `/admin` with defaults, ranges and validation — nothing hardcoded.
+  - **Unified table UX** (see ADR-077): every list table gets **server-side sortable
+    headers** (whitelisted, asc/desc, filters preserved) and **tokenised, order-independent,
+    typo-tolerant** full-text search across all visible fields (`src/table.rs`).
+  - **Digging & discovery**: seed-driven suggestions from hub-internal co-occurrence plus
+    last.fm, ReccoBeats, cosine.club, FreqBlog (BPM/key, quota-guarded) and local audio
+    embeddings; BPM/key/harmonic filters; artist explorer with profile insights.
+  - **Ingest**: Spotify (likes + owned/collaborative playlists), SoundCloud (api-v2 sets +
+    likes), YouTube, Traktor `collection.nml`, and the MMM tag library import; all sources
+    write an **import history** ledger and per-track **archive** (keep/drop on removal).
+  - **Downloads**: music-api integration — per-track format, whole-playlist and per-tag
+    **ZIP download**, order-only-missing, prioritize, and a `/downloads` status table.
+
+### Added — Backpack sources (tag/playlist/lens/track) (#329)
+
+- Typed **sources layer** for backpacks (`mmm-hub/src/backpacks.rs`): attach a source of kind
+  `tag` / `playlist` / `lens` / `track` to a backpack, list a backpack's sources in append order,
+  and remove one item or clear all. `add_source` / `list_sources` / `remove_source` / `clear_sources`
+  keep exactly one source column set per row, validate lens keys against `curate::LENSES` (DB CHECK
+  stays lenient on purpose), and bump the parent `hub_backpacks.updated_at` on every write.
+  Resolution/union/dedup (#330), the UI (#328) and active-scope logic (#331) are out of scope.
+  No migration changed.
+---
+
+## [1.15.2] — 2026-10-08
+
+### Fixed
+
+- **Subscription poll cadence (#151, PR #152)**: subscribed playlists were polled every
+  300 s. At ~50 subscriptions that is ~15k `GET /playlists/{id}` calls/day — the dominant
+  Spotify API load and the source of the chronic app-level 429s (multi-hour `Retry-After`).
+  The default is now 21600 s (6 h) and migration 035 raises existing rows to 6 h.
+  On-demand freshness is unchanged (per-playlist sync action).
+
+### Changed
+
+- Playlists page shows the poll interval in hours instead of raw seconds.
+
+---
+
+## [1.15.1] — 2026-10-08
+
+### Fixed
+
+- **Liked-songs sync API load (#147, PR #148)**: the sync re-fetched every `/me/tracks`
+  page on every 15-minute poll cycle (~1,048 requests/cycle, ~100k/day at ~52k likes) —
+  the dominant cause of the app-level rate-limit exhaustion and the chronic multi-hour
+  `Retry-After` 429s. It is now incremental: page newest-first and stop once a full page
+  is unchanged, upsert only new/changed memberships, and retire only when the like total
+  shrank (rare full scan). Steady state drops to ~1–3 requests per pass.
+- **`sync_bpm_key_playlists` stuck in `Running` (#148)**: the early-abort/cancel paths
+  skipped finalization, leaving the task at `Running` — whose `bpm_key_sync` conflict key
+  then rejected every later sync. Every exit path now finalizes the task.
+
+### Changed
+
+- Liked-songs sync runs on its own interval (`spotify.liked_sync_interval_secs`, default
+  3600 s) instead of on every poll cycle.
+
+### Added
+
+- **Spotify request metrics**: process-wide per-source counters (`liked_sync`,
+  `playlist_list`, `playlist_tracks`, `subscriptions`, `bpm_key_sync`, `auth`, `other`)
+  exposed at `GET /api/services/spotify/metrics` and in the poll-cycle summary log.
+- bpm-key reconcile stages its Spotify calls with a 250 ms inter-call delay.
+
+---
+
+## [1.15.0] — 2026-10-08
+
+### Added
+
+- **Migration 033 — `rediscovery_pushes`-Ledger (#79)**: neues explizites Push-Ledger
+  `rediscovery_pushes` (`track_id`, `playlist_id` nullable/`ON DELETE SET NULL`, `pushed_at`,
+  `facet_json`, `slot`) mit den Indizes `idx_rediscovery_pushes_track(track_id, pushed_at)` und
+  `idx_rediscovery_pushes_slot(slot, pushed_at)`. Es trägt die Rediscovery-Historie über
+  `keepLast`-Pruning hinweg: `pushed_at` treibt `excludePushedSinceDays`, `slot` ist die
+  idempotente, neustartfeste Quelle der Tages-Umbenennung. Migration ist additiv
+  (`CREATE TABLE IF NOT EXISTS`); Canary in `tests/migration_integrity.rs` erwartet die Tabelle,
+  4 Integrationstests in `tests/migration_rediscovery_pushes.rs` (frische DB 001→033,
+  Playlist-Delete ⇒ `playlist_id NULL` + Zeile bleibt, Track-Delete ⇒ CASCADE, Index-Nutzung).
+
+- **`GET /api/rediscovery/candidates` — Facetten + Reasons (#81)**: neuer Endpoint
+  (`src/api/rediscovery.rs`) mit allen Facetten, server-seitigem Filter/Sort/Pagination und
+  erklärenden `reasons[]` je Trefferzeile (`touchedBeforeDays` auf Basis von `last_touched_at`,
+  `likedOnly`, `excludeBackpack`, `requireBpm`/`requireKey`, `bpmMin`/`bpmMax`, `keys`, `genres`,
+  `excludePushedSinceDays` über das Ledger 033). Gebatchte Fact-/Facetten-/Ledger-Loader in
+  `src/db/rediscovery.rs` (kein N+1, keine Pro-Row-View-Zugriffe); `bpmMin > bpmMax` ⇒ 400.
+  14 Integrationstests in `tests/api_rediscovery.rs`.
+
+- **`GET /api/rediscovery/stats` (#82)**: neuer Aggregat-Endpunkt über **dieselben
+  Facetten-Parameter** wie `candidates` (geteilte `RediscoveryFacetsQuery`). Liefert
+  `matching`, `withBpmAndKey`, `needsAnalysis`, `notOwned`, `pushedRecently`,
+  `byBpmBucket` und `byLiked` — berechnet rein aggregierend über den einen batched
+  geladenen Survivor-Set (kein Pro-Row-Laden, keine Migration). `byBpmBucket` nutzt die
+  neue Single-Source-Bucket-Definition `db::rediscovery::BPM_BUCKET_WIDTH` +
+  `bpm_bucket_label` (Breite 5, Label `"120-124"`; nur belegte Buckets).
+  `pushedRecently` zählt Tracks, die alle übrigen Facetten erfüllen, aber am
+  Push-Cooldown herausfallen (`0` bei deaktiviertem Facet). Die gemeinsame
+  Survivor-Berechnung wurde in `facet_survivors` gezogen; `candidates` nutzt sie
+  unverändert.
+
+- **Test-Seed-Szenario `rediscovery` (#80)**: `db::testing::seed_rediscovery_scenario` erweitert
+  `seed_liked_songs_scenario` um Tracks/Dateien 10–18, den Backpack-Tag + die kuratierte Playlist 60
+  und 2 `rediscovery_pushes`-Zeilen — deterministisch über den festen Anker
+  `REDISCOVERY_SEED_EPOCH` (kein `unixepoch()`/`now()`), idempotent (`OR IGNORE`). Registriert am
+  `POST /api/testing/seed`-Endpoint (`{"scenario":"rediscovery"}`); `clear_all_tables` räumt
+  `rediscovery_pushes` FK-sicher mit ab. Test-Helper `tests/common::seed_rediscovery_data`.
+
+- **SPA-Seite `#rediscovery` (#83)**: neue Frontend-Seite `frontend/pages/rediscovery.js`
+  (Route `#rediscovery`, Eintrag im Tools-Menü) mit Facetten-Formular links, einer
+  server-seitigen Live-Preview-Tabelle (Reason-Chips **verbatim** aus dem API-Feld
+  `reasons`) und einer Kennzahlen-Leiste aus `GET /api/rediscovery/stats`. Facetten-
+  Änderungen lösen (300 ms debounced) ein Neu-Laden ohne Page-Reload aus; Sortierung,
+  `total` und Pagination laufen strikt server-seitig über `limit`/`offset`
+  (`GET /api/rediscovery/candidates`), kein Client-Side-Filtern nach Pagination.
+  Der „Generate Playlist"-Button ist bewusst noch ein Platzhalter (1.16.0/1.18.0).
+  Playwright-Abdeckung via Seed-Szenario `rediscovery` (`frontend/tests/rediscovery.spec.js`).
+
+- **Playwright-Spec `rediscovery.spec.js` (#84)**: deterministische Playwright-Spec für die
+  Rediscovery-Seite (Filter, Reason-Chips, Pagination, Stats-Bar) — 8 Testfälle statt der alten
+  `waitForTimeout`-basierten Fassung; kein Produktivcode geändert (1 Testdatei).
+
+- **BPM//key-System-Playlists (#145, PR #146)**: pro `(BPM, Key)`-Kombination der Bibliothek eine
+  echte Spotify-Playlist (Name `124bpm // 12m` in Traktor-Notation, `keyStyle` umstellbar auf
+  Camelot). Die Zeilen nutzen `playlist_kind='generated'` (Migration 032) und bleiben damit aus
+  Tag-Matching, Kommentar-Write-out, Usage-/„last touched"-Scoring und dem Playlist-Poller heraus.
+  **Migration 034** ergänzt `service_playlists.system_key` (+ partieller Unique-Index
+  `idx_service_playlists_system_key`) als stabilen Kombi-Schlüssel (`bpm_key:124:12A`). Neue
+  Endpunkte `GET /api/bpm-key-playlists/preview`, `POST /api/bpm-key-playlists/sync`,
+  `GET /api/bpm-key-playlists` und `GET|PUT /api/bpm-key-playlists/settings`; Task
+  `SyncBpmKeyPlaylists` (Conflict-Key `bpm_key_sync`) mit Auto-Enqueue nach Ordner-Scan/Traktor-Import
+  (optionaler Schedule, Default aus). Der globale Poller überspringt bekannte
+  Nicht-`curated`-Playlists (kein Re-Fetch pro Zyklus). SPA-Seite `#bpm-key-playlists` (Tools) plus
+  `system`-Filter auf der Playlists-Seite. BPM wird auf Ganzzahl gerundet, Keys kanonisch über den
+  Camelot-Parser gruppiert (`12m`/`12A` kollabieren), Variant-Dateien über eine Repräsentant-Datei
+  pro Spotify-Track entdoppelt. Abdeckung: 18 Integrationstests (`tests/api_bpm_key_playlists.rs`),
+  Unit-Tests, Playwright-Spec. ADR-073. Default aus (`enabled=false`), Playlists privat,
+  `min_tracks=1`.
+
+## [1.14.0] — 2026-10-02
+
+### Added
+
+- **`db::rediscovery` — TrackFacts-Zugang über `v_track_forgotten_facts` (#62)**: neues
+  Modul `src/db/rediscovery.rs` mit `get_track_facts(pool, track_id)` (typisierte
+  Track-Fakten inkl. Spiel-/Like-Zeit, BPM/Key/Genre/Playcount und `in_backpack` aus
+  dem File-Join über `v_file_track_link`, deterministisch per niedrigster `files.id`)
+  und `count_touched_before(pool, days)` (zählt kuratierte **und** gelikte Kontakte
+  älter als die Grenze; Scope kommt aus der View, kein zusätzlicher `liked`-Filter).
+  `in_backpack` nutzt die Backpack-Definition aus `crate::backpack`, kein Duplikat.
+  Kein `SELECT *`.
+
+- **Liked-Songs-Sync (`liked_sync`)**: neues Modul `src/liked_sync.rs` spiegelt die
+  Spotify-Liked-Songs in eine synthetische Playlist (`playlist_id = 'spotify:liked'`,
+  `playlist_kind = 'liked'`) und setzt dabei **immer** das Spotify-Like-Datum als
+  `added_at` — auch für bereits vorhandene Memberships (Relike-Semantik, bewusster
+  Unterschied zum Global Poller). `retire_missing_likes` tombstoned nur Memberships,
+  die nicht mehr geliked sind (Tracks in anderen Playlists bleiben unberührt).
+  Fetch- und DB-Schicht sind getrennt, damit die Merge-Logik ohne Netzwerk testbar ist
+  (`tests/liked_sync.rs`, 7 Tests).
+
+- **Tag-/Playlist-Löschung aktualisiert die Filter jetzt sofort**: `file_resolved_tags` /
+  `track_resolved_tags` werden nach Tag- oder Playlist-Änderungen (create/update/delete,
+  Kategorie-Änderung, Reorder, Categorize) sowie vor jedem Comment-Count/-Write
+  neu aufgebaut. Vorher konnte ein gelöschter Tag bis zum nächsten Hintergrund-Refresh
+  (Maintainer 1 h, Scan/Poller) weiter filtern — und im neu geschriebenen Comment stehen.
+
+- **Backpack-Filter auf der Files-Seite**: `?backpack=true|false` (und als POST-Filterfeld)
+  filtert serverseitig nach Backpack-Zugehörigkeit — Buttons **In / Not in**. Die Definition
+  ist exakt die autoritative Menge aus `get_backpack_track_ids` (Tracks in aktiven
+  Subscriptions ∪ Tracks mit `backpack = 1`-Tag), also dieselbe, die `prune` schützt.
+  Kombiniert sich mit allen anderen Filtern (z. B. „In + STEMS Missing").
+
+- **Backpack-Stem-Staging**: `GET`/`POST /api/files/backpack-conversion` zählt die
+  Backpack-Tracks, die lokal vorliegen, aber noch keinen lokalen `stem.m4a` haben, und
+  legt für sie Symlinks in `~/Music/backpack_conversion` ab (Ziel per
+  `MOMOS_BACKPACK_CONVERSION_DIR` überschreibbar). Neuer Button **„Stage Backpack → Stems"
+  (N)** im Actions-Panel der Files-Seite — der Count ist dort direkt sichtbar. Anders als
+  „Stage for Conversion" braucht er keine Filter/Auswahl.
+
+- **Test-Seed-Szenario `liked_songs`**: `POST /api/testing/seed {"scenario":"liked_songs"}`
+  erweitert das Basic-Szenario um die Likes-Spiegel (Playlist 5 `liked`, Playlist 7 `Likes`),
+  die generierte Playlist 6 `Today's Selection` und die Track-Verknüpfungen, mit denen
+  `v_track_forgotten_facts` liked/generated-Semantik prüfbar wird (Track 1 geliked +
+  `playlist_count=1`, Track 2 nur geliked, Track 3 in zwei kuratierten Playlists).
+
+- **Liked-Sync läuft im Global Poller mit + Endpoint `POST /api/spotify/sync-liked`**: der
+  Global Poller ruft pro Zyklus (nach Playlist-Sync/Deleted-Detection, vor der Summary)
+  genau einmal `liked_sync::sync_liked_songs` auf. Der Schritt respektiert den
+  prozessweiten Spotify-Cooldown (429 im Playlist-Teil überspringt ihn), und ein Fehler
+  bricht den Zyklus nicht ab. Die Zyklus-Zusammenfassung nennt `linked`/`retired`/`total`,
+  und bei neuen Liked-Memberships wird der Tag-Refresh (Step 6) ebenfalls ausgelöst.
+  Neuer synchroner Endpoint `POST /api/spotify/sync-liked` liefert
+  `{"linked":n,"retired":n,"total":n}`.
+
+### Fixed
+
+- **Aus Playlists entfernte Tracks sind jetzt wirklich weg** (außer bei Archiving):
+  `service_playlist_tracks.deleted_at` ist ein Grabstein, der nur für archivierende
+  Playlists (`archive_deleted = 1`) gedacht ist. Der Sync hat ihn aber bei _jeder_
+  Playlist hinterlassen, und diese Zeilen leckten in Tag-Auflösung, Backpack-Zugehörigkeit
+  und Comment-Ziele — z. B. blieb ein aus einer Beatport-Playlist entfernter Track im
+  Backpack (und damit prune-geschützt). Migration 031 räumt die Altlasten auf (5960 Zeilen)
+  und gibt `v_track_tags` den Guard, den alle anderen Auflösungs-Views schon hatten.
+  Der Sync und der Archive-Schalter halten die Invariante ab jetzt selbst.
+
+## [1.13.0] — 2026-09-24
+
+### Added
+
+- **Backpack-Datei-Sync wieder in der UI**: `GET`/`PUT /api/storage/settings/backpack-sync`
+  liefern/setzen den File-Sync-Schalter; die Backpack-Seite zeigt ihn als Toggle neben
+  „Sync All".
+
+- **Dynamic Bundles: Top-N + Camelot-Balance**: Bundles können jetzt auf die
+  besten **N** Dateien begrenzt werden (`limitCount`) nach einem wählbaren
+  Ranking (`rankBy`: `rating_playcount` (Default: `rating*3 + ln(1+plays)`),
+  `rating`, `playcount`, `recent`, `none`) — und optional die Auswahl über die
+  24 Camelot-Keys **round-robin ausbalancieren** (`diversifyKeys`), sodass jeder
+  Key vertreten ist; dünn besetzte Keys geben alles, der Rest wird nach Score
+  aufgefüllt. Deterministisch (Tiebreak `file_id`). Neu in der UI im
+  Bundle-Editor; Migration 029.
+- **`cleanup-redundant` CLI**: löscht redundante lokale Formate (z. B. einen lokal
+  vorhandenen flac, wenn der bevorzugte `stem.m4a` desselben Tracks ebenfalls lokal
+  und der flac im Object Store gesichert ist). Die Sicherheitsprüfung akzeptiert nur
+  noch `store:`-Backups — eine alte NAS-Zeile autorisiert keine Löschung mehr. Damit
+  ließ sich der Mac um ~56 GiB entlasten.
+- **`store-import`** (music-api): einmaliges Migrations-Bin, das einen Verzeichnisbaum
+  (z. B. die NAS-Backups) kanonisiert wie MMM (Comment-Tag geleert, WAV roh), in den
+  content-addressed Store auf `.200` legt und pro Objekt Metadaten schreibt. Neue
+  Spalten `store_objects.group_key` (Track) und `stem_type` (vocals/bass/drums/…) für
+  die Stem-Parts pro Track. Idempotent, schreibt ein Manifest für den DB-Abgleich.
+- **Remote object store (Upload-Seite)**: MMM lädt die Bibliothek in einen
+  content-addressed Store auf dem Musik-Host und kann danach fragen, ob eine
+  Datei gesichert ist. Objekte sind die **kanonisierte** Datei (Comment-Tag
+  geleert) — Dateien, die sich nur im Comment unterscheiden, deduplizieren.
+  Neu: Spalte `files.content_hash` (Migration 028), `[store]`-Config, Task
+  `StoreSync` (pro Batch: hashen → `POST /objects/check` → `PUT` fehlende),
+  `POST /api/storage/sync-store` und ein „Sync to store“-Knopf auf der
+  Storage-Seite. `auto_prune` stützt sich nur noch auf `store:`-Backups, nicht
+  mehr auf die alten rsync-Zeilen.
+- **Schalter für den Backpack-File-Sync**: Der Backpack-Sync (fehlende Files per
+  rsync aus dem Backup ziehen, Formate aufräumen) lief bisher immer beim
+  App-Start und beim Umschalten eines Tags. Neuer Settings-Key
+  `backpack.sync_enabled` (Default an), Toggle auf der Backpack-Seite, und
+  `POST /api/backpack/sync-enabled`. Aus = kein Auto-Pull beim Start, kein Sync
+  beim Tag-Toggle, und `POST /api/storage/sync-backpack` antwortet **409**.
+- **music-api-Consumer**: MMM bestellt fehlende Backpack-ISRCs bei `music-api`,
+  importiert die gelieferten Dateien (FLAC, sonst 320/128) in die Library und
+  stößt den Scan der Zielordner an. Neue Tabelle `music_api_imports` (Migration
+  027), `[music_api]`-Config (Base-URL + Token, env `MUSIC_API_URL` /
+  `MUSIC_API_TOKEN`), `GET /api/backpack` liefert den Fortschritt als
+  `musicApi`-Block, `POST /api/backpack/pull` startet einen Zyklus sofort
+  (409, solange nicht konfiguriert). Die Backpack-Seite zeigt die Zähler und
+  einen „Pull now“-Knopf.
+
+### Added
+
+- **Restore + Streaming aus dem Object Store**: Eine nicht mehr lokale Datei wird
+  jetzt aus dem content-addressed Store zurückgeholt statt per rsync. `BackpackSync`
+  lädt Objekte über `GET /objects/{hash}` und schreibt danach den **Comment aus der
+  DB neu** (der Upload hatte ihn geleert), `POST /api/files/{id}/pull-from-backup`
+  nutzt denselben Pfad, und `GET /api/files/{id}/stream` proxyt remote-only Dateien
+  aus dem Store inklusive `Range`-Durchreichung (Playback/ffmpeg bleiben intakt).
+- **Backpack-Seite verwaltet das Backpack**: Playlist-Quellen (subscribte Playlists)
+  und Tag-Quellen werden nebeneinander gelistet und sind dort direkt entfernbar (Tag:
+  `PUT /api/tags/{id}/backpack`, Playlist: `DELETE /api/playlists/subscriptions/{id}`).
+  Die Seite war bisher read-only.
+
+### Changed
+
+- **Store-Sync läuft jetzt periodisch** (Maintainer-Zyklus, std. 1 h) statt nur beim
+  App-Start. Ohne das erreichten per music-api geladene Dateien den Object Store erst
+  beim nächsten Neustart — also praktisch nie.
+
+- **music-api: begrenzte Retries für `failed`** (`failed` ist nicht mehr sofort terminal):
+  Transiente Fehler (download timeout, abgebrochener Download) werden bis zu **3×** erneut
+  geordert (Migration 030 `music_api_imports.attempts`). `absent` (kein streambarer Treffer)
+  bleibt terminal. Vorher verlor jeder Timeout den Track dauerhaft.
+
+- **music-api: Demand = ganze Bibliothek (Backpack zuerst)**: Der Consumer bestellt
+  nicht mehr nur Backpack-ISRCs, sondern jeden Track ohne verlinkte Datei. Backpack-Tracks
+  werden zuerst geordert, damit sie nie hinter dem Backlog warten. Siehe ADR-068.
+- **Backpack ≠ Archive (UI)**: Backpack ist jetzt durchgängig ein **Beutel**
+  (`fa-bag-shopping`, an = `--primary`), Archive eine **Archivbox** (`fa-box-archive`,
+  an = `--yellow`). Vorher war der Aus-Zustand beider Buttons dasselbe Icon
+  (`fa-box-open`) und damit nicht unterscheidbar. Betrifft Playlists-, Tags-, Tracks-,
+  Dashboard- und Backpack-Seite.
+
+- **„Subscribe“ heißt in der UI jetzt „Backpack“ (#40)**: Spalte, Filter, Buttons
+  (Beutel-Icon `fa-bag-shopping`), Dashboard-Karte und Toasts. Die Tooltips beschreiben
+  die reale Semantik (Mitglied der Keep-Menge → auf dem Mac vorhalten, prune-safe).
+  API-Pfade und interne Namen bleiben unverändert.
+
+### Removed
+
+- **Backpack-Playlist-Transport entfernt**: Die aggregierte Spotify-„backpack"-Playlist
+  (Materialisierung aus Tags ∪ Subscriptions, Push, Mirror) ist weg — sie war nur der
+  deemix-Download-Pfad und ist seit music-api obsolet. Entfernt: die Endpunkte
+  `/api/backpack`, `/api/backpack/push`, `/api/backpack/pull`, `/api/backpack/sync-enabled`,
+  die Spotify-Transport-Karten der Backpack-Seite, der Coordinator + die Materialisierung in
+  `src/backpack.rs`, das `AppState.backpack_coordinator`-Feld und die
+  `backpack.{playlist_*,signature,dirty_at,last_push_*}` Settings-Keys. Die **Keep-Regel bleibt**
+  (Backpack = Tags ∪ Subscriptions; `prune` schützt sie) — die Backpack-Seite bleibt als Steuerung
+  für „das will ich auf dem Mac haben" (Quellen, Belegung, File-Sync, Sync All), ebenso der
+  `backpack`-Toggle auf der Tags-Seite. Die bestehende Spotify-Playlist muss manuell gelöscht
+  werden. Siehe ADR-067.
+
+- **NAS/SSH-Backup vollständig entfernt**: Das `backup`-Modul (`BackupEngine`) und
+  die Tasks `BackupFolder`/`BackupWavs`/`BackupDiscovery`/`BackupVerify`/
+  `AutoBackupCheck` sind gelöscht, ebenso die Endpunkte `/api/storage/backup/{id}`,
+  `/api/storage/backup-wavs/{id}`, `/api/storage/discover-backup/{id}`,
+  `/api/storage/backfill-backup-sizes`, `/api/backup/test`, `/api/backup/explore`,
+  `/api/folders/{id}/backup` und `/api/folders/{id}/auto-backup`. Der Maintainer
+  fährt nur noch Scan-/Refresh-/Prune-/Traktor-Checks; `auto_backup`-Poller und
+  Auto-Reconcile sind weg. `BackpackSync` und der Pull-from-Backup-Handler
+  behandeln nur noch `store:<sha256>`-Locations. Das Backup-Frontend (Spalten,
+  Modal-Felder, Storage-Buttons) ist entfernt; `scan_sources` läuft jetzt über
+  `PUT /api/folders/{id}`. `dufs` (`:5000`, `-A`) auf dem Musik-Host ist gestoppt.
+  `folders.backup_path`/`auto_backup` bleiben als deprecated Spalten. Siehe ADR-066.
+- **Einzel-Playlist-Pushes an deemix entfernt**: Der einzige deemix-Transport ist
+  jetzt die eine aggregierte Backpack-Playlist. Entfernt wurden der generische
+  Endpoint `POST /api/services/deemix/queue` (die Route bleibt nur `GET`; ein POST
+  antwortet **405**), die deemix-Spalte samt Plus-/Restart-/Retry-Buttons auf der
+  Playlists-Seite, der „Restart"-Button der Deemix-Queue-Seite sowie
+  `momos-music-manager deemix add <url>`. Die Backend-Anreicherung
+  `deemixStatus`/`deemixId` der Playlists-API (inkl. Live-Queue-Call und Backfill
+  einzelner `deemix_downloads`-Zeilen) ist ebenfalls entfallen.
+- **`DownloadGuarantor` re-queuede Zombie-Einträge pro Playlist-URL**: Statt N
+  Einzel-URLs wird bei Zombie-Einträgen jetzt genau der eine Backpack-Playlist-URL
+  re-submittet (`ensure_queued` — Retry wenn terminal, No-Op wenn aktiv).
+
+### Removed
+
+- **deemix-Auto-Push entfernt**: Der Backpack-Coordinator und der Push-Handler
+  übergeben keine Spotify-Playlist mehr an deemix, und `download_guarantor`
+  re-queued keine Zombie-Playlists mehr. Grund: deemix löst Spotify-Links nicht
+  mehr auf (Client-Credentials-Apps bekommen seit Feb 2026 nur den Playlist-Namen,
+  keine Songs) und beide Spotify-Apps liefen in einen app-weiten 429. Der neue
+  Dienst `music-api` übernimmt den Download per ISRC-Order.
+
+### Fixed
+
+- **Backpack-File-Sync-Schalter galt nicht im Maintainer**: Der Maintainer startete
+  den Backpack-File-Sync stündlich, auch wenn `backpack.sync_enabled = 0` gesetzt war
+  (der Schalter war nur am API-Handler und beim App-Start wirksam). Jetzt prüft auch
+  der Maintainer den Schalter. Toter `parse_backup_path` entfernt.
+- **Dynamic Bundles: BASE-Tags wirkten nicht**: Der `baseTags`-Filter matchte
+  exakte **Playlist-Namen** statt der aufgelösten Tags. Ein Parent-Tag wie
+  `afterhours` (das über `v_resolved_tags` auf 2725 Tracks auflöst, aber keine
+  gleichnamige Playlist hat) lieferte deshalb **0 Treffer**. Jetzt matcht der
+  Filter gegen `file_resolved_tags` (parent-aufgelöst, case-insensitiv).
+
+- **Backpack-Playlist wurde nie angelegt**: `get_current_user_id` gab die rspotify-_URI_
+  (`spotify:user:<id>`) statt der blanken Id zurück → `POST
+/v1/users/spotify:user:<id>/playlists` → **400 Bad Request**. Ebenso lieferte
+  `create_playlist` die Playlist-URI zurück und `get_playlist_track_uris` baute
+  `spotify:track:spotify:track:<id>`.
+- **429-Sturm (#49)**: Coordinator, Subscription- und Global-Poller ignorierten
+  `Retry-After` (auf 300 s geklemmt bzw. gar nicht gelesen) und retryten im
+  Penalty-Fenster; der Coordinator zusätzlich alle 5 s (2081 Versuche/Tag, 0 Erfolge).
+  Jetzt: prozessweiter Cooldown, exponentielles Backoff (60 s → 30 min) und
+  Zyklus-Abbruch beim ersten 429.
+- **Backpack-Verifikation** las mit `Market::FromToken`, wodurch Spotify für
+  markt-nicht-verfügbare Tracks `null` liefert (~90 von 6480) — die Playlist sah
+  „unvollständig“ aus und `backpack.signature` wurde nie gesetzt (Rebuild-Loop). Der
+  Read ist jetzt marktfrei, die Verifikation toleriert kleine Abweichungen (1 %, min 5)
+  und ein Read-Fehler gilt als unklar statt als Mismatch. Zusätzlich sind
+  Materialisierungen serialisiert (Coordinator vs. manueller Push).
+- **`v_track_tags`-Backpack-Query 8,8 s → 0,05 s** (Migration 026: Expression-Indizes
+  auf `LOWER(TRIM(name))`). Das war die Ursache der leeren Backpack-Karte
+  (`/api/backpack`-Timeout) und beschleunigt zugleich `refresh_track_resolved_tags`,
+  die Digging-Queries und die Files-Tag-Filter.
+
+- **Dirty-Marker blieb stehen**: Ein signature-gated Lauf ohne Änderung
+  (`unchanged`) räumte `backpack.dirty_at` nicht auf. Dadurch blieb das
+  Debounce-Gate des Coordinators dauerhaft offen und das komplette Set wurde
+  alle 5 s neu aufgelöst (vor Migration 026: jedes Mal ~8,8 s).
+
+- **Backpack-Badge sagte dauerhaft „out of sync“**: `dirty` heißt „eine
+  Membership-Mutation ist vorgemerkt“, nicht „die Playlist ist falsch“ — und der
+  Poller setzte es zusätzlich in jeder Runde mit fälligen Subscriptions (also fast
+  immer). `GET /api/backpack` liefert jetzt `inSync` (Vergleich der gespeicherten
+  Signatur mit dem aktuellen Set) und die UI stützt das Badge darauf; der Poller
+  markiert dirty nur noch, wenn wirklich Tracks dazukamen oder die Playlist
+  umbenannt wurde (der Name steuert das Tag↔Playlist-Matching).
+- **Silenter Coordinator-Fehler**: schlug `from_stored_tokens` fehl, backte der
+  Coordinator nur auf `debug` ab (im Default-Log unsichtbar) — der Backpack-
+  Transport war damit unbemerkt still. Jetzt `warn` inklusive nächstem Versuch.
+
+## [1.12.0] — 2026-09-21
+
+### Fixed
+
+- **Rolling-Kanal bot neue Dev-Builds nicht an (#47, PR #46)**: Der Rolling-Vergleich
+  nutzte `latest > current` auf SemVer-`Version`, dessen abgeleitetes `Ord`
+  die Build-Metadata (den SHA) lexikographisch mitvergleicht — ein frisch
+  gepushter Commit, dessen SHA niedriger sortiert als der laufende, galt als
+  „Up to date" (`1.11.0-dev+0f5dde5a` < `1.11.0-dev+f0000000`). Rolling
+  vergleicht jetzt die Versionszeichenkette (jeder andere Build von `main`
+  ist ein Update), eine ältere **Basisversion** bleibt ausgeschlossen.
+  Zusätzlich verglich ein Kanalwechsel über die Pre-Release-Grenze: ein
+  Release-Build (`1.11.0`) auf dem Rolling-Kanal bekam `1.11.0-dev+<sha>`
+  nie angeboten, weil stabile Versionen _über_ ihren Pre-Releases stehen.
+  Cross-Channel gilt jetzt „gleiche/neuere Basisversion + andere
+  Zeichenkette → Update", ohne Silent-Downgrade. Tests:
+  `rolling_offers_new_dev_build_whose_sha_sorts_lower`,
+  `release_build_on_rolling_channel_offers_same_base_dev_build`,
+  `release_build_on_rolling_channel_ignores_older_base_dev_build`,
+  `dev_build_on_rolling_channel_ignores_older_base_dev_build`,
+  `dev_build_on_release_channel_offers_stable_release`.
+
+### Added
+
+- **Backpack: expliziter Spotify-Playlist-Push (#43, ADR-060)**: Die eine
+  `Backpack`-Playlist wird jetzt **gespiegelt** statt angehängt
+  (`replace_playlist_items`) — entfernte Tracks verschwinden aus Spotify, keine
+  deemix-Residual-Downloads mehr. Neu: `GET /api/backpack` (Set-Größe,
+  Playlist-URL, dirty/Last-Push-Status) und `POST /api/backpack/push`
+  (`force` / `dryRun` / `submitToDeemix` → `MaterializeOutcome`). Mutationen
+  (Track-Toggle, Tag-Flag, Subscribe/Unsubscribe, Global-Poller) setzen einen
+  Dirty-Marker, den ein `BackpackSyncCoordinator` nach 30 s Debounce
+  materialisiert (plus 10-min-Reconciliation als Safety-Net); der Poller baut
+  nicht mehr inline. Nach jedem Replace wird die Remote-Playlist zurückgelesen
+  und verglichen — nur bei Gleichheit wird die Signatur fortgeschrieben, bei
+  404/403 wird die Playlist neu angelegt. Backpack-Seite: Status-Karte +
+  Button „Push to Spotify". Keine Migration nötig.
+
+## [1.11.0] — 2026-09-11
+
+### Added
+
+- **Traktor-Import-Summary (#27/Phase 0, PR #39)**: Nach einem Traktor-Import
+  zeigt die Import-Seite jetzt eine strukturierte Summary statt roher Log-Zeilen
+  — Chips (`parsed` / `matched` / `without match`) plus Liste der Dateinamen ohne
+  DB-Match. Gespeist aus dem neuen optionalen `Task.result_data` (nicht mehr aus
+  dem Freitext-Log geparst); keine Schema-Migration, keine Breaking Changes am
+  API-Vertrag.
+
+## [1.10.0] — 2026-09-11
+
+### Added
+
+- **M2 — Release-spezifische Seiten/Assets pro Tag (#8, PR #38)**: Der Tag-Build
+  (`build-all.yml`) stellt den automatisch generierten Release-Notes jetzt eine
+  „Downloads + SHA256SUMS"-Sektion voran — Plattform-Matrix (macOS universal,
+  Windows x64/ARM64, Linux x64/ARM64) mit aggregierten Checksummen und
+  Verifikationsanleitung. Das neue, netzwerkfreie Skript `scripts/release-notes.sh`
+  erzeugt die Sektion aus `dist/SHA256SUMS` und wird auch vom PR-Publish-Gate als
+  Dry-Run ausgeführt. Die Landing-Page verlinkt die stabile Version nun über
+  `releases/latest` (nie stale) plus expliziten Changelog-Link.
+
+## [1.9.0] — 2026-09-11
+
+### Added
+
+- **deemix-Stack vollständig im Eigentum von MMM (#32/Abschnitt B, PR #37)**: Der
+  `DeemixClient` deckt den kompletten deemix-Lifecycle ab — ARL-Auth + automatische
+  Re-Auth (sowohl HTTP 401 als auch `{"result":false,"errid":"NotLoggedIn"}`, jetzt
+  auch im neuen Delete-Pfad), vollständige Queue-Steuerung via neuem
+  `remove_from_queue(uuid)` (`POST /api/removeFromQueue`) ergänzend zu
+  `add_to_queue`/`retry_download`, Status-/Fortschritts-Polling via
+  `get_download_progress(spotify_url)` (`DeemixDownloadProgress`: status, progress,
+  downloaded/total, finished, has_errors) sowie Download-Verifikation via
+  `verify_download` + `AudioQuality` (Priorität `stem` > `flac` > `mp3`). Rein additiv
+  (`src/deemix/{client,models}.rs`), keine Änderung an bestehenden API-Routen oder am
+  DB-Schema. Gemockte-HTTP-Integrationstests; der Live-e2e-Test bleibt ein
+  `#[ignore]`-Test gegen die eigene deemix-Instanz (ARL ausschließlich per Env, nie im
+  Repo/CI).
+
+### Fixed
+
+- **Site-Download-Links**: Asset-Dateinamen in `site/index.html` zeigten auf den
+  alten Build-Stand (`momos-music-manager-1.7.0-*`) statt auf den Release-Tag; die
+  Links verweisen jetzt auf die zum Tag passenden Asset-Namen.
+
+## [1.8.0] — 2026-09-11
+
+### Added
+
+- **Extended-Mix Auto-Upgrade, Stufe 1 (#29/#36)**: neues, quellen-agnostisches
+  Modul `src/extended_mix.rs` erkennt Versions-Varianten (Extended Mix, Ext Mix,
+  Radio Edit, Original/Club Mix, Instrumental) und gruppiert Releases über
+  `base_title`. Upgrade-Entscheidung ohne Loop/Downgrade (`find_extended_mix`,
+  `upgrade_target_for_release`) sowie library-weite Kandidatensuche
+  (`find_upgrade_candidates`). Neuer read-only Endpoint
+  `GET /api/extended-mix/candidates`; `is_extended_mix` auf Digging-Ergebnissen.
+  Opt-in-Toggle `autoupgrade` (Env `MOMOS_AUTOUPGRADE_ENABLED` > `[autoupgrade]
+enabled` > Default aus). Der eigentliche Download-/Ersetzungsschritt folgt als
+  separater PR (benötigt ARL/Single-Track-Download).
+
+## [1.7.0] — 2026-09-11
+
+### Changed
+
+- **UI Phase-0 Quick Wins (#27/#35)**: `Folders` von der Services- in die
+  Library-Navigation verschoben + `#folders?new=1`-Direkteinstieg (Dashboard-
+  Empty-State, Settings-Karte); sichtbarer **Apply**-Button für den Traktor-
+  Manual-Path; Deemix-Queue zeigt Fehlermeldungen als eigene Inline-Zeile mit
+  **Retry**-Button; Platzhalter-Semantik getrennt („—“ = nicht gesetzt,
+  „?“ = unbekannt) via `shared/format.js`; Last-Played-Spaltenbreiten angepasst.
+
+## [1.6.0] — 2026-09-11
+
+### Added
+
+- **Backpack-Konzept (Verschmelzung)**: die markierten Spotify-Playlists
+  (Subscriptions) und die `tags.backpack`-Flags laufen in **einen** `Backpack`
+  zusammen (deduplizierte Vereinigung). Die Menge wird in **genau eine**
+  Spotify-Playlist `Backpack` materialisiert und **nur diese eine** URL an
+  deemix submittet — statt N Einzel-Submits. Auto-Download
+  (`stem.m4a` > `flac` > `mp3`) und Prune-Schutz wirken auf die gesamte Menge.
+  Migration `025_backpack_concept.sql` konsolidiert `deemix_downloads` auf
+  eine Transport-Row (kein Datenverlust). (#32)
+
+---
+
+## [1.5.0] — 2026-09-11
+
+### Added
+
+- **STEMS-Filter in der Files-View**: neuer `STEMS`-Filter (All/Missing/Has)
+  auf `#files` zeigt Nicht-Stem-Dateien, deren Track (gleiche ISRC) noch kein
+  `stem.m4a` hat; kombinierbar mit allen bestehenden Filtern. Neuer `stems`-
+  Query-Param auf `GET /api/files` + `GET /api/files/count` inkl. Select-All.
+  (#2)
+
+### Documentation
+
+- `CHANGELOG.md`: `[Unreleased]`-Block in getrennte Versionsabschnitte
+  v1.1.0–v1.4.0 aufgeteilt. (#31)
+- UI/UX-Redesign-Proposal: Ist-Zustand, Reibungsanalyse, Mockups und Roadmap
+  dokumentiert. (#28)
+
+---
+
+## [1.4.0] — 2026-09-10
+
+### Added
+
+- **Telemetry Full Package — UI- & Log-Telemetrie**: erweitert die
+  Event-Telemetrie um drei Familien — `ui.view.opened` (View-Tracking,
+  von der SPA bei jeder Navigation gefeuert), die sechs `ui.action.*`-
+  Typen (`scan_folder`, `run_backup`, `restore_dump`, `traktor_import`,
+  `recompute_embeddings`, `deemix_enqueue`; serverseitig in den
+  ausschließlich user-getriggerten Handlern, `ok`/sanitisierte
+  `error_message` je Response-Entscheidung) und `log.entry`
+  (Log-Shipping über einen eigenen tracing-Layer: Level- und
+  Target-Filter nur für `momos_music_manager`, Rekursionsschutz für das
+  Telemetry-Modul, Home-Pfad-Strip + 1000-Zeichen-Kürzung, bounded Kanal
+  (2k, Drop-on-full ohne Blockieren), Token-Bucket `log_max_events_per_sec`
+  → bestehende emit-Pipeline). Alles **default aus**: neue `[telemetry]`-
+  Keys `ui_events_enabled` + `log_shipping_enabled` (beide `false`),
+  `log_min_level` (`"warn"`, error/warn/info/debug/trace) und
+  `log_max_events_per_sec` (`50`, Pflicht-Cap 1–10000, ungültig → Default
+  - Warn) mit `MOMOS_TELEMETRY_UI_EVENTS_ENABLED`/
+    `MOMOS_TELEMETRY_LOG_SHIPPING_ENABLED`/`MOMOS_TELEMETRY_LOG_MIN_LEVEL`/
+    `MOMOS_TELEMETRY_LOG_MAX_EVENTS_PER_SEC`; Env > TOML > Default wie
+    gehabt. Neuer interner Endpoint `POST /api/ui-events` (mappt nur `ui.*`
+    auf die Allowlist, antwortet **immer 204** — Flag aus, unbekannter Typ,
+    ungültiger Payload oder keine Pipeline erzeugen nie 4xx). Settings-UI:
+    zwei neue Toggles, Log-Level-Select und Max-Events/s-Feld in der
+    Telemetry-Card (persistiert in `config.toml`, Env-Pinning/409 wie die
+    bestehenden Felder). Receiver: neue Migration
+    `migrations/telemetry/002_ui_log_views.sql` mit **nur Views**
+    (`v_ui_views`, `v_ui_actions`, `v_log_volume`; 001 bleibt unangetastet —
+    Checksumme); Rollout-Hinweis: Receiver-Binary vor Aktivierung neu
+    deployen (alter v1.2.1-Receiver droppt unbekannte Typen nach 3× 4xx).
+
+---
+
+## [1.3.0] — 2026-09-04
+
+### Added
+
+- **Telemetry-Settings-Seite (GUI) + Version 1.3.0**: neuer Bereich
+  „Telemetry“ in den Settings — konfigurierbar ohne Config-Graben:
+  `enabled` (Toggle, Default **OFF**), `base_url`, `token`, `instance` und
+  `full_db_interval_secs`. Gespeichert wird direkt in die bestehende
+  `config.toml` (`[telemetry]`-Sektion, zeilenerhaltend — Kommentare und
+  fremde Sektionen bleiben unangetastet; neue Datei wird bei Bedarf
+  angelegt); Priorität **Env > TOML > Defaults** bleibt vollständig
+  erhalten — env-gebundene Felder sind in der UI gesperrt (409 bei
+  Schreibversuch), TOML-Werte editierbar. Beim Schreiben von
+  `full_db_interval_secs` wird der Legacy-Key `interval_secs` automatisch
+  aus der Sektion entfernt (der explizite Key ist autoritativ, „0 = aus“
+  muss auch aus sein). Dazu ein **„Push now“-Button**: löst denselben
+  One-Shot-Push wie die CLI (`telemetry push` / `push_once`) aus und zeigt
+  Erfolg/Fehler inline plus Zeitpunkt des letzten (erfolgreichen) Push
+  (persistiert in der `settings`-KV, Keys `telemetry.last_push_*`, gesetzt
+  von Button, CLI und periodischem Loop). Neue Endpunkte:
+  `GET/POST /api/telemetry-settings/status|settings`,
+  `POST /api/telemetry-settings/push`. Die Hintergrund-Loops (periodischer
+  Push, Event-Pipeline) lesen ihre Werte beim Start — Änderungen wirken
+  nach dem nächsten Neustart, Status und Push-Button nutzen immer den
+  aktuellen Datei-/Env-Stand.
+
+- **CLI-Zugriff bei macOS-App-Installation**: Die App wird als `.app`
+  (DMG nach `/Applications`) installiert und hat damit keinen CLI-Zugriff.
+  Beim **ersten App-Start** (und nach jedem erfolgreichen
+  **DMG-Self-Install** des Autoupdaters) legt die App jetzt automatisch
+  einen Symlink `momos-music-manager` in ein PATH-Verzeichnis an — Ziel
+  ist das Binary im Bundle (`…/Momo's Music Manager.app/Contents/MacOS/…`),
+  der stabile Bundle-Pfad überlebt In-Place-Updates. Auswahl: erstes
+  schreibbares Verzeichnis von `/usr/local/bin` (Default-PATH),
+  `/opt/homebrew/bin` (Apple-Silicon-Homebrew) bzw. `~/.local/bin`
+  (per-User-XDG, wird angelegt; nicht auf dem macOS-Default-PATH — Hinweis
+  in der Settings-UI „CLI access“ + README). Danach funktionieren
+  `momos-music-manager --version` und `momos-music-manager telemetry push`
+  aus dem Terminal. Neues Modul `cli_link` (idempotent, repariert
+  veraltete Links, nie destruktiv) + CLI-Status in den Settings
+  (`GET …/status` → `cli`). Kein Symlink für Dev-/Linux-Binary-Builds.
+
+- **Minor-Bump 1.2.1 → 1.3.0**: `Cargo.toml` + `Cargo.lock` (Basis der
+  Dev-Versionsformel `<Cargo>-dev+<sha8>`; Release-Version kommt beim
+  Tagen aus dem Git-Tag, die Auto-Update-Logik liest die Version
+  ausschließlich als eingebettetes `env!("MMM_VERSION")` — kein weiterer
+  Versionsort nötig, `site/index.html` wird erst beim Release-Tag
+  angehoben).
+
+---
+
+## [1.2.1] — 2026-09-03
+
+### Fixed
+
+- **Update-Check-404 bei Release-Builds (Hotfix v1.2.1)**: `DEFAULT_RELEASE_BASE_URL`
+  endete auf `…/releases/latest` ohne `/download`-Segment — GitHub liefert Assets
+  nur unter `releases/latest/download/<asset>` bzw. `releases/download/<tag>/<asset>`
+  aus, daher schlugen Update-Check/Apply von Release-Builds (Minisig-Signatur,
+  SHA256SUMS-Manifest, versioniertes Binary) mit HTTP 404 fehl. Die Basis-URL
+  trägt jetzt das `download`-Segment (Regression aus PR #19, Fix in PR #23).
+
+---
+
+## [1.2.0] — 2026-09-03
+
+### Added
+
+- **Full-DB-Snapshot-Option (periodischer kompletter DB-Push)**: explizite,
+  dokumentierte Option, die die KOMPLETTE DB (konsistenter `VACUUM INTO`-
+  Snapshot + redacted Meta: Logs/Tasks/Metriken) periodisch an den Collector
+  sendet — neue Config-Key `[telemetry] full_db_interval_secs`
+  (`MOMOS_TELEMETRY_FULL_DB_INTERVAL_SECS`), Default `0` = AUS. Gating:
+  `telemetry.enabled=true` + Intervall > 0 (wie bisher); es wird die
+  bestehende Snapshot-Infrastruktur wiederverwendet (`PUT
+/api/telemetry/{instance}/db/{ts}` mit Bearer-Auth, kein Neubau).
+  Legacy-Key `interval_secs` (Analytics-Ära) bleibt als Alias voll
+  wirksam — explizite Option gewinnt, kein Verhaltenswechsel für
+  Bestands-Configs. Getriggert bleibt der One-Shot-Push über die CLI
+  (`telemetry push`). Logging nennt jetzt die Quelle des Intervalls.
+
+- **Event-Telemetrie (v1)**: strukturierte Core-Events (Tasks, Scans,
+  Downloads, App-Updates, Fehler) als HTTPS-Batches an einen Collector —
+  ergänzend zum bestehenden Snapshot-Push. Client: stabile persistierte
+  Client-ID, Ringbuffer (10k), crash-sicherer JSONL-Spool im Data-Dir,
+  Async-Flusher mit Batch-Limit (≤200 Events / ~1 MB), Exponential-Backoff
+  - Jitter (Cap 1h), 4xx-Drop nach 3 Versuchen, Shutdown-Drain; Events
+    überleben Neustarts (Spool→Buffer-Reload, Dedup über `event_id`).
+    Server: eigene `telemetry.db` (eigene Migrationskette
+    `migrations/telemetry/`, Hauptkette unverändert), `POST /api/telemetry`
+    mit Bearer-Auth, Validierung, Idempotenz-Dedup, Clients-Upsert,
+    Retention-Prune (`retention_days`, Default 30) und 6 SQL-Views
+    (`v_tasks_per_hour`, `v_error_rate`, `v_downloads_by_source`,
+    `v_scan_duration_trend`, `v_client_versions`, `v_clients_last_seen`).
+    Config: `telemetry.events_endpoint`
+    (`MOMOS_TELEMETRY_EVENTS_ENDPOINT`), `telemetry_receiver.db_path`
+    (`MOMOS_TELEMETRY_RECEIVER_DB_PATH`), `telemetry_receiver.retention_days`
+    (`MOMOS_TELEMETRY_RECEIVER_RETENTION_DAYS`); alles aus per Default
+    (`telemetry.enabled=false`) — kein Verhaltenswechsel. Payload-Hygiene:
+    keine Secrets, Pfade werden gestrippt/gekürzt. Konzept-Doc:
+    `plans/proposed/telemetry-events.md`. Keine UI-Actions, keine Heartbeats.
+
+- **Nachhaltiges Versioning-Konzept**: Release-Builds beziehen ihre Version
+  aus dem Git-Tag (`v1.2.0` → `1.2.0`), Dev-Builds aus der Cargo.toml-Basis
+  - Commit-SHA (`1.1.0-dev+<sha8>`, rolling `main`). Mechanik: `build.rs`
+    injiziert `MMM_VERSION` (Env, Fallback Cargo.toml),
+    `scripts/resolve-version.sh` ist die einzige CI-Versionsquelle,
+    Packaging-Skripte versionieren aus `MMM_VERSION`. CI benennt Assets nach
+    Schema (`momos-music-manager-<version>-<os-arch>.<ext>`, Dev zusätzlich
+    stabile `-latest-`-Namen), publiziert versionierte Dev-Assets inkl.
+    signiertem Manifest und räumt stale/legacy Assets aus `latest-main` auf.
+    Autoupdater-Kanäle: Dev → `latest-main`, Release → `releases/latest`,
+    mit Kanal-Guards (kein automatischer dev↔release-Wechsel) und
+    rolling-Vergleich über den SHA. Doku: `docs/versioning.md`
+    (Schema, Kanäle, Release-Runbook, Alt-Tag-Repair),
+    `repair-release.yml` für die v1.1.0-Nachbesserung (Assets
+    `1.0.1` → `1.1.0`, Neu-Signatur des Manifests).
+
+- **Update-Kanal-Wahl (`release` | `rolling`)**: Die Settings-Seite
+  (`#settings`) bekommt ein Kanal-Dropdown neben dem Auto-Update-Toggle
+  (Confirm-Modal beim Wechsel; Persistenz wie `autoupdate.enabled` über
+  die SQLite-KV aus Migration 024). Default = Kanal des laufenden Builds
+  (Dev-Build → `rolling`, Release-Build → `release`), Precedence Env
+  (`MOMOS_AUTOUPDATE_CHANNEL`) > UI (`settings['autoupdate.channel']`) >
+  TOML (`[autoupdate] channel`) > Default. `GET /api/update/status`
+  liefert `channel`, `channelSource` und `availableChannels`;
+  `POST /api/update/settings` nimmt zusätzlich `{"channel": …}` an;
+  `check`/`apply` laufen gegen den gewählten Kanal (Basis-URL folgt dem
+  Kanal; ein `base_url`-Override behält Vorrang). **Cross-Channel-
+  Semantik**: Ein expliziter Kanalwechsel ist kein Fehler mehr —
+  `ChannelMismatch` greift nur noch, wenn die Update-Quelle den _anderen_
+  Kanal ausliefert als gewählt (inkonsistenter Override); die UI erklärt
+  den Mismatch entsprechend. Ein Kanalwechsel löscht den gecachten letzten
+  Check (Ergebnisse vom alten Kanal gelten nicht für den neuen). Doku:
+  `docs/versioning.md` §3/§6, `.env.example`, `deploy/config.toml`.
+
+- **Auto-Apply + Self-Restart + macOS DMG-Self-Install (Phase C)**: Der
+  Autoupdater installiert Updates jetzt auch vollautomatisch. Neuer
+  periodischer Scheduler (`serve`): check → apply → Self-Restart im
+  konfigurierbaren Intervall. Interval-Precedence **Env > UI > TOML > Default
+  4 h** (`MOMOS_AUTOUPDATE_INTERVAL_SECS`, Settings-Dropdown
+  `autoupdate.interval_secs` in der KV-Tabelle, `[autoupdate] interval_secs`;
+  `0` = periodische Schleife aus, Startup-Check läuft weiter; Default
+  14400 s = 4 h). Einstellbar in der Settings-Seite (neuer Select, gesperrt
+  - Hinweis bei Env/TOML-Pinning wie Toggle/Kanal). Self-Restart-Guards:
+    Swap-Marker (laufendes Update) blockiert Folge-Apply; Crash-Loop-Breaker
+    (persistierter Auto-Apply-State, aktiviert beim Startup-Auto-Rollback)
+    verhindert Endlos-Restart-Loops derselben Version; unter systemd
+    (`INVOCATION_ID`) übernimmt der Service-Manager den Neustart
+    (`Restart=always`), sonst startet ein detachter Relauncher das neue Binary
+    nach 2 s neu (macOS `.app`: `open` des ersetzten Bundles, nur wenn das
+    laufende Bundle im Installations-Verzeichnis liegt). **macOS DMG-Handling**:  
+     verifizierter DMG wird gemountet (`hdiutil attach`), das `.app`-Bundle
+    atomar ersetzt (`ditto` → Staging → Swap, alte Version als
+    `<App>.app.updater-bak` für manuelle Wiederherstellung, Restore bei
+    Fehlern), wieder unmountet, DMG aufgeräumt; Installations-Ziel
+    konfigurierbar (`MOMOS_AUTOUPDATE_APP_DIR` / `[autoupdate] app_dir`,
+    Default `/Applications`). Schlägt der Self-Install fehl, bleibt der
+    verifizierte Download in `~/Downloads` (v1-Fallback). `ApplyOutcome::
+Installed`-Pfad/Status-JSON unverändert → Telemetry-PR #20 (`app.updated`
+    bei Versionswechsel) bleibt kompatibel. Neue Module: `update_auto.rs`,
+    `restart.rs`, `dmg.rs`, `macos.rs`; Doku: README, `.env.example`,
+    `docs/versioning.md` §6/§7, PLATFORM-SUPPORT.
+
+---
+
+## [1.1.0] — 2026-08-31
+
+### Added
+
+- **Autoupdater (M6 v1)**: self-update gegen das rolling `latest-main`-Release
+  mit strikter Verifikationskette — Ed25519-Signatur (minisign-Format) über
+  das `SHA256SUMS`-Manifest (Pubkey im Binary eingebettet, Spiegel in
+  `scripts/minisign.pub`), SHA256 je Artefakt, dann atomarer Austausch mit
+  `.bak` + `update-state.json`-Marker, Health-Grace nach Neustart (mit
+  Selbst-Probe von `/api/health`), Auto-Rollback bei wiederholten Fehlstarts,
+  manuelles `update rollback`. Neue CLI: `update check | apply | rollback |
+status`. Opt-out: `serve --no-autoupdate`, `MOMOS_AUTOUPDATE_ENABLED=false`,
+  `[autoupdate] enabled = false`. CI (Publish-Job) signiert das Manifest mit
+  dem Secret `MINISIGN_SECRET_KEY` (base64 der `minisign.key`) und lädt
+  `SHA256SUMS.minisig` hoch; ohne Secret bleibt es unsigned und der
+  Autoupdater lehnt Updates ab (safe default). macOS v1: verifizierter
+  Download (kein Swap im `.app`-Bundle); Windows: Swap bei gestopptem Server.
+  Doku: README, PLATFORM-SUPPORT, RELEASE-ROADMAP (M6), ADR-059.
+
+- **Landing-Page-Downloads für alle Plattformen**: `site/` bietet jetzt
+  Download-Buttons für macOS (Universal-DMG), Windows (x64 + arm64) und Linux
+  (x64 + arm64) aus dem rolling `latest-main`-Release, jeweils mit
+  SHA256-Checksummen-Link und Verifikations-Anleitung. CI publiziert dafür
+  stabile Artefakt-Namen (`momos-music-manager-latest-<os>-<arch>.<ext>`,
+  `Momo-s-Music-Manager-latest.dmg.sha256`) und erweitert das aggregierte
+  `SHA256SUMS` um diese Einträge.
+
+- **docs/RELEASE-ROADMAP.md**: iterative Roadmap für die Verteilungs-Strategie
+  (M1 Downloads alle Plattformen ✅, M2 versionierte Releases, M3 Windows
+  Code-Signing, M4 macOS Notarization, M5 Linux AppImage/Flatpak, M6 optional
+  Autoupdater) — jeder Milestone einzeln abarbeitbar mit Definition of Done.
+
+- **Linux support**: Self-contained release builds (SQLite bundled via sqlx,
+  TLS via rustls — no system sqlite/openssl dev packages needed). New
+  `scripts/package-linux.sh` produces a portable `tar.gz` + `SHA256SUMS`,
+  ships a systemd unit for headless server mode. README documents Linux
+  build/run/systemd.
+
+- **Windows support**: `scripts/package-windows.ps1` produces a `zip` + sha256
+  for x64 and ARM64 (hosted `windows-11-arm` runner).
+
+- **Cross-platform CI**: `.github/workflows/build-all.yml` builds Linux x64,
+  Linux ARM64 (cross), Windows x64, Windows ARM64 and macOS universal on every
+  `main` push (rolling `latest-main` release) and on `v*` tags — artifacts
+  named `momos-music-manager-<version>-<os>-<arch>.<ext>` with per-file
+  `.sha256` and aggregated `SHA256SUMS`.
+
+- **`docs/PLATFORM-SUPPORT.md`**: Platform matrix for all 6 targets (build,
+  toolchain, packaging, CI, signing/security per platform) with priorities and
+  honest "open" items.
+
+### Changed
+
+- `docs/PLATFORM-SUPPORT.md`: Landing-Page-Status auf erledigt aktualisiert.
+
+- TLS stack switched from native-tls/OpenSSL to **rustls** (reqwest, hf-hub,
+  rspotify) — enables clean Linux cross-compilation to ARM64 and removes the
+  OpenSSL system dependency on Linux.
+
+---
+
+## [1.0.1] — 2026-08-29
+
+### Added
+
+- **macOS App Bundle**: Ships as a double-clickable `.app` with universal binary
+  (Apple Silicon + Intel via `lipo`). Drag-to-install DMG distribution.
+  Auto-opens browser on launch (`--no-browser` flag to disable).
+  `LSUIElement = true` — runs in background, no dock icon.
+- **GitHub CI Release Workflow**: Automatic DMG builds on `v*` tag pushes.
+  Creates universal binary, `.app` bundle, and DMG via `create-dmg`.
+- **`cargo-bundle` support**: `[package.metadata.bundle]` in `Cargo.toml` for
+  automated `.app` bundle generation.
+- **Download Guarantor**: Aggressive auto-remediation background task that
+  guarantees 100% file coverage for subscribed Spotify playlists — deemix first,
+  spotDL (YouTube) fallback. Ships with the standalone `download-service/`
+  Python pipeline (deemix + spotDL + Spotify clients).
+- **Telemetry**: The prod instance periodically pushes a self-describing bundle
+  (consistent SQLite full snapshot via `VACUUM INTO`, logs, task history, and
+  redacted metrics) over HTTPS to a small receiver on the LAN server.
+- **macOS Menu Bar Tray Icon**: Menu bar icon showing server status with
+  "Open Dashboard" and "Quit" actions. Restructures `main()` so the Tao event
+  loop owns the main thread while the Axum server + background tasks run on a
+  spawned Tokio runtime.
+- **File↔Track Corrections** (migration 023): Manual `include`/`exclude`
+  overrides for the automatic file↔track linking. New endpoints
+  `GET/PUT /api/files/{id}/track-corrections`,
+  `GET/PUT /api/tracks/{id}/file-corrections`, plus disconnect/re-link UI on the
+  Track and File detail pages.
+
+### Changed
+
+- **Removed dead `youtube = "0.1.1"` dependency** — crate was yanked from
+  crates.io and never used in source.
+- **Version bumped to 1.0.1** — first shippable release.
+
+### Fixed
+
+- **External tool path resolution**: `metaflac`, `exiftool`, `ffmpeg`, and
+  `ffprobe` are now resolved to absolute paths (Homebrew/MacPorts locations).
+  Fixes "No such file or directory (os error 2)" when writing comments or
+  reading metadata/streaming from a GUI-launched app (which inherits a minimal
+  `PATH`).
+
+---
+
+## [Unreleased]
+
+### Added
+
+- **STEMS Filter** (`#files`): New "STEMS" filter row shows all non-stem files whose track has no `stem.m4a` yet (same ISRC). Combines with all existing filters (backup, on-disk, type, tags, …) and with the new inverse "Has" state. Server-side via `stems` query param on `GET /api/files` + `/api/files/count` and in the select-all filter body. Linux dev builds unblocked by moving macOS-only deps (`tray-icon`, `objc2*`) behind `cfg(target_os = "macos")`.
+
+## [0.9.0] — 2026-07-02
+
+### Added
+
+- **Backpack System** (`#backpack` page): Overhauled the "Follow" mechanism into a full Backpack system. Tracks inherit backpack status from their tags. Backpack sync actively pulls missing files from backup and cleans up redundant formats. WAV source files excluded (Ableton only). Per-track file status display, "Sync All" and "Pull Missing" bulk buttons. Migration 016 renames `tags.followed` → `tags.backpack`.
+
+- **Auto-Prune & File Tracking**: Explicit local file presence tracking via `file_locations.local`. Auto-prune runs in the Maintainer cycle, deleting backed-up files that aren't followed. Storage page overhauled with per-type size breakdowns, prune preview with `hasStemVariant` badges, and interactive filters.
+
+- **Configurable Format Priority**: User-configurable audio format ranking (`stem.m4a` > `flac` > `mp3` > `wav` > `aiff`) via `GET/PUT /api/storage/settings/format-priority`. Backpack pulls use configured priority. UI with drag-to-reorder on Storage page.
+
+- **Tag Bundles**: New `tag_bundles` table — a bundle tag aggregates multiple member tags (additive, not substitutive). Transitive closure resolution (fixed-point iteration, 20-iteration safety limit). New `#tag-bundles` SPA page with two-panel layout: searchable bundle list + member editor with typeahead.
+
+- **Dynamic Tag Bundles** (migration 019/020): Filter-based bundle definitions instead of manually curated member lists. Filters: base tags (OR), all tracks toggle, BPM range, PMV categories, file types, exclude WAV sources. Resolved at-refresh time into `file_resolved_tags`. Two-panel `#dynamic-bundles` page with file preview.
+
+- **BPM / Key / Rating / Play Count on Tracks and Files**: Both views now show file-derived metrics. Tracks aggregate across linked files (best-file-wins for key, sum for play count, max for rating). All four metrics are sortable and filterable server-side on both pages.
+
+- **Traktor BPM/Key/Rating Import + Maintainer Auto-Import**: The Maintainer now auto-imports `collection.nml` on its hourly cycle. Matches by filename basename (not full path) — works across machines with different mount points.
+
+- **Push-to-Spotify UI**: Service badges on the Playlists page, "Push to Spotify" button for local playlists, "Open in Spotify" link for already-pushed ones. Uses the existing `POST /api/playlists/{id}/push-to-spotify` endpoint + `canonical_playlist_id` linking.
+
+- **Playwright E2E Test Infrastructure**: Automated browser tests in `frontend/tests/` — auto-starts Rust server with isolated test DB, seeds data via `POST /api/testing/seed`, runs tests, kills server.
+
+- **Needs-Analysis Pipeline** (`GET /api/tags/{id}/needs-analysis`): Returns files in a tag that need BPM/key extraction and are available locally. `scripts/lab-stage.sh` rsyncs them from LAN to MacBook for Traktor analysis.
+
+- **Server Deployment**: systemd unit for the Rust server, deploy script, config template, deemix systemd unit, Caddy reverse proxy integration, service dependency chain.
+
+- **Ghost Record Purge** (migration 021): `folder_id` FK on `files` table linking each file to its discovering folder. Orphan detection + `POST /api/storage/purge-orphans` endpoint. Storage page card for ghost records.
+
+- **Task History** (migration 022): Persistent `task_history` table with auto-write from `TaskManager`. `GET /api/tasks/history` with paginated query and status/type filters.
+
+### Changed
+
+- **Reduce Idle CPU**: DB-aware scan skip (check before extraction, skip SHA256+lofty+exiftool for unchanged files). SHA-256 replaced with mtime+size string (zero I/O). Exiftool guarded behind file-type check (skip FLAC/WAV/AIFF). Poller sleep moved to bottom of loop. Global poller 60s cold-start instead of 15 min. Folder watcher skips immediate initial scan (configurable via `MOMOS_FOLDER_WATCH_INTERVAL_SECS`).
+
+- **Modularization**: `src/api.rs` (10.6K lines) split into 15 domain files. `src/db.rs` (5.4K lines) split into 10 domain modules. Coverage data now actionable per-domain.
+
+- **Backup Integrity Overhaul**: Reconcile now matches by full relative path (not basename alone). Post-rsync size verification with optional sampling. Self-healing size=0 backup records via `backfill_backup_sizes()`. Periodic backup re-verification in Maintainer (every 24h).
+
+### Fixed
+
+- **Prune safety**: Relaxed overly-strict gates — removed `source_of IS NOT NULL` requirement for WAVs and metadata-completeness requirement for non-WAVs. A file is safe to delete if: backed up + local + not in backpack.
+
+- **Backpack pull**: Files now grouped by `track_id` (via `v_file_track_link`), not just ISRC. Unicode normalization (NFC) applied consistently across backup paths. Stale local entries cleaned up with NFC normalization.
+
+- **Backup host resolution**: Fixed in all backpack pull code paths.
+
+- **Comment diff display**: Fixed `✓null` shown for unchanged comments (now shows `(empty)`. Filter "Needs Update" now uses server-computed `needsUpdate` instead of client-computed `commentUnchanged`.
+
+- **Select-all filter parity**: Uses count endpoint for accurate needs-comment counts with active filters.
+
+- **Bundle cycle detection**: Excludes current bundle from cycle detection traversal. New tag appears in bundle list immediately after creation.
+
+- **Build**: Fixed duplicate `FileLocation` struct breaking edition 2024 on Rust 1.96+. Working systemd unit (removed `WorkingDirectory`, fixed `ExecStartPre`).
+
+- **Startup**: Consistency check at boot validates `file_locations.local` against actual disk presence.
+
+### Migration Notes
+
+- **New migrations**: 016 (`backpack_rename`), 017 (`tag_bundles`), 018 (`canonical_playlist_id`), 019 (`dynamic_bundles`), 020 (`dynamic_bundle_filters`), 021 (`folder_id_on_files`), 022 (`task_history`).
+- **Upgrading from v0.3.x**: All migrations 004–022 run sequentially. The server applies them automatically on first start. No manual steps needed.
+- **Backpack rename**: Column `tags.followed` renamed to `tags.backpack`. Code handles both names for transition.
+
+---
+
+## [0.3.2] — 2026-05-22
+
+### Changed
+
+- **Rate-Limit Retry (Phase 2)**: Extracted shared `extract_retry_after_secs` into `src/spotify/retry.rs`, used by sync worker, subscription poller, and global poller. Fixed global poller's broken string-parsing implementation that mistook HTTP status `429` for 429 seconds of backoff.
+
+### Fixed
+
+- **Subscription poller 429 loop**: Added retry logic (3 attempts, proper `Retry-After` backoff) for `get_playlist` and `get_playlist_tracks` calls. Spotify client now reused across subscriptions in a cycle (eliminates unnecessary token refresh calls). 300ms inter-subscription delay prevents burst traffic.
+- **Global poller 429 loop**: Added retry logic (3 attempts) for `get_user_playlists` call. Uses proper header-parsing instead of string-scraping.
+
+### Migration Notes
+
+- Migrations 006 and 007 consolidated into a single `006_local_service.sql` (includes `snapshot_id` column for global poller). If upgrading from 0.3.1, delete `app.db` and re-run.
+
+---
+
+## [0.3.0] — 2026-05-21
+
+### Added
+
+- **Digging Multi-Seed Engine**: New `POST /api/digging/suggest` endpoint with BPM outlier detection, Camelot compatibility, ISRC dedup, and scored suggestions. Audio streaming via `GET /api/files/{id}/stream` with Range header support.
+- **Digging Frontend** (`#digging` page): Split-panel workflow with tag-based seed selection, scored suggestion cards, embedded `<audio>` player with waveform visualization, staging area, and key coverage indicator.
+- **Local Playlists**: `service='local'` playlists persist digging sessions without Spotify API calls. Automatic Setlist tag creation via `v_tag_playlist`. New `POST /api/playlists/local` endpoint.
+- **Global Playlist Poller**: Background task that checks ALL Spotify playlists via snapshot-based change detection (default 15min interval). Auto-discovers new playlists, detects deleted ones.
+- **Auto-Deemix Subscriptions**: Subscription poller automatically triggers deemix downloads on first poll and when new tracks are found.
+
+### Changed
+
+- Consolidated migrations 006 + 007 into `006_local_service.sql`.
+
+---
+
+## [0.2.0] — 2026-05-20
+
+### Added
+
+- **Tracks Playlist Filter**: New playlist typeahead + chips on the Tracks page (LEFT column, between Tags and Date). Type a playlist name, get suggestions from `/api/playlists`, click to add chips, and the track list filters to tracks belonging to any selected playlist (OR logic). Multiple playlists supported. Case-insensitive matching.
+
+- **Incremental Folder Scan**: New `ScanMode` enum (Full/Incremental). Incremental mode checks file mtimes and skips unchanged files. FolderWatcher now auto-starts in `serve()` with a 5-minute polling interval. Folders page has two scan buttons: Quick Scan (⚡ incremental, new/changed files only) and Full Rescan (🔄 reprocess all).
+
+- **New Playlists Sync**: `SyncType::NewPlaylists` — fetches the full playlist list from Spotify, diffs against existing DB entries, and only syncs metadata + tracks for playlists that don't yet exist. "Sync New" button on the Playlists page.
+
+- **Playlist Stale Filter**: New "Stale" toggle on the Playlists page filter panel — shows only playlists where `localTrackCount ≠ remoteTrackCount`.
+
+- **Remote Track Count Tracking**: Remote track counts are now updated during playlist-list sync (from `SimplifiedPlaylist.tracks.total`) and during subscription polling (after streaming all tracks). Keeps the playlist page stats accurate.
+
+- **Playlist Category ID Filtering**: Category filter on Playlists page switched from prefix letters (`p,m,v,e,s`) to category IDs. Backed by new `v_playlist_tag_category` view (migration 005). Category buttons are rendered dynamically from the tag-categories table.
+
+- **App Version Embedding**: Version from `Cargo.toml` is now displayed in the CLI (`--version`), available via `GET /api/version`, and shown as a subtle `v0.2.0` badge in the web UI's top navigation bar.
+
+- **Tag Parent Resolution**: Setlist-category tags can now have "parent" tags that replace them in file comments. A long Setlist tag like `Dark Techno/2026/Hardtechno/...` resolves to shorter parent tags (`dark`, `techno`, `hard`) with their own categories (Mood, Vibe, Merkmal). Comments use parent tag names and categories instead of the original. Backed by new `tag_parents` table + `v_resolved_tags` / `v_file_resolved_tags` views.
+
+- **Tag Curation Page** (`#tag-curation`): A dedicated curation workflow page for going through Setlist tags and assigning parent tags. Features a sequential workflow (prev/next with keyboard shortcuts), tag card with metadata, parent chip editor with typeahead search, inline "Create & Add" flow (category picker → create → add as parent), and a browsable mini table. Auto-save persists changes immediately.
+
+- **Import/Export Web UI** (`#data` page): Database dump and restore via the web UI. Export downloads the full DB as JSON. Import uploads a JSON dump with preview (row counts per table, timestamp) before confirming the destructive restore. Backend endpoints: `GET /api/dump`, `POST /api/restore?confirm=true`.
+
+- **Tracks Bulk Write Comments**: Multi-select checkboxes on the Tracks page with an ACTIONS panel "WRITE COMMENTS (X)" button. X counts how many selected tracks have linked files with outdated comments. Backend endpoints: `POST /api/tracks/needs-comment-count`, `POST /api/tracks/write-comments`.
+
+- **Files Bulk Write Comments**: Same checkbox-selection + bulk WRITE COMMENTS pattern on the Files page. Backend endpoints: `POST /api/files/needs-comment-count`, `POST /api/files/write-comments-by-ids`.
+
+- **Spotify Rate-Limit Retry**: The Spotify sync worker now parses the `Retry-After` header from 429 responses and retries with backoff (up to 3 attempts). A 300ms delay between successful playlist syncs helps stay under Spotify's soft rate limit (~3 req/s).
+
+- **Playlist Sync Tracking** (migration `002_playlist_fetch_tracking.sql`): The "Sync Stale" operation now catches all local != remote mismatches (missing tracks, extra tracks, missing playlists), not just the stale ones.
+
+- **Server-Side Filtering**: Client-side filters on Tracks and Files pages moved to server-side. Tracks: `services`, `fileTypes`, `fileTypeAgg` params. Files: PMV, file type, and comment-status filters. Fixes broken pagination when filters were active.
+
+- **Tags Page Filter Box**: Retrofitted the Tags page toolbar into the canonical 2-column filter-panel pattern (category multi-select buttons + search + New Tag button) matching Files/Playlists pages.
+
+- **Dropdown Navigation**: Top nav now uses dropdown menus for Tools and Library sections, reducing horizontal clutter.
+
+- **Actions Panel** (`shared/actions-panel.js`): Generic, reusable actions panel with configurable buttons and selection count badge, shared across Tracks and Files pages.
+
+### Changed
+
+- **Column Resize**: Switched from percentage-based to pixel-based column sizing (30–500px range). New `columnConfig_v2_` localStorage key avoids stale percentage data. Eliminates the resize feedback loop.
+
+- **Playlist Filter UI**: Fixed filter button state synchronization — clicking service/PMV buttons now correctly toggles the active CSS class. PMV filter refactored to use tag category lookups server-side.
+
+### Fixed
+
+- Playlist service and PMV filter buttons now properly sync their visual state after clicks.
+- Column resize no longer enters a feedback loop when dragging handles.
+- Pagination on Tracks and Files pages works correctly when filters are active.
+
+### Migration Notes
+
+- **New migrations**: `002_playlist_fetch_tracking.sql` (playlist sync tracking columns + tag_parents table + resolved-tag views), `003_remote_unique_count.sql`, `004_unique_tags_nocase.sql`, `005_v_playlist_tag_category.sql` (playlist→tag→category resolution view).
+- Delete old `app.db*` files and restart to run migrations from scratch.
+- Column config localStorage uses `columnConfig_v2_` prefix — old percentage-based config is ignored.
+
+---
+
+## [0.1.0] — Initial Release
+
+- Rust backend (Axum/SQLx/SQLite) with embedded SPA frontend (vanilla JS, ES modules).
+- Local file management with BPM/Key detection and Camelot wheel key matching.
+- Spotify OAuth + playlist/track sync.
+- Tag system with 5 categories (Setlist, Phase, Mood, Vibe, Merkmal).
+- Structured ID3 comment format `[{P}{M}{V}] tags source_id`.
+- Traktor collection.nml import.
+- Semantic tag embeddings for auto-categorization.
+- Playlist subscriptions with 30s background polling.
+- macOS Launch Agent deployment.
+- Config priority: env vars > config.toml > defaults.
