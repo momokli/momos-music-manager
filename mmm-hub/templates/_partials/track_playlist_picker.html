@@ -1,0 +1,76 @@
+{# Playlist picker (#318): add the track to one of the user's own Spotify playlists
+(writes to Spotify) or to a curated playlist, or create a new curated playlist. A
+client-side filter keeps the list usable at ~500 items. #}
+<div class="hub-ta hub-ta-open hub-ta-picker">
+    <input
+        type="text"
+        class="hub-ta-search"
+        placeholder="Playlist filtern…"
+        autocomplete="off"
+        oninput="hubFilterList(this)"
+        aria-label="Playlist filtern"
+    />
+    <div class="hub-ta-list">
+        {% for p in curated %}
+        <form
+            hx-post="/track/{{ id }}/actions/playlist"
+            hx-target="closest .hub-ta"
+            hx-swap="innerHTML"
+            data-name="{{ p.name_lower }}"
+        >
+            <input type="hidden" name="playlist_id" value="{{ p.id }}" />
+            <button type="submit" class="hub-ta-btn" title="kuratierte Playlist">
+                ✦ {{ p.name }}
+            </button>
+        </form>
+        {% endfor %} {% for p in spotify %}
+        <form
+            hx-post="/track/{{ id }}/actions/playlist"
+            hx-target="closest .hub-ta"
+            hx-swap="innerHTML"
+            data-name="{{ p.name_lower }}"
+        >
+            <input type="hidden" name="sp_playlist_id" value="{{ p.id }}" />
+            <button type="submit" class="hub-ta-btn" title="meine Spotify-Playlist">
+                ▶ {{ p.name }}
+            </button>
+        </form>
+        {% endfor %} {% if curated.is_empty() && spotify.is_empty() %}
+        <span class="hub-ta-hint">Keine Playlist gefunden.</span>
+        {% endif %}
+    </div>
+    <div class="hub-ta-foot">
+        <span class="hub-ta-hint">✦ kuratiert · ▶ Spotify</span>
+        <form
+            hx-post="/track/{{ id }}/actions/playlist"
+            hx-target="closest .hub-ta"
+            hx-swap="innerHTML"
+            class="hub-ta-new"
+        >
+            <input
+                type="text"
+                name="new_name"
+                placeholder="Neue Playlist…"
+                autocomplete="off"
+            />
+            <button type="submit" class="hub-ta-btn hub-ta-primary">＋ Neu</button>
+        </form>
+        <button
+            type="button"
+            class="hub-ta-btn hub-ta-cancel"
+            hx-get="/track/{{ id }}/actions"
+            hx-target="closest .hub-ta"
+            hx-swap="innerHTML"
+            aria-label="Abbrechen"
+        >
+            ×
+        </button>
+    </div>
+    {% if !write_ready %}
+    <span class="hub-ta-hint"
+        >Spotify-Schreibrechte fehlen —
+        <a href="/api/hub/services/spotify/connect">neu verbinden</a> zum direkten
+        Hinzufügen.</span
+    >
+    {% endif %}
+</div>

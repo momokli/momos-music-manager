@@ -1,0 +1,60 @@
+{% extends "base.html" %} {% block title %}Tag-Suche — Spelunke{% endblock %} {% block
+content %}
+<hgroup>
+    <h1>Tag-Suche</h1>
+    <p class="hub-muted">
+        Tracks nach Tags gewichtet finden. Stärke als <code>name:stärke</code> (z. B.
+        dark:3, groovy:1) und/oder Seed-Track-IDs. Score = Σ 2−2^−(stärke−1).
+    </p>
+</hgroup>
+
+<form method="get" action="/tag-search" class="hub-filter">
+    <input
+        type="search"
+        name="tags"
+        value="{{ tags_input }}"
+        placeholder="dark:3, groovy:1 …"
+        aria-label="Tags mit Stärke"
+    />
+    <input
+        type="text"
+        name="seed"
+        value="{{ seed_input }}"
+        placeholder="Seed Track-IDs (z. B. 12,34,56)"
+        aria-label="Seed Tracks"
+    />
+    <button type="submit">Suchen</button>
+</form>
+
+{% if !searched %}
+<p class="hub-muted">Gib Tags (<code>name:stärke</code>) und/oder Seed-Tracks ein.</p>
+{% else if results.is_empty() %}
+<p class="hub-muted">Keine Treffer.</p>
+{% else %}
+<p class="hub-muted">{{ count }} Treffer · nach Passgenauigkeit sortiert</p>
+<div class="overflow-auto hub-scroll-y">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Tag-Suche-Ergebnisse
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Track</th>
+                <th scope="col">Score</th>
+                <th scope="col">Tags</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in results %}
+            <tr>
+                <td class="hub-cell-track">
+                    <a href="/track/{{ r.id }}">{{ r.artists }} — {{ r.title }}</a>
+                </td>
+                <td class="hub-nowrap">{{ r.score }}</td>
+                <td class="hub-nowrap">{{ r.matched }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %} {% endblock %}

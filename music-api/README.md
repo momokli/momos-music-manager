@@ -68,6 +68,30 @@ lands on whatever the ARL's Deezer tier allows.
 
 ### `GET /isrc/{isrc}/{flac|320|128}` — stream the file.
 
+### Queue control (transparent, hub-facing)
+
+| Method | Path                      | Use                                                        |
+| ------ | ------------------------- | ---------------------------------------------------------- |
+| `GET`  | `/queue`                  | live deemix queue (`items`) + per-state `counts`           |
+| `GET`  | `/worker`                 | `{paused, intervalSecs, maxAttempts}`                      |
+| `POST` | `/worker/pause` `/resume` | pause/resume the worker                                    |
+| `POST` | `/isrc/{isrc}/retry`      | reset a failed/stranded ISRC to `pending` (`409` if ready) |
+| `GET`  | `/logs?limit=n`           | recent service events, newest first                        |
+| `GET`  | `/tracks?isrcs=a,b,c`     | bulk metadata/state for many ISRCs                         |
+
+### Per-ISRC metadata (BPM/key authority)
+
+The service is also the ISRC → {bpm, key, camelot} authority for a **range** of
+ISRCs (fed by the hub's Traktor/analysis data).
+
+| Method | Path                    | Use                                                              |
+| ------ | ----------------------- | ---------------------------------------------------------------- |
+| `POST` | `/metadata`             | bulk upsert `{items:[{isrc,bpm,key,camelot,…}]}` (non-null wins) |
+| `GET`  | `/metadata?isrcs=a,b,c` | metadata for a range; unknown ISRCs come back in `missing`       |
+| `GET`  | `/metadata/{isrc}`      | metadata for one ISRC (`404` if unknown)                         |
+
+Merge rule: a non-null field wins; a `null` field keeps the stored value.
+
 ## States
 
 | state         | meaning                                                          |
@@ -81,15 +105,25 @@ lands on whatever the ARL's Deezer tier allows.
 Order status is derived: `open` while any item is pending/downloading, `done`
 when all are `ready`, otherwise `partial`.
 
+Transient failures are retried with exponential backoff up to `QUEUE_MAX_ATTEMPTS`
+(default 3); only then does a track become `failed`. `absent` (no streamable match)
+stays terminal. A row in `downloading` holds a **lease** that the worker refreshes
+while deemix reports progress; if the lease lapses (dead process, evicted item) the
+row is re-queued by the reaper at the start of the next tick.
+
 ## Pipeline (one worker, no external queue)
 
-The `tracks.state` column _is_ the queue; the worker runs a flat two-phase tick:
+The `tracks.state` column _is_ the queue; the worker runs a flat tick (skipped while
+globally paused):
 
-1. **resolve+enqueue** — for each `pending` ISRC: look it up on Deezer, then
-   submit `https://www.deezer.com/track/<id>` to deemix at `DEEMIX_BITRATE`.
-   `CantStream` → `absent`; other rejections → `failed`.
+0. **reap** — re-queue any `downloading` row whose lease lapsed (crash/restart recovery).
+1. **resolve+enqueue** — for each _due_ `pending` ISRC (past its backoff window):
+   look it up on Deezer, then submit `https://www.deezer.com/track/<id>` to deemix
+   at `DEEMIX_BITRATE`. `CantStream` → `absent`; other rejections become a bounded,
+   backoff retry.
 2. **advance** — poll the deemix queue for the in-flight UUIDs; on a terminal
-   success status, locate the file, copy it into the store and transcode.
+   success status, locate the file, copy it into the store and transcode. While the
+   item is still downloading its lease is refreshed.
 
 Lossless source → `flac/` + `320/` + `128/`. When deemix had to fall back to
 MP3 (no lossless master, or a Deezer tier that caps quality), the delivered file
@@ -102,6 +136,10 @@ download dir is ours, so the source file is removed after it has been collected.
 See [`.env.example`](.env.example). Everything is env-driven; `MUSIC_API_TOKEN`
 and `DEEMIX_ARL` are the only required secrets. Response bodies from
 `loginArl` are never logged — deemix echoes the ARL back.
+
+Queue tuning: `QUEUE_MAX_ATTEMPTS` (default `3`), `QUEUE_RETRY_BASE_SECS` (`60`)
+and `QUEUE_RETRY_MAX_SECS` (`1800`) shape the bounded retry backoff. The download
+lease reuses `DOWNLOAD_TIMEOUT_SECS` (refreshed as a heartbeat).
 
 ## Deploy
 
@@ -152,10 +190,12 @@ The tier is a property of the ARL, not of this service.
 cargo test
 ````
 
-17 tests: unit tests for ISRC normalisation, order-status derivation, deemix and
-Deezer payload parsing, constant-time token compare and download-file matching;
-plus integration tests over the real router (auth, order create/read/list,
-`/isrc` status, file delivery, order flipping to `done`).
+31 tests: unit tests for ISRC normalisation, order-status derivation, retry
+backoff, deemix and Deezer payload parsing, constant-time token compare and
+download-file matching; plus integration tests over the real router (auth, order
+create/read/list, `/isrc` status, file delivery, order flipping to `done`, the
+durable queue: retry, lease recovery, worker status and queue counts, and the
+per-ISRC metadata upsert/merge/range read).
 
 ## v1 scope / known limits
 
@@ -164,7 +204,7 @@ plus integration tests over the real router (auth, order create/read/list,
 - The MP3 fallback is classified by an ffprobe bit-rate read; a container that
   reports none is treated as 320.
 - No on-disk garbage collection; a track is stored once (keyed by ISRC) and kept.
-- The worker holds no per-track retry counter — `failed` is terminal. Re-order
-  the ISRC (after clearing the row) to retry.
+- Terminal rows (`failed`/`absent`) are re-queued via `POST /isrc/{isrc}/retry`;
+  a plain re-order stays a cheap no-op.
 - MMM-side consumption (order the Backpack's ISRCs, then link delivered files)
   is the next step and not part of this crate.

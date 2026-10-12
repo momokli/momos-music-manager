@@ -1,0 +1,29 @@
+# mmm-analyzer Python dependencies
+#
+# IMPORTANT — numpy is pinned on purpose.
+# The target host (music-catalog) is an x86-64 *baseline* (v1) KVM CPU: it does
+# NOT expose SSE4.2/AVX. numpy >= 2.0 ships wheels built with an x86-64-v2
+# baseline and refuses to import on such a machine
+# ("your machine doesn't support: (X86_V2)"). numpy 1.26.4 is built for the
+# plain baseline and imports fine.
+numpy==1.26.4
+
+# Essentia *with TensorFlow support* provides RhythmExtractor2013 (BPM),
+# KeyExtractor (key) and TensorflowPredictEffnetDiscogs / TensorflowPredict2D
+# (Discogs-EffNet embeddings + genre classifier).
+#
+# Use the `essentia-tensorflow` wheel, NOT plain `essentia`: the plain wheel is
+# built without TensorFlow, so it has no TensorflowPredict* algorithms at all
+# (only TensorflowInput* helpers). The wheel is a pre-release, hence `pip
+# install --pre`.
+#
+# The bundled TensorFlow build is compiled for a low CPU baseline (it reports
+# oneDNN support for SSE3 only, no AVX/SSE4.2), so it runs fine on
+# music-catalog's "Common KVM processor". A generic TensorFlow or ONNX Runtime
+# build would SIGILL there — this specific wheel does not.
+essentia-tensorflow==2.1b6.dev1389
+
+# Runtime dependencies of the essentia wheel that aren't pulled in automatically
+# when installing it as a pre-release dependency.
+six==1.17.0
+PyYAML==6.0.3

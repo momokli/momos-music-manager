@@ -1,0 +1,145 @@
+{% extends "base.html" %} {% block title %}Admin — Spelunke{% endblock %} {% block content
+%}
+<hgroup>
+    <h1>Admin</h1>
+    <p class="hub-muted">
+        API-Keys & Infrastruktur. Geheime Werte werden nie angezeigt (Feld leer lassen =
+        unverändert). Keys greifen <strong>nach einem Neustart</strong>; die Umgebung
+        (.env) bleibt Fallback.
+    </p>
+</hgroup>
+
+<form method="post" action="/admin">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Einstellungen
+        </caption>
+        <tbody>
+            {% for f in fields %}
+            <tr>
+                <th scope="row" style="white-space: nowrap">
+                    {{ f.label }}{% if f.hint != "" %}
+                    <div class="hub-muted" style="font-weight: 400; font-size: 0.7rem">
+                        {{ f.hint }}
+                    </div>
+                    {% endif %}
+                </th>
+                <td>
+                    {% if f.kind == "bool" %}
+                    <input
+                        type="checkbox"
+                        name="{{ f.key }}"
+                        value="1"
+                        {%
+                        if
+                        f.checked
+                        %}checked{%
+                        endif
+                        %}
+                    />
+                    {% else if f.kind == "enum" %}
+                    <select name="{{ f.key }}">
+                        {% for o in f.options %}
+                        <option
+                            value="{{ o.value }}"
+                            {%
+                            if
+                            o.selected
+                            %}selected{%
+                            endif
+                            %}
+                        >
+                            {{ o.value }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                    {% else if f.kind == "num" %}
+                    <input
+                        name="{{ f.key }}"
+                        type="number"
+                        step="any"
+                        value="{{ f.value }}"
+                        min="{{ f.min }}"
+                        max="{{ f.max }}"
+                        placeholder="{{ f.default }}"
+                        autocomplete="off"
+                    />
+                    {% else %}
+                    <input
+                        name="{{ f.key }}"
+                        type="{% if f.secret %}password{% else %}text{% endif %}"
+                        value="{{ f.value }}"
+                        placeholder="{% if f.set %}••• gesetzt{% else %}{{ f.default }}{% endif %}"
+                        autocomplete="off"
+                    />
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <label>
+        <input
+            type="checkbox"
+            name="registration_open"
+            {%
+            if
+            registration_open
+            %}checked{%
+            endif
+            %}
+        />
+        Registrierung offen (neue Accounts erlauben)
+    </label>
+
+    <button type="submit">Speichern</button>
+</form>
+
+<h2>Nutzer</h2>
+<form method="get" action="/admin" class="hub-filter" role="search">
+    <input
+        type="search"
+        name="q"
+        value="{{ q }}"
+        placeholder="Nutzer suchen …"
+        aria-label="Nutzer suchen"
+    />
+    <button type="submit">Suchen</button>
+</form>
+<div class="overflow-auto">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Nutzer und Admin-Status
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">
+                    <a
+                        href="{{ s_user.href }}"
+                        class="hub-sort{% if s_user.active %} hub-sort-on{% endif %}"
+                        >{{ s_user.label }}{% if s_user.active %} {{ s_user.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+                <th scope="col">
+                    <a
+                        href="{{ s_admin.href }}"
+                        class="hub-sort{% if s_admin.active %} hub-sort-on{% endif %}"
+                        >{{ s_admin.label }}{% if s_admin.active %} {{ s_admin.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for u in users %}
+            <tr>
+                <td><a href="/user/{{ u.slug }}">@{{ u.slug }}</a></td>
+                <td>{% if u.is_admin %}ja{% else %}—{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

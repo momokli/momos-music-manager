@@ -33,10 +33,8 @@ async fn main() -> anyhow::Result<()> {
     let pool = connect_db(&config).await?;
     db::init(&pool).await?;
 
-    let store = music_api::store::Store::new(
-        config.store_root.clone(),
-        config.store_max_upload_bytes,
-    );
+    let store =
+        music_api::store::Store::new(config.store_root.clone(), config.store_max_upload_bytes);
     music_api::store::init(&pool, &store).await?;
 
     let http = reqwest::Client::builder()
@@ -44,6 +42,8 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_secs(60))
         .build()?;
 
+    let ytdlp_concurrency = config.ytdlp_concurrency;
+    let transcode_concurrency = config.transcode_concurrency;
     let state = Arc::new(AppState {
         pool,
         config,
@@ -51,6 +51,11 @@ async fn main() -> anyhow::Result<()> {
         notify: Arc::new(Notify::new()),
         deemix_login: Default::default(),
         store,
+        logs: music_api::logbuf::LogBuffer::new(),
+        paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ytdlp_sem: Arc::new(tokio::sync::Semaphore::new(ytdlp_concurrency)),
+        finalize_sem: Arc::new(tokio::sync::Semaphore::new(transcode_concurrency)),
+        finalizing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
     });
 
     let worker_state = state.clone();

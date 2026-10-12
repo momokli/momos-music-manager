@@ -1,0 +1,76 @@
+{# "Now playing" widget (issue #293/#294). Rendered as an htmx fragment by `GET
+/now-playing` and polled by the shell (`base.html`). Shows the track a user is currently
+playing in Spotify and lets them tag it in place. Keep all conditionals as element content
+— never inside an HTML tag. #} {% if !logged_in %}
+<div class="hub-now hub-now-off" aria-live="polite"></div>
+{% else if !connected %}
+<div class="hub-now" aria-live="polite">
+    <a class="hub-badge hub-badge-no" href="/api/hub/services/spotify/connect"
+        >Spotify neu verbinden für „Now Playing“</a
+    >
+    <span class="hub-now-sub hub-muted"
+        >Braucht den Scope <code>user-read-currently-playing</code>.</span
+    >
+</div>
+{% else if error != "" %}
+<div class="hub-now hub-now-err" aria-live="polite">
+    <span class="hub-now-title">{{ error }}</span>
+</div>
+{% else if !playing %}
+<div class="hub-now hub-now-idle" aria-live="polite">
+    <span class="hub-now-wave" aria-hidden="true">♪</span>
+    <span class="hub-now-sub hub-muted">Gerade läuft nichts in Spotify.</span>
+</div>
+{% else %}
+<div class="hub-now" aria-live="polite">
+    {% if image != "" %}
+    <img class="hub-now-art" src="{{ image }}" alt="" width="56" height="56" />
+    {% else %}
+    <span class="hub-now-art hub-now-art-ph" aria-hidden="true">♪</span>
+    {% endif %}
+    <div class="hub-now-main">
+        <div class="hub-now-line">
+            <span class="hub-now-dot" aria-hidden="true"></span>
+            {% if has_track %}
+            <a class="hub-now-title" href="{{ track_url }}" title="{{ play_state }}"
+                >{{ title }}</a
+            >
+            {% else %}
+            <span class="hub-now-title" title="{{ play_state }}">{{ title }}</span>
+            {% endif %}
+            <span class="hub-now-artists">{{ artists }}</span>
+        </div>
+        <div
+            class="hub-now-bar"
+            role="progressbar"
+            aria-valuenow="{{ progress_pct }}"
+            aria-valuemin="0"
+            aria-valuemax="100"
+        >
+            <span class="hub-now-bar-fill" style="width: {{ progress_pct }}%"></span>
+        </div>
+        <div class="hub-now-meta hub-muted">
+            {{ progress_disp }} / {{ duration_disp }} · {{ bpm }} BPM · {{ music_key }} ·
+            {{ album }}
+        </div>
+    </div>
+
+    {% if has_track %} {% if !tag_clouds.is_empty() %}
+    <div class="hub-now-tags">
+        {% for c in tag_clouds %}
+        <span class="hub-now-cloud"
+            ><span class="hub-now-cloud-h">{{ c.icon }} {{ c.type_label }}</span>
+            {% for t in c.chips %}
+            <a class="hub-chip hub-chip-on" href="/tag/{{ t.id }}">{{ t.name }}</a>
+            {% endfor %}</span
+        >
+        {% endfor %}
+    </div>
+    {% endif %} {% let id = hub_track_id %} {% include "_partials/track_actions.html" %}
+    {% else %}
+    <span class="hub-now-sub hub-muted"
+        >Noch nicht im Hub — erscheint nach dem nächsten Sync.</span
+    >
+    {% endif %}
+</div>
+{% endif %}

@@ -40,8 +40,15 @@ async fn harness() -> Harness {
         deezer_base: "http://127.0.0.1:1".to_string(),
         ffmpeg: "ffmpeg".to_string(),
         ffprobe: "ffprobe".to_string(),
+        ytdlp: "yt-dlp".to_string(),
+        ytdlp_dir: root.join("ytdlp"),
+        ytdlp_concurrency: 2,
+        transcode_concurrency: 2,
         worker_interval: Duration::from_secs(5),
         download_timeout: Duration::from_secs(60),
+        queue_max_attempts: 3,
+        queue_retry_base_secs: 60,
+        queue_retry_max_secs: 1800,
     };
 
     for dir in [
@@ -57,6 +64,8 @@ async fn harness() -> Harness {
     let pool = connect_db(&config).await.unwrap();
     db::init(&pool).await.unwrap();
 
+    let ytdlp_concurrency = config.ytdlp_concurrency;
+    let config_transcode_concurrency = config.transcode_concurrency;
     let state = Arc::new(AppState {
         pool,
         config,
@@ -67,6 +76,11 @@ async fn harness() -> Harness {
             root.join("objects"),
             music_api::store::DEFAULT_MAX_UPLOAD_BYTES,
         ),
+        logs: music_api::logbuf::LogBuffer::new(),
+        paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ytdlp_sem: Arc::new(tokio::sync::Semaphore::new(ytdlp_concurrency)),
+        finalize_sem: Arc::new(tokio::sync::Semaphore::new(config_transcode_concurrency)),
+        finalizing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
     });
 
     Harness {
@@ -79,7 +93,13 @@ async fn harness() -> Harness {
 async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Vec<u8>) {
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     (status, bytes)
 }
 
@@ -123,7 +143,10 @@ async fn health_is_public() {
     let h = harness().await;
     let (status, _) = send(
         &h.app,
-        Request::builder().uri("/health").body(Body::empty()).unwrap(),
+        Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -193,6 +216,36 @@ async fn create_and_read_order() {
 }
 
 #[tokio::test]
+async fn create_soundcloud_order_uses_composite_key() {
+    let h = harness().await;
+    let (status, body) = send(
+        &h.app,
+        authed("POST", "/orders")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [ { "source": "soundcloud", "externalId": "1837565340" } ]
+            })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create soundcloud order failed");
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let order_id = v["orderId"].as_str().unwrap().to_string();
+
+    let (st, b) = send(
+        &h.app,
+        authed("GET", &format!("/orders/{order_id}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let ov: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(ov["items"][0]["isrc"], "soundcloud:1837565340");
+    assert_eq!(ov["items"][0]["state"], "pending");
+}
+
+#[tokio::test]
 async fn order_listing_filters_by_status() {
     let h = harness().await;
     create_order(&h.app, &["AEA0D1846146"]).await;
@@ -252,7 +305,11 @@ async fn serves_ready_files_and_flips_order_to_done() {
     create_order(&h.app, &["AEA0D1846146"]).await;
 
     // Seed a finished track (the worker would normally do this).
-    let mp3_320 = write_file(&h.state.config.mp3_320_dir(), "AEA0D1846146.mp3", b"ID3fake");
+    let mp3_320 = write_file(
+        &h.state.config.mp3_320_dir(),
+        "AEA0D1846146.mp3",
+        b"ID3fake",
+    );
     db::mark_ready(
         &h.state.pool,
         "AEA0D1846146",
@@ -390,7 +447,13 @@ async fn object_store_round_trips_and_verifies() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
-    let part = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let part = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     assert_eq!(part, b"hello");
 
     // Re-upload is a no-op.
@@ -411,9 +474,7 @@ async fn object_store_round_trips_and_verifies() {
         &h.app,
         authed("POST", "/objects/check")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(
-                serde_json::json!({"hashes": [hash, missing]}),
-            ))
+            .body(json_body(serde_json::json!({"hashes": [hash, missing]})))
             .unwrap(),
     )
     .await;
@@ -444,6 +505,192 @@ async fn object_store_rejects_a_wrong_digest() {
         authed("HEAD", &format!("/objects/{wrong}"))
             .body(Body::empty())
             .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ── Durable queue: retries, lease recovery, counts ──────────────────────────
+
+#[tokio::test]
+async fn worker_status_reports_retry_cap() {
+    let h = harness().await;
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/worker").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["paused"], false);
+    assert_eq!(v["maxAttempts"], 3);
+}
+
+#[tokio::test]
+async fn queue_reports_state_counts() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146", "USQX91201487"]).await;
+    let (status, body) = send(&h.app, authed("GET", "/queue").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["counts"]["pending"], 2);
+}
+
+#[tokio::test]
+async fn retry_resets_a_failed_track() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+    db::mark_terminal(&h.state.pool, "AEA0D1846146", "failed", "boom")
+        .await
+        .unwrap();
+
+    let (status, body) = send(
+        &h.app,
+        authed("POST", "/isrc/aea0d1846146/retry")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["state"], "pending");
+
+    let t = db::get_track(&h.state.pool, "AEA0D1846146")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.state, "pending");
+    assert_eq!(t.attempts, 0);
+}
+
+#[tokio::test]
+async fn expired_lease_is_requeued() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+    // Stranded in `downloading` with a lease already in the past (dead process).
+    db::mark_downloading(&h.state.pool, "AEA0D1846146", "uuid-1", 0)
+        .await
+        .unwrap();
+
+    let policy = db::RetryPolicy {
+        max_attempts: 3,
+        base_secs: 60,
+        max_secs: 1800,
+    };
+    let recovered = db::recover_expired_leases(&h.state.pool, &policy, db::now())
+        .await
+        .unwrap();
+    assert_eq!(recovered, 1);
+
+    let t = db::get_track(&h.state.pool, "AEA0D1846146")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.state, "pending");
+    assert_eq!(t.attempts, 1);
+    // The backoff window pushes it out of the due set until it elapses.
+    assert_eq!(
+        db::due_tracks(&h.state.pool, 10, db::now())
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+// ── Per-ISRC metadata (BPM/key authority) ─────────────────────────────────
+
+#[tokio::test]
+async fn metadata_upsert_and_range_get() {
+    let h = harness().await;
+
+    // Upsert two ISRCs (hyphenated input is normalised; `musicalKey` alias works).
+    let (status, body) = send(
+        &h.app,
+        authed("POST", "/metadata")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [
+                    { "isrc": "deq022280682", "bpm": 128.0, "key": "11m", "camelot": "8A", "source": "traktor" },
+                    { "isrc": "USQX91201487", "bpm": 124.5, "musicalKey": "8A" }
+                ]
+            })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["upserted"], 2);
+
+    // Range lookup returns found items + the missing ISRCs.
+    let (status, body) = send(
+        &h.app,
+        authed(
+            "GET",
+            "/metadata?isrcs=DEQ022280682,USQX91201487,NOTFOUND123",
+        )
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    let missing = v["missing"].as_array().unwrap();
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0], "NOTFOUND123");
+    let deq = items.iter().find(|m| m["isrc"] == "DEQ022280682").unwrap();
+    assert_eq!(deq["bpm"], 128.0);
+    assert_eq!(deq["musicalKey"], "11m");
+    assert_eq!(deq["camelot"], "8A");
+    let usq = items.iter().find(|m| m["isrc"] == "USQX91201487").unwrap();
+    assert_eq!(usq["musicalKey"], "8A");
+}
+
+#[tokio::test]
+async fn metadata_merge_keeps_non_null() {
+    let h = harness().await;
+
+    let _ = send(
+        &h.app,
+        authed("POST", "/metadata")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [{ "isrc": "USQX91201487", "bpm": 124.0, "source": "traktor" }]
+            })))
+            .unwrap(),
+    )
+    .await;
+    // Second push: key only (bpm null) — must not wipe the stored bpm.
+    let _ = send(
+        &h.app,
+        authed("POST", "/metadata")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [{ "isrc": "USQX91201487", "key": "8A", "source": "analysis" }]
+            })))
+            .unwrap(),
+    )
+    .await;
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/metadata/USQX91201487")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["bpm"], 124.0, "bpm must survive a null-field push");
+    assert_eq!(v["musicalKey"], "8A");
+    assert_eq!(v["source"], "analysis");
+
+    // Unknown single ISRC → 404.
+    let (status, _) = send(
+        &h.app,
+        authed("GET", "/metadata/NOPE").body(Body::empty()).unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);

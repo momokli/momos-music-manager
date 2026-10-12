@@ -1,0 +1,140 @@
+{% extends "base.html" %} {% block title %}{{ name }} — Spelunke{% endblock %} {% block
+content %}
+<nav class="hub-crumbs" aria-label="Brotkrumen">
+    <ol>
+        <li><a href="/">Übersicht</a></li>
+        <li><a href="/collectives">Collectives</a></li>
+        <li>{{ name }}</li>
+    </ol>
+</nav>
+<hgroup>
+    <h1>{{ icon }} {{ name }}</h1>
+    <p class="hub-muted">
+        Owner <a href="/user/{{ owner }}">@{{ owner }}</a> · {{ members.len() }}
+        Mitglieder
+    </p>
+</hgroup>
+
+{% if is_owner %}
+<details>
+    <summary>Bearbeiten (Name / Icon)</summary>
+    <form
+        method="post"
+        action="/collectives/{{ id }}/update"
+        style="
+            display: flex;
+            gap: 0.4rem;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-top: 0.4rem;
+        "
+    >
+        <input
+            type="text"
+            name="name"
+            value="{{ name }}"
+            aria-label="Collective-Name"
+            required
+        />
+        <select name="icon" aria-label="Icon">
+            {% for i in icons %}
+            <option value="{{ i.value }}" {% if i.selected %}selected{% endif %}>
+                {{ i.value }}
+            </option>
+            {% endfor %}
+        </select>
+        <button type="submit">Speichern</button>
+    </form>
+</details>
+{% endif %}
+
+<section class="hub-filter">
+    {% if is_owner %}
+    <form method="post" action="/collectives/{{ id }}/delete" style="display: inline">
+        <button type="submit" class="secondary outline">Collective löschen</button>
+    </form>
+    {% elif member %}
+    <form method="post" action="/collectives/{{ id }}/leave" style="display: inline">
+        <button type="submit" class="secondary outline">verlassen</button>
+    </form>
+    {% else %}
+    <form method="post" action="/collectives/{{ id }}/join" style="display: inline">
+        <button type="submit" class="secondary">beitreten</button>
+    </form>
+    {% endif %}
+</section>
+
+<h3>Mitglieder ({{ members.len() }})</h3>
+<div class="overflow-auto">
+    <table class="hub-dense-table">
+        <thead>
+            <tr>
+                <th scope="col">
+                    <a
+                        href="{{ s_muser.href }}"
+                        class="hub-sort{% if s_muser.active %} hub-sort-on{% endif %}"
+                        >{{ s_muser.label }}{% if s_muser.active %} {{ s_muser.arrow }}{%
+                        endif %}</a
+                    >
+                </th>
+                <th scope="col">Rolle</th>
+                {% if is_owner %}
+                <th scope="col"></th>
+                {% endif %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for m in members %}
+            <tr>
+                <td><a href="/user/{{ m.slug }}">@{{ m.slug }}</a></td>
+                <td>{{ m.role }}</td>
+                {% if is_owner %}
+                <td>
+                    {% if m.role != "owner" %}
+                    <form
+                        method="post"
+                        action="/collectives/{{ id }}/member"
+                        style="display: inline-flex; gap: 0.25rem; align-items: center"
+                    >
+                        <input type="hidden" name="slug" value="{{ m.slug }}" />
+                        <select name="role">
+                            <option value="member">member</option>
+                            <option value="owner">owner</option>
+                        </select>
+                        <button type="submit" class="secondary">setzen</button>
+                    </form>
+                    <form
+                        method="post"
+                        action="/collectives/{{ id }}/member/remove"
+                        style="display: inline"
+                    >
+                        <input type="hidden" name="slug" value="{{ m.slug }}" />
+                        <button type="submit" title="Entfernen">×</button>
+                    </form>
+                    {% endif %}
+                </td>
+                {% endif %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if is_owner %}
+<form
+    method="post"
+    action="/collectives/{{ id }}/member"
+    style="display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap"
+>
+    <select name="slug" aria-label="User">
+        {% for u in users %}
+        <option value="{{ u }}">@{{ u }}</option>
+        {% endfor %}
+    </select>
+    <select name="role" aria-label="Rolle">
+        <option value="member">member</option>
+        <option value="owner">owner</option>
+    </select>
+    <button type="submit">Mitglied hinzufügen / setzen</button>
+</form>
+{% endif %} {% endblock %}

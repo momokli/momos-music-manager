@@ -10,10 +10,12 @@ pub mod config;
 pub mod db;
 pub mod deemix;
 pub mod deezer;
+pub mod logbuf;
 pub mod models;
 pub mod store;
 pub mod transcode;
 pub mod worker;
+pub mod ytdlp;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,13 +40,25 @@ pub struct AppState {
     pub deemix_login: worker::LoginBackoff,
     /// Content-addressed object store.
     pub store: store::Store,
+    /// Recent service events (surfaced via `GET /logs`).
+    pub logs: logbuf::LogBuffer,
+    /// When set, the worker does not pick up new work.
+    pub paused: Arc<std::sync::atomic::AtomicBool>,
+    /// Bounds concurrent yt-dlp downloads (non-Deezer sources).
+    pub ytdlp_sem: Arc<tokio::sync::Semaphore>,
+    /// Bounds concurrent `finalize` (copy + transcode) jobs.
+    pub finalize_sem: Arc<tokio::sync::Semaphore>,
+    /// ISRCs with a `finalize` task currently in flight (dedupe guard).
+    pub finalizing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Build the fully-stated router: public `/health`, everything else behind the
 /// bearer check.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let protected = api::router()
-        .layer(middleware::from_fn_with_state(state.clone(), auth::require_bearer));
+    let protected = api::router().layer(middleware::from_fn_with_state(
+        state.clone(),
+        auth::require_bearer,
+    ));
     Router::new()
         .route("/health", get(api::health))
         .merge(protected)
