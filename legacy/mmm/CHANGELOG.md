@@ -56,6 +56,16 @@ All notable changes to Momo's Music Manager.
     write an **import history** ledger and per-track **archive** (keep/drop on removal).
   - **Downloads**: music-api integration — per-track format, whole-playlist and per-tag
     **ZIP download**, order-only-missing, prioritize, and a `/downloads` status table.
+
+### Added — Backpack sources (tag/playlist/lens/track) (#329)
+
+- Typed **sources layer** for backpacks (`mmm-hub/src/backpacks.rs`): attach a source of kind
+  `tag` / `playlist` / `lens` / `track` to a backpack, list a backpack's sources in append order,
+  and remove one item or clear all. `add_source` / `list_sources` / `remove_source` / `clear_sources`
+  keep exactly one source column set per row, validate lens keys against `curate::LENSES` (DB CHECK
+  stays lenient on purpose), and bump the parent `hub_backpacks.updated_at` on every write.
+  Resolution/union/dedup (#330), the UI (#328) and active-scope logic (#331) are out of scope.
+  No migration changed.
 ---
 
 ## [1.15.2] — 2026-10-08

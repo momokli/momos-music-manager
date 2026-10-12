@@ -1,0 +1,549 @@
+//! Backpack sources (#329): typed model + persistence helpers for attaching a
+//! source of one of four kinds (tag / playlist / lens / track) to a backpack.
+//!
+//! Schema lives in `044_hub_backpacks.sql` (#327). This module hosts the
+//! *sources layer* (#329), the *resolver* (#330, [`resolve`] unions the tracks of
+//! a backpack's sources, dedups and score-sorts them) and the *active-scope*
+//! layer (#331, [`active_backpack`] / [`set_active`] / [`clear_active`] /
+//! [`active_scope_track_ids`]). No UI (#328) here.
+//!
+//! Conventions mirror `curate.rs`: `anyhow` results, `chrono::Utc::now()`
+//! RFC3339 timestamps, and every write bumps the parent `hub_backpacks.updated_at`.
+
+use std::collections::{BTreeMap, HashSet};
+use std::str::FromStr;
+
+use anyhow::{Result, bail};
+use sqlx::SqlitePool;
+
+/// The four source kinds, matching the DB CHECK on `hub_backpack_items.source_kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    Tag,
+    Playlist,
+    Lens,
+    Track,
+}
+
+impl SourceKind {
+    /// The exact DB literal for this kind.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SourceKind::Tag => "tag",
+            SourceKind::Playlist => "playlist",
+            SourceKind::Lens => "lens",
+            SourceKind::Track => "track",
+        }
+    }
+}
+
+impl FromStr for SourceKind {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "tag" => Ok(SourceKind::Tag),
+            "playlist" => Ok(SourceKind::Playlist),
+            "lens" => Ok(SourceKind::Lens),
+            "track" => Ok(SourceKind::Track),
+            other => bail!("unknown source kind: {other}"),
+        }
+    }
+}
+
+/// Typed view of one `hub_backpacks` row.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Backpack {
+    pub id: i64,
+    pub user_id: i64,
+    pub name: String,
+    pub is_active: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Typed view of one `hub_backpack_items` row.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct BackpackItem {
+    pub id: i64,
+    pub backpack_id: i64,
+    pub source_kind: String,
+    pub source_tag_id: Option<i64>,
+    pub source_playlist_id: Option<i64>,
+    pub source_lens: Option<String>,
+    pub source_track_id: Option<i64>,
+    pub position: i64,
+    pub added_at: String,
+}
+
+/// A source to attach to a backpack (exactly one variant).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceRef {
+    Tag(i64),
+    Playlist(i64),
+    Lens(String),
+    Track(i64),
+}
+
+impl SourceRef {
+    pub fn kind(&self) -> SourceKind {
+        match self {
+            SourceRef::Tag(_) => SourceKind::Tag,
+            SourceRef::Playlist(_) => SourceKind::Playlist,
+            SourceRef::Lens(_) => SourceKind::Lens,
+            SourceRef::Track(_) => SourceKind::Track,
+        }
+    }
+}
+
+/// Attach a source to a backpack, appending it (position = MAX+1) and bumping
+/// the backpack's `updated_at`. Returns the new item id.
+///
+/// A lens key must exist in [`crate::curate::LENSES`]; otherwise this returns an
+/// error and writes nothing.
+pub async fn add_source(pool: &SqlitePool, backpack_id: i64, src: SourceRef) -> Result<i64> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let kind = src.kind().as_str();
+
+    // App-level lens validation (DB CHECK allows any lens text on purpose).
+    let (tag_id, playlist_id, lens, track_id): (Option<i64>, Option<i64>, Option<String>, Option<i64>) =
+        match &src {
+            SourceRef::Tag(id) => (Some(*id), None, None, None),
+            SourceRef::Playlist(id) => (None, Some(*id), None, None),
+            SourceRef::Lens(key) => {
+                if !crate::curate::LENSES.iter().any(|(k, _)| k == key) {
+                    bail!("unknown lens key: {key}");
+                }
+                (None, None, Some(key.clone()), None)
+            }
+            SourceRef::Track(id) => (None, None, None, Some(*id)),
+        };
+
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_backpack_items
+            (backpack_id, source_kind, source_tag_id, source_playlist_id, source_lens, source_track_id, position, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6,
+                 (SELECT COALESCE(MAX(position), 0) + 1 FROM hub_backpack_items WHERE backpack_id = ?1),
+                 ?7)
+         RETURNING id",
+    )
+    .bind(backpack_id)
+    .bind(kind)
+    .bind(tag_id)
+    .bind(playlist_id)
+    .bind(lens)
+    .bind(track_id)
+    .bind(&now)
+    .fetch_one(pool)
+    .await?;
+
+    sqlx::query("UPDATE hub_backpacks SET updated_at = ?2 WHERE id = ?1")
+        .bind(backpack_id)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+
+    Ok(id)
+}
+
+/// All items of a backpack, ordered by append order (`position, id`).
+/// An unknown/empty backpack yields an empty `Vec`.
+pub async fn list_sources(pool: &SqlitePool, backpack_id: i64) -> Result<Vec<BackpackItem>> {
+    Ok(sqlx::query_as::<_, BackpackItem>(
+        "SELECT id, backpack_id, source_kind, source_tag_id, source_playlist_id,
+                source_lens, source_track_id, position, added_at
+           FROM hub_backpack_items
+          WHERE backpack_id = ?1
+          ORDER BY position, id",
+    )
+    .bind(backpack_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Remove one item by id. Returns `true` when a row was deleted. Bumps the
+/// owning backpack's `updated_at` (a no-op bump when nothing was deleted).
+pub async fn remove_source(pool: &SqlitePool, item_id: i64) -> Result<bool> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let backpack_id: Option<i64> = sqlx::query_scalar(
+        "DELETE FROM hub_backpack_items WHERE id = ?1 RETURNING backpack_id",
+    )
+    .bind(item_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(bp) = backpack_id {
+        sqlx::query("UPDATE hub_backpacks SET updated_at = ?2 WHERE id = ?1")
+            .bind(bp)
+            .bind(&now)
+            .execute(pool)
+            .await?;
+    }
+
+    Ok(backpack_id.is_some())
+}
+
+/// Delete all items of a backpack. Returns the number of rows removed and bumps
+/// the backpack's `updated_at`.
+pub async fn clear_sources(pool: &SqlitePool, backpack_id: i64) -> Result<u64> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let res = sqlx::query("DELETE FROM hub_backpack_items WHERE backpack_id = ?1")
+        .bind(backpack_id)
+        .execute(pool)
+        .await?;
+    sqlx::query("UPDATE hub_backpacks SET updated_at = ?2 WHERE id = ?1")
+        .bind(backpack_id)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
+}
+
+// ── Active scope (#331) ──────────────────────────────────────────────────────
+
+/// The user's active backpack, if any.
+///
+/// The partial UNIQUE index `idx_hub_backpacks_active_user` guarantees at most
+/// one active backpack per user, so this returns `None` or exactly one row.
+/// An unknown `user_id` yields `Ok(None)`.
+pub async fn active_backpack(pool: &SqlitePool, user_id: i64) -> Result<Option<Backpack>> {
+    Ok(sqlx::query_as::<_, Backpack>(
+        "SELECT id, user_id, name, is_active, created_at, updated_at
+           FROM hub_backpacks
+          WHERE user_id = ?1 AND is_active = 1
+          LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Make `backpack_id` the user's single active backpack (deactivating any other).
+///
+/// Runs in a transaction: first clears `is_active` on every backpack of the
+/// user, then sets the target to `1`. The `updated_at` of every touched row is
+/// bumped. A `backpack_id` that does not belong to `user_id` is an error and
+/// writes nothing (no silent cross-user access).
+pub async fn set_active(pool: &SqlitePool, user_id: i64, backpack_id: i64) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let owned: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM hub_backpacks WHERE id = ?1 AND user_id = ?2")
+            .bind(backpack_id)
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some(id) = owned else {
+        bail!("backpack {backpack_id} not found for user {user_id}");
+    };
+
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "UPDATE hub_backpacks SET is_active = 0, updated_at = ?2
+          WHERE user_id = ?1 AND is_active = 1",
+    )
+    .bind(user_id)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE hub_backpacks SET is_active = 1, updated_at = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Deactivate every backpack of the user, returning the number of rows that
+/// were active (and thus changed). An `updated_at` is bumped on those rows.
+pub async fn clear_active(pool: &SqlitePool, user_id: i64) -> Result<u64> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let res = sqlx::query(
+        "UPDATE hub_backpacks SET is_active = 0, updated_at = ?2
+          WHERE user_id = ?1 AND is_active = 1",
+    )
+    .bind(user_id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// The track-id scope of the user's active backpack.
+///
+/// `Ok(None)` means **no active backpack** (list views stay unscoped);
+/// `Ok(Some(set))` is the backpack's resolved track set, resolved **without**
+/// the 500-row clamp of [`resolve`] so a scope filter never truncates.
+pub async fn active_scope_track_ids(
+    pool: &SqlitePool,
+    user_id: i64,
+) -> Result<Option<HashSet<i64>>> {
+    let Some(bp) = active_backpack(pool, user_id).await? else {
+        return Ok(None);
+    };
+    let tracks = resolve_unbounded(pool, bp.id).await?;
+    Ok(Some(tracks.into_iter().map(|t| t.track_id).collect()))
+}
+
+/// Scope for the hub list views (#331): `None` = unscoped, `Some` = active
+/// backpack's resolved track set.
+///
+/// This is the single error policy shared by `/tags`, `/albums` and `/artists`:
+/// a resolver failure (or any DB hiccup while loading the scope) degrades to
+/// **unscoped** and is logged, instead of silently emptying the library. The
+/// helper therefore never returns an error — an availability-preserving,
+/// fail-open choice documented here so the three views cannot drift apart.
+///
+/// An active backpack that resolves to **no** tracks is *not* an error: it
+/// yields `Some(empty)` and the list views then hide everything (the scope is
+/// genuinely empty).
+pub async fn active_scope_for_views(pool: &SqlitePool, user_id: i64) -> Option<HashSet<i64>> {
+    match active_scope_track_ids(pool, user_id).await {
+        Ok(scope) => scope,
+        Err(e) => {
+            tracing::warn!("active backpack scope load failed for user {user_id}: {e:#}; falling back to unscoped");
+            None
+        }
+    }
+}
+
+// ── Resolver (#330) ───────────────────────────────────────────────────────────
+
+/// One resolved track: its hub id, relevance score, and the distinct backpack
+/// sources that contributed it (ordered by source position, ascending).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ResolvedTrack {
+    pub track_id: i64,
+    pub score: i64,
+    pub sources: Vec<ResolvedSource>,
+}
+
+/// A contributing source of a resolved track. Mirrors [`SourceRef`] (#329) so
+/// the UI (#328) can label "why is this track here" without re-querying items.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ResolvedSource {
+    Tag { tag_id: i64 },
+    Playlist { playlist_id: i64 },
+    Lens { lens: String },
+    Track { track_id: i64 },
+}
+
+/// Canonical kind order for stable `sources` ordering: tag < playlist < lens < track.
+fn kind_rank(src: &ResolvedSource) -> u8 {
+    match src {
+        ResolvedSource::Tag { .. } => 0,
+        ResolvedSource::Playlist { .. } => 1,
+        ResolvedSource::Lens { .. } => 2,
+        ResolvedSource::Track { .. } => 3,
+    }
+}
+
+/// Resolve a backpack to a scored, deduped, sorted, limited track list.
+///
+/// Each item is resolved to an ordered set of hub track ids (tag /
+/// playlist / lens / literal track), the sets are unioned and deduped by
+/// `track_id`, and every track is scored by the number of *distinct* contributing
+/// source targets. The result is sorted by `score` descending, then the smallest
+/// contributing `position` ascending, then `track_id` ascending (a total order).
+///
+/// Unknown/empty backpack -> `Ok(vec![])`. `limit` is clamped to `1..=500`
+/// (so `limit <= 0` behaves as `1`, mirroring [`crate::curate::resolve_track_ids`]).
+/// Never errors on empty/absent source data.
+pub async fn resolve(
+    pool: &SqlitePool,
+    backpack_id: i64,
+    limit: i64,
+) -> Result<Vec<ResolvedTrack>> {
+    resolve_with_limit(pool, backpack_id, limit.clamp(1, 500)).await
+}
+
+/// Resolve a backpack's full track set without the 1..=500 clamp of [`resolve`].
+///
+/// Used by the active-scope filter (#331), which must see every scoped track.
+/// Semantics (union / dedup / scoring / ordering) are identical to [`resolve`].
+pub async fn resolve_unbounded(pool: &SqlitePool, backpack_id: i64) -> Result<Vec<ResolvedTrack>> {
+    resolve_with_limit(pool, backpack_id, i64::MAX).await
+}
+
+async fn resolve_with_limit(
+    pool: &SqlitePool,
+    backpack_id: i64,
+    limit: i64,
+) -> Result<Vec<ResolvedTrack>> {
+    let user_id: Option<i64> =
+        sqlx::query_scalar("SELECT user_id FROM hub_backpacks WHERE id = ?1")
+            .bind(backpack_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some(user_id) = user_id else {
+        return Ok(vec![]);
+    };
+
+    let items = list_sources(pool, backpack_id).await?;
+
+    // Resolve each item to (source target, item position, ordered track ids).
+    // Source identity is the *target* (kind + id/lens key): a repeated target
+    // counts once for scoring.
+    let mut contributions: Vec<(ResolvedSource, i64, Vec<i64>)> = Vec::new();
+    let mut seen: HashSet<ResolvedSource> = HashSet::new();
+
+    for item in &items {
+        let (source, tracks) = match item.source_kind.as_str() {
+            "tag" => {
+                let Some(tag_id) = item.source_tag_id else {
+                    continue;
+                };
+                (ResolvedSource::Tag { tag_id }, tracks_for_tag(pool, tag_id).await?)
+            }
+            "playlist" => {
+                let Some(playlist_id) = item.source_playlist_id else {
+                    continue;
+                };
+                (
+                    ResolvedSource::Playlist { playlist_id },
+                    tracks_for_playlist(pool, playlist_id).await?,
+                )
+            }
+            "lens" => {
+                let lens = item.source_lens.clone().unwrap_or_default();
+                let tracks = tracks_for_lens(pool, user_id, &lens).await?;
+                (ResolvedSource::Lens { lens }, tracks)
+            }
+            "track" => {
+                let Some(track_id) = item.source_track_id else {
+                    continue;
+                };
+                (ResolvedSource::Track { track_id }, vec![track_id])
+            }
+            // The DB CHECK forbids any other kind; skip defensively.
+            _ => continue,
+        };
+
+        if !seen.insert(source.clone()) {
+            continue;
+        }
+        contributions.push((source, item.position, tracks));
+    }
+
+    Ok(fold_sources(&contributions, limit))
+}
+
+/// Fold per-source contributions into scored, deduped, ordered, limited tracks.
+fn fold_sources(
+    contributions: &[(ResolvedSource, i64, Vec<i64>)],
+    limit: i64,
+) -> Vec<ResolvedTrack> {
+    struct Acc {
+        score: i64,
+        first_position: i64,
+        // (position, kind rank, source)
+        sources: Vec<(i64, u8, ResolvedSource)>,
+    }
+
+    let mut by_track: BTreeMap<i64, Acc> = BTreeMap::new();
+    for (source, position, tracks) in contributions {
+        let rank = kind_rank(source);
+        // A track can only count once per contributing source target, even if
+        // that target's query were to yield it more than once.
+        let mut counted: HashSet<i64> = HashSet::new();
+        for &track_id in tracks {
+            if !counted.insert(track_id) {
+                continue;
+            }
+            let acc = by_track.entry(track_id).or_insert_with(|| Acc {
+                score: 0,
+                first_position: *position,
+                sources: Vec::new(),
+            });
+            acc.score += 1;
+            if *position < acc.first_position {
+                acc.first_position = *position;
+            }
+            acc.sources.push((*position, rank, source.clone()));
+        }
+    }
+
+    let mut ordered: Vec<(i64, Acc)> = by_track.into_iter().collect();
+    ordered.sort_by(|(ta, a), (tb, b)| {
+        b.score
+            .cmp(&a.score)
+            .then(a.first_position.cmp(&b.first_position))
+            .then(ta.cmp(tb))
+    });
+
+    let mut out: Vec<ResolvedTrack> = ordered
+        .into_iter()
+        .map(|(track_id, mut acc)| {
+            acc.sources
+                .sort_by(|(pa, ra, _), (pb, rb, _)| pa.cmp(pb).then(ra.cmp(rb)));
+            ResolvedTrack {
+                track_id,
+                score: acc.score,
+                sources: acc
+                    .sources
+                    .into_iter()
+                    .map(|(_, _, src)| src)
+                    .collect(),
+            }
+        })
+        .collect();
+
+    out.truncate(limit as usize);
+    out
+}
+
+/// Hub track ids carrying `tag_id` (via `hub_track_resolved_tags`), id-ordered.
+async fn tracks_for_tag(pool: &SqlitePool, tag_id: i64) -> Result<Vec<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT track_id FROM hub_track_resolved_tags WHERE tag_id = ?1 ORDER BY track_id",
+    )
+    .bind(tag_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Hub track ids in a playlist, in playlist order.
+async fn tracks_for_playlist(pool: &SqlitePool, playlist_id: i64) -> Result<Vec<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT track_id FROM hub_playlist_tracks WHERE playlist_id = ?1 ORDER BY position",
+    )
+    .bind(playlist_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Resolve a smart lens to hub track ids using the same rules as
+/// [`crate::curate::resolve_track_ids`], scoped to the backpack's `user_id`.
+/// Unknown/empty lens keys fall back to `newest` (never errors).
+async fn tracks_for_lens(pool: &SqlitePool, user_id: i64, lens: &str) -> Result<Vec<i64>> {
+    let ids = match lens {
+        "liked" => {
+            sqlx::query_scalar(
+                "SELECT track_id FROM hub_liked_tracks
+                  WHERE user_id = ?1 ORDER BY liked_at DESC",
+            )
+            .bind(user_id)
+            .fetch_all(pool)
+            .await?
+        }
+        "unheard" => {
+            sqlx::query_scalar(
+                "SELECT t.id
+                   FROM hub_tracks t
+                   LEFT JOIN hub_v_track_traktor v ON v.track_id = t.id
+                  ORDER BY COALESCE(v.play_count, 0) ASC, t.first_seen_at DESC",
+            )
+            .fetch_all(pool)
+            .await?
+        }
+        // "newest" and any unknown/empty key fall back to newest-in-hub.
+        _ => {
+            sqlx::query_scalar("SELECT id FROM hub_tracks ORDER BY first_seen_at DESC, id DESC")
+                .fetch_all(pool)
+                .await?
+        }
+    };
+    Ok(ids)
+}

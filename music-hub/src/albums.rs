@@ -11,6 +11,7 @@ use serde::Deserialize;
 use sqlx::{QueryBuilder, Row, Sqlite};
 
 use crate::api::AppState;
+use std::collections::HashSet;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -36,6 +37,29 @@ fn album_href(name: &str) -> String {
 
 fn artist_href(name: &str) -> String {
     format!("/artist/{}", urlencoding::encode(name))
+}
+
+/// Append a #331 scope predicate `{lhs} IN (SELECT value FROM json_each(?))`
+/// to `qb`.
+///
+/// The scope is bound as **one** JSON array, so the number of SQL variables is
+/// constant regardless of the backpack size (a literal `IN (?, ?, …)` list
+/// would grow one variable per track and risk `SQLITE_MAX_VARIABLE_NUMBER`).
+///
+/// An empty scope yields the always-false `1 = 0`: SQLite rejects a bare
+/// `IN ()` with a syntax error, so an active backpack that resolves no tracks
+/// must hide everything instead of breaking the `/albums` query.
+fn push_scope_ids(qb: &mut QueryBuilder<'_, Sqlite>, lhs: &str, scope: &HashSet<i64>) {
+    if scope.is_empty() {
+        qb.push("1 = 0");
+        return;
+    }
+    let json = serde_json::to_string(&scope.iter().copied().collect::<Vec<i64>>())
+        .expect("serialize scope ids");
+    qb.push(lhs)
+        .push(" IN (SELECT value FROM json_each(")
+        .push_bind(json)
+        .push("))");
 }
 
 #[derive(Deserialize, Default)]
@@ -102,6 +126,9 @@ async fn albums_page(
     let (sort, dir) =
         crate::table::resolve_sort(f.sort.as_deref(), f.dir.as_deref(), allowed, "album", "asc");
 
+    // Active-scope filter (#331): loaded once per request; `None` = unscoped.
+    let scope = crate::backpacks::active_scope_for_views(&st.pool, nav.id).await;
+
     // Wrapped so the derived-table aliases can be fuzzy-searched and sorted.
     let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(
         "SELECT * FROM (SELECT album AS album,
@@ -109,9 +136,15 @@ async fn albums_page(
                 MAX(artists) AS artists,
                 MAX(image_url) AS cover
            FROM hub_tracks
-          WHERE album IS NOT NULL AND TRIM(album) <> ''
-          GROUP BY album",
+          WHERE album IS NOT NULL AND TRIM(album) <> ''",
     );
+    // Scope filter: an album is listed only when >= 1 of its tracks is in the
+    // active backpack's scope; `COUNT(*)` then reflects the scoped set.
+    if let Some(scope) = &scope {
+        qb.push(" AND ");
+        push_scope_ids(&mut qb, "id", scope);
+    }
+    qb.push(" GROUP BY album");
     if !a_needle.is_empty() {
         qb.push(" HAVING instr(lower(COALESCE(MAX(artists), '')), ")
             .push_bind(a_needle.clone())
@@ -289,4 +322,25 @@ async fn album_page(
         s_artists,
         s_duration,
     })
+}
+
+#[cfg(test)]
+mod scope_sql_tests {
+    use super::*;
+    use sqlx::Execute;
+
+    #[test]
+    fn empty_scope_predicate_never_emits_in_empty() {
+        let mut qb: QueryBuilder<'_, Sqlite> = QueryBuilder::new("SELECT 1 FROM hub_tracks WHERE ");
+        push_scope_ids(&mut qb, "id", &HashSet::new());
+        let sql = qb.build().sql().to_string();
+        assert!(
+            !sql.contains("IN ()"),
+            "empty scope must not emit invalid `IN ()`: {sql}"
+        );
+        assert!(
+            sql.contains("1 = 0"),
+            "empty scope must become the always-false predicate: {sql}"
+        );
+    }
 }

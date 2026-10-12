@@ -258,6 +258,14 @@ async fn artists_page(
 
     let tracks = load_tracks(&st.pool).await;
 
+    // Active-scope filter (#331): keep only tracks in the active backpack's
+    // scope before folding artists, so aggregates reflect the scoped set.
+    let scope = crate::backpacks::active_scope_for_views(&st.pool, me).await;
+    let tracks: Vec<TrackInfo> = match &scope {
+        Some(set) => tracks.into_iter().filter(|t| set.contains(&t.id)).collect(),
+        None => tracks,
+    };
+
     // Per-track lookups (bounded, single scans — no N+1).
     let tag_counts: HashMap<i64, i64> = sqlx::query(
         "SELECT track_id, COUNT(*) AS c FROM hub_track_resolved_tags GROUP BY track_id",
