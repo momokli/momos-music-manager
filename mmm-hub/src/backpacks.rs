@@ -1,13 +1,15 @@
 //! Backpack sources (#329): typed model + persistence helpers for attaching a
 //! source of one of four kinds (tag / playlist / lens / track) to a backpack.
 //!
-//! Schema lives in `044_hub_backpacks.sql` (#327). This module is the *sources
-//! layer* only: no resolution/union/dedup (that is the resolver, #330), no UI
-//! (#328) and no active-scope logic (#331).
+//! Schema lives in `044_hub_backpacks.sql` (#327). This module hosts the
+//! *sources layer* (#329) and the *resolver* (#330): [`resolve`] unions the
+//! tracks of a backpack's sources, dedups and score-sorts them. No UI (#328)
+//! and no active-scope logic (#331) here.
 //!
 //! Conventions mirror `curate.rs`: `anyhow` results, `chrono::Utc::now()`
 //! RFC3339 timestamps, and every write bumps the parent `hub_backpacks.updated_at`.
 
+use std::collections::{BTreeMap, HashSet};
 use std::str::FromStr;
 
 use anyhow::{Result, bail};
@@ -183,4 +185,230 @@ pub async fn clear_sources(pool: &SqlitePool, backpack_id: i64) -> Result<u64> {
         .execute(pool)
         .await?;
     Ok(res.rows_affected())
+}
+
+// ── Resolver (#330) ───────────────────────────────────────────────────────────
+
+/// One resolved track: its hub id, relevance score, and the distinct backpack
+/// sources that contributed it (ordered by source position, ascending).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ResolvedTrack {
+    pub track_id: i64,
+    pub score: i64,
+    pub sources: Vec<ResolvedSource>,
+}
+
+/// A contributing source of a resolved track. Mirrors [`SourceRef`] (#329) so
+/// the UI (#328) can label "why is this track here" without re-querying items.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ResolvedSource {
+    Tag { tag_id: i64 },
+    Playlist { playlist_id: i64 },
+    Lens { lens: String },
+    Track { track_id: i64 },
+}
+
+/// Canonical kind order for stable `sources` ordering: tag < playlist < lens < track.
+fn kind_rank(src: &ResolvedSource) -> u8 {
+    match src {
+        ResolvedSource::Tag { .. } => 0,
+        ResolvedSource::Playlist { .. } => 1,
+        ResolvedSource::Lens { .. } => 2,
+        ResolvedSource::Track { .. } => 3,
+    }
+}
+
+/// Resolve a backpack to a scored, deduped, sorted, limited track list.
+///
+/// Each item is resolved to an ordered set of hub track ids (tag /
+/// playlist / lens / literal track), the sets are unioned and deduped by
+/// `track_id`, and every track is scored by the number of *distinct* contributing
+/// source targets. The result is sorted by `score` descending, then the smallest
+/// contributing `position` ascending, then `track_id` ascending (a total order).
+///
+/// Unknown/empty backpack -> `Ok(vec![])`. `limit` is clamped to `1..=500`
+/// (so `limit <= 0` behaves as `1`, mirroring [`crate::curate::resolve_track_ids`]).
+/// Never errors on empty/absent source data.
+pub async fn resolve(
+    pool: &SqlitePool,
+    backpack_id: i64,
+    limit: i64,
+) -> Result<Vec<ResolvedTrack>> {
+    let limit = limit.clamp(1, 500);
+
+    let user_id: Option<i64> =
+        sqlx::query_scalar("SELECT user_id FROM hub_backpacks WHERE id = ?1")
+            .bind(backpack_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some(user_id) = user_id else {
+        return Ok(vec![]);
+    };
+
+    let items = list_sources(pool, backpack_id).await?;
+
+    // Resolve each item to (source target, item position, ordered track ids).
+    // Source identity is the *target* (kind + id/lens key): a repeated target
+    // counts once for scoring.
+    let mut contributions: Vec<(ResolvedSource, i64, Vec<i64>)> = Vec::new();
+    let mut seen: HashSet<ResolvedSource> = HashSet::new();
+
+    for item in &items {
+        let (source, tracks) = match item.source_kind.as_str() {
+            "tag" => {
+                let Some(tag_id) = item.source_tag_id else {
+                    continue;
+                };
+                (ResolvedSource::Tag { tag_id }, tracks_for_tag(pool, tag_id).await?)
+            }
+            "playlist" => {
+                let Some(playlist_id) = item.source_playlist_id else {
+                    continue;
+                };
+                (
+                    ResolvedSource::Playlist { playlist_id },
+                    tracks_for_playlist(pool, playlist_id).await?,
+                )
+            }
+            "lens" => {
+                let lens = item.source_lens.clone().unwrap_or_default();
+                let tracks = tracks_for_lens(pool, user_id, &lens).await?;
+                (ResolvedSource::Lens { lens }, tracks)
+            }
+            "track" => {
+                let Some(track_id) = item.source_track_id else {
+                    continue;
+                };
+                (ResolvedSource::Track { track_id }, vec![track_id])
+            }
+            // The DB CHECK forbids any other kind; skip defensively.
+            _ => continue,
+        };
+
+        if !seen.insert(source.clone()) {
+            continue;
+        }
+        contributions.push((source, item.position, tracks));
+    }
+
+    Ok(fold_sources(&contributions, limit))
+}
+
+/// Fold per-source contributions into scored, deduped, ordered, limited tracks.
+fn fold_sources(
+    contributions: &[(ResolvedSource, i64, Vec<i64>)],
+    limit: i64,
+) -> Vec<ResolvedTrack> {
+    struct Acc {
+        score: i64,
+        first_position: i64,
+        // (position, kind rank, source)
+        sources: Vec<(i64, u8, ResolvedSource)>,
+    }
+
+    let mut by_track: BTreeMap<i64, Acc> = BTreeMap::new();
+    for (source, position, tracks) in contributions {
+        let rank = kind_rank(source);
+        // A track can only count once per contributing source target, even if
+        // that target's query were to yield it more than once.
+        let mut counted: HashSet<i64> = HashSet::new();
+        for &track_id in tracks {
+            if !counted.insert(track_id) {
+                continue;
+            }
+            let acc = by_track.entry(track_id).or_insert_with(|| Acc {
+                score: 0,
+                first_position: *position,
+                sources: Vec::new(),
+            });
+            acc.score += 1;
+            if *position < acc.first_position {
+                acc.first_position = *position;
+            }
+            acc.sources.push((*position, rank, source.clone()));
+        }
+    }
+
+    let mut ordered: Vec<(i64, Acc)> = by_track.into_iter().collect();
+    ordered.sort_by(|(ta, a), (tb, b)| {
+        b.score
+            .cmp(&a.score)
+            .then(a.first_position.cmp(&b.first_position))
+            .then(ta.cmp(tb))
+    });
+
+    let mut out: Vec<ResolvedTrack> = ordered
+        .into_iter()
+        .map(|(track_id, mut acc)| {
+            acc.sources
+                .sort_by(|(pa, ra, _), (pb, rb, _)| pa.cmp(pb).then(ra.cmp(rb)));
+            ResolvedTrack {
+                track_id,
+                score: acc.score,
+                sources: acc
+                    .sources
+                    .into_iter()
+                    .map(|(_, _, src)| src)
+                    .collect(),
+            }
+        })
+        .collect();
+
+    out.truncate(limit as usize);
+    out
+}
+
+/// Hub track ids carrying `tag_id` (via `hub_track_resolved_tags`), id-ordered.
+async fn tracks_for_tag(pool: &SqlitePool, tag_id: i64) -> Result<Vec<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT track_id FROM hub_track_resolved_tags WHERE tag_id = ?1 ORDER BY track_id",
+    )
+    .bind(tag_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Hub track ids in a playlist, in playlist order.
+async fn tracks_for_playlist(pool: &SqlitePool, playlist_id: i64) -> Result<Vec<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT track_id FROM hub_playlist_tracks WHERE playlist_id = ?1 ORDER BY position",
+    )
+    .bind(playlist_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Resolve a smart lens to hub track ids using the same rules as
+/// [`crate::curate::resolve_track_ids`], scoped to the backpack's `user_id`.
+/// Unknown/empty lens keys fall back to `newest` (never errors).
+async fn tracks_for_lens(pool: &SqlitePool, user_id: i64, lens: &str) -> Result<Vec<i64>> {
+    let ids = match lens {
+        "liked" => {
+            sqlx::query_scalar(
+                "SELECT track_id FROM hub_liked_tracks
+                  WHERE user_id = ?1 ORDER BY liked_at DESC",
+            )
+            .bind(user_id)
+            .fetch_all(pool)
+            .await?
+        }
+        "unheard" => {
+            sqlx::query_scalar(
+                "SELECT t.id
+                   FROM hub_tracks t
+                   LEFT JOIN hub_v_track_traktor v ON v.track_id = t.id
+                  ORDER BY COALESCE(v.play_count, 0) ASC, t.first_seen_at DESC",
+            )
+            .fetch_all(pool)
+            .await?
+        }
+        // "newest" and any unknown/empty key fall back to newest-in-hub.
+        _ => {
+            sqlx::query_scalar("SELECT id FROM hub_tracks ORDER BY first_seen_at DESC, id DESC")
+                .fetch_all(pool)
+                .await?
+        }
+    };
+    Ok(ids)
 }
