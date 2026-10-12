@@ -1,5 +1,5 @@
-/target
-/dev-data/
+/legacy/mmm/target
+/legacy/mmm/dev-data/
 .env
 app.db*
 library.db
@@ -9,20 +9,20 @@ library.db
 *.bak
 .sqlx
 .DS_Store
-frontend/node_modules/
-frontend/dist/
-frontend/*.log
-frontend/playwright-report/
-frontend/test-results/
+legacy/mmm/frontend/node_modules/
+legacy/mmm/frontend/dist/
+legacy/mmm/frontend/*.log
+legacy/mmm/frontend/playwright-report/
+legacy/mmm/frontend/test-results/
 prod.db*
 test-playwright.db*
 library.db*
-resources/icon.iconset/
+legacy/mmm/resources/icon.iconset/
 
 # Python
-download-service/__pycache__/
+legacy/download-service/__pycache__/
 *.pyc
-scripts/keys/
+legacy/mmm/scripts/keys/
 
 # Tool-/Editor-Backups neben Quelldateien (a9c64c8 hatte so eine versehentlich eingecheckt)
 *.dbgbak

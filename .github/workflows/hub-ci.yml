@@ -1,17 +1,17 @@
 name: Hub CI
 
-# CI for the standalone `mmm-hub` crate (issue M1-1). It is a separate crate,
+# CI for the standalone `music-hub` crate (issue M1-1). It is a separate crate,
 # not a member of the root workspace, so it builds from its own directory.
 
 on:
   pull_request:
     paths:
-      - 'mmm-hub/**'
+      - 'music-hub/**'
       - '.github/workflows/hub-ci.yml'
   push:
     branches: [main]
     paths:
-      - 'mmm-hub/**'
+      - 'music-hub/**'
       - '.github/workflows/hub-ci.yml'
 
 permissions:
@@ -26,7 +26,7 @@ env:
 
 defaults:
   run:
-    working-directory: mmm-hub
+    working-directory: music-hub
 
 jobs:
   build-test:
@@ -37,7 +37,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: mmm-hub -> target
+          workspaces: music-hub -> target
           key: hub-ci
       - name: cargo build
         run: cargo build --locked

@@ -1,0 +1,15 @@
+[Unit]
+Description=Spelunke - music hub (web app)
+After=network.target
+
+[Service]
+Type=simple
+User=momo
+WorkingDirectory=/home/momo/music-hub
+EnvironmentFile=/home/momo/music-hub/.env
+ExecStart=/home/momo/music-hub/target/release/music-hub serve --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

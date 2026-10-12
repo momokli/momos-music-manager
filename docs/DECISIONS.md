@@ -1,4 +1,9 @@
-# Momo's Music Manager — Architectural Decision Records
+> **Stack-wide ADR log.** Continues the original **Momo's Music Manager** ADRs
+> (now sunset, code in `legacy/mmm/`) and also records decisions for **music-hub**,
+> **music-api** and **kellner**. The earliest ADRs are MMM-era; relative links in
+> them may be stale. Stack overview: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
+
+# Architectural Decision Records (ADR)
 
 ## ADR-014: Modular SPA with ES Modules (frontend_next)
 
@@ -1719,12 +1724,13 @@ of the (configurable) display name, so renames don't create duplicates.
   remainder for the next idempotent run. When `enabled`, a sync is auto-enqueued after
   folder scans / Traktor imports and coalesced via the conflict key; the optional schedule
   is off by default (`public = false` → private playlists).
+
 ---
 
 ## ADR-074: MMM Hub — multi-user ingest as a separate crate with local accounts (not OIDC)
 
 **Date**: 2026-10-09
-**Status**: Accepted (implemented on `feat/mmm-hub`)
+**Status**: Accepted (implemented on `feat/music-hub`)
 **Relates**: ADR-014 (single-user client / modular SPA), ADR-065 (music-api as download authority)
 
 **Context**: Several DJs share overlapping tastes and want to explore the overlap —
@@ -1735,14 +1741,14 @@ single-user client core has **no user dimension**: its `files`/`service_*` table
 anyway — global track identity shared across users, per-user service tokens, and
 overlap views. Precedent already exists in the repo: `music-api/` is an independent
 crate with its own `Cargo.toml`, not part of the root build. The original plan assumed
-generic accounts via **OIDC / Pocket ID** (see `plans/mmm-hub/auth.md`); that would add
+generic accounts via **OIDC / Pocket ID** (see `plans/music-hub/auth.md`); that would add
 an external IdP, discovery/JWKS handling, and an issuer dependency for a ≤ handful of
 trusted friends on the LAN.
 
 **Decision**:
 
-- **Separate crate** `mmm-hub/` — its own `Cargo.toml`, its own additive migration
-  chain (`mmm-hub/migrations/001…006`), its own `tests/`. The root `cargo build`/CI is
+- **Separate crate** `music-hub/` — its own `Cargo.toml`, its own additive migration
+  chain (`music-hub/migrations/001…006`), its own `tests/`. The root `cargo build`/CI is
   untouched. Same stack as the client (axum + sqlx + SQLite).
 - **One shared SQLite DB** (`hub.db`) with a **user dimension**: every provenance row
   (`hub_playlists`, `hub_playlist_tracks`, `hub_liked_tracks`, `hub_service_accounts`)
@@ -1754,12 +1760,12 @@ trusted friends on the LAN.
   This deliberately drops Pocket ID / OIDC from the v1 build.
 - **Per-user Spotify OAuth**: each user links their own account; tokens live per user
   in `hub_service_accounts`. The web flow uses the public HTTPS redirect
-  `https://hub.zukkafabrik.de/api/hub/services/spotify/callback`; `mmm-hub auth` keeps a
+  `https://hub.zukkafabrik.de/api/hub/services/spotify/callback`; `music-hub auth` keeps a
   loopback redirect for one-time local grabs.
 - **Background worker** (`src/worker.rs`) is the only place that calls Spotify for sync.
   It is driven purely by DB flags (`likes_status`, `enabled_for_fetch`/`items_available`),
   runs one request stream at a time, and is staggered and 429/QUOTA_EXCEEDED-aware.
-  Triggered by UI toggles, `mmm-hub backfill`, or `POST /api/hub/services/{service}/sync`.
+  Triggered by UI toggles, `music-hub backfill`, or `POST /api/hub/services/{service}/sync`.
 - **Read-only exploration** over four overlap views (`hub_v_track_presence`,
   `hub_v_track_playlists`, `hub_v_shared_tracks`, `hub_v_user_overlap`) plus a
   session-gated `<SELECT|WITH>`-only SQL console.
@@ -1778,7 +1784,7 @@ trusted friends on the LAN.
 - **Sanitized public copy**: read-only sibling tools (Datasette, SchemaSpy) serve a
   sanitized `hub-public.db`, never the live DB, so credentials/tokens never leave the
   hub. The public surface is intentionally separate from the authenticated hub.
-- The published plan docs (`plans/mmm-hub/auth.md`) still describe the OIDC design; this
+- The published plan docs (`plans/music-hub/auth.md`) still describe the OIDC design; this
   ADR supersedes that part — the shipped auth is local accounts + server-side sessions.
 
 ---
@@ -1786,8 +1792,8 @@ trusted friends on the LAN.
 ## ADR-075: Spelunke — per-user tag layer over playlists (tags → groups → collectives)
 
 **Date**: 2026-10-10
-**Status**: Accepted (implemented on `feat/mmm-hub` / `feat/hub-music-status`)
-**Relates**: ADR-074 (hub as a crate), `plans/mmm-hub/tagging-spelunking.md`
+**Status**: Accepted (implemented on `feat/music-hub` / `feat/hub-music-status`)
+**Relates**: ADR-074 (hub as a crate), `plans/music-hub/tagging-spelunking.md`
 
 **Context**: Raw playlists are a weak signal: names drift, the same track sits in many
 lists, and there is no shared vocabulary for “mood”, “phase”, “vibe”. The hub needed a
@@ -1951,7 +1957,7 @@ ADR-075 angelegt), fehlte die Speicher- und Read-Seite.
   ohne BPM überschreibt den gespeicherten BPM nicht (`COALESCE(excluded, stored)`).
 - **`GET /metadata?isrcs=a,b,c`** — **Range**-Read; unbekannte ISRCs kommen in
   `missing` zurück (unterscheidbar von „nicht angefragt“). Plus `GET /metadata/{isrc}`.
-- **Hub pusht** seine Analyse: `mmm-hub push-metadata --limit N` (CLI) bzw. der
+- **Hub pusht** seine Analyse: `music-hub push-metadata --limit N` (CLI) bzw. der
   Button „BPM/Key pushen“ in der `/music-api`-Konsole → `music_api::push_analysis`
   liest `hub_track_analysis ⋈ hub_tracks.isrc` und ruft `POST /metadata`.
 - Hub-Client: `push_metadata`, `metadata_bulk`, `analysis_metadata`.
