@@ -148,7 +148,14 @@ async fn recommendations_use_relationship_signals() {
     tags::tag_track(&app.pool, me, 80002, house).await.unwrap();
 
     // 80001 shares artist + album with the tagged 80002 -> House is recommended.
-    let recs = music_hub::recommend::recommend_tags(&app.pool, 80001, 10).await;
+    let recs = music_hub::recommend::recommend_tags(
+        &app.pool,
+        80001,
+        10,
+        me,
+        music_hub::recommend::RecScope::All,
+    )
+    .await;
     assert!(
         recs.iter().any(|r| r.name == "House"),
         "artist/album relationship should recommend House: {:?}",
@@ -191,7 +198,14 @@ async fn recommendations_exclude_setlist_and_rumpelkiste() {
     tags::tag_track(&app.pool, me, 81002, s_tag).await.unwrap();
     tags::tag_track(&app.pool, me, 81002, h_tag).await.unwrap();
 
-    let recs = music_hub::recommend::recommend_tags(&app.pool, 81001, 20).await;
+    let recs = music_hub::recommend::recommend_tags(
+        &app.pool,
+        81001,
+        20,
+        me,
+        music_hub::recommend::RecScope::All,
+    )
+    .await;
     let names: Vec<&str> = recs.iter().map(|r| r.name.as_str()).collect();
     assert!(
         names.contains(&"House"),
@@ -200,5 +214,82 @@ async fn recommendations_exclude_setlist_and_rumpelkiste() {
     assert!(
         !names.contains(&"setlist25"),
         "setlist tag must NOT be recommended: {names:?}"
+    );
+}
+
+/// The track view surfaces the cluster signal and the scope toggle; `?scope=all`
+/// widens visibility to another owner's cluster sibling.
+#[tokio::test]
+async fn track_view_shows_cluster_rec_and_scope_toggle() {
+    use music_hub::tags;
+    use music_hub::tagtypes::{TagType, set as set_type};
+    let app = common::spawn().await;
+    let alice = app.seed.alice;
+    let bob = app.seed.bob;
+
+    let dark = tags::ensure_tag(&app.pool, alice, "Dark").await.unwrap();
+    let duester = tags::ensure_tag(&app.pool, bob, "Düster").await.unwrap();
+    set_type(&app.pool, alice, dark, Some(TagType::Mood)).await.unwrap();
+    set_type(&app.pool, bob, duester, Some(TagType::Mood))
+        .await
+        .unwrap();
+    let cid: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_tag_clusters (tag_type, label, created_at, updated_at)
+         VALUES ('MOOD', 'dark', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00') RETURNING id",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    for t in [dark, duester] {
+        sqlx::query(
+            "INSERT INTO hub_tag_cluster_members (cluster_id, tag_id, added_at)
+             VALUES (?1, ?2, '2026-01-01T00:00:00+00:00')",
+        )
+        .bind(cid)
+        .bind(t)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+    tags::tag_track(&app.pool, alice, app.seed.t_all, dark)
+        .await
+        .unwrap();
+
+    let cookie = app.session_cookie(alice).await;
+
+    // Default scope = all: Bob's cluster sibling is visible + cluster reason.
+    let html = app
+        .client()
+        .get(app.url(&format!("/track/{}", app.seed.t_all)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(html.contains("Empfohlen"), "recommendation section missing");
+    assert!(
+        html.contains("gleicher Cluster"),
+        "cluster reason label missing"
+    );
+    assert!(html.contains("Düster"), "cluster sibling not shown");
+    assert!(html.contains("Meine Tags"), "scope toggle missing");
+    assert!(html.contains("scope=mine"), "mine toggle link missing");
+
+    // Explicit mine: Bob's sibling disappears.
+    let mine_html = app
+        .client()
+        .get(app.url(&format!("/track/{}?scope=mine", app.seed.t_all)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !mine_html.contains("Düster"),
+        "mine scope must hide another owner's tag"
     );
 }
