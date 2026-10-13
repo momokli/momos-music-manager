@@ -73,6 +73,7 @@ pub const ENGINE_REC_TAG: &str = "engine_rec_tag";
 pub const ENGINE_REC_PLAYLIST: &str = "engine_rec_playlist";
 pub const ENGINE_REC_ARTIST: &str = "engine_rec_artist";
 pub const ENGINE_REC_ALBUM: &str = "engine_rec_album";
+pub const ENGINE_REC_CLUSTER: &str = "engine_rec_cluster";
 
 /// The kind of a setting value — drives the admin input widget and validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -409,6 +410,13 @@ pub const SETTINGS: &[SettingSpec] = &[
         0.0,
         100.0,
     ),
+    num(
+        ENGINE_REC_CLUSTER,
+        "Empfehlung: Gewicht gleicher Cluster",
+        "1",
+        0.0,
+        100.0,
+    ),
 ];
 
 /// Find the registry entry for a key, if any.
@@ -520,6 +528,7 @@ pub struct Engine {
     pub rec_playlist: f64,
     pub rec_artist: f64,
     pub rec_album: f64,
+    pub rec_cluster: f64,
 }
 
 impl Default for Engine {
@@ -560,6 +569,7 @@ impl Default for Engine {
             rec_playlist: 1.0,
             rec_artist: 1.0,
             rec_album: 1.0,
+            rec_cluster: 1.0,
         }
     }
 }
@@ -642,6 +652,7 @@ pub async fn engine(pool: &SqlitePool) -> Engine {
         rec_playlist: num(ENGINE_REC_PLAYLIST, 1.0),
         rec_artist: num(ENGINE_REC_ARTIST, 1.0),
         rec_album: num(ENGINE_REC_ALBUM, 1.0),
+        rec_cluster: num(ENGINE_REC_CLUSTER, 1.0),
     }
 }
 

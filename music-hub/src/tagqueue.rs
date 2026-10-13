@@ -242,9 +242,24 @@ struct QueueDetail {
     my_tags: Vec<DetailGroupTag>,
     my_types: Vec<TypeOption>,
     recommended: Vec<RecChip>,
+    rec_scope: String,
+    rec_scope_mine_url: String,
+    rec_scope_all_url: String,
 }
 
-async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
+/// Recommendation-scope query for the queue detail fragment.
+#[derive(Deserialize)]
+struct ScopeQuery {
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+async fn build_detail(
+    st: &AppState,
+    me: i64,
+    id: i64,
+    scope: crate::recommend::RecScope,
+) -> Option<QueueDetail> {
     let row = sqlx::query(
         "SELECT COALESCE(t.title,'') AS title, COALESCE(t.artists,'') AS artists,
                 COALESCE(t.album,'') AS album, t.duration_ms,
@@ -379,7 +394,7 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
         .into_iter()
         .map(|(value, label, _icon)| TypeOption { value, label })
         .collect();
-    let recommended: Vec<RecChip> = crate::recommend::recommend_tags(&st.pool, id, 16)
+    let recommended: Vec<RecChip> = crate::recommend::recommend_tags(&st.pool, id, 16, me, scope)
         .await
         .into_iter()
         .map(|r| RecChip {
@@ -388,6 +403,9 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
             name: r.name,
         })
         .collect();
+    let rec_scope = scope.as_str().to_string();
+    let rec_scope_mine_url = format!("/tag-queue/{id}?scope=mine");
+    let rec_scope_all_url = format!("/tag-queue/{id}?scope=all");
 
     let spotify_id: String = sqlx::query_scalar(
         "SELECT external_id FROM hub_track_external_ids WHERE track_id = ?1 AND service = 'spotify' LIMIT 1",
@@ -432,18 +450,23 @@ async fn build_detail(st: &AppState, me: i64, id: i64) -> Option<QueueDetail> {
         my_tags,
         my_types,
         recommended,
+        rec_scope,
+        rec_scope_mine_url,
+        rec_scope_all_url,
     })
 }
 
 async fn queue_detail(
     State(st): State<AppState>,
     Path(id): Path<i64>,
+    Query(q): Query<ScopeQuery>,
     headers: HeaderMap,
 ) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "queue").await else {
         return Redirect::to("/login").into_response();
     };
-    match build_detail(&st, nav.id, id).await {
+    let scope = crate::recommend::RecScope::parse(q.scope.as_deref());
+    match build_detail(&st, nav.id, id, scope).await {
         Some(d) => render(&d),
         None => (StatusCode::NOT_FOUND, "Track nicht gefunden.").into_response(),
     }
@@ -455,6 +478,9 @@ struct TagForm {
     /// Optional tag type (e.g. "MOOD") to apply to the new tag.
     #[serde(default, rename = "type")]
     tag_type: Option<String>,
+    /// Recommendation scope to preserve across the mutation (`mine` | `all`).
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 async fn queue_tag(
@@ -478,7 +504,8 @@ async fn queue_tag(
             let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
         }
     }
-    match build_detail(&st, nav.id, id).await {
+    let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
+    match build_detail(&st, nav.id, id, scope).await {
         Some(d) => render(&d),
         None => (StatusCode::NOT_FOUND, "Track nicht gefunden.").into_response(),
     }
@@ -496,7 +523,8 @@ async fn queue_untag(
     if let Some(tag_id) = crate::tags::find_tag_id_by_name(&st.pool, &f.name).await {
         let _ = crate::tags::untag_track(&st.pool, nav.id, id, tag_id).await;
     }
-    match build_detail(&st, nav.id, id).await {
+    let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
+    match build_detail(&st, nav.id, id, scope).await {
         Some(d) => render(&d),
         None => (StatusCode::NOT_FOUND, "Track nicht gefunden.").into_response(),
     }

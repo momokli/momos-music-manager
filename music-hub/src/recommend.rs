@@ -9,12 +9,43 @@
 //!   * `playlist` — tracks in the same playlists as the seed
 //!   * `artist`   — other tracks by the same artist
 //!   * `album`    — other tracks on the same album
+//!   * `cluster`  — sibling tags in the same semantic cluster as a seed tag
 
 use std::collections::HashMap;
 
 use sqlx::SqlitePool;
 
 use crate::settings::Engine;
+
+/// Visibility scope for recommendations: only the viewer's own tags, or all
+/// owners (whole clusters included).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecScope {
+    Mine,
+    All,
+}
+
+impl RecScope {
+    /// Parse a query value; anything unknown falls back to `All` (default).
+    pub fn parse(raw: Option<&str>) -> RecScope {
+        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("mine") => RecScope::Mine,
+            _ => RecScope::All,
+        }
+    }
+
+    pub fn is_mine(self) -> bool {
+        matches!(self, RecScope::Mine)
+    }
+
+    /// Canonical query value (`"mine"` | `"all"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecScope::Mine => "mine",
+            RecScope::All => "all",
+        }
+    }
+}
 
 /// One contributing signal for a recommended tag.
 #[derive(Debug, Clone)]
@@ -61,6 +92,7 @@ fn weight(e: &Engine, kind: &str) -> f64 {
         "playlist" => e.rec_playlist,
         "artist" => e.rec_artist,
         "album" => e.rec_album,
+        "cluster" => e.rec_cluster,
         _ => 0.0,
     }
 }
@@ -71,14 +103,29 @@ fn label(kind: &str) -> &'static str {
         "playlist" => "gleiche Playlist",
         "artist" => "gleicher Artist",
         "album" => "gleiches Album",
+        "cluster" => "gleicher Cluster",
         _ => "?",
     }
 }
 
 /// Recommend tags for `track_id`, ranked by weighted score, with reasons.
-pub async fn recommend_tags(pool: &SqlitePool, track_id: i64, limit: usize) -> Vec<Recommendation> {
+///
+/// `scope` restricts candidates to the viewer's own tags (`Mine`) or keeps every
+/// owner (`All`); the filter applies uniformly to all neighbourhoods.
+pub async fn recommend_tags(
+    pool: &SqlitePool,
+    track_id: i64,
+    limit: usize,
+    viewer_id: i64,
+    scope: RecScope,
+) -> Vec<Recommendation> {
     let e = crate::settings::engine(pool).await;
-    let rows = sqlx::query_as::<_, (i64, String, String, String, i64)>(
+    let owner_filter = if scope.is_mine() {
+        "AND t.owner_user_id = ?2"
+    } else {
+        ""
+    };
+    let sql = format!(
         "WITH s AS (SELECT ?1 AS id),
               seed_tags AS (SELECT tag_id FROM hub_track_resolved_tags WHERE track_id = (SELECT id FROM s)),
               cand AS (
@@ -107,6 +154,13 @@ pub async fn recommend_tags(pool: &SqlitePool, track_id: i64, limit: usize) -> V
                    JOIN hub_track_resolved_tags rt ON rt.track_id = a2.id
                   WHERE a1.id = (SELECT id FROM s)
                     AND a1.album IS NOT NULL AND TRIM(a1.album) <> ''
+                 UNION ALL
+                 SELECT sib.id, 'cluster'
+                   FROM seed_tags stg
+                   JOIN hub_tag_cluster_members m1 ON m1.tag_id = stg.tag_id
+                   JOIN hub_tag_cluster_members m2 ON m2.cluster_id = m1.cluster_id
+                   JOIN hub_tags sib ON sib.id = m2.tag_id
+                  WHERE sib.id NOT IN (SELECT tag_id FROM seed_tags)
               )
          SELECT x.tag_id, t.name, u.slug, x.kind, COUNT(*) AS cnt
            FROM cand x
@@ -115,12 +169,14 @@ pub async fn recommend_tags(pool: &SqlitePool, track_id: i64, limit: usize) -> V
           WHERE x.tag_id NOT IN (SELECT tag_id FROM seed_tags)
             AND x.tag_id NOT IN (
                  SELECT id FROM hub_tags WHERE type IN ('SETLIST', 'RUMPELKISTE'))
-          GROUP BY x.tag_id, t.name, u.slug, x.kind",
-    )
-    .bind(track_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+            {owner_filter}
+          GROUP BY x.tag_id, t.name, u.slug, x.kind"
+    );
+    let mut query = sqlx::query_as::<_, (i64, String, String, String, i64)>(&sql).bind(track_id);
+    if scope.is_mine() {
+        query = query.bind(viewer_id);
+    }
+    let rows = query.fetch_all(pool).await.unwrap_or_default();
 
     let mut map: HashMap<i64, Recommendation> = HashMap::new();
     for (tag_id, name, owner, kind, cnt) in rows {

@@ -46,6 +46,7 @@ fn registry_is_well_formed_and_covers_the_engine() {
         settings::ENGINE_REC_PLAYLIST,
         settings::ENGINE_REC_ARTIST,
         settings::ENGINE_REC_ALBUM,
+        settings::ENGINE_REC_CLUSTER,
     ] {
         let s = settings::spec(key).unwrap_or_else(|| panic!("missing spec for {key}"));
         assert!(!s.default.is_empty(), "{key} has no default");
