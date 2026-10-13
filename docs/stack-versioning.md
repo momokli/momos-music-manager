@@ -7,19 +7,19 @@
 
 ## Version string
 
-| Build | Source | Example |
-| --- | --- | --- |
-| **Release** | git tag `v*` on `main` (tag without leading `v`) | `v1.16.0` -> `1.16.0` |
-| **Dev / rolling** | `<Cargo.toml version>-dev+<sha8>` | `0.1.0-dev+602650f8` |
+| Build             | Source                                           | Example               |
+| ----------------- | ------------------------------------------------ | --------------------- |
+| **Release**       | git tag `v*` on `main` (tag without leading `v`) | `v1.16.0` -> `1.16.0` |
+| **Dev / rolling** | `<Cargo.toml version>-dev+<sha8>`                | `0.1.0-dev+602650f8`  |
 
 Additional raw metadata is always embedded:
 
-| Field | Meaning |
-| --- | --- |
-| `VERSION` | the string above (env override `<CRATE>_VERSION` wins) |
-| `GIT_SHA` | `git rev-parse --short=8 HEAD` (or `unknown`) |
-| `GIT_DESCRIBE` | `git describe --tags --always --dirty` (or `unknown`) |
-| `LONG_VERSION` | `VERSION (GIT_DESCRIBE)` - the long `--version` form |
+| Field          | Meaning                                                |
+| -------------- | ------------------------------------------------------ |
+| `VERSION`      | the string above (env override `<CRATE>_VERSION` wins) |
+| `GIT_SHA`      | `git rev-parse --short=8 HEAD` (or `unknown`)          |
+| `GIT_DESCRIBE` | `git describe --tags --always --dirty` (or `unknown`)  |
+| `LONG_VERSION` | `VERSION (GIT_DESCRIBE)` - the long `--version` form   |
 
 ## How it works
 
@@ -38,13 +38,13 @@ set `<CRATE>_VERSION` from the tag.
 
 ## Where to see it
 
-| Surface | music-hub | music-api | kellner |
-| --- | --- | --- | --- |
-| CLI | `music-hub --version` (`-V` short, `--version` long) | `music-api --version` | `kellner --version` |
-| HTTP | `GET /api/hub/health` -> `{version,gitSha,describe}` | `GET /health` -> same | - |
-| Web UI | footer shows `music-hub <VERSION>` | - | - |
-| Logs | startup `starting music-hub version=... git_sha=...` | startup `music-api listening on ... version=...` | - |
-| Code | `music_hub::{VERSION,GIT_SHA,GIT_DESCRIBE,LONG_VERSION}` | `music_api::{VERSION,GIT_SHA,GIT_DESCRIBE}` | `env!("BUILD_VERSION")` |
+| Surface | music-hub                                                | music-api                                        | kellner                 |
+| ------- | -------------------------------------------------------- | ------------------------------------------------ | ----------------------- |
+| CLI     | `music-hub --version` (`-V` short, `--version` long)     | `music-api --version`                            | `kellner --version`     |
+| HTTP    | `GET /api/hub/health` -> `{version,gitSha,describe}`     | `GET /health` -> same                            | -                       |
+| Web UI  | footer shows `music-hub <VERSION>`                       | -                                                | -                       |
+| Logs    | startup `starting music-hub version=... git_sha=...`     | startup `music-api listening on ... version=...` | -                       |
+| Code    | `music_hub::{VERSION,GIT_SHA,GIT_DESCRIBE,LONG_VERSION}` | `music_api::{VERSION,GIT_SHA,GIT_DESCRIBE}`      | `env!("BUILD_VERSION")` |
 
 ## Releases
 
@@ -54,6 +54,16 @@ basis (kept loosely in sync). A missed bump is harmless - dev builds carry the
 
 ## Tags & SHAs
 
-Git tags are semver on `main` (`git describe` reads e.g. `v1.15.2-180-g602650f`).
-The tag names the release; the embedded `GIT_SHA`/`GIT_DESCRIBE` pin the exact
-commit of every dev/rolling build.
+Each component has its **own tag line**, and `build.rs` matches it
+(`git describe --match '<prefix>-v*'`):
+
+| Component | Tag prefix  | Example          |
+| --------- | ----------- | ---------------- |
+| music-hub | `hub-v`     | `hub-v0.24.0`    |
+| music-api | `api-v`     | `api-v0.4.0`     |
+| kellner   | `kellner-v` | `kellner-v0.1.0` |
+
+So `music-hub 0.24.0-dev+343dae21 (hub-v0.24.0)` ties the build to the hub's
+own tag line - not the legacy MMM `v1.x` tags, which stay historical. Without a
+matching tag, `--always` falls back to the bare SHA. The embedded
+`GIT_SHA`/`GIT_DESCRIBE` pin the exact commit of every build.
