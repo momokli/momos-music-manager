@@ -750,3 +750,290 @@ async fn tracks_for_lens(pool: &SqlitePool, user_id: i64, lens: &str) -> Result<
     };
     Ok(ids)
 }
+
+// ── Export (#333) ─────────────────────────────────────────────────────────────
+
+/// Format-agnostic export view of one resolved backpack track.
+///
+/// Carries the hub track id plus the metadata the m3u8 / NML / ZIP builders
+/// need. `score` is kept so a caller can order or annotate without re-resolving.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportTrack {
+    pub track_id: i64,
+    pub title: String,
+    pub artists: String,
+    pub score: i64,
+}
+
+/// The backpack row when it belongs to `user_id`, else `None`.
+///
+/// Basis for the export owner check: a foreign backpack is indistinguishable
+/// from a missing one (both `None`), so the handler yields a 404 without a
+/// cross-user leak.
+pub async fn backpack_owned_by(
+    pool: &SqlitePool,
+    backpack_id: i64,
+    user_id: i64,
+) -> Result<Option<Backpack>> {
+    Ok(sqlx::query_as::<_, Backpack>(
+        "SELECT id, user_id, name, is_active, created_at, updated_at
+           FROM hub_backpacks
+          WHERE id = ?1 AND user_id = ?2",
+    )
+    .bind(backpack_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Load a backpack's resolved tracks as [`ExportTrack`] rows.
+///
+/// Source is [`resolve_unbounded`] (no 1..=500 clamp), so the output order is
+/// exactly the resolve order (score desc -> first-position -> track_id). The
+/// `title` / `artists` come from `hub_tracks` via `COALESCE(..., '')`: a missing
+/// row or NULL column degrades to empty strings and never errors. An
+/// unknown/empty backpack yields `Ok(vec![])`.
+pub async fn export_tracks(pool: &SqlitePool, backpack_id: i64) -> Result<Vec<ExportTrack>> {
+    let resolved = resolve_unbounded(pool, backpack_id).await?;
+    let mut out = Vec::with_capacity(resolved.len());
+    for rt in resolved {
+        let meta: Option<(String, String)> = sqlx::query_as(
+            "SELECT COALESCE(title, '') AS title, COALESCE(artists, '') AS artists
+               FROM hub_tracks WHERE id = ?1",
+        )
+        .bind(rt.track_id)
+        .fetch_optional(pool)
+        .await?;
+        let (title, artists) = meta.unwrap_or_default();
+        out.push(ExportTrack {
+            track_id: rt.track_id,
+            title,
+            artists,
+            score: rt.score,
+        });
+    }
+    Ok(out)
+}
+
+/// Export a backpack as an m3u8 text playlist.
+///
+/// `#EXTM3U` first, then an optional `#PLAYLIST:{name}` header (only when the
+/// trimmed name is non-empty), then per track exactly two lines: an
+/// `#EXTINF:-1,{artists} - {title}` info line and a `/track/{id}/stream` URL.
+/// Line endings are `\n` with a trailing newline; the order is stable (input
+/// order, i.e. resolve order) and no time/random values are written. An empty
+/// list yields just the header (`#EXTM3U` [+ `#PLAYLIST`]) and never panics.
+///
+/// Caveat: `/track/{id}/stream` is session-bound, so the playlist is meant for
+/// authenticated hub consumers (e.g. VLC with a session cookie), not open
+/// third-party contexts.
+pub fn m3u8_playlist(name: &str, tracks: &[ExportTrack]) -> String {
+    let mut s = String::new();
+    s.push_str("#EXTM3U\n");
+    let name = name.trim();
+    if !name.is_empty() {
+        s.push_str("#PLAYLIST:");
+        s.push_str(name);
+        s.push('\n');
+    }
+    for t in tracks {
+        s.push_str("#EXTINF:-1,");
+        s.push_str(&t.artists);
+        s.push_str(" - ");
+        s.push_str(&t.title);
+        s.push('\n');
+        s.push_str(&format!("/track/{}/stream\n", t.track_id));
+    }
+    s
+}
+
+/// XML-escape the five markup-significant characters (`& < > " '`).
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Export a backpack as a Traktor NML playlist document.
+///
+/// Mirrors the node structure [`crate::traktor::import_str`] understands: a
+/// `<COLLECTION>` with one `<ENTRY>` per track (`LOCATION/FILE`, `TITLE`,
+/// `ARTIST`) and a `<PLAYLISTS>` tree with `NODE TYPE="FOLDER"` wrapping a
+/// `NODE TYPE="PLAYLIST"` holding `PLAYLIST/ENTRY/PRIMARYKEY` references. Both
+/// the `FILE` basename and the `PRIMARYKEY KEY` basename are
+/// `{artists} - {title}.{ext}` (so import's basename mapping stays consistent).
+/// `title` / `artists` / `name` are XML-escaped. An empty list yields a valid
+/// NML with `ENTRIES="0"`.
+pub fn traktor_nml(name: &str, tracks: &[ExportTrack], ext: &str) -> String {
+    let ext = ext.trim_start_matches('.');
+    let n = tracks.len();
+    let mut s = String::new();
+    s.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n");
+    s.push_str("<NML VERSION=\"19\">\n");
+    s.push_str("<HEAD COMPANY=\"music-hub\" PRODUCT=\"music-hub\" PRODUCTVERSION=\"19\"></HEAD>\n");
+    s.push_str("<MUSICFOLDERS></MUSICFOLDERS>\n");
+    s.push_str(&format!("<COLLECTION ENTRIES=\"{n}\">\n"));
+    for t in tracks {
+        let file = format!("{} - {}.{}", t.artists, t.title, ext);
+        s.push_str("<ENTRY>\n");
+        s.push_str(&format!(
+            "<LOCATION DIR=\"/:hub:/\" FILE=\"{}\"></LOCATION>\n",
+            xml_escape(&file)
+        ));
+        s.push_str("<INFO></INFO>\n");
+        s.push_str(&format!("<TITLE>{}</TITLE>\n", xml_escape(&t.title)));
+        s.push_str(&format!("<ARTIST>{}</ARTIST>\n", xml_escape(&t.artists)));
+        s.push_str("</ENTRY>\n");
+    }
+    s.push_str("</COLLECTION>\n");
+    s.push_str("<PLAYLISTS>\n");
+    s.push_str("<NODE TYPE=\"FOLDER\" NAME=\"Hub\">\n");
+    s.push_str(&format!(
+        "<NODE TYPE=\"PLAYLIST\" NAME=\"{}\">\n",
+        xml_escape(name)
+    ));
+    s.push_str(&format!("<PLAYLIST ENTRIES=\"{n}\">\n"));
+    for t in tracks {
+        let key = format!("{} - {}.{}", t.artists, t.title, ext);
+        s.push_str("<ENTRY>\n");
+        s.push_str(&format!(
+            "<PRIMARYKEY TYPE=\"TRACK\" KEY=\"{}\"></PRIMARYKEY>\n",
+            xml_escape(&key)
+        ));
+        s.push_str("</ENTRY>\n");
+    }
+    s.push_str("</PLAYLIST>\n");
+    s.push_str("</NODE>\n");
+    s.push_str("</NODE>\n");
+    s.push_str("</PLAYLISTS>\n");
+    s.push_str("</NML>\n");
+    s
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    fn tr(id: i64, title: &str, artists: &str, score: i64) -> ExportTrack {
+        ExportTrack {
+            track_id: id,
+            title: title.to_string(),
+            artists: artists.to_string(),
+            score,
+        }
+    }
+
+    #[test]
+    fn m3u8_empty_has_only_header() {
+        let s = m3u8_playlist("Reise", &[]);
+        assert_eq!(s, "#EXTM3U\n#PLAYLIST:Reise\n");
+    }
+
+    #[test]
+    fn m3u8_empty_name_omits_playlist_header() {
+        let s = m3u8_playlist("   ", &[]);
+        assert_eq!(s, "#EXTM3U\n");
+    }
+
+    #[test]
+    fn m3u8_preserves_order_and_fields() {
+        let tracks = vec![tr(7, "Alpha", "Aaa", 2), tr(3, "Beta", "Bbb", 1)];
+        let s = m3u8_playlist("Mix", &tracks);
+        assert!(s.starts_with("#EXTM3U\n#PLAYLIST:Mix\n"));
+        assert!(s.contains("#EXTINF:-1,Aaa - Alpha\n/track/7/stream\n"));
+        assert!(s.contains("#EXTINF:-1,Bbb - Beta\n/track/3/stream\n"));
+        // order: 7 before 3
+        let p7 = s.find("/track/7/stream").unwrap();
+        let p3 = s.find("/track/3/stream").unwrap();
+        assert!(p7 < p3);
+        assert!(s.ends_with("\n"));
+    }
+
+    #[test]
+    fn m3u8_single_track_has_two_lines() {
+        let tracks = vec![tr(1, "Solo", "One", 5)];
+        let s = m3u8_playlist("P", &tracks);
+        assert_eq!(
+            s,
+            "#EXTM3U\n#PLAYLIST:P\n#EXTINF:-1,One - Solo\n/track/1/stream\n"
+        );
+    }
+
+    #[test]
+    fn nml_parses_and_has_playlist_node() {
+        let tracks = vec![tr(1, "Alpha", "Aaa", 2), tr(2, "Beta", "Bbb", 1)];
+        let s = traktor_nml("Mix", &tracks, "flac");
+        let doc = roxmltree::Document::parse(&s).expect("valid NML");
+        assert!(doc.descendants().any(|n| n.has_tag_name("COLLECTION")));
+        let nodes: Vec<_> = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("NODE") && n.attribute("TYPE") == Some("PLAYLIST"))
+            .collect();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].attribute("NAME"), Some("Mix"));
+        let pks: Vec<_> = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("PRIMARYKEY"))
+            .map(|n| n.attribute("KEY").unwrap().to_string())
+            .collect();
+        assert_eq!(pks, vec!["Aaa - Alpha.flac", "Bbb - Beta.flac"]);
+    }
+
+    #[test]
+    fn nml_escapes_special_chars() {
+        let tracks = vec![tr(1, "A&B <C>", "D\"e'f", 1)];
+        let s = traktor_nml("Mix & More", &tracks, "mp3");
+        let doc = roxmltree::Document::parse(&s).expect("valid NML after escaping");
+        let coll = doc
+            .descendants()
+            .find(|n| n.has_tag_name("COLLECTION"))
+            .unwrap();
+        let entry = coll.children().find(|n| n.has_tag_name("ENTRY")).unwrap();
+        let title = entry
+            .children()
+            .find(|n| n.has_tag_name("TITLE"))
+            .unwrap()
+            .text()
+            .unwrap();
+        assert_eq!(title, "A&B <C>");
+        let loc = entry
+            .children()
+            .find(|n| n.has_tag_name("LOCATION"))
+            .unwrap();
+        let file = loc.attribute("FILE").unwrap();
+        let pk = doc
+            .descendants()
+            .find(|n| n.has_tag_name("PRIMARYKEY"))
+            .unwrap()
+            .attribute("KEY")
+            .unwrap();
+        assert_eq!(file, pk, "KEY basename == FILE basename");
+        assert_eq!(file, "D\"e'f - A&B <C>.mp3");
+    }
+
+    #[test]
+    fn nml_empty_is_valid() {
+        let s = traktor_nml("Empty", &[], "flac");
+        let doc = roxmltree::Document::parse(&s).expect("valid empty NML");
+        let coll = doc
+            .descendants()
+            .find(|n| n.has_tag_name("COLLECTION"))
+            .unwrap();
+        assert_eq!(coll.attribute("ENTRIES"), Some("0"));
+        assert_eq!(
+            doc.descendants()
+                .filter(|n| n.has_tag_name("ENTRY"))
+                .count(),
+            0
+        );
+    }
+}
