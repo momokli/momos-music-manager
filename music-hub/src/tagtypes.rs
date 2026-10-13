@@ -148,6 +148,30 @@ impl TagType {
     }
 }
 
+/// The five canonical describing *families* (canonical order). `PHASE_1..5`
+/// collapse into the single family `"PHASE"`.
+pub const DESCRIBE_FAMILIES: &[&str] = &["MOOD", "GENRE", "VIBE", "PHASE", "MERKMAL"];
+
+impl TagType {
+    /// The describing *family* of this type, or `None` when the type does not
+    /// describe a track (SETLIST / RUMPELKISTE). `PHASE_1..5` all map to
+    /// `"PHASE"` so a single phase tag satisfies the whole phase family.
+    pub fn describe_family(self) -> Option<&'static str> {
+        Some(match self {
+            TagType::Mood => "MOOD",
+            TagType::Genre => "GENRE",
+            TagType::Vibe => "VIBE",
+            TagType::Phase1
+            | TagType::Phase2
+            | TagType::Phase3
+            | TagType::Phase4
+            | TagType::Phase5 => "PHASE",
+            TagType::Merkmal => "MERKMAL",
+            TagType::Setlist | TagType::Rumpelkiste => return None,
+        })
+    }
+}
+
 /// All types as a display-ready list of `(value, label, icon)`.
 pub fn options() -> Vec<(&'static str, &'static str, &'static str)> {
     TYPE_NAMES
@@ -187,4 +211,44 @@ pub async fn set(
         anyhow::bail!("tag not found or not yours");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describe_family_covers_all_types() {
+        for name in TYPE_NAMES {
+            let ty = TagType::parse(name).unwrap();
+            let fam = ty.describe_family();
+            match ty {
+                TagType::Setlist | TagType::Rumpelkiste => {
+                    assert_eq!(fam, None, "{name} must not describe");
+                }
+                _ => {
+                    let fam = fam.unwrap_or_else(|| panic!("{name} has no family"));
+                    assert!(
+                        DESCRIBE_FAMILIES.contains(&fam),
+                        "{name} family {fam} not canonical"
+                    );
+                }
+            }
+        }
+        // PHASE_1..5 all collapse to one family.
+        for p in [
+            TagType::Phase1,
+            TagType::Phase2,
+            TagType::Phase3,
+            TagType::Phase4,
+            TagType::Phase5,
+        ] {
+            assert_eq!(p.describe_family(), Some("PHASE"));
+        }
+        assert_eq!(TagType::Mood.describe_family(), Some("MOOD"));
+        assert_eq!(TagType::Genre.describe_family(), Some("GENRE"));
+        assert_eq!(TagType::Vibe.describe_family(), Some("VIBE"));
+        assert_eq!(TagType::Merkmal.describe_family(), Some("MERKMAL"));
+        assert!(!DESCRIBE_FAMILIES.contains(&"SETLIST"));
+    }
 }

@@ -29,6 +29,7 @@ fn registry_is_well_formed_and_covers_the_engine() {
         settings::ENGINE_META_WEIGHT,
         settings::ENGINE_TRAK_WEIGHT,
         settings::ENGINE_TAG_POINTS,
+        settings::ENGINE_TAG_DONE_TYPES,
         settings::ENGINE_TRAK_PLAYCOUNT_CAP,
         settings::ENGINE_TAG_OVERLAP_BASE,
         settings::ENGINE_CROSS_GROUP_BONUS,
