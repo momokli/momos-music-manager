@@ -1,6 +1,6 @@
 //! Track "tagged-complete" flag (#345, T5-1 / F1).
 //!
-//! A track counts as fully tagged when **both** derived signals agree:
+//! A track counts as fully tagged when **either** derived signal holds:
 //!
 //! * `auto`   — every configured describing tag-type *family* has at least one
 //!   resolved tag on the track (`hub_track_resolved_tags`, all sources).
@@ -31,12 +31,14 @@ pub struct TagDoneStatus {
 /// built-in `DESCRIBE_FAMILIES` when the setting is unset or empty.
 pub async fn configured_families(pool: &SqlitePool) -> Vec<String> {
     let raw = settings::get(pool, ENGINE_TAG_DONE_TYPES).await;
-    let parsed: Vec<String> = raw
-        .unwrap_or_default()
-        .split(',')
-        .map(|p| p.trim().to_ascii_uppercase())
-        .filter(|p| !p.is_empty())
-        .collect();
+    let mut parsed: Vec<String> = Vec::new();
+    for p in raw.unwrap_or_default().split(',') {
+        let p = p.trim().to_ascii_uppercase();
+        // Dedupe (`MOOD,MOOD`) while keeping first-seen order.
+        if !p.is_empty() && !parsed.iter().any(|q| q == &p) {
+            parsed.push(p);
+        }
+    }
     if parsed.is_empty() {
         DESCRIBE_FAMILIES.iter().map(|s| s.to_string()).collect()
     } else {
