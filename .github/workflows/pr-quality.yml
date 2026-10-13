@@ -51,6 +51,16 @@ jobs:
             const title = (context.payload.pull_request.title || '');
             const body = (context.payload.pull_request.body || '');
 
+            // Release-PRs (Titel `chore(release): …` ODER Label `release:*`) schliessen
+            // kein Issue (MMM/der Stack fuehrt kein Release-Tracking-Issue) — fuer sie
+            // entfaellt die Closing-Pflicht, sonst bleibt der Required-Check dauerhaft rot.
+            const labels = (context.payload.pull_request.labels || []).map((l) => l.name);
+            const isRelease = /^chore\(release\)/i.test(title) || labels.some((l) => l.startsWith('release'));
+            if (isRelease) {
+              core.info('Release-PR (chore(release)/release:*) — Issue-Referenz nicht erforderlich.');
+              return;
+            }
+
             // Pflicht: ein CLOSING-Keyword ("Closes/Fixes/Resolves #123", optional mit
             // Doppelpunkt und owner/repo-Prefix). Reines "Refs #123" genuegt NICHT:
             // nur ein Closing-Keyword laesst GitHub das Issue beim Merge automatisch
