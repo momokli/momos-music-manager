@@ -148,6 +148,140 @@ pub async fn candidates(
     Ok(items)
 }
 
+/// A persisted tagging task for one `(user, cadence, period_start)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagTask {
+    pub id: i64,
+    pub cadence: Cadence,
+    pub period_start: String,
+    pub generated_at: String,
+    pub items: Vec<TagTaskItem>,
+}
+
+/// Read the persisted task header, if present.
+async fn load_header(
+    pool: &SqlitePool,
+    user_id: i64,
+    cadence: Cadence,
+    period_start: &str,
+) -> Result<Option<(i64, String)>> {
+    Ok(sqlx::query_as::<_, (i64, String)>(
+        "SELECT id, generated_at FROM hub_tag_tasks
+          WHERE user_id = ?1 AND cadence = ?2 AND period_start = ?3",
+    )
+    .bind(user_id)
+    .bind(cadence.as_str())
+    .bind(period_start)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Read a task's items, ordered by rank.
+async fn load_items(pool: &SqlitePool, task_id: i64) -> Result<Vec<TagTaskItem>> {
+    let rows = sqlx::query_as::<_, (i64, i64, i64, String)>(
+        "SELECT track_id, rank, plays, missing FROM hub_tag_task_items
+          WHERE task_id = ?1 ORDER BY rank ASC, track_id ASC",
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(track_id, rank, plays, missing)| TagTaskItem {
+            track_id,
+            rank,
+            plays,
+            missing: missing
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+        })
+        .collect())
+}
+
+/// The current period's tagging task for `user_id`, generating and persisting it
+/// if it does not exist yet.
+///
+/// Within a period the task is stable: an existing row is returned unchanged
+/// (same `id` + items). At the period boundary a fresh task is generated. The
+/// insert uses `ON CONFLICT DO NOTHING` + re-read so concurrent callers cannot
+/// create duplicates. `now` is injected for deterministic tests.
+pub async fn task_for(
+    pool: &SqlitePool,
+    user_id: i64,
+    cadence: Cadence,
+    now: DateTime<Utc>,
+    limit: i64,
+) -> Result<TagTask> {
+    let period = period_start(cadence, now);
+
+    // Stable within the period: return the persisted task untouched.
+    if let Some((id, generated_at)) = load_header(pool, user_id, cadence, &period).await? {
+        let items = load_items(pool, id).await?;
+        return Ok(TagTask {
+            id,
+            cadence,
+            period_start: period,
+            generated_at,
+            items,
+        });
+    }
+
+    let families = crate::tagdone::configured_families(pool).await;
+    let items = candidates(pool, user_id, &families, limit).await?;
+    let generated_at = now.to_rfc3339();
+
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO hub_tag_tasks (user_id, cadence, period_start, generated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(user_id, cadence, period_start) DO NOTHING",
+    )
+    .bind(user_id)
+    .bind(cadence.as_str())
+    .bind(&period)
+    .bind(&generated_at)
+    .execute(&mut *tx)
+    .await?;
+
+    // Re-read inside the tx: wins the insert or reads a concurrent winner's row.
+    let (id, stored_generated_at): (i64, String) = sqlx::query_as(
+        "SELECT id, generated_at FROM hub_tag_tasks
+          WHERE user_id = ?1 AND cadence = ?2 AND period_start = ?3",
+    )
+    .bind(user_id)
+    .bind(cadence.as_str())
+    .bind(&period)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    for it in &items {
+        sqlx::query(
+            "INSERT INTO hub_tag_task_items (task_id, track_id, rank, plays, missing)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(task_id, track_id) DO NOTHING",
+        )
+        .bind(id)
+        .bind(it.track_id)
+        .bind(it.rank)
+        .bind(it.plays)
+        .bind(it.missing.join(","))
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+
+    let items = load_items(pool, id).await?;
+    Ok(TagTask {
+        id,
+        cadence,
+        period_start: period,
+        generated_at: stored_generated_at,
+        items,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
