@@ -50,7 +50,7 @@ period so it is stable within a period). Expose it via the JSON API
 | planner   | done    | Plan below (5 backend user stories, US1–US5) |
 | setup     | done    | Branch `feature/issue-346-tag-task` von origin/main (14fc0eb); Baseline `cargo test` grün: 337 passed / 0 failed (40 Suites), Log /tmp/346-baseline.log |
 | developer | done    | US1–US5 implementiert + getestet; `cargo test` 350 passed / 0 failed (41 Suites); Commits cf8c1f8, ab89c46, e330750, 0c5eac8, 99fb0fe |
-| verifier  | pending | |
+| verifier  | done    | PASS — `cargo test` 350 passed / 0 failed (41 Suites); `tag_tasks` 9/9; US1–US5 vollständig; Migration 046 additiv (045 unberührt); keine Secrets/Debug-Prints; Log /tmp/346-verify.log |
 | tester    | pending | |
 | reviewer  | pending | |
 
