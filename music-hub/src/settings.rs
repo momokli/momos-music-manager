@@ -48,6 +48,9 @@ pub const ENGINE_CROSS_GROUP_BONUS: &str = "engine_cross_group_bonus";
 // Describing tag-type families required for a track to count as fully tagged
 // (#345). CSV of family names; empty falls back to the built-in families.
 pub const ENGINE_TAG_DONE_TYPES: &str = "engine_tag_done_types";
+// Daily/weekly tagging task (#346) knobs.
+pub const ENGINE_TAG_TASK_LIMIT: &str = "engine_tag_task_limit";
+pub const ENGINE_TAG_TASK_CADENCE: &str = "engine_tag_task_cadence";
 
 // Per-tag-type weights (digging/similarity ranking). One knob per semantic type;
 // the five PHASE levels share `engine_w_phase`.
@@ -279,6 +282,19 @@ pub const SETTINGS: &[SettingSpec] = &[
         ENGINE_TAG_DONE_TYPES,
         "Scoring: Familien fuer 'vollstaendig getaggt' (CSV)",
         "MOOD,GENRE,VIBE,PHASE,MERKMAL",
+    ),
+    num(
+        ENGINE_TAG_TASK_LIMIT,
+        "Tag-Task: max. Tracks pro Task",
+        "50",
+        1.0,
+        1000.0,
+    ),
+    one_of(
+        ENGINE_TAG_TASK_CADENCE,
+        "Tag-Task: Kadenz",
+        "daily",
+        &["daily", "weekly"],
     ),
     num(
         ENGINE_TRAK_PLAYCOUNT_CAP,

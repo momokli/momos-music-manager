@@ -33,6 +33,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hub/playlists", get(playlists))
         .route("/api/hub/query", post(query))
         .route("/api/hub/me", get(me))
+        .route("/api/hub/tag-task", get(tag_task))
         .route("/api/hub/services/{service}/sync", post(sync))
         .with_state(state.clone())
         .merge(crate::artists::router(state.clone()))
@@ -233,6 +234,90 @@ async fn sync(
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(json!({ "data": { "started": true } })))
+}
+
+/// Query for `GET /api/hub/tag-task`.
+#[derive(Deserialize)]
+struct TagTaskQuery {
+    cadence: Option<String>,
+}
+
+/// `GET /api/hub/tag-task?cadence=daily|weekly` — the current period's
+/// uncomplete-track queue (issue #346), most-played first, refreshed per
+/// period. `cadence` defaults to the `engine_tag_task_cadence` setting.
+async fn tag_task(
+    State(st): State<AppState>,
+    Query(q): Query<TagTaskQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let Some((user_id, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Err(err(StatusCode::UNAUTHORIZED, "login required"));
+    };
+
+    let cadence = match q.cadence.as_deref() {
+        None | Some("") => {
+            let configured =
+                crate::settings::get(&st.pool, crate::settings::ENGINE_TAG_TASK_CADENCE).await;
+            configured
+                .as_deref()
+                .and_then(crate::tagtasks::Cadence::parse)
+                .unwrap_or(crate::tagtasks::Cadence::Daily)
+        }
+        Some(raw) => match crate::tagtasks::Cadence::parse(raw) {
+            Some(c) => c,
+            None => return Err(err(StatusCode::BAD_REQUEST, "invalid cadence")),
+        },
+    };
+
+    let limit = crate::settings::get(&st.pool, crate::settings::ENGINE_TAG_TASK_LIMIT)
+        .await
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(50);
+
+    let task = crate::tagtasks::task_for(&st.pool, user_id, cadence, chrono::Utc::now(), limit)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let rows = sqlx::query(
+        "SELECT i.track_id, i.rank, i.plays, i.missing, t.title, t.artists
+           FROM hub_tag_task_items i
+           LEFT JOIN hub_tracks t ON t.id = i.track_id
+          WHERE i.task_id = ?1
+          ORDER BY i.rank ASC, i.track_id ASC",
+    )
+    .bind(task.id)
+    .fetch_all(&st.pool)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let missing: String = r.get("missing");
+            let missing: Vec<String> = missing
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            json!({
+                "trackId": r.get::<i64, _>("track_id"),
+                "rank": r.get::<i64, _>("rank"),
+                "plays": r.get::<i64, _>("plays"),
+                "missing": missing,
+                "title": r.get::<Option<String>, _>("title"),
+                "artists": r.get::<Option<String>, _>("artists"),
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "data": {
+        "id": task.id,
+        "cadence": task.cadence.as_str(),
+        "periodStart": task.period_start,
+        "generatedAt": task.generated_at,
+        "items": items,
+    }})))
 }
 
 /// A linked account needs re-auth when its refresh token is gone or the
