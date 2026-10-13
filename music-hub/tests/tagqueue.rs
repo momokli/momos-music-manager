@@ -254,3 +254,119 @@ async fn detail_shows_all_meta_and_relations() {
         assert!(html.contains(label), "detail missing {label}");
     }
 }
+
+/// A cluster sibling owned by someone else, shared by the two scope tests.
+async fn seed_other_owner_cluster(app: &common::TestApp) -> i64 {
+    use music_hub::tagtypes::{TagType, set as set_type};
+    use music_hub::tags;
+    let alice = app.seed.alice;
+    let bob = app.seed.bob;
+    let dark = tags::ensure_tag(&app.pool, alice, "Dark").await.unwrap();
+    let duester = tags::ensure_tag(&app.pool, bob, "Düster").await.unwrap();
+    set_type(&app.pool, alice, dark, Some(TagType::Mood))
+        .await
+        .unwrap();
+    set_type(&app.pool, bob, duester, Some(TagType::Mood))
+        .await
+        .unwrap();
+    let cid: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_tag_clusters (tag_type, label, created_at, updated_at)
+         VALUES ('MOOD', 'dark', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00') RETURNING id",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    for t in [dark, duester] {
+        sqlx::query(
+            "INSERT INTO hub_tag_cluster_members (cluster_id, tag_id, added_at)
+             VALUES (?1, ?2, '2026-01-01T00:00:00+00:00')",
+        )
+        .bind(cid)
+        .bind(t)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+    tags::tag_track(&app.pool, alice, app.seed.t_all, dark)
+        .await
+        .unwrap();
+    cid
+}
+
+/// Tagging from the queue fragment must preserve the selected scope: the
+/// `scope=mine` POST re-renders "Meine Tags" active (Bob's cluster sibling
+/// stays hidden) instead of jumping back to the default `all`.
+#[tokio::test]
+async fn queue_tag_preserves_selected_scope() {
+    let app = common::spawn().await;
+    seed_other_owner_cluster(&app).await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+    let track = app.seed.t_all;
+
+    let tag_url = app.url(&format!("/tag-queue/{track}/tag"));
+
+    let mine_html = app
+        .client()
+        .post(&tag_url)
+        .header("Cookie", &cookie)
+        .form(&[("name", "Extra"), ("scope", "mine")])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !mine_html.contains("Düster"),
+        "scope=mine must survive a queue tag mutation"
+    );
+    assert!(
+        mine_html.contains("name=\"scope\" value=\"mine\""),
+        "the fragment must carry the preserved scope for follow-up mutations"
+    );
+
+    let all_html = app
+        .client()
+        .post(&tag_url)
+        .header("Cookie", &cookie)
+        .form(&[("name", "ExtraTwo"), ("scope", "all")])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        all_html.contains("Düster"),
+        "scope=all must keep another owner's cluster sibling visible"
+    );
+}
+
+/// Untagging from the queue fragment must likewise preserve the selected scope.
+#[tokio::test]
+async fn queue_untag_preserves_selected_scope() {
+    use music_hub::tags;
+    let app = common::spawn().await;
+    seed_other_owner_cluster(&app).await;
+    let alice = app.seed.alice;
+    let track = app.seed.t_all;
+    let extra = tags::ensure_tag(&app.pool, alice, "Extra").await.unwrap();
+    tags::tag_track(&app.pool, alice, track, extra).await.unwrap();
+    let cookie = app.session_cookie(alice).await;
+
+    let mine_html = app
+        .client()
+        .post(app.url(&format!("/tag-queue/{track}/untag")))
+        .header("Cookie", &cookie)
+        .form(&[("name", "Extra"), ("scope", "mine")])
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !mine_html.contains("Düster"),
+        "scope=mine must survive a queue untag mutation"
+    );
+}

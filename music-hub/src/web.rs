@@ -1506,6 +1506,9 @@ struct TrackTagForm {
     name: String,
     #[serde(default, rename = "type")]
     tag_type: Option<String>,
+    /// Recommendation scope to preserve across the redirect (`mine` | `all`).
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 /// Directly tag the track (track view = core element).
@@ -1530,7 +1533,8 @@ async fn track_tag(
             let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
         }
     }
-    Redirect::to(&format!("/track/{id}")).into_response()
+    let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
+    Redirect::to(&format!("/track/{id}?scope={}", scope.as_str())).into_response()
 }
 
 /// Remove a direct (manual) tag from the track.
@@ -1546,7 +1550,8 @@ async fn track_untag(
     if let Some(tag_id) = crate::tags::find_tag_id_by_name(&st.pool, &f.name).await {
         let _ = crate::tags::untag_track(&st.pool, nav.id, id, tag_id).await;
     }
-    Redirect::to(&format!("/track/{id}")).into_response()
+    let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
+    Redirect::to(&format!("/track/{id}?scope={}", scope.as_str())).into_response()
 }
 
 // ── now playing (issue #293/#294) ───────────────────────────────────────────

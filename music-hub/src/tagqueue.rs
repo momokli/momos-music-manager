@@ -478,6 +478,9 @@ struct TagForm {
     /// Optional tag type (e.g. "MOOD") to apply to the new tag.
     #[serde(default, rename = "type")]
     tag_type: Option<String>,
+    /// Recommendation scope to preserve across the mutation (`mine` | `all`).
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 async fn queue_tag(
@@ -501,7 +504,8 @@ async fn queue_tag(
             let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
         }
     }
-    match build_detail(&st, nav.id, id, crate::recommend::RecScope::All).await {
+    let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
+    match build_detail(&st, nav.id, id, scope).await {
         Some(d) => render(&d),
         None => (StatusCode::NOT_FOUND, "Track nicht gefunden.").into_response(),
     }
@@ -519,7 +523,8 @@ async fn queue_untag(
     if let Some(tag_id) = crate::tags::find_tag_id_by_name(&st.pool, &f.name).await {
         let _ = crate::tags::untag_track(&st.pool, nav.id, id, tag_id).await;
     }
-    match build_detail(&st, nav.id, id, crate::recommend::RecScope::All).await {
+    let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
+    match build_detail(&st, nav.id, id, scope).await {
         Some(d) => render(&d),
         None => (StatusCode::NOT_FOUND, "Track nicht gefunden.").into_response(),
     }

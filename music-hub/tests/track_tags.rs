@@ -33,7 +33,11 @@ async fn tagging_from_track_view_persists() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-    assert_eq!(resp.headers()["location"], format!("/track/{track}"));
+    // The redirect carries the (default) scope so the toggle does not reset.
+    assert_eq!(
+        resp.headers()["location"],
+        format!("/track/{track}?scope=all")
+    );
 
     // The track page now shows the tag.
     let html = app
@@ -291,5 +295,65 @@ async fn track_view_shows_cluster_rec_and_scope_toggle() {
     assert!(
         !mine_html.contains("Düster"),
         "mine scope must hide another owner's tag"
+    );
+}
+
+/// Mutating tags from the track view must carry the active recommendation scope
+/// in the redirect, so the toggle does not jump back to "all".
+#[tokio::test]
+async fn track_tag_redirect_preserves_scope() {
+    let app = common::spawn().await;
+    let alice = app.seed.alice;
+    let track = app.seed.t_all;
+    let cookie = app.session_cookie(alice).await;
+
+    let resp = app
+        .client()
+        .post(app.url(&format!("/track/{track}/tag")))
+        .header("Cookie", &cookie)
+        .form(&[("name", "Dark"), ("scope", "mine")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers()["location"],
+        format!("/track/{track}?scope=mine")
+    );
+
+    let resp = app
+        .client()
+        .post(app.url(&format!("/track/{track}/untag")))
+        .header("Cookie", &cookie)
+        .form(&[("name", "Dark"), ("scope", "mine")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers()["location"],
+        format!("/track/{track}?scope=mine")
+    );
+}
+
+/// The rendered track view embeds the active scope as a hidden field on every
+/// mutating form, so tag/untag round-trips keep the chosen scope.
+#[tokio::test]
+async fn track_view_emits_scope_hidden_field() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+    let html = app
+        .client()
+        .get(app.url(&format!("/track/{}?scope=mine", app.seed.t_all)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        html.contains("name=\"scope\" value=\"mine\""),
+        "track view must embed the active scope for mutations"
     );
 }
