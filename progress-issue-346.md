@@ -51,8 +51,8 @@ period so it is stable within a period). Expose it via the JSON API
 | setup     | done    | Branch `feature/issue-346-tag-task` von origin/main (14fc0eb); Baseline `cargo test` grün: 337 passed / 0 failed (40 Suites), Log /tmp/346-baseline.log |
 | developer | done    | US1–US5 implementiert + getestet; `cargo test` 350 passed / 0 failed (41 Suites); Commits cf8c1f8, ab89c46, e330750, 0c5eac8, 99fb0fe |
 | verifier  | done    | PASS — `cargo test` 350 passed / 0 failed (41 Suites); `tag_tasks` 9/9; US1–US5 vollständig; Migration 046 additiv (045 unberührt); keine Secrets/Debug-Prints; Log /tmp/346-verify.log |
-| tester    | pending | |
-| reviewer  | pending | |
+| tester    | done    | PASS — `cargo test` 350 passed / 0 failed (41 Suites); `tag_tasks` 9/9; 6 zusätzliche Edge-Case-Probes (temp. Harness) alle grün: plays=0 nicht ausgeschlossen + tie-break, Sonderzeichen-Roundtrip, limit-Grenze (Setting + candidates), HTTP-Periodenstabilität, cadence=foo→400, PHASE_x→PHASE-Familie, cadence case-insensitive; Log /tmp/346-test.log |
+| reviewer  | done    | Finaler Diff-Review PASS (Lesbarkeit/Idiomatik: sauber; additive Migration 046; Tests 9/9; Doku/CHANGELOG: kein Root-CHANGELOG, Hub-PRs pflegen legacy/mmm/CHANGELOG.md nicht → keine Ergänzung nötig); PR #402 erstellt |
 
 ## Plan
 
