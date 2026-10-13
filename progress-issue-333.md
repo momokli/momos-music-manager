@@ -53,7 +53,7 @@ Kein PR/Branch für #333 → normale Pipeline.
 | 4 verify | done | **PASS** (unabhängige Verifikation, Host planet). Scope isoliert, Auth/Owner korrekt, Security ok, Build/Tests unabhängig reproduziert. 0 blocking, 3 non-blocking. Details siehe Stage-4-Report unten. |
 | 5 test | done | **PASS** (Host planet). Neuer Test `backpack_export` EXIT 0 (11/11 nach Coverage-Ergänzung). Regression `backpack_{schema,sources,resolver,active,view}` je EXIT 0 (51/51). Crate-Smoke `cargo test --locked -p music-hub` EXIT 0 (39 `test result: ok`-Blöcke, 321 passed, 0 failed). Coverage: alle 6 Akzeptanzkriterien abgedeckt; 1 Lücke (Integration-Level `#EXTINF`) additiv geschlossen. Details siehe Stage-5-Report unten. |
 | 6 PR | done | Branch `feat/issue-333-backpack-export` gepusht (`origin`, Tracking gesetzt). PR **#391** gegen `main`: https://github.com/momokli/momos-music-manager/pull/391 — Body mit Closing-Keyword `Closes #333`; verifiziert via `clanker-gh pr view 391 --json body,url,state,headRefName,baseRefName` (state OPEN, base `main`, head `feat/issue-333-backpack-export`). Kein Screenshot-Check in CI (`.github/workflows/pr-quality.yml` = semantic-title + issue-reference). |
-| 7 review | pending | |
+| 7 review | done | **APPROVE** (keine Blocker). Closing-Keyword `Closes #333` ok; CI-Gates Conventional-Commit-Titel + Issue-Referenz **pass**, fmt pass; Build+Test (cargo), Build+Test (hub), clippy pending → mergeState BLOCKED (waiting on CI). Details siehe Stage-7-Report unten. |
 
 ## Stage 4 — Verify (unabhängige Verifikation, Host planet)
 
@@ -144,3 +144,57 @@ m3u8-Newline-Sanitizing / `CONTENT_DISPOSITION`-Header-Härtung / `backpack_zip_
 
 ### Ergebnis
 PASS → Stage 6 (PR).
+
+
+## Stage 7 — Final Review (Host planet)
+
+**Verdict: APPROVE** — 0 blockierende Funde. Merge erst nach grünen CI-Checks (derzeit pending).
+
+### PR-Metadaten (verifiziert)
+- PR **#391**: https://github.com/momokli/momos-music-manager/pull/391
+- Titel `feat(hub): backpack export (m3u8 / Traktor / ZIP) (#333)` → Conventional Commit (`feat`), PASS.
+- `baseRefName=main`, `headRefName=feat/issue-333-backpack-export`, `state=OPEN`, `mergeable=MERGEABLE`.
+- Body enthält Closing-Keyword **`Closes #333`** (kein „Refs"). → Issue wird beim Merge automatisch geschlossen.
+
+### Diff (`origin/main..HEAD`) — Scope
+- `git diff --name-status` = nur `M backpacks.rs`, `M pages.rs`, `M templates/backpacks.html`, `A tests/backpack_export.rs`, `A progress-issue-333.md`; **985 insertions / 0 deletions** (reine Additionen).
+- Keine Migration verändert (`music-hub/migrations/` unberührt). Keine #328-CRUD-, keine #332-View-Änderung.
+- `resolve`/`resolve_unbounded`/`resolve_with_limit` **unverändert** (diff enthält nur einen *Aufruf* von `resolve_unbounded`, keine Definition).
+
+### Auth / Owner (PASS)
+- `pages.rs` `backpack_export`: `crate::ui::nav(...)` → `None` ⇒ `Redirect::to("/login")`; `backpack_owned_by(pool, id, nav.id)` → `None` ⇒ `not_found("Backpack nicht gefunden.")` (404, kein Cross-User-Leak).
+- SQL-Owner-Check parametrisiert: `WHERE id = ?1 AND user_id = ?2`. Tests: `export_requires_login` (303 `/login`), `export_foreign_backpack_is_404_and_own_is_200` (404 fremd / 200 eigen).
+
+### Security (PASS)
+- SQL durchgängig `bind`-parametrisiert (keine String-Interpolation).
+- NML: `xml_escape` für `& < > " '` auf `TITLE`/`ARTIST`/`NODE NAME`/`FILE`/`KEY`; Test `nml_escapes_special_chars` + `KEY`-Basename == `FILE`-Basename.
+- Dateiname via `sanitize_filename`; `Content-Disposition: attachment`.
+- Keine `unwrap()` auf User-/DB-Daten in neuen Pfaden: Handler nutzt `.ok().flatten()` / `.unwrap_or_default()`; `attachment` nutzt `unwrap_or_else`; `backpack_zip_rows` matcht `Err => Vec::new()`.
+
+### Konsistenz Plan ↔ Implementierung (PASS)
+- US1 `ExportTrack`/`export_tracks`/`backpack_owned_by`; US2 `m3u8_playlist`; US3 `traktor_nml`; US4 Route+Handler `backpack_export`+`valid_export_format`+`backpack_zip_rows`+`attachment`; US5 Template-Buttons; US6 Integrationstests — alle vorhanden und deckungsgleich mit `plan-issue-333.md`.
+
+### Testabdeckung (PASS)
+- `cd music-hub && cargo test --locked --test backpack_export` → **EXIT 0, 11 passed / 0 failed** (unabhängig reproduziert). 7 Unit-Tests (`export_tests`) + 11 Integrationstests.
+- Akzeptanzkriterien vollständig abgedeckt (Login-Gate, Owner-404, m3u8 inkl. `#EXTINF`-je-Track, NML-XML+`PRIMARYKEY`, ZIP-502, leeres Backpack).
+
+### CI-Checks (`clanker-gh pr checks 391`)
+| Check | Status |
+|-------|--------|
+| Conventional-Commit-Titel | **pass** |
+| Issue-Referenz im PR | **pass** |
+| cargo fmt (informativ) | **pass** |
+| Build + Test (cargo) | **pending** |
+| Build + Test (hub) | **pending** |
+| cargo clippy (informativ) | **pending** |
+
+- Required-Gates (Conventional-Commit-Titel, Issue-Referenz) = beide **pass**. Kein Screenshot-Check im Repo (`.github/workflows/pr-quality.yml` = semantic-title + issue-reference; `ci-pr.yml`/`hub-ci.yml` = build/test/fmt/clippy).
+- `mergeStateStatus=BLOCKED` (pending Checks). Kein Retry-Loop; **waiting on CI: #391**.
+
+### Non-blocking (aus Stage 4, unverändert — kein Merge-Blocker)
+1. `backpacks.rs:~860` — m3u8 ist ein Plaintext-Format; ein eingebettetes `\n` in Metadaten/Name könnte zusätzliche Playlist-Zeilen einschleusen (nur konsumentenseitig, keine Server-Auswirkung).
+2. `pages.rs:542` (`sanitize_filename`) entfernt kein `\r`/`\n` → Backpack-Name mit Zeilenumbruch macht den `CONTENT_DISPOSITION`-Headerwert invalid → `unwrap_or_else` ⇒ 500 (keine Header-Injection, nur Degradation).
+3. `pages.rs` `backpack_zip_rows` schluckt Resolve-Fehler zu `Vec::new()` ⇒ ZIP meldet 502 (bewusst, spiegelt übrige Download-Handler).
+
+### Ergebnis
+APPROVE → Merge nach grünen CI-Checks. Optionales Folge-Ticket: m3u8-Newline-Sanitizing / `CONTENT_DISPOSITION`-Härtung.
