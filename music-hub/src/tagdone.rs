@@ -46,6 +46,15 @@ pub async fn configured_families(pool: &SqlitePool) -> Vec<String> {
     }
 }
 
+/// The describing *family* for a raw tag-type string (canonical form; `PHASE_1..5`
+/// all collapse to `"PHASE"`). `None` when the type is unknown or does not
+/// describe a track (SETLIST / RUMPELKISTE).
+pub fn family_of(type_name: &str) -> Option<String> {
+    TagType::parse(type_name)
+        .and_then(|t| t.describe_family())
+        .map(str::to_string)
+}
+
 /// Is the track manually marked done for this user?
 pub async fn is_done(pool: &SqlitePool, user_id: i64, track_id: i64) -> bool {
     sqlx::query_scalar::<_, i64>(
@@ -101,9 +110,9 @@ async fn covered_families(pool: &SqlitePool, track_id: i64) -> Vec<String> {
     .unwrap_or_default();
     let mut families: Vec<String> = Vec::new();
     for (type_name, _cnt) in rows {
-        if let Some(fam) = TagType::parse(&type_name).and_then(|t| t.describe_family()) {
-            if !families.iter().any(|f| f == fam) {
-                families.push(fam.to_string());
+        if let Some(fam) = family_of(&type_name) {
+            if !families.iter().any(|f| f == &fam) {
+                families.push(fam);
             }
         }
     }
