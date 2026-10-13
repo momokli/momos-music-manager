@@ -12,7 +12,7 @@ use anyhow::Result;
 use sqlx::SqlitePool;
 
 use crate::settings::{self, ENGINE_TAG_DONE_TYPES};
-use crate::tagtypes::{TagType, DESCRIBE_FAMILIES};
+use crate::tagtypes::{DESCRIBE_FAMILIES, TagType};
 
 /// The evaluated completion state for one (user, track) pair.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
