@@ -21,7 +21,7 @@ fn main() {
         .or_else(|| git(&["rev-parse", "--short=8", "HEAD"]));
     let describe = std::env::var("GIT_DESCRIBE")
         .ok()
-        .or_else(|| git(&["describe", "--tags", "--always", "--dirty"]));
+        .or_else(|| git(&["describe", "--tags", "--always", "--dirty", "--match", "api-v*"]));
     let version = std::env::var("MUSIC_API_VERSION")
         .ok()
         .unwrap_or_else(|| match &sha {
