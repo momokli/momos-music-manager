@@ -49,7 +49,7 @@ Kein PR/Branch für #333 → normale Pipeline.
 | 0 RE | done | siehe oben |
 | 1 plan | pending | |
 | 2 setup | done | Branch `feat/issue-333-backpack-export` von `main` @ 3540dbe (nur lokal). Baseline in `music-hub/`: `cargo build --locked` EXIT 0, `cargo test --locked --no-run` EXIT 0. Vorbestehende Warnungen: `music-hub` (lib) dead_code `tags`/`me` in `src/web.rs:986`; `tests/ui.rs:1713` unused var `cookie`. |
-| 3 dev | pending | |
+| 3 dev | done | US1–US6 umgesetzt. Dateien: `music-hub/src/backpacks.rs` (ExportTrack, export_tracks, backpack_owned_by, m3u8_playlist, traktor_nml, xml_escape + 7 Unit-Tests), `music-hub/src/pages.rs` (ExportQuery, valid_export_format, backpack_zip_rows, attachment, Route `/backpacks/{id}/export`, Handler `backpack_export`), `music-hub/templates/backpacks.html` (Export-Buttons), `music-hub/tests/backpack_export.rs` (neu, 10 Integrationstests). Verifikation (Host planet, aus `music-hub/`): `cargo build --locked` EXIT 0; `cargo test --locked -p music-hub` EXIT 0 (39 `test result: ok`-Blöcke, 0 failed; darunter alle 7 neuen Unit- + 10 neuen Integrationstests); `cargo clippy --locked -p music-hub --all-targets` EXIT 0 (keine neuen Warnungen aus neuem Code); neue Datei `cargo fmt --check`-clean (Repo-Baseline ist breit fmt-dirty, unverändert). Commits: `ff231f9` (US1–US3 backpacks.rs), `f3c206a` (US4 pages.rs), `dd99d07` (US5 Template), `e9f428c` (US6 Tests). Nicht gepusht (PR-Stage pusht). |
 | 4 verify | pending | |
 | 5 test | pending | |
 | 6 PR | pending | |
