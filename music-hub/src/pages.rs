@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         .route("/backpacks/{id}/rename", post(backpack_rename))
         .route("/backpacks/{id}/delete", post(backpack_delete))
         .route("/backpacks/{id}/active", post(backpack_toggle_active))
+        .route("/backpacks/{id}/export", get(backpack_export))
         .route("/tags/create", post(tag_create))
         .route("/tag-search", get(tag_search_page))
         .route("/revisit", get(revisit_page))
@@ -751,6 +752,18 @@ fn valid_format(f: Option<String>) -> String {
         Some(f) if !f.is_empty() && f.chars().all(|c| c.is_ascii_alphanumeric()) => f,
         _ => "flac".to_string(),
     }
+}
+
+/// Build a small text/XML body as a download attachment.
+fn attachment(body: String, content_type: &str, filename: String) -> Response {
+    Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, content_type)
+        .header(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .body(axum::body::Body::from(body))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// `POST /playlist/{id}/order` — order only the playlist's missing ISRCs.
@@ -4483,6 +4496,113 @@ async fn backpack_toggle_active(
     match result {
         Ok(()) => Redirect::to("/backpacks").into_response(),
         Err(e) => flash_redirect("/backpacks", format!("Fehler: {e}")),
+    }
+}
+
+// ── backpack export (#333) ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ExportQuery {
+    /// `m3u8` (default) | `traktor` | `zip`.
+    format: Option<String>,
+    /// Audio format for `traktor`/`zip`, validated by [`valid_format`].
+    audio: Option<String>,
+}
+
+/// Normalize the export format: `traktor` / `zip` pass through, anything else
+/// (including `None`) defaults to `m3u8`.
+fn valid_export_format(f: Option<String>) -> String {
+    match f.as_deref() {
+        Some("traktor") => "traktor".to_string(),
+        Some("zip") => "zip".to_string(),
+        _ => "m3u8".to_string(),
+    }
+}
+
+/// Load the backpack's resolved tracks as ZIP rows, in resolve order.
+///
+/// Columns match what [`build_playlist_zip`] reads (`isrc`, `title`, `artists`).
+/// A resolve failure yields an empty `Vec` (the ZIP path then reports the 502
+/// "no files" branch, mirroring the other download handlers).
+async fn backpack_zip_rows(
+    pool: &sqlx::SqlitePool,
+    backpack_id: i64,
+) -> Vec<sqlx::sqlite::SqliteRow> {
+    let resolved = match crate::backpacks::resolve_unbounded(pool, backpack_id).await {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let mut rows = Vec::with_capacity(resolved.len());
+    for rt in resolved {
+        if let Ok(Some(row)) =
+            sqlx::query("SELECT isrc, title, artists FROM hub_tracks WHERE id = ?1")
+                .bind(rt.track_id)
+                .fetch_optional(pool)
+                .await
+        {
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+/// `GET /backpacks/{id}/export?format=m3u8|traktor|zip[&audio=flac]` (#333):
+/// export the caller's resolved backpack track list.
+///
+/// No session -> `/login`; a foreign/unknown backpack -> `404` (owner scoping
+/// via [`crate::backpacks::backpack_owned_by`], never a cross-user leak). The
+/// body is the resolve-ordered list: `m3u8` text playlist (`audio/x-mpegurl`),
+/// Traktor NML (`application/xml`), or — for `zip` — the actual audio bytes via
+/// the existing [`zip_for`] path (`502` when music-api has none). The m3u8
+/// stream URLs are session-bound (see [`crate::backpacks::m3u8_playlist`]).
+async fn backpack_export(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<ExportQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "backpacks").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(bp) = crate::backpacks::backpack_owned_by(&st.pool, id, nav.id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return not_found("Backpack nicht gefunden.");
+    };
+
+    let format = valid_export_format(q.format);
+    let audio = valid_format(q.audio);
+    let label = sanitize_filename(&bp.name);
+
+    match format.as_str() {
+        "traktor" => {
+            let tracks = crate::backpacks::export_tracks(&st.pool, id)
+                .await
+                .unwrap_or_default();
+            let body = crate::backpacks::traktor_nml(&bp.name, &tracks, &audio);
+            attachment(
+                body,
+                "application/xml; charset=utf-8",
+                format!("{label}.nml"),
+            )
+        }
+        "zip" => {
+            let rows = backpack_zip_rows(&st.pool, id).await;
+            zip_for(&st, &rows, &audio, &label).await
+        }
+        _ => {
+            let tracks = crate::backpacks::export_tracks(&st.pool, id)
+                .await
+                .unwrap_or_default();
+            let body = crate::backpacks::m3u8_playlist(&bp.name, &tracks);
+            attachment(
+                body,
+                "audio/x-mpegurl; charset=utf-8",
+                format!("{label}.m3u8"),
+            )
+        }
     }
 }
 

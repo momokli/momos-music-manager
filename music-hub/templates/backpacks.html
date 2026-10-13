@@ -65,6 +65,36 @@
             <button type="submit" class="secondary outline">Löschen</button>
         </form>
 
+        <p class="hub-muted" style="margin-top: 0.6rem">Export</p>
+        <div style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center">
+            <a
+                role="button"
+                class="secondary outline"
+                href="/backpacks/{{ c.id }}/export?format=m3u8"
+                >m3u8</a
+            >
+            <a
+                role="button"
+                class="secondary outline"
+                href="/backpacks/{{ c.id }}/export?format=traktor"
+                >Traktor</a
+            >
+            <form
+                method="get"
+                action="/backpacks/{{ c.id }}/export"
+                style="display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center"
+            >
+                <input type="hidden" name="format" value="zip" />
+                <select name="audio" aria-label="Audioformat">
+                    <option value="flac">flac</option>
+                    <option value="mp3">mp3</option>
+                    <option value="wav">wav</option>
+                    <option value="m4a">m4a</option>
+                </select>
+                <button type="submit" class="secondary outline">ZIP laden</button>
+            </form>
+        </div>
+
         {% if c.sources.is_empty() %}
         <p class="hub-muted">Keine Quellen.</p>
         {% else %}
