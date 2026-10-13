@@ -19,9 +19,11 @@ fn main() {
     let sha = std::env::var("GIT_SHA")
         .ok()
         .or_else(|| git(&["rev-parse", "--short=8", "HEAD"]));
-    let describe = std::env::var("GIT_DESCRIBE")
-        .ok()
-        .or_else(|| git(&["describe", "--tags", "--always", "--dirty"]));
+    let describe = std::env::var("GIT_DESCRIBE").ok().or_else(|| {
+        git(&[
+            "describe", "--tags", "--always", "--dirty", "--match", "hub-v*",
+        ])
+    });
     // Env override wins; else <pkg>-dev+<sha8>; else <pkg>.
     let version = std::env::var("MUSIC_HUB_VERSION")
         .ok()

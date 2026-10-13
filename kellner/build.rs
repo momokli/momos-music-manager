@@ -19,9 +19,16 @@ fn main() {
     let sha = std::env::var("GIT_SHA")
         .ok()
         .or_else(|| git(&["rev-parse", "--short=8", "HEAD"]));
-    let describe = std::env::var("GIT_DESCRIBE")
-        .ok()
-        .or_else(|| git(&["describe", "--tags", "--always", "--dirty"]));
+    let describe = std::env::var("GIT_DESCRIBE").ok().or_else(|| {
+        git(&[
+            "describe",
+            "--tags",
+            "--always",
+            "--dirty",
+            "--match",
+            "kellner-v*",
+        ])
+    });
     let version = std::env::var("KELLNER_VERSION")
         .ok()
         .unwrap_or_else(|| match &sha {
