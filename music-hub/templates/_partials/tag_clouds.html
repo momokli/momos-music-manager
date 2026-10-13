@@ -23,6 +23,7 @@ to POST a direct untag (form field `name`) htmx: bool — when true, submit via 
             style="display: inline"
         >
             <input type="hidden" name="name" value="{{ t.name }}" />
+            <input type="hidden" name="scope" value="{{ rec_scope }}" />
             <button type="submit" class="hub-x" title="Tag entfernen">×</button>
         </form>
         {% endif %}</span

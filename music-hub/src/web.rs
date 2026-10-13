@@ -311,6 +311,9 @@ struct Creds {
 #[derive(Deserialize)]
 struct Flash {
     msg: Option<String>,
+    /// Recommendation scope (`mine` | `all`); unknown values fall back to `all`.
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 /// Server-side playlist filter (issue #163). Unknown values fall back to `all`.
@@ -996,6 +999,9 @@ struct TrackPage {
     // Core-element additions: direct tagging + player + recommendations.
     my_tags: Vec<(i64, String)>,
     recommended: Vec<RecTag>,
+    rec_scope: String,
+    rec_scope_mine_url: String,
+    rec_scope_all_url: String,
     can_stream: bool,
     me: String,
     spotify_id: String,
@@ -1147,7 +1153,7 @@ async fn track_page(
     let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
         return Redirect::to("/login").into_response();
     };
-    match build_track_page(&st, nav, id, flash.msg.unwrap_or_default()).await {
+    match build_track_page(&st, nav, id, flash.msg.unwrap_or_default(), crate::recommend::RecScope::parse(flash.scope.as_deref())).await {
         Some(page) => render_track(page),
         None => track_not_found(),
     }
@@ -1160,6 +1166,7 @@ async fn build_track_page(
     nav: crate::ui::Nav,
     id: i64,
     flash: String,
+    scope: crate::recommend::RecScope,
 ) -> Option<TrackPage> {
     let row = sqlx::query(
         "SELECT id, title, artists, album, duration_ms, isrc, service, service_track_id,
@@ -1369,15 +1376,19 @@ async fn build_track_page(
     let e = crate::settings::engine(&st.pool).await;
     let rip = crate::scoring::ripeness(&st.pool, id, &e).await;
     let my_tags = crate::tags::list_user_tags(&st.pool, nav.id).await;
-    let recommended: Vec<RecTag> = crate::recommend::recommend_tags(&st.pool, id, 12)
-        .await
-        .into_iter()
-        .map(|r| RecTag {
-            reason: r.why(),
-            type_label: r.type_label,
-            name: r.name,
-        })
-        .collect();
+    let recommended: Vec<RecTag> =
+        crate::recommend::recommend_tags(&st.pool, id, 12, nav.id, scope)
+            .await
+            .into_iter()
+            .map(|r| RecTag {
+                reason: r.why(),
+                type_label: r.type_label,
+                name: r.name,
+            })
+            .collect();
+    let rec_scope = scope.as_str().to_string();
+    let rec_scope_mine_url = format!("/track/{id}?scope=mine");
+    let rec_scope_all_url = format!("/track/{id}?scope=all");
     let can_stream = st.cfg.music_api_token.is_some() && !isrc.trim().is_empty();
     let me = nav.slug.clone();
     // Bucket the track's tags into clouds by their type.
@@ -1459,6 +1470,9 @@ async fn build_track_page(
         meta_present: rip.meta_present,
         my_tags,
         recommended,
+        rec_scope,
+        rec_scope_mine_url,
+        rec_scope_all_url,
         can_stream,
         me,
         spotify_id,
@@ -1492,6 +1506,9 @@ struct TrackTagForm {
     name: String,
     #[serde(default, rename = "type")]
     tag_type: Option<String>,
+    /// Recommendation scope to preserve across the redirect (`mine` | `all`).
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 /// Directly tag the track (track view = core element).
@@ -1516,7 +1533,8 @@ async fn track_tag(
             let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
         }
     }
-    Redirect::to(&format!("/track/{id}")).into_response()
+    let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
+    Redirect::to(&format!("/track/{id}?scope={}", scope.as_str())).into_response()
 }
 
 /// Remove a direct (manual) tag from the track.
@@ -1532,7 +1550,8 @@ async fn track_untag(
     if let Some(tag_id) = crate::tags::find_tag_id_by_name(&st.pool, &f.name).await {
         let _ = crate::tags::untag_track(&st.pool, nav.id, id, tag_id).await;
     }
-    Redirect::to(&format!("/track/{id}")).into_response()
+    let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
+    Redirect::to(&format!("/track/{id}?scope={}", scope.as_str())).into_response()
 }
 
 // ── now playing (issue #293/#294) ───────────────────────────────────────────
@@ -1744,8 +1763,14 @@ async fn now_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
     match crate::nowplaying::current(&st.pool, &st.cfg, nav.id).await {
         Ok(Some(n)) => match n.hub_track_id {
             Some(id) => {
-                match build_track_page(&st, nav.clone(), id, "Jetzt läuft in Spotify".to_string())
-                    .await
+                match build_track_page(
+                    &st,
+                    nav.clone(),
+                    id,
+                    "Jetzt läuft in Spotify".to_string(),
+                    crate::recommend::RecScope::All,
+                )
+                .await
                 {
                     Some(page) => render_track(page),
                     None => render(&now_external(nav, &n, true)),
