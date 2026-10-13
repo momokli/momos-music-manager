@@ -45,6 +45,9 @@ pub const ENGINE_TAG_POINTS: &str = "engine_tag_points";
 pub const ENGINE_TRAK_PLAYCOUNT_CAP: &str = "engine_trak_playcount_cap";
 pub const ENGINE_TAG_OVERLAP_BASE: &str = "engine_tag_overlap_base";
 pub const ENGINE_CROSS_GROUP_BONUS: &str = "engine_cross_group_bonus";
+// Describing tag-type families required for a track to count as fully tagged
+// (#345). CSV of family names; empty falls back to the built-in families.
+pub const ENGINE_TAG_DONE_TYPES: &str = "engine_tag_done_types";
 
 // Per-tag-type weights (digging/similarity ranking). One knob per semantic type;
 // the five PHASE levels share `engine_w_phase`.
@@ -271,6 +274,11 @@ pub const SETTINGS: &[SettingSpec] = &[
         ENGINE_TAG_POINTS,
         "Scoring: Tag-Punkte je Position (CSV)",
         "100,50,25,10,5,1",
+    ),
+    csv(
+        ENGINE_TAG_DONE_TYPES,
+        "Scoring: Familien fuer 'vollstaendig getaggt' (CSV)",
+        "MOOD,GENRE,VIBE,PHASE,MERKMAL",
     ),
     num(
         ENGINE_TRAK_PLAYCOUNT_CAP,
