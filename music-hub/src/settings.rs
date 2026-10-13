@@ -45,6 +45,12 @@ pub const ENGINE_TAG_POINTS: &str = "engine_tag_points";
 pub const ENGINE_TRAK_PLAYCOUNT_CAP: &str = "engine_trak_playcount_cap";
 pub const ENGINE_TAG_OVERLAP_BASE: &str = "engine_tag_overlap_base";
 pub const ENGINE_CROSS_GROUP_BONUS: &str = "engine_cross_group_bonus";
+// Describing tag-type families required for a track to count as fully tagged
+// (#345). CSV of family names; empty falls back to the built-in families.
+pub const ENGINE_TAG_DONE_TYPES: &str = "engine_tag_done_types";
+// Daily/weekly tagging task (#346) knobs.
+pub const ENGINE_TAG_TASK_LIMIT: &str = "engine_tag_task_limit";
+pub const ENGINE_TAG_TASK_CADENCE: &str = "engine_tag_task_cadence";
 
 // Per-tag-type weights (digging/similarity ranking). One knob per semantic type;
 // the five PHASE levels share `engine_w_phase`.
@@ -73,6 +79,7 @@ pub const ENGINE_REC_TAG: &str = "engine_rec_tag";
 pub const ENGINE_REC_PLAYLIST: &str = "engine_rec_playlist";
 pub const ENGINE_REC_ARTIST: &str = "engine_rec_artist";
 pub const ENGINE_REC_ALBUM: &str = "engine_rec_album";
+pub const ENGINE_REC_CLUSTER: &str = "engine_rec_cluster";
 
 /// The kind of a setting value — drives the admin input widget and validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,6 +278,24 @@ pub const SETTINGS: &[SettingSpec] = &[
         "Scoring: Tag-Punkte je Position (CSV)",
         "100,50,25,10,5,1",
     ),
+    csv(
+        ENGINE_TAG_DONE_TYPES,
+        "Scoring: Familien fuer 'vollstaendig getaggt' (CSV)",
+        "MOOD,GENRE,VIBE,PHASE,MERKMAL",
+    ),
+    num(
+        ENGINE_TAG_TASK_LIMIT,
+        "Tag-Task: max. Tracks pro Task",
+        "50",
+        1.0,
+        1000.0,
+    ),
+    one_of(
+        ENGINE_TAG_TASK_CADENCE,
+        "Tag-Task: Kadenz",
+        "daily",
+        &["daily", "weekly"],
+    ),
     num(
         ENGINE_TRAK_PLAYCOUNT_CAP,
         "Scoring: Playcount-Cap fuer Traktor-Signal",
@@ -409,6 +434,13 @@ pub const SETTINGS: &[SettingSpec] = &[
         0.0,
         100.0,
     ),
+    num(
+        ENGINE_REC_CLUSTER,
+        "Empfehlung: Gewicht gleicher Cluster",
+        "1",
+        0.0,
+        100.0,
+    ),
 ];
 
 /// Find the registry entry for a key, if any.
@@ -520,6 +552,7 @@ pub struct Engine {
     pub rec_playlist: f64,
     pub rec_artist: f64,
     pub rec_album: f64,
+    pub rec_cluster: f64,
 }
 
 impl Default for Engine {
@@ -560,6 +593,7 @@ impl Default for Engine {
             rec_playlist: 1.0,
             rec_artist: 1.0,
             rec_album: 1.0,
+            rec_cluster: 1.0,
         }
     }
 }
@@ -642,6 +676,7 @@ pub async fn engine(pool: &SqlitePool) -> Engine {
         rec_playlist: num(ENGINE_REC_PLAYLIST, 1.0),
         rec_artist: num(ENGINE_REC_ARTIST, 1.0),
         rec_album: num(ENGINE_REC_ALBUM, 1.0),
+        rec_cluster: num(ENGINE_REC_CLUSTER, 1.0),
     }
 }
 

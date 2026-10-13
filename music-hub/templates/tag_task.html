@@ -1,0 +1,36 @@
+{% extends "base.html" %} {% block title %}Tag-Task — Spelunke{% endblock %} {% block
+content %}
+<hgroup>
+    <h1>Tag-Task</h1>
+    <p class="hub-muted">
+        Die Tracks deiner aktuellen <strong>Tagging-Aufgabe</strong> — meistgespielt zuerst.
+        Fehlende Familien direkt auf der Karte taggen oder als <em>fertig</em> markieren.
+    </p>
+</hgroup>
+
+<p class="hub-scope-toggle" role="group" aria-label="Kadenz">
+    <a
+        class="hub-chip"
+        href="/tag-task?cadence=daily"
+        {% if cadence_daily %}aria-current="page"{% endif %}
+        >Täglich</a
+    >
+    <a
+        class="hub-chip"
+        href="/tag-task?cadence=weekly"
+        {% if cadence_weekly %}aria-current="page"{% endif %}
+        >Wöchentlich</a
+    >
+    <span class="hub-muted" style="margin-left: 0.5rem">{{ cards.len() }} Karten</span>
+</p>
+
+{% if cards.is_empty() %}
+<p class="hub-muted">
+    Alles erledigt — keine offenen Tracks in dieser Aufgabe. 🎉
+</p>
+{% else %}
+<div class="hub-tag-task-grid">
+    {% for card in cards %} {% include "_partials/tag_task_card.html" %} {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

@@ -31,6 +31,8 @@ pub fn router(state: AppState) -> Router {
         .route("/track/{id}/fetch", post(track_fetch))
         .route("/track/{id}/tag", post(track_tag))
         .route("/track/{id}/untag", post(track_untag))
+        .route("/track/{id}/done", post(track_done))
+        .route("/track/{id}/undone", post(track_undone))
         .route("/track/{id}/actions", get(track_actions_frag))
         .route(
             "/track/{id}/actions/playlist",
@@ -311,6 +313,9 @@ struct Creds {
 #[derive(Deserialize)]
 struct Flash {
     msg: Option<String>,
+    /// Recommendation scope (`mine` | `all`); unknown values fall back to `all`.
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 /// Server-side playlist filter (issue #163). Unknown values fall back to `all`.
@@ -996,6 +1001,9 @@ struct TrackPage {
     // Core-element additions: direct tagging + player + recommendations.
     my_tags: Vec<(i64, String)>,
     recommended: Vec<RecTag>,
+    rec_scope: String,
+    rec_scope_mine_url: String,
+    rec_scope_all_url: String,
     can_stream: bool,
     me: String,
     spotify_id: String,
@@ -1004,6 +1012,13 @@ struct TrackPage {
     tag_action: String,
     htmx: bool,
     my_types: Vec<TypeOption>,
+    // "tagged-complete" flag (#345).
+    tag_complete: bool,
+    tag_done_auto: bool,
+    tag_done_manual: bool,
+    tag_missing: Vec<String>,
+    done_action: String,
+    undone_action: String,
 }
 
 struct TagCloudRow {
@@ -1147,7 +1162,7 @@ async fn track_page(
     let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
         return Redirect::to("/login").into_response();
     };
-    match build_track_page(&st, nav, id, flash.msg.unwrap_or_default()).await {
+    match build_track_page(&st, nav, id, flash.msg.unwrap_or_default(), crate::recommend::RecScope::parse(flash.scope.as_deref())).await {
         Some(page) => render_track(page),
         None => track_not_found(),
     }
@@ -1160,6 +1175,7 @@ async fn build_track_page(
     nav: crate::ui::Nav,
     id: i64,
     flash: String,
+    scope: crate::recommend::RecScope,
 ) -> Option<TrackPage> {
     let row = sqlx::query(
         "SELECT id, title, artists, album, duration_ms, isrc, service, service_track_id,
@@ -1369,15 +1385,19 @@ async fn build_track_page(
     let e = crate::settings::engine(&st.pool).await;
     let rip = crate::scoring::ripeness(&st.pool, id, &e).await;
     let my_tags = crate::tags::list_user_tags(&st.pool, nav.id).await;
-    let recommended: Vec<RecTag> = crate::recommend::recommend_tags(&st.pool, id, 12)
-        .await
-        .into_iter()
-        .map(|r| RecTag {
-            reason: r.why(),
-            type_label: r.type_label,
-            name: r.name,
-        })
-        .collect();
+    let recommended: Vec<RecTag> =
+        crate::recommend::recommend_tags(&st.pool, id, 12, nav.id, scope)
+            .await
+            .into_iter()
+            .map(|r| RecTag {
+                reason: r.why(),
+                type_label: r.type_label,
+                name: r.name,
+            })
+            .collect();
+    let rec_scope = scope.as_str().to_string();
+    let rec_scope_mine_url = format!("/track/{id}?scope=mine");
+    let rec_scope_all_url = format!("/track/{id}?scope=all");
     let can_stream = st.cfg.music_api_token.is_some() && !isrc.trim().is_empty();
     let me = nav.slug.clone();
     // Bucket the track's tags into clouds by their type.
@@ -1430,6 +1450,13 @@ async fn build_track_page(
 
     let my_types = type_options();
 
+    // "tagged-complete" flag (#345): auto (all configured families tagged) or
+    // manual (user marked it done).
+    let done_families = crate::tagdone::configured_families(&st.pool).await;
+    let done_type_refs: Vec<&str> = done_families.iter().map(|s| s.as_str()).collect();
+    let done_status =
+        crate::tagdone::status(&st.pool, nav.id, id, &done_type_refs).await;
+
     Some(TrackPage {
         nav,
         id,
@@ -1459,6 +1486,9 @@ async fn build_track_page(
         meta_present: rip.meta_present,
         my_tags,
         recommended,
+        rec_scope,
+        rec_scope_mine_url,
+        rec_scope_all_url,
         can_stream,
         me,
         spotify_id,
@@ -1467,6 +1497,12 @@ async fn build_track_page(
         tag_action: format!("/track/{id}/tag"),
         htmx: false,
         my_types,
+        tag_complete: done_status.complete,
+        tag_done_auto: done_status.auto,
+        tag_done_manual: done_status.manual,
+        tag_missing: done_status.missing,
+        done_action: format!("/track/{id}/done"),
+        undone_action: format!("/track/{id}/undone"),
     })
 }
 
@@ -1492,6 +1528,9 @@ struct TrackTagForm {
     name: String,
     #[serde(default, rename = "type")]
     tag_type: Option<String>,
+    /// Recommendation scope to preserve across the redirect (`mine` | `all`).
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 /// Directly tag the track (track view = core element).
@@ -1516,7 +1555,8 @@ async fn track_tag(
             let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
         }
     }
-    Redirect::to(&format!("/track/{id}")).into_response()
+    let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
+    Redirect::to(&format!("/track/{id}?scope={}", scope.as_str())).into_response()
 }
 
 /// Remove a direct (manual) tag from the track.
@@ -1532,7 +1572,49 @@ async fn track_untag(
     if let Some(tag_id) = crate::tags::find_tag_id_by_name(&st.pool, &f.name).await {
         let _ = crate::tags::untag_track(&st.pool, nav.id, id, tag_id).await;
     }
-    Redirect::to(&format!("/track/{id}")).into_response()
+    let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
+    Redirect::to(&format!("/track/{id}?scope={}", scope.as_str())).into_response()
+}
+
+#[derive(Deserialize)]
+struct TrackDoneForm {
+    /// Recommendation scope to preserve across the redirect (`mine` | `all`).
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// Manually mark the track as "fertig" (fully tagged) for the current user.
+async fn track_done(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<TrackDoneForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Err(e) = crate::tagdone::set_done(&st.pool, nav.id, id).await {
+        return error_page(&format!("Konnte Track nicht als fertig markieren: {e}"));
+    }
+    let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
+    Redirect::to(&format!("/track/{id}?scope={}", scope.as_str())).into_response()
+}
+
+/// Remove the manual "fertig" mark for the current user.
+async fn track_undone(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<TrackDoneForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Err(e) = crate::tagdone::clear_done(&st.pool, nav.id, id).await {
+        return error_page(&format!("Konnte Markierung nicht entfernen: {e}"));
+    }
+    let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
+    Redirect::to(&format!("/track/{id}?scope={}", scope.as_str())).into_response()
 }
 
 // ── now playing (issue #293/#294) ───────────────────────────────────────────
@@ -1744,8 +1826,14 @@ async fn now_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
     match crate::nowplaying::current(&st.pool, &st.cfg, nav.id).await {
         Ok(Some(n)) => match n.hub_track_id {
             Some(id) => {
-                match build_track_page(&st, nav.clone(), id, "Jetzt läuft in Spotify".to_string())
-                    .await
+                match build_track_page(
+                    &st,
+                    nav.clone(),
+                    id,
+                    "Jetzt läuft in Spotify".to_string(),
+                    crate::recommend::RecScope::All,
+                )
+                .await
                 {
                     Some(page) => render_track(page),
                     None => render(&now_external(nav, &n, true)),

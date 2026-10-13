@@ -1,8 +1,78 @@
 {# Shared recommended-tags renderer (uniform across track view + tag-queue). Context:
-recommended: [{ name, type_label, reason }], tag_action, htmx #} {% if
-!recommended.is_empty() %}
+recommended: [{ name, type_label, reason }], tag_action, htmx,
+rec_scope: "mine" | "all", rec_scope_mine_url, rec_scope_all_url #}
 <div style="margin-top: 0.45rem">
     <span class="hub-cloud-h">Empfohlen — warum</span>
+    <span class="hub-scope-toggle" style="margin-left: 0.5rem">
+        {% if htmx %}
+        <button
+            type="button"
+            class="hub-chip"
+            hx-get="{{ rec_scope_mine_url }}"
+            hx-target="#queue-detail"
+            hx-swap="innerHTML"
+            {%
+            if
+            rec_scope
+            ==
+            "mine"
+            %}aria-current="true"
+            {%
+            endif
+            %}
+        >
+            Meine Tags
+        </button>
+        <button
+            type="button"
+            class="hub-chip"
+            hx-get="{{ rec_scope_all_url }}"
+            hx-target="#queue-detail"
+            hx-swap="innerHTML"
+            {%
+            if
+            rec_scope
+            ==
+            "all"
+            %}aria-current="true"
+            {%
+            endif
+            %}
+        >
+            Alle
+        </button>
+        {% else %}
+        <a
+            href="{{ rec_scope_mine_url }}"
+            class="hub-chip"
+            {%
+            if
+            rec_scope
+            ==
+            "mine"
+            %}aria-current="true"
+            {%
+            endif
+            %}
+            >Meine Tags</a
+        >
+        <a
+            href="{{ rec_scope_all_url }}"
+            class="hub-chip"
+            {%
+            if
+            rec_scope
+            ==
+            "all"
+            %}aria-current="true"
+            {%
+            endif
+            %}
+            >Alle</a
+        >
+        {% endif %}
+    </span>
+    {% if !recommended.is_empty() %}
     <div class="hub-cloud">
         {% for r in recommended %}
         <form
@@ -20,6 +90,7 @@ recommended: [{ name, type_label, reason }], tag_action, htmx #} {% if
             style="display: inline"
         >
             <input type="hidden" name="name" value="{{ r.name }}" />
+            <input type="hidden" name="scope" value="{{ rec_scope }}" />
             <button
                 type="submit"
                 class="hub-chip hub-rec"
@@ -34,5 +105,5 @@ recommended: [{ name, type_label, reason }], tag_action, htmx #} {% if
         </form>
         {% endfor %}
     </div>
+    {% endif %}
 </div>
-{% endif %}

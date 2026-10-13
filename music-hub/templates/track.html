@@ -159,6 +159,32 @@ content %}
                     <th scope="row">Tags</th>
                     <td>
                         {% include "_partials/tag_clouds.html" %}
+                        <div class="hub-tag-status" style="margin-top: 0.4rem">
+                            {% if tag_complete %}{% if tag_done_auto %}<span
+                                    class="hub-chip"
+                                    title="Alle beschreibenden Familien sind getaggt"
+                                    >✓ vollständig getaggt</span
+                                >{% else %}<span class="hub-chip" title="Manuell als fertig markiert"
+                                    >✓ fertig (manuell)</span
+                                >{% endif %}{% else %}<span class="hub-muted"
+                                >offen — fehlt: {% for m in tag_missing %}{{ m }}{% if !loop.last %}, {% endif %}{% endfor %}</span
+                            >{% endif %}
+                            {% if tag_done_manual %}
+                            <form method="post" action="{{ undone_action }}" style="display: inline">
+                                <input type="hidden" name="scope" value="{{ rec_scope }}" />
+                                <button class="outline" type="submit">Markierung entfernen</button>
+                            </form>
+                            {% else %}
+                            <form method="post" action="{{ done_action }}" style="display: inline">
+                                <input type="hidden" name="scope" value="{{ rec_scope }}" />
+                                {% if tag_complete %}
+                                <button class="outline" type="submit">Als fertig markieren</button>
+                                {% else %}
+                                <button class="outline" type="submit">Trotzdem als fertig markieren</button>
+                                {% endif %}
+                            </form>
+                            {% endif %}
+                        </div>
                         <form
                             method="post"
                             action="/track/{{ id }}/tag"
@@ -169,6 +195,7 @@ content %}
                                 align-items: center;
                             "
                         >
+                            <input type="hidden" name="scope" value="{{ rec_scope }}" />
                             <input
                                 type="text"
                                 name="name"
