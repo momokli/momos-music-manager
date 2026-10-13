@@ -265,6 +265,46 @@ async fn export_m3u8_body_has_resolved_tracks_in_order() {
 }
 
 #[tokio::test]
+async fn export_m3u8_has_extinf_per_track_in_order() {
+    let app = common::spawn().await;
+    let (owner, cookie) = app.user_with_password("packer", "pw").await;
+    let bp = backpack_with_seeded_playlist(&app, owner).await;
+
+    let resp = app
+        .client()
+        .get(app.url(&format!("/backpacks/{bp}/export?format=m3u8")))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body = resp.text().await.unwrap();
+
+    // One `#EXTINF:-1,{artists} - {title}` info line per resolved track, each
+    // immediately followed by its `/track/{id}/stream` line, in resolve order
+    // (pl_alice = [t_all (pos 0), t_pl (pos 1)]).
+    let first = format!(
+        "#EXTINF:-1,Aaa - Shared Anthem\n/track/{}/stream\n",
+        app.seed.t_all
+    );
+    let second = format!(
+        "#EXTINF:-1,Ccc - Playlist Only\n/track/{}/stream\n",
+        app.seed.t_pl
+    );
+    assert!(body.contains(&first), "first EXTINF+stream pair present");
+    assert!(body.contains(&second), "second EXTINF+stream pair present");
+    assert_eq!(
+        body.matches("#EXTINF:-1,").count(),
+        2,
+        "exactly one EXTINF per resolved track"
+    );
+    assert!(
+        body.find(&first).unwrap() < body.find(&second).unwrap(),
+        "EXTINF lines follow resolve order"
+    );
+}
+
+#[tokio::test]
 async fn export_traktor_body_parses_as_xml() {
     let app = common::spawn().await;
     let (owner, cookie) = app.user_with_password("packer", "pw").await;
