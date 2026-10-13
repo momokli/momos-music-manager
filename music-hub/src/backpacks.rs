@@ -319,9 +319,7 @@ pub async fn create_backpack(pool: &SqlitePool, user_id: i64, name: &str) -> Res
     .bind(user_id)
     .bind(name)
     .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    .await?;
     if clash.is_some() {
         bail!("es gibt schon ein Backpack mit diesem Namen");
     }
@@ -365,9 +363,7 @@ pub async fn rename_backpack(
     .bind(name)
     .bind(backpack_id)
     .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    .await?;
     if clash.is_some() {
         bail!("es gibt schon ein Backpack mit diesem Namen");
     }

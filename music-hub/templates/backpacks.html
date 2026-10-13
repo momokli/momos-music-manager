@@ -1,7 +1,4 @@
-{% extends "base.html" %} {% block title %}Backpacks — Spelunke{% endblock %} {% block flash %}
-{% if flash != "" %}
-<p class="hub-flash-err">{{ flash }}</p>
-{% endif %} {% endblock %} {% block content %}
+{% extends "base.html" %} {% block title %}Backpacks — Spelunke{% endblock %} {% block content %}
 <hgroup>
     <h1>Backpacks</h1>
     <p class="hub-muted">
@@ -64,7 +61,7 @@
             {% endif %}
         </form>
 
-        <form method="post" action="/backpacks/{{ c.id }}/delete" style="display: inline">
+        <form method="post" action="/backpacks/{{ c.id }}/delete" style="display: inline" onsubmit="return confirm('Backpack wirklich löschen?')">
             <button type="submit" class="secondary outline">Löschen</button>
         </form>
 
