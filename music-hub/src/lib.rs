@@ -52,6 +52,7 @@ pub mod tagqueue;
 pub mod tags;
 pub mod tagsearch;
 pub mod tagtasks;
+pub mod tagtaskui;
 pub mod tagtypes;
 pub mod traktor;
 pub mod ui;

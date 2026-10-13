@@ -1,0 +1,43 @@
+{# Tag-task card (#347). Context: card = { id, rank, title, artists, plays,
+missing: [{label, icon}], my_types: [{value, label}] } #}
+<article class="hub-tag-task-card">
+    <header class="hub-tag-task-head">
+        <span class="hub-tag-task-rank" aria-label="Platz {{ card.rank }}">#{{ card.rank }}</span>
+        <strong>{{ card.title }}</strong>
+        <a href="/track/{{ card.id }}" class="hub-x" title="Track-Home öffnen">↗</a>
+        <span class="hub-muted hub-tag-task-artists">{{ card.artists }}</span>
+        <span class="hub-muted hub-tag-task-plays">{{ card.plays }} Plays</span>
+    </header>
+
+    <div class="hub-tag-task-missing" aria-label="Fehlende Familien">
+        {% if card.missing.is_empty() %}
+        <span class="hub-muted">Keine Familien offen.</span>
+        {% else %} {% for m in card.missing %}
+        <span class="hub-chip hub-chip-missing" title="Fehlt: {{ m.label }}"
+            >{{ m.icon }} {{ m.label }}</span
+        >
+        {% endfor %} {% endif %}
+    </div>
+
+    <form method="post" action="/tag-task/{{ card.id }}/tag" class="hub-tag-task-form">
+        <input
+            type="text"
+            name="name"
+            placeholder="Tag…"
+            autocomplete="off"
+            required
+            aria-label="Tag-Name"
+        />
+        <select name="type" aria-label="Tag-Typ">
+            <option value="">Typ…</option>
+            {% for t in card.my_types %}
+            <option value="{{ t.value }}">{{ t.label }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit">Taggen</button>
+    </form>
+
+    <form method="post" action="/tag-task/{{ card.id }}/done" class="hub-tag-task-done">
+        <button type="submit" class="secondary">Fertig</button>
+    </form>
+</article>

@@ -42,7 +42,8 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::listening::router(state.clone()))
         .merge(crate::clusters::router(state.clone()))
         .merge(crate::music_ops::router(state.clone()))
-        .merge(crate::tagqueue::router(state))
+        .merge(crate::tagqueue::router(state.clone()))
+        .merge(crate::tagtaskui::router(state))
 }
 
 /// The full application: JSON API + web + pages, with the per-view filter-state
