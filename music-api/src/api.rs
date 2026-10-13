@@ -17,7 +17,12 @@ use crate::{AppState, db};
 
 /// Public liveness probe (no auth).
 pub async fn health() -> impl IntoResponse {
-    Json(json!({ "status": "ok" }))
+    Json(json!({
+        "status": "ok",
+        "version": crate::VERSION,
+        "gitSha": crate::GIT_SHA,
+        "describe": crate::GIT_DESCRIBE
+    }))
 }
 
 /// All protected routes. The auth layer is applied by the caller.

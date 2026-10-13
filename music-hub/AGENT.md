@@ -78,15 +78,21 @@ Login for smoke tests: `Mctoastus` / `1234` (also `momo`, `ANKD`; passwords may 
 
 ```bash
 # run from repo root
+# The tar carries no .git, so pass the git build-info in — the build embeds it.
 tar czf - -C music-hub --exclude target --exclude 'hub.db*' --exclude .env \
   --exclude 'datasette-*' --exclude 'make-public*' --exclude docs --exclude 'models' --exclude 'tmp' . \
   | ssh music-catalog 'tar xzf - -C ~/music-hub 2>/dev/null && find ~/music-hub -name "._*" -delete' \
-  && ssh music-catalog 'cd ~/music-hub && ~/.cargo/bin/cargo build --release --locked 2>&1 | tail -1 && sudo systemctl restart music-hub && sleep 2 && systemctl is-active music-hub'
+  && ssh music-catalog "cd ~/music-hub && GIT_SHA=$(git rev-parse --short=8 HEAD) GIT_DESCRIBE='$(git describe --tags --always --dirty)' ~/.cargo/bin/cargo build --release --locked 2>&1 | tail -1 && sudo systemctl restart music-hub && sleep 2 && systemctl is-active music-hub"
 ```
 
 - **Never ship the DB or `.env`** (excluded above). The tar excludes `docs/`, `models/`,
   `tmp/` too.
 - `find … -name "._*" -delete` strips macOS AppleDouble junk.
+- **Build info / traceability**: every build embeds a git-derived version
+  (`github.com/.../build.rs`): `git rev-parse --short=8 HEAD` + `git describe
+--tags --always --dirty` (passed as `GIT_SHA` / `GIT_DESCRIBE` here, since the
+  tar has no `.git`). Visible at `/api/hub/health`, in the UI footer, in the CLI
+  `music-hub --version`, and in the startup log. See `docs/stack-versioning.md`.
 - Migrations run automatically on boot (sqlx migrate). Additive only — **never edit
   `001_initial_schema.sql`**.
 - Live smoke (cookie auth):

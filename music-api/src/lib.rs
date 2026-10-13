@@ -29,6 +29,11 @@ use tokio::sync::Notify;
 
 pub use config::Config;
 
+/// Full build version (git-derived). Set by `build.rs`.
+pub const VERSION: &str = env!("BUILD_VERSION");
+pub const GIT_SHA: &str = env!("BUILD_GIT_SHA");
+pub const GIT_DESCRIBE: &str = env!("BUILD_GIT_DESCRIBE");
+
 /// Shared application state handed to every handler and the worker.
 pub struct AppState {
     pub pool: sqlx::Pool<sqlx::Sqlite>,

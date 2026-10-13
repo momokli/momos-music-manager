@@ -63,7 +63,14 @@ fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
 }
 
 async fn health() -> Json<Value> {
-    Json(json!({ "data": { "status": "ok", "version": env!("CARGO_PKG_VERSION") } }))
+    Json(json!({
+        "data": {
+            "status": "ok",
+            "version": crate::VERSION,
+            "gitSha": crate::GIT_SHA,
+            "describe": crate::GIT_DESCRIBE,
+        }
+    }))
 }
 
 #[derive(Deserialize)]

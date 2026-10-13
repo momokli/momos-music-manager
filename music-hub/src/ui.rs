@@ -22,6 +22,8 @@ pub struct Nav {
     pub is_admin: bool,
     /// Name of the active backpack scope, if any (#331). `None` = unscoped.
     pub active_backpack: Option<String>,
+    /// Git-derived build version, shown in the shell footer.
+    pub version: String,
 }
 
 impl Nav {
@@ -68,5 +70,6 @@ pub async fn nav(st: &AppState, headers: &HeaderMap, active: &str) -> Option<Nav
             .ok()
             .flatten()
             .map(|b| b.name),
+        version: crate::VERSION.to_string(),
     })
 }
