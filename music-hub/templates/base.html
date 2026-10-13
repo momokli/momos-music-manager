@@ -523,6 +523,69 @@
         background: #123c22;
         color: #7fe0a0 !important;
       }
+      /* Tag-task card queue (#347) */
+      .hub-tag-task-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+        gap: 0.6rem;
+        align-items: start;
+      }
+      .hub-tag-task-card {
+        border: 1px solid var(--pico-muted-border-color);
+        border-radius: 0.4rem;
+        padding: 0.6rem 0.7rem;
+        margin: 0;
+      }
+      .hub-tag-task-head {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        align-items: baseline;
+      }
+      .hub-tag-task-rank {
+        font-variant-numeric: tabular-nums;
+        font-weight: 700;
+        color: var(--pico-muted-color);
+      }
+      .hub-tag-task-artists {
+        flex: 1 1 100%;
+        overflow-wrap: anywhere;
+      }
+      .hub-tag-task-plays {
+        margin-left: auto;
+        white-space: nowrap;
+      }
+      .hub-tag-task-missing {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.3rem;
+        margin: 0.45rem 0;
+      }
+      .hub-chip-missing {
+        border-style: dashed;
+      }
+      .hub-tag-task-form {
+        display: flex;
+        gap: 0.3rem;
+        margin: 0.2rem 0 0;
+      }
+      .hub-tag-task-form input[type="text"] {
+        flex: 1 1 auto;
+        min-width: 0;
+        margin: 0;
+      }
+      .hub-tag-task-form select,
+      .hub-tag-task-form button {
+        margin: 0;
+        width: auto;
+      }
+      .hub-tag-task-done {
+        margin: 0.35rem 0 0;
+      }
+      .hub-tag-task-done button {
+        margin: 0;
+        width: auto;
+      }
       /* Overlap: allow long content to wrap so horizontal scrolling is never needed */
       .hub-cell-track {
         overflow-wrap: anywhere;
@@ -1051,10 +1114,11 @@
         </li>
         <li>
           <details class="dropdown">
-            <summary {% if nav.active == "playlists" || nav.active == "queue" || nav.active == "tags" || nav.active == "revisit" || nav.active == "collectives" || nav.active == "playlist" || nav.active == "tag" || nav.active == "curate" || nav.active == "listening" || nav.active == "clusters" || nav.active == "backpacks" %}aria-current="page"{% endif %}>Bibliothek</summary>
+            <summary {% if nav.active == "playlists" || nav.active == "queue" || nav.active == "tag-task" || nav.active == "tags" || nav.active == "revisit" || nav.active == "collectives" || nav.active == "playlist" || nav.active == "tag" || nav.active == "curate" || nav.active == "listening" || nav.active == "clusters" || nav.active == "backpacks" %}aria-current="page"{% endif %}>Bibliothek</summary>
             <ul>
               <li><a href="/me/playlists">Playlists</a></li>
               <li><a href="/tag-queue">Tag-Queue</a></li>
+              <li><a href="/tag-task" {% if nav.active == "tag-task" %}aria-current="page"{% endif %}>Tag-Task</a></li>
               <li><a href="/tags">Tags</a></li>
               <li><a href="/tag-clusters">Cluster</a></li>
               <li><a href="/curate">Kuratieren</a></li>
