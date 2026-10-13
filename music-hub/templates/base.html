@@ -517,6 +517,12 @@
         background: #123c22;
         color: #7fe0a0;
       }
+      /* Rec-scope toggle: the active scope (aria-current) reads as "on". */
+      .hub-scope-toggle .hub-chip[aria-current="true"] {
+        border-color: #1e6b3a;
+        background: #123c22;
+        color: #7fe0a0 !important;
+      }
       /* Overlap: allow long content to wrap so horizontal scrolling is never needed */
       .hub-cell-track {
         overflow-wrap: anywhere;
