@@ -34,7 +34,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use serde::Deserialize;
 use serde_json::Value;
-use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
+use sqlx::{Executor, QueryBuilder, Row, Sqlite, SqliteConnection, SqlitePool};
 
 use crate::api::AppState;
 
@@ -196,21 +196,25 @@ pub async fn artist_id_by_name(pool: &SqlitePool, name: &str) -> Option<i64> {
 }
 
 /// Find-or-create an artist by name (case-insensitive). Returns its id.
-pub async fn upsert_artist_by_name(pool: &SqlitePool, name: &str) -> Result<i64> {
+///
+/// Generic over the executor so it runs on a pool **or** inside a transaction
+/// (`&mut *tx`): the backfill batches all of its upserts in one transaction.
+/// The single `INSERT … ON CONFLICT … RETURNING` keeps the first-seen spelling
+/// (the no-op `DO UPDATE` only exists to make `RETURNING` emit the row).
+pub async fn upsert_artist_by_name<'e, E>(ex: E, name: &str) -> Result<i64>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     let name = name.trim();
     let now = now_iso();
-    sqlx::query(
-        "INSERT OR IGNORE INTO hub_artists (name, first_seen_at, updated_at) VALUES (?1, ?2, ?2)",
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_artists (name, first_seen_at, updated_at) VALUES (?1, ?2, ?2)
+         ON CONFLICT(name COLLATE NOCASE) DO UPDATE SET name = hub_artists.name
+         RETURNING id",
     )
     .bind(name)
     .bind(&now)
-    .execute(pool)
-    .await?;
-    let id: i64 = sqlx::query_scalar(
-        "SELECT id FROM hub_artists WHERE name = ?1 COLLATE NOCASE ORDER BY id LIMIT 1",
-    )
-    .bind(name)
-    .fetch_one(pool)
+    .fetch_one(ex)
     .await?;
     Ok(id)
 }
@@ -260,13 +264,16 @@ pub async fn upsert_artist_by_spotify(
 }
 
 /// Find-or-create an album by title (case-insensitive). Used by the backfill.
-pub async fn upsert_album_by_title(pool: &SqlitePool, title: &str) -> Result<i64> {
+///
+/// Takes a connection rather than a pool because it issues two statements and
+/// is always called on the backfill's transaction (`&mut *tx`).
+pub async fn upsert_album_by_title(conn: &mut SqliteConnection, title: &str) -> Result<i64> {
     let title = title.trim();
     let existing: Option<i64> = sqlx::query_scalar(
         "SELECT id FROM hub_albums WHERE title = ?1 COLLATE NOCASE ORDER BY id LIMIT 1",
     )
     .bind(title)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
     if let Some(id) = existing {
         return Ok(id);
@@ -277,7 +284,7 @@ pub async fn upsert_album_by_title(pool: &SqlitePool, title: &str) -> Result<i64
     )
     .bind(title)
     .bind(&now)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
     Ok(id)
 }
@@ -440,27 +447,38 @@ pub async fn link_track_artist_name(pool: &SqlitePool, track_id: i64, name: &str
     Ok(())
 }
 
-/// One-time (idempotent) backfill: create `hub_artists` / `hub_albums` rows from
-/// the historical free-text `hub_tracks.artists` / `hub_tracks.album` columns and
-/// link them. This is the **only** place application code splits artist strings.
+/// Process up to `limit` tracks that still lack artist links, all inside one
+/// transaction (`pool.begin()` … `tx.commit()`), and return how many tracks were
+/// processed. Returns `0` when nothing is left to do.
 ///
-/// Processes only tracks that have no `hub_track_artists` rows yet, so it is safe
-/// to call repeatedly (e.g. after test seeds).
-pub async fn backfill_artist_entities(pool: &SqlitePool) -> Result<usize> {
+/// Selection is `NOT EXISTS (hub_track_artists)`, so a track that already has
+/// links is never touched again — the backfill is resumable. The extra guard
+/// skips tracks that have nothing to backfill (and album-only tracks whose
+/// `album_id` is already set) so the caller's `while > 0` loop always terminates.
+pub async fn backfill_artist_entities_batch(pool: &SqlitePool, limit: i64) -> Result<usize> {
     let rows = sqlx::query(
         "SELECT t.id AS id, COALESCE(t.artists, '') AS artists, COALESCE(t.album, '') AS album
            FROM hub_tracks t
-          WHERE NOT EXISTS (SELECT 1 FROM hub_track_artists ta WHERE ta.track_id = t.id)",
+          WHERE NOT EXISTS (SELECT 1 FROM hub_track_artists ta WHERE ta.track_id = t.id)
+            AND (TRIM(COALESCE(t.artists, '')) != ''
+                 OR (TRIM(COALESCE(t.album, '')) != '' AND t.album_id IS NULL))
+          ORDER BY t.id
+          LIMIT ?1",
     )
+    .bind(limit)
     .fetch_all(pool)
     .await?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
     let mut n = 0usize;
     for r in rows {
         let tid: i64 = r.get("id");
         let artists_raw: String = r.get("artists");
         let album: String = r.get("album");
         for (pos, name) in split_artists(&artists_raw).iter().enumerate() {
-            let aid = upsert_artist_by_name(pool, name).await?;
+            let aid = upsert_artist_by_name(&mut *tx, name).await?;
             sqlx::query(
                 "INSERT INTO hub_track_artists (track_id, artist_id, position) VALUES (?1, ?2, ?3)
                  ON CONFLICT(track_id, artist_id) DO NOTHING",
@@ -468,33 +486,37 @@ pub async fn backfill_artist_entities(pool: &SqlitePool) -> Result<usize> {
             .bind(tid)
             .bind(aid)
             .bind(pos as i64)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
         }
         if !album.trim().is_empty() {
-            let aid = upsert_album_by_title(pool, &album).await?;
+            let aid = upsert_album_by_title(&mut *tx, &album).await?;
             sqlx::query("UPDATE hub_tracks SET album_id = ?1 WHERE id = ?2 AND album_id IS NULL")
                 .bind(aid)
                 .bind(tid)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await?;
         }
         n += 1;
     }
+    tx.commit().await?;
     Ok(n)
 }
 
-/// Startup hook: backfill only when no artist entities exist yet (the plan's
-/// "run once, when `hub_artists` is empty" trigger).
-pub async fn backfill_artist_entities_if_empty(pool: &SqlitePool) -> Result<usize> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_artists")
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
-    if count > 0 {
-        return Ok(0);
+/// Backfill every track that still lacks artist links, in batches of 1000, and
+/// return the total number of tracks processed. Idempotent: a second run over an
+/// already-backfilled DB returns `0`.
+pub async fn backfill_artist_entities(pool: &SqlitePool) -> Result<usize> {
+    const BATCH: i64 = 1000;
+    let mut total = 0usize;
+    loop {
+        let n = backfill_artist_entities_batch(pool, BATCH).await?;
+        if n == 0 {
+            break;
+        }
+        total += n;
     }
-    backfill_artist_entities(pool).await
+    Ok(total)
 }
 
 /// Load a track's artists as `(artist_id, name)`, ordered by position.

@@ -21,10 +21,10 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
         .await?;
 
     sqlx::migrate!("./migrations").run(&pool).await?;
-    // One-time backfill of artist/album entities from the historical free-text
-    // `hub_tracks.artists` / `hub_tracks.album` columns (plan P0). Runs only when
-    // `hub_artists` is still empty, so it is a no-op on every later boot.
-    crate::artists::backfill_artist_entities_if_empty(&pool).await?;
+    // NOTE: the artist/album entity backfill deliberately does **not** run here.
+    // It is far too slow to sit in the boot path (per-row statements on a 78k-track
+    // DB blocked startup for ~15 min). Run it explicitly via
+    // `music-hub backfill-artists` (batched + transactional + resumable).
     Ok(pool)
 }
 
