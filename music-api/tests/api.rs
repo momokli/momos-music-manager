@@ -98,6 +98,7 @@ async fn harness_with(analyzer_url: Option<String>) -> Harness {
         analysis_sem: Arc::new(tokio::sync::Semaphore::new(1)),
         analyzing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         analysis_backoff: Default::default(),
+        artist_ingesting: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
     });
 
     Harness {
@@ -1238,4 +1239,168 @@ async fn vault_backfill_is_idempotent_and_batched() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["resolved"]["bpm"], 124.0);
     assert_eq!(v["resolved"]["source"], "traktor");
+}
+
+// ── Artist orders (whole-discography download + ingest) ──────────────────────
+
+#[tokio::test]
+async fn artist_order_create_and_get() {
+    let h = harness().await;
+
+    // A bare Deezer artist id is canonicalised to its URL. No ARL is configured,
+    // so no deemix call is made and the order stays `open`.
+    let (status, body) = send(
+        &h.app,
+        authed("POST", "/artist-orders")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(
+                serde_json::json!({ "artist": "12345", "priority": 7 }),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["status"], "open");
+    assert_eq!(v["artist"], "https://www.deezer.com/artist/12345");
+    let order_id = v["orderId"].as_str().unwrap().to_string();
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", &format!("/artist-orders/{order_id}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["orderId"], order_id);
+    assert_eq!(v["artist"], "12345");
+    assert_eq!(v["artistUrl"], "https://www.deezer.com/artist/12345");
+    assert_eq!(v["status"], "open");
+    assert_eq!(v["priority"], 7);
+    assert_eq!(v["added"], 0);
+    assert!(v["items"].as_array().unwrap().is_empty());
+
+    // Unknown id → 404.
+    let (status, _) = send(
+        &h.app,
+        authed("GET", "/artist-orders/nope")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn artist_order_rejects_a_bad_artist() {
+    let h = harness().await;
+    let (status, _) = send(
+        &h.app,
+        authed("POST", "/artist-orders")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({ "artist": "not an artist" })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn artist_ingest_parses_ffprobe_fixture_into_vault() {
+    let h = harness().await;
+
+    // A realistic `ffprobe -show_format -show_streams -print_format json` body.
+    let fixture = r#"{
+        "streams": [{ "codec_type": "audio", "codec_name": "flac" }],
+        "format": {
+            "format_name": "flac",
+            "duration": "343.414000",
+            "tags": {
+                "ISRC": "GBKQU2538819",
+                "TITLE": "Sudno",
+                "ARTIST": "Molchat Doma",
+                "ALBUM": "Etazhi"
+            }
+        }
+    }"#;
+    let tags = music_api::tags::parse_ffprobe(fixture);
+    assert_eq!(tags.isrc.as_deref(), Some("GBKQU2538819"));
+    assert_eq!(tags.duration_ms, Some(343_414));
+
+    // The ingest writes the hubs, links and the metadata satellite (with duration).
+    let mut conn = h.state.pool.acquire().await.unwrap();
+    let track_hk = music_api::vault::ingest_file_tags(
+        &mut conn,
+        tags.isrc.as_deref().unwrap(),
+        tags.title.as_deref(),
+        tags.artist.as_deref(),
+        tags.album.as_deref(),
+        tags.duration_ms,
+        "deemix",
+    )
+    .await
+    .unwrap()
+    .expect("an ISRC is present, so a track hub is written");
+    drop(conn);
+    assert!(!track_hk.is_empty());
+
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM hub_track").await, 1);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM hub_artist").await, 1);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM hub_album").await, 1);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM link_track_artist").await, 1);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM link_track_album").await, 1);
+    let duration: Option<i64> =
+        sqlx::query_scalar("SELECT duration_ms FROM sat_track_meta WHERE track_hk = ?")
+            .bind(&track_hk)
+            .fetch_one(&h.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(duration, Some(343_414));
+
+    // The operational ledger row is `ready` with the FLAC path, so the analysis
+    // worker picks it up.
+    db::ingest_ready_track(
+        &h.state.pool,
+        "GBKQU2538819",
+        "flac",
+        Some("/data/flac/GBKQU2538819.flac"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let track = db::get_track(&h.state.pool, "GBKQU2538819")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(track.state, "ready");
+    assert_eq!(
+        track.path_flac.as_deref(),
+        Some("/data/flac/GBKQU2538819.flac")
+    );
+    assert_eq!(
+        db::ready_flac_unaanalyzed(&h.state.pool, 10)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the ingested track is an analysis candidate"
+    );
+
+    // A file without an ISRC is a best-effort skip, not an error.
+    let mut conn = h.state.pool.acquire().await.unwrap();
+    let none = music_api::vault::ingest_file_tags(
+        &mut conn,
+        "",
+        Some("Untitled"),
+        Some("Someone"),
+        None,
+        None,
+        "deemix",
+    )
+    .await
+    .unwrap();
+    assert!(none.is_none());
 }

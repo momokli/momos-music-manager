@@ -12,8 +12,8 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio_util::io::ReaderStream;
 
-use crate::models::{CreateOrderRequest, MetadataPushRequest};
-use crate::{db, AppState};
+use crate::models::{CreateArtistOrderRequest, CreateOrderRequest, MetadataPushRequest};
+use crate::{db, worker, AppState};
 
 /// Public liveness probe (no auth).
 pub async fn health() -> impl IntoResponse {
@@ -32,6 +32,12 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/orders/{id}", get(get_order))
         .route("/orders/{id}/cancel", post(cancel_order))
         .route("/orders/{id}/priority", post(set_priority))
+        // Artist orders: download a whole Deezer artist's discography.
+        .route(
+            "/artist-orders",
+            post(create_artist_order).get(list_artist_orders),
+        )
+        .route("/artist-orders/{id}", get(get_artist_order))
         .route("/isrc/{isrc}", get(get_isrc))
         .route("/isrc/{isrc}/retry", post(retry_isrc))
         .route("/isrc/{isrc}/{format}", get(get_file))
@@ -96,6 +102,100 @@ async fn create_order(
     );
 
     Json(json!({ "orderId": order_id, "status": "open", "count": isrcs.len() })).into_response()
+}
+
+/// `POST /artist-orders` — order a whole Deezer artist's discography.
+async fn create_artist_order(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateArtistOrderRequest>,
+) -> Response {
+    let Some(artist_url) = crate::deezer::normalize_artist_url(&req.artist) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "artist must be a Deezer artist id or URL",
+        );
+    };
+
+    let order_id = uuid::Uuid::new_v4().to_string();
+    if let Err(e) = db::create_artist_order(
+        &state.pool,
+        &order_id,
+        req.artist.trim(),
+        &artist_url,
+        req.priority,
+    )
+    .await
+    {
+        tracing::error!("create_artist_order failed: {e:#}");
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to create artist order",
+        );
+    }
+
+    // Best-effort submit; the worker retries while the order stays `open`.
+    let deemix_ready = worker::ensure_deemix_login(&state).await;
+    let status = worker::submit_artist_order(&state, &order_id, &artist_url, deemix_ready).await;
+
+    state.notify.notify_one();
+    state.logs.push(
+        "info",
+        format!(
+            "artist order {order_id}: {artist_url} (prio {})",
+            req.priority
+        ),
+    );
+
+    Json(json!({ "orderId": order_id, "status": status, "artist": artist_url })).into_response()
+}
+
+/// `GET /artist-orders` — list artist orders, optionally filtered by status.
+async fn list_artist_orders(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ListQuery>,
+) -> Response {
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    match db::list_artist_orders(&state.pool, q.status.as_deref(), limit).await {
+        Ok(orders) => Json(json!({ "orders": orders })).into_response(),
+        Err(e) => {
+            tracing::error!("list_artist_orders failed: {e:#}");
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to list artist orders",
+            )
+        }
+    }
+}
+
+/// `GET /artist-orders/{id}` — artist order status plus the ingested ISRCs.
+async fn get_artist_order(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let order = match db::get_artist_order(&state.pool, &id).await {
+        Ok(Some(o)) => o,
+        Ok(None) => return error(StatusCode::NOT_FOUND, "artist order not found"),
+        Err(e) => {
+            tracing::error!("get_artist_order failed: {e:#}");
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to read artist order",
+            );
+        }
+    };
+    let items = db::artist_order_items(&state.pool, &id)
+        .await
+        .unwrap_or_default();
+    Json(json!({
+        "orderId": order.id,
+        "artist": order.artist,
+        "artistUrl": order.artist_url,
+        "status": order.status,
+        "priority": order.priority,
+        "added": order.added,
+        "error": order.error,
+        "createdAt": order.created_at,
+        "updatedAt": order.updated_at,
+        "items": items,
+    }))
+    .into_response()
 }
 
 /// `POST /orders/{id}/cancel` — mark an order cancelled and drop its item links.
