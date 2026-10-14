@@ -470,6 +470,17 @@ pub async fn queue_counts(
     Ok(out)
 }
 
+/// Number of rows currently in `downloading` — the in-flight set the
+/// dispatcher caps against `MAX_INFLIGHT`. Counts every source, so a non-Deezer
+/// (yt-dlp) download consumes a slot just like a deemix one.
+pub async fn count_downloading(pool: &Pool<Sqlite>) -> anyhow::Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE state = 'downloading'")
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
 /// Reset a non-ready track to `pending` so the worker re-resolves/re-downloads it.
 pub async fn reset_track_to_pending(pool: &Pool<Sqlite>, isrc: &str) -> anyhow::Result<bool> {
     let n = sqlx::query(

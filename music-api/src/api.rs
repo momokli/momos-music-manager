@@ -264,6 +264,7 @@ async fn worker_status(State(state): State<Arc<AppState>>) -> Response {
         "paused": state.paused.load(Ordering::Relaxed),
         "intervalSecs": state.config.worker_interval.as_secs(),
         "maxAttempts": state.config.queue_max_attempts,
+        "maxInflight": state.config.max_inflight,
     }))
     .into_response()
 }

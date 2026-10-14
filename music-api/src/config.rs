@@ -48,6 +48,11 @@ pub struct Config {
     pub queue_retry_base_secs: i64,
     /// Upper bound on the retry backoff (seconds).
     pub queue_retry_max_secs: i64,
+    /// Maximum number of downloads dispatched to deemix at once. Orders are
+    /// still accepted without limit; only the *dispatch* is bounded, so at most
+    /// this many rows sit in `downloading`. Priority decides *which* pending
+    /// rows fill the free slots.
+    pub max_inflight: usize,
     /// Base URL of the BPM/key analyzer service (Essentia), e.g.
     /// `http://127.0.0.1:8711`. `POST {url}/analyze` with a server-local file
     /// path. `None` (unset or blank) disables analysis entirely.
@@ -113,6 +118,7 @@ impl Config {
             queue_max_attempts: env_parse("QUEUE_MAX_ATTEMPTS", 3u32).max(1),
             queue_retry_base_secs: env_parse("QUEUE_RETRY_BASE_SECS", 60i64).max(1),
             queue_retry_max_secs: env_parse("QUEUE_RETRY_MAX_SECS", 1800i64).max(1),
+            max_inflight: env_parse("MAX_INFLIGHT", 5usize).max(1),
             analyzer_url: analyzer_url_from_env(),
             analysis_concurrency: env_parse("ANALYSIS_CONCURRENCY", 1usize).max(1),
             analysis_precedence: env_list(
