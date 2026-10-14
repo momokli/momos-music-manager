@@ -256,6 +256,101 @@ pub async fn retry_later(
     Ok(true)
 }
 
+/// `(kind, ref)`-keyed companions used by the download ledger's transitions
+/// (`mark_downloading`/`mark_ready`/`mark_terminal`/`schedule_retry`) to keep the
+/// queue item in lockstep without threading an id around.
+///
+/// Mark a `(kind, ref)` running, creating it if needed. Called when a download is
+/// dispatched, so the in-flight ledger and the queue agree.
+pub async fn ensure_running_ref(
+    pool: &Pool<Sqlite>,
+    kind: &str,
+    reference: &str,
+    now: i64,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO work_items (kind, ref, state, attempts, created_at, updated_at)
+         VALUES (?, ?, 'running', 0, ?, ?)
+         ON CONFLICT(kind, ref) DO UPDATE SET state = 'running', updated_at = excluded.updated_at",
+    )
+    .bind(kind)
+    .bind(reference)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Mark a `(kind, ref)` done (no-op when it does not exist).
+pub async fn finish_ref(pool: &Pool<Sqlite>, kind: &str, reference: &str, now: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE work_items SET state = 'done', error = NULL, not_before = NULL, updated_at = ?
+          WHERE kind = ? AND ref = ?",
+    )
+    .bind(now)
+    .bind(kind)
+    .bind(reference)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Mark a `(kind, ref)` permanently failed.
+pub async fn fail_ref(
+    pool: &Pool<Sqlite>,
+    kind: &str,
+    reference: &str,
+    error: &str,
+    now: i64,
+) -> Result<()> {
+    sqlx::query("UPDATE work_items SET state = 'failed', error = ?, updated_at = ? WHERE kind = ? AND ref = ?")
+        .bind(error)
+        .bind(now)
+        .bind(kind)
+        .bind(reference)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Re-queue a `(kind, ref)` with a backoff, or fail it out at `max_attempts`.
+pub async fn retry_ref(
+    pool: &Pool<Sqlite>,
+    kind: &str,
+    reference: &str,
+    error: &str,
+    not_before: i64,
+    now: i64,
+) -> Result<()> {
+    let row: Option<(i64, i64)> =
+        sqlx::query_as("SELECT attempts, max_attempts FROM work_items WHERE kind = ? AND ref = ?")
+            .bind(kind)
+            .bind(reference)
+            .fetch_optional(pool)
+            .await?;
+    match row {
+        Some((attempts, max)) if attempts >= max => {
+            fail_ref(pool, kind, reference, error, now).await?;
+        }
+        Some(_) => {
+            sqlx::query(
+                "UPDATE work_items SET state = 'queued', error = ?, not_before = ?, updated_at = ?
+                  WHERE kind = ? AND ref = ?",
+            )
+            .bind(error)
+            .bind(not_before)
+            .bind(now)
+            .bind(kind)
+            .bind(reference)
+            .execute(pool)
+            .await?;
+        }
+        None => enqueue(pool, kind, reference, 0, None).await?,
+    }
+    Ok(())
+}
+
 /// Re-queue items stranded in `running` (a worker that died mid-flight). Items
 /// whose `updated_at` is older than `stale_secs` go back to `queued`; the next
 /// claim counts another attempt, so a poison item still fails out. Returns how

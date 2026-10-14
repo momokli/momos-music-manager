@@ -1759,3 +1759,54 @@ async fn transcode_kind_derives_formats_from_flac() {
         .unwrap();
     assert_eq!(t2.path_320, t.path_320);
 }
+
+// ── download runs through the queue ─────────────────────────────────
+
+#[tokio::test]
+async fn download_kind_tracks_the_tracks_ledger() {
+    let h = harness().await;
+    // An order materialises `download` items carrying the order priority.
+    create_order_with_priority(&h.app, &["DLHIGH", "DLLOW"], 42).await;
+    let items = music_api::work::items(&h.state.pool, Some("download"), 10)
+        .await
+        .unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items
+        .iter()
+        .all(|i| i.state == "queued" && i.priority == 42));
+
+    // Dispatching (mark_downloading) moves the item to `running`...
+    db::mark_downloading(&h.state.pool, "DLHIGH", "uuid", db::now() + 60)
+        .await
+        .unwrap();
+    let queued = music_api::work::next(&h.state.pool, "download", 5, db::now())
+        .await
+        .unwrap();
+    assert!(
+        queued.iter().all(|i| i.reference != "DLHIGH"),
+        "the in-flight item left the queue"
+    );
+    assert_eq!(
+        music_api::work::count_running(&h.state.pool, "download")
+            .await
+            .unwrap(),
+        1
+    );
+
+    // ...and completing the download (mark_ready) finishes it.
+    db::mark_ready(
+        &h.state.pool,
+        "DLHIGH",
+        "mp3-320",
+        None,
+        Some("/x.mp3"),
+        None,
+    )
+    .await
+    .unwrap();
+    let items = music_api::work::items(&h.state.pool, Some("download"), 10)
+        .await
+        .unwrap();
+    let hi = items.iter().find(|i| i.reference == "DLHIGH").unwrap();
+    assert_eq!(hi.state, "done");
+}

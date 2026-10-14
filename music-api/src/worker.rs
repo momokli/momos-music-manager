@@ -30,6 +30,10 @@ const ARTIST_INGEST_MAX_FILES: usize = 2000;
 /// failed after this long (bounded lifetime).
 const ARTIST_ORDER_STALE_SECS: i64 = 1800;
 
+/// How many pending tracks to materialise into the `download` kind per tick
+/// (bounded reconcile; highest priority first).
+const RECONCILE_BATCH: i64 = 500;
+
 /// Work items stranded in `running` longer than this are re-queued (a worker
 /// that died mid-flight); the next claim counts another attempt.
 const WORK_STALE_SECS: i64 = 1800;
@@ -151,12 +155,11 @@ pub async fn ensure_deemix_login(state: &Arc<AppState>) -> bool {
 
 /// Phase A: look each pending ISRC up on Deezer and submit it to deemix.
 ///
-/// Orders are accepted without limit; only the *dispatch to deemix* is bounded.
-/// Each tick pulls at most `max_inflight - inflight` due rows — the `next`
-/// function is [`db::due_tracks`], which already sorts by order priority, so
-/// priority decides *which* pending rows fill the free slots. At most
-/// `MAX_INFLIGHT` rows therefore sit in `downloading` at any time; the rest stay
-/// `pending` and are picked up as slots free up.
+/// Orders are accepted without limit; only the *dispatch* is bounded. The pending
+/// set is materialised into the `download` kind (bounded reconcile) and the
+/// dispatcher pulls `next("download")` — the priority `next`. The in-flight cap
+/// stays on the `tracks` ledger (`count_downloading`, the #427 fix), so at most
+/// `MAX_INFLIGHT` rows are `downloading` at once and the rest wait their turn.
 pub async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     let policy = retry_policy(state);
 
@@ -171,15 +174,21 @@ pub async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
         return Ok(());
     }
 
-    // Only pull as many as there are free slots; `due_tracks` is the priority
-    // `next` function (highest order priority first, then oldest).
-    let pending = db::due_tracks(&state.pool, slots.min(25), db::now()).await?;
+    // Materialise the highest-priority pending tracks into the download kind, so
+    // the queue stays a faithful, priority-ordered view of what still needs
+    // downloading.
+    for (isrc, priority) in db::pending_work(&state.pool, RECONCILE_BATCH, db::now()).await? {
+        work::enqueue(&state.pool, work::kind::DOWNLOAD, &isrc, priority, None).await?;
+    }
+
+    // Pull at most `slots` from the priority `next`, highest priority first.
+    let queued = work::next(&state.pool, work::kind::DOWNLOAD, slots.min(25), db::now()).await?;
     debug!(
-        "resolve_pending: {} due ({} slots free of {max_inflight})",
-        pending.len(),
+        "resolve_pending: {} queued ({} slots free of {max_inflight})",
+        queued.len(),
         slots
     );
-    if pending.is_empty() {
+    if queued.is_empty() {
         return Ok(());
     }
 
@@ -188,7 +197,23 @@ pub async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     // below does not need deemix and still runs regardless.
     let deemix_ready = ensure_deemix_login(state).await;
 
-    for track in pending {
+    for item in queued {
+        let Some(track) = db::get_track(&state.pool, &item.reference).await? else {
+            // Unknown ref — settle it so it stops being offered.
+            work::finish(&state.pool, item.id, db::now()).await?;
+            continue;
+        };
+        if track.state == state::DOWNLOADING {
+            // Already in flight but the item was not marked running — sync it.
+            work::ensure_running_ref(&state.pool, work::kind::DOWNLOAD, &track.isrc, db::now())
+                .await?;
+            continue;
+        }
+        if track.state != state::PENDING {
+            // Terminal (ready/absent/failed): settle the item.
+            work::finish(&state.pool, item.id, db::now()).await?;
+            continue;
+        }
         // Non-Deezer sources (e.g. SoundCloud) are dispatched to a bounded
         // background task so the tick never blocks on a download.
         if track.source() != "deezer" {
