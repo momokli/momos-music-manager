@@ -31,8 +31,6 @@ pub fn router(state: AppState) -> Router {
         .route("/track/{id}/fetch", post(track_fetch))
         .route("/track/{id}/tag", post(track_tag))
         .route("/track/{id}/untag", post(track_untag))
-        .route("/track/{id}/done", post(track_done))
-        .route("/track/{id}/undone", post(track_undone))
         .route("/track/{id}/actions", get(track_actions_frag))
         .route(
             "/track/{id}/actions/playlist",
@@ -1023,12 +1021,6 @@ struct TrackPage {
     tag_action: String,
     htmx: bool,
     my_types: Vec<TypeOption>,
-    // "tagged-complete" flag (#345).
-    tag_complete: bool,
-    tag_done_manual: bool,
-    tag_missing: Vec<String>,
-    done_action: String,
-    undone_action: String,
 }
 
 struct TagCloudRow {
@@ -1681,10 +1673,6 @@ async fn build_track_page(
 
     // "tagged-complete" flag (#345): auto (all configured families tagged) or
     // manual (user marked it done).
-    let done_families = crate::tagdone::configured_families(&st.pool).await;
-    let done_type_refs: Vec<&str> = done_families.iter().map(|s| s.as_str()).collect();
-    let done_status = crate::tagdone::status(&st.pool, nav.id, id, &done_type_refs).await;
-
     Some(TrackPage {
         nav,
         id,
@@ -1729,11 +1717,6 @@ async fn build_track_page(
         tag_action: format!("/track/{id}/tag"),
         htmx: false,
         my_types,
-        tag_complete: done_status.complete,
-        tag_done_manual: done_status.manual,
-        tag_missing: done_status.missing,
-        done_action: format!("/track/{id}/done"),
-        undone_action: format!("/track/{id}/undone"),
     })
 }
 
@@ -1802,47 +1785,6 @@ async fn track_untag(
     };
     if let Some(tag_id) = crate::tags::find_tag_id_by_name(&st.pool, &f.name).await {
         let _ = crate::tags::untag_track(&st.pool, nav.id, id, tag_id).await;
-    }
-    let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
-    Redirect::to(&format!("/track/{id}?scope={}", scope.as_str())).into_response()
-}
-
-#[derive(Deserialize)]
-struct TrackDoneForm {
-    /// Recommendation scope to preserve across the redirect (`mine` | `all`).
-    #[serde(default)]
-    scope: Option<String>,
-}
-
-/// Manually mark the track as "fertig" (fully tagged) for the current user.
-async fn track_done(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-    Form(f): Form<TrackDoneForm>,
-) -> Response {
-    let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
-        return Redirect::to("/login").into_response();
-    };
-    if let Err(e) = crate::tagdone::set_done(&st.pool, nav.id, id).await {
-        return error_page(&format!("Konnte Track nicht als fertig markieren: {e}"));
-    }
-    let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
-    Redirect::to(&format!("/track/{id}?scope={}", scope.as_str())).into_response()
-}
-
-/// Remove the manual "fertig" mark for the current user.
-async fn track_undone(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-    Form(f): Form<TrackDoneForm>,
-) -> Response {
-    let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
-        return Redirect::to("/login").into_response();
-    };
-    if let Err(e) = crate::tagdone::clear_done(&st.pool, nav.id, id).await {
-        return error_page(&format!("Konnte Markierung nicht entfernen: {e}"));
     }
     let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
     Redirect::to(&format!("/track/{id}?scope={}", scope.as_str())).into_response()

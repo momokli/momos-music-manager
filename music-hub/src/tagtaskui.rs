@@ -68,6 +68,8 @@ struct PageQuery {
     cadence: Option<String>,
     /// "1" = only tracks in my playlists.
     mine: Option<String>,
+    /// "1" = show the skipped tracks instead of the task cards.
+    skipped: Option<String>,
 }
 
 /// True when the request came from htmx (so we return a fragment, not a redirect).
@@ -131,7 +133,16 @@ struct TagTaskPage {
     cadence_daily: bool,
     cadence_weekly: bool,
     mine: bool,
+    skipped: bool,
     cards: Vec<CardView>,
+    skipped_tracks: Vec<SkippedRow>,
+}
+
+/// A track the user skipped (for the "übersprungene" view).
+struct SkippedRow {
+    id: i64,
+    title: String,
+    artists_html: String,
 }
 
 /// Map a missing describing *family* (e.g. `MOOD`, `PHASE`) to a display chip.
@@ -307,6 +318,29 @@ async fn card_for(
     Some(card)
 }
 
+/// The tracks the user has skipped (for the "übersprungene" view), newest first.
+async fn build_skipped(st: &AppState, user_id: i64) -> Vec<SkippedRow> {
+    let rows = sqlx::query_as::<_, (i64, String)>(
+        "SELECT t.id, COALESCE(t.title,'') FROM hub_track_tag_done d
+           JOIN hub_tracks t ON t.id = d.track_id
+          WHERE d.user_id = ?1
+          ORDER BY d.marked_at DESC LIMIT 500",
+    )
+    .bind(user_id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+    let ids: Vec<i64> = rows.iter().map(|(id, _)| *id).collect();
+    let mut html = crate::artists::artists_html_for_tracks(&st.pool, &ids).await;
+    rows.into_iter()
+        .map(|(id, title)| SkippedRow {
+            id,
+            title,
+            artists_html: html.remove(&id).unwrap_or_default(),
+        })
+        .collect()
+}
+
 async fn tag_task_page(
     State(st): State<AppState>,
     Query(q): Query<PageQuery>,
@@ -317,6 +351,7 @@ async fn tag_task_page(
     };
     let cadence = cadence_for(&st, q.cadence.as_deref()).await;
     let mine = q.mine.as_deref() == Some("1");
+    let skipped = q.skipped.as_deref() == Some("1");
     let limit = limit_for(&st).await;
     let task = match crate::tagtasks::task_for(&st.pool, nav.id, cadence, chrono::Utc::now(), limit)
         .await
@@ -331,6 +366,11 @@ async fn tag_task_page(
         }
     };
     let cards = build_cards(&st, nav.id, task.id, cadence.as_str(), mine).await;
+    let skipped_tracks = if skipped {
+        build_skipped(&st, nav.id).await
+    } else {
+        Vec::new()
+    };
     render(&TagTaskPage {
         nav,
         flash: String::new(),
@@ -338,7 +378,9 @@ async fn tag_task_page(
         cadence_daily: cadence == crate::tagtasks::Cadence::Daily,
         cadence_weekly: cadence == crate::tagtasks::Cadence::Weekly,
         mine,
+        skipped,
         cards,
+        skipped_tracks,
     })
 }
 
@@ -411,5 +453,9 @@ async fn tag_task_undone(
         return Redirect::to("/login").into_response();
     };
     let _ = crate::tagdone::clear_done(&st.pool, nav.id, id).await;
-    Redirect::to("/tag-task").into_response()
+    if is_htmx(&headers) {
+        // An empty outerHTML swap removes the row.
+        return Html(String::new()).into_response();
+    }
+    Redirect::to("/tag-task?skipped=1").into_response()
 }

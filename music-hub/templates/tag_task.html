@@ -46,13 +46,59 @@ content %}
         %}
         >Nur meine Playlists</a
     >
+    <a
+        class="hub-chip"
+        href="/tag-task?cadence={{ cadence }}&amp;skipped=1"
+        {%
+        if
+        skipped
+        %}aria-current="page"
+        {%
+        endif
+        %}
+        >Übersprungene</a
+    >
     <span class="hub-muted" style="margin-left: 0.5rem">{{ cards.len() }} Karten</span>
 </p>
 
-{% if cards.is_empty() %}
+{% if skipped %}
+<h2>Übersprungene Tracks ({{ skipped_tracks.len() }})</h2>
+{% if skipped_tracks.is_empty() %}
+<p class="hub-muted">Keine übersprungenen Tracks.</p>
+{% else %}
+<table class="hub-dense-table">
+    <caption class="hub-visually-hidden">
+        Übersprungene Tracks
+    </caption>
+    <tbody>
+        {% for s in skipped_tracks %}
+        <tr id="skipped-{{ s.id }}">
+            <td>
+                <strong>{{ s.title }}</strong>
+                <span class="hub-muted">{{ s.artists_html|safe }}</span>
+            </td>
+            <td>
+                <a href="/track/{{ s.id }}" class="hub-x" title="Track-Home öffnen">↗</a>
+            </td>
+            <td>
+                <form
+                    method="post"
+                    action="/tag-task/{{ s.id }}/undone"
+                    hx-post="/tag-task/{{ s.id }}/undone"
+                    hx-target="closest tr"
+                    hx-swap="outerHTML"
+                >
+                    <button type="submit" class="outline">Überspringen aufheben</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %} {% else %} {% if cards.is_empty() %}
 <p class="hub-muted">Alles erledigt — keine offenen Tracks in dieser Aufgabe. 🎉</p>
 {% else %}
 <div class="hub-tag-task-grid">
     {% for card in cards %} {% include "_partials/tag_task_card.html" %} {% endfor %}
 </div>
-{% endif %} {% endblock %}
+{% endif %} {% endif %} {% endblock %}

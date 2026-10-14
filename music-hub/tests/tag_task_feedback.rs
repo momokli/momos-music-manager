@@ -130,3 +130,60 @@ async fn mine_filter_limits_cards_to_my_playlists() {
         "t_two is not in alice's playlists and must be filtered out"
     );
 }
+
+#[tokio::test]
+async fn skip_hides_from_task_and_can_be_restored() {
+    let app = common::spawn().await;
+    let alice = app.seed.alice;
+    let cookie = app.session_cookie(alice).await;
+
+    // Load the task first (it is generated once per period and frozen).
+    let html = get_page(&app, &cookie, "").await;
+    assert!(
+        html.contains(&format!("/track/{}\"", app.seed.t_all)),
+        "t_all starts in the task"
+    );
+
+    // Skip t_all from the task.
+    let resp = app
+        .client()
+        .post(app.url(&format!("/tag-task/{}/done", app.seed.t_all)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+
+    // It leaves the task cards...
+    let html = get_page(&app, &cookie, "").await;
+    assert!(
+        !html.contains(&format!("/track/{}\"", app.seed.t_all)),
+        "a skipped track must leave the task"
+    );
+
+    // ...but shows up under ?skipped=1 with an undo.
+    let html = get_page(&app, &cookie, "?skipped=1").await;
+    assert!(
+        html.contains(&format!("/track/{}\"", app.seed.t_all)),
+        "a skipped track must appear in the skipped view"
+    );
+    assert!(
+        html.contains("Überspringen aufheben"),
+        "the skipped view must offer an undo"
+    );
+
+    // Undo restores it to the task.
+    let resp = app
+        .client()
+        .post(app.url(&format!("/tag-task/{}/undone", app.seed.t_all)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    let html = get_page(&app, &cookie, "").await;
+    assert!(
+        html.contains(&format!("/track/{}\"", app.seed.t_all)),
+        "a restored track must reappear in the task"
+    );
+}
