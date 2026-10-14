@@ -8,6 +8,45 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ## [Unreleased]
 
+## [0.27.0] — 2026-10-14
+
+**hub-tagging** — Tagging workflow: a track counts as *tagged-complete* when the
+describing tag families (MOOD/GENRE/VIBE/PHASE/MERKMAL) are set, or the user forces
+it; a daily/weekly tagging task surfaces the most-played uncomplete tracks as a
+card queue; per-type „describes the song" toggles refine which types count as
+describing.
+
+### Added
+
+- **Track 'tagged-complete' flag** (#345, PR #401): auto rule (all describing
+  families set) plus a per-user manual flag (`complete = auto || manual`); migration
+  `045_hub_track_tag_done.sql`, `music-hub/src/tagdone.rs`, setting
+  `engine_tag_done_types`, routes `POST /track/{id}/done|undone`, badge + button on
+  the track view.
+- **Daily/weekly tagging task** (#346, PR #402): `GET /api/hub/tag-task?cadence=daily|weekly`
+  returns the user's incomplete tracks most-played first, persisted per
+  `(user, cadence, period_start)`; module `music-hub/src/tagtasks.rs`, migration
+  `046_tag_task.sql`, settings `engine_tag_task_limit` / `engine_tag_task_cadence`.
+- **Tag-task UI** (#347, PR #403): `/tag-task` renders the task as a card grid
+  (rank, title, artists, plays, missing-family chips) with tag/done/undone routes and
+  a nav link; `music-hub/src/tagtaskui.rs`, `templates/tag_task.html`.
+- **Per-type 'describes the song' toggle** (#348, PR #436): 7 per-type boolean
+  settings `ENGINE_DESCRIBES_{MOOD,GENRE,VIBE,PHASE,MERKMAL,SETLIST,RUMPELKISTE}`
+  (defaults mood/genre/vibe/phase/merkmal=`1`, setlist/rumpelkiste=`0`), editable
+  under `/admin`; `artists.rs` / `tagdone.rs` use `describes_map()` with fallback to
+  `TagType::describes()`.
+
+### Fixed
+
+- **Tag-queue „nur ungetaggt" filter + tag-task card UX** (#430, PR #431): the
+  untagged filter now counts every resolved tag, not only typed ones; tag-task cards
+  show resolved tags, a play button, and update in place (htmx).
+- **Tag „fertig" reframed as „überspringen"** (#432, PR #433): the manual flag means
+  *skip this track in the tagging task*, not *done*; wording and buttons updated.
+- **Tag skip action moved off the track page onto the tag-task** (#434, PR #435): the
+  track page drops the tag-status block; the task gains an „Übersprungene" view with
+  undo.
+
 ## [0.26.0] — 2026-10-13
 
 **hub-artist-album** — Artist-explorer depth: the artist profile carries
@@ -80,7 +119,8 @@ deduped, score-sorted track list and can be exported.
 - **Backpack export** — m3u8 / Traktor / ZIP (#333, #391).
 - **Backpack tests** — resolver + scope + UI (#334).
 
-[Unreleased]: https://github.com/momokli/momos-music-manager/compare/hub-v0.26.0...HEAD
+[Unreleased]: https://github.com/momokli/momos-music-manager/compare/hub-v0.27.0...HEAD
+[0.27.0]: https://github.com/momokli/momos-music-manager/releases/tag/hub-v0.27.0
 [0.26.0]: https://github.com/momokli/momos-music-manager/releases/tag/hub-v0.26.0
 [0.25.0]: https://github.com/momokli/momos-music-manager/releases/tag/hub-v0.25.0
 [0.24.0]: https://github.com/momokli/momos-music-manager/releases/tag/hub-v0.24.0
