@@ -26,7 +26,7 @@ NOT already done: kein PR/Branch referenziert #348.
 | 4 | verifier | done | PASS — Diff/AK geprüft, `cargo test` grün (alle Targets 0 failed, Lib 75 passed) |
 | 5 | tester | done | PASS — Integrations-Test ergänzt (Settings-Persistenz→tagdone), `cargo test` grün (398 passed / 0 failed) |
 | 6 | developer (PR) | done | PR #436 erstellt |
-| 7 | reviewer | pending | |
+| 7 | reviewer | done | APPROVE — PR #436 final review PASS |
 
 ## PR
 
@@ -288,3 +288,53 @@ unbekannte Family-Tokens bleiben erhalten (`family_primary_type`→`None`⇒reta
 **Stage-Status 5 → done (PASS).** Keine blockierenden Findings; Randnotiz (nicht #348):
 `SettingKind::Csv` parst nur Zahlen → `engine_tag_done_types` im Admin faktisch nicht
 speicherbar (aus Stage 4 bestätigt, separates Issue).
+
+## Review-Ergebnis (Stage 7)
+
+**Entscheidung: APPROVE** — PR #436 ist final reviewt und gegen `main` frei mergebar.
+
+### PR-Body / Issue-Referenz
+- PR #436, base `main` ← `feature/issue-348-describes-toggle`, State OPEN.
+- Body enthält Closing-Keyword **`Closes #348`** korrekt. CI-Check „Issue-Referenz im PR" = pass.
+
+### Diff-Hygiene
+- Nur `music-hub/src/{settings,tagtypes,artists,tagdone}.rs` + `progress-issue-348.md`; keine
+  Migration, keine fremden Module, kein Template-/UI-Code.
+- Keine Debug-Reste (`dbg!`/`println!`/`eprintln!`/`console.`), keine TODO/FIXME/XXX,
+  kein `unsafe`, keine Secrets. `unwrap()` ausschließlich in `#[cfg(test)]`-Pfaden.
+- Keine main-Push-/Force-Effekte: Branch 6 Commits ahead von `origin/main`, `merge-base == origin/main`,
+  `git merge-tree` leer ⇒ Fast-Forward, keine Konflikte.
+
+### Semantik S1–S6
+- **S1** 7 `ENGINE_DESCRIBES_*` als `flag`/`Bool`, Defaults mood/genre/vibe/phase/merkmal=`1`,
+  setlist/rumpelkiste=`0` — deckt built-in `describes()` exakt. ✅
+- **S2** `describes()` bleibt Default; `describe_key()` (PHASE_1..5 → phase), `parse_bool`
+  (1/true/on/yes; unset/unknown ⇒ Default), `describes_map()` mit Fallback. ✅
+- **S3** `artists.rs` lädt `describes_map` einmal vor der Type-Dist-Schleife; Filter nutzt
+  Setting mit Fallback; leere DB ⇒ identisch zuvor. ✅
+- **S4** `tagdone.rs`: `family_primary_type()` + `configured_families()` droppt Typen mit
+  `describes==false`; unbekannte Tokens bleiben (dokumentiert, kein Blocker). ✅
+- **S5** Admin-UI: neue Bool-Specs werden generisch gerendert/persistiert (`admin_save` schreibt
+  alle Bool-Specs) — kein Template-/Handler-Edit nötig. ✅
+- **S6** Doc-Kommentare korrigiert (kein „inherent/hard-wired"). ✅
+
+### Tests
+- `cd music-hub && cargo test` (Host planet, Stage 7 erneut ausgeführt) → **Exit 0**,
+  alle ~39 Targets **0 failed**, Lib **76 passed**, UI-Integration 53, views 5, Doc-tests 0.
+- 11 neue #348-Tests vorhanden/grün, inkl. End-to-End `describes_toggle_end_to_end_drops_merkmal_requirement`
+  (Settings-Persistenz → tagdone). Belastbar.
+
+### Mergebarkeit
+- `mergeable=MERGEABLE`, `mergeStateStatus=BLOCKED` (nur Branch-Protection/Review-Gate, **keine**
+  Konflikte). CI: Conventional-Commit-Titel + Issue-Referenz = pass.
+
+### Frontend-Regel
+- Keine Frontend-/Template-/Styling-Datei geändert; die neuen /admin-Checkboxen entstehen rein
+  datengetrieben aus der SETTINGS-Registry. Screenshot-Pflicht damit **nicht** ausgelöst.
+  Optional (nice-to-have, nicht blockierend): Screenshot der /admin-Ansicht.
+
+### Findings
+Keine blockierenden Findings. Randnotiz (nicht #348): `SettingKind::Csv` parst nur Zahlen →
+`engine_tag_done_types` im Admin faktisch nicht speicherbar; separates Issue empfohlen.
+
+**Stage-Status 7 → done (APPROVE).** Kein Merge, kein Push durch Stage 7.
