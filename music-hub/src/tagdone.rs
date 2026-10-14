@@ -4,6 +4,8 @@
 //!
 //! * `auto`   — every configured describing tag-type *family* has at least one
 //!   resolved tag on the track (`hub_track_resolved_tags`, all sources).
+//!   Families whose type is toggled off via `engine_describes_*` (#348) are
+//!   skipped so a disabled type never becomes a dead requirement.
 //! * `manual` — the user explicitly marked it done (`hub_track_tag_done`).
 //!
 //! `complete = auto || manual`; a manual mark overrides a missing family.
@@ -27,8 +29,26 @@ pub struct TagDoneStatus {
     pub missing: Vec<String>,
 }
 
+/// The representative tag type for a describing *family* name (canonical,
+/// uppercase). `PHASE` maps to `Phase1` (the family is shared by all phases).
+/// `None` for unknown family names.
+pub fn family_primary_type(family: &str) -> Option<TagType> {
+    Some(match family.trim().to_ascii_uppercase().as_str() {
+        "MOOD" => TagType::Mood,
+        "GENRE" => TagType::Genre,
+        "VIBE" => TagType::Vibe,
+        "PHASE" => TagType::Phase1,
+        "MERKMAL" => TagType::Merkmal,
+        _ => return None,
+    })
+}
+
 /// Read the configured describing families from settings. Falls back to the
 /// built-in `DESCRIBE_FAMILIES` when the setting is unset or empty.
+///
+/// Since #348 a family whose representative type is toggled off via
+/// `engine_describes_*` is dropped, so a disabled type never becomes a dead
+/// "required" family. Unknown family tokens are kept as-is (no type to look up).
 pub async fn configured_families(pool: &SqlitePool) -> Vec<String> {
     let raw = settings::get(pool, ENGINE_TAG_DONE_TYPES).await;
     let mut parsed: Vec<String> = Vec::new();
@@ -40,10 +60,16 @@ pub async fn configured_families(pool: &SqlitePool) -> Vec<String> {
         }
     }
     if parsed.is_empty() {
-        DESCRIBE_FAMILIES.iter().map(|s| s.to_string()).collect()
-    } else {
-        parsed
+        parsed = DESCRIBE_FAMILIES.iter().map(|s| s.to_string()).collect();
     }
+    // Keep only families whose representative type currently describes a track.
+    let describes = crate::tagtypes::describes_map(pool).await;
+    parsed.retain(|fam| {
+        family_primary_type(fam)
+            .map(|t| describes.get(&t).copied().unwrap_or_else(|| t.describes()))
+            .unwrap_or(true)
+    });
+    parsed
 }
 
 /// The describing *family* for a raw tag-type string (canonical form; `PHASE_1..5`
@@ -142,5 +168,137 @@ pub async fn status(
         auto,
         manual,
         missing,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn family_primary_type_maps_canonical_families() {
+        assert_eq!(family_primary_type("MOOD"), Some(TagType::Mood));
+        assert_eq!(family_primary_type("genre"), Some(TagType::Genre));
+        assert_eq!(family_primary_type("Vibe"), Some(TagType::Vibe));
+        assert_eq!(family_primary_type("PHASE"), Some(TagType::Phase1));
+        assert_eq!(family_primary_type("MERKMAL"), Some(TagType::Merkmal));
+        assert_eq!(family_primary_type("SETLIST"), None);
+        assert_eq!(family_primary_type("bogus"), None);
+    }
+
+    #[tokio::test]
+    async fn configured_families_default_to_builtin() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let fams = configured_families(&pool).await;
+        assert_eq!(
+            fams,
+            DESCRIBE_FAMILIES.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_families_drop_disabled_types() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        // Turn MOOD and setlist describing off; MOOD must drop from the list.
+        settings::set(&pool, settings::ENGINE_DESCRIBES_MOOD, "0")
+            .await
+            .unwrap();
+        let fams = configured_families(&pool).await;
+        assert!(!fams.iter().any(|f| f == "MOOD"), "MOOD should be dropped");
+        assert!(fams.iter().any(|f| f == "GENRE"));
+        assert!(fams.iter().any(|f| f == "PHASE"));
+        // Setlist is not a describe family; unrelated toggles leave it absent.
+        assert!(!fams.iter().any(|f| f == "SETLIST"));
+    }
+
+    const TS: &str = "2026-01-01T00:00:00+00:00";
+
+    async fn seed_tag(pool: &SqlitePool, owner: i64, slug: &str, ty: &str) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO hub_tags (owner_user_id, slug, name, created_at, type)
+             VALUES (?1, ?2, ?2, ?3, ?4) RETURNING id",
+        )
+        .bind(owner)
+        .bind(slug)
+        .bind(TS)
+        .bind(ty)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn resolve_tag(pool: &SqlitePool, track_id: i64, tag_id: i64) {
+        sqlx::query(
+            "INSERT INTO hub_track_resolved_tags (track_id, tag_id) VALUES (?1, ?2)
+             ON CONFLICT(track_id, tag_id) DO NOTHING",
+        )
+        .bind(track_id)
+        .bind(tag_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// End-to-end via the settings store: a track covered on every describing
+    /// family *except* MERKMAL is not `auto`-done by default; persisting the
+    /// MERKMAL toggle off (the same `settings::set` call `admin_save` uses) drops
+    /// MERKMAL from the required families and flips the track to `auto`/complete.
+    #[tokio::test]
+    async fn describes_toggle_end_to_end_drops_merkmal_requirement() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let uid: i64 = sqlx::query_scalar(
+            "INSERT INTO hub_users (slug, display_name, created_at)
+             VALUES ('u', 'u', ?1) RETURNING id",
+        )
+        .bind(TS)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let tid: i64 = sqlx::query_scalar(
+            "INSERT INTO hub_tracks (service, service_track_id, title, artists, first_seen_at)
+             VALUES ('spotify', 't1', 'T', 'A', ?1) RETURNING id",
+        )
+        .bind(TS)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Cover every describing family except MERKMAL.
+        for (slug, ty) in [
+            ("mood", "MOOD"),
+            ("genre", "GENRE"),
+            ("vibe", "VIBE"),
+            ("phase", "PHASE_1"),
+        ] {
+            let tag = seed_tag(&pool, uid, slug, ty).await;
+            resolve_tag(&pool, tid, tag).await;
+        }
+
+        // Defaults: MERKMAL is still a required describing family -> not auto.
+        let fams = configured_families(&pool).await;
+        let refs: Vec<&str> = fams.iter().map(String::as_str).collect();
+        let before = status(&pool, uid, tid, &refs).await;
+        assert!(!before.auto, "MERKMAL still required by default");
+        assert!(before.missing.iter().any(|m| m == "MERKMAL"));
+        assert!(!before.complete);
+
+        // Persist the toggle off, exactly as the admin save path does.
+        settings::set(&pool, settings::ENGINE_DESCRIBES_MERKMAL, "0")
+            .await
+            .unwrap();
+
+        let fams = configured_families(&pool).await;
+        assert!(
+            !fams.iter().any(|f| f == "MERKMAL"),
+            "MERKMAL no longer required once toggled off"
+        );
+        // Unrelated families survive the toggle.
+        assert!(fams.iter().any(|f| f == "MOOD"));
+        assert!(fams.iter().any(|f| f == "GENRE"));
+        let refs: Vec<&str> = fams.iter().map(String::as_str).collect();
+        let after = status(&pool, uid, tid, &refs).await;
+        assert!(after.auto, "auto passes once MERKMAL is toggled off");
+        assert!(after.complete);
+        assert!(after.missing.is_empty());
     }
 }
