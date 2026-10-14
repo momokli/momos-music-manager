@@ -72,7 +72,7 @@ struct SortOpt {
 struct QueueRowView {
     id: i64,
     title: String,
-    artists: String,
+    artists_html: String,
     total: i64,
     meta_score: i64,
     traktor: String,
@@ -117,25 +117,31 @@ async fn queue_page(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .and_then(|s| s.parse::<f64>().ok());
-    let rows: Vec<QueueRowView> = crate::scoring::queue(&st.pool, &e, max, untagged, &sort, 2000)
-        .await
-        .into_iter()
-        .filter(|r| {
-            let hay = format!("{} {} {}", r.title, r.artists, r.album).to_lowercase();
-            crate::table::matches_typo(&hay, &needle_toks)
-                && (!mine || mine_ids.contains(&r.track_id))
-        })
-        .take(500)
-        .map(|r| QueueRowView {
-            id: r.track_id,
-            title: r.title,
-            artists: r.artists,
-            total: r.total.round() as i64,
-            meta_score: r.meta_score.round() as i64,
-            traktor: format!("{:.1}", r.traktor_score),
-            tag_count: r.tag_count,
-        })
-        .collect();
+    let mut rows: Vec<QueueRowView> =
+        crate::scoring::queue(&st.pool, &e, max, untagged, &sort, 2000)
+            .await
+            .into_iter()
+            .filter(|r| {
+                let hay = format!("{} {} {}", r.title, r.artists, r.album).to_lowercase();
+                crate::table::matches_typo(&hay, &needle_toks)
+                    && (!mine || mine_ids.contains(&r.track_id))
+            })
+            .take(500)
+            .map(|r| QueueRowView {
+                id: r.track_id,
+                title: r.title,
+                artists_html: String::new(),
+                total: r.total.round() as i64,
+                meta_score: r.meta_score.round() as i64,
+                traktor: format!("{:.1}", r.traktor_score),
+                tag_count: r.tag_count,
+            })
+            .collect();
+    let queue_ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    let mut queue_html = crate::artists::artists_html_for_tracks(&st.pool, &queue_ids).await;
+    for r in rows.iter_mut() {
+        r.artists_html = queue_html.remove(&r.id).unwrap_or_default();
+    }
     let total_shown = rows.len();
     let sort_opts: Vec<SortOpt> = [
         ("", "Ripeness ↑ (am wenigsten getaggt)"),
@@ -261,7 +267,7 @@ async fn build_detail(
     scope: crate::recommend::RecScope,
 ) -> Option<QueueDetail> {
     let row = sqlx::query(
-        "SELECT COALESCE(t.title,'') AS title, COALESCE(t.artists,'') AS artists,
+        "SELECT COALESCE(t.title,'') AS title,
                 COALESCE(t.album,'') AS album, t.duration_ms,
                 COALESCE(t.isrc,'') AS isrc, COALESCE(t.explicit,0) AS explicit,
                 COALESCE(t.image_url,'') AS image_url,
@@ -295,14 +301,12 @@ async fn build_detail(
     } else {
         format!("/album/{}", urlencoding::encode(&album))
     };
-    let artists_str = row.get::<String, _>("artists");
-    let artists: Vec<DetailLink> = artists_str
-        .split(",")
-        .map(|a| a.trim())
-        .filter(|a| !a.is_empty())
-        .map(|a| DetailLink {
-            name: a.to_string(),
-            href: format!("/artist/{}", urlencoding::encode(a)),
+    let artists: Vec<DetailLink> = crate::artists::artists_for_track(&st.pool, id)
+        .await
+        .into_iter()
+        .map(|(aid, name)| DetailLink {
+            name,
+            href: format!("/artist/{aid}"),
         })
         .collect();
     let genres = {

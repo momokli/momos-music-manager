@@ -58,7 +58,7 @@
             {% for t in tracks %}
             <tr>
                 <td><a href="/track/{{ t.id }}">{{ t.title }}</a></td>
-                <td>{{ t.artists }}</td>
+                <td>{{ t.artists_html|safe }}</td>
                 <td>{{ t.album }}</td>
             </tr>
             {% endfor %}

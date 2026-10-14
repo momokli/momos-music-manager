@@ -249,7 +249,7 @@ content %}
             {% for r in rows %}
             <tr>
                 <td class="hub-cell-track">
-                    <a href="/track/{{ r.id }}">{{ r.artists }} — {{ r.title }}</a>
+                    {{ r.artists_html|safe }} — <a href="/track/{{ r.id }}">{{ r.title }}</a>
                     · <a href="/digging?seed={{ r.id }}">dig</a> {% if r.isrc != "" %}<br /><code
                         class="hub-muted"
                         >{{ r.isrc }}</code

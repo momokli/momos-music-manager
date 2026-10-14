@@ -198,7 +198,7 @@ struct DashboardPage {
 struct RecentRow {
     id: i64,
     title: String,
-    artists: String,
+    artists_html: String,
 }
 
 #[derive(Template)]
@@ -975,6 +975,7 @@ struct TrackPage {
     id: i64,
     title: String,
     artists: String,
+    artists_html: String,
     album: String,
     duration: String,
     isrc: String,
@@ -1093,7 +1094,7 @@ struct NowPlaying {
     track_url: String,
     play_state: String,
     title: String,
-    artists: String,
+    artists_html: String,
     album: String,
     image: String,
     progress_pct: i64,
@@ -1145,7 +1146,7 @@ struct NowPage {
     connect_link: bool,
     has_external: bool,
     title: String,
-    artists: String,
+    artists_html: String,
     album: String,
     image: String,
     progress_pct: i64,
@@ -1162,7 +1163,15 @@ async fn track_page(
     let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
         return Redirect::to("/login").into_response();
     };
-    match build_track_page(&st, nav, id, flash.msg.unwrap_or_default(), crate::recommend::RecScope::parse(flash.scope.as_deref())).await {
+    match build_track_page(
+        &st,
+        nav,
+        id,
+        flash.msg.unwrap_or_default(),
+        crate::recommend::RecScope::parse(flash.scope.as_deref()),
+    )
+    .await
+    {
         Some(page) => render_track(page),
         None => track_not_found(),
     }
@@ -1454,14 +1463,16 @@ async fn build_track_page(
     // manual (user marked it done).
     let done_families = crate::tagdone::configured_families(&st.pool).await;
     let done_type_refs: Vec<&str> = done_families.iter().map(|s| s.as_str()).collect();
-    let done_status =
-        crate::tagdone::status(&st.pool, nav.id, id, &done_type_refs).await;
+    let done_status = crate::tagdone::status(&st.pool, nav.id, id, &done_type_refs).await;
 
     Some(TrackPage {
         nav,
         id,
         title: row.get::<Option<String>, _>("title").unwrap_or_default(),
         artists: row.get::<Option<String>, _>("artists").unwrap_or_default(),
+        artists_html: crate::artists::artist_links_html(
+            &crate::artists::artists_for_track(&st.pool, id).await,
+        ),
         album: row.get::<Option<String>, _>("album").unwrap_or_default(),
         duration,
         isrc,
@@ -1711,6 +1722,17 @@ async fn render_now(st: &AppState, nav: &crate::ui::Nav) -> Response {
                     "—".to_string(),
                 ),
             };
+            let artists_html = match n.hub_track_id {
+                Some(tid) => {
+                    let linked = crate::artists::artists_for_track(&st.pool, tid).await;
+                    if linked.is_empty() {
+                        crate::artists::escape_html(&n.artists)
+                    } else {
+                        crate::artists::artist_links_html(&linked)
+                    }
+                }
+                None => crate::artists::escape_html(&n.artists),
+            };
             render(&NowPlaying {
                 logged_in: true,
                 connected: true,
@@ -1720,7 +1742,7 @@ async fn render_now(st: &AppState, nav: &crate::ui::Nav) -> Response {
                 track_url,
                 play_state: if n.playing { "Läuft" } else { "Pausiert" }.to_string(),
                 title: n.title.clone(),
-                artists: n.artists.clone(),
+                artists_html,
                 album: n.album.clone(),
                 image: n.image.clone(),
                 progress_pct: n.progress_pct(),
@@ -1815,7 +1837,7 @@ async fn now_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
             connect_link: true,
             has_external: false,
             title: String::new(),
-            artists: String::new(),
+            artists_html: String::new(),
             album: String::new(),
             image: String::new(),
             progress_pct: 0,
@@ -1848,7 +1870,7 @@ async fn now_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
             connect_link: false,
             has_external: false,
             title: String::new(),
-            artists: String::new(),
+            artists_html: String::new(),
             album: String::new(),
             image: String::new(),
             progress_pct: 0,
@@ -1862,7 +1884,7 @@ async fn now_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
             connect_link: false,
             has_external: false,
             title: String::new(),
-            artists: String::new(),
+            artists_html: String::new(),
             album: String::new(),
             image: String::new(),
             progress_pct: 0,
@@ -1882,7 +1904,7 @@ fn now_external(nav: crate::ui::Nav, n: &crate::nowplaying::Now, _known: bool) -
         connect_link: false,
         has_external: true,
         title: n.title.clone(),
-        artists: n.artists.clone(),
+        artists_html: crate::artists::escape_html(&n.artists),
         album: n.album.clone(),
         image: n.image.clone(),
         progress_pct: n.progress_pct(),
@@ -2203,7 +2225,7 @@ struct CurateRow {
 struct CurateTrackRow {
     id: i64,
     title: String,
-    artists: String,
+    artists_html: String,
     spotify: bool,
 }
 
@@ -2538,16 +2560,18 @@ async fn curate_detail(
                         .try_get::<Option<String>, _>("title")
                         .unwrap_or_default()
                         .unwrap_or_default(),
-                    artists: r
-                        .try_get::<Option<String>, _>("artists")
-                        .unwrap_or_default()
-                        .unwrap_or_default(),
+                    artists_html: String::new(),
                     spotify: sp != 0,
                 }
             })
             .collect();
         got.sort_by_key(|r| order.get(&r.id).copied().unwrap_or(usize::MAX));
         preview.extend(got);
+    }
+    let preview_ids: Vec<i64> = preview.iter().map(|r| r.id).collect();
+    let mut preview_html = crate::artists::artists_html_for_tracks(&st.pool, &preview_ids).await;
+    for r in preview.iter_mut() {
+        r.artists_html = preview_html.remove(&r.id).unwrap_or_default();
     }
 
     let tags = crate::tags::list_user_tags(&st.pool, nav.id).await;
@@ -2625,15 +2649,20 @@ async fn curate_delete(
 
 /// A few recently seen tracks for the dashboard.
 async fn recent_tracks(st: &AppState) -> Vec<RecentRow> {
-    let rows = sqlx::query("SELECT id, artists, title FROM hub_tracks ORDER BY id DESC LIMIT 25")
+    let rows = sqlx::query("SELECT id, title FROM hub_tracks ORDER BY id DESC LIMIT 25")
         .fetch_all(&st.pool)
         .await
         .unwrap_or_default();
+    let ids: Vec<i64> = rows.iter().map(|r| r.get::<i64, _>("id")).collect();
+    let mut html = crate::artists::artists_html_for_tracks(&st.pool, &ids).await;
     rows.iter()
-        .map(|r| RecentRow {
-            id: r.get("id"),
-            title: r.get::<Option<String>, _>("title").unwrap_or_default(),
-            artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
+        .map(|r| {
+            let id = r.get::<i64, _>("id");
+            RecentRow {
+                id,
+                title: r.get::<Option<String>, _>("title").unwrap_or_default(),
+                artists_html: html.remove(&id).unwrap_or_default(),
+            }
         })
         .collect()
 }

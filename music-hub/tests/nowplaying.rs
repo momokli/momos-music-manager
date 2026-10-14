@@ -77,6 +77,70 @@ async fn ingest_spotify_item_creates_track_and_external_id() {
     .await
     .unwrap();
     assert_eq!(ext, 1);
+    // Atomic artist/album entities (plan P0).
+    let links: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM hub_track_artists WHERE track_id = ?1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(links, 1, "one artist link expected");
+    let album_id: Option<i64> = sqlx::query_scalar("SELECT album_id FROM hub_tracks WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert!(album_id.is_some(), "album entity not linked");
+}
+
+#[tokio::test]
+async fn ingest_stores_atomic_artists_and_album() {
+    let app = common::spawn().await;
+    let item = json!({
+        "id": "multi-1",
+        "name": "Duo",
+        "artists": [
+            { "id": "sp-a", "name": "Alpha" },
+            { "id": "sp-b", "name": "Beta" }
+        ],
+        "album": {
+            "id": "alb-1",
+            "name": "Collab",
+            "album_type": "single",
+            "release_date": "2024-01-01",
+            "total_tracks": 2,
+            "images": [{ "url": "http://img/a" }]
+        },
+        "duration_ms": 1000,
+        "explicit": false
+    });
+    let id = music_hub::ingest::ingest_spotify_item(&app.pool, &item)
+        .await
+        .unwrap()
+        .expect("track created");
+    let links: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM hub_track_artists WHERE track_id = ?1")
+            .bind(id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(links, 2, "two atomic artists expected");
+    let ext: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_artist_external_ids
+          WHERE service = 'spotify' AND external_id IN ('sp-a', 'sp-b')",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(ext, 2, "both spotify artist ids recorded");
+    let album_ext: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_album_external_ids
+          WHERE service = 'spotify' AND external_id = 'alb-1'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(album_ext, 1, "album external id recorded");
 }
 
 #[tokio::test]

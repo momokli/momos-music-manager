@@ -38,7 +38,7 @@ playing in Spotify and lets them tag it in place. Keep all conditionals as eleme
             {% else %}
             <span class="hub-now-title" title="{{ play_state }}">{{ title }}</span>
             {% endif %}
-            <span class="hub-now-artists">{{ artists }}</span>
+            <span class="hub-now-artists">{{ artists_html|safe }}</span>
         </div>
         <div
             class="hub-now-bar"

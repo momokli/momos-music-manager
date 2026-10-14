@@ -89,7 +89,7 @@ content %}
         <tr>
             <td>{{ loop.index }}</td>
             <td><a href="/track/{{ t.id }}">{{ t.title }}</a></td>
-            <td>{{ t.artists }}</td>
+            <td>{{ t.artists_html|safe }}</td>
             <td>{% if t.spotify %}✓{% else %}—{% endif %}</td>
         </tr>
         {% endfor %}

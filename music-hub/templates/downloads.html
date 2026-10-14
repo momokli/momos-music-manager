@@ -157,7 +157,7 @@ content %}
                 <tr>
                     <td><code>{{ r.isrc }}</code></td>
                     <td>{{ r.title }}</td>
-                    <td>{{ r.artists }}</td>
+                    <td>{{ r.artists_html|safe }}</td>
                     <td>{{ r.service }}</td>
                     <td>{{ r.state }}</td>
                     <td>{{ r.source_format }}</td>

@@ -148,6 +148,7 @@ struct SearchRow {
     id: i64,
     title: String,
     artists: String,
+    artists_html: String,
     album: String,
 }
 
@@ -184,6 +185,7 @@ async fn run_search(
             id: r.get("id"),
             title: r.get::<Option<String>, _>("title").unwrap_or_default(),
             artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
+            artists_html: String::new(),
             album: r.get::<Option<String>, _>("album").unwrap_or_default(),
         })
         .collect()
@@ -229,6 +231,13 @@ async fn search_page(
             });
             tracks.truncate(100);
         }
+    }
+
+    // Link artist names (id-based) for the result rows.
+    let ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
+    let mut html = crate::artists::artists_html_for_tracks(&st.pool, &ids).await;
+    for t in tracks.iter_mut() {
+        t.artists_html = html.remove(&t.id).unwrap_or_default();
     }
 
     let rawq = raw.as_deref().unwrap_or("");
@@ -410,7 +419,7 @@ struct PlaylistTrackRow {
     position: String,
     id: i64,
     title: String,
-    artists: String,
+    artists_html: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -483,7 +492,7 @@ async fn playlist_page(
     crate::table::push_fuzzy(&mut qb, &q, &["title", "artists"]);
     crate::table::order_by(&mut qb, &sort, &dir, allowed, "pos");
 
-    let tracks: Vec<PlaylistTrackRow> = qb
+    let mut tracks: Vec<PlaylistTrackRow> = qb
         .build()
         .fetch_all(&st.pool)
         .await
@@ -496,9 +505,14 @@ async fn playlist_page(
                 .unwrap_or_else(|| "—".to_string()),
             id: r.get("id"),
             title: r.get::<Option<String>, _>("title").unwrap_or_default(),
-            artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
+            artists_html: String::new(),
         })
         .collect();
+    let track_ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
+    let mut track_html = crate::artists::artists_html_for_tracks(&st.pool, &track_ids).await;
+    for t in tracks.iter_mut() {
+        t.artists_html = track_html.remove(&t.id).unwrap_or_default();
+    }
 
     let isrcs: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT t.isrc FROM hub_playlist_tracks hpt
@@ -1131,8 +1145,8 @@ async fn download_rows(
 ) -> Vec<DownloadTrackRow> {
     let offset = (page - 1).max(0) * DOWNLOADS_PER_PAGE;
     let mut qb = QueryBuilder::new(format!(
-        "SELECT t.isrc AS isrc, COALESCE(t.title, '') AS title, \
-         COALESCE(t.artists, '') AS artists, t.service AS service, \
+        "SELECT t.id AS track_id, t.isrc AS isrc, COALESCE(t.title, '') AS title, \
+         t.service AS service, \
          COALESCE(ms.state, 'unknown') AS state, \
          COALESCE(ms.source_format, '') AS source_format, \
          COALESCE(ms.deezer_id, '') AS deezer_id, \
@@ -1151,15 +1165,17 @@ async fn download_rows(
     }
     qb.push(" LIMIT ").push_bind(DOWNLOADS_PER_PAGE);
     qb.push(" OFFSET ").push_bind(offset);
-    qb.build()
+    let mut rows: Vec<DownloadTrackRow> = qb
+        .build()
         .fetch_all(pool)
         .await
         .unwrap_or_default()
         .into_iter()
         .map(|r| DownloadTrackRow {
+            track_id: r.get::<Option<i64>, _>("track_id").unwrap_or(0),
             isrc: r.get::<Option<String>, _>("isrc").unwrap_or_default(),
             title: r.get::<Option<String>, _>("title").unwrap_or_default(),
-            artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
+            artists_html: String::new(),
             service: r.get::<Option<String>, _>("service").unwrap_or_default(),
             state: r.get::<Option<String>, _>("state").unwrap_or_default(),
             source_format: r
@@ -1168,7 +1184,13 @@ async fn download_rows(
             deezer_id: r.get::<Option<String>, _>("deezer_id").unwrap_or_default(),
             error: r.get::<Option<String>, _>("error").unwrap_or_default(),
         })
-        .collect()
+        .collect();
+    let ids: Vec<i64> = rows.iter().map(|r| r.track_id).collect();
+    let mut html = crate::artists::artists_html_for_tracks(pool, &ids).await;
+    for r in rows.iter_mut() {
+        r.artists_html = html.remove(&r.track_id).unwrap_or_default();
+    }
+    rows
 }
 
 /// Distinct ISRCs matching the current filters (for order/refresh actions).
@@ -1305,9 +1327,10 @@ struct QueueItem {
 
 /// One row of the all-tracks table.
 struct DownloadTrackRow {
+    track_id: i64,
     isrc: String,
     title: String,
-    artists: String,
+    artists_html: String,
     service: String,
     state: String,
     source_format: String,
@@ -1793,6 +1816,7 @@ struct CompareRow {
     id: i64,
     title: String,
     artists: String,
+    artists_html: String,
     isrc: String,
     bpm: String,
     key: String,
@@ -2233,6 +2257,7 @@ async fn overlap_page(
             id: tid,
             title: t.title,
             artists: t.artists,
+            artists_html: String::new(),
             isrc: t.isrc,
             bpm: bpm_opt
                 .map(|b| format!("{b:.0}"))
@@ -2300,6 +2325,11 @@ async fn overlap_page(
             .then_with(|| a.title.cmp(&b.title))
     });
     rows.truncate(1000);
+    let overlap_ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    let mut overlap_html = crate::artists::artists_html_for_tracks(&st.pool, &overlap_ids).await;
+    for r in rows.iter_mut() {
+        r.artists_html = overlap_html.remove(&r.id).unwrap_or_default();
+    }
 
     let mut pairs: Vec<OverlapPair> = pair_counts
         .into_iter()
@@ -2851,7 +2881,7 @@ struct DiggingPage {
     has_seed: bool,
     seed_id: i64,
     seed_title: String,
-    seed_artists: String,
+    seed_artists_html: String,
     rows: Vec<DigRow>,
     lastfm_enabled: bool,
     freqblog_enabled: bool,
@@ -2877,6 +2907,7 @@ struct DigRow {
     matched: bool,
     title: String,
     artists: String,
+    artists_html: String,
     sources: Vec<String>,
     users: i64,
     playlists: i64,
@@ -2962,6 +2993,7 @@ async fn merge_candidate(
             matched: tid.is_some(),
             title: title.to_string(),
             artists: artists.to_string(),
+            artists_html: String::new(),
             sources: vec![source.to_string()],
             users: 0,
             playlists: 0,
@@ -3121,7 +3153,7 @@ async fn digging_page(
     };
 
     let mut has_seed = false;
-    let (mut seed_id, mut seed_title, mut seed_artists) = (0i64, String::new(), String::new());
+    let (mut seed_id, mut seed_title) = (0i64, String::new());
     let mut seed_tag_ids: HashSet<i64> = HashSet::new();
     let mut cand: HashMap<String, DigRow> = HashMap::new();
 
@@ -3130,7 +3162,6 @@ async fn digging_page(
             has_seed = true;
             seed_id = seed.id;
             seed_title = seed.title.clone();
-            seed_artists = seed.artists.clone();
 
             // 1. Hub-intern: tracks sharing the seed's playlists (capped so the
             //    external discoveries below still fit the table).
@@ -3143,13 +3174,13 @@ async fn digging_page(
             .await
             .ok()
             .flatten();
-            let seed_artist = seed
-                .artists
-                .split(',')
+            // First artist from the entity table (no string splitting).
+            let seed_artist = crate::artists::artists_for_track(&st.pool, sid)
+                .await
+                .into_iter()
                 .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
+                .map(|(_, name)| name)
+                .unwrap_or_default();
             seed_tag_ids = sqlx::query_scalar::<_, i64>(
                 "SELECT tag_id FROM hub_track_resolved_tags WHERE track_id = ?1",
             )
@@ -3482,6 +3513,22 @@ async fn digging_page(
     });
     let with_hub = rows.iter().filter(|r| r.users > 0 || r.likes > 0).count();
     rows.truncate(500);
+    // Link artist names for hub-matched candidates; escape the rest.
+    let dig_ids: Vec<i64> = rows
+        .iter()
+        .filter(|r| r.matched)
+        .map(|r| r.track_id)
+        .collect();
+    let mut dig_html = crate::artists::artists_html_for_tracks(&st.pool, &dig_ids).await;
+    for r in rows.iter_mut() {
+        r.artists_html = if r.matched {
+            dig_html
+                .remove(&r.track_id)
+                .unwrap_or_else(|| crate::artists::escape_html(&r.artists))
+        } else {
+            crate::artists::escape_html(&r.artists)
+        };
+    }
 
     // Filter toggle links, preserving the other flags.
     let link = |mine: bool, bpm: bool, harm: bool, tol: i64| -> String {
@@ -3608,7 +3655,9 @@ async fn digging_page(
         has_seed,
         seed_id,
         seed_title,
-        seed_artists,
+        seed_artists_html: crate::artists::artist_links_html(
+            &crate::artists::artists_for_track(&st.pool, seed_id).await,
+        ),
         rows,
         lastfm_enabled,
         freqblog_enabled,
@@ -4360,7 +4409,10 @@ async fn backpacks_page(
         Ok(b) => b,
         Err(e) => {
             tracing::warn!("backpacks list failed for user {}: {e:#}", nav.id);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Backpacks konnten nicht geladen werden")
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Backpacks konnten nicht geladen werden",
+            )
                 .into_response();
         }
     };
@@ -4489,7 +4541,9 @@ async fn backpack_toggle_active(
         Err(e) => return flash_redirect("/backpacks", format!("Fehler: {e}")),
     };
     let result = if is_active {
-        crate::backpacks::clear_active(&st.pool, nav.id).await.map(|_| ())
+        crate::backpacks::clear_active(&st.pool, nav.id)
+            .await
+            .map(|_| ())
     } else {
         crate::backpacks::set_active(&st.pool, nav.id, id).await
     };
@@ -4620,7 +4674,7 @@ struct TagSearchQuery {
 struct TagSearchRow {
     id: i64,
     title: String,
-    artists: String,
+    artists_html: String,
     score: String,
     matched: i64,
 }
@@ -4677,16 +4731,21 @@ async fn tag_search_page(
     } else {
         Vec::new()
     };
-    let results: Vec<TagSearchRow> = hits
+    let mut results: Vec<TagSearchRow> = hits
         .into_iter()
         .map(|h| TagSearchRow {
             id: h.track_id,
             title: h.title,
-            artists: h.artists,
+            artists_html: String::new(),
             score: format!("{:.2}", h.score),
             matched: h.matched,
         })
         .collect();
+    let ts_ids: Vec<i64> = results.iter().map(|r| r.id).collect();
+    let mut ts_html = crate::artists::artists_html_for_tracks(&st.pool, &ts_ids).await;
+    for r in results.iter_mut() {
+        r.artists_html = ts_html.remove(&r.id).unwrap_or_default();
+    }
     render(&TagSearchPage {
         nav,
         flash: q.msg.unwrap_or_default(),
@@ -4706,7 +4765,7 @@ struct RevisitQuery {
 struct RevisitRow {
     id: i64,
     title: String,
-    artists: String,
+    artists_html: String,
     last_tagged: String,
     missed: i64,
 }
@@ -4731,7 +4790,7 @@ async fn revisit_page(
     };
     let q = f.q.unwrap_or_default().trim().to_string();
     let toks = crate::table::tokens(&q);
-    let rows: Vec<RevisitRow> = crate::tagsearch::revisit(&st.pool, nav.id, 2000)
+    let mut rows: Vec<RevisitRow> = crate::tagsearch::revisit(&st.pool, nav.id, 2000)
         .await
         .into_iter()
         .filter(|r| {
@@ -4745,11 +4804,16 @@ async fn revisit_page(
         .map(|r| RevisitRow {
             id: r.track_id,
             title: r.title,
-            artists: r.artists,
+            artists_html: String::new(),
             last_tagged: r.last_tagged.get(..10).unwrap_or("—").to_string(),
             missed: r.missed,
         })
         .collect();
+    let revisit_ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    let mut revisit_html = crate::artists::artists_html_for_tracks(&st.pool, &revisit_ids).await;
+    for r in rows.iter_mut() {
+        r.artists_html = revisit_html.remove(&r.id).unwrap_or_default();
+    }
     render(&RevisitPage {
         nav,
         flash: String::new(),
@@ -4765,6 +4829,7 @@ struct TagTrack {
     id: i64,
     title: String,
     artists: String,
+    artists_html: String,
 }
 
 /// A source playlist feeding a tag, plus its keep-on-remove policy.
@@ -4869,7 +4934,12 @@ async fn tag_detail_page(
     let mut tracks: Vec<TagTrack> = d
         .tracks
         .into_iter()
-        .map(|(id, title, artists)| TagTrack { id, title, artists })
+        .map(|(id, title, artists)| TagTrack {
+            id,
+            title,
+            artists,
+            artists_html: String::new(),
+        })
         .filter(|t| {
             crate::table::matches_typo(&format!("{} {}", t.title, t.artists).to_lowercase(), &toks)
         })
@@ -4887,6 +4957,12 @@ async fn tag_detail_page(
             };
             if desc { o.reverse() } else { o }
         });
+    }
+    let tag_track_ids: Vec<i64> = tracks.iter().map(|t| t.id).collect();
+    let mut tag_track_html =
+        crate::artists::artists_html_for_tracks(&st.pool, &tag_track_ids).await;
+    for t in tracks.iter_mut() {
+        t.artists_html = tag_track_html.remove(&t.id).unwrap_or_default();
     }
     let is_owner = d.owner.eq_ignore_ascii_case(&nav.slug);
     let isrcs: Vec<String> = sqlx::query_scalar(
@@ -5725,7 +5801,10 @@ mod scope_sql_tests {
             sql.contains("id IN (SELECT value FROM json_each(?))"),
             "expects the json_each predicate: {sql}"
         );
-        assert!(!sql.contains("1 = 0"), "non-empty scope keeps the predicate: {sql}");
+        assert!(
+            !sql.contains("1 = 0"),
+            "non-empty scope keeps the predicate: {sql}"
+        );
         assert_eq!(
             sql.matches('?').count(),
             1,

@@ -26,6 +26,14 @@ async fn insert_track(
     .unwrap();
 }
 
+async fn artist_id(pool: &sqlx::SqlitePool, name: &str) -> i64 {
+    sqlx::query_scalar("SELECT id FROM hub_artists WHERE name = ?1 COLLATE NOCASE")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 async fn play(pool: &sqlx::SqlitePool, uid: i64, track_id: i64, count: i64) {
     sqlx::query(
         "INSERT INTO hub_traktor_tracks (user_id, track_id, play_count) VALUES (?1, ?2, ?3)",
@@ -133,6 +141,11 @@ async fn seed_artists(app: &common::TestApp) -> (i64, i64, i64) {
     playlist(p, alice, "pl-deep", "Deep House", &[70001, 70004]).await;
     playlist(p, carol, "pl-tech", "Techno", &[70007]).await;
 
+    // Populate the artist/album entities (normally done at ingest / startup).
+    music_hub::artists::backfill_artist_entities(p)
+        .await
+        .unwrap();
+
     (alice, bob, carol)
 }
 
@@ -236,9 +249,10 @@ async fn artist_profile_most_played_is_per_user_with_collapsible_others() {
     let (alice, ..) = seed_artists(&app).await;
     let cookie = app.session_cookie(alice).await;
 
+    let nova = artist_id(&app.pool, "Nova").await;
     let html = app
         .client()
-        .get(app.url("/artist/Nova"))
+        .get(app.url(&format!("/artist/{nova}")))
         .header("Cookie", &cookie)
         .send()
         .await
@@ -262,9 +276,10 @@ async fn artist_profile_tags_playlists_collabs_b2b_albums() {
     let (alice, ..) = seed_artists(&app).await;
     let cookie = app.session_cookie(alice).await;
 
+    let nova = artist_id(&app.pool, "Nova").await;
     let html = app
         .client()
-        .get(app.url("/artist/Nova"))
+        .get(app.url(&format!("/artist/{nova}")))
         .header("Cookie", &cookie)
         .send()
         .await
@@ -291,9 +306,10 @@ async fn artist_profile_renders_explicit_empty_states() {
     let (alice, ..) = seed_artists(&app).await;
     let cookie = app.session_cookie(alice).await;
 
+    let solo = artist_id(&app.pool, "Solo").await;
     let html = app
         .client()
-        .get(app.url("/artist/Solo"))
+        .get(app.url(&format!("/artist/{solo}")))
         .header("Cookie", &cookie)
         .send()
         .await
@@ -312,6 +328,29 @@ async fn artist_profile_renders_explicit_empty_states() {
     assert!(
         html.contains("Keine Tags für die Tracks"),
         "tag empty state"
+    );
+}
+
+#[tokio::test]
+async fn artist_name_redirects_to_id() {
+    let app = common::spawn().await;
+    let (alice, ..) = seed_artists(&app).await;
+    let cookie = app.session_cookie(alice).await;
+    let nova = artist_id(&app.pool, "Nova").await;
+    let resp = app
+        .client()
+        .get(app.url("/artist/Nova"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let expected = format!("/artist/{nova}");
+    assert_eq!(
+        resp.headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok()),
+        Some(expected.as_str())
     );
 }
 
@@ -338,9 +377,10 @@ async fn artist_references_are_visible_per_selected_user() {
     let alice_cookie = app.session_cookie(alice).await;
 
     // Default view = alice: Rex is in her library, Kai is not.
+    let nova = artist_id(&app.pool, "Nova").await;
     let html = app
         .client()
-        .get(app.url("/artist/Nova"))
+        .get(app.url(&format!("/artist/{nova}")))
         .header("Cookie", &alice_cookie)
         .send()
         .await
@@ -358,7 +398,7 @@ async fn artist_references_are_visible_per_selected_user() {
     let carol_cookie = app.session_cookie(carol).await;
     let html = app
         .client()
-        .get(app.url("/artist/Nova?user=carol"))
+        .get(app.url(&format!("/artist/{nova}?user=carol")))
         .header("Cookie", &carol_cookie)
         .send()
         .await

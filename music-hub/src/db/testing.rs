@@ -149,13 +149,26 @@ pub async fn seed(pool: &SqlitePool) -> Result<Seed> {
     let pl_carol = playlist(pool, carol, "pl-carol", "Techno", true, "Carol", false).await?;
 
     // A collaborative playlist shared by alice + bob (same Spotify id across users).
-    playlist(pool, alice, "pl-shared", "Shared Collab", true, "Alice", true).await?;
+    playlist(
+        pool,
+        alice,
+        "pl-shared",
+        "Shared Collab",
+        true,
+        "Alice",
+        true,
+    )
+    .await?;
     playlist(pool, bob, "pl-shared", "Shared Collab", true, "Alice", true).await?;
 
     membership(pool, pl_alice, t_all, 0).await?;
     membership(pool, pl_alice, t_pl, 1).await?;
     membership(pool, pl_bob, t_pl, 0).await?;
     membership(pool, pl_carol, t_carol, 0).await?;
+
+    // Populate the artist/album entities from the seeded display strings (the
+    // real ingest path does this atomically; tests insert raw rows).
+    crate::artists::backfill_artist_entities(pool).await?;
 
     Ok(Seed {
         alice,

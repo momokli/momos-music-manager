@@ -69,7 +69,7 @@
                     />{% endif %}
                 </td>
                 <td><a href="{{ a.href }}">{{ a.name }}</a></td>
-                <td class="hub-cell-pl hub-muted">{{ a.artists }}</td>
+                <td class="hub-cell-pl hub-muted">{{ a.artists_html|safe }}</td>
                 <td>{{ a.tracks }}</td>
             </tr>
             {% endfor %}

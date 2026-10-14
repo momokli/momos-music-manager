@@ -154,7 +154,7 @@ content %}
             {% for t in tracks %}
             <tr>
                 <td>{{ t.position }}</td>
-                <td><a href="/track/{{ t.id }}">{{ t.artists }} - {{ t.title }}</a></td>
+                <td>{{ t.artists_html|safe }} - <a href="/track/{{ t.id }}">{{ t.title }}</a></td>
             </tr>
             {% endfor %}
         </tbody>

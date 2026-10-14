@@ -106,7 +106,7 @@ content %}
                             class="hub-x"
                             title="Track-Home öffnen"
                             >↗</a
-                        ><br /><span class="hub-muted">{{ r.artists }}</span>
+                        ><br /><span class="hub-muted">{{ r.artists_html|safe }}</span>
                     </td>
                     <td>{{ r.total }}</td>
                     <td>{{ r.tag_count }}</td>

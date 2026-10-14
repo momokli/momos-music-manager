@@ -48,7 +48,7 @@ content %}
             {% for r in results %}
             <tr>
                 <td class="hub-cell-track">
-                    <a href="/track/{{ r.id }}">{{ r.artists }} — {{ r.title }}</a>
+                    {{ r.artists_html|safe }} — <a href="/track/{{ r.id }}">{{ r.title }}</a>
                 </td>
                 <td class="hub-nowrap">{{ r.score }}</td>
                 <td class="hub-nowrap">{{ r.matched }}</td>
