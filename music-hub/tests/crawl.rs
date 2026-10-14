@@ -37,7 +37,8 @@ async fn mock_orders(sink: Arc<Mutex<Vec<Value>>>) -> String {
     format!("http://{addr}")
 }
 
-/// Boot a mock Spotify API serving one artist's albums + one album's tracks.
+/// Boot a mock Spotify API serving one artist's albums + top-tracks and one
+/// album's tracks.
 async fn mock_spotify_crawl() -> String {
     async fn artist_albums(Path(_id): Path<String>) -> Json<Value> {
         Json(json!({
@@ -47,6 +48,15 @@ async fn mock_spotify_crawl() -> String {
                 "images": [{ "url": "http://img/alb" }]
             }],
             "next": null
+        }))
+    }
+    async fn artist_top(Path(_id): Path<String>) -> Json<Value> {
+        Json(json!({
+            "tracks": [{
+                "type": "track", "id": "trk-top", "name": "Top Track",
+                "artists": [{ "id": "sp-art", "name": "Artist" }],
+                "duration_ms": 2000, "explicit": false
+            }]
         }))
     }
     async fn album_tracks(Path(_id): Path<String>) -> Json<Value> {
@@ -61,6 +71,7 @@ async fn mock_spotify_crawl() -> String {
     }
     let app = Router::new()
         .route("/artists/{id}/albums", get(artist_albums))
+        .route("/artists/{id}/top-tracks", get(artist_top))
         .route("/albums/{id}/tracks", get(album_tracks));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -254,7 +265,7 @@ async fn touch_cascade_creates_albums_and_tracks() {
     let used = music_hub::crawl::touch_cascade(&app.pool, &app.cfg, 10)
         .await
         .unwrap();
-    assert_eq!(used, 2, "one artist request + one album request");
+    assert_eq!(used, 3, "artist + top-tracks + album request");
 
     // The album and its track were created.
     let albums: i64 =
@@ -271,16 +282,126 @@ async fn touch_cascade_creates_albums_and_tracks() {
     .unwrap();
     assert_eq!(tracks, 1);
 
-    // The crawl frontier is recorded (artist + album done).
+    // The artist's top-track (no album) was ingested too.
+    let top: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_tracks WHERE service = 'spotify' AND service_track_id = 'trk-top'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(top, 1, "top-track ingested");
+
+    // The crawl frontier is recorded (artist + artist_top + album done).
     let done: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_crawl_state WHERE state = 'done'")
         .fetch_one(&app.pool)
         .await
         .unwrap();
-    assert_eq!(done, 2);
+    assert_eq!(done, 3);
 
     // A second pass spends nothing (TTL not expired).
     let again = music_hub::crawl::touch_cascade(&app.pool, &app.cfg, 10)
         .await
         .unwrap();
     assert_eq!(again, 0, "TTL'd crawl does not repeat");
+}
+
+/// Link `track_id` to a fresh Spotify artist and return the artist's local id.
+async fn link_spotify_artist(pool: &sqlx::SqlitePool, track_id: i64, sid: &str) -> i64 {
+    music_hub::artists::upsert_artist_by_spotify(pool, sid, "Touch Artist")
+        .await
+        .unwrap();
+    let artist_id: i64 = sqlx::query_scalar(
+        "SELECT artist_id FROM hub_artist_external_ids
+          WHERE service = 'spotify' AND external_id = ?1",
+    )
+    .bind(sid)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO hub_track_artists (track_id, artist_id, position) VALUES (?1, ?2, 0)
+         ON CONFLICT(track_id, artist_id) DO NOTHING",
+    )
+    .bind(track_id)
+    .bind(artist_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    artist_id
+}
+
+#[tokio::test]
+async fn touch_tracks_orders_and_seeds_artist_frontier() {
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let base = mock_orders(sink.clone()).await;
+    let app = common::spawn().await;
+    let cfg = cfg_with(base, Some("tok"));
+
+    sqlx::query("UPDATE hub_tracks SET isrc = 'ISRC-TOUCH' WHERE id = ?1")
+        .bind(app.seed.t_all)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    link_spotify_artist(&app.pool, app.seed.t_all, "sp-touch").await;
+
+    music_hub::crawl::touch_tracks(&app.pool, &cfg, &[app.seed.t_all])
+        .await
+        .unwrap();
+
+    // Ordered at music-api (immediate).
+    {
+        let calls = sink.lock().unwrap();
+        assert_eq!(calls.len(), 1, "one order group");
+        assert_eq!(calls[0]["items"][0]["isrc"], "ISRC-TOUCH");
+    }
+
+    // Both frontier kinds seeded `pending` for the track's artist.
+    for kind in ["artist", "artist_top"] {
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM hub_crawl_state WHERE kind = ?1 AND ref = 'sp-touch'",
+        )
+        .bind(kind)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        assert_eq!(state, "pending", "{kind} frontier seeded pending");
+    }
+}
+
+#[tokio::test]
+async fn seed_artist_frontier_does_not_reset_done() {
+    let app = common::spawn().await;
+    link_spotify_artist(&app.pool, app.seed.t_all, "sp-done").await;
+
+    // The artist's album crawl already finished.
+    sqlx::query(
+        "INSERT INTO hub_crawl_state (kind, ref, state, attempts, crawled_at, created_at, updated_at)
+         VALUES ('artist', 'sp-done', 'done', 1, ?1, ?1, ?1)",
+    )
+    .bind(NOW)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    music_hub::crawl::seed_artist_frontier(&app.pool, &[app.seed.t_all])
+        .await
+        .unwrap();
+
+    // The existing `done` row is left untouched (no re-crawl before TTL).
+    let state: String = sqlx::query_scalar(
+        "SELECT state FROM hub_crawl_state WHERE kind = 'artist' AND ref = 'sp-done'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "done", "existing done row is not reset");
+
+    // The absent `artist_top` row is seeded `pending`.
+    let top: String = sqlx::query_scalar(
+        "SELECT state FROM hub_crawl_state WHERE kind = 'artist_top' AND ref = 'sp-done'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(top, "pending");
 }

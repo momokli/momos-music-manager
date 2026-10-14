@@ -7,8 +7,11 @@
 //!   now-playing). Re-ordering is a cheap no-op, and [`order_pending`] only
 //!   re-orders on a real change (tracked in `hub_order_state`).
 //! * **Touch-cascade** — a bounded, TTL'd Spotify crawl: touched artists →
-//!   `GET /artists/{id}/albums` → `hub_albums`; each album →
-//!   `GET /albums/{id}/tracks` → `hub_tracks` (which re-triggers enrichment).
+//!   `GET /artists/{id}/albums` (all release groups) → `hub_albums`; each album →
+//!   `GET /albums/{id}/tracks` → `hub_tracks`; plus `GET /artists/{id}/top-tracks`
+//!   → `hub_tracks` (popular tracks that live on no album). Every upserted track
+//!   is immediately ordered and its artists seeded into the frontier
+//!   ([`touch_tracks`]) so the cascade starts without waiting for the next pass.
 //!
 //! Everything is bounded: a per-pass request budget, per-artist album caps and
 //! per-artist/album TTLs. It never runs unbounded and backs off on 429/quota.
@@ -247,10 +250,76 @@ pub async fn order_now_playing(pool: &SqlitePool, cfg: &Config, track_id: i64) -
     Ok(())
 }
 
+// ── immediate touch ──────────────────────────────────────────────────────────
+
+/// Immediate touch for freshly ingested tracks: order them at music-api
+/// (idempotent — a re-order is a no-op) and seed their artists into the crawl
+/// frontier so the cascade starts on the next pass instead of waiting for a
+/// track to be re-selected. Safe to call with an empty slice.
+pub async fn touch_tracks(pool: &SqlitePool, cfg: &Config, ids: &[i64]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let _ = order_touched(pool, cfg, ids).await;
+    seed_artist_frontier(pool, ids).await
+}
+
+/// Seed the crawl frontier for the Spotify artists of `ids`: both the `artist`
+/// (albums) and `artist_top` (top-tracks) kinds, state `pending`. Existing rows
+/// are left untouched (`DO NOTHING`) so a `done` artist is not re-crawled before
+/// its TTL — only genuinely new artists start a cascade.
+pub async fn seed_artist_frontier(pool: &SqlitePool, ids: &[i64]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut ext: Vec<String> = Vec::new();
+    for chunk in ids.chunks(CHUNK) {
+        let sql = format!(
+            "SELECT DISTINCT e.external_id AS sid
+               FROM hub_track_artists ta
+               JOIN hub_artist_external_ids e
+                 ON e.artist_id = ta.artist_id AND e.service = 'spotify'
+              WHERE ta.track_id IN ({})",
+            in_clause(chunk.len())
+        );
+        let mut q = sqlx::query(&sql);
+        for id in chunk {
+            q = q.bind(id);
+        }
+        for r in q.fetch_all(pool).await? {
+            ext.push(r.get("sid"));
+        }
+    }
+    ext.sort();
+    ext.dedup();
+    for sid in ext {
+        seed_crawl(pool, "artist", &sid).await?;
+        seed_crawl(pool, "artist_top", &sid).await?;
+    }
+    Ok(())
+}
+
+/// Insert a frontier row only when absent (state `pending`). Never resets an
+/// existing row, so a `done` artist is not re-crawled before its TTL.
+async fn seed_crawl(pool: &SqlitePool, kind: &str, reference: &str) -> Result<()> {
+    let now = now_iso();
+    sqlx::query(
+        "INSERT INTO hub_crawl_state (kind, ref, state, attempts, created_at, updated_at)
+         VALUES (?1, ?2, 'pending', 0, ?3, ?3)
+         ON CONFLICT(kind, ref) DO NOTHING",
+    )
+    .bind(kind)
+    .bind(reference)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // ── touch-cascade (Spotify, bounded) ─────────────────────────────────────────
 
-/// Run one bounded crawl pass: touched artists → albums, then pending albums →
-/// tracks. Returns the number of Spotify requests spent.
+/// Run one bounded crawl pass: touched artists → albums, then their top-tracks,
+/// then pending albums → tracks. Returns the number of Spotify requests spent.
 pub async fn touch_cascade(pool: &SqlitePool, cfg: &Config, budget: usize) -> Result<usize> {
     if budget == 0 || !flag_setting(pool, settings::CRAWL_ENABLED, true).await {
         return Ok(0);
@@ -259,6 +328,9 @@ pub async fn touch_cascade(pool: &SqlitePool, cfg: &Config, budget: usize) -> Re
         return Ok(0);
     };
     let mut used = crawl_artists(pool, cfg, &token, budget).await?;
+    if used < budget {
+        used += crawl_artist_top(pool, cfg, &token, budget - used).await?;
+    }
     if used < budget {
         used += crawl_albums(pool, cfg, &token, budget - used).await?;
     }
@@ -323,10 +395,10 @@ async fn crawl_artists(
         }
         let sid: String = r.get("sid");
         let url = format!(
-            "{}/artists/{}/albums?include_groups=album,single&limit=50",
+            "{}/artists/{}/albums?include_groups=album,single,compilation,appears_on&limit=50",
             cfg.spotify_api_base, sid
         );
-        match get_paged(token, &url, max_albums).await {
+        match get_paged(token, &url, max_albums, "items").await {
             Ok(albums) => {
                 for alb in &albums {
                     crate::artists::upsert_album(pool, alb).await?;
@@ -382,11 +454,17 @@ async fn crawl_albums(
         let sid: String = r.get("sid");
         let album_id: i64 = r.get("album_id");
         let url = format!("{}/albums/{}/tracks?limit=50", cfg.spotify_api_base, sid);
-        match get_paged(token, &url, 500).await {
+        match get_paged(token, &url, 500, "items").await {
             Ok(tracks) => {
+                let mut ids = Vec::new();
                 for t in &tracks {
-                    upsert_album_track(pool, t, album_id).await?;
+                    if let Some(id) = upsert_album_track(pool, t, Some(album_id)).await? {
+                        ids.push(id);
+                    }
                 }
+                // Immediate touch: order the new tracks + seed their artists so
+                // the cascade continues without waiting for the next pass.
+                touch_tracks(pool, cfg, &ids).await?;
                 mark_crawl(pool, "album", &sid, "done", None).await?;
                 used += 1;
             }
@@ -402,9 +480,73 @@ async fn crawl_albums(
     Ok(used)
 }
 
+/// Crawl up to `budget` artists' top tracks: `GET /artists/{id}/top-tracks` →
+/// upsert tracks (no album — these are the popular tracks that live on no
+/// album). Own frontier kind (`artist_top`) with the artist TTL.
+async fn crawl_artist_top(
+    pool: &SqlitePool,
+    cfg: &Config,
+    token: &str,
+    budget: usize,
+) -> Result<usize> {
+    let ttl = ttl_cutoff(pool, settings::CRAWL_ARTIST_TTL_DAYS, 90.0).await;
+    let rows = sqlx::query(
+        "SELECT e.external_id AS sid
+           FROM hub_artists a
+           JOIN hub_artist_external_ids e ON e.artist_id = a.id AND e.service = 'spotify'
+           LEFT JOIN hub_crawl_state c ON c.kind = 'artist_top' AND c.ref = e.external_id
+          WHERE c.ref IS NULL
+             OR c.state = 'pending'
+             OR (c.state = 'error' AND c.attempts < 5)
+             OR (c.state = 'done' AND (c.crawled_at IS NULL OR c.crawled_at < ?1))
+          ORDER BY a.updated_at DESC, a.id DESC
+          LIMIT ?2",
+    )
+    .bind(&ttl)
+    .bind(budget as i64)
+    .fetch_all(pool)
+    .await?;
+
+    let mut used = 0usize;
+    for r in rows {
+        if used >= budget {
+            break;
+        }
+        let sid: String = r.get("sid");
+        let url = format!("{}/artists/{}/top-tracks", cfg.spotify_api_base, sid);
+        match get_paged(token, &url, 50, "tracks").await {
+            Ok(tracks) => {
+                let mut ids = Vec::new();
+                for t in &tracks {
+                    if let Some(id) = upsert_album_track(pool, t, None).await? {
+                        ids.push(id);
+                    }
+                }
+                touch_tracks(pool, cfg, &ids).await?;
+                mark_crawl(pool, "artist_top", &sid, "done", None).await?;
+                used += 1;
+            }
+            Err(e) => {
+                mark_crawl(pool, "artist_top", &sid, "error", Some(&e.to_string())).await?;
+                tracing::warn!("artist top-tracks crawl {sid} failed: {e}");
+                if is_rate_limit(&e) {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(used)
+}
+
 /// Follow `next` links up to `max_items`, mapping 429/403 to errors (with a
-/// backoff sleep on 429). Never unbounded.
-async fn get_paged(token: &str, first_url: &str, max_items: usize) -> Result<Vec<Value>> {
+/// backoff sleep on 429). Never unbounded. `key` is the array field to read
+/// (`items` for most endpoints, `tracks` for `/artists/{id}/top-tracks`).
+async fn get_paged(
+    token: &str,
+    first_url: &str,
+    max_items: usize,
+    key: &str,
+) -> Result<Vec<Value>> {
     let mut url = first_url.to_string();
     let mut out: Vec<Value> = Vec::new();
     loop {
@@ -422,7 +564,7 @@ async fn get_paged(token: &str, first_url: &str, max_items: usize) -> Result<Vec
             403 => anyhow::bail!("spotify 403"),
             s => anyhow::bail!("spotify HTTP {s}"),
         }
-        if let Some(items) = page.body["items"].as_array() {
+        if let Some(items) = page.body[key].as_array() {
             out.extend(items.iter().cloned());
         }
         if out.len() >= max_items {
@@ -444,7 +586,12 @@ fn is_rate_limit(e: &anyhow::Error) -> bool {
 
 /// Upsert a track from a simplified album-track object without clobbering the
 /// richer fields a full ingest may already have set (album/isrc/image).
-async fn upsert_album_track(pool: &SqlitePool, t: &Value, album_id: i64) -> Result<Option<i64>> {
+/// `album_id` is `None` for top-tracks (no album context).
+async fn upsert_album_track(
+    pool: &SqlitePool,
+    t: &Value,
+    album_id: Option<i64>,
+) -> Result<Option<i64>> {
     let Some(sid) = t["id"].as_str().filter(|s| !s.is_empty()) else {
         return Ok(None);
     };

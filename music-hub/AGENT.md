@@ -18,8 +18,15 @@
 > `049` (`hub_crawl_state` + `hub_order_state`). New modules `src/analysis.rs`
 > (reads the resolved BPM/key from the music-api vault into `hub_track_audio`)
 > and `src/crawl.rs` (download-priority orders + bounded Spotify touch-cascade).
-> The hub is **only a consumer**: it never analyses and owns no vault — music-api
-> is the Data Vault of music. See `plans/proposed/hub-crawl-everything.md` and
+> The cascade crawls **everything**: artist albums across all release groups
+> (`album,single,compilation,appears_on`) **and** `/artists/{id}/top-tracks`
+> (frontier kinds `artist` / `artist_top`), then each album's tracks. Every
+> freshly ingested track is **immediately touched** (`crawl::touch_tracks`:
+> order at music-api + seed its artists into the frontier) from `ingest.rs`
+> (`store_likes` / `store_playlist_items`), the album/top-track crawl, and
+> now-playing. The hub is **only a consumer**: it never analyses and owns no
+> vault — music-api is the Data Vault of music. See
+> `plans/proposed/hub-crawl-everything.md` and
 > `plans/proposed/music-api-data-vault.md`.
 
 ---
@@ -160,7 +167,7 @@ music-hub/
 │   ├── tagqueue.rs        /tag-queue (ripeness-sorted) + direct tagging + player
 │   ├── albums.rs          /artists + /artist/{name} explorer
 │   ├── analysis.rs        reads the vault's resolved BPM/key into hub_track_audio
-│   ├── crawl.rs           download-priority orders + bounded touch-cascade
+│   ├── crawl.rs           download-priority orders + bounded touch-cascade (albums + top-tracks)
 │   ├── history.rs         import-run ledger + change events (all sources)
 │   ├── settings.rs        hub_settings + SETTINGS registry + Engine config
 │   └── mmm_import.rs      import tags/categories/parents/energy from MMM library.db
@@ -191,7 +198,7 @@ Migrations **001–024** (see `migrations/`). Highlights:
   - `hub_group_tags(tag_id, group_id, rank)` — **rank 0..5 lives here** (per group membership).
   - `hub_collectives(id, slug, name, icon, owner_user_id)` + `hub_collective_members`.
 - Other: `hub_settings`, `hub_task_history`, `hub_api_usage` (FreqBlog quota), `hub_deemix_downloads`.
-- Crawl-everything (048/049): `hub_track_audio(track_id, bpm, musical_key, camelot, energy, source, updated_at)` — flat read-model of the **vault's resolved best value** (music-api owns the vault; the hub only consumes `GET /vault/tracks?isrcs=`); `hub_crawl_state(kind, ref, state, …)` — TTL'd touch-cascade frontier; `hub_order_state(track_id, priority, ordered_at)` — idempotency ledger for music-api download-priority orders.
+- Crawl-everything (048/049): `hub_track_audio(track_id, bpm, musical_key, camelot, energy, source, updated_at)` — flat read-model of the **vault's resolved best value** (music-api owns the vault; the hub only consumes `GET /vault/tracks?isrcs=`); `hub_crawl_state(kind, ref, state, …)` — TTL'd touch-cascade frontier (`kind` ∈ `artist` | `artist_top` | `album`); `hub_order_state(track_id, priority, ordered_at)` — idempotency ledger for music-api download-priority orders.
 
 Views of interest: `hub_v_track_presence`, `hub_v_track_playlists`, `hub_v_shared_tracks`,
 `hub_v_user_overlap`, `v_track_audio`, `hub_v_track_tags`.
