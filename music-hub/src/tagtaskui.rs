@@ -17,7 +17,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
-use sqlx::Row;
 
 use crate::api::AppState;
 
@@ -67,6 +66,13 @@ async fn limit_for(st: &AppState) -> i64 {
 #[derive(Deserialize, Default)]
 struct PageQuery {
     cadence: Option<String>,
+    /// "1" = only tracks in my playlists.
+    mine: Option<String>,
+}
+
+/// True when the request came from htmx (so we return a fragment, not a redirect).
+fn is_htmx(headers: &HeaderMap) -> bool {
+    headers.get("HX-Request").is_some()
 }
 
 struct Chip {
@@ -87,7 +93,33 @@ struct CardView {
     artists_html: String,
     plays: i64,
     missing: Vec<Chip>,
+    /// Tags already resolved on the track, so a freshly added tag is visible
+    /// without a full reload.
+    tags: Vec<String>,
+    /// Whether the track can be streamed (music-api configured + ISRC present).
+    playable: bool,
+    /// Cadence of the task this card belongs to (carried through the htmx form).
+    cadence: String,
     my_types: Vec<TypeOption>,
+}
+
+/// One task item joined with its track — the row shape `build_cards`/`card_for`
+/// share.
+#[derive(sqlx::FromRow)]
+struct ItemRow {
+    track_id: i64,
+    rank: i64,
+    plays: i64,
+    missing: String,
+    title: String,
+    isrc: String,
+}
+
+/// A single card, rendered standalone for the htmx in-place update.
+#[derive(Template)]
+#[template(path = "_partials/tag_task_card.html")]
+struct TagTaskCard {
+    card: CardView,
 }
 
 #[derive(Template)]
@@ -98,6 +130,7 @@ struct TagTaskPage {
     cadence: String,
     cadence_daily: bool,
     cadence_weekly: bool,
+    mine: bool,
     cards: Vec<CardView>,
 }
 
@@ -126,12 +159,66 @@ fn family_chip(fam: &str) -> Chip {
     }
 }
 
-/// Build the render-ready card list from the persisted task: join stored items
-/// with `hub_tracks`, drop manually-done tracks, map `missing` to chips.
-async fn build_cards(st: &AppState, user_id: i64, task_id: i64) -> Vec<CardView> {
-    let rows = sqlx::query(
+/// Build one render-ready card from a joined task-item row: live missing
+/// families, the resolved tags, and whether it is streamable.
+async fn card_from(
+    st: &AppState,
+    user_id: i64,
+    r: ItemRow,
+    music_api: bool,
+    cadence: &str,
+    my_types: &[TypeOption],
+) -> CardView {
+    // Display reactivity (US3): keep the task's families as the base, but drop
+    // those a tag applied during the period already resolved.
+    let stored: Vec<String> = r
+        .missing
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    let stored_refs: Vec<&str> = stored.iter().map(|s| s.as_str()).collect();
+    let live = crate::tagdone::status(&st.pool, user_id, r.track_id, &stored_refs)
+        .await
+        .missing;
+    let missing: Vec<Chip> = live.iter().map(|f| family_chip(f)).collect();
+    let tags: Vec<String> = sqlx::query_scalar(
+        "SELECT t.name FROM hub_track_resolved_tags rt
+           JOIN hub_tags t ON t.id = rt.tag_id
+          WHERE rt.track_id = ?1 ORDER BY t.name COLLATE NOCASE LIMIT 100",
+    )
+    .bind(r.track_id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+    CardView {
+        id: r.track_id,
+        rank: r.rank,
+        title: r.title,
+        artists_html: String::new(),
+        plays: r.plays,
+        missing,
+        tags,
+        playable: music_api && !r.isrc.trim().is_empty(),
+        cadence: cadence.to_string(),
+        my_types: my_types.to_vec(),
+    }
+}
+
+/// The render-ready card list from the persisted task: join stored items with
+/// `hub_tracks`, drop manually-done tracks (and, with `mine`, tracks outside the
+/// user's playlists), map `missing` to chips.
+async fn build_cards(
+    st: &AppState,
+    user_id: i64,
+    task_id: i64,
+    cadence: &str,
+    mine: bool,
+) -> Vec<CardView> {
+    let rows = sqlx::query_as::<_, ItemRow>(
         "SELECT i.track_id, i.rank, i.plays, i.missing,
-                COALESCE(t.title,'') AS title, COALESCE(t.artists,'') AS artists
+                COALESCE(t.title,'') AS title, COALESCE(t.isrc,'') AS isrc
            FROM hub_tag_task_items i
            LEFT JOIN hub_tracks t ON t.id = i.track_id
           WHERE i.task_id = ?1
@@ -142,42 +229,38 @@ async fn build_cards(st: &AppState, user_id: i64, task_id: i64) -> Vec<CardView>
     .await
     .unwrap_or_default();
 
+    let music_api = st.cfg.music_api_token.is_some();
     let my_types: Vec<TypeOption> = crate::tagtypes::options()
         .into_iter()
         .map(|(value, label, _icon)| TypeOption { value, label })
         .collect();
 
+    // Tracks in my playlists (for the "mine" filter).
+    let mine_ids: std::collections::HashSet<i64> = if mine {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT DISTINCT hpt.track_id FROM hub_playlist_tracks hpt
+               JOIN hub_playlists hp ON hp.id = hpt.playlist_id
+              WHERE hp.user_id = ?1",
+        )
+        .bind(user_id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+    } else {
+        Default::default()
+    };
+
     let mut cards = Vec::new();
     for r in rows {
-        let track_id: i64 = r.get("track_id");
-        if crate::tagdone::is_done(&st.pool, user_id, track_id).await {
+        if crate::tagdone::is_done(&st.pool, user_id, r.track_id).await {
             continue;
         }
-        let missing_raw: String = r.get("missing");
-        // Display reactivity (US3): keep the task's families as the base, but
-        // drop those a tag applied during the period already resolved, so a
-        // freshly tagged family disappears from the card. The card set/order
-        // still comes from the persisted (frozen) task.
-        let stored: Vec<String> = missing_raw
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect();
-        let stored_refs: Vec<&str> = stored.iter().map(|s| s.as_str()).collect();
-        let live = crate::tagdone::status(&st.pool, user_id, track_id, &stored_refs)
-            .await
-            .missing;
-        let missing: Vec<Chip> = live.iter().map(|f| family_chip(f)).collect();
-        cards.push(CardView {
-            id: track_id,
-            rank: r.get("rank"),
-            title: r.get("title"),
-            artists_html: String::new(),
-            plays: r.get("plays"),
-            missing,
-            my_types: my_types.clone(),
-        });
+        if mine && !mine_ids.contains(&r.track_id) {
+            continue;
+        }
+        cards.push(card_from(st, user_id, r, music_api, cadence, &my_types).await);
     }
     let ids: Vec<i64> = cards.iter().map(|c| c.id).collect();
     let mut html = crate::artists::artists_html_for_tracks(&st.pool, &ids).await;
@@ -185,6 +268,43 @@ async fn build_cards(st: &AppState, user_id: i64, task_id: i64) -> Vec<CardView>
         c.artists_html = html.remove(&c.id).unwrap_or_default();
     }
     cards
+}
+
+/// Rebuild a single card (for the htmx in-place update after a tag/done action).
+/// Ensures the task exists (generating it if needed) so a tag POST works even
+/// before the page has been loaded.
+async fn card_for(
+    st: &AppState,
+    user_id: i64,
+    track_id: i64,
+    cadence: crate::tagtasks::Cadence,
+) -> Option<CardView> {
+    let limit = limit_for(st).await;
+    let task = crate::tagtasks::task_for(&st.pool, user_id, cadence, chrono::Utc::now(), limit)
+        .await
+        .ok()?;
+    let row = sqlx::query_as::<_, ItemRow>(
+        "SELECT i.track_id, i.rank, i.plays, i.missing,
+                COALESCE(t.title,'') AS title, COALESCE(t.isrc,'') AS isrc
+           FROM hub_tag_task_items i
+           LEFT JOIN hub_tracks t ON t.id = i.track_id
+          WHERE i.track_id = ?1 AND i.task_id = ?2",
+    )
+    .bind(track_id)
+    .bind(task.id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten()?;
+    let music_api = st.cfg.music_api_token.is_some();
+    let my_types: Vec<TypeOption> = crate::tagtypes::options()
+        .into_iter()
+        .map(|(value, label, _icon)| TypeOption { value, label })
+        .collect();
+    let mut card = card_from(st, user_id, row, music_api, cadence.as_str(), &my_types).await;
+    let mut html = crate::artists::artists_html_for_tracks(&st.pool, &[card.id]).await;
+    card.artists_html = html.remove(&card.id).unwrap_or_default();
+    Some(card)
 }
 
 async fn tag_task_page(
@@ -196,6 +316,7 @@ async fn tag_task_page(
         return Redirect::to("/login").into_response();
     };
     let cadence = cadence_for(&st, q.cadence.as_deref()).await;
+    let mine = q.mine.as_deref() == Some("1");
     let limit = limit_for(&st).await;
     let task = match crate::tagtasks::task_for(&st.pool, nav.id, cadence, chrono::Utc::now(), limit)
         .await
@@ -209,13 +330,14 @@ async fn tag_task_page(
                 .into_response();
         }
     };
-    let cards = build_cards(&st, nav.id, task.id).await;
+    let cards = build_cards(&st, nav.id, task.id, cadence.as_str(), mine).await;
     render(&TagTaskPage {
         nav,
         flash: String::new(),
         cadence: cadence.as_str().to_string(),
         cadence_daily: cadence == crate::tagtasks::Cadence::Daily,
         cadence_weekly: cadence == crate::tagtasks::Cadence::Weekly,
+        mine,
         cards,
     })
 }
@@ -225,10 +347,14 @@ struct TagForm {
     name: String,
     #[serde(default, rename = "type")]
     tag_type: Option<String>,
+    /// Cadence of the task the card belongs to (carried through the htmx form).
+    #[serde(default)]
+    cadence: Option<String>,
 }
 
-/// Apply a tag from a card through the shared pipeline, then redirect back to
-/// the queue. Mirrors `tagqueue::queue_tag` (ensure → set type → tag_track).
+/// Apply a tag from a card through the shared pipeline. htmx gets the re-rendered
+/// card back (in-place update); a plain POST redirects to the queue.
+/// Mirrors `tagqueue::queue_tag` (ensure → set type → tag_track).
 async fn tag_task_tag(
     State(st): State<AppState>,
     Path(id): Path<i64>,
@@ -250,6 +376,13 @@ async fn tag_task_tag(
             let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
         }
     }
+    if is_htmx(&headers) {
+        let cadence = cadence_for(&st, f.cadence.as_deref()).await;
+        return match card_for(&st, nav.id, id, cadence).await {
+            Some(card) => render(&TagTaskCard { card }),
+            None => Html(String::new()).into_response(),
+        };
+    }
     Redirect::to("/tag-task").into_response()
 }
 
@@ -262,6 +395,10 @@ async fn tag_task_done(
         return Redirect::to("/login").into_response();
     };
     let _ = crate::tagdone::set_done(&st.pool, nav.id, id).await;
+    if is_htmx(&headers) {
+        // An empty outerHTML swap removes the card.
+        return Html(String::new()).into_response();
+    }
     Redirect::to("/tag-task").into_response()
 }
 

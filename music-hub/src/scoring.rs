@@ -323,6 +323,17 @@ pub async fn queue(
         slot.1 += cnt;
     }
 
+    // All resolved tags per track (typed or not). The "Tags" column and the
+    // "nur ungetaggt" filter must count *every* tag — a track with only untyped
+    // tags is still tagged.
+    let all_rows = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT track_id, COUNT(*) FROM hub_track_resolved_tags GROUP BY track_id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let all_count: HashMap<i64, i64> = all_rows.into_iter().collect();
+
     // Traktor signal per track.
     let trak_rows = sqlx::query_as::<_, (i64, i64, Option<i64>, Option<String>, i64, i64)>(
         "SELECT track_id, play_count, rating, last_played, session_occurrence, playlist_occurrence
@@ -361,7 +372,8 @@ pub async fn queue(
     let mut out: Vec<QueueRow> = Vec::with_capacity(meta_rows.len());
     for r in &meta_rows {
         let id: i64 = r.get("id");
-        let (t_score, t_count) = tag_score.get(&id).copied().unwrap_or((0.0, 0));
+        let (t_score, _) = tag_score.get(&id).copied().unwrap_or((0.0, 0));
+        let t_count = all_count.get(&id).copied().unwrap_or(0);
         if only_untagged && t_count > 0 {
             continue;
         }
