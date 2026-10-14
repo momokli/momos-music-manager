@@ -109,6 +109,7 @@ pub async fn spawn_with(dir: tempfile::TempDir, cfg: Config) -> TestApp {
         ro_pool,
         cfg: cfg.clone(),
         oauth_states: Arc::new(Mutex::new(HashMap::new())),
+        worker_health: music_hub::worker::WorkerHealth::default(),
     };
 
     let app = music_hub::api::app(state.clone());
