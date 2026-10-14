@@ -176,6 +176,39 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
         .execute(pool)
         .await;
 
+    // The unified priority work-queue (additive, idempotent). Every background
+    // kind — download, transcode, analyze, crawl:<source> leads — lives here;
+    // `next` (see `crate::work`) is the single place priority is applied.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS work_items (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind          TEXT NOT NULL,
+            ref           TEXT NOT NULL,
+            priority      INTEGER NOT NULL DEFAULT 0,
+            state         TEXT NOT NULL DEFAULT 'queued',
+            attempts      INTEGER NOT NULL DEFAULT 0,
+            max_attempts  INTEGER NOT NULL DEFAULT 5,
+            not_before    INTEGER,
+            record_source TEXT,
+            error         TEXT,
+            created_at    INTEGER NOT NULL,
+            updated_at    INTEGER NOT NULL,
+            UNIQUE (kind, ref)
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Serves the `next` selection: kind + due + priority ordering.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_work_next
+            ON work_items(kind, state, priority DESC, not_before);",
+    )
+    .execute(pool)
+    .await?;
+
     // Data Vault 2.0 tables (additive, idempotent). The vault is the data home;
     // the tables above stay the operational queue. See `crate::vault`.
     crate::vault::init(pool).await?;
@@ -227,6 +260,17 @@ pub async fn create_order(
     }
 
     tx.commit().await?;
+    // Materialise the new tracks into the `download` kind (raise-only on re-touch).
+    for isrc in isrcs {
+        crate::work::enqueue(
+            pool,
+            crate::work::kind::DOWNLOAD,
+            isrc,
+            priority,
+            Some(crate::models::track_source(isrc)),
+        )
+        .await?;
+    }
     refresh_order(pool, order_id).await?;
     Ok(())
 }
@@ -368,6 +412,68 @@ pub async fn due_tracks(pool: &Pool<Sqlite>, limit: i64, now: i64) -> anyhow::Re
     .await?)
 }
 
+/// The order priority for one ISRC: the highest priority among the orders it
+/// belongs to (`0` when it has never been ordered). This is the single scale
+/// every work kind reads.
+pub async fn order_priority(pool: &Pool<Sqlite>, isrc: &str) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT COALESCE(MAX(o.priority), 0) FROM order_items oi
+           JOIN orders o ON o.id = oi.order_id
+          WHERE oi.isrc = ?",
+    )
+    .bind(isrc)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Record derived lossy paths filled in by the `transcode` worker. `COALESCE`
+/// keeps any path that is already present, so it is safe to call with partials.
+pub async fn set_track_derived(
+    pool: &Pool<Sqlite>,
+    isrc: &str,
+    path_320: Option<&str>,
+    path_128: Option<&str>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE tracks
+            SET path_320 = COALESCE(?, path_320),
+                path_128 = COALESCE(?, path_128),
+                updated_at = ?
+          WHERE isrc = ?",
+    )
+    .bind(path_320)
+    .bind(path_128)
+    .bind(now())
+    .bind(isrc)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Pending downloads with their order priority — the reconcile source for the
+/// materialised `download` kind. Bounded by `limit`, highest priority first.
+pub async fn pending_work(
+    pool: &Pool<Sqlite>,
+    limit: i64,
+    now: i64,
+) -> anyhow::Result<Vec<(String, i64)>> {
+    Ok(sqlx::query_as(
+        "SELECT t.isrc AS isrc,
+                COALESCE((SELECT MAX(o.priority) FROM order_items oi
+                            JOIN orders o ON o.id = oi.order_id
+                           WHERE oi.isrc = t.isrc), 0) AS priority
+           FROM tracks t
+          WHERE t.state = 'pending'
+            AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= ?)
+          ORDER BY priority DESC, t.created_at ASC
+          LIMIT ?",
+    )
+    .bind(now)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?)
+}
+
 /// Retry tuning for the durable queue.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
@@ -420,6 +526,8 @@ pub async fn schedule_retry(
     .execute(pool)
     .await?;
     refresh_orders_for_isrc(pool, isrc).await?;
+    // Keep the materialised download item in lockstep (re-queue or fail out).
+    crate::work::retry_ref(pool, crate::work::kind::DOWNLOAD, isrc, error, next, now).await?;
     Ok(true)
 }
 
@@ -494,6 +602,9 @@ pub async fn reset_track_to_pending(pool: &Pool<Sqlite>, isrc: &str) -> anyhow::
     .await?
     .rows_affected();
     refresh_orders_for_isrc(pool, isrc).await?;
+    if n > 0 {
+        crate::work::enqueue(pool, crate::work::kind::DOWNLOAD, isrc, 0, None).await?;
+    }
     Ok(n > 0)
 }
 
@@ -510,6 +621,18 @@ pub async fn set_order_priority(
         .execute(pool)
         .await?
         .rows_affected();
+    if n > 0 {
+        // Re-prioritising an order raises the priority of its (materialised)
+        // download items too.
+        let isrcs: Vec<String> =
+            sqlx::query_scalar("SELECT isrc FROM order_items WHERE order_id = ?")
+                .bind(order_id)
+                .fetch_all(pool)
+                .await?;
+        for isrc in isrcs {
+            crate::work::enqueue(pool, crate::work::kind::DOWNLOAD, &isrc, priority, None).await?;
+        }
+    }
     Ok(n > 0)
 }
 
@@ -788,6 +911,7 @@ pub async fn mark_downloading(
     .bind(isrc)
     .execute(pool)
     .await?;
+    crate::work::ensure_running_ref(pool, crate::work::kind::DOWNLOAD, isrc, now()).await?;
     refresh_orders_for_isrc(pool, isrc).await
 }
 
@@ -813,6 +937,7 @@ pub async fn mark_ready(
     .bind(isrc)
     .execute(pool)
     .await?;
+    crate::work::finish_ref(pool, crate::work::kind::DOWNLOAD, isrc, now()).await?;
     refresh_orders_for_isrc(pool, isrc).await
 }
 
@@ -833,6 +958,7 @@ pub async fn mark_terminal(
     .bind(isrc)
     .execute(pool)
     .await?;
+    crate::work::finish_ref(pool, crate::work::kind::DOWNLOAD, isrc, now()).await?;
     refresh_orders_for_isrc(pool, isrc).await
 }
 

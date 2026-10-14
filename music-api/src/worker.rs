@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
 use crate::models::{state, ArtistOrder, MetadataItem, Track};
-use crate::{analyzer, db, deemix, deezer, tags, transcode, vault, AppState};
+use crate::{analyzer, db, deemix, deezer, tags, transcode, vault, work, AppState};
 
 const AUDIO_EXTENSIONS: &[&str] = &["flac", "mp3", "m4a", "opus", "ogg"];
 
@@ -29,6 +29,14 @@ const ARTIST_INGEST_MAX_FILES: usize = 2000;
 /// A `running` artist order whose deemix item vanished but produced no files is
 /// failed after this long (bounded lifetime).
 const ARTIST_ORDER_STALE_SECS: i64 = 1800;
+
+/// How many pending tracks to materialise into the `download` kind per tick
+/// (bounded reconcile; highest priority first).
+const RECONCILE_BATCH: i64 = 500;
+
+/// Work items stranded in `running` longer than this are re-queued (a worker
+/// that died mid-flight); the next claim counts another attempt.
+const WORK_STALE_SECS: i64 = 1800;
 
 const LOGIN_BACKOFF_BASE: i64 = 60;
 const LOGIN_BACKOFF_MAX: i64 = 1800;
@@ -85,15 +93,21 @@ pub async fn run(state: Arc<AppState>) {
 }
 
 async fn tick(state: &Arc<AppState>) -> Result<()> {
-    // Recover rows stranded in `downloading` by a crash/restart before doing work.
+    // Recover rows stranded in `downloading`/`running` by a crash/restart before
+    // doing work.
     db::recover_expired_leases(&state.pool, &retry_policy(state), db::now()).await?;
+    work::recover_stale(&state.pool, db::now(), WORK_STALE_SECS).await?;
     resolve_pending(state).await?;
     advance_downloads(state).await?;
     // Artist orders (whole-discography downloads) run alongside the ISRC queue.
     advance_artist_orders(state).await?;
+    // Drain the crawl-lead queue (the spider) into artist orders.
+    advance_crawl_leads(state).await?;
+    // Derive the lossy formats (320/128) off the download path.
+    advance_transcode(state).await?;
     // Analyse freshly-ready FLACs last, so a `ready` row written this tick is
     // picked up here (or on the next) without blocking downloads.
-    analyze_ready(state).await?;
+    advance_analyze(state).await?;
     Ok(())
 }
 
@@ -141,12 +155,11 @@ pub async fn ensure_deemix_login(state: &Arc<AppState>) -> bool {
 
 /// Phase A: look each pending ISRC up on Deezer and submit it to deemix.
 ///
-/// Orders are accepted without limit; only the *dispatch to deemix* is bounded.
-/// Each tick pulls at most `max_inflight - inflight` due rows — the `next`
-/// function is [`db::due_tracks`], which already sorts by order priority, so
-/// priority decides *which* pending rows fill the free slots. At most
-/// `MAX_INFLIGHT` rows therefore sit in `downloading` at any time; the rest stay
-/// `pending` and are picked up as slots free up.
+/// Orders are accepted without limit; only the *dispatch* is bounded. The pending
+/// set is materialised into the `download` kind (bounded reconcile) and the
+/// dispatcher pulls `next("download")` — the priority `next`. The in-flight cap
+/// stays on the `tracks` ledger (`count_downloading`, the #427 fix), so at most
+/// `MAX_INFLIGHT` rows are `downloading` at once and the rest wait their turn.
 pub async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     let policy = retry_policy(state);
 
@@ -161,15 +174,21 @@ pub async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
         return Ok(());
     }
 
-    // Only pull as many as there are free slots; `due_tracks` is the priority
-    // `next` function (highest order priority first, then oldest).
-    let pending = db::due_tracks(&state.pool, slots.min(25), db::now()).await?;
+    // Materialise the highest-priority pending tracks into the download kind, so
+    // the queue stays a faithful, priority-ordered view of what still needs
+    // downloading.
+    for (isrc, priority) in db::pending_work(&state.pool, RECONCILE_BATCH, db::now()).await? {
+        work::enqueue(&state.pool, work::kind::DOWNLOAD, &isrc, priority, None).await?;
+    }
+
+    // Pull at most `slots` from the priority `next`, highest priority first.
+    let queued = work::next(&state.pool, work::kind::DOWNLOAD, slots.min(25), db::now()).await?;
     debug!(
-        "resolve_pending: {} due ({} slots free of {max_inflight})",
-        pending.len(),
+        "resolve_pending: {} queued ({} slots free of {max_inflight})",
+        queued.len(),
         slots
     );
-    if pending.is_empty() {
+    if queued.is_empty() {
         return Ok(());
     }
 
@@ -178,7 +197,23 @@ pub async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     // below does not need deemix and still runs regardless.
     let deemix_ready = ensure_deemix_login(state).await;
 
-    for track in pending {
+    for item in queued {
+        let Some(track) = db::get_track(&state.pool, &item.reference).await? else {
+            // Unknown ref — settle it so it stops being offered.
+            work::finish(&state.pool, item.id, db::now()).await?;
+            continue;
+        };
+        if track.state == state::DOWNLOADING {
+            // Already in flight but the item was not marked running — sync it.
+            work::ensure_running_ref(&state.pool, work::kind::DOWNLOAD, &track.isrc, db::now())
+                .await?;
+            continue;
+        }
+        if track.state != state::PENDING {
+            // Terminal (ready/absent/failed): settle the item.
+            work::finish(&state.pool, item.id, db::now()).await?;
+            continue;
+        }
         // Non-Deezer sources (e.g. SoundCloud) are dispatched to a bounded
         // background task so the tick never blocks on a download.
         if track.source() != "deezer" {
@@ -362,32 +397,30 @@ async fn run_non_deezer(state: &Arc<AppState>, track: &Track) -> Result<()> {
     }
 }
 
-/// Transcode a yt-dlp download into our 320/128 store and mark it ready. No
-/// FLAC — the source is lossy.
+/// Transcode a yt-dlp download into our 320 store and mark it ready (the 128 is
+/// derived by the `transcode` queue kind). No FLAC — the source is lossy.
 async fn finalize_soundcloud(state: &Arc<AppState>, track: &Track, src: &Path) -> Result<()> {
     let cfg = &state.config;
     let base = track.isrc.replace([':', '/'], "_");
     let mp3_320 = cfg.mp3_320_dir().join(format!("{base}.mp3"));
-    let mp3_128 = cfg.mp3_128_dir().join(format!("{base}.mp3"));
     tokio::fs::create_dir_all(cfg.mp3_320_dir()).await?;
-    tokio::fs::create_dir_all(cfg.mp3_128_dir()).await?;
     transcode::to_mp3(&cfg.ffmpeg, src, &mp3_320, 320).await?;
-    transcode::to_mp3(&cfg.ffmpeg, src, &mp3_128, 128).await?;
     db::mark_ready(
         &state.pool,
         &track.isrc,
         "mp3-320",
         None,
         Some(&mp3_320.display().to_string()),
-        Some(&mp3_128.display().to_string()),
+        None,
     )
     .await?;
-    vault_download(state, &track.isrc, "ready", Some("mp3-320"), "320,128").await;
-    info!("{}: ready (soundcloud 320 + 128)", track.isrc);
+    vault_download(state, &track.isrc, "ready", Some("mp3-320"), "320").await;
+    info!("{}: ready (soundcloud 320) — 128 queued", track.isrc);
     state
         .logs
         .push("info", format!("{}: ready (soundcloud)", track.isrc));
     let _ = tokio::fs::remove_file(src).await;
+    enqueue_transcode(state, &track.isrc).await;
     Ok(())
 }
 
@@ -526,23 +559,25 @@ async fn finalize(state: &Arc<AppState>, track: &Track) -> Result<bool> {
     if is_flac {
         tokio::fs::create_dir_all(cfg.flac_dir()).await?;
         tokio::fs::copy(&src, &flac_dst).await?;
-        transcode::to_mp3(&cfg.ffmpeg, &flac_dst, &mp3_320, 320).await?;
-        transcode::to_mp3(&cfg.ffmpeg, &flac_dst, &mp3_128, 128).await?;
 
+        // Make the lossless file available immediately; the derived 320/128 are
+        // filled in by the `transcode` queue kind, so a slow ffmpeg never delays
+        // the FLAC (or the download slot).
         db::mark_ready(
             &state.pool,
             &track.isrc,
             "flac",
             Some(&flac_dst.display().to_string()),
-            Some(&mp3_320.display().to_string()),
-            Some(&mp3_128.display().to_string()),
+            None,
+            None,
         )
         .await?;
-        vault_download(state, &track.isrc, "ready", Some("flac"), "flac,320,128").await;
-        info!("{}: ready (flac + 320 + 128)", track.isrc);
+        vault_download(state, &track.isrc, "ready", Some("flac"), "flac").await;
+        info!("{}: ready (flac) — 320/128 queued", track.isrc);
         state
             .logs
             .push("info", format!("{}: ready (flac)", track.isrc));
+        enqueue_transcode(state, &track.isrc).await;
     } else {
         // deemix fell back (no lossless available). The delivered MP3 may be
         // 320 *or* 128 — the ARL's Deezer tier decides — so classify it by what
@@ -553,7 +588,6 @@ async fn finalize(state: &Arc<AppState>, track: &Track) -> Result<bool> {
         if is_320 {
             tokio::fs::create_dir_all(cfg.mp3_320_dir()).await?;
             tokio::fs::copy(&src, &mp3_320).await?;
-            transcode::to_mp3(&cfg.ffmpeg, &mp3_320, &mp3_128, 128).await?;
 
             db::mark_ready(
                 &state.pool,
@@ -561,11 +595,15 @@ async fn finalize(state: &Arc<AppState>, track: &Track) -> Result<bool> {
                 "mp3-320",
                 None,
                 Some(&mp3_320.display().to_string()),
-                Some(&mp3_128.display().to_string()),
+                None,
             )
             .await?;
-            vault_download(state, &track.isrc, "ready", Some("mp3-320"), "320,128").await;
-            info!("{}: ready (mp3 320 + 128, no FLAC available)", track.isrc);
+            vault_download(state, &track.isrc, "ready", Some("mp3-320"), "320").await;
+            info!(
+                "{}: ready (mp3 320, no FLAC available) — 128 queued",
+                track.isrc
+            );
+            enqueue_transcode(state, &track.isrc).await;
         } else {
             tokio::fs::create_dir_all(cfg.mp3_128_dir()).await?;
             tokio::fs::copy(&src, &mp3_128).await?;
@@ -617,6 +655,122 @@ async fn vault_download(
     }
 }
 
+// ── Phase E: derived formats — the `transcode` kind ─────────────────────────
+
+/// Enqueue derived-format work for a track (320/128 from the primary). It runs
+/// on the bounded queue, priority-ordered like every kind, so it never blocks
+/// the download slot or the lossless file.
+async fn enqueue_transcode(state: &Arc<AppState>, isrc: &str) {
+    let priority = db::order_priority(&state.pool, isrc).await.unwrap_or(0);
+    if let Err(e) = work::enqueue(
+        &state.pool,
+        work::kind::TRANSCODE,
+        isrc,
+        priority,
+        Some("music-api-worker"),
+    )
+    .await
+    {
+        warn!("{isrc}: enqueue transcode failed: {e:#}");
+    }
+}
+
+/// The `transcode` kind: drain `next("transcode")` up to `MAX_INFLIGHT`, each on
+/// a bounded background task.
+async fn advance_transcode(state: &Arc<AppState>) -> Result<()> {
+    let kind = work::kind::TRANSCODE;
+    let slots = work::free_slots(&state.pool, kind, state.config.max_inflight as i64).await?;
+    if slots == 0 {
+        return Ok(());
+    }
+    for item in work::next(&state.pool, kind, slots, db::now()).await? {
+        if !work::claim(&state.pool, item.id, db::now()).await? {
+            continue;
+        }
+        spawn_transcode(state.clone(), item);
+    }
+    Ok(())
+}
+
+/// Run one transcode on a bounded background task and settle its queue item.
+fn spawn_transcode(state: Arc<AppState>, item: work::WorkItem) {
+    tokio::spawn(async move {
+        let _permit = state.finalize_sem.acquire().await.ok();
+        let now = db::now();
+        let attempt = item.attempts.max(1) as u32;
+        match transcode_item(&state, &item.reference).await {
+            Ok(()) => {
+                let _ = work::finish(&state.pool, item.id, now).await;
+            }
+            Err(e) => {
+                warn!("{}: transcode failed: {e:#}", item.reference);
+                let _ = work::retry_later(
+                    &state.pool,
+                    item.id,
+                    &format!("{e}"),
+                    now + db::backoff_delay(
+                        attempt,
+                        state.config.queue_retry_base_secs,
+                        state.config.queue_retry_max_secs,
+                    ),
+                    now,
+                )
+                .await;
+            }
+        }
+    });
+}
+
+/// Derive the missing lossy formats for one track: 320 + 128 from a FLAC, or 128
+/// from a 320. Idempotent — a track whose formats already exist is a no-op.
+/// Public so tests can drive a single transcode without the background/handling
+/// machinery.
+pub async fn transcode_item(state: &Arc<AppState>, isrc: &str) -> Result<()> {
+    let Some(track) = db::get_track(&state.pool, isrc).await? else {
+        return Ok(()); // unknown track — nothing to derive
+    };
+    let cfg = &state.config;
+    let base = isrc.replace([':', '/'], "_");
+
+    let mut path_320: Option<String> = None;
+    let mut path_128: Option<String> = None;
+
+    if let Some(flac) = track.path_flac.as_deref() {
+        if track.path_320.is_none() {
+            let dst = cfg.mp3_320_dir().join(format!("{base}.mp3"));
+            tokio::fs::create_dir_all(cfg.mp3_320_dir()).await?;
+            transcode::to_mp3(&cfg.ffmpeg, Path::new(flac), &dst, 320).await?;
+            path_320 = Some(dst.display().to_string());
+        }
+        if track.path_128.is_none() {
+            let dst = cfg.mp3_128_dir().join(format!("{base}.mp3"));
+            tokio::fs::create_dir_all(cfg.mp3_128_dir()).await?;
+            transcode::to_mp3(&cfg.ffmpeg, Path::new(flac), &dst, 128).await?;
+            path_128 = Some(dst.display().to_string());
+        }
+    } else if let Some(from_320) = track.path_320.as_deref() {
+        if track.path_128.is_none() {
+            let dst = cfg.mp3_128_dir().join(format!("{base}.mp3"));
+            tokio::fs::create_dir_all(cfg.mp3_128_dir()).await?;
+            transcode::to_mp3(&cfg.ffmpeg, Path::new(from_320), &dst, 128).await?;
+            path_128 = Some(dst.display().to_string());
+        }
+    }
+
+    if path_320.is_none() && path_128.is_none() {
+        return Ok(()); // nothing to derive (already complete, or no source)
+    }
+    db::set_track_derived(&state.pool, isrc, path_320.as_deref(), path_128.as_deref()).await?;
+
+    // Refresh the vault download satellite with the full format set.
+    if let Some(t) = db::get_track(&state.pool, isrc).await? {
+        let formats = t.formats().join(",");
+        vault_download(state, isrc, "ready", t.source_format.as_deref(), &formats).await;
+    }
+    info!("{isrc}: derived formats ready");
+    Ok(())
+}
+
 // ── Artist orders (whole-discography download) ───────────────────────────────
 
 /// Submit an artist order to deemix (login already ensured by the caller).
@@ -661,6 +815,66 @@ pub async fn submit_artist_order(
             "open".to_string()
         }
     }
+}
+
+/// Drain the crawl-lead queue. A lead is *"complete this entity via one
+/// source"*; v1 handles `crawl:deezer` by turning an artist lead into an
+/// artist-discography order, which the artist-order phase then drives. Bounded
+/// by `MAX_INFLIGHT` and priority-ordered like every other kind.
+async fn advance_crawl_leads(state: &Arc<AppState>) -> Result<()> {
+    let kind = work::kind::crawl("deezer");
+    let slots = work::free_slots(&state.pool, &kind, state.config.max_inflight as i64).await?;
+    if slots == 0 {
+        return Ok(());
+    }
+    let leads = work::next(&state.pool, &kind, slots, db::now()).await?;
+    if leads.is_empty() {
+        return Ok(());
+    }
+    let deemix_ready = ensure_deemix_login(state).await;
+    for lead in leads {
+        if !work::claim(&state.pool, lead.id, db::now()).await? {
+            continue;
+        }
+        let Some(artist_url) = deezer::normalize_artist_url(&lead.reference) else {
+            work::fail(
+                &state.pool,
+                lead.id,
+                "not a Deezer artist id/URL",
+                db::now(),
+            )
+            .await?;
+            continue;
+        };
+        let order_id = uuid::Uuid::new_v4().to_string();
+        if let Err(e) = db::create_artist_order(
+            &state.pool,
+            &order_id,
+            lead.reference.trim(),
+            &artist_url,
+            lead.priority,
+        )
+        .await
+        {
+            warn!(
+                "crawl lead {}: create artist order failed: {e:#}",
+                lead.reference
+            );
+            work::retry_later(
+                &state.pool,
+                lead.id,
+                &format!("create artist order: {e}"),
+                db::now() + 60,
+                db::now(),
+            )
+            .await?;
+            continue;
+        }
+        // The artist order now owns the work; submit it and release the lead.
+        submit_artist_order(state, &order_id, &artist_url, deemix_ready).await;
+        work::finish(&state.pool, lead.id, db::now()).await?;
+    }
+    Ok(())
 }
 
 /// Phase D: submit `open` artist orders to deemix and ingest finished ones.
@@ -921,48 +1135,94 @@ async fn store_downloaded(
     }
 }
 
-// ── Phase C: BPM/key analysis (music-api as analysis authority) ─────────────
+// ── Phase C: BPM/key analysis — the `analyze` kind on the unified queue ─────
 
-/// Hand ready-but-unanalysed FLACs to the analyzer. Disabled when no
+/// The `analyze` kind. Each tick reconciles work from ready-but-unanalysed FLACs
+/// (`enqueue_if_absent`, so a permanently failed item is not resurrected), then
+/// drains `next("analyze")` up to the analysis concurrency. Disabled when no
 /// `ANALYZER_URL` is configured. A dead analyzer is backed off (see
 /// `analysis_backoff`) so it is not retried — or logged — every tick.
-async fn analyze_ready(state: &Arc<AppState>) -> Result<()> {
+pub async fn advance_analyze(state: &Arc<AppState>) -> Result<()> {
     if !analyzer::enabled(state.config.analyzer_url.as_deref()) {
         return Ok(());
     }
     if state.analysis_backoff.blocked(db::now()) {
         return Ok(());
     }
-    let candidates = db::ready_flac_unaanalyzed(&state.pool, ANALYSIS_BATCH).await?;
-    for track in candidates {
-        spawn_analysis(state.clone(), track);
+
+    let kind = work::kind::ANALYZE;
+    for track in db::ready_flac_unaanalyzed(&state.pool, ANALYSIS_BATCH).await? {
+        let priority = db::order_priority(&state.pool, &track.isrc).await?;
+        work::enqueue_if_absent(&state.pool, kind, &track.isrc, priority, Some("essentia")).await?;
+    }
+
+    let slots =
+        work::free_slots(&state.pool, kind, state.config.analysis_concurrency as i64).await?;
+    if slots == 0 {
+        return Ok(());
+    }
+    for item in work::next(&state.pool, kind, slots, db::now()).await? {
+        if !work::claim(&state.pool, item.id, db::now()).await? {
+            continue;
+        }
+        let Some(track) = db::get_track(&state.pool, &item.reference).await? else {
+            work::fail(&state.pool, item.id, "unknown track", db::now()).await?;
+            continue;
+        };
+        // `attempts` after the claim is `item.attempts + 1`.
+        spawn_analysis(state.clone(), track, item.id, item.attempts as u32 + 1);
     }
     Ok(())
 }
 
-/// Dispatch one analysis onto a bounded background task. A per-ISRC guard stops
-/// duplicate work while a job is live (the tick may re-select a row before the
-/// `essentia` metadata row lands).
-fn spawn_analysis(state: Arc<AppState>, track: Track) {
+/// Dispatch one analysis onto a bounded background task and settle its queue
+/// item. A per-ISRC guard stops duplicate work while a job is live.
+fn spawn_analysis(state: Arc<AppState>, track: Track, work_id: i64, attempt: u32) {
     {
         let mut live = state.analyzing.lock().expect("analyzing mutex");
         if !live.insert(track.isrc.clone()) {
-            return; // already being analysed
+            return; // already being analysed — the item stays `running`
         }
     }
     tokio::spawn(async move {
         let _permit = state.analysis_sem.acquire().await.ok();
-        match analyze_track(&state, &track).await {
-            Ok(true) => state.analysis_backoff.note_success(),
-            // The analyzer answered but had nothing usable; leave the row
-            // unanalysed so a later tick tries again.
-            Ok(false) => {}
+        let outcome = analyze_track(&state, &track).await;
+        let now = db::now();
+        let base = state.config.queue_retry_base_secs;
+        let max = state.config.queue_retry_max_secs;
+        match outcome {
+            Ok(true) => {
+                state.analysis_backoff.note_success();
+                let _ = work::finish(&state.pool, work_id, now).await;
+            }
+            // The analyzer answered but had nothing usable — back off, then give
+            // up after `max_attempts` (the reconciler won't re-arm it).
+            Ok(false) => {
+                let delay = state.analysis_backoff.note_failure(now);
+                let _ = work::retry_later(
+                    &state.pool,
+                    work_id,
+                    "analyzer returned no fields",
+                    now + db::backoff_delay(attempt, base, max),
+                    now,
+                )
+                .await;
+                debug!("analyzer returned nothing; retry after {delay}s");
+            }
             Err(e) => {
                 warn!("{}: analysis failed: {e:#}", track.isrc);
                 state
                     .logs
                     .push("warn", format!("{}: analysis failed: {e}", track.isrc));
-                let delay = state.analysis_backoff.note_failure(db::now());
+                let delay = state.analysis_backoff.note_failure(now);
+                let _ = work::retry_later(
+                    &state.pool,
+                    work_id,
+                    &format!("{e}"),
+                    now + db::backoff_delay(attempt, base, max),
+                    now,
+                )
+                .await;
                 debug!("analyzer backed off for {delay}s");
             }
         }

@@ -1474,3 +1474,339 @@ async fn artist_ingest_parses_ffprobe_fixture_into_vault() {
     .unwrap();
     assert!(none.is_none());
 }
+
+// ── unified work-queue ───────────────────────────────────────────────────────
+
+fn post_work(body: serde_json::Value) -> Request<Body> {
+    authed("POST", "/work")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(json_body(body))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn work_enqueue_and_overview_round_trip() {
+    let h = harness().await;
+
+    let (status, body) = send(
+        &h.app,
+        post_work(serde_json::json!({
+            "kind": "crawl:deezer",
+            "ref": "10725209",
+            "priority": 7,
+            "recordSource": "hub"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["kind"], "crawl:deezer");
+    assert_eq!(v["ref"], "10725209");
+    assert_eq!(v["priority"], 7);
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/work?kind=crawl:deezer")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["items"].as_array().unwrap().len(), 1);
+    assert_eq!(v["items"][0]["state"], "queued");
+    assert_eq!(v["items"][0]["recordSource"], "hub");
+    assert_eq!(v["counts"][0]["kind"], "crawl:deezer");
+    assert_eq!(v["counts"][0]["state"], "queued");
+    assert_eq!(v["counts"][0]["count"], 1);
+}
+
+#[tokio::test]
+async fn work_enqueue_dedupes_and_raises_priority() {
+    let h = harness().await;
+
+    let _ = send(
+        &h.app,
+        post_work(serde_json::json!({"kind": "analyze", "ref": "X1", "priority": 3})),
+    )
+    .await;
+    // A lower re-touch must not lower the stored priority...
+    let _ = send(
+        &h.app,
+        post_work(serde_json::json!({"kind": "analyze", "ref": "X1", "priority": 1})),
+    )
+    .await;
+    let items = music_api::work::items(&h.state.pool, Some("analyze"), 10)
+        .await
+        .unwrap();
+    assert_eq!(items.len(), 1, "same (kind, ref) must not duplicate");
+    assert_eq!(items[0].priority, 3, "priority never lowers");
+
+    // ...but a higher one raises it.
+    let _ = send(
+        &h.app,
+        post_work(serde_json::json!({"kind": "analyze", "ref": "X1", "priority": 100})),
+    )
+    .await;
+    let items = music_api::work::items(&h.state.pool, Some("analyze"), 10)
+        .await
+        .unwrap();
+    assert_eq!(items[0].priority, 100);
+}
+
+#[tokio::test]
+async fn work_next_is_priority_ordered_and_claim_is_exclusive() {
+    let h = harness().await;
+    let pool = &h.state.pool;
+    music_api::work::enqueue(pool, "download", "LOW", 0, None)
+        .await
+        .unwrap();
+    music_api::work::enqueue(pool, "download", "HIGH", 50, None)
+        .await
+        .unwrap();
+
+    let now = music_api::db::now();
+    let next = music_api::work::next(pool, "download", 1, now)
+        .await
+        .unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(
+        next[0].reference, "HIGH",
+        "`next` serves the highest priority first"
+    );
+
+    // Claim is exclusive: the same item cannot be claimed twice.
+    let id = next[0].id;
+    assert!(music_api::work::claim(pool, id, now).await.unwrap());
+    assert!(!music_api::work::claim(pool, id, now).await.unwrap());
+    assert_eq!(
+        music_api::work::count_running(pool, "download")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        music_api::work::free_slots(pool, "download", 5)
+            .await
+            .unwrap(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn work_retry_backs_off_then_fails_out() {
+    let h = harness().await;
+    let pool = &h.state.pool;
+    music_api::work::enqueue(pool, "download", "FLAKY", 0, None)
+        .await
+        .unwrap();
+    let now = music_api::db::now();
+    let item = music_api::work::next(pool, "download", 1, now)
+        .await
+        .unwrap()
+        .remove(0);
+
+    for i in 0..item.max_attempts {
+        assert!(
+            music_api::work::claim(pool, item.id, now).await.unwrap(),
+            "attempt {i} claims"
+        );
+        let retryable = music_api::work::retry_later(pool, item.id, "boom", now + 60, now)
+            .await
+            .unwrap();
+        if i + 1 < item.max_attempts {
+            assert!(retryable, "still retryable after attempt {}", i + 1);
+            // Backed off: not due again yet.
+            assert!(music_api::work::next(pool, "download", 1, now)
+                .await
+                .unwrap()
+                .is_empty());
+        } else {
+            assert!(!retryable, "the final attempt fails the item out");
+        }
+    }
+
+    let counts = music_api::work::counts(pool).await.unwrap();
+    assert!(counts
+        .iter()
+        .any(|c| c.kind == "download" && c.state == "failed" && c.count == 1));
+}
+
+#[tokio::test]
+async fn work_recover_stale_requeues_running_items() {
+    let h = harness().await;
+    let pool = &h.state.pool;
+    music_api::work::enqueue(pool, "analyze", "STUCK", 0, None)
+        .await
+        .unwrap();
+    let now = music_api::db::now();
+    let item = music_api::work::next(pool, "analyze", 1, now)
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(music_api::work::claim(pool, item.id, now).await.unwrap());
+
+    // Not stale yet — left alone.
+    assert_eq!(
+        music_api::work::recover_stale(pool, now, 1800)
+            .await
+            .unwrap(),
+        0
+    );
+    // Far in the future, it is recovered.
+    assert_eq!(
+        music_api::work::recover_stale(pool, now + 3600, 1800)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        music_api::work::count_running(pool, "analyze")
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+// ── analyze runs through the queue ───────────────────────────────────
+
+#[tokio::test]
+async fn analyze_kind_is_enqueued_and_claimed() {
+    let url = spawn_analyzer().await;
+    let h = harness_with(Some(url)).await;
+    seed_ready_flac(&h, "USQX91201487", "/data/flac/USQX91201487.flac").await;
+
+    // The reconciler seeds the item and the tick claims it.
+    music_api::worker::advance_analyze(&h.state).await.unwrap();
+
+    let items = music_api::work::items(&h.state.pool, Some("analyze"), 10)
+        .await
+        .unwrap();
+    assert_eq!(items.len(), 1, "a ready FLAC becomes one analyze item");
+    assert_eq!(items[0].reference, "USQX91201487");
+}
+
+// ── transcode runs through the queue ─────────────────────────────────
+
+/// Generate a short real FLAC with ffmpeg. `None` when ffmpeg is unavailable.
+fn make_flac(path: &Path) -> Option<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    let ok = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=0.5",
+            "-c:a",
+            "flac",
+        ])
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    ok.then_some(())
+}
+
+#[tokio::test]
+async fn transcode_kind_derives_formats_from_flac() {
+    let h = harness().await;
+    let flac = h.state.config.flac_dir().join("TRANSCODE1.flac");
+    if make_flac(&flac).is_none() {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    }
+
+    db::create_order(&h.state.pool, "o1", &["TRANSCODE1".to_string()], 0)
+        .await
+        .unwrap();
+    db::mark_ready(
+        &h.state.pool,
+        "TRANSCODE1",
+        "flac",
+        Some(&flac.display().to_string()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    music_api::worker::transcode_item(&h.state, "TRANSCODE1")
+        .await
+        .unwrap();
+
+    let t = db::get_track(&h.state.pool, "TRANSCODE1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(t.path_320.is_some(), "320 derived from the FLAC");
+    assert!(t.path_128.is_some(), "128 derived from the FLAC");
+    assert!(Path::new(t.path_320.as_deref().unwrap()).exists());
+    assert!(Path::new(t.path_128.as_deref().unwrap()).exists());
+    assert_eq!(t.formats(), vec!["flac", "320", "128"]);
+
+    // Idempotent: a second run leaves the paths untouched.
+    music_api::worker::transcode_item(&h.state, "TRANSCODE1")
+        .await
+        .unwrap();
+    let t2 = db::get_track(&h.state.pool, "TRANSCODE1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t2.path_320, t.path_320);
+}
+
+// ── download runs through the queue ─────────────────────────────────
+
+#[tokio::test]
+async fn download_kind_tracks_the_tracks_ledger() {
+    let h = harness().await;
+    // An order materialises `download` items carrying the order priority.
+    create_order_with_priority(&h.app, &["DLHIGH", "DLLOW"], 42).await;
+    let items = music_api::work::items(&h.state.pool, Some("download"), 10)
+        .await
+        .unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items
+        .iter()
+        .all(|i| i.state == "queued" && i.priority == 42));
+
+    // Dispatching (mark_downloading) moves the item to `running`...
+    db::mark_downloading(&h.state.pool, "DLHIGH", "uuid", db::now() + 60)
+        .await
+        .unwrap();
+    let queued = music_api::work::next(&h.state.pool, "download", 5, db::now())
+        .await
+        .unwrap();
+    assert!(
+        queued.iter().all(|i| i.reference != "DLHIGH"),
+        "the in-flight item left the queue"
+    );
+    assert_eq!(
+        music_api::work::count_running(&h.state.pool, "download")
+            .await
+            .unwrap(),
+        1
+    );
+
+    // ...and completing the download (mark_ready) finishes it.
+    db::mark_ready(
+        &h.state.pool,
+        "DLHIGH",
+        "mp3-320",
+        None,
+        Some("/x.mp3"),
+        None,
+    )
+    .await
+    .unwrap();
+    let items = music_api::work::items(&h.state.pool, Some("download"), 10)
+        .await
+        .unwrap();
+    let hi = items.iter().find(|i| i.reference == "DLHIGH").unwrap();
+    assert_eq!(hi.state, "done");
+}

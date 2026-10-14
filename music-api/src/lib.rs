@@ -17,6 +17,7 @@ pub mod store;
 pub mod tags;
 pub mod transcode;
 pub mod vault;
+pub mod work;
 pub mod worker;
 pub mod ytdlp;
 
