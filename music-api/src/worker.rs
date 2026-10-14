@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
 use crate::models::{state, ArtistOrder, MetadataItem, Track};
-use crate::{analyzer, db, deemix, deezer, tags, transcode, vault, AppState};
+use crate::{analyzer, db, deemix, deezer, tags, transcode, vault, work, AppState};
 
 const AUDIO_EXTENSIONS: &[&str] = &["flac", "mp3", "m4a", "opus", "ogg"];
 
@@ -29,6 +29,10 @@ const ARTIST_INGEST_MAX_FILES: usize = 2000;
 /// A `running` artist order whose deemix item vanished but produced no files is
 /// failed after this long (bounded lifetime).
 const ARTIST_ORDER_STALE_SECS: i64 = 1800;
+
+/// Work items stranded in `running` longer than this are re-queued (a worker
+/// that died mid-flight); the next claim counts another attempt.
+const WORK_STALE_SECS: i64 = 1800;
 
 const LOGIN_BACKOFF_BASE: i64 = 60;
 const LOGIN_BACKOFF_MAX: i64 = 1800;
@@ -85,12 +89,16 @@ pub async fn run(state: Arc<AppState>) {
 }
 
 async fn tick(state: &Arc<AppState>) -> Result<()> {
-    // Recover rows stranded in `downloading` by a crash/restart before doing work.
+    // Recover rows stranded in `downloading`/`running` by a crash/restart before
+    // doing work.
     db::recover_expired_leases(&state.pool, &retry_policy(state), db::now()).await?;
+    work::recover_stale(&state.pool, db::now(), WORK_STALE_SECS).await?;
     resolve_pending(state).await?;
     advance_downloads(state).await?;
     // Artist orders (whole-discography downloads) run alongside the ISRC queue.
     advance_artist_orders(state).await?;
+    // Drain the crawl-lead queue (the spider) into artist orders.
+    advance_crawl_leads(state).await?;
     // Analyse freshly-ready FLACs last, so a `ready` row written this tick is
     // picked up here (or on the next) without blocking downloads.
     analyze_ready(state).await?;
@@ -661,6 +669,66 @@ pub async fn submit_artist_order(
             "open".to_string()
         }
     }
+}
+
+/// Drain the crawl-lead queue. A lead is *"complete this entity via one
+/// source"*; v1 handles `crawl:deezer` by turning an artist lead into an
+/// artist-discography order, which the artist-order phase then drives. Bounded
+/// by `MAX_INFLIGHT` and priority-ordered like every other kind.
+async fn advance_crawl_leads(state: &Arc<AppState>) -> Result<()> {
+    let kind = work::kind::crawl("deezer");
+    let slots = work::free_slots(&state.pool, &kind, state.config.max_inflight as i64).await?;
+    if slots == 0 {
+        return Ok(());
+    }
+    let leads = work::next(&state.pool, &kind, slots, db::now()).await?;
+    if leads.is_empty() {
+        return Ok(());
+    }
+    let deemix_ready = ensure_deemix_login(state).await;
+    for lead in leads {
+        if !work::claim(&state.pool, lead.id, db::now()).await? {
+            continue;
+        }
+        let Some(artist_url) = deezer::normalize_artist_url(&lead.reference) else {
+            work::fail(
+                &state.pool,
+                lead.id,
+                "not a Deezer artist id/URL",
+                db::now(),
+            )
+            .await?;
+            continue;
+        };
+        let order_id = uuid::Uuid::new_v4().to_string();
+        if let Err(e) = db::create_artist_order(
+            &state.pool,
+            &order_id,
+            lead.reference.trim(),
+            &artist_url,
+            lead.priority,
+        )
+        .await
+        {
+            warn!(
+                "crawl lead {}: create artist order failed: {e:#}",
+                lead.reference
+            );
+            work::retry_later(
+                &state.pool,
+                lead.id,
+                &format!("create artist order: {e}"),
+                db::now() + 60,
+                db::now(),
+            )
+            .await?;
+            continue;
+        }
+        // The artist order now owns the work; submit it and release the lead.
+        submit_artist_order(state, &order_id, &artist_url, deemix_ready).await;
+        work::finish(&state.pool, lead.id, db::now()).await?;
+    }
+    Ok(())
 }
 
 /// Phase D: submit `open` artist orders to deemix and ingest finished ones.

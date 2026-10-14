@@ -176,6 +176,39 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
         .execute(pool)
         .await;
 
+    // The unified priority work-queue (additive, idempotent). Every background
+    // kind — download, transcode, analyze, crawl:<source> leads — lives here;
+    // `next` (see `crate::work`) is the single place priority is applied.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS work_items (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind          TEXT NOT NULL,
+            ref           TEXT NOT NULL,
+            priority      INTEGER NOT NULL DEFAULT 0,
+            state         TEXT NOT NULL DEFAULT 'queued',
+            attempts      INTEGER NOT NULL DEFAULT 0,
+            max_attempts  INTEGER NOT NULL DEFAULT 5,
+            not_before    INTEGER,
+            record_source TEXT,
+            error         TEXT,
+            created_at    INTEGER NOT NULL,
+            updated_at    INTEGER NOT NULL,
+            UNIQUE (kind, ref)
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Serves the `next` selection: kind + due + priority ordering.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_work_next
+            ON work_items(kind, state, priority DESC, not_before);",
+    )
+    .execute(pool)
+    .await?;
+
     // Data Vault 2.0 tables (additive, idempotent). The vault is the data home;
     // the tables above stay the operational queue. See `crate::vault`.
     crate::vault::init(pool).await?;

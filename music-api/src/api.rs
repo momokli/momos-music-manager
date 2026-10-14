@@ -13,7 +13,7 @@ use serde_json::json;
 use tokio_util::io::ReaderStream;
 
 use crate::models::{CreateArtistOrderRequest, CreateOrderRequest, MetadataPushRequest};
-use crate::{db, worker, AppState};
+use crate::{db, work, worker, AppState};
 
 /// Public liveness probe (no auth).
 pub async fn health() -> impl IntoResponse {
@@ -55,6 +55,8 @@ pub fn router() -> Router<Arc<AppState>> {
         // Data Vault 2.0 consumer surface: resolved BPM/key by precedence.
         .route("/vault/tracks", get(get_vault_tracks))
         .route("/vault/track/{isrc}", get(get_vault_track))
+        // The unified priority work-queue (download/transcode/analyze/crawl:*).
+        .route("/work", post(create_work).get(get_work))
         // Content-addressed object store (Backpack backup / file home).
         .route("/objects", get(crate::store::list))
         .route("/objects/check", post(crate::store::check))
@@ -147,6 +149,66 @@ async fn create_artist_order(
     );
 
     Json(json!({ "orderId": order_id, "status": status, "artist": artist_url })).into_response()
+}
+
+/// `POST /work` — enqueue a work item (raise/re-arm on conflict). Generic so any
+/// producer (the hub, the spider) can seed any kind.
+async fn create_work(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateWorkRequest>,
+) -> Response {
+    let kind = req.kind.trim().to_lowercase();
+    let reference = req.reference.trim();
+    if kind.is_empty() || reference.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "kind and ref are required");
+    }
+    if let Err(e) = work::enqueue(
+        &state.pool,
+        &kind,
+        reference,
+        req.priority,
+        req.record_source.as_deref(),
+    )
+    .await
+    {
+        tracing::error!("create_work failed: {e:#}");
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to enqueue work");
+    }
+    state.notify.notify_one();
+    Json(json!({ "kind": kind, "ref": reference, "priority": req.priority })).into_response()
+}
+
+/// `GET /work` — queue overview: `(kind, state)` counts plus the top items.
+async fn get_work(State(state): State<Arc<AppState>>, Query(q): Query<WorkQuery>) -> Response {
+    let counts = work::counts(&state.pool).await.unwrap_or_default();
+    let items = work::items(&state.pool, q.kind.as_deref(), q.limit.unwrap_or(50))
+        .await
+        .unwrap_or_default();
+    Json(json!({ "counts": counts, "items": items })).into_response()
+}
+
+/// `POST /work` body. `ref`/`refId` are both accepted.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateWorkRequest {
+    /// e.g. `download`, `analyze`, `crawl:deezer`.
+    kind: String,
+    /// What the work acts on.
+    #[serde(rename = "ref", alias = "refId")]
+    reference: String,
+    /// Higher runs first (default 0).
+    #[serde(default)]
+    priority: i64,
+    /// Which source requested it (free-form; stored for provenance).
+    #[serde(default)]
+    record_source: Option<String>,
+}
+
+/// `GET /work` query.
+#[derive(Debug, Deserialize)]
+struct WorkQuery {
+    kind: Option<String>,
+    limit: Option<i64>,
 }
 
 /// `GET /artist-orders` — list artist orders, optionally filtered by status.

@@ -1474,3 +1474,196 @@ async fn artist_ingest_parses_ffprobe_fixture_into_vault() {
     .unwrap();
     assert!(none.is_none());
 }
+
+// ── unified work-queue ───────────────────────────────────────────────────────
+
+fn post_work(body: serde_json::Value) -> Request<Body> {
+    authed("POST", "/work")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(json_body(body))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn work_enqueue_and_overview_round_trip() {
+    let h = harness().await;
+
+    let (status, body) = send(
+        &h.app,
+        post_work(serde_json::json!({
+            "kind": "crawl:deezer",
+            "ref": "10725209",
+            "priority": 7,
+            "recordSource": "hub"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["kind"], "crawl:deezer");
+    assert_eq!(v["ref"], "10725209");
+    assert_eq!(v["priority"], 7);
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/work?kind=crawl:deezer")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["items"].as_array().unwrap().len(), 1);
+    assert_eq!(v["items"][0]["state"], "queued");
+    assert_eq!(v["items"][0]["recordSource"], "hub");
+    assert_eq!(v["counts"][0]["kind"], "crawl:deezer");
+    assert_eq!(v["counts"][0]["state"], "queued");
+    assert_eq!(v["counts"][0]["count"], 1);
+}
+
+#[tokio::test]
+async fn work_enqueue_dedupes_and_raises_priority() {
+    let h = harness().await;
+
+    let _ = send(
+        &h.app,
+        post_work(serde_json::json!({"kind": "analyze", "ref": "X1", "priority": 3})),
+    )
+    .await;
+    // A lower re-touch must not lower the stored priority...
+    let _ = send(
+        &h.app,
+        post_work(serde_json::json!({"kind": "analyze", "ref": "X1", "priority": 1})),
+    )
+    .await;
+    let items = music_api::work::items(&h.state.pool, Some("analyze"), 10)
+        .await
+        .unwrap();
+    assert_eq!(items.len(), 1, "same (kind, ref) must not duplicate");
+    assert_eq!(items[0].priority, 3, "priority never lowers");
+
+    // ...but a higher one raises it.
+    let _ = send(
+        &h.app,
+        post_work(serde_json::json!({"kind": "analyze", "ref": "X1", "priority": 100})),
+    )
+    .await;
+    let items = music_api::work::items(&h.state.pool, Some("analyze"), 10)
+        .await
+        .unwrap();
+    assert_eq!(items[0].priority, 100);
+}
+
+#[tokio::test]
+async fn work_next_is_priority_ordered_and_claim_is_exclusive() {
+    let h = harness().await;
+    let pool = &h.state.pool;
+    music_api::work::enqueue(pool, "download", "LOW", 0, None)
+        .await
+        .unwrap();
+    music_api::work::enqueue(pool, "download", "HIGH", 50, None)
+        .await
+        .unwrap();
+
+    let now = music_api::db::now();
+    let next = music_api::work::next(pool, "download", 1, now)
+        .await
+        .unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(
+        next[0].reference, "HIGH",
+        "`next` serves the highest priority first"
+    );
+
+    // Claim is exclusive: the same item cannot be claimed twice.
+    let id = next[0].id;
+    assert!(music_api::work::claim(pool, id, now).await.unwrap());
+    assert!(!music_api::work::claim(pool, id, now).await.unwrap());
+    assert_eq!(
+        music_api::work::count_running(pool, "download")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        music_api::work::free_slots(pool, "download", 5)
+            .await
+            .unwrap(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn work_retry_backs_off_then_fails_out() {
+    let h = harness().await;
+    let pool = &h.state.pool;
+    music_api::work::enqueue(pool, "download", "FLAKY", 0, None)
+        .await
+        .unwrap();
+    let now = music_api::db::now();
+    let item = music_api::work::next(pool, "download", 1, now)
+        .await
+        .unwrap()
+        .remove(0);
+
+    for i in 0..item.max_attempts {
+        assert!(
+            music_api::work::claim(pool, item.id, now).await.unwrap(),
+            "attempt {i} claims"
+        );
+        let retryable = music_api::work::retry_later(pool, item.id, "boom", now + 60, now)
+            .await
+            .unwrap();
+        if i + 1 < item.max_attempts {
+            assert!(retryable, "still retryable after attempt {}", i + 1);
+            // Backed off: not due again yet.
+            assert!(music_api::work::next(pool, "download", 1, now)
+                .await
+                .unwrap()
+                .is_empty());
+        } else {
+            assert!(!retryable, "the final attempt fails the item out");
+        }
+    }
+
+    let counts = music_api::work::counts(pool).await.unwrap();
+    assert!(counts
+        .iter()
+        .any(|c| c.kind == "download" && c.state == "failed" && c.count == 1));
+}
+
+#[tokio::test]
+async fn work_recover_stale_requeues_running_items() {
+    let h = harness().await;
+    let pool = &h.state.pool;
+    music_api::work::enqueue(pool, "analyze", "STUCK", 0, None)
+        .await
+        .unwrap();
+    let now = music_api::db::now();
+    let item = music_api::work::next(pool, "analyze", 1, now)
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(music_api::work::claim(pool, item.id, now).await.unwrap());
+
+    // Not stale yet — left alone.
+    assert_eq!(
+        music_api::work::recover_stale(pool, now, 1800)
+            .await
+            .unwrap(),
+        0
+    );
+    // Far in the future, it is recovered.
+    assert_eq!(
+        music_api::work::recover_stale(pool, now + 3600, 1800)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        music_api::work::count_running(pool, "analyze")
+            .await
+            .unwrap(),
+        0
+    );
+}
