@@ -99,6 +99,8 @@ async fn tick(state: &Arc<AppState>) -> Result<()> {
     advance_artist_orders(state).await?;
     // Drain the crawl-lead queue (the spider) into artist orders.
     advance_crawl_leads(state).await?;
+    // Derive the lossy formats (320/128) off the download path.
+    advance_transcode(state).await?;
     // Analyse freshly-ready FLACs last, so a `ready` row written this tick is
     // picked up here (or on the next) without blocking downloads.
     advance_analyze(state).await?;
@@ -370,32 +372,30 @@ async fn run_non_deezer(state: &Arc<AppState>, track: &Track) -> Result<()> {
     }
 }
 
-/// Transcode a yt-dlp download into our 320/128 store and mark it ready. No
-/// FLAC — the source is lossy.
+/// Transcode a yt-dlp download into our 320 store and mark it ready (the 128 is
+/// derived by the `transcode` queue kind). No FLAC — the source is lossy.
 async fn finalize_soundcloud(state: &Arc<AppState>, track: &Track, src: &Path) -> Result<()> {
     let cfg = &state.config;
     let base = track.isrc.replace([':', '/'], "_");
     let mp3_320 = cfg.mp3_320_dir().join(format!("{base}.mp3"));
-    let mp3_128 = cfg.mp3_128_dir().join(format!("{base}.mp3"));
     tokio::fs::create_dir_all(cfg.mp3_320_dir()).await?;
-    tokio::fs::create_dir_all(cfg.mp3_128_dir()).await?;
     transcode::to_mp3(&cfg.ffmpeg, src, &mp3_320, 320).await?;
-    transcode::to_mp3(&cfg.ffmpeg, src, &mp3_128, 128).await?;
     db::mark_ready(
         &state.pool,
         &track.isrc,
         "mp3-320",
         None,
         Some(&mp3_320.display().to_string()),
-        Some(&mp3_128.display().to_string()),
+        None,
     )
     .await?;
-    vault_download(state, &track.isrc, "ready", Some("mp3-320"), "320,128").await;
-    info!("{}: ready (soundcloud 320 + 128)", track.isrc);
+    vault_download(state, &track.isrc, "ready", Some("mp3-320"), "320").await;
+    info!("{}: ready (soundcloud 320) — 128 queued", track.isrc);
     state
         .logs
         .push("info", format!("{}: ready (soundcloud)", track.isrc));
     let _ = tokio::fs::remove_file(src).await;
+    enqueue_transcode(state, &track.isrc).await;
     Ok(())
 }
 
@@ -534,23 +534,25 @@ async fn finalize(state: &Arc<AppState>, track: &Track) -> Result<bool> {
     if is_flac {
         tokio::fs::create_dir_all(cfg.flac_dir()).await?;
         tokio::fs::copy(&src, &flac_dst).await?;
-        transcode::to_mp3(&cfg.ffmpeg, &flac_dst, &mp3_320, 320).await?;
-        transcode::to_mp3(&cfg.ffmpeg, &flac_dst, &mp3_128, 128).await?;
 
+        // Make the lossless file available immediately; the derived 320/128 are
+        // filled in by the `transcode` queue kind, so a slow ffmpeg never delays
+        // the FLAC (or the download slot).
         db::mark_ready(
             &state.pool,
             &track.isrc,
             "flac",
             Some(&flac_dst.display().to_string()),
-            Some(&mp3_320.display().to_string()),
-            Some(&mp3_128.display().to_string()),
+            None,
+            None,
         )
         .await?;
-        vault_download(state, &track.isrc, "ready", Some("flac"), "flac,320,128").await;
-        info!("{}: ready (flac + 320 + 128)", track.isrc);
+        vault_download(state, &track.isrc, "ready", Some("flac"), "flac").await;
+        info!("{}: ready (flac) — 320/128 queued", track.isrc);
         state
             .logs
             .push("info", format!("{}: ready (flac)", track.isrc));
+        enqueue_transcode(state, &track.isrc).await;
     } else {
         // deemix fell back (no lossless available). The delivered MP3 may be
         // 320 *or* 128 — the ARL's Deezer tier decides — so classify it by what
@@ -561,7 +563,6 @@ async fn finalize(state: &Arc<AppState>, track: &Track) -> Result<bool> {
         if is_320 {
             tokio::fs::create_dir_all(cfg.mp3_320_dir()).await?;
             tokio::fs::copy(&src, &mp3_320).await?;
-            transcode::to_mp3(&cfg.ffmpeg, &mp3_320, &mp3_128, 128).await?;
 
             db::mark_ready(
                 &state.pool,
@@ -569,11 +570,15 @@ async fn finalize(state: &Arc<AppState>, track: &Track) -> Result<bool> {
                 "mp3-320",
                 None,
                 Some(&mp3_320.display().to_string()),
-                Some(&mp3_128.display().to_string()),
+                None,
             )
             .await?;
-            vault_download(state, &track.isrc, "ready", Some("mp3-320"), "320,128").await;
-            info!("{}: ready (mp3 320 + 128, no FLAC available)", track.isrc);
+            vault_download(state, &track.isrc, "ready", Some("mp3-320"), "320").await;
+            info!(
+                "{}: ready (mp3 320, no FLAC available) — 128 queued",
+                track.isrc
+            );
+            enqueue_transcode(state, &track.isrc).await;
         } else {
             tokio::fs::create_dir_all(cfg.mp3_128_dir()).await?;
             tokio::fs::copy(&src, &mp3_128).await?;
@@ -623,6 +628,122 @@ async fn vault_download(
             warn!("{isrc}: vault download load failed: {e:#}");
         }
     }
+}
+
+// ── Phase E: derived formats — the `transcode` kind ─────────────────────────
+
+/// Enqueue derived-format work for a track (320/128 from the primary). It runs
+/// on the bounded queue, priority-ordered like every kind, so it never blocks
+/// the download slot or the lossless file.
+async fn enqueue_transcode(state: &Arc<AppState>, isrc: &str) {
+    let priority = db::order_priority(&state.pool, isrc).await.unwrap_or(0);
+    if let Err(e) = work::enqueue(
+        &state.pool,
+        work::kind::TRANSCODE,
+        isrc,
+        priority,
+        Some("music-api-worker"),
+    )
+    .await
+    {
+        warn!("{isrc}: enqueue transcode failed: {e:#}");
+    }
+}
+
+/// The `transcode` kind: drain `next("transcode")` up to `MAX_INFLIGHT`, each on
+/// a bounded background task.
+async fn advance_transcode(state: &Arc<AppState>) -> Result<()> {
+    let kind = work::kind::TRANSCODE;
+    let slots = work::free_slots(&state.pool, kind, state.config.max_inflight as i64).await?;
+    if slots == 0 {
+        return Ok(());
+    }
+    for item in work::next(&state.pool, kind, slots, db::now()).await? {
+        if !work::claim(&state.pool, item.id, db::now()).await? {
+            continue;
+        }
+        spawn_transcode(state.clone(), item);
+    }
+    Ok(())
+}
+
+/// Run one transcode on a bounded background task and settle its queue item.
+fn spawn_transcode(state: Arc<AppState>, item: work::WorkItem) {
+    tokio::spawn(async move {
+        let _permit = state.finalize_sem.acquire().await.ok();
+        let now = db::now();
+        let attempt = item.attempts.max(1) as u32;
+        match transcode_item(&state, &item.reference).await {
+            Ok(()) => {
+                let _ = work::finish(&state.pool, item.id, now).await;
+            }
+            Err(e) => {
+                warn!("{}: transcode failed: {e:#}", item.reference);
+                let _ = work::retry_later(
+                    &state.pool,
+                    item.id,
+                    &format!("{e}"),
+                    now + db::backoff_delay(
+                        attempt,
+                        state.config.queue_retry_base_secs,
+                        state.config.queue_retry_max_secs,
+                    ),
+                    now,
+                )
+                .await;
+            }
+        }
+    });
+}
+
+/// Derive the missing lossy formats for one track: 320 + 128 from a FLAC, or 128
+/// from a 320. Idempotent — a track whose formats already exist is a no-op.
+/// Public so tests can drive a single transcode without the background/handling
+/// machinery.
+pub async fn transcode_item(state: &Arc<AppState>, isrc: &str) -> Result<()> {
+    let Some(track) = db::get_track(&state.pool, isrc).await? else {
+        return Ok(()); // unknown track — nothing to derive
+    };
+    let cfg = &state.config;
+    let base = isrc.replace([':', '/'], "_");
+
+    let mut path_320: Option<String> = None;
+    let mut path_128: Option<String> = None;
+
+    if let Some(flac) = track.path_flac.as_deref() {
+        if track.path_320.is_none() {
+            let dst = cfg.mp3_320_dir().join(format!("{base}.mp3"));
+            tokio::fs::create_dir_all(cfg.mp3_320_dir()).await?;
+            transcode::to_mp3(&cfg.ffmpeg, Path::new(flac), &dst, 320).await?;
+            path_320 = Some(dst.display().to_string());
+        }
+        if track.path_128.is_none() {
+            let dst = cfg.mp3_128_dir().join(format!("{base}.mp3"));
+            tokio::fs::create_dir_all(cfg.mp3_128_dir()).await?;
+            transcode::to_mp3(&cfg.ffmpeg, Path::new(flac), &dst, 128).await?;
+            path_128 = Some(dst.display().to_string());
+        }
+    } else if let Some(from_320) = track.path_320.as_deref() {
+        if track.path_128.is_none() {
+            let dst = cfg.mp3_128_dir().join(format!("{base}.mp3"));
+            tokio::fs::create_dir_all(cfg.mp3_128_dir()).await?;
+            transcode::to_mp3(&cfg.ffmpeg, Path::new(from_320), &dst, 128).await?;
+            path_128 = Some(dst.display().to_string());
+        }
+    }
+
+    if path_320.is_none() && path_128.is_none() {
+        return Ok(()); // nothing to derive (already complete, or no source)
+    }
+    db::set_track_derived(&state.pool, isrc, path_320.as_deref(), path_128.as_deref()).await?;
+
+    // Refresh the vault download satellite with the full format set.
+    if let Some(t) = db::get_track(&state.pool, isrc).await? {
+        let formats = t.formats().join(",");
+        vault_download(state, isrc, "ready", t.source_format.as_deref(), &formats).await;
+    }
+    info!("{isrc}: derived formats ready");
+    Ok(())
 }
 
 // ── Artist orders (whole-discography download) ───────────────────────────────

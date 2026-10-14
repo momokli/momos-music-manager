@@ -1685,3 +1685,77 @@ async fn analyze_kind_is_enqueued_and_claimed() {
     assert_eq!(items.len(), 1, "a ready FLAC becomes one analyze item");
     assert_eq!(items[0].reference, "USQX91201487");
 }
+
+// ── transcode runs through the queue ─────────────────────────────────
+
+/// Generate a short real FLAC with ffmpeg. `None` when ffmpeg is unavailable.
+fn make_flac(path: &Path) -> Option<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    let ok = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=0.5",
+            "-c:a",
+            "flac",
+        ])
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    ok.then_some(())
+}
+
+#[tokio::test]
+async fn transcode_kind_derives_formats_from_flac() {
+    let h = harness().await;
+    let flac = h.state.config.flac_dir().join("TRANSCODE1.flac");
+    if make_flac(&flac).is_none() {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    }
+
+    db::create_order(&h.state.pool, "o1", &["TRANSCODE1".to_string()], 0)
+        .await
+        .unwrap();
+    db::mark_ready(
+        &h.state.pool,
+        "TRANSCODE1",
+        "flac",
+        Some(&flac.display().to_string()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    music_api::worker::transcode_item(&h.state, "TRANSCODE1")
+        .await
+        .unwrap();
+
+    let t = db::get_track(&h.state.pool, "TRANSCODE1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(t.path_320.is_some(), "320 derived from the FLAC");
+    assert!(t.path_128.is_some(), "128 derived from the FLAC");
+    assert!(Path::new(t.path_320.as_deref().unwrap()).exists());
+    assert!(Path::new(t.path_128.as_deref().unwrap()).exists());
+    assert_eq!(t.formats(), vec!["flac", "320", "128"]);
+
+    // Idempotent: a second run leaves the paths untouched.
+    music_api::worker::transcode_item(&h.state, "TRANSCODE1")
+        .await
+        .unwrap();
+    let t2 = db::get_track(&h.state.pool, "TRANSCODE1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t2.path_320, t.path_320);
+}

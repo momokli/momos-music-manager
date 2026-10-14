@@ -415,6 +415,30 @@ pub async fn order_priority(pool: &Pool<Sqlite>, isrc: &str) -> anyhow::Result<i
     .await?)
 }
 
+/// Record derived lossy paths filled in by the `transcode` worker. `COALESCE`
+/// keeps any path that is already present, so it is safe to call with partials.
+pub async fn set_track_derived(
+    pool: &Pool<Sqlite>,
+    isrc: &str,
+    path_320: Option<&str>,
+    path_128: Option<&str>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE tracks
+            SET path_320 = COALESCE(?, path_320),
+                path_128 = COALESCE(?, path_128),
+                updated_at = ?
+          WHERE isrc = ?",
+    )
+    .bind(path_320)
+    .bind(path_128)
+    .bind(now())
+    .bind(isrc)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Retry tuning for the durable queue.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
