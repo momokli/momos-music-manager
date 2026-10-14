@@ -11,6 +11,7 @@
                     <th scope="col">Letzter Lauf</th>
                     <th scope="col">Iterationen</th>
                     <th scope="col">Status</th>
+                    <th scope="col">Aktion</th>
                 </tr>
             </thead>
             <tbody>
@@ -20,16 +21,34 @@
                     <td>{{ w.last_run }}</td>
                     <td>{{ w.iterations }}</td>
                     <td>
-                        {% if w.last_worked %}<span class="hub-badge hub-badge-ok">läuft</span>
+                        {% if w.paused %}<span class="hub-badge hub-badge-no">pausiert</span>
+                        {% else if w.last_worked %}<span class="hub-badge hub-badge-ok">läuft</span>
                         {% else %}<span class="hub-badge">idle</span>{% endif %} {% if
                         w.last_error != "" %}<span class="hub-badge hub-badge-no">{{ w.last_error }}</span>{%
                         endif %}
+                    </td>
+                    <td>
+                        {% if w.paused %}
+                        <button hx-post="/api/hub/ops/workers/{{ w.name }}/resume" hx-swap="none" class="secondary">
+                            Fortsetzen
+                        </button>
+                        {% else %}
+                        <button hx-post="/api/hub/ops/workers/{{ w.name }}/pause" hx-swap="none" class="secondary">
+                            Pausieren
+                        </button>
+                        {% endif %}
                     </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
     </div>
+
+    <p>
+        <button hx-post="/api/hub/ops/retry" hx-swap="none" class="secondary">
+            Retry fehlgeschlagene Jobs
+        </button>
+    </p>
 
     <h3>Backlog</h3>
     <p class="hub-muted">

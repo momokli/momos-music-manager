@@ -13,6 +13,11 @@
     <p class="hub-muted">Ops-Status wird geladen …</p>
 </section>
 
+<section hx-get="/api/hub/ops/logs" hx-trigger="load, every 15s" hx-swap="innerHTML" aria-label="Hub-Ereignisse">
+    <h3>Hub-Ereignisse</h3>
+    <p class="hub-muted">Ereignis-Log wird geladen …</p>
+</section>
+
 <form method="post" action="/admin">
     <table class="hub-dense-table">
         <caption class="hub-visually-hidden">

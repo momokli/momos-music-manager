@@ -3728,6 +3728,7 @@ struct WorkerRow {
     last_worked: bool,
     iterations: u64,
     last_error: String,
+    paused: bool,
 }
 
 struct BacklogRow {
@@ -3754,6 +3755,7 @@ async fn status_panel(State(st): State<AppState>, headers: HeaderMap) -> Respons
             last_worked: l.last_worked,
             iterations: l.iterations,
             last_error: l.last_error.clone().unwrap_or_default(),
+            paused: l.paused,
         })
         .collect();
 
