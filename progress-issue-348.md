@@ -25,8 +25,14 @@ NOT already done: kein PR/Branch referenziert #348.
 | 3 | developer | done | S1–S6 implementiert, build+test grün (11 neue Tests) |
 | 4 | verifier | done | PASS — Diff/AK geprüft, `cargo test` grün (alle Targets 0 failed, Lib 75 passed) |
 | 5 | tester | done | PASS — Integrations-Test ergänzt (Settings-Persistenz→tagdone), `cargo test` grün (398 passed / 0 failed) |
-| 6 | developer (PR) | pending | |
+| 6 | developer (PR) | done | PR #436 erstellt |
 | 7 | reviewer | pending | |
+
+## PR
+
+- PR **#436** — https://github.com/momokli/momos-music-manager/pull/436
+- base `main` ← head `feature/issue-348-describes-toggle`
+- Body: `Closes #348`. Push via clanker-git (kein force).
 
 ## Koordination
 - Nur music-hub/**. Kein Merge/main-Push. Commit-Style fix(#348):/feat(#348): <english>.
