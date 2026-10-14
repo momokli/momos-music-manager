@@ -872,30 +872,37 @@ pub async fn push_analysis(pool: &SqlitePool, cfg: &Config, limit: usize) -> Res
     push_metadata(cfg, &items).await
 }
 
-/// `GET /metadata?isrcs=a,b,c` — metadata for a range of ISRCs (empty on failure).
-pub async fn metadata_bulk(cfg: &Config, isrcs: &[String]) -> Vec<serde_json::Value> {
+/// `GET /vault/tracks?isrcs=a,b,c` — the vault's resolved best BPM/key per ISRC.
+///
+/// music-api is the Data Vault of music; it resolves the "right" value per track
+/// by source precedence and returns
+/// `{"tracks":[{"isrc","bpm","key","camelot","energy","source","updatedAt"}]}`.
+///
+/// Returns `None` when the request could not be made or failed (so callers can
+/// tell a transient outage from an all-unknown result), `Some(tracks)` otherwise.
+pub async fn vault_tracks(cfg: &Config, isrcs: &[String]) -> Option<Vec<serde_json::Value>> {
     if isrcs.is_empty() {
-        return Vec::new();
+        return Some(Vec::new());
     }
-    let Ok(t) = token(cfg) else {
-        return Vec::new();
-    };
-    let url = format!("{}/metadata", cfg.music_api_base);
-    let resp = match reqwest::Client::new()
+    let t = token(cfg).ok()?;
+    let url = format!("{}/vault/tracks", cfg.music_api_base);
+    let resp = reqwest::Client::new()
         .get(&url)
         .bearer_auth(t)
         .query(&[("isrcs", isrcs.join(","))])
         .send()
         .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        _ => return Vec::new(),
-    };
-    resp.json::<serde_json::Value>()
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let items = resp
+        .json::<serde_json::Value>()
         .await
         .ok()
-        .and_then(|v| v.get("items").and_then(|x| x.as_array()).cloned())
-        .unwrap_or_default()
+        .and_then(|v| v.get("tracks").and_then(|x| x.as_array()).cloned())
+        .unwrap_or_default();
+    Some(items)
 }
 
 #[cfg(test)]

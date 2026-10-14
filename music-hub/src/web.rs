@@ -982,6 +982,8 @@ struct TrackPage {
     explicit: bool,
     bpm: String,
     music_key: String,
+    /// Source the resolved BPM/key came from (empty when none).
+    bpm_source: String,
     energy: String,
     feat_note: String,
     users: Vec<UserGroup>,
@@ -1266,48 +1268,29 @@ async fn build_track_page(
         .unwrap_or_else(|| "—".to_string());
     let isrc: String = row.get::<Option<String>, _>("isrc").unwrap_or_default();
 
-    // Audio features (ReccoBeats) for this track.
-    let feat = sqlx::query(
-        "SELECT bpm, camelot, key_pitch, key_mode, energy, found
-           FROM hub_track_features WHERE track_id = ?1",
-    )
-    .bind(id)
-    .fetch_optional(&st.pool)
-    .await
-    .ok()
-    .flatten();
-    let (bpm, music_key, energy, feat_note) = match feat {
-        Some(r) if r.get::<i64, _>("found") == 1 => {
-            let bpm: Option<f64> = r.get("bpm");
-            let camelot: Option<String> = r.get("camelot");
-            let pitch: Option<i64> = r.get("key_pitch");
-            let mode: Option<i64> = r.get("key_mode");
-            let energy: Option<f64> = r.get("energy");
-            let bpm = bpm.map(|b| format!("{b:.0}")).unwrap_or_else(|| "—".into());
-            let music_key = match (pitch, mode, camelot) {
-                (Some(p), Some(m), Some(c)) => {
-                    let m = if m == 1 { "maj" } else { "min" };
-                    format!("{} {} · {c}", crate::features::key_name(p), m)
-                }
-                _ => "—".to_string(),
-            };
-            let energy = energy
-                .map(|e| format!("{:.2}", e))
-                .unwrap_or_else(|| "—".into());
-            (bpm, music_key, energy, String::new())
-        }
-        Some(_) => (
-            "—".into(),
-            "—".into(),
-            "—".into(),
-            "ReccoBeats hat für diesen Track keine Audio-Features.".to_string(),
-        ),
-        None => (
-            "—".into(),
-            "—".into(),
-            "—".into(),
-            "Audio-Features noch nicht abgeglichen (Worker läuft).".to_string(),
-        ),
+    // Resolved best BPM/key from the vault read-model (`hub_track_audio`).
+    // The hub never analyses and owns no vault — music-api resolves the "right"
+    // value by source precedence; we only display it.
+    let audio = crate::analysis::get(&st.pool, id).await.unwrap_or_default();
+    let bpm = audio
+        .bpm
+        .map(|b| format!("{b:.0}"))
+        .unwrap_or_else(|| "—".into());
+    let music_key = audio
+        .key
+        .clone()
+        .or_else(|| audio.camelot.clone())
+        .unwrap_or_else(|| "—".into());
+    let bpm_source = audio.source.clone().unwrap_or_default();
+    let energy = audio
+        .energy
+        .map(|e| format!("{e:.2}"))
+        .unwrap_or_else(|| "—".into());
+
+    let feat_note = if audio.has_data() {
+        String::new()
+    } else {
+        "Noch keine BPM/Key-Quelle im music-api-Vault.".to_string()
     };
 
     // External service IDs for this track.
@@ -1479,6 +1462,7 @@ async fn build_track_page(
         explicit: row.get::<Option<i64>, _>("explicit").unwrap_or(0) != 0,
         bpm,
         music_key,
+        bpm_source,
         energy,
         feat_note,
         users,
@@ -1928,35 +1912,18 @@ fn with_toast(mut resp: Response, msg: &str, kind: &str) -> Response {
     resp
 }
 
-/// BPM + Camelot key for a hub track, preferring ReccoBeats over Traktor.
+/// BPM + key for a hub track, from the vault read-model (`hub_track_audio`).
 async fn track_bpm_key(st: &AppState, track_id: i64) -> (String, String) {
-    let row = sqlx::query(
-        "SELECT f.bpm AS fbpm, f.camelot AS fcam, v.bpm AS tbpm, v.camelot AS tcam
-           FROM hub_tracks t
-           LEFT JOIN hub_track_features f ON f.track_id = t.id
-           LEFT JOIN hub_v_track_traktor v ON v.track_id = t.id
-          WHERE t.id = ?1",
+    let audio = crate::analysis::get(&st.pool, track_id)
+        .await
+        .unwrap_or_default();
+    (
+        audio
+            .bpm
+            .map(|b| format!("{b:.0}"))
+            .unwrap_or_else(|| "—".into()),
+        audio.key.or(audio.camelot).unwrap_or_else(|| "—".into()),
     )
-    .bind(track_id)
-    .fetch_optional(&st.pool)
-    .await
-    .ok()
-    .flatten();
-    match row {
-        Some(r) => {
-            let bpm: Option<f64> = r
-                .get::<Option<f64>, _>("fbpm")
-                .or(r.get::<Option<f64>, _>("tbpm"));
-            let key = r
-                .get::<Option<String>, _>("fcam")
-                .or(r.get::<Option<String>, _>("tcam"));
-            (
-                bpm.map(|b| format!("{b:.0}")).unwrap_or_else(|| "—".into()),
-                key.unwrap_or_else(|| "—".into()),
-            )
-        }
-        None => ("—".to_string(), "—".to_string()),
-    }
 }
 
 async fn track_actions_frag(

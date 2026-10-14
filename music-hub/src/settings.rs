@@ -29,6 +29,22 @@ pub const YOUTUBE_CLIENT_ID: &str = "youtube_client_id";
 pub const YOUTUBE_CLIENT_SECRET: &str = "youtube_client_secret";
 pub const REGISTRATION_OPEN: &str = "registration_open";
 
+// Bounded touch-cascade (#hub-crawl-everything).
+/// Master switch for the Spotify touch-cascade loop.
+pub const CRAWL_ENABLED: &str = "crawl_enabled";
+/// Cap on albums pulled per artist in one crawl.
+pub const CRAWL_MAX_ALBUMS_PER_ARTIST: &str = "crawl_max_albums_per_artist";
+/// TTL (days) before a crawled artist is revisited.
+pub const CRAWL_ARTIST_TTL_DAYS: &str = "crawl_artist_ttl_days";
+/// TTL (days) before a crawled album is revisited.
+pub const CRAWL_ALBUM_TTL_DAYS: &str = "crawl_album_ttl_days";
+/// Spotify request budget per crawl pass.
+pub const CRAWL_REQUESTS_PER_PASS: &str = "crawl_requests_per_pass";
+/// Order touched tracks at music-api (download priority).
+pub const CRAWL_ORDER_ON_TOUCH: &str = "crawl_order_on_touch";
+/// Priority boost for the currently-playing track (fast lane).
+pub const CRAWL_NOWPLAYING_BOOST: &str = "crawl_nowplaying_boost";
+
 // Ranking-engine knobs (editable in the web UI, no secrets).
 pub const ENGINE_SHARED_FACTOR: &str = "engine_shared_factor";
 pub const ENGINE_CANDIDATE_FACTOR: &str = "engine_candidate_factor";
@@ -194,6 +210,44 @@ pub const SETTINGS: &[SettingSpec] = &[
     text(SPOTIFY_CLIENT_SECRET, "Spotify Client-Secret", true),
     text(MUSIC_API_BASE, "music-api Base-URL", false),
     text(MUSIC_API_TOKEN, "music-api Token", true),
+    // ── Touch-cascade (#hub-crawl-everything) ───────────────────────────────
+    flag(CRAWL_ENABLED, "Touch-Cascade aktiv", "1"),
+    num(
+        CRAWL_MAX_ALBUMS_PER_ARTIST,
+        "Crawl: max. Alben pro Artist",
+        "40",
+        1.0,
+        500.0,
+    ),
+    num(
+        CRAWL_ARTIST_TTL_DAYS,
+        "Crawl: Artist-TTL (Tage)",
+        "90",
+        0.0,
+        3650.0,
+    ),
+    num(
+        CRAWL_ALBUM_TTL_DAYS,
+        "Crawl: Album-TTL (Tage)",
+        "90",
+        0.0,
+        3650.0,
+    ),
+    num(
+        CRAWL_REQUESTS_PER_PASS,
+        "Crawl: Spotify-Requests pro Durchlauf",
+        "10",
+        1.0,
+        200.0,
+    ),
+    flag(CRAWL_ORDER_ON_TOUCH, "Downloads bei Beruehrung ordern", "1"),
+    num(
+        CRAWL_NOWPLAYING_BOOST,
+        "Download-Prioritaet: Now-Playing-Boost",
+        "100",
+        0.0,
+        10_000.0,
+    ),
     text(RECCOBEATS_BASE, "ReccoBeats Base-URL", false),
     text(COSINE_API_KEY, "cosine.club API-Key", true),
     text(COSINE_BASE, "cosine.club Base-URL", false),

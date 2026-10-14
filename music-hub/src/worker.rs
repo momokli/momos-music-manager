@@ -83,6 +83,41 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) {
         });
     }
 
+    // music-api loop: pull the vault's resolved BPM/key into the read-model
+    // (`hub_track_audio`) and drain the download-priority orders. Both are
+    // bounded + idempotent.
+    {
+        let pool = pool.clone();
+        let cfg = cfg.clone();
+        tokio::spawn(async move {
+            loop {
+                let a = crate::analysis::refresh_from_vault(&pool, &cfg, 200)
+                    .await
+                    .unwrap_or(0);
+                let o = crate::crawl::order_pending(&pool, &cfg, 500)
+                    .await
+                    .unwrap_or(0);
+                tokio::time::sleep(if a > 0 || o > 0 { BUSY_WAIT } else { IDLE_WAIT }).await;
+            }
+        });
+    }
+
+    // Spotify crawl loop: bounded touch-cascade (artist -> albums -> album
+    // tracks). Own task so its quota backoffs can't starve the other loops.
+    {
+        let pool = pool.clone();
+        let cfg = cfg.clone();
+        tokio::spawn(async move {
+            loop {
+                let budget = crate::crawl::requests_per_pass(&pool).await;
+                let n = crate::crawl::touch_cascade(&pool, &cfg, budget)
+                    .await
+                    .unwrap_or(0);
+                tokio::time::sleep(if n > 0 { BUSY_WAIT } else { IDLE_WAIT }).await;
+            }
+        });
+    }
+
     // Curation loop: push daily curated playlists to Spotify (#316). Checks
     // every 30 min; `daily_due` gates each playlist to at most once per 20 h.
     tokio::spawn(async move {

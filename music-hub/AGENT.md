@@ -1,6 +1,6 @@
 # music-hub — Agent Handover
 
-> **Last updated**: 2026-10-10 · branch `feat/hub-music-status` (→ `feat/music-hub`)
+> **Last updated**: 2026-10-14 · branch `feat/hub-music-status` (→ `feat/music-hub`)
 > Keep this file current. It is the entry point for any agent working on `music-hub/`.
 >
 > **New in this batch (engine + unified UX):** migrations `028`–`035`
@@ -12,6 +12,15 @@
 > - ripeness wired into digging/overlap, and the tag recommendation engine with
 >   explanations. ADRs **[074](../docs/DECISIONS.md)/075/076**. See
 >   `plans/music-hub/tagging-spelunking.md`.
+>
+> **New in this batch (crawl-everything, hub side):** migrations `048`
+> (`hub_track_audio` — flat read-model of the vault's resolved best BPM/key) and
+> `049` (`hub_crawl_state` + `hub_order_state`). New modules `src/analysis.rs`
+> (reads the resolved BPM/key from the music-api vault into `hub_track_audio`)
+> and `src/crawl.rs` (download-priority orders + bounded Spotify touch-cascade).
+> The hub is **only a consumer**: it never analyses and owns no vault — music-api
+> is the Data Vault of music. See `plans/proposed/hub-crawl-everything.md` and
+> `plans/proposed/music-api-data-vault.md`.
 
 ---
 
@@ -149,7 +158,9 @@ music-hub/
 │   ├── similarity.rs      similarity v2 (tag overlap cross-group, rumpelkiste)
 │   ├── table.rs           shared table UX: sortable headers + fuzzy/typo search
 │   ├── tagqueue.rs        /tag-queue (ripeness-sorted) + direct tagging + player
-│   ├── artists.rs         /artists + /artist/{name} explorer
+│   ├── albums.rs          /artists + /artist/{name} explorer
+│   ├── analysis.rs        reads the vault's resolved BPM/key into hub_track_audio
+│   ├── crawl.rs           download-priority orders + bounded touch-cascade
 │   ├── history.rs         import-run ledger + change events (all sources)
 │   ├── settings.rs        hub_settings + SETTINGS registry + Engine config
 │   └── mmm_import.rs      import tags/categories/parents/energy from MMM library.db
@@ -180,6 +191,7 @@ Migrations **001–024** (see `migrations/`). Highlights:
   - `hub_group_tags(tag_id, group_id, rank)` — **rank 0..5 lives here** (per group membership).
   - `hub_collectives(id, slug, name, icon, owner_user_id)` + `hub_collective_members`.
 - Other: `hub_settings`, `hub_task_history`, `hub_api_usage` (FreqBlog quota), `hub_deemix_downloads`.
+- Crawl-everything (048/049): `hub_track_audio(track_id, bpm, musical_key, camelot, energy, source, updated_at)` — flat read-model of the **vault's resolved best value** (music-api owns the vault; the hub only consumes `GET /vault/tracks?isrcs=`); `hub_crawl_state(kind, ref, state, …)` — TTL'd touch-cascade frontier; `hub_order_state(track_id, priority, ordered_at)` — idempotency ledger for music-api download-priority orders.
 
 Views of interest: `hub_v_track_presence`, `hub_v_track_playlists`, `hub_v_shared_tracks`,
 `hub_v_user_overlap`, `v_track_audio`, `hub_v_track_tags`.
