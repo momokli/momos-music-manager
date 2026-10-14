@@ -128,6 +128,36 @@ pub async fn enqueue(
     Ok(())
 }
 
+/// Enqueue only when the `(kind, ref)` is not present — never re-arms a terminal
+/// row. Used by reconcilers that seed work from existing state on every tick, so
+/// a permanently failed item is not resurrected in a loop. Returns whether a new
+/// row was inserted.
+pub async fn enqueue_if_absent(
+    pool: &Pool<Sqlite>,
+    kind: &str,
+    reference: &str,
+    priority: i64,
+    record_source: Option<&str>,
+) -> Result<bool> {
+    let ts = db::now();
+    let n = sqlx::query(
+        "INSERT INTO work_items
+             (kind, ref, priority, state, attempts, record_source, created_at, updated_at)
+         VALUES (?, ?, ?, 'queued', 0, ?, ?, ?)
+         ON CONFLICT(kind, ref) DO NOTHING",
+    )
+    .bind(kind)
+    .bind(reference)
+    .bind(priority)
+    .bind(record_source)
+    .bind(ts)
+    .bind(ts)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(n > 0)
+}
+
 /// The `next` function: the next `slots` due items of `kind`, **highest
 /// priority first, then oldest**. This is the only place priority decides which
 /// work runs. Served by `idx_work_next`.

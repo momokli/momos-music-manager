@@ -401,6 +401,20 @@ pub async fn due_tracks(pool: &Pool<Sqlite>, limit: i64, now: i64) -> anyhow::Re
     .await?)
 }
 
+/// The order priority for one ISRC: the highest priority among the orders it
+/// belongs to (`0` when it has never been ordered). This is the single scale
+/// every work kind reads.
+pub async fn order_priority(pool: &Pool<Sqlite>, isrc: &str) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT COALESCE(MAX(o.priority), 0) FROM order_items oi
+           JOIN orders o ON o.id = oi.order_id
+          WHERE oi.isrc = ?",
+    )
+    .bind(isrc)
+    .fetch_one(pool)
+    .await?)
+}
+
 /// Retry tuning for the durable queue.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {

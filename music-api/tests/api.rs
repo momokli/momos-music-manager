@@ -1667,3 +1667,21 @@ async fn work_recover_stale_requeues_running_items() {
         0
     );
 }
+
+// ── analyze runs through the queue ───────────────────────────────────
+
+#[tokio::test]
+async fn analyze_kind_is_enqueued_and_claimed() {
+    let url = spawn_analyzer().await;
+    let h = harness_with(Some(url)).await;
+    seed_ready_flac(&h, "USQX91201487", "/data/flac/USQX91201487.flac").await;
+
+    // The reconciler seeds the item and the tick claims it.
+    music_api::worker::advance_analyze(&h.state).await.unwrap();
+
+    let items = music_api::work::items(&h.state.pool, Some("analyze"), 10)
+        .await
+        .unwrap();
+    assert_eq!(items.len(), 1, "a ready FLAC becomes one analyze item");
+    assert_eq!(items[0].reference, "USQX91201487");
+}

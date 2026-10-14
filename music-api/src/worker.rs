@@ -101,7 +101,7 @@ async fn tick(state: &Arc<AppState>) -> Result<()> {
     advance_crawl_leads(state).await?;
     // Analyse freshly-ready FLACs last, so a `ready` row written this tick is
     // picked up here (or on the next) without blocking downloads.
-    analyze_ready(state).await?;
+    advance_analyze(state).await?;
     Ok(())
 }
 
@@ -989,48 +989,94 @@ async fn store_downloaded(
     }
 }
 
-// ── Phase C: BPM/key analysis (music-api as analysis authority) ─────────────
+// ── Phase C: BPM/key analysis — the `analyze` kind on the unified queue ─────
 
-/// Hand ready-but-unanalysed FLACs to the analyzer. Disabled when no
+/// The `analyze` kind. Each tick reconciles work from ready-but-unanalysed FLACs
+/// (`enqueue_if_absent`, so a permanently failed item is not resurrected), then
+/// drains `next("analyze")` up to the analysis concurrency. Disabled when no
 /// `ANALYZER_URL` is configured. A dead analyzer is backed off (see
 /// `analysis_backoff`) so it is not retried — or logged — every tick.
-async fn analyze_ready(state: &Arc<AppState>) -> Result<()> {
+pub async fn advance_analyze(state: &Arc<AppState>) -> Result<()> {
     if !analyzer::enabled(state.config.analyzer_url.as_deref()) {
         return Ok(());
     }
     if state.analysis_backoff.blocked(db::now()) {
         return Ok(());
     }
-    let candidates = db::ready_flac_unaanalyzed(&state.pool, ANALYSIS_BATCH).await?;
-    for track in candidates {
-        spawn_analysis(state.clone(), track);
+
+    let kind = work::kind::ANALYZE;
+    for track in db::ready_flac_unaanalyzed(&state.pool, ANALYSIS_BATCH).await? {
+        let priority = db::order_priority(&state.pool, &track.isrc).await?;
+        work::enqueue_if_absent(&state.pool, kind, &track.isrc, priority, Some("essentia")).await?;
+    }
+
+    let slots =
+        work::free_slots(&state.pool, kind, state.config.analysis_concurrency as i64).await?;
+    if slots == 0 {
+        return Ok(());
+    }
+    for item in work::next(&state.pool, kind, slots, db::now()).await? {
+        if !work::claim(&state.pool, item.id, db::now()).await? {
+            continue;
+        }
+        let Some(track) = db::get_track(&state.pool, &item.reference).await? else {
+            work::fail(&state.pool, item.id, "unknown track", db::now()).await?;
+            continue;
+        };
+        // `attempts` after the claim is `item.attempts + 1`.
+        spawn_analysis(state.clone(), track, item.id, item.attempts as u32 + 1);
     }
     Ok(())
 }
 
-/// Dispatch one analysis onto a bounded background task. A per-ISRC guard stops
-/// duplicate work while a job is live (the tick may re-select a row before the
-/// `essentia` metadata row lands).
-fn spawn_analysis(state: Arc<AppState>, track: Track) {
+/// Dispatch one analysis onto a bounded background task and settle its queue
+/// item. A per-ISRC guard stops duplicate work while a job is live.
+fn spawn_analysis(state: Arc<AppState>, track: Track, work_id: i64, attempt: u32) {
     {
         let mut live = state.analyzing.lock().expect("analyzing mutex");
         if !live.insert(track.isrc.clone()) {
-            return; // already being analysed
+            return; // already being analysed — the item stays `running`
         }
     }
     tokio::spawn(async move {
         let _permit = state.analysis_sem.acquire().await.ok();
-        match analyze_track(&state, &track).await {
-            Ok(true) => state.analysis_backoff.note_success(),
-            // The analyzer answered but had nothing usable; leave the row
-            // unanalysed so a later tick tries again.
-            Ok(false) => {}
+        let outcome = analyze_track(&state, &track).await;
+        let now = db::now();
+        let base = state.config.queue_retry_base_secs;
+        let max = state.config.queue_retry_max_secs;
+        match outcome {
+            Ok(true) => {
+                state.analysis_backoff.note_success();
+                let _ = work::finish(&state.pool, work_id, now).await;
+            }
+            // The analyzer answered but had nothing usable — back off, then give
+            // up after `max_attempts` (the reconciler won't re-arm it).
+            Ok(false) => {
+                let delay = state.analysis_backoff.note_failure(now);
+                let _ = work::retry_later(
+                    &state.pool,
+                    work_id,
+                    "analyzer returned no fields",
+                    now + db::backoff_delay(attempt, base, max),
+                    now,
+                )
+                .await;
+                debug!("analyzer returned nothing; retry after {delay}s");
+            }
             Err(e) => {
                 warn!("{}: analysis failed: {e:#}", track.isrc);
                 state
                     .logs
                     .push("warn", format!("{}: analysis failed: {e}", track.isrc));
-                let delay = state.analysis_backoff.note_failure(db::now());
+                let delay = state.analysis_backoff.note_failure(now);
+                let _ = work::retry_later(
+                    &state.pool,
+                    work_id,
+                    &format!("{e}"),
+                    now + db::backoff_delay(attempt, base, max),
+                    now,
+                )
+                .await;
                 debug!("analyzer backed off for {delay}s");
             }
         }
