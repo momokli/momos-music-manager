@@ -35,6 +35,15 @@ block content %}
             {% endfor %}
         </select>
     </label>
+    <label style="display: flex; gap: 0.3rem; align-items: center">
+        Änderung
+        <select name="change" aria-label="Änderung">
+            <option value="" {% if change_all_selected %}selected{% endif %}>alle</option>
+            {% for c in changes %}
+            <option value="{{ c.value }}" {% if c.selected %}selected{% endif %}>{{ c.label }}</option>
+            {% endfor %}
+        </select>
+    </label>
     <button type="submit">Filtern</button>
     <a href="/history" role="button" class="secondary outline">Zurücksetzen</a>
 </form>
@@ -102,13 +111,14 @@ block content %}
                             s_r_finished.arrow }}{% endif %}</a
                         >
                     </th>
+                    <th scope="col">Änderungen</th>
                     <th scope="col">Stats</th>
                 </tr>
             </thead>
             <tbody>
                 {% for r in runs %}
                 <tr>
-                    <td>{{ r.id }}</td>
+                    <td><a href="{{ r.run_href }}" title="Timeline auf diesen Run filtern">{{ r.id }}</a></td>
                     <td>{{ r.source }}</td>
                     <td>@{{ r.user }}</td>
                     <td>
@@ -116,97 +126,133 @@ block content %}
                     </td>
                     <td class="hub-nowrap">{{ r.started }}</td>
                     <td class="hub-nowrap">{{ r.finished }}</td>
-                    <td class="hub-muted">{{ r.stats }}</td>
+                    <td class="hub-nowrap">
+                        {% if r.has_changes %}
+                        <span class="hub-badge {{ r.added_class }}">+{{ r.added }}</span>
+                        <span class="hub-badge {{ r.removed_class }}">−{{ r.removed }}</span>
+                        <span class="hub-badge {{ r.changed_class }}">~{{ r.changed }}</span>
+                        {% else %}
+                        <span class="hub-muted">—</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if r.stats_empty %}
+                        <span class="hub-muted">—</span>
+                        {% else %}
+                        <span class="hub-chip-row">
+                            {% for s in r.stats_chips %}<span class="hub-chip">{{ s.key }}: {{ s.value }}</span>{% endfor %}
+                        </span>
+                        {% endif %}
+                    </td>
                 </tr>
                 {% endfor %} {% if run_count == 0 %}
                 <tr>
-                    <td colspan="7" class="hub-empty">Keine Import-Läufe.</td>
+                    <td colspan="8" class="hub-empty">Keine Import-Läufe.</td>
                 </tr>
                 {% endif %}
             </tbody>
         </table>
     </div>
 
-    <div
-        class="hub-scroll-y overflow-auto"
-        style="
-            max-height: 74vh;
-            overflow: auto;
-            border: 1px solid var(--pico-muted-border-color);
-        "
-    >
-        <table class="hub-dense-table">
-            <caption class="hub-visually-hidden">
-                Timeline der Änderungen
-            </caption>
-            <thead>
-                <tr>
-                    <th scope="col">
-                        <a
-                            href="{{ s_e_at.href }}"
-                            class="hub-sort{% if s_e_at.active %} hub-sort-on{% endif %}"
-                            >{{ s_e_at.label }}{% if s_e_at.active %} {{ s_e_at.arrow }}{%
-                            endif %}</a
-                        >
-                    </th>
-                    <th scope="col">
-                        <a
-                            href="{{ s_e_source.href }}"
-                            class="hub-sort{% if s_e_source.active %} hub-sort-on{% endif %}"
-                            >{{ s_e_source.label }}{% if s_e_source.active %} {{
-                            s_e_source.arrow }}{% endif %}</a
-                        >
-                    </th>
-                    <th scope="col">User</th>
-                    <th scope="col">
-                        <a
-                            href="{{ s_e_entity_type.href }}"
-                            class="hub-sort{% if s_e_entity_type.active %} hub-sort-on{% endif %}"
-                            >{{ s_e_entity_type.label }}{% if s_e_entity_type.active %} {{
-                            s_e_entity_type.arrow }}{% endif %}</a
-                        >
-                    </th>
-                    <th scope="col">
-                        <a
-                            href="{{ s_e_entity_ref.href }}"
-                            class="hub-sort{% if s_e_entity_ref.active %} hub-sort-on{% endif %}"
-                            >{{ s_e_entity_ref.label }}{% if s_e_entity_ref.active %} {{
-                            s_e_entity_ref.arrow }}{% endif %}</a
-                        >
-                    </th>
-                    <th scope="col">
-                        <a
-                            href="{{ s_e_change.href }}"
-                            class="hub-sort{% if s_e_change.active %} hub-sort-on{% endif %}"
-                            >{{ s_e_change.label }}{% if s_e_change.active %} {{
-                            s_e_change.arrow }}{% endif %}</a
-                        >
-                    </th>
-                    <th scope="col">vorher</th>
-                    <th scope="col">nachher</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for e in events %}
-                <tr>
-                    <td class="hub-nowrap">{{ e.at }}</td>
-                    <td>{{ e.source }}</td>
-                    <td>@{{ e.user }}</td>
-                    <td>{{ e.entity_type }}</td>
-                    <td>{{ e.entity_ref }}</td>
-                    <td>
-                        <span class="hub-badge {{ e.change_class }}">{{ e.change }}</span>
-                    </td>
-                    <td class="hub-muted">{{ e.before }}</td>
-                    <td class="hub-muted">{{ e.after }}</td>
-                </tr>
-                {% endfor %} {% if event_count == 0 %}
-                <tr>
-                    <td colspan="8" class="hub-empty">Keine Änderungen.</td>
-                </tr>
-                {% endif %}
-            </tbody>
-        </table>
+    <div>
+        {% if run_filter_active %}
+        <div class="hub-chip-row" style="margin-bottom: 0.4rem">
+            <a
+                class="hub-chip hub-chip-on"
+                href="{{ run_chip_href }}"
+                title="Run-Filter entfernen"
+                >{{ run_chip_label }} ×</a
+            >
+        </div>
+        {% endif %}
+        <div
+            class="hub-scroll-y overflow-auto"
+            style="
+                max-height: 74vh;
+                overflow: auto;
+                border: 1px solid var(--pico-muted-border-color);
+            "
+        >
+            <table class="hub-dense-table">
+                <caption class="hub-visually-hidden">
+                    Timeline der Änderungen
+                </caption>
+                <thead>
+                    <tr>
+                        <th scope="col">
+                            <a
+                                href="{{ s_e_at.href }}"
+                                class="hub-sort{% if s_e_at.active %} hub-sort-on{% endif %}"
+                                >{{ s_e_at.label }}{% if s_e_at.active %} {{ s_e_at.arrow }}{%
+                                endif %}</a
+                            >
+                        </th>
+                        <th scope="col">
+                            <a
+                                href="{{ s_e_source.href }}"
+                                class="hub-sort{% if s_e_source.active %} hub-sort-on{% endif %}"
+                                >{{ s_e_source.label }}{% if s_e_source.active %} {{
+                                s_e_source.arrow }}{% endif %}</a
+                            >
+                        </th>
+                        <th scope="col">User</th>
+                        <th scope="col">
+                            <a
+                                href="{{ s_e_entity_type.href }}"
+                                class="hub-sort{% if s_e_entity_type.active %} hub-sort-on{% endif %}"
+                                >{{ s_e_entity_type.label }}{% if s_e_entity_type.active %} {{
+                                s_e_entity_type.arrow }}{% endif %}</a
+                            >
+                        </th>
+                        <th scope="col">
+                            <a
+                                href="{{ s_e_entity_ref.href }}"
+                                class="hub-sort{% if s_e_entity_ref.active %} hub-sort-on{% endif %}"
+                                >{{ s_e_entity_ref.label }}{% if s_e_entity_ref.active %} {{
+                                s_e_entity_ref.arrow }}{% endif %}</a
+                            >
+                        </th>
+                        <th scope="col">
+                            <a
+                                href="{{ s_e_change.href }}"
+                                class="hub-sort{% if s_e_change.active %} hub-sort-on{% endif %}"
+                                >{{ s_e_change.label }}{% if s_e_change.active %} {{
+                                s_e_change.arrow }}{% endif %}</a
+                            >
+                        </th>
+                        <th scope="col">Änderung (Diff)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for e in events %}
+                    <tr>
+                        <td class="hub-nowrap">{{ e.at }}</td>
+                        <td>{{ e.source }}</td>
+                        <td>@{{ e.user }}</td>
+                        <td>{{ e.entity_type }}</td>
+                        <td>{{ e.entity_ref }}</td>
+                        <td>
+                            <span class="hub-badge {{ e.change_class }}">{{ e.change }}</span>
+                        </td>
+                        <td class="hub-nowrap">
+                            {% if e.is_added %}<span class="hub-diff-add">{{ e.diff_after }}</span>
+                            {% else if e.is_removed %}<span class="hub-diff-rem">{{ e.diff_before }}</span>
+                            {% else if e.is_changed %}<span class="hub-diff-rem">{{ e.diff_before }}</span> <span class="hub-diff-arrow">{{ e.arrow }}</span> <span class="hub-diff-add">{{ e.diff_after }}</span>
+                            {% else %}<span class="hub-muted">—</span>{% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %} {% if event_count == 0 %}
+                    <tr>
+                        <td colspan="7" class="hub-empty">
+                            {% if events_filter_active %} Keine Änderungen für diesen Filter.
+                            <a href="{{ events_reset_href }}">Filter entfernen</a>
+                            {% else %} Keine Änderungen. {% endif %}
+                        </td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 {% endblock %}

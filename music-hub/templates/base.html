@@ -555,6 +555,33 @@
         background: #123c22;
         color: #7fe0a0;
       }
+      /* Import-history polish (#351): diff cells + stats chips + dim badges */
+      .hub-chip-row {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 0.25rem;
+        align-items: center;
+      }
+      .hub-diff-add {
+        background: #123c22;
+        color: #5fe08a;
+        border-radius: 0.25rem;
+        padding: 0 0.25rem;
+      }
+      .hub-diff-rem {
+        background: #3a1f22;
+        color: #ff9a9a;
+        text-decoration: line-through;
+        border-radius: 0.25rem;
+        padding: 0 0.25rem;
+      }
+      .hub-diff-arrow {
+        color: var(--pico-muted-color);
+        margin: 0 0.25rem;
+      }
+      .hub-badge-dim {
+        opacity: 0.4;
+      }
       /* Rec-scope toggle: the active scope (aria-current) reads as "on". */
       .hub-scope-toggle .hub-chip[aria-current="true"] {
         border-color: #1e6b3a;

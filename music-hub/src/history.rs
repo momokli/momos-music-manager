@@ -15,11 +15,11 @@
 //! the ingest paths. Nothing here depends on `tags`/`web`/`pages`.
 
 use askama::Template;
-use axum::Router;
 use axum::extract::{Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
+use axum::Router;
 use serde::Deserialize;
 use sqlx::{QueryBuilder, Row, SqlitePool};
 
@@ -208,6 +208,11 @@ struct HistoryFilter {
     source: Option<String>,
     /// Exact user slug match (empty = all).
     user: Option<String>,
+    /// Change-kind filter; whitelisted (`added|removed|changed`), else ignored.
+    change: Option<String>,
+    /// Per-run filter (numeric run id; `run=` empty is tolerated).
+    #[serde(default, deserialize_with = "crate::table::qnum::opt_i64")]
+    run: Option<i64>,
     /// Sort field for the runs table (whitelisted; default `started`).
     rsort: Option<String>,
     /// Sort direction for the runs table (`asc`/`desc`).
@@ -226,6 +231,13 @@ struct HistoryPage {
     q: String,
     sources: Vec<SourceOption>,
     users: Vec<UserOption>,
+    changes: Vec<ChangeOption>,
+    change_all_selected: bool,
+    run_filter_active: bool,
+    run_chip_href: String,
+    run_chip_label: String,
+    events_filter_active: bool,
+    events_reset_href: String,
     runs: Vec<RunRow>,
     events: Vec<EventRow>,
     run_count: usize,
@@ -252,6 +264,18 @@ struct UserOption {
     selected: bool,
 }
 
+struct ChangeOption {
+    value: String,
+    label: String,
+    selected: bool,
+}
+
+/// One parsed `stats` entry rendered as a `key: value` chip.
+struct StatChip {
+    key: String,
+    value: String,
+}
+
 struct RunRow {
     id: i64,
     source: String,
@@ -260,7 +284,17 @@ struct RunRow {
     status_class: String,
     started: String,
     finished: String,
-    stats: String,
+    stats_chips: Vec<StatChip>,
+    stats_empty: bool,
+    added: i64,
+    removed: i64,
+    changed: i64,
+    added_class: String,
+    removed_class: String,
+    changed_class: String,
+    has_changes: bool,
+    /// Precomputed link to scope the change timeline to this run.
+    run_href: String,
 }
 
 struct EventRow {
@@ -271,8 +305,12 @@ struct EventRow {
     entity_ref: String,
     change: String,
     change_class: String,
-    before: String,
-    after: String,
+    diff_before: String,
+    diff_after: String,
+    is_added: bool,
+    is_removed: bool,
+    is_changed: bool,
+    arrow: String,
 }
 
 /// Badge class for a run status (precomputed — askama must not compare inside
@@ -332,6 +370,88 @@ fn change_class(change: &str) -> String {
     }
 }
 
+/// Whitelisted change kinds: raw value + German label.
+const CHANGE_KINDS: &[(&str, &str)] = &[
+    ("added", "hinzugefügt"),
+    ("removed", "entfernt"),
+    ("changed", "geändert"),
+];
+
+/// Badge class for a per-run change count (dimmed when zero).
+fn count_class(kind: &str, n: i64) -> String {
+    if n <= 0 {
+        return "hub-badge-dim".to_string();
+    }
+    match kind {
+        "added" => "hub-badge-ok".to_string(),
+        "removed" => "hub-badge-no".to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Parse a run `stats` JSON blob into ordered `key`/`value` chips. A non-object
+/// or invalid JSON yields no chips.
+fn parse_stats(raw: &str) -> Vec<StatChip> {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str(raw) else {
+        return Vec::new();
+    };
+    map.into_iter()
+        .map(|(key, val)| {
+            let value = match val {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            StatChip { key, value }
+        })
+        .collect()
+}
+
+/// Rebuild the raw query string, setting (`Some`) or removing (`None`) one key.
+/// Other parameters keep their original order.
+fn query_with(raw: &str, key: &str, value: Option<&str>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut replaced = false;
+    for kv in raw.split('&') {
+        if kv.is_empty() {
+            continue;
+        }
+        if kv.split('=').next().unwrap_or("") == key {
+            if let Some(v) = value {
+                parts.push(format!("{key}={}", urlencoding::encode(v)));
+            }
+            replaced = true;
+            continue;
+        }
+        parts.push(kv.to_string());
+    }
+    if !replaced {
+        if let Some(v) = value {
+            parts.push(format!("{key}={}", urlencoding::encode(v)));
+        }
+    }
+    parts.join("&")
+}
+
+/// Drop several keys at once (used by the "clear event filter" link).
+fn query_drop(raw: &str, keys: &[&str]) -> String {
+    raw.split('&')
+        .filter(|kv| {
+            let k = kv.split('=').next().unwrap_or("");
+            !kv.is_empty() && !keys.contains(&k)
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// Attach a query string to `/history` (empty → bare path).
+fn hist_url(qs: &str) -> String {
+    if qs.is_empty() {
+        "/history".to_string()
+    } else {
+        format!("/history?{qs}")
+    }
+}
+
 async fn history_page(
     State(st): State<AppState>,
     Query(f): Query<HistoryFilter>,
@@ -344,6 +464,24 @@ async fn history_page(
     let q = f.q.unwrap_or_default().trim().to_string();
     let source = f.source.unwrap_or_default().trim().to_string();
     let user = f.user.unwrap_or_default().trim().to_string();
+    let rawq = raw.as_deref().unwrap_or("");
+
+    // Change-kind filter: only the whitelist is applied, anything else ignored.
+    let change_raw = f.change.unwrap_or_default().trim().to_string();
+    let change = CHANGE_KINDS
+        .iter()
+        .any(|(v, _)| *v == change_raw)
+        .then_some(change_raw);
+    let run = f.run;
+
+    let changes: Vec<ChangeOption> = CHANGE_KINDS
+        .iter()
+        .map(|(value, label)| ChangeOption {
+            value: value.to_string(),
+            label: label.to_string(),
+            selected: change.as_deref() == Some(*value),
+        })
+        .collect();
 
     // Filter option lists (server-side; distinct across all runs).
     let sources: Vec<SourceOption> = sqlx::query_scalar::<_, String>(
@@ -393,9 +531,19 @@ async fn history_page(
         "SELECT * FROM (SELECT r.id AS id, r.source AS source, u.slug AS user_slug,
                 r.status AS status, r.started_at AS started_at,
                 COALESCE(r.finished_at, '') AS finished_at,
-                COALESCE(r.stats, '') AS stats
+                COALESCE(r.stats, '') AS stats,
+                COALESCE(c.added, 0) AS added,
+                COALESCE(c.removed, 0) AS removed,
+                COALESCE(c.changed, 0) AS changed
            FROM hub_import_runs r
            JOIN hub_users u ON u.id = r.user_id
+           LEFT JOIN (
+                SELECT run_id,
+                       SUM(change = 'added') AS added,
+                       SUM(change = 'removed') AS removed,
+                       SUM(change = 'changed') AS changed
+                  FROM hub_import_events GROUP BY run_id
+           ) c ON c.run_id = r.id
           WHERE 1 = 1",
     );
     if !source.is_empty() {
@@ -414,15 +562,30 @@ async fn history_page(
         .iter()
         .map(|r| {
             let status: String = r.get("status");
+            let id: i64 = r.get("id");
+            let stats: String = r.get("stats");
+            let stats_chips = parse_stats(&stats);
+            let added: i64 = r.get("added");
+            let removed: i64 = r.get("removed");
+            let changed: i64 = r.get("changed");
             RunRow {
                 status_class: status_class(&status),
-                id: r.get("id"),
+                id,
                 source: r.get("source"),
                 user: r.get("user_slug"),
                 status,
                 started: r.get("started_at"),
                 finished: r.get("finished_at"),
-                stats: r.get("stats"),
+                stats_empty: stats_chips.is_empty(),
+                stats_chips,
+                added,
+                removed,
+                changed,
+                added_class: count_class("added", added),
+                removed_class: count_class("removed", removed),
+                changed_class: count_class("changed", changed),
+                has_changes: added > 0 || removed > 0 || changed > 0,
+                run_href: hist_url(&query_with(rawq, "run", Some(&id.to_string()))),
             }
         })
         .collect();
@@ -457,6 +620,12 @@ async fn history_page(
     if !user.is_empty() {
         eq.push(" AND u.slug = ").push_bind(user.clone());
     }
+    if let Some(run_id) = run {
+        eq.push(" AND e.run_id = ").push_bind(run_id);
+    }
+    if let Some(c) = &change {
+        eq.push(" AND e.change = ").push_bind(c.clone());
+    }
     eq.push(") WHERE 1 = 1");
     // Fuzzy full-text over every visible text column (order-independent).
     crate::table::push_fuzzy(
@@ -480,6 +649,11 @@ async fn history_page(
         .iter()
         .map(|r| {
             let change: String = r.get("change");
+            let before: String = r.get("before_val");
+            let after: String = r.get("after_val");
+            let is_added = change == "added";
+            let is_removed = change == "removed";
+            let is_changed = change == "changed";
             EventRow {
                 change_class: change_class(&change),
                 at: r.get("at"),
@@ -488,8 +662,24 @@ async fn history_page(
                 entity_type: r.get("entity_type"),
                 entity_ref: r.get("entity_ref"),
                 change,
-                before: r.get("before_val"),
-                after: r.get("after_val"),
+                diff_before: if before.is_empty() {
+                    "—".to_string()
+                } else {
+                    before
+                },
+                diff_after: if after.is_empty() {
+                    "—".to_string()
+                } else {
+                    after
+                },
+                is_added,
+                is_removed,
+                is_changed,
+                arrow: if is_changed {
+                    "→".to_string()
+                } else {
+                    String::new()
+                },
             }
         })
         .collect();
@@ -497,7 +687,12 @@ async fn history_page(
     let run_count = runs.len();
     let event_count = events.len();
 
-    let rawq = raw.as_deref().unwrap_or("");
+    let events_filter_active = run.is_some() || change.is_some();
+    let run_filter_active = run.is_some();
+    let events_reset_href = hist_url(&query_drop(rawq, &["run", "change"]));
+    let run_chip_href = hist_url(&query_with(rawq, "run", None));
+    let run_chip_label = run.map(|id| format!("Run #{id}")).unwrap_or_default();
+
     let s_r_source = prefixed_sort_head(rawq, "r", "source", "Quelle", &rsort, &rdir);
     let s_r_user = prefixed_sort_head(rawq, "r", "user", "User", &rsort, &rdir);
     let s_r_status = prefixed_sort_head(rawq, "r", "status", "Status", &rsort, &rdir);
@@ -514,6 +709,13 @@ async fn history_page(
         q,
         sources,
         users,
+        changes,
+        change_all_selected: change.is_none(),
+        run_filter_active,
+        run_chip_href,
+        run_chip_label,
+        events_filter_active,
+        events_reset_href,
         runs,
         events,
         run_count,
