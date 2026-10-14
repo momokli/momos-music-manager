@@ -974,27 +974,35 @@ struct TrackPage {
     nav: crate::ui::Nav,
     id: i64,
     title: String,
-    artists: String,
-    artists_html: String,
     album: String,
+    album_href: String,
+    album_release: String,
+    album_external: Vec<ExtId>,
     duration: String,
     isrc: String,
     explicit: bool,
-    bpm: String,
-    music_key: String,
-    /// Source the resolved BPM/key came from (empty when none).
-    bpm_source: String,
-    energy: String,
-    feat_note: String,
+    /// Service the track was ingested from (`spotify` / `soundcloud` / …).
+    service: String,
+    /// Whether the track has an ISRC (gates the vault section).
+    has_isrc: bool,
+    /// Whether the live vault read succeeded (gates RESOLVED + SATELLITES).
+    has_vault: bool,
+    /// The vault's frozen per-track view, rendered transparently.
+    vault: VaultView,
+    /// Artists for the LINKS section (vault-driven, resolved to hub ids).
+    link_artists: Vec<LinkArtist>,
+    /// Distinct playlists that hold this track (LINKS: "wer hat's").
+    link_playlists: Vec<PlaylistRef>,
     users: Vec<UserGroup>,
-    avail_text: String,
-    deezer_id: String,
     fetchable: bool,
     external_ids: Vec<ExternalId>,
     tags: Vec<TrackTag>,
     genres: Vec<String>,
     flash: String,
     music_api: bool,
+    // Listening (hub-own).
+    listening: Vec<ListenRow>,
+    listen_total: i64,
     // Ripeness (issues #214/#215).
     ripeness_total: i64,
     ripeness_tag: i64,
@@ -1081,6 +1089,69 @@ struct TrackTag {
     owner: String,
     type_label: String,
     type_icon: String,
+}
+
+/// A provider id (service + value + optional link) shown in the LINKS section.
+struct ExtId {
+    service: String,
+    value: String,
+    url: String,
+}
+
+/// One artist link in the LINKS section: hub page (when known) + provider ids.
+struct LinkArtist {
+    name: String,
+    /// `/artist/{id}` when the hub knows the artist, else empty.
+    href: String,
+    external: Vec<ExtId>,
+}
+
+/// One recent listen (hub-own listening history).
+struct ListenRow {
+    when: String,
+    who: String,
+}
+
+/// One analyzer satellite row (per-analyzer analysis result).
+struct VaultAnalysisRow {
+    analyzer: String,
+    bpm: String,
+    key: String,
+    camelot: String,
+    energy: String,
+    load_date: String,
+}
+
+/// One meta satellite row (per record source).
+struct VaultMetaRow {
+    record_source: String,
+    title: String,
+    artist: String,
+    album: String,
+    duration: String,
+    load_date: String,
+}
+
+/// Template-facing view of the vault's frozen `/vault/track/{isrc}` response:
+/// the RESOLVED best value plus the transparent SATELLITES (analysis / download
+/// / meta), each with its source + load date.
+#[derive(Default)]
+struct VaultView {
+    // RESOLVED (precedence winner).
+    bpm: String,
+    key: String,
+    camelot: String,
+    energy: String,
+    source: String,
+    has_resolved: bool,
+    // SATELLITES.
+    analysis: Vec<VaultAnalysisRow>,
+    has_download: bool,
+    download_state: String,
+    download_format: String,
+    download_formats: String,
+    download_load_date: String,
+    meta: Vec<VaultMetaRow>,
 }
 
 /// The `_partials/now_playing.html` widget (issue #293/#294).
@@ -1179,6 +1250,24 @@ async fn track_page(
     }
 }
 
+/// `2026-01-01T00:00:00+00:00` -> `2026-01-01 00:00` (empty when absent).
+fn fmt_ts(ts: Option<String>) -> String {
+    match ts {
+        Some(s) if s.len() >= 16 => s[..16].replace('T', " "),
+        Some(s) => s,
+        None => String::new(),
+    }
+}
+
+/// Best-effort external URL for a provider id (`artist` / `album`).
+fn provider_url(kind: &str, service: &str, id: &str) -> String {
+    match service {
+        "spotify" => format!("https://open.spotify.com/{kind}/{id}"),
+        "deezer" => format!("https://www.deezer.com/{kind}/{id}"),
+        _ => String::new(),
+    }
+}
+
 /// Build the full track-detail page model, or `None` when the track is unknown.
 /// Shared by the track page and the Now Playing page.
 async fn build_track_page(
@@ -1262,36 +1351,177 @@ async fn build_track_page(
         .filter_map(|uid| groups.remove(&uid))
         .collect();
 
-    let duration_ms: Option<i64> = row.get("duration_ms");
+    let isrc: String = row.get::<Option<String>, _>("isrc").unwrap_or_default();
+    let has_isrc = !isrc.trim().is_empty();
+    let service: String = row.get::<Option<String>, _>("service").unwrap_or_default();
+    let hub_album: String = row.get::<Option<String>, _>("album").unwrap_or_default();
+
+    // ── One live read of the Data Vault (music-api) ──────────────────────────
+    // The hub is a pure consumer: HUB identity, RESOLVED best value, LINKS and
+    // the transparent SATELLITES all come from this single frozen response — no
+    // second cache, no divergent live panel. ISRC-less tracks skip it entirely.
+    let vault = if has_isrc {
+        crate::music_api::vault_track(&st.cfg, &isrc).await
+    } else {
+        None
+    };
+    let has_vault = vault.is_some();
+
+    // HUB identity: duration/explicit come from the hub row, enriched by the
+    // vault's own identity block when the hub lacks them.
+    let vault_hub = vault.as_ref().map(|v| v.hub.clone()).unwrap_or_default();
+    let duration_ms: Option<i64> = row
+        .get::<Option<i64>, _>("duration_ms")
+        .or(vault_hub.duration_ms);
     let duration = duration_ms
         .map(|ms| format!("{}:{:02}", ms / 60000, (ms % 60000) / 1000))
         .unwrap_or_else(|| "—".to_string());
-    let isrc: String = row.get::<Option<String>, _>("isrc").unwrap_or_default();
+    let explicit = row.get::<Option<i64>, _>("explicit").unwrap_or(0) != 0
+        || vault_hub.explicit.unwrap_or(false);
 
-    // Resolved best BPM/key from the vault read-model (`hub_track_audio`).
-    // The hub never analyses and owns no vault — music-api resolves the "right"
-    // value by source precedence; we only display it.
-    let audio = crate::analysis::get(&st.pool, id).await.unwrap_or_default();
-    let bpm = audio
-        .bpm
-        .map(|b| format!("{b:.0}"))
-        .unwrap_or_else(|| "—".into());
-    let music_key = audio
-        .key
-        .clone()
-        .or_else(|| audio.camelot.clone())
-        .unwrap_or_else(|| "—".into());
-    let bpm_source = audio.source.clone().unwrap_or_default();
-    let energy = audio
-        .energy
-        .map(|e| format!("{e:.2}"))
-        .unwrap_or_else(|| "—".into());
+    // RESOLVED + SATELLITES from the vault.
+    let mut view = VaultView::default();
+    if let Some(v) = vault.as_ref() {
+        view.bpm = v
+            .resolved
+            .bpm
+            .map(|b| format!("{b:.0}"))
+            .unwrap_or_else(|| "—".into());
+        view.key = v.resolved.key.clone().unwrap_or_else(|| "—".into());
+        view.camelot = v.resolved.camelot.clone().unwrap_or_default();
+        view.energy = v
+            .resolved
+            .energy
+            .map(|e| format!("{e:.2}"))
+            .unwrap_or_else(|| "—".into());
+        view.source = v.resolved.source.clone().unwrap_or_default();
+        view.has_resolved = v.resolved.bpm.is_some()
+            || v.resolved.key.is_some()
+            || v.resolved.camelot.is_some()
+            || v.resolved.energy.is_some();
+        view.analysis = v
+            .satellites
+            .analysis
+            .iter()
+            .map(|a| VaultAnalysisRow {
+                analyzer: a.analyzer.clone().unwrap_or_default(),
+                bpm: a.bpm.map(|b| format!("{b:.0}")).unwrap_or_default(),
+                key: a.key.clone().unwrap_or_default(),
+                camelot: a.camelot.clone().unwrap_or_default(),
+                energy: a.energy.map(|e| format!("{e:.2}")).unwrap_or_default(),
+                load_date: fmt_ts(a.load_date.clone()),
+            })
+            .collect();
+        if let Some(d) = v.satellites.download.as_ref() {
+            view.has_download = true;
+            view.download_state = d.state.clone().unwrap_or_default();
+            view.download_format = d.source_format.clone().unwrap_or_default();
+            view.download_formats = d.formats.join(", ");
+            view.download_load_date = fmt_ts(d.load_date.clone());
+        }
+        view.meta = v
+            .satellites
+            .meta
+            .iter()
+            .map(|m| VaultMetaRow {
+                record_source: m.record_source.clone().unwrap_or_default(),
+                title: m.title.clone().unwrap_or_default(),
+                artist: m.artist.clone().unwrap_or_default(),
+                album: m.album.clone().unwrap_or_default(),
+                duration: m
+                    .duration_ms
+                    .map(|ms| format!("{}:{:02}", ms / 60000, (ms % 60000) / 1000))
+                    .unwrap_or_default(),
+                load_date: fmt_ts(m.load_date.clone()),
+            })
+            .collect();
+    }
 
-    let feat_note = if audio.has_data() {
+    // LINKS: artists (vault-driven, resolved to hub artist pages) + album.
+    let hub_artists = crate::artists::artists_for_track(&st.pool, id).await;
+    let link_artists: Vec<LinkArtist> = match vault.as_ref() {
+        Some(v) if !v.links.artists.is_empty() => {
+            let mut out = Vec::with_capacity(v.links.artists.len());
+            for a in &v.links.artists {
+                let name = a.name.clone().unwrap_or_default();
+                let href = match crate::artists::artist_id_by_name(&st.pool, &name).await {
+                    Some(aid) => format!("/artist/{aid}"),
+                    None => String::new(),
+                };
+                out.push(LinkArtist {
+                    name,
+                    href,
+                    external: a
+                        .external_ids
+                        .iter()
+                        .map(|(svc, val)| ExtId {
+                            service: svc.clone(),
+                            value: val.clone(),
+                            url: provider_url("artist", svc, val),
+                        })
+                        .collect(),
+                });
+            }
+            out
+        }
+        _ => hub_artists
+            .iter()
+            .map(|(aid, name)| LinkArtist {
+                name: name.clone(),
+                href: format!("/artist/{aid}"),
+                external: Vec::new(),
+            })
+            .collect(),
+    };
+
+    // Album link: prefer the vault's album title, fall back to the hub's.
+    let vault_album = vault.as_ref().and_then(|v| v.links.album.clone());
+    let album = vault_album
+        .as_ref()
+        .and_then(|a| a.title.clone())
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or(hub_album);
+    let album_href = if album.trim().is_empty() {
         String::new()
     } else {
-        "Noch keine BPM/Key-Quelle im music-api-Vault.".to_string()
+        format!("/album/{}", urlencoding::encode(&album))
     };
+    let album_release = vault_album
+        .as_ref()
+        .and_then(|a| a.release_date.clone())
+        .unwrap_or_default();
+    let album_external: Vec<ExtId> = vault_album
+        .as_ref()
+        .map(|a| {
+            a.external_ids
+                .iter()
+                .map(|(svc, val)| ExtId {
+                    service: svc.clone(),
+                    value: val.clone(),
+                    url: provider_url("album", svc, val),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Distinct playlists that hold this track (LINKS: "wer hat's").
+    let mut link_playlists: Vec<PlaylistRef> = Vec::new();
+    let mut seen_pl: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for u in &users {
+        for p in u.owned.iter().chain(u.followed.iter()) {
+            if seen_pl.insert(p.id) {
+                link_playlists.push(PlaylistRef {
+                    id: p.id,
+                    name: p.name.clone(),
+                    owner: p.owner.clone(),
+                });
+            }
+        }
+    }
+
+    // Download availability (drives the player's "Jetzt holen" fallback).
+    let download_ready = view.has_download && view.download_state == "ready";
+    let fetchable = has_isrc && st.cfg.music_api_token.is_some() && !download_ready;
 
     // External service IDs for this track.
     let external_ids: Vec<ExternalId> = sqlx::query(
@@ -1356,23 +1586,31 @@ async fn build_track_page(
     .await
     .unwrap_or_default();
 
-    // music-api status from the cache — no per-track network call (AGENT.md §10).
-    let mut avail_text = String::from("—");
-    let mut fetchable = false;
-    let mut deezer_id = String::new();
-    if !isrc.is_empty() {
-        match crate::music_api::cached_state(&st.pool, &isrc).await {
-            Some(c) => {
-                avail_text = c.label();
-                fetchable = !c.ready();
-                deezer_id = c.deezer_id.unwrap_or_default();
-            }
-            None => {
-                avail_text = "noch nicht im music-api-Cache".to_string();
-                fetchable = true;
-            }
-        }
-    }
+    // Listening history for this track (hub-own, not from the vault).
+    let listen_total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM hub_listening_history WHERE track_id = ?1")
+            .bind(id)
+            .fetch_one(&st.pool)
+            .await
+            .unwrap_or(0);
+    let listening: Vec<ListenRow> = sqlx::query(
+        "SELECT h.played_at, u.slug AS who
+           FROM hub_listening_history h
+           JOIN hub_users u ON u.id = h.user_id
+          WHERE h.track_id = ?1
+          ORDER BY h.played_at DESC
+          LIMIT 8",
+    )
+    .bind(id)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| ListenRow {
+        when: fmt_ts(r.get::<Option<String>, _>("played_at")),
+        who: r.get::<Option<String>, _>("who").unwrap_or_default(),
+    })
+    .collect();
 
     let e = crate::settings::engine(&st.pool).await;
     let rip = crate::scoring::ripeness(&st.pool, id, &e).await;
@@ -1452,28 +1690,28 @@ async fn build_track_page(
         nav,
         id,
         title: row.get::<Option<String>, _>("title").unwrap_or_default(),
-        artists: row.get::<Option<String>, _>("artists").unwrap_or_default(),
-        artists_html: crate::artists::artist_links_html(
-            &crate::artists::artists_for_track(&st.pool, id).await,
-        ),
-        album: row.get::<Option<String>, _>("album").unwrap_or_default(),
+        album,
+        album_href,
+        album_release,
+        album_external,
         duration,
         isrc,
-        explicit: row.get::<Option<i64>, _>("explicit").unwrap_or(0) != 0,
-        bpm,
-        music_key,
-        bpm_source,
-        energy,
-        feat_note,
+        explicit,
+        service,
+        has_isrc,
+        has_vault,
+        vault: view,
+        link_artists,
+        link_playlists,
         users,
-        avail_text,
-        deezer_id,
         fetchable,
         external_ids,
         tags,
         genres,
         flash,
         music_api: st.cfg.music_api_token.is_some(),
+        listening,
+        listen_total,
         ripeness_total: rip.total.round() as i64,
         ripeness_tag: rip.tag_score.round() as i64,
         ripeness_meta: rip.meta_score.round() as i64,

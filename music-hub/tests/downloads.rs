@@ -1,6 +1,8 @@
-//! `/downloads` page + music-api state-cache tests (format column, summary,
-//! track-page status from cache) and the all-tracks table (filters, pagination,
-//! order-all).
+//! `/downloads` page + music-api state-cache tests (format column, summary) and
+//! the all-tracks table (filters, pagination, order-all).
+//!
+//! The track page no longer reads `hub_music_state` — it renders the live vault
+//! (`/vault/track/{isrc}`) instead; see `tests/track_audio.rs`.
 //!
 //! The music-api service is unconfigured in tests, so the live queue is skipped
 //! and only the cached `hub_music_state` overview is exercised.
@@ -212,33 +214,6 @@ fn format_bucket_classifies() {
     assert_eq!(format_bucket(None, "flac,mp3-320"), "flac");
     assert_eq!(format_bucket(None, "mp3-320"), "320");
     assert_eq!(format_bucket(None, ""), "other");
-}
-
-#[tokio::test]
-async fn track_page_shows_cached_music_state() {
-    let app = common::spawn().await;
-    let cookie = app.session_cookie(app.seed.alice).await;
-
-    sqlx::query("UPDATE hub_tracks SET isrc = 'ISRCTRACK01' WHERE id = ?1")
-        .bind(app.seed.t_all)
-        .execute(&app.pool)
-        .await
-        .unwrap();
-    seed_state(&app, "ISRCTRACK01", "ready", Some("flac"), Some("flac")).await;
-
-    let resp = app
-        .client()
-        .get(app.url(&format!("/track/{}", app.seed.t_all)))
-        .header("Cookie", &cookie)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let html = resp.text().await.unwrap();
-    assert!(
-        html.contains("ready · flac"),
-        "cached music-api state missing on track page: {html}"
-    );
 }
 
 // ── all-tracks table (filters, pagination, order-all) ───────────────────────

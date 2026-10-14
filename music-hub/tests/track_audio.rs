@@ -8,7 +8,9 @@ mod common;
 
 use std::collections::HashMap;
 
-use axum::extract::Query;
+use axum::extract::{Path, Query};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use music_hub::config::Config;
@@ -35,6 +37,56 @@ async fn mock_vault() -> String {
         Json(json!({ "tracks": tracks }))
     }
     let app = Router::new().route("/vault/tracks", get(vault_tracks));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+/// Boot a mock music-api `/vault/track/{isrc}` endpoint (the frozen per-track
+/// Data-Vault view). Unknown ISRCs answer 404 like the real service.
+async fn mock_vault_track() -> String {
+    async fn vault_track(Path(isrc): Path<String>) -> Response {
+        if isrc != "USAAA0000009" {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        Json(json!({
+            "isrc": isrc,
+            "hub": { "title": "Shared Anthem", "durationMs": 210000, "explicit": false },
+            "resolved": {
+                "bpm": 126.0, "key": "11m", "camelot": "8A", "energy": 0.75,
+                "source": "essentia"
+            },
+            "links": {
+                "artists": [ { "name": "Aaa", "externalIds": { "spotify": "sp-aaa" } } ],
+                "album": {
+                    "title": "Shared", "releaseDate": "2024-01-01",
+                    "externalIds": { "spotify": "al-1" }
+                }
+            },
+            "satellites": {
+                "analysis": [
+                    { "analyzer": "traktor", "bpm": 125.0, "key": "11m", "camelot": "8A",
+                      "energy": 0.7, "loadDate": "2026-01-01T00:00:00+00:00" },
+                    { "analyzer": "essentia", "bpm": 126.0, "key": "11m", "camelot": "8A",
+                      "energy": 0.75, "loadDate": "2026-01-02T00:00:00+00:00" }
+                ],
+                "download": {
+                    "state": "ready", "sourceFormat": "flac",
+                    "formats": ["flac", "mp3-320"], "loadDate": "2026-01-03T00:00:00+00:00"
+                },
+                "meta": [
+                    { "recordSource": "deezer", "title": "Shared Anthem", "artist": "Aaa",
+                      "album": "Shared", "durationMs": 210000,
+                      "loadDate": "2026-01-01T00:00:00+00:00" }
+                ]
+            }
+        }))
+        .into_response()
+    }
+    let app = Router::new().route("/vault/track/{isrc}", get(vault_track));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -103,20 +155,20 @@ async fn get_many_returns_rows() {
 }
 
 #[tokio::test]
-async fn track_page_shows_resolved_bpm_and_source() {
-    let app = common::spawn().await;
+async fn track_page_renders_vault_hub_links_and_satellites() {
+    let base = mock_vault_track().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = Config::for_test(format!("sqlite:{}/hub.db", dir.path().display()));
+    cfg.music_api_base = base;
+    cfg.music_api_token = Some("tok".to_string());
+    let app = common::spawn_with(dir, cfg).await;
     let cookie = app.session_cookie(app.seed.alice).await;
-    music_hub::analysis::upsert(
-        &app.pool,
-        app.seed.t_all,
-        Some(126.0),
-        Some("11m"),
-        Some("8A"),
-        Some(0.75),
-        Some("essentia"),
-    )
-    .await
-    .unwrap();
+
+    sqlx::query("UPDATE hub_tracks SET isrc = 'USAAA0000009' WHERE id = ?1")
+        .bind(app.seed.t_all)
+        .execute(&app.pool)
+        .await
+        .unwrap();
 
     let resp = app
         .client()
@@ -127,8 +179,41 @@ async fn track_page_shows_resolved_bpm_and_source() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let html = resp.text().await.unwrap();
+
+    // RESOLVED: the vault's chosen BPM/key + its source, prominent.
+    assert!(html.contains("Resolved"), "resolved bucket header: {html}");
     assert!(html.contains("126"), "resolved BPM shown: {html}");
-    assert!(html.contains("essentia"), "BPM source shown: {html}");
+    assert!(html.contains("essentia"), "resolved source shown: {html}");
+    // LINKS: album + artist are clickable.
+    assert!(html.contains("/album/Shared"), "album linked: {html}");
+    assert!(html.contains("/artist/"), "artist linked: {html}");
+    // SATELLITES: one row per analyzer + download + meta buckets.
+    assert!(html.contains("Analyzer"), "analysis bucket header: {html}");
+    assert!(html.contains("traktor"), "traktor analyzer row: {html}");
+    assert!(html.contains("mp3-320"), "download formats shown: {html}");
+    assert!(html.contains("deezer"), "meta record source shown: {html}");
+}
+
+#[tokio::test]
+async fn track_page_without_isrc_omits_vault_section() {
+    let app = common::spawn().await;
+    let cookie = app.session_cookie(app.seed.alice).await;
+
+    let resp = app
+        .client()
+        .get(app.url(&format!("/track/{}", app.seed.t_all)))
+        .header("Cookie", cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let html = resp.text().await.unwrap();
+    // No ISRC -> the vault-derived sections are omitted entirely.
+    assert!(!html.contains("Satellites"), "no satellites bucket: {html}");
+    assert!(!html.contains("Resolved"), "no resolved bucket: {html}");
+    // The hub-own sections still render.
+    assert!(html.contains("Hub"), "hub bucket present: {html}");
+    assert!(html.contains("Tags"), "tags bucket present: {html}");
 }
 
 #[tokio::test]
