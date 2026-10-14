@@ -8,6 +8,20 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ## [Unreleased]
 
+### Added
+
+- **Import-history change-count badges** (#351, PR #440): the runs table shows per-run
+  added/changed/removed counts as coloured `+n` / `~n` / `−n` badges, plus a change-count
+  event list with kind-filtering and a diff column.
+
+### Changed
+
+- **Import-history UI polish** (#351, PR #440): history page gains a change-kind filter
+  (`change=`), a per-run filter with an active chip, a before/after diff cell for change
+  events, stats chips per run, and filter-aware empty states (a `q`/`source`/`user` filter
+  that matches nothing now reads „Keine Änderungen für diesen Filter" with a reset link
+  that clears every filter).
+
 ## [0.27.0] — 2026-10-14
 
 **hub-tagging** — Tagging workflow: a track counts as *tagged-complete* when the

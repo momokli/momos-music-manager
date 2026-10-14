@@ -200,11 +200,9 @@ async fn diff_scalar_records_change_only_when_different() {
 
     // record_event rejects an invalid change kind (DB CHECK).
     assert!(
-        record_event(
-            &app.pool, run, alice, "traktor", "track", "x", "bogus", None, None
-        )
-        .await
-        .is_err()
+        record_event(&app.pool, run, alice, "traktor", "track", "x", "bogus", None, None)
+            .await
+            .is_err()
     );
 }
 
@@ -377,4 +375,231 @@ async fn history_page_filters_by_source_user_and_q() {
         !html.contains("ALPHA-ref"),
         "non-matching event leaked into q=GAMMA"
     );
+}
+
+// ── #351: import-history polish — filters, diffs, change events ──────────────
+
+/// Fetch `/history` (or a sub-path) as `alice`.
+async fn fetch(app: &common::TestApp, alice: i64, path: &str) -> String {
+    let cookie = app.session_cookie(alice).await;
+    app.client()
+        .get(app.url(path))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn history_change_filter_scopes_events() {
+    let app = common::spawn().await;
+    let (alice, _) = seed_history(&app).await;
+
+    // added → only ALPHA-ref.
+    let html = fetch(&app, alice, "/history?change=added").await;
+    assert!(html.contains("ALPHA-ref"), "added event missing");
+    assert!(
+        !html.contains("BETA-ref"),
+        "changed leaked into change=added"
+    );
+    assert!(
+        !html.contains("GAMMA-ref"),
+        "removed leaked into change=added"
+    );
+
+    // removed → only GAMMA-ref.
+    let html = fetch(&app, alice, "/history?change=removed").await;
+    assert!(html.contains("GAMMA-ref"), "removed event missing");
+    assert!(
+        !html.contains("ALPHA-ref"),
+        "added leaked into change=removed"
+    );
+    assert!(
+        !html.contains("BETA-ref"),
+        "changed leaked into change=removed"
+    );
+
+    // An unknown value is ignored → all events visible again.
+    let html = fetch(&app, alice, "/history?change=bogus").await;
+    assert!(
+        html.contains("ALPHA-ref") && html.contains("BETA-ref") && html.contains("GAMMA-ref"),
+        "unknown change= must be ignored (all events visible)"
+    );
+}
+
+#[tokio::test]
+async fn history_run_filter_scopes_events() {
+    let app = common::spawn().await;
+    let (a, _) = seed_history(&app).await;
+
+    // run a → only its own event.
+    let html = fetch(&app, alice_of(&app), &format!("/history?run={a}")).await;
+    assert!(html.contains("ALPHA-ref"), "run a event missing");
+    assert!(!html.contains("BETA-ref"), "run b event leaked into run=a");
+    assert!(!html.contains("GAMMA-ref"), "run c event leaked into run=a");
+    // Active filter chip is shown.
+    assert!(
+        html.contains(&format!("Run #{a}")),
+        "run filter chip missing"
+    );
+
+    // Empty run= is tolerated (no error, all events visible).
+    let html = fetch(&app, alice_of(&app), "/history?run=").await;
+    assert!(html.contains("ALPHA-ref"), "empty run= must not error");
+
+    // Unknown run id → filter-aware empty state.
+    let html = fetch(&app, alice_of(&app), "/history?run=999999").await;
+    assert!(
+        html.contains("Keine Änderungen für diesen Filter"),
+        "filter-aware empty state missing for unknown run"
+    );
+}
+
+#[tokio::test]
+async fn history_run_link_and_chip_present() {
+    let app = common::spawn().await;
+    let (a, _) = seed_history(&app).await;
+    let alice = alice_of(&app);
+
+    // The run id in the runs table links to ?run=<id>.
+    let html = fetch(&app, alice, "/history").await;
+    assert!(
+        html.contains(&format!("run={a}")),
+        "run id link missing in runs table"
+    );
+
+    // The chip link keeps other params (source) and drops run.
+    let html = fetch(&app, alice, &format!("/history?run={a}&source=srcalpha")).await;
+    assert!(html.contains(&format!("Run #{a}")), "chip label missing");
+    assert!(html.contains("hub-chip-on"), "active run chip missing");
+    assert!(
+        html.contains("href=\"/history?source=srcalpha\""),
+        "chip link must drop run and preserve source"
+    );
+}
+
+#[tokio::test]
+async fn history_change_counts_badges() {
+    let app = common::spawn().await;
+    let (alice, _) = seed_history(&app).await;
+    let html = fetch(&app, alice, "/history").await;
+
+    // Run a: added=1; run b: changed=1; run c: removed=1.
+    assert!(html.contains("+1"), "added count badge missing (+1)");
+    assert!(html.contains("~1"), "changed count badge missing (~1)");
+    assert!(html.contains("−1"), "removed count badge missing (−1)");
+    // The badge classes carry the change kind.
+    assert!(html.contains("hub-badge-ok"), "added badge class missing");
+    assert!(html.contains("hub-badge-no"), "removed badge class missing");
+    assert!(
+        html.contains("hub-badge-warn"),
+        "changed badge class missing (hub-badge-warn)"
+    );
+}
+
+#[tokio::test]
+async fn history_stats_rendered_as_chips() {
+    let app = common::spawn().await;
+    let (alice, _) = seed_history(&app).await;
+    let html = fetch(&app, alice, "/history").await;
+
+    // Run a's stats {"marker":"STATALPHA"} → key and value rendered as a chip.
+    assert!(html.contains("marker"), "stats key missing");
+    assert!(html.contains("STATALPHA"), "stats value missing");
+    assert!(
+        html.contains("marker: STATALPHA"),
+        "stats must render as key: value chip"
+    );
+}
+
+#[tokio::test]
+async fn history_diff_rendering() {
+    let app = common::spawn().await;
+    let (alice, _) = seed_history(&app).await;
+    let html = fetch(&app, alice, "/history").await;
+
+    assert!(html.contains("Änderung (Diff)"), "diff column missing");
+    // added → only the after value, green.
+    assert!(
+        html.contains("hub-diff-add\">7<"),
+        "added after value not marked hub-diff-add"
+    );
+    // removed → only the before value, red/struck.
+    assert!(
+        html.contains("hub-diff-rem\">5<"),
+        "removed before value not marked hub-diff-rem"
+    );
+    // changed → before, arrow, after.
+    assert!(
+        html.contains("hub-diff-rem\">3<") && html.contains("hub-diff-add\">8<"),
+        "changed values missing"
+    );
+    assert!(html.contains("hub-diff-arrow"), "changed arrow missing");
+}
+
+#[tokio::test]
+async fn history_filtered_empty_state() {
+    let app = common::spawn().await;
+    let (_, c) = seed_history(&app).await;
+    let alice = alice_of(&app);
+
+    // Run c only has a removed event; change=added yields a filter-aware message.
+    let html = fetch(&app, alice, &format!("/history?change=added&run={c}")).await;
+    assert!(
+        html.contains("Keine Änderungen für diesen Filter"),
+        "filter-aware empty state missing"
+    );
+    assert!(
+        !html.contains("Keine Änderungen."),
+        "generic empty state must not appear with an active filter"
+    );
+}
+
+#[tokio::test]
+async fn history_empty_state_for_freetext_and_source_filters() {
+    let app = common::spawn().await;
+    let (_, _) = seed_history(&app).await;
+    let alice = alice_of(&app);
+
+    // A free-text filter matching nothing → filter-aware empty state, not the
+    // generic one, and the reset link clears every filter back to /history.
+    let html = fetch(&app, alice, "/history?q=NOMATCHZZZ").await;
+    assert!(
+        html.contains("Keine Änderungen für diesen Filter"),
+        "filter-aware empty state missing for q filter"
+    );
+    assert!(
+        !html.contains("Keine Änderungen."),
+        "generic empty state must not appear with an active q filter"
+    );
+    assert!(
+        html.contains("href=\"/history\""),
+        "reset link for q filter must clear back to /history"
+    );
+
+    // A source filter matching nothing → filter-aware empty state as well.
+    let html = fetch(&app, alice, "/history?source=nosuchsource").await;
+    assert!(
+        html.contains("Keine Änderungen für diesen Filter"),
+        "filter-aware empty state missing for source filter"
+    );
+    assert!(
+        html.contains("href=\"/history\""),
+        "reset link for source filter must clear back to /history"
+    );
+
+    // Reset from a combined filter drops q/source/user/run/change together.
+    let html = fetch(&app, alice, "/history?source=srcalpha&q=NOMATCHZZZ").await;
+    assert!(
+        html.contains("href=\"/history\""),
+        "reset link must drop all filter params"
+    );
+}
+
+/// The seeded alice user id.
+fn alice_of(app: &common::TestApp) -> i64 {
+    app.seed.alice
 }
