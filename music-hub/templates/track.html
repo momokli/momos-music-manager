@@ -12,7 +12,8 @@ content %}
     <a href="/digging?seed={{ id }}">Digging von diesem Track →</a> ·
     <a href="https://digdeeper.fm/" target="_blank" rel="noreferrer"
         >auf digdeeper.fm öffnen (extern)</a
-    >{% if music_api %} · <a href="/track/{{ id }}/download?format=flac">FLAC laden</a> ·
+    >{% if music_api && has_isrc %} ·
+    <a href="/track/{{ id }}/download?format=flac">FLAC laden</a> ·
     <a href="/track/{{ id }}/download?format=mp3">MP3 laden</a>{% endif %}
 </p>
 
@@ -48,280 +49,452 @@ content %}
 
 <div class="hub-dense hub-cols">
     <section>
-        <table class="hub-kv">
-            <caption class="hub-visually-hidden">
-                Ripeness
-            </caption>
-            <tbody>
-                <tr>
-                    <th scope="row">Ripeness</th>
-                    <td>
-                        <strong>{{ ripeness_total }}</strong>
-                        <span class="hub-muted"
-                            >(Tags {{ ripeness_tag }} · Meta {{ ripeness_meta }} · Traktor
-                            {{ ripeness_trak }})</span
-                        >
-                    </td>
-                </tr>
-                <tr>
-                    <th scope="row">Meta</th>
-                    <td>
-                        {% for m in meta_present %}<span class="hub-chip"
-                            >{% if m.1 %}✓{% else %}✗{% endif %} {{ m.0 }}</span
-                        >
-                        {% endfor %}
-                    </td>
-                </tr>
-            </tbody>
-        </table>
-    </section>
-    <section>
-        <table class="hub-kv">
-            <caption class="hub-visually-hidden">
-                Track-Fakten
-            </caption>
-            <tbody>
-                <tr>
-                    <th scope="row">Titel</th>
-                    <td><strong>{{ title }}</strong></td>
-                </tr>
-                <tr>
-                    <th scope="row">Artists</th>
-                    <td>
-                        {% if artists_html != "" %}{{ artists_html|safe }}{% else %}{{
-                        artists }}{% endif %}
-                    </td>
-                </tr>
-                <tr>
-                    <th scope="row">Album</th>
-                    <td>
-                        {% if album != "" %}<a href="/album/{{ album }}">{{ album }}</a>{%
-                        else %}—{% endif %}
-                    </td>
-                </tr>
-                <tr>
-                    <th scope="row">Dauer</th>
-                    <td>{{ duration }}</td>
-                </tr>
-                <tr>
-                    <th scope="row">Explicit</th>
-                    <td>{% if explicit %}ja{% else %}nein{% endif %}</td>
-                </tr>
-                <tr>
-                    <th scope="row">ISRC</th>
-                    <td>
-                        {% if isrc != "" %}<code>{{ isrc }}</code>{% else %}—{% endif %}
-                    </td>
-                </tr>
-                <tr>
-                    <th scope="row">IDs</th>
-                    <td>
-                        {% if external_ids.is_empty() %}—{% else %} {% for e in
-                        external_ids %}
-                        <a href="{{ e.url }}" target="_blank" rel="noreferrer"
-                            ><code>{{ e.service }}:{{ e.external_id }}</code></a
-                        >
-                        {% endfor %} {% endif %}
-                    </td>
-                </tr>
-                <tr>
-                    <th scope="row">music-api</th>
-                    <td>
-                        {{ avail_text }}{% if deezer_id != "" %} ·
-                        <a
-                            href="https://www.deezer.com/track/{{ deezer_id }}"
-                            target="_blank"
-                            rel="noreferrer"
-                            ><code>deezer:{{ deezer_id }}</code></a
-                        >{% endif %} {% if fetchable %}
-                        <form method="post" action="/track/{{ id }}/fetch">
-                            <button class="outline" type="submit">holen</button>
-                        </form>
-                        {% endif %}
-                    </td>
-                </tr>
-                <tr>
-                    <th scope="row">BPM</th>
-                    <td>
-                        {{ bpm }}{% if bpm_source != "" %}
-                        <span class="hub-muted">· {{ bpm_source }}</span>{% endif %}
-                    </td>
-                </tr>
-                <tr>
-                    <th scope="row">Key</th>
-                    <td>{{ music_key }}</td>
-                </tr>
-                <tr>
-                    <th scope="row">Energy</th>
-                    <td>{{ energy }}</td>
-                </tr>
-                {% if feat_note != "" %}
-                <tr>
-                    <th scope="row"></th>
-                    <td class="hub-muted">{{ feat_note }}</td>
-                </tr>
-                {% endif %}
-                <tr>
-                    <th scope="row">Tags</th>
-                    <td>
-                        {% include "_partials/tag_clouds.html" %}
-                        <div class="hub-tag-status" style="margin-top: 0.4rem">
-                            {% if tag_complete %}{% if tag_done_auto %}<span
-                                class="hub-chip"
-                                title="Alle beschreibenden Familien sind getaggt"
-                                >✓ vollständig getaggt</span
-                            >{% else %}<span
-                                class="hub-chip"
-                                title="Manuell als fertig markiert"
-                                >✓ fertig (manuell)</span
-                            >{% endif %}{% else %}<span class="hub-muted"
-                                >offen — fehlt: {% for m in tag_missing %}{{ m }}{% if
-                                !loop.last %}, {% endif %}{% endfor %}</span
-                            >{% endif %} {% if tag_done_manual %}
-                            <form
-                                method="post"
-                                action="{{ undone_action }}"
-                                style="display: inline"
-                            >
-                                <input
-                                    type="hidden"
-                                    name="scope"
-                                    value="{{ rec_scope }}"
-                                />
-                                <button class="outline" type="submit">
-                                    Markierung entfernen
-                                </button>
-                            </form>
-                            {% else %}
-                            <form
-                                method="post"
-                                action="{{ done_action }}"
-                                style="display: inline"
-                            >
-                                <input
-                                    type="hidden"
-                                    name="scope"
-                                    value="{{ rec_scope }}"
-                                />
-                                {% if tag_complete %}
-                                <button class="outline" type="submit">
-                                    Als fertig markieren
-                                </button>
-                                {% else %}
-                                <button class="outline" type="submit">
-                                    Trotzdem als fertig markieren
-                                </button>
-                                {% endif %}
-                            </form>
-                            {% endif %}
-                        </div>
-                        <form
-                            method="post"
-                            action="/track/{{ id }}/tag"
-                            style="
-                                display: flex;
-                                gap: 0.3rem;
-                                margin-top: 0.4rem;
-                                align-items: center;
-                            "
-                        >
-                            <input type="hidden" name="scope" value="{{ rec_scope }}" />
-                            <input
-                                type="text"
-                                name="name"
-                                list="my-tags"
-                                placeholder="Tag hinzufügen …"
-                                aria-label="Tag"
-                                required
-                            />
-                            <datalist id="my-tags">
-                                {% for t in my_tags %}
-                                <option value="{{ t.1 }}"></option>
-                                {% endfor %}
-                            </datalist>
-                            <select
-                                name="type"
-                                aria-label="Typ (optional)"
-                                style="width: 9rem"
-                            >
-                                <option value="">Typ: keiner</option>
-                                {% for t in my_types %}
-                                <option value="{{ t.value }}">{{ t.label }}</option>
-                                {% endfor %}
-                            </select>
-                            <button type="submit">Taggen</button>
-                        </form>
-                        {% include "_partials/rec_tags.html" %}
-                    </td>
-                </tr>
-                <tr>
-                    <th scope="row">Genres</th>
-                    <td>
-                        {% if genres.is_empty() %}—{% else %} {% for g in genres %}<span
-                            class="hub-tag"
-                            >{{ g }}</span
-                        >{% endfor %} {% endif %}
-                    </td>
-                </tr>
-            </tbody>
-        </table>
-    </section>
+        {# ── HUB: the track's identity (business key visible) ─────────────── #}
+        <div class="hub-bucket">
+            <h2>Hub</h2>
+            <table class="hub-kv">
+                <caption class="hub-visually-hidden">
+                    Track-Identität
+                </caption>
+                <tbody>
+                    <tr>
+                        <th scope="row">Titel</th>
+                        <td><strong>{{ title }}</strong></td>
+                    </tr>
+                    <tr>
+                        <th scope="row">ISRC</th>
+                        <td>
+                            {% if isrc != "" %}<code>{{ isrc }}</code>{% else %}—{% endif
+                            %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Service</th>
+                        <td>
+                            {% if service != "" %}<span class="hub-badge"
+                                >{{ service }}</span
+                            >{% else %}—{% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Dauer</th>
+                        <td>{{ duration }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Explicit</th>
+                        <td>{% if explicit %}ja{% else %}nein{% endif %}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">IDs</th>
+                        <td>
+                            {% if external_ids.is_empty() %}—{% else %} {% for e in
+                            external_ids %}{% if e.url != "" %}<a
+                                href="{{ e.url }}"
+                                target="_blank"
+                                rel="noreferrer"
+                                ><code>{{ e.service }}:{{ e.external_id }}</code></a
+                            >{% else %}<code>{{ e.service }}:{{ e.external_id }}</code>{%
+                            endif %} {% endfor %} {% endif %}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
 
-    <section>
-        <h2>In Playlists</h2>
-        {% if users.is_empty() %}
-        <p class="hub-muted">
-            Niemand hat diesen Track (weder geliked noch in einer Playlist).
-        </p>
-        {% else %}
-        <table class="hub-dense-table">
-            <caption class="hub-visually-hidden">
-                Nutzer mit diesem Track
-            </caption>
-            <thead>
-                <tr>
-                    <th scope="col">User</th>
-                    <th scope="col">♥</th>
-                    <th scope="col">Playlists (eigen / gefolgt)</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for u in users %}
-                <tr>
-                    <td class="hub-nowrap">
-                        <a href="/user/{{ u.slug }}">@{{ u.slug }}</a>
-                    </td>
-                    <td>{% if u.liked %}♥{% else %}—{% endif %}</td>
-                    <td>
-                        {% for p in u.owned %}<a
-                            href="/playlist/{{ p.id }}"
-                            class="hub-tag hub-tag-own"
-                            title="{{ p.owner }}"
-                            >{{ p.name }}</a
-                        >{% endfor %} {% for p in u.followed %}<a
-                            href="/playlist/{{ p.id }}"
-                            class="hub-tag hub-tag-follow"
-                            title="{{ p.owner }}"
-                            >{{ p.name }}</a
-                        >{% endfor %} {% if u.owned.is_empty() && u.followed.is_empty()
-                        %}<span class="hub-muted">nur geliked</span>{% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+        {# ── RESOLVED: the vault's chosen BPM/key/energy + its source ─────── #}
+        {% if has_isrc %}
+        <div class="hub-bucket">
+            <h2>Resolved</h2>
+            {% if has_vault %} {% if vault.has_resolved %}
+            <div class="hub-resolved">
+                <span
+                    ><span class="hub-big">{{ vault.bpm }}</span>
+                    <span class="hub-muted">BPM</span></span
+                >
+                <span
+                    ><span class="hub-big">{{ vault.key }}</span>
+                    <span class="hub-muted">Key</span></span
+                >
+                {% if vault.camelot != "" %}<span class="hub-chip"
+                    >{{ vault.camelot }}</span
+                >{% endif %}
+                <span
+                    ><span class="hub-big">{{ vault.energy }}</span>
+                    <span class="hub-muted">Energy</span></span
+                >
+            </div>
+            {% if vault.source != "" %}
+            <p class="hub-muted" style="margin: 0.25rem 0 0">
+                Quelle (Präzedenz): <strong>{{ vault.source }}</strong>
+            </p>
+            {% endif %} {% else %}
+            <p class="hub-muted">Keine aufgelösten BPM/Key-Werte im Vault.</p>
+            {% endif %} {% else %}
+            <p class="hub-muted">music-api-Vault nicht erreichbar.</p>
+            {% endif %}
+        </div>
         {% endif %}
+
+        {# ── LINKS: artists, album, playlists, sources — all clickable ──────
+        #}
+        <div class="hub-bucket">
+            <h2>Links</h2>
+            <table class="hub-kv">
+                <caption class="hub-visually-hidden">
+                    Links
+                </caption>
+                <tbody>
+                    <tr>
+                        <th scope="row">Artists</th>
+                        <td>
+                            {% if link_artists.is_empty() %}—{% else %} {% for a in
+                            link_artists %} {% if a.href != "" %}<a href="{{ a.href }}"
+                                >{{ a.name }}</a
+                            >{% else %}{{ a.name }}{% endif %} {% for e in a.external %}
+                            <a
+                                href="{{ e.url }}"
+                                target="_blank"
+                                rel="noreferrer"
+                                class="hub-chip"
+                                title="{{ e.service }}:{{ e.value }}"
+                                >{{ e.service }}</a
+                            >{% endfor %} {% if !loop.last %}, {% endif %} {% endfor %} {%
+                            endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Album</th>
+                        <td>
+                            {% if album != "" %}{% if album_href != "" %}<a
+                                href="{{ album_href }}"
+                                >{{ album }}</a
+                            >{% else %}{{ album }}{% endif %} {% if album_release != ""
+                            %}<span class="hub-muted">· {{ album_release }}</span>{% endif
+                            %} {% for e in album_external %}
+                            <a
+                                href="{{ e.url }}"
+                                target="_blank"
+                                rel="noreferrer"
+                                class="hub-chip"
+                                title="{{ e.service }}:{{ e.value }}"
+                                >{{ e.service }}</a
+                            >{% endfor %} {% else %}—{% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Playlists</th>
+                        <td>
+                            {% if link_playlists.is_empty() %}<span class="hub-muted"
+                                >—</span
+                            >{% else %} {% for p in link_playlists %}<a
+                                href="/playlist/{{ p.id }}"
+                                class="hub-tag"
+                                title="{{ p.owner }}"
+                                >{{ p.name }}</a
+                            >
+                            {% endfor %} {% endif %}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
     </section>
 
     <section>
-        <h2>music-api</h2>
-        <div
-            id="track-music-api"
-            hx-get="/track/{{ id }}/music-api"
-            hx-trigger="load"
-            hx-swap="innerHTML"
-        >
-            <p class="hub-muted">lädt …</p>
+        {# ── SATELLITES: transparent per-source buckets ───────────────────── #}
+        {% if has_isrc %}
+        <div class="hub-bucket">
+            <h2>Satellites</h2>
+            {% if has_vault %}
+            <h3>Analysis <span class="hub-bucket-src">je Analyzer</span></h3>
+            {% if vault.analysis.is_empty() %}
+            <p class="hub-muted">Keine Analyzer-Ergebnisse.</p>
+            {% else %}
+            <table class="hub-dense-table">
+                <caption class="hub-visually-hidden">
+                    Analysis-Satelliten
+                </caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Analyzer</th>
+                        <th scope="col">BPM</th>
+                        <th scope="col">Key</th>
+                        <th scope="col">Camelot</th>
+                        <th scope="col">Energy</th>
+                        <th scope="col">Load</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for a in vault.analysis %}
+                    <tr>
+                        <td><strong>{{ a.analyzer }}</strong></td>
+                        <td>{{ a.bpm }}</td>
+                        <td>{{ a.key }}</td>
+                        <td>{{ a.camelot }}</td>
+                        <td>{{ a.energy }}</td>
+                        <td class="hub-muted hub-nowrap">{{ a.load_date }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+
+            <h3>Download <span class="hub-bucket-src">Objekt-Store</span></h3>
+            {% if vault.has_download %}
+            <table class="hub-kv">
+                <caption class="hub-visually-hidden">
+                    Download-Satellit
+                </caption>
+                <tbody>
+                    <tr>
+                        <th scope="row">State</th>
+                        <td>{{ vault.download_state }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Format</th>
+                        <td>
+                            {% if vault.download_format != "" %}{{ vault.download_format
+                            }}{% else %}—{% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Formate</th>
+                        <td>
+                            {% if vault.download_formats != "" %}{{ vault.download_formats
+                            }}{% else %}—{% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Load</th>
+                        <td class="hub-muted">{{ vault.download_load_date }}</td>
+                    </tr>
+                </tbody>
+            </table>
+            {% else %}
+            <p class="hub-muted">Kein Download-Satellit.</p>
+            {% endif %}
+
+            <h3>Meta <span class="hub-bucket-src">je Quelle</span></h3>
+            {% if vault.meta.is_empty() %}
+            <p class="hub-muted">Keine Meta-Satelliten.</p>
+            {% else %}
+            <table class="hub-dense-table">
+                <caption class="hub-visually-hidden">
+                    Meta-Satelliten
+                </caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Quelle</th>
+                        <th scope="col">Titel</th>
+                        <th scope="col">Artist</th>
+                        <th scope="col">Album</th>
+                        <th scope="col">Dauer</th>
+                        <th scope="col">Load</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for m in vault.meta %}
+                    <tr>
+                        <td><strong>{{ m.record_source }}</strong></td>
+                        <td>{{ m.title }}</td>
+                        <td>{{ m.artist }}</td>
+                        <td>{{ m.album }}</td>
+                        <td>{{ m.duration }}</td>
+                        <td class="hub-muted hub-nowrap">{{ m.load_date }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endif %} {% else %}
+            <p class="hub-muted">music-api-Vault nicht erreichbar.</p>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        {# ── Tags (hub-own) ─────────────────────────────────────────────────
+        #}
+        <div class="hub-bucket">
+            <h2>Tags</h2>
+            {% include "_partials/tag_clouds.html" %}
+            <div class="hub-tag-status" style="margin-top: 0.4rem">
+                {% if tag_complete %}{% if tag_done_auto %}<span
+                    class="hub-chip"
+                    title="Alle beschreibenden Familien sind getaggt"
+                    >✓ vollständig getaggt</span
+                >{% else %}<span class="hub-chip" title="Manuell als fertig markiert"
+                    >✓ fertig (manuell)</span
+                >{% endif %}{% else %}<span class="hub-muted"
+                    >offen — fehlt: {% for m in tag_missing %}{{ m }}{% if !loop.last %},
+                    {% endif %}{% endfor %}</span
+                >{% endif %} {% if tag_done_manual %}
+                <form method="post" action="{{ undone_action }}" style="display: inline">
+                    <input type="hidden" name="scope" value="{{ rec_scope }}" />
+                    <button class="outline" type="submit">Markierung entfernen</button>
+                </form>
+                {% else %}
+                <form method="post" action="{{ done_action }}" style="display: inline">
+                    <input type="hidden" name="scope" value="{{ rec_scope }}" />
+                    {% if tag_complete %}
+                    <button class="outline" type="submit">Als fertig markieren</button>
+                    {% else %}
+                    <button class="outline" type="submit">
+                        Trotzdem als fertig markieren
+                    </button>
+                    {% endif %}
+                </form>
+                {% endif %}
+            </div>
+            <form
+                method="post"
+                action="/track/{{ id }}/tag"
+                style="
+                    display: flex;
+                    gap: 0.3rem;
+                    margin-top: 0.4rem;
+                    align-items: center;
+                "
+            >
+                <input type="hidden" name="scope" value="{{ rec_scope }}" />
+                <input
+                    type="text"
+                    name="name"
+                    list="my-tags"
+                    placeholder="Tag hinzufügen …"
+                    aria-label="Tag"
+                    required
+                />
+                <datalist id="my-tags">
+                    {% for t in my_tags %}
+                    <option value="{{ t.1 }}"></option>
+                    {% endfor %}
+                </datalist>
+                <select name="type" aria-label="Typ (optional)" style="width: 9rem">
+                    <option value="">Typ: keiner</option>
+                    {% for t in my_types %}
+                    <option value="{{ t.value }}">{{ t.label }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit">Taggen</button>
+            </form>
+            {% include "_partials/rec_tags.html" %}
+        </div>
+
+        {# ── In Playlists (hub-own) ───────────────────────────────────────── #}
+        <div class="hub-bucket">
+            <h2>In Playlists</h2>
+            {% if users.is_empty() %}
+            <p class="hub-muted">
+                Niemand hat diesen Track (weder geliked noch in einer Playlist).
+            </p>
+            {% else %}
+            <table class="hub-dense-table">
+                <caption class="hub-visually-hidden">
+                    Nutzer mit diesem Track
+                </caption>
+                <thead>
+                    <tr>
+                        <th scope="col">User</th>
+                        <th scope="col">♥</th>
+                        <th scope="col">Playlists (eigen / gefolgt)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for u in users %}
+                    <tr>
+                        <td class="hub-nowrap">
+                            <a href="/user/{{ u.slug }}">@{{ u.slug }}</a>
+                        </td>
+                        <td>{% if u.liked %}♥{% else %}—{% endif %}</td>
+                        <td>
+                            {% for p in u.owned %}<a
+                                href="/playlist/{{ p.id }}"
+                                class="hub-tag hub-tag-own"
+                                title="{{ p.owner }}"
+                                >{{ p.name }}</a
+                            >{% endfor %} {% for p in u.followed %}<a
+                                href="/playlist/{{ p.id }}"
+                                class="hub-tag hub-tag-follow"
+                                title="{{ p.owner }}"
+                                >{{ p.name }}</a
+                            >{% endfor %} {% if u.owned.is_empty() &&
+                            u.followed.is_empty() %}<span class="hub-muted"
+                                >nur geliked</span
+                            >{% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+        </div>
+
+        {# ── Listening (hub-own) ──────────────────────────────────────────── #}
+        <div class="hub-bucket">
+            <h2>Listening</h2>
+            {% if listen_total == 0 %}
+            <p class="hub-muted">Noch keine Hör-Einträge.</p>
+            {% else %}
+            <p class="hub-muted" style="margin: 0 0 0.25rem">
+                {{ listen_total }} Hör-Einträge
+            </p>
+            <table class="hub-dense-table">
+                <caption class="hub-visually-hidden">
+                    Letzte Hör-Einträge
+                </caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Wann</th>
+                        <th scope="col">Wer</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for l in listening %}
+                    <tr>
+                        <td class="hub-nowrap">{{ l.when }}</td>
+                        <td><a href="/user/{{ l.who }}">@{{ l.who }}</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+        </div>
+
+        {# ── Hub-Meta: ripeness, meta presence, genres (hub-own) ──────────── #}
+        <div class="hub-bucket">
+            <h2>Hub-Meta</h2>
+            <table class="hub-kv">
+                <caption class="hub-visually-hidden">
+                    Hub-Metadaten
+                </caption>
+                <tbody>
+                    <tr>
+                        <th scope="row">Ripeness</th>
+                        <td>
+                            <strong>{{ ripeness_total }}</strong>
+                            <span class="hub-muted"
+                                >(Tags {{ ripeness_tag }} · Meta {{ ripeness_meta }} ·
+                                Traktor {{ ripeness_trak }})</span
+                            >
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Meta</th>
+                        <td>
+                            {% for m in meta_present %}<span class="hub-chip"
+                                >{% if m.1 %}✓{% else %}✗{% endif %} {{ m.0 }}</span
+                            >
+                            {% endfor %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">Genres</th>
+                        <td>
+                            {% if genres.is_empty() %}—{% else %} {% for g in genres
+                            %}<span class="hub-tag">{{ g }}</span>{% endfor %} {% endif %}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
         </div>
     </section>
 </div>

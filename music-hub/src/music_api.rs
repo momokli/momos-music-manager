@@ -905,9 +905,152 @@ pub async fn vault_tracks(cfg: &Config, isrcs: &[String]) -> Option<Vec<serde_js
     Some(items)
 }
 
+// ── Data Vault: frozen per-track view ────────────────────────────────────────
+
+/// The frozen Data-Vault view of one track (`GET /vault/track/{isrc}`).
+///
+/// The hub is a pure consumer: it renders the HUB identity, the RESOLVED best
+/// BPM/key, the LINKS (artists/album) and the transparent SATELLITES
+/// (per-analyzer analysis, download state, per-source meta) straight from this
+/// one response — no second cache, no divergent live panel.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultTrack {
+    #[serde(default)]
+    pub isrc: String,
+    #[serde(default)]
+    pub hub: VaultHub,
+    #[serde(default)]
+    pub resolved: VaultResolved,
+    #[serde(default)]
+    pub links: VaultLinks,
+    #[serde(default)]
+    pub satellites: VaultSatellites,
+}
+
+/// Track identity as the vault knows it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultHub {
+    pub title: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub explicit: Option<bool>,
+}
+
+/// The vault's resolved "right" BPM/key/energy (picked by source precedence).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultResolved {
+    pub bpm: Option<f64>,
+    pub key: Option<String>,
+    pub camelot: Option<String>,
+    pub energy: Option<f64>,
+    /// Analyzer the resolved value came from (precedence winner).
+    pub source: Option<String>,
+}
+
+/// Links out of the vault: artists + album, each with provider ids.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultLinks {
+    #[serde(default)]
+    pub artists: Vec<VaultArtistLink>,
+    pub album: Option<VaultAlbumLink>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultArtistLink {
+    /// The artist hub's business key (normalised); `None` when unknown.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Provider → id (e.g. `{"spotify": "…", "deezer": "…"}`).
+    #[serde(default)]
+    pub external_ids: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultAlbumLink {
+    pub title: Option<String>,
+    pub release_date: Option<String>,
+    #[serde(default)]
+    pub external_ids: std::collections::BTreeMap<String, String>,
+}
+
+/// The transparent satellites behind a track: every analysis result, the
+/// download state and every meta record, each with its source + load date.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultSatellites {
+    #[serde(default)]
+    pub analysis: Vec<VaultAnalysis>,
+    pub download: Option<VaultDownload>,
+    #[serde(default)]
+    pub meta: Vec<VaultMeta>,
+}
+
+/// One analyzer's analysis result (one row per analyzer).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultAnalysis {
+    pub analyzer: Option<String>,
+    pub bpm: Option<f64>,
+    pub key: Option<String>,
+    pub camelot: Option<String>,
+    pub energy: Option<f64>,
+    pub load_date: Option<String>,
+}
+
+/// The download satellite (object-store state for the ISRC).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultDownload {
+    pub state: Option<String>,
+    pub source_format: Option<String>,
+    #[serde(default)]
+    pub formats: Vec<String>,
+    pub load_date: Option<String>,
+}
+
+/// One meta record (one row per record source).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultMeta {
+    pub record_source: Option<String>,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub load_date: Option<String>,
+}
+
+/// `GET /vault/track/{isrc}` — the frozen per-track Data-Vault view.
+///
+/// Returns `None` when the request could not be made or failed (unknown ISRC →
+/// 404, outage, missing token), so callers can omit the vault section entirely.
+pub async fn vault_track(cfg: &Config, isrc: &str) -> Option<VaultTrack> {
+    let t = token(cfg).ok()?;
+    let url = format!(
+        "{}/vault/track/{}",
+        cfg.music_api_base,
+        urlencoding::encode(isrc)
+    );
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(t)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.json::<VaultTrack>().await.ok()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::order_item;
+    use super::{VaultTrack, order_item};
 
     #[test]
     fn order_item_splits_composite_keys() {
@@ -919,5 +1062,86 @@ mod tests {
             order_item("USQX91201487"),
             serde_json::json!({ "isrc": "USQX91201487" })
         );
+    }
+
+    #[test]
+    fn vault_track_deserialises_the_frozen_shape() {
+        let json = serde_json::json!({
+            "isrc": "USAAA0000009",
+            "hub": { "title": "Anthem", "durationMs": 210000, "explicit": true },
+            "resolved": {
+                "bpm": 126.0, "key": "11m", "camelot": "8A", "energy": 0.75,
+                "source": "essentia"
+            },
+            "links": {
+                "artists": [
+                    { "name": "Alice", "externalIds": { "spotify": "sp1", "deezer": "dz1" } }
+                ],
+                "album": {
+                    "title": "Shared", "releaseDate": "2024-01-01",
+                    "externalIds": { "spotify": "al1" }
+                }
+            },
+            "satellites": {
+                "analysis": [
+                    { "analyzer": "traktor", "bpm": 125.0, "key": "11m", "camelot": "8A",
+                      "energy": 0.7, "loadDate": "2026-01-01T00:00:00+00:00" },
+                    { "analyzer": "essentia", "bpm": 126.0, "key": "11m", "camelot": "8A",
+                      "energy": 0.75, "loadDate": "2026-01-02T00:00:00+00:00" }
+                ],
+                "download": {
+                    "state": "ready", "sourceFormat": "flac",
+                    "formats": ["flac", "mp3-320"], "loadDate": "2026-01-03T00:00:00+00:00"
+                },
+                "meta": [
+                    { "recordSource": "deezer", "title": "Anthem", "artist": "Alice",
+                      "album": "Shared", "durationMs": 210000,
+                      "loadDate": "2026-01-01T00:00:00+00:00" }
+                ]
+            }
+        });
+        let v: VaultTrack = serde_json::from_value(json).expect("deserialise vault track");
+        assert_eq!(v.isrc, "USAAA0000009");
+        assert_eq!(v.hub.title.as_deref(), Some("Anthem"));
+        assert_eq!(v.hub.duration_ms, Some(210000));
+        assert_eq!(v.hub.explicit, Some(true));
+        assert_eq!(v.resolved.bpm, Some(126.0));
+        assert_eq!(v.resolved.source.as_deref(), Some("essentia"));
+        assert_eq!(v.links.artists.len(), 1);
+        assert_eq!(v.links.artists[0].name.as_deref(), Some("Alice"));
+        assert_eq!(
+            v.links.artists[0]
+                .external_ids
+                .get("spotify")
+                .map(String::as_str),
+            Some("sp1")
+        );
+        let album = v.links.album.expect("album link");
+        assert_eq!(album.title.as_deref(), Some("Shared"));
+        assert_eq!(album.release_date.as_deref(), Some("2024-01-01"));
+        assert_eq!(v.satellites.analysis.len(), 2);
+        assert_eq!(
+            v.satellites.analysis[0].analyzer.as_deref(),
+            Some("traktor")
+        );
+        let dl = v.satellites.download.expect("download satellite");
+        assert_eq!(dl.state.as_deref(), Some("ready"));
+        assert_eq!(dl.source_format.as_deref(), Some("flac"));
+        assert_eq!(dl.formats, vec!["flac", "mp3-320"]);
+        assert_eq!(v.satellites.meta.len(), 1);
+        assert_eq!(
+            v.satellites.meta[0].record_source.as_deref(),
+            Some("deezer")
+        );
+    }
+
+    #[test]
+    fn vault_track_tolerates_missing_sections() {
+        let v: VaultTrack =
+            serde_json::from_value(serde_json::json!({ "isrc": "X" })).expect("minimal vault");
+        assert_eq!(v.isrc, "X");
+        assert!(v.links.artists.is_empty());
+        assert!(v.satellites.analysis.is_empty());
+        assert!(v.satellites.download.is_none());
     }
 }
