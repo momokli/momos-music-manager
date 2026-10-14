@@ -140,10 +140,35 @@ pub async fn ensure_deemix_login(state: &Arc<AppState>) -> bool {
 }
 
 /// Phase A: look each pending ISRC up on Deezer and submit it to deemix.
-async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
+///
+/// Orders are accepted without limit; only the *dispatch to deemix* is bounded.
+/// Each tick pulls at most `max_inflight - inflight` due rows — the `next`
+/// function is [`db::due_tracks`], which already sorts by order priority, so
+/// priority decides *which* pending rows fill the free slots. At most
+/// `MAX_INFLIGHT` rows therefore sit in `downloading` at any time; the rest stay
+/// `pending` and are picked up as slots free up.
+pub async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     let policy = retry_policy(state);
-    let pending = db::due_tracks(&state.pool, 25, db::now()).await?;
-    debug!("resolve_pending: {} due", pending.len());
+
+    // In-flight cap: never have more than `max_inflight` downloads dispatched
+    // (submitted to deemix / dispatched to yt-dlp) at once. A submitted row is
+    // marked `downloading`, so it counts here on the next tick.
+    let max_inflight = state.config.max_inflight as i64;
+    let inflight = db::count_downloading(&state.pool).await?;
+    let slots = max_inflight - inflight;
+    if slots <= 0 {
+        debug!("resolve_pending: {inflight}/{max_inflight} in flight — no free slots, waiting");
+        return Ok(());
+    }
+
+    // Only pull as many as there are free slots; `due_tracks` is the priority
+    // `next` function (highest order priority first, then oldest).
+    let pending = db::due_tracks(&state.pool, slots.min(25), db::now()).await?;
+    debug!(
+        "resolve_pending: {} due ({} slots free of {max_inflight})",
+        pending.len(),
+        slots
+    );
     if pending.is_empty() {
         return Ok(());
     }

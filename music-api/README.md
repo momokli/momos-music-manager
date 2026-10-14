@@ -73,7 +73,7 @@ lands on whatever the ARL's Deezer tier allows.
 | Method | Path                      | Use                                                        |
 | ------ | ------------------------- | ---------------------------------------------------------- |
 | `GET`  | `/queue`                  | live deemix queue (`items`) + per-state `counts`           |
-| `GET`  | `/worker`                 | `{paused, intervalSecs, maxAttempts}`                      |
+| `GET`  | `/worker`                 | `{paused, intervalSecs, maxAttempts, maxInflight}`         |
 | `POST` | `/worker/pause` `/resume` | pause/resume the worker                                    |
 | `POST` | `/isrc/{isrc}/retry`      | reset a failed/stranded ISRC to `pending` (`409` if ready) |
 | `GET`  | `/logs?limit=n`           | recent service events, newest first                        |
@@ -267,16 +267,22 @@ stays terminal. A row in `downloading` holds a **lease** that the worker refresh
 while deemix reports progress; if the lease lapses (dead process, evicted item) the
 row is re-queued by the reaper at the start of the next tick.
 
+**In-flight cap.** Orders are accepted without limit, but only `MAX_INFLIGHT`
+(default 5) rows are dispatched to deemix at once — the `downloading` rows _are_
+the in-flight set. Each tick the worker pulls at most `max_inflight - inflight`
+rows from the priority-ordered due set, so priority decides _which_ pending rows
+fill the free slots and the queue cannot flood deemix.
+
 ## Pipeline (one worker, no external queue)
 
 The `tracks.state` column _is_ the queue; the worker runs a flat tick (skipped while
 globally paused):
 
 0. **reap** — re-queue any `downloading` row whose lease lapsed (crash/restart recovery).
-1. **resolve+enqueue** — for each _due_ `pending` ISRC (past its backoff window):
-   look it up on Deezer, then submit `https://www.deezer.com/track/<id>` to deemix
-   at `DEEMIX_BITRATE`. `CantStream` → `absent`; other rejections become a bounded,
-   backoff retry.
+1. **resolve+enqueue** — pull at most `max_inflight - inflight` _due_ `pending`
+   ISRCs (highest order priority first, then oldest): look each up on Deezer, then
+   submit `https://www.deezer.com/track/<id>` to deemix at `DEEMIX_BITRATE`.
+   `CantStream` → `absent`; other rejections become a bounded, backoff retry.
 2. **advance** — poll the deemix queue for the in-flight UUIDs; on a terminal
    success status, locate the file, copy it into the store and transcode. While the
    item is still downloading its lease is refreshed.
@@ -300,7 +306,9 @@ and `DEEMIX_ARL` are the only required secrets. Response bodies from
 
 Queue tuning: `QUEUE_MAX_ATTEMPTS` (default `3`), `QUEUE_RETRY_BASE_SECS` (`60`)
 and `QUEUE_RETRY_MAX_SECS` (`1800`) shape the bounded retry backoff. The download
-lease reuses `DOWNLOAD_TIMEOUT_SECS` (refreshed as a heartbeat).
+lease reuses `DOWNLOAD_TIMEOUT_SECS` (refreshed as a heartbeat). `MAX_INFLIGHT`
+(default `5`) caps how many downloads are dispatched to deemix at once; order
+intake itself is unbounded.
 
 Analysis: `ANALYZER_URL` (fallback `HUB_ANALYZER_URL`) enables the BPM/key job;
 unset/blank disables it. `ANALYSIS_CONCURRENCY` (default `1`) caps concurrent

@@ -56,6 +56,7 @@ async fn harness_with(analyzer_url: Option<String>) -> Harness {
         queue_max_attempts: 3,
         queue_retry_base_secs: 60,
         queue_retry_max_secs: 1800,
+        max_inflight: 5,
         analyzer_url,
         analysis_concurrency: 1,
         analysis_precedence: vec![
@@ -154,6 +155,26 @@ fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let p = dir.join(name);
     std::fs::write(&p, bytes).unwrap();
     p
+}
+
+async fn create_order_with_priority(app: &Router, isrcs: &[&str], priority: i64) -> String {
+    let items: Vec<serde_json::Value> = isrcs
+        .iter()
+        .map(|i| serde_json::json!({ "isrc": i }))
+        .collect();
+    let (status, body) = send(
+        app,
+        authed("POST", "/orders")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(
+                serde_json::json!({ "items": items, "priority": priority }),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create order failed");
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    v["orderId"].as_str().unwrap().to_string()
 }
 
 #[tokio::test]
@@ -542,6 +563,7 @@ async fn worker_status_reports_retry_cap() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["paused"], false);
     assert_eq!(v["maxAttempts"], 3);
+    assert_eq!(v["maxInflight"], 5);
 }
 
 #[tokio::test]
@@ -614,6 +636,54 @@ async fn expired_lease_is_requeued() {
             .len(),
         0
     );
+}
+
+#[tokio::test]
+async fn due_tracks_orders_by_priority_then_age() {
+    let h = harness().await;
+    // The high-priority order is created *after* the low-priority one, so age
+    // alone would pick the wrong row — priority must win (the `next` function).
+    create_order_with_priority(&h.app, &["AEA0D1846146"], 1).await;
+    create_order_with_priority(&h.app, &["USQX91201487"], 9).await;
+
+    let due = db::due_tracks(&h.state.pool, 10, db::now()).await.unwrap();
+    assert_eq!(due.len(), 2);
+    assert_eq!(due[0].isrc, "USQX91201487");
+    assert_eq!(due[1].isrc, "AEA0D1846146");
+}
+
+#[tokio::test]
+async fn resolve_pending_respects_inflight_cap() {
+    let h = harness().await; // max_inflight = 5
+    let isrcs = [
+        "AEA0D1846146",
+        "USQX91201487",
+        "USUM71807935",
+        "GBUM71029604",
+        "FRZ039800054",
+        "USRC17607839",
+    ];
+    create_order(&h.app, &isrcs).await;
+    // Five of the six are already dispatched (in flight).
+    for isrc in &isrcs[..5] {
+        db::mark_downloading(&h.state.pool, isrc, "uuid", db::now() + 60)
+            .await
+            .unwrap();
+    }
+    assert_eq!(db::count_downloading(&h.state.pool).await.unwrap(), 5);
+
+    // Zero free slots → nothing new is pulled from the priority `next` set, and
+    // no deemix/Deezer call is made for the sixth row.
+    music_api::worker::resolve_pending(&h.state).await.unwrap();
+
+    assert_eq!(db::count_downloading(&h.state.pool).await.unwrap(), 5);
+    let t = db::get_track(&h.state.pool, isrcs[5])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.state, "pending");
+    assert_eq!(t.attempts, 0);
+    assert_eq!(t.next_attempt_at, None);
 }
 
 // ── Per-ISRC metadata (BPM/key authority) ─────────────────────────────────
