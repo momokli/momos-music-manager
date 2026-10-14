@@ -4,11 +4,15 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct DeezerArtist {
+    #[serde(default)]
+    pub id: Option<i64>,
     pub name: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct DeezerAlbum {
+    #[serde(default)]
+    pub id: Option<i64>,
     #[serde(default)]
     pub title: String,
 }
@@ -48,17 +52,17 @@ pub enum Lookup {
         title: String,
         artist: String,
         album: String,
+        /// Deezer artist id (for the vault's artist extid satellite).
+        artist_id: Option<String>,
+        /// Deezer album id (for the vault's album extid satellite).
+        album_id: Option<String>,
     },
     /// Deezer has no such ISRC (or it is not streamable for any account).
     Absent { reason: String },
 }
 
 /// Resolve a single ISRC against Deezer's public API.
-pub async fn lookup_isrc(
-    http: &reqwest::Client,
-    base: &str,
-    isrc: &str,
-) -> anyhow::Result<Lookup> {
+pub async fn lookup_isrc(http: &reqwest::Client, base: &str, isrc: &str) -> anyhow::Result<Lookup> {
     let url = format!("{base}/track/isrc:{isrc}");
     let resp = http.get(&url).send().await?;
 
@@ -86,11 +90,22 @@ pub async fn lookup_isrc(
         });
     }
 
+    let (artist, artist_id) = match body.artist {
+        Some(a) => (a.name, a.id.map(|i| i.to_string())),
+        None => (String::new(), None),
+    };
+    let (album, album_id) = match body.album {
+        Some(a) => (a.title, a.id.map(|i| i.to_string())),
+        None => (String::new(), None),
+    };
+
     Ok(Lookup::Found {
         deezer_id: body.id.to_string(),
         title: body.title,
-        artist: body.artist.map(|a| a.name).unwrap_or_default(),
-        album: body.album.map(|a| a.title).unwrap_or_default(),
+        artist,
+        album,
+        artist_id,
+        album_id,
     })
 }
 
@@ -115,8 +130,7 @@ mod tests {
 
     #[test]
     fn parses_absent_payload() {
-        let json =
-            r#"{"error":{"type":"DataException","message":"no data","code":800}}"#;
+        let json = r#"{"error":{"type":"DataException","message":"no data","code":800}}"#;
         let r: DeezerTrackResponse = serde_json::from_str(json).unwrap();
         let err = r.error.unwrap();
         assert_eq!(err.code, 800);

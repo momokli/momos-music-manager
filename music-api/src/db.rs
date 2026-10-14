@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqlx::{Pool, Sqlite};
 
-use crate::models::{Order, OrderItem, Track, state};
+use crate::models::{state, Order, OrderItem, Track};
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -138,6 +138,10 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN source TEXT NOT NULL DEFAULT 'deezer'")
         .execute(pool)
         .await;
+
+    // Data Vault 2.0 tables (additive, idempotent). The vault is the data home;
+    // the tables above stay the operational queue. See `crate::vault`.
+    crate::vault::init(pool).await?;
 
     Ok(())
 }
@@ -622,6 +626,25 @@ pub async fn upsert_metadata(
     Ok(n)
 }
 
+/// Ready tracks that have a FLAC on disk but no Essentia analysis yet — the
+/// analysis job's work set. Idempotent: once a `source='essentia'` row exists the
+/// track drops out, so it is never analysed twice.
+pub async fn ready_flac_unaanalyzed(pool: &Pool<Sqlite>, limit: i64) -> anyhow::Result<Vec<Track>> {
+    Ok(sqlx::query_as::<_, Track>(
+        "SELECT t.* FROM tracks t
+          WHERE t.state = 'ready'
+            AND t.path_flac IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM track_metadata m
+                 WHERE m.isrc = t.isrc AND m.source = 'essentia')
+          ORDER BY t.updated_at ASC
+          LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?)
+}
+
 /// Metadata for a single ISRC (normalised lookup).
 pub async fn get_metadata(
     pool: &Pool<Sqlite>,
@@ -632,7 +655,8 @@ pub async fn get_metadata(
     )
     .bind(normalize_isrc(isrc))
     .fetch_optional(pool)
-    .await?)
+    .await?
+    .map(crate::models::TrackMetadata::with_key_alias))
 }
 
 /// Metadata for a range of ISRCs (already normalised/de-duplicated).
@@ -652,7 +676,10 @@ pub async fn metadata_bulk(
     Ok(qb
         .build_query_as::<crate::models::TrackMetadata>()
         .fetch_all(pool)
-        .await?)
+        .await?
+        .into_iter()
+        .map(crate::models::TrackMetadata::with_key_alias)
+        .collect())
 }
 
 #[cfg(test)]

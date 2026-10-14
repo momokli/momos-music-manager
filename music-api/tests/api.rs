@@ -6,14 +6,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
+use axum::http::{header, Request, StatusCode};
+use axum::routing::post;
+use axum::Json;
+use axum::Router;
 use http_body_util::BodyExt;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-use music_api::{AppState, Config, build_router, connect_db, db};
+use music_api::{build_router, connect_db, db, AppState, Config};
 
 const TOKEN: &str = "test-token";
 
@@ -24,6 +26,11 @@ struct Harness {
 }
 
 async fn harness() -> Harness {
+    harness_with(None).await
+}
+
+/// Harness variant that configures the BPM/key analyzer base URL.
+async fn harness_with(analyzer_url: Option<String>) -> Harness {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
 
@@ -49,6 +56,13 @@ async fn harness() -> Harness {
         queue_max_attempts: 3,
         queue_retry_base_secs: 60,
         queue_retry_max_secs: 1800,
+        analyzer_url,
+        analysis_concurrency: 1,
+        analysis_precedence: vec![
+            "traktor".to_string(),
+            "essentia".to_string(),
+            "reccobeats".to_string(),
+        ],
     };
 
     for dir in [
@@ -81,6 +95,9 @@ async fn harness() -> Harness {
         ytdlp_sem: Arc::new(tokio::sync::Semaphore::new(ytdlp_concurrency)),
         finalize_sem: Arc::new(tokio::sync::Semaphore::new(config_transcode_concurrency)),
         finalizing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        analysis_sem: Arc::new(tokio::sync::Semaphore::new(1)),
+        analyzing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        analysis_backoff: Default::default(),
     });
 
     Harness {
@@ -694,4 +711,418 @@ async fn metadata_merge_keeps_non_null() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ── Analysis job (music-api as BPM/key authority) ─────────────────────────────
+
+/// A stand-in for the Essentia analyzer: answers `POST /analyze` with a fixed
+/// result. No real network — the mock lives on loopback.
+async fn analyzer_mock(Json(_body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "bpm": 123.0, "key": "8A", "camelot": "8A" }))
+}
+
+/// Spawn the mock analyzer on an ephemeral port; returns its base URL.
+async fn spawn_analyzer() -> String {
+    let app = Router::new().route("/analyze", post(analyzer_mock));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+/// Seed one `ready` track with a FLAC path. No file must exist — the analyzer is
+/// mocked and never actually reads it.
+async fn seed_ready_flac(h: &Harness, isrc: &str, flac: &str) {
+    db::create_order(&h.state.pool, "o1", &[isrc.to_string()], 0)
+        .await
+        .unwrap();
+    db::mark_ready(
+        &h.state.pool,
+        isrc,
+        "flac",
+        Some(flac),
+        Some("/x/320.mp3"),
+        None,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn analysis_stores_essentia_metadata() {
+    let url = spawn_analyzer().await;
+    let h = harness_with(Some(url)).await;
+    seed_ready_flac(&h, "USQX91201487", "/data/flac/USQX91201487.flac").await;
+
+    let track = db::get_track(&h.state.pool, "USQX91201487")
+        .await
+        .unwrap()
+        .unwrap();
+    let stored = music_api::worker::analyze_track(&h.state, &track)
+        .await
+        .unwrap();
+    assert!(stored, "analyzer returned fields, so a row must be written");
+
+    let m = db::get_metadata(&h.state.pool, "USQX91201487")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(m.bpm, Some(123.0));
+    assert_eq!(m.musical_key.as_deref(), Some("8A"));
+    assert_eq!(m.camelot.as_deref(), Some("8A"));
+    assert_eq!(m.source.as_deref(), Some("essentia"));
+    assert_eq!(
+        m.key.as_deref(),
+        Some("8A"),
+        "key alias mirrors musical_key"
+    );
+
+    // Idempotent: the analysed track is no longer a candidate.
+    let left = db::ready_flac_unaanalyzed(&h.state.pool, 10).await.unwrap();
+    assert!(
+        left.is_empty(),
+        "analysed track must drop out of the work set"
+    );
+}
+
+#[tokio::test]
+async fn analysis_disabled_without_url() {
+    let h = harness().await; // analyzer_url = None
+    seed_ready_flac(&h, "USQX91201487", "/data/flac/USQX91201487.flac").await;
+    let track = db::get_track(&h.state.pool, "USQX91201487")
+        .await
+        .unwrap()
+        .unwrap();
+    let stored = music_api::worker::analyze_track(&h.state, &track)
+        .await
+        .unwrap();
+    assert!(!stored);
+    assert!(db::get_metadata(&h.state.pool, "USQX91201487")
+        .await
+        .unwrap()
+        .is_none());
+    // Still a candidate (analysis was off, not done).
+    let left = db::ready_flac_unaanalyzed(&h.state.pool, 10).await.unwrap();
+    assert_eq!(left.len(), 1);
+}
+
+#[tokio::test]
+async fn analysis_result_is_exposed_via_http() {
+    // End-to-end through `GET /metadata/{isrc}`: the analyzer result lands in the
+    // store and comes back over the wire (incl. the `key` alias).
+    let url = spawn_analyzer().await;
+    let h = harness_with(Some(url)).await;
+    seed_ready_flac(&h, "USQX91201487", "/data/flac/USQX91201487.flac").await;
+    let track = db::get_track(&h.state.pool, "USQX91201487")
+        .await
+        .unwrap()
+        .unwrap();
+    music_api::worker::analyze_track(&h.state, &track)
+        .await
+        .unwrap();
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/metadata/USQX91201487")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["bpm"], 123.0);
+    assert_eq!(v["musicalKey"], "8A");
+    assert_eq!(v["key"], "8A");
+    assert_eq!(v["camelot"], "8A");
+    assert_eq!(v["source"], "essentia");
+}
+
+// ── Data Vault 2.0 (hubs/links/satellites + precedence resolver) ──────────────
+
+async fn count(h: &Harness, sql: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(sql)
+        .fetch_one(&h.state.pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn vault_resolves_bpm_by_precedence() {
+    let h = harness().await;
+
+    // Two analyzers disagree on the BPM; traktor is first in the precedence list.
+    let (status, _) = send(
+        &h.app,
+        authed("POST", "/metadata")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [
+                    { "isrc": "USQX91201487", "bpm": 124.0, "source": "essentia" },
+                    { "isrc": "USQX91201487", "bpm": 128.0, "key": "8A", "camelot": "8A", "source": "traktor" }
+                ]
+            })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/vault/track/USQX91201487")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["isrc"], "USQX91201487");
+    assert_eq!(v["bpm"], 128.0, "traktor outranks essentia");
+    assert_eq!(v["key"], "8A");
+    assert_eq!(v["camelot"], "8A");
+    assert_eq!(
+        v["source"], "traktor",
+        "source = analyzer of the chosen BPM"
+    );
+    assert!(v["updatedAt"].is_string());
+    // Frozen shape: exactly these seven fields.
+    let obj = v.as_object().unwrap();
+    assert_eq!(obj.len(), 7, "unexpected fields: {obj:?}");
+}
+
+#[tokio::test]
+async fn vault_tracks_batch_omits_unknown() {
+    let h = harness().await;
+    let _ = send(
+        &h.app,
+        authed("POST", "/metadata")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [{ "isrc": "USQX91201487", "bpm": 124.0, "source": "essentia" }]
+            })))
+            .unwrap(),
+    )
+    .await;
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/vault/tracks?isrcs=USQX91201487,NOTFOUND123")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let tracks = v["tracks"].as_array().unwrap();
+    assert_eq!(tracks.len(), 1, "unknown ISRCs are omitted");
+    assert_eq!(tracks[0]["isrc"], "USQX91201487");
+    assert_eq!(tracks[0]["bpm"], 124.0);
+}
+
+#[tokio::test]
+async fn vault_track_unknown_is_404() {
+    let h = harness().await;
+    let (status, _) = send(
+        &h.app,
+        authed("GET", "/vault/track/NOPE")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn vault_analysis_worker_writes_satellite() {
+    let url = spawn_analyzer().await;
+    let h = harness_with(Some(url)).await;
+    seed_ready_flac(&h, "USQX91201487", "/data/flac/USQX91201487.flac").await;
+    let track = db::get_track(&h.state.pool, "USQX91201487")
+        .await
+        .unwrap()
+        .unwrap();
+    music_api::worker::analyze_track(&h.state, &track)
+        .await
+        .unwrap();
+
+    // The analysis lands in the vault satellite, keyed by analyzer='essentia'.
+    assert_eq!(
+        count(
+            &h,
+            "SELECT COUNT(*) FROM sat_track_analysis WHERE analyzer = 'essentia'"
+        )
+        .await,
+        1
+    );
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/vault/track/USQX91201487")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["bpm"], 123.0);
+    assert_eq!(v["key"], "8A");
+    assert_eq!(v["source"], "essentia");
+}
+
+#[tokio::test]
+async fn vault_ingest_writes_hubs_links_and_satellites() {
+    let h = harness().await;
+    let mut conn = h.state.pool.acquire().await.unwrap();
+    music_api::vault::ingest_deezer(
+        &mut conn,
+        "USQX91201487",
+        "836932812",
+        "Sudno",
+        "Molchat Doma",
+        "Etazhi",
+        Some("1234"),
+        Some("5678"),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM hub_track").await, 1);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM hub_artist").await, 1);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM hub_album").await, 1);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM link_track_artist").await, 1);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM link_track_album").await, 1);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM sat_track_meta").await, 1);
+    assert_eq!(
+        count(
+            &h,
+            "SELECT COUNT(*) FROM sat_artist_extid WHERE service = 'deezer'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            &h,
+            "SELECT COUNT(*) FROM sat_album_extid WHERE service = 'deezer'"
+        )
+        .await,
+        1
+    );
+
+    // Idempotent: re-ingesting the same track writes nothing new.
+    let mut conn = h.state.pool.acquire().await.unwrap();
+    music_api::vault::ingest_deezer(
+        &mut conn,
+        "USQX91201487",
+        "836932812",
+        "Sudno",
+        "Molchat Doma",
+        "Etazhi",
+        Some("1234"),
+        Some("5678"),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM hub_track").await, 1);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM sat_track_meta").await, 1);
+}
+
+#[tokio::test]
+async fn vault_backfill_is_idempotent_and_batched() {
+    let h = harness().await;
+
+    // Seed operational rows: two ready tracks + one metadata row.
+    db::create_order(
+        &h.state.pool,
+        "o1",
+        &["USQX91201487".to_string(), "DEQ022280682".to_string()],
+        0,
+    )
+    .await
+    .unwrap();
+    db::mark_resolved(
+        &h.state.pool,
+        "USQX91201487",
+        "836932812",
+        "Sudno",
+        "Molchat Doma",
+        "Etazhi",
+    )
+    .await
+    .unwrap();
+    db::mark_ready(
+        &h.state.pool,
+        "USQX91201487",
+        "flac",
+        Some("/data/flac/USQX91201487.flac"),
+        Some("/data/320/USQX91201487.mp3"),
+        None,
+    )
+    .await
+    .unwrap();
+    db::upsert_metadata(
+        &h.state.pool,
+        &[music_api::models::MetadataItem {
+            isrc: "USQX91201487".to_string(),
+            bpm: Some(124.0),
+            key: Some("8A".to_string()),
+            camelot: Some("8A".to_string()),
+            title: None,
+            artist: None,
+            album: None,
+            genre: None,
+            source: Some("traktor".to_string()),
+        }],
+    )
+    .await
+    .unwrap();
+
+    // Batch size 1 forces multiple batches over the two tracks.
+    let first = music_api::vault::backfill(&h.state.pool, 1).await.unwrap();
+    assert_eq!(first.tracks, 2);
+    assert!(first.batches >= 2, "batched: {}", first.batches);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM hub_track").await, 2);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM sat_track_meta").await, 2);
+    assert_eq!(
+        count(&h, "SELECT COUNT(*) FROM sat_track_download").await,
+        2
+    );
+    assert_eq!(
+        count(
+            &h,
+            "SELECT COUNT(*) FROM sat_track_analysis WHERE analyzer = 'traktor'"
+        )
+        .await,
+        1
+    );
+
+    // Re-running is a no-op (idempotent).
+    let second = music_api::vault::backfill(&h.state.pool, 1).await.unwrap();
+    assert_eq!(second.tracks, 2);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM hub_track").await, 2);
+    assert_eq!(count(&h, "SELECT COUNT(*) FROM sat_track_meta").await, 2);
+    assert_eq!(
+        count(&h, "SELECT COUNT(*) FROM sat_track_download").await,
+        2
+    );
+    assert_eq!(
+        count(&h, "SELECT COUNT(*) FROM sat_track_analysis").await,
+        1
+    );
+
+    // The backfilled analysis is visible through the resolver.
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/vault/track/USQX91201487")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["bpm"], 124.0);
+    assert_eq!(v["source"], "traktor");
 }

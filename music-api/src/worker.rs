@@ -4,18 +4,21 @@
 //! No external queue: the SQLite `tracks.state` column *is* the queue.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Result;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-use crate::models::{Track, state};
-use crate::{AppState, db, deemix, deezer, transcode};
+use crate::models::{state, MetadataItem, Track};
+use crate::{analyzer, db, deemix, deezer, transcode, vault, AppState};
 
 const AUDIO_EXTENSIONS: &[&str] = &["flac", "mp3", "m4a", "opus", "ogg"];
+
+/// How many ready-but-unanalysed tracks to consider per tick (bounded fan-out).
+const ANALYSIS_BATCH: i64 = 25;
 
 const LOGIN_BACKOFF_BASE: i64 = 60;
 const LOGIN_BACKOFF_MAX: i64 = 1800;
@@ -76,6 +79,9 @@ async fn tick(state: &Arc<AppState>) -> Result<()> {
     db::recover_expired_leases(&state.pool, &retry_policy(state), db::now()).await?;
     resolve_pending(state).await?;
     advance_downloads(state).await?;
+    // Analyse freshly-ready FLACs last, so a `ready` row written this tick is
+    // picked up here (or on the next) without blocking downloads.
+    analyze_ready(state).await?;
     Ok(())
 }
 
@@ -156,6 +162,8 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
                 title,
                 artist,
                 album,
+                artist_id,
+                album_id,
             }) => {
                 db::mark_resolved(
                     &state.pool,
@@ -166,6 +174,24 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
                     &album,
                 )
                 .await?;
+                // Vault load: hubs, links, extids and the metadata satellite.
+                // Best-effort — a vault hiccup must not stall the download.
+                if let Ok(mut conn) = state.pool.acquire().await {
+                    if let Err(e) = vault::ingest_deezer(
+                        &mut conn,
+                        &track.isrc,
+                        &deezer_id,
+                        &title,
+                        &artist,
+                        &album,
+                        artist_id.as_deref(),
+                        album_id.as_deref(),
+                    )
+                    .await
+                    {
+                        warn!("{}: vault ingest failed: {e:#}", track.isrc);
+                    }
+                }
                 state.logs.push(
                     "info",
                     format!("{}: resolved — {title} / {artist}", track.isrc),
@@ -312,6 +338,7 @@ async fn finalize_soundcloud(state: &Arc<AppState>, track: &Track, src: &Path) -
         Some(&mp3_128.display().to_string()),
     )
     .await?;
+    vault_download(state, &track.isrc, "ready", Some("mp3-320"), "320,128").await;
     info!("{}: ready (soundcloud 320 + 128)", track.isrc);
     state
         .logs
@@ -467,6 +494,7 @@ async fn finalize(state: &Arc<AppState>, track: &Track) -> Result<bool> {
             Some(&mp3_128.display().to_string()),
         )
         .await?;
+        vault_download(state, &track.isrc, "ready", Some("flac"), "flac,320,128").await;
         info!("{}: ready (flac + 320 + 128)", track.isrc);
         state
             .logs
@@ -492,6 +520,7 @@ async fn finalize(state: &Arc<AppState>, track: &Track) -> Result<bool> {
                 Some(&mp3_128.display().to_string()),
             )
             .await?;
+            vault_download(state, &track.isrc, "ready", Some("mp3-320"), "320,128").await;
             info!("{}: ready (mp3 320 + 128, no FLAC available)", track.isrc);
         } else {
             tokio::fs::create_dir_all(cfg.mp3_128_dir()).await?;
@@ -506,6 +535,7 @@ async fn finalize(state: &Arc<AppState>, track: &Track) -> Result<bool> {
                 Some(&mp3_128.display().to_string()),
             )
             .await?;
+            vault_download(state, &track.isrc, "ready", Some("mp3-128"), "128").await;
             info!(
                 "{}: ready (mp3 128 only — Deezer tier/availability caps quality)",
                 track.isrc
@@ -515,6 +545,149 @@ async fn finalize(state: &Arc<AppState>, track: &Track) -> Result<bool> {
 
     // The dedicated deemix download dir is ours — drop the source once copied.
     let _ = tokio::fs::remove_file(&src).await;
+    Ok(true)
+}
+
+/// Best-effort vault snapshot of the operational download state. A vault hiccup
+/// must never fail the download itself.
+async fn vault_download(
+    state: &Arc<AppState>,
+    isrc: &str,
+    state_str: &str,
+    source_format: Option<&str>,
+    formats: &str,
+) {
+    if let Ok(mut conn) = state.pool.acquire().await {
+        if let Err(e) = vault::load_download(
+            &mut conn,
+            isrc,
+            state_str,
+            source_format,
+            formats,
+            "music-api-worker",
+        )
+        .await
+        {
+            warn!("{isrc}: vault download load failed: {e:#}");
+        }
+    }
+}
+
+// ── Phase C: BPM/key analysis (music-api as analysis authority) ─────────────
+
+/// Hand ready-but-unanalysed FLACs to the analyzer. Disabled when no
+/// `ANALYZER_URL` is configured. A dead analyzer is backed off (see
+/// `analysis_backoff`) so it is not retried — or logged — every tick.
+async fn analyze_ready(state: &Arc<AppState>) -> Result<()> {
+    if !analyzer::enabled(state.config.analyzer_url.as_deref()) {
+        return Ok(());
+    }
+    if state.analysis_backoff.blocked(db::now()) {
+        return Ok(());
+    }
+    let candidates = db::ready_flac_unaanalyzed(&state.pool, ANALYSIS_BATCH).await?;
+    for track in candidates {
+        spawn_analysis(state.clone(), track);
+    }
+    Ok(())
+}
+
+/// Dispatch one analysis onto a bounded background task. A per-ISRC guard stops
+/// duplicate work while a job is live (the tick may re-select a row before the
+/// `essentia` metadata row lands).
+fn spawn_analysis(state: Arc<AppState>, track: Track) {
+    {
+        let mut live = state.analyzing.lock().expect("analyzing mutex");
+        if !live.insert(track.isrc.clone()) {
+            return; // already being analysed
+        }
+    }
+    tokio::spawn(async move {
+        let _permit = state.analysis_sem.acquire().await.ok();
+        match analyze_track(&state, &track).await {
+            Ok(true) => state.analysis_backoff.note_success(),
+            // The analyzer answered but had nothing usable; leave the row
+            // unanalysed so a later tick tries again.
+            Ok(false) => {}
+            Err(e) => {
+                warn!("{}: analysis failed: {e:#}", track.isrc);
+                state
+                    .logs
+                    .push("warn", format!("{}: analysis failed: {e}", track.isrc));
+                let delay = state.analysis_backoff.note_failure(db::now());
+                debug!("analyzer backed off for {delay}s");
+            }
+        }
+        state
+            .analyzing
+            .lock()
+            .expect("analyzing mutex")
+            .remove(&track.isrc);
+    });
+}
+
+/// Analyse one track's FLAC and store the result as `source='essentia'`.
+/// Returns `true` when the analyzer produced at least one field and a metadata
+/// row was written. Public so tests can drive a single analysis without the
+/// background/backoff machinery.
+pub async fn analyze_track(state: &Arc<AppState>, track: &Track) -> Result<bool> {
+    let Some(base) = state.config.analyzer_url.as_deref() else {
+        return Ok(false);
+    };
+    let Some(path) = track.path_flac.as_deref() else {
+        return Ok(false);
+    };
+
+    let analysis = analyzer::analyze(&state.http, base, path).await?;
+    if analysis.is_empty() {
+        warn!("{}: analyzer returned no fields for {path}", track.isrc);
+        state.logs.push(
+            "warn",
+            format!("{}: analyzer returned no fields", track.isrc),
+        );
+        return Ok(false);
+    }
+
+    // The vault is the data home: write the analysis satellite (insert-only,
+    // hash_diff-gated, one row per analyzer).
+    {
+        let mut conn = state.pool.acquire().await?;
+        let track_hk = vault::load_track(&mut conn, &track.isrc, "music-api-worker").await?;
+        vault::load_analysis(
+            &mut conn,
+            &track_hk,
+            "essentia",
+            "music-api-worker",
+            analysis.bpm,
+            analysis.key.as_deref(),
+            analysis.camelot.as_deref(),
+            None,
+        )
+        .await?;
+    }
+
+    // Compat projection: keep `track_metadata` in step so the legacy read
+    // surface (`/metadata`) and the idempotency check keep working unchanged.
+    // Non-null wins; a partial result never wipes a value the hub already pushed.
+    let item = MetadataItem {
+        isrc: track.isrc.clone(),
+        bpm: analysis.bpm,
+        key: analysis.key,
+        camelot: analysis.camelot,
+        title: None,
+        artist: None,
+        album: None,
+        genre: None,
+        source: Some("essentia".to_string()),
+    };
+    db::upsert_metadata(&state.pool, std::slice::from_ref(&item)).await?;
+    info!(
+        "{}: analysed (bpm {:?}, key {:?}, camelot {:?})",
+        track.isrc, item.bpm, item.key, item.camelot
+    );
+    state
+        .logs
+        .push("info", format!("{}: analysed by essentia", track.isrc));
     Ok(true)
 }
 

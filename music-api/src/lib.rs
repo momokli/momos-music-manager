@@ -4,6 +4,7 @@
 //! Deezer, downloads the best available quality through a dedicated deemix
 //! instance, derives the lossy variants and serves the files back by ISRC.
 
+pub mod analyzer;
 pub mod api;
 pub mod auth;
 pub mod config;
@@ -14,6 +15,7 @@ pub mod logbuf;
 pub mod models;
 pub mod store;
 pub mod transcode;
+pub mod vault;
 pub mod worker;
 pub mod ytdlp;
 
@@ -21,9 +23,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::Router;
 use axum::middleware;
 use axum::routing::get;
+use axum::Router;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::Notify;
 
@@ -55,6 +57,12 @@ pub struct AppState {
     pub finalize_sem: Arc<tokio::sync::Semaphore>,
     /// ISRCs with a `finalize` task currently in flight (dedupe guard).
     pub finalizing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Bounds concurrent analyzer calls (BPM/key, CPU-heavy).
+    pub analysis_sem: Arc<tokio::sync::Semaphore>,
+    /// ISRCs with an analysis task currently in flight (dedupe guard).
+    pub analyzing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Backoff for analyzer calls so a dead analyzer is not retried every tick.
+    pub analysis_backoff: worker::LoginBackoff,
 }
 
 /// Build the fully-stated router: public `/health`, everything else behind the

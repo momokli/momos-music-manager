@@ -92,6 +92,69 @@ ISRCs (fed by the hub's Traktor/analysis data).
 
 Merge rule: a non-null field wins; a `null` field keeps the stored value.
 
+### Analysis (BPM/key authority)
+
+When `ANALYZER_URL` (fallback `HUB_ANALYZER_URL`) points at an Essentia analyzer
+(e.g. `http://127.0.0.1:8711`), music-api analyses its **own** downloads: once a
+track is `ready` with a FLAC on disk, the worker posts the FLAC path to
+`{ANALYZER_URL}/analyze` (`{"path":…,"embed":false}`) and upserts the returned
+`bpm`/`key`/`camelot` into `track_metadata` with **`source='essentia'`**. This
+makes music-api the analysis authority — the hub never analyses itself and just
+reads the result back via `GET /metadata/{isrc}`.
+
+It is additive to (and coexists with) the hub's `POST /metadata` push: the merge
+rule is `source`-agnostic (non-null wins), so whichever side has a value, it is
+kept. The analysis job is **idempotent** (a track with an `essentia` row is never
+re-analysed), runs **bounded/asynchronously** off the download tick
+(`ANALYSIS_CONCURRENCY`, default `1`), and a failing/absent analyzer is **backed
+off** (60s→1800s) instead of retried every tick. A blank URL disables analysis.
+
+### Data Vault 2.0 (`/vault/*`)
+
+music-api is the **data vault of music**: a Data Vault 2.0 model (hubs, links,
+satellites) over every entity it touches. Insert-only, hash-keyed, auditable —
+multiple sources' truths coexist and consumers pick the value they trust. The
+schema lives in `src/vault.rs` (additive DDL, created on every boot via
+`db::init`); the design is [`plans/proposed/music-api-data-vault.md`](../plans/proposed/music-api-data-vault.md).
+
+| Layer      | Tables                                                                                                                                   |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Hubs       | `hub_track` (ISRC), `hub_artist` (name), `hub_album` (title+date)                                                                        |
+| Links      | `link_track_artist`, `link_track_album`                                                                                                  |
+| Satellites | `sat_track_meta`, `sat_track_analysis`, `sat_track_download`, `sat_artist_meta`, `sat_artist_extid`, `sat_album_meta`, `sat_album_extid` |
+
+Conventions: `*_hk = UPPER(HEX(SHA256(normalized_bk)))`, `*_lk = SHA256(hub keys)`,
+`hash_diff = SHA256(descriptive cols)`, `load_date` UTC ISO-8601, `record_source`
+the producer. Satellites are **insert-only**: a new row is written only when the
+`hash_diff` changes. The operational queue (`tracks.state`, `orders`) is _not_ the
+vault — the worker writes _loads_ into it.
+
+**Consumer surface** (the hub is only a consumer):
+
+| Method | Path                      | Use                                                      |
+| ------ | ------------------------- | -------------------------------------------------------- |
+| `GET`  | `/vault/tracks?isrcs=a,b` | resolved analysis for many ISRCs (unknown ISRCs omitted) |
+| `GET`  | `/vault/track/{isrc}`     | resolved analysis for one ISRC (`404` if unknown)        |
+
+Each row is `{isrc, bpm, key, camelot, energy, source, updatedAt}`. BPM/key/camelot
+are picked **per field by precedence** over the latest per-analyzer satellite rows
+(default `traktor > essentia > reccobeats`, configurable via `ANALYSIS_PRECEDENCE`);
+`source` is the analyzer that provided the chosen BPM. A trash value stays in the
+model — it is simply not chosen.
+
+**Ingest** happens on the resolve path (Deezer → hubs/links/extids/`sat_track_meta`),
+on `ready` (`sat_track_download`), on the analysis job (`sat_track_analysis`,
+`analyzer='essentia'`), and on `POST /metadata` (analysis + metadata satellites).
+`track_metadata` is kept as a **compat projection** so the legacy `/metadata`
+surface and the idempotency check keep working unchanged.
+
+**Backfill** existing rows off the boot path (never blocks startup):
+
+```bash
+# batched, transactional, idempotent — safe to re-run
+DATABASE_URL=sqlite:… VAULT_BACKFILL_BATCH=500 music-api backfill-vault
+```
+
 ## States
 
 | state         | meaning                                                          |
@@ -124,6 +187,9 @@ globally paused):
 2. **advance** — poll the deemix queue for the in-flight UUIDs; on a terminal
    success status, locate the file, copy it into the store and transcode. While the
    item is still downloading its lease is refreshed.
+3. **analyze** — for each `ready` track with a FLAC and no `essentia` metadata
+   yet, call the analyzer (bounded, off the tick loop) and upsert BPM/key. Skipped
+   entirely when `ANALYZER_URL` is unset.
 
 Lossless source → `flac/` + `320/` + `128/`. When deemix had to fall back to
 MP3 (no lossless master, or a Deezer tier that caps quality), the delivered file
@@ -140,6 +206,12 @@ and `DEEMIX_ARL` are the only required secrets. Response bodies from
 Queue tuning: `QUEUE_MAX_ATTEMPTS` (default `3`), `QUEUE_RETRY_BASE_SECS` (`60`)
 and `QUEUE_RETRY_MAX_SECS` (`1800`) shape the bounded retry backoff. The download
 lease reuses `DOWNLOAD_TIMEOUT_SECS` (refreshed as a heartbeat).
+
+Analysis: `ANALYZER_URL` (fallback `HUB_ANALYZER_URL`) enables the BPM/key job;
+unset/blank disables it. `ANALYSIS_CONCURRENCY` (default `1`) caps concurrent
+analyzer calls. `ANALYSIS_PRECEDENCE` (default `traktor,essentia,reccobeats`) sets
+the vault resolver's per-field precedence. The one-shot backfill reads
+`VAULT_BACKFILL_BATCH` (default `500`).
 
 ## Deploy
 
@@ -190,12 +262,14 @@ The tier is a property of the ARL, not of this service.
 cargo test
 ````
 
-31 tests: unit tests for ISRC normalisation, order-status derivation, retry
-backoff, deemix and Deezer payload parsing, constant-time token compare and
-download-file matching; plus integration tests over the real router (auth, order
-create/read/list, `/isrc` status, file delivery, order flipping to `done`, the
-durable queue: retry, lease recovery, worker status and queue counts, and the
-per-ISRC metadata upsert/merge/range read).
+53 tests: unit tests for ISRC normalisation, order-status derivation, retry
+backoff, deemix and Deezer payload parsing, constant-time token compare,
+download-file matching and the vault hashing/normalisation primitives; plus
+integration tests over the real router (auth, order create/read/list, `/isrc`
+status, file delivery, order flipping to `done`, the durable queue: retry, lease
+recovery, worker status and queue counts, the per-ISRC metadata upsert/merge/range
+read, and the Data Vault: precedence resolution, hub/link/satellite ingest and the
+batched, idempotent backfill).
 
 ## v1 scope / known limits
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -13,7 +13,7 @@ use serde_json::json;
 use tokio_util::io::ReaderStream;
 
 use crate::models::{CreateOrderRequest, MetadataPushRequest};
-use crate::{AppState, db};
+use crate::{db, AppState};
 
 /// Public liveness probe (no auth).
 pub async fn health() -> impl IntoResponse {
@@ -46,6 +46,9 @@ pub fn router() -> Router<Arc<AppState>> {
         // Per-ISRC metadata (BPM/key authority).
         .route("/metadata", post(post_metadata).get(get_metadata_range))
         .route("/metadata/{isrc}", get(get_metadata_one))
+        // Data Vault 2.0 consumer surface: resolved BPM/key by precedence.
+        .route("/vault/tracks", get(get_vault_tracks))
+        .route("/vault/track/{isrc}", get(get_vault_track))
         // Content-addressed object store (Backpack backup / file home).
         .route("/objects", get(crate::store::list))
         .route("/objects/check", post(crate::store::check))
@@ -280,7 +283,14 @@ async fn post_metadata(
     Json(req): Json<MetadataPushRequest>,
 ) -> Response {
     match db::upsert_metadata(&state.pool, &req.items).await {
-        Ok(n) => Json(json!({ "upserted": n })).into_response(),
+        Ok(n) => {
+            // Mirror the push into the vault (analysis + metadata satellites).
+            // Best-effort: the legacy table above is the compat read surface.
+            if let Err(e) = crate::vault::ingest_metadata(&state.pool, &req.items).await {
+                tracing::warn!("vault ingest_metadata failed: {e:#}");
+            }
+            Json(json!({ "upserted": n })).into_response()
+        }
         Err(e) => {
             tracing::error!("upsert_metadata failed: {e:#}");
             error(
@@ -337,6 +347,56 @@ async fn get_metadata_one(
         Err(e) => {
             tracing::error!("get_metadata failed: {e:#}");
             error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read metadata")
+        }
+    }
+}
+
+// ── Data Vault 2.0 consumer surface ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct VaultQuery {
+    /// Comma-separated ISRCs (range lookup).
+    isrcs: Option<String>,
+    limit: Option<usize>,
+}
+
+/// `GET /vault/tracks?isrcs=a,b,c` — the resolved analysis for many ISRCs. One
+/// row per **known** ISRC (unknown ISRCs are omitted); BPM/key/camelot are picked
+/// by precedence over the latest per-analyzer satellite rows.
+async fn get_vault_tracks(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<VaultQuery>,
+) -> Response {
+    let limit = q.limit.unwrap_or(1000).clamp(1, 2000);
+    let mut isrcs: Vec<String> = q
+        .isrcs
+        .unwrap_or_default()
+        .split(',')
+        .map(db::normalize_key)
+        .filter(|s| !s.is_empty())
+        .collect();
+    isrcs.sort();
+    isrcs.dedup();
+    isrcs.truncate(limit);
+    match crate::vault::resolve_tracks(&state.pool, &isrcs, &state.config.analysis_precedence).await
+    {
+        Ok(tracks) => Json(json!({ "tracks": tracks })).into_response(),
+        Err(e) => {
+            tracing::error!("resolve_tracks failed: {e:#}");
+            error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read vault")
+        }
+    }
+}
+
+/// `GET /vault/track/{isrc}` — the resolved analysis for one ISRC (`404` if the
+/// ISRC is unknown to the vault).
+async fn get_vault_track(State(state): State<Arc<AppState>>, Path(isrc): Path<String>) -> Response {
+    match crate::vault::resolve_track(&state.pool, &isrc, &state.config.analysis_precedence).await {
+        Ok(Some(t)) => Json(t).into_response(),
+        Ok(None) => error(StatusCode::NOT_FOUND, "unknown ISRC"),
+        Err(e) => {
+            tracing::error!("resolve_track failed: {e:#}");
+            error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read vault")
         }
     }
 }
