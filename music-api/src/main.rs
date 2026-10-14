@@ -7,7 +7,7 @@ use tokio::sync::Notify;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use music_api::{AppState, Config, build_router, connect_db, db, worker};
+use music_api::{build_router, connect_db, db, worker, AppState, Config};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -31,6 +31,24 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let config = Config::from_env()?;
+
+    // One-shot vault backfill. Deliberately **off the boot path**: the server
+    // never blocks on it. Batched, transactional and idempotent — safe to re-run.
+    if std::env::args().skip(1).any(|a| a == "backfill-vault") {
+        let batch = std::env::var("VAULT_BACKFILL_BATCH")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(500)
+            .max(1);
+        let pool = connect_db(&config).await?;
+        db::init(&pool).await?;
+        let stats = music_api::vault::backfill(&pool, batch).await?;
+        println!(
+            "backfill-vault: {} tracks, {} analyses, {} batches (batch size {})",
+            stats.tracks, stats.analyses, stats.batches, batch
+        );
+        return Ok(());
+    }
 
     for dir in [
         config.data_dir.clone(),
@@ -56,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
 
     let ytdlp_concurrency = config.ytdlp_concurrency;
     let transcode_concurrency = config.transcode_concurrency;
+    let analysis_concurrency = config.analysis_concurrency;
     let state = Arc::new(AppState {
         pool,
         config,
@@ -68,6 +87,9 @@ async fn main() -> anyhow::Result<()> {
         ytdlp_sem: Arc::new(tokio::sync::Semaphore::new(ytdlp_concurrency)),
         finalize_sem: Arc::new(tokio::sync::Semaphore::new(transcode_concurrency)),
         finalizing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        analysis_sem: Arc::new(tokio::sync::Semaphore::new(analysis_concurrency)),
+        analyzing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        analysis_backoff: Default::default(),
     });
 
     let worker_state = state.clone();
@@ -82,6 +104,10 @@ async fn main() -> anyhow::Result<()> {
         state.config.deemix_url,
         state.config.deemix_download_dir.display()
     );
+    match state.config.analyzer_url.as_deref() {
+        Some(url) => info!("BPM/key analysis enabled (analyzer {url})"),
+        None => info!("BPM/key analysis disabled (ANALYZER_URL not set)"),
+    }
 
     axum::serve(listener, build_router(state))
         .with_graceful_shutdown(shutdown_signal())

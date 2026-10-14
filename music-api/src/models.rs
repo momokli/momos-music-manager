@@ -204,4 +204,17 @@ pub struct TrackMetadata {
     pub genre: Option<String>,
     pub source: Option<String>,
     pub updated_at: i64,
+    /// Output-only alias of `musicalKey` (the analyzer's field name for the same
+    /// value), echoed for consumers that speak the analyzer contract. Not a
+    /// column; filled by [`TrackMetadata::with_key_alias`].
+    #[sqlx(default)]
+    pub key: Option<String>,
+}
+
+impl TrackMetadata {
+    /// Populate the `key` output alias from `musical_key` (same value).
+    pub fn with_key_alias(mut self) -> Self {
+        self.key = self.musical_key.clone();
+        self
+    }
 }

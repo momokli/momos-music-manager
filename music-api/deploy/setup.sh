@@ -98,6 +98,10 @@ DATABASE_URL=sqlite:$ROOT/data/music-api.db
 DEEZER_BASE=https://api.deezer.com
 FFMPEG=ffmpeg
 FFPROBE=ffprobe
+# BPM/key analysis (Essentia on the hub host); unset/blank disables it:
+# ANALYZER_URL=http://127.0.0.1:8711
+# Vault resolver precedence (first analyzer with a value wins, per field):
+# ANALYSIS_PRECEDENCE=traktor,essentia,reccobeats
 WORKER_INTERVAL_SECS=5
 DOWNLOAD_TIMEOUT_SECS=900
 RUST_LOG=info

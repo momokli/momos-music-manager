@@ -27,6 +27,84 @@ The hub then uses that catalogue for **discovery** (filter/sort by BPM/key/genre
 and — the sweet bit — to tell you **the BPM/key of whatever you're hearing**,
 usually within seconds.
 
+### Touch-cascade & download priority (spec, 2026-10-14)
+
+**A spider, level by level — every touch cascades into the DB.** Anything we
+_touch_ (now-playing, liked, playlist item, Discover/radio, manual) pulls its whole
+neighbourhood in. L0–L2 are the **hub's** Spotify crawl (metadata); acquisition is
+music-api's.
+
+- **L0 — Track**: upsert the **full Spotify track object** (ids, isrc, album id,
+  artist ids, + audio features/energy _when the API still returns them_). → artist /
+  album entities (already live, migration 047).
+- **L1 — Artist**: `GET /artists/{id}` + `/artists/{id}/albums` → **all**
+  albums/singles/EPs of every credited artist into `hub_albums`.
+- **L2 — Album**: `/albums/{id}/tracks` → all tracks (metadata first) into
+  `hub_tracks` → re-triggers L0 for each new track.
+- Bounded by **TTLs + per-artist caps + a Spotify request budget** (never unbounded).
+
+**Everything touched → music-api.** Every touched track is ordered at music-api by
+ISRC (url-order for non-Spotify). music-api keeps its **own nested DB**; there we can
+request a **whole artist at deemix** → it returns the **discography** → ingested +
+analysed → imported back. **Now-Playing and listening history** flow to music-api too.
+(Later: more platforms.)
+
+**Download priority** (order in the music-api queue):
+
+| Situation                                                     | Priority                 |
+| ------------------------------------------------------------- | ------------------------ |
+| touched, but **no reference** (just heard / album-only crawl) | **0** — backfill, trails |
+| **liked** by a hub user, or in a user's **playlist**          | **≥ 1**                  |
+| **+1 per additional playlist reference**                      | +1 each                  |
+| **currently playing** (now-playing)                           | **+100** — fast lane     |
+
+New/important material is fetched first; the long tail rides at priority 0. Priority
+is per-ISRC effective (music-api orders by `MAX(priority)` over `order_items`); the
+hub computes it from references and (re)sets it — re-order is a cheap no-op.
+
+### Empirical findings (2026-10-14) — where BPM/Key actually come from
+
+Tested track 78911 (`Binaryh – Hozho Naasha (Extended Mix)`, ISRC `GBKQU2538819`,
+Spotify `29Be1APBabDZ91ftZxnQlA`):
+
+| Source                            | Result                                                          |
+| --------------------------------- | --------------------------------------------------------------- |
+| Hub `hub_track_features`          | ReccoBeats `found = 0`                                          |
+| ReccoBeats (direct query)         | `content: []` — **no features**                                 |
+| Deezer (public, keyless, by ISRC) | ✅ ids/title/artist/album/cover/**30 s preview** — but `bpm: 0` |
+| music-api (before order)          | `unknown ISRC`                                                  |
+| music-api order (priority 100)    | ✅ **flac + 320 + 128 in ~30 s**, `sourceFormat = flac`         |
+| music-api `/metadata` (after)     | ❌ `unknown ISRC` — **no BPM/Key**                              |
+
+**Conclusion.** For underground/white-label tracks ReccoBeats misses and Deezer gives
+no BPM. music-api delivers the **file** fast, but has **no analysis worker** today
+(metadata is only _pushed_ hub→api). So the reliable BPM/Key source is **analysis of
+the actual file**.
+
+**Decision → music-api analysis worker (default job).** After a track reaches `ready`,
+spawn an **async job** that runs the analyzer (Essentia `RhythmExtractor`/`KeyExtractor`,
+or the shared `.200:8711` analyzer service) on the FLAC and writes BPM (+ Key) into
+`track_metadata` (`source='essentia'`). Then `/metadata/{isrc}` serves BPM/Key and the
+hub reads it back — no hub-side analysis needed for owned files.
+
+- **BPM**: trust it (the file is ground truth). **Key**: provisional (Essentia is decent,
+  not gospel) — keep hub/ReccoBeats/Traktor values as higher-trust where present.
+- Deezer also hands us **artist ids** (here `deezer:artist:10725209`) → a whole-artist
+  **deemix discography** order becomes possible for the catalogue.
+
+### Architecture: the hub is a consumer; analysis results are satellites (Data Vault)
+
+- **The hub never analyses.** It is a **display/consumer**: it talks to APIs
+  (Spotify, music-api) and keeps **its own DB**. The analysis happens in **music-api**.
+- The hub DB is modelled **Data Vault style**: **hubs** (business keys: track /
+  artist / album), **links** (track↔artist, track↔album), **satellites**
+  (descriptive, per-source, time-stamped).
+- **Analysis results are a satellite, not "the BPM".** Each source writes its own row
+  keyed `(track, source)` — e.g. `music-api`/`essentia`, `reccobeats`, `traktor`.
+  Consumers pull the **right** value on demand (configurable precedence). If the
+  worker's BPM/Key turns out to be trash, we simply stop using it — it stays in the
+  model, nothing is overwritten. That's the point of modelling it in the vault.
+
 Everything stays **API-friendly**: one call per unique key per TTL, no hard
 duplicates, batched reads, idle-driven background work.
 
@@ -337,13 +415,13 @@ crawl_feature_source_chain csv    music-api,reccobeats,freqblog
 
 ### Files to modify
 
-| File                                                                  | Change                                                                    |
-| --------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `music-api/src/db.rs`                                                 | `requests`, `jobs`, `expansion_state`, non-ISRC tracks, catalogue columns |
-| `music-api/src/worker.rs`                                             | scheduler (high-prio vs idle expansion), ingest + analyze steps           |
-| `music-api/src/api.rs`                                                | `POST /requests`, `GET /jobs`, `GET /catalogue`                           |
-| `music-api/src/deemix.rs`                                             | artist/album URL orders (already URL-capable)                             |
-| `music-api/src/{models,config}.rs`                                    | request/job types + knobs (§9)                                            |
+| File                                                                    | Change                                                                    |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `music-api/src/db.rs`                                                   | `requests`, `jobs`, `expansion_state`, non-ISRC tracks, catalogue columns |
+| `music-api/src/worker.rs`                                               | scheduler (high-prio vs idle expansion), ingest + analyze steps           |
+| `music-api/src/api.rs`                                                  | `POST /requests`, `GET /jobs`, `GET /catalogue`                           |
+| `music-api/src/deemix.rs`                                               | artist/album URL orders (already URL-capable)                             |
+| `music-api/src/{models,config}.rs`                                      | request/job types + knobs (§9)                                            |
 | `music-hub/migrations/044_hub_artists_albums.sql`                       | artists/albums/links/ids + backfill                                       |
 | `music-hub/src/crawl.rs`                                                | `touch_track` → order + (TTL) identity crawl                              |
 | `music-hub/src/music_api.rs`                                            | orders + batched `/tracks`/`/metadata` reads + catalogue import           |

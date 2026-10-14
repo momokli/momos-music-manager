@@ -48,6 +48,15 @@ pub struct Config {
     pub queue_retry_base_secs: i64,
     /// Upper bound on the retry backoff (seconds).
     pub queue_retry_max_secs: i64,
+    /// Base URL of the BPM/key analyzer service (Essentia), e.g.
+    /// `http://127.0.0.1:8711`. `POST {url}/analyze` with a server-local file
+    /// path. `None` (unset or blank) disables analysis entirely.
+    pub analyzer_url: Option<String>,
+    /// How many analyzer calls may run concurrently (analysis is CPU-heavy).
+    pub analysis_concurrency: usize,
+    /// Analyzer precedence for the vault resolver: the first analyzer in this
+    /// list that has a value wins, per field. Default `traktor,essentia,reccobeats`.
+    pub analysis_precedence: Vec<String>,
 }
 
 impl Config {
@@ -104,6 +113,12 @@ impl Config {
             queue_max_attempts: env_parse("QUEUE_MAX_ATTEMPTS", 3u32).max(1),
             queue_retry_base_secs: env_parse("QUEUE_RETRY_BASE_SECS", 60i64).max(1),
             queue_retry_max_secs: env_parse("QUEUE_RETRY_MAX_SECS", 1800i64).max(1),
+            analyzer_url: analyzer_url_from_env(),
+            analysis_concurrency: env_parse("ANALYSIS_CONCURRENCY", 1usize).max(1),
+            analysis_precedence: env_list(
+                "ANALYSIS_PRECEDENCE",
+                &["traktor", "essentia", "reccobeats"],
+            ),
         })
     }
 
@@ -118,9 +133,33 @@ impl Config {
     }
 }
 
+/// The analyzer base URL: `ANALYZER_URL` wins, `HUB_ANALYZER_URL` is the
+/// fallback. A blank/whitespace value is treated as "not configured" (analysis
+/// disabled).
+fn analyzer_url_from_env() -> Option<String> {
+    std::env::var("ANALYZER_URL")
+        .or_else(|_| std::env::var("HUB_ANALYZER_URL"))
+        .ok()
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .filter(|v| !v.is_empty())
+}
+
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
     std::env::var(key)
         .ok()
         .and_then(|v| v.parse::<T>().ok())
         .unwrap_or(default)
+}
+
+/// A comma-separated list from the environment (lowercased, trimmed, blanks
+/// dropped). Falls back to `default` when unset or blank.
+fn env_list(key: &str, default: &[&str]) -> Vec<String> {
+    match std::env::var(key) {
+        Ok(v) if !v.trim().is_empty() => v
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => default.iter().map(|s| s.to_string()).collect(),
+    }
 }
