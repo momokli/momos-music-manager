@@ -1025,7 +1025,6 @@ struct TrackPage {
     my_types: Vec<TypeOption>,
     // "tagged-complete" flag (#345).
     tag_complete: bool,
-    tag_done_auto: bool,
     tag_done_manual: bool,
     tag_missing: Vec<String>,
     done_action: String,
@@ -1731,7 +1730,6 @@ async fn build_track_page(
         htmx: false,
         my_types,
         tag_complete: done_status.complete,
-        tag_done_auto: done_status.auto,
         tag_done_manual: done_status.manual,
         tag_missing: done_status.missing,
         done_action: format!("/track/{id}/done"),
