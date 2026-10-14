@@ -7,7 +7,7 @@
 //! It runs continuously while there is work, one request stream at a time, with a
 //! small page delay and hard backoff on 429 / dev-mode quota.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,6 +21,8 @@ use crate::spotify;
 
 const IDLE_WAIT: Duration = Duration::from_secs(10);
 const BUSY_WAIT: Duration = Duration::from_secs(1);
+/// Hard cap on the in-memory event ring-buffer (issue #350).
+pub const EVENT_CAPACITY: usize = 200;
 const MAX_PLAYLISTS_PER_PASS: usize = 12;
 const MAX_LIKES_ACCOUNTS_PER_PASS: usize = 2;
 const PAGE_DELAY: Duration = Duration::from_millis(150);
@@ -45,6 +47,8 @@ pub struct WorkerHealth(Arc<Mutex<WorkerHealthInner>>);
 struct WorkerHealthInner {
     started_at: Option<chrono::DateTime<chrono::Utc>>,
     loops: BTreeMap<&'static str, LoopState>,
+    /// Bounded ring-buffer of the most recent iterations, oldest first.
+    events: VecDeque<Event>,
 }
 
 #[derive(Clone, Default)]
@@ -53,6 +57,18 @@ struct LoopState {
     last_worked: bool,
     iterations: u64,
     last_error: Option<String>,
+    /// In-memory pause flag (issue #350): a paused loop skips its work and
+    /// records nothing until resumed. Lost on restart (accepted).
+    paused: bool,
+}
+
+/// One recorded loop iteration, surfaced in the ops log view (issue #350).
+#[derive(Debug, Clone)]
+pub struct Event {
+    pub at: String,
+    pub loop_name: &'static str,
+    pub worked: bool,
+    pub error: Option<String>,
 }
 
 /// Owned, JSON-ready snapshot of one loop's state.
@@ -63,6 +79,7 @@ pub struct LoopSnapshot {
     pub last_worked: bool,
     pub iterations: u64,
     pub last_error: Option<String>,
+    pub paused: bool,
 }
 
 /// Owned snapshot of the whole registry.
@@ -92,17 +109,50 @@ impl WorkerHealth {
         Self(Arc::new(Mutex::new(inner)))
     }
 
+    /// Set the in-memory pause flag for a loop (issue #350).
+    ///
+    /// Unknown names are harmless: the entry is created lazily, like
+    /// [`record`](WorkerHealth::record). A running pass is never cancelled;
+    /// the flag takes effect at the next loop iteration.
+    pub fn set_paused(&self, name: &'static str, paused: bool) {
+        let mut inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        inner.loops.entry(name).or_default().paused = paused;
+    }
+
+    /// Whether a loop is currently paused (unknown names read as not paused).
+    pub fn is_paused(&self, name: &'static str) -> bool {
+        let inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        inner.loops.get(name).map(|s| s.paused).unwrap_or(false)
+    }
+
     /// Record one loop iteration. `err = None` clears a previous error.
     pub fn record(&self, name: &'static str, worked: bool, err: Option<String>) {
         let mut inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if inner.started_at.is_none() {
             inner.started_at = Some(chrono::Utc::now());
         }
+        let at = chrono::Utc::now().to_rfc3339();
         let st = inner.loops.entry(name).or_default();
-        st.last_run_at = Some(chrono::Utc::now().to_rfc3339());
+        st.last_run_at = Some(at.clone());
         st.last_worked = worked;
         st.iterations += 1;
-        st.last_error = err;
+        st.last_error = err.clone();
+        // One event per iteration; drop the oldest when at capacity.
+        if inner.events.len() >= EVENT_CAPACITY {
+            inner.events.pop_front();
+        }
+        inner.events.push_back(Event {
+            at,
+            loop_name: name,
+            worked,
+            error: err,
+        });
+    }
+
+    /// A cloned, newest-first view of the recent loop events (issue #350).
+    pub fn events(&self) -> Vec<Event> {
+        let inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        inner.events.iter().rev().cloned().collect()
     }
 
     /// Owned snapshot of every registered loop.
@@ -117,6 +167,7 @@ impl WorkerHealth {
                 last_worked: st.last_worked,
                 iterations: st.iterations,
                 last_error: st.last_error.clone(),
+                paused: st.paused,
             })
             .collect();
         Snapshot {
@@ -153,6 +204,10 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) -> WorkerHealth {
         let health = health.clone();
         tokio::spawn(async move {
             loop {
+                if health.is_paused("enrichment") {
+                    tokio::time::sleep(IDLE_WAIT).await;
+                    continue;
+                }
                 // On-demand ReccoBeats requests first, then the generic backlog.
                 let p = crate::features::priority_once(&pool, &cfg, 50).await;
                 let f = crate::features::sync_once(&pool, &cfg, 50).await;
@@ -176,6 +231,10 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) -> WorkerHealth {
         let health = health.clone();
         tokio::spawn(async move {
             loop {
+                if health.is_paused("freqblog") {
+                    tokio::time::sleep(IDLE_WAIT).await;
+                    continue;
+                }
                 let n = crate::features::freqblog_priority_once(&pool, &cfg, 5).await;
                 let worked = matches!(n, Ok(v) if v > 0);
                 health.record("freqblog", worked, n.err().map(|e| e.to_string()));
@@ -191,6 +250,10 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) -> WorkerHealth {
         let health = health.clone();
         tokio::spawn(async move {
             loop {
+                if health.is_paused("spotify") {
+                    tokio::time::sleep(IDLE_WAIT).await;
+                    continue;
+                }
                 let r = run_once(&pool, &cfg).await;
                 if let Err(e) = &r {
                     tracing::warn!("worker pass failed: {e}");
@@ -211,6 +274,10 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) -> WorkerHealth {
         let health = health.clone();
         tokio::spawn(async move {
             loop {
+                if health.is_paused("crawl") {
+                    tokio::time::sleep(IDLE_WAIT).await;
+                    continue;
+                }
                 let a = crate::analysis::refresh_from_vault(&pool, &cfg, 200).await;
                 let o = crate::crawl::order_pending(&pool, &cfg, 500).await;
                 let worked = matches!(a, Ok(n) if n > 0) || matches!(o, Ok(n) if n > 0);
@@ -229,6 +296,10 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) -> WorkerHealth {
         let health = health.clone();
         tokio::spawn(async move {
             loop {
+                if health.is_paused("crawl") {
+                    tokio::time::sleep(IDLE_WAIT).await;
+                    continue;
+                }
                 let budget = crate::crawl::requests_per_pass(&pool).await;
                 let n = crate::crawl::touch_cascade(&pool, &cfg, budget).await;
                 let worked = matches!(n, Ok(v) if v > 0);
@@ -244,6 +315,10 @@ pub fn spawn(pool: SqlitePool, cfg: Arc<Config>) -> WorkerHealth {
         let health = health.clone();
         tokio::spawn(async move {
             loop {
+                if health.is_paused("curation") {
+                    tokio::time::sleep(IDLE_WAIT).await;
+                    continue;
+                }
                 let cutoff = (chrono::Utc::now() - chrono::Duration::hours(20)).to_rfc3339();
                 let due = match crate::curate::daily_due(&pool, &cutoff).await {
                     Ok(due) => due,
@@ -575,5 +650,47 @@ mod health_tests {
         let h = WorkerHealth::new();
         assert!(h.uptime_secs() >= 0);
         assert!(h.snapshot().started_at.is_some());
+    }
+
+    #[test]
+    fn pause_flag_toggles_per_loop() {
+        let h = WorkerHealth::new();
+        // Default: every registered loop runs.
+        for name in LOOP_NAMES {
+            assert!(!h.is_paused(name), "{name} starts running");
+        }
+        h.set_paused("spotify", true);
+        assert!(h.is_paused("spotify"));
+        assert!(!h.is_paused("crawl"), "only the named loop pauses");
+        // The flag is visible in the snapshot.
+        let snap = h.snapshot();
+        let spotify = snap.loops.iter().find(|l| l.name == "spotify").unwrap();
+        assert!(spotify.paused);
+        h.set_paused("spotify", false);
+        assert!(!h.is_paused("spotify"));
+        // Unknown names are harmless.
+        h.set_paused("nope", true);
+        assert!(h.is_paused("nope"));
+    }
+
+    #[test]
+    fn events_are_newest_first_and_bounded() {
+        let h = WorkerHealth::new();
+        assert!(h.events().is_empty());
+        h.record("enrichment", true, None);
+        h.record("crawl", false, Some("boom".to_string()));
+        let ev = h.events();
+        assert_eq!(ev.len(), 2);
+        assert_eq!(ev[0].loop_name, "crawl", "newest first");
+        assert_eq!(ev[1].loop_name, "enrichment");
+        assert_eq!(ev[0].error.as_deref(), Some("boom"));
+        assert!(ev[0].at.contains('T'), "RFC3339 timestamp");
+
+        // Ring-buffer stays hard-capped at EVENT_CAPACITY.
+        for i in 0..(super::EVENT_CAPACITY + 50) {
+            h.record("curation", i % 2 == 0, None);
+        }
+        let ev = h.events();
+        assert_eq!(ev.len(), super::EVENT_CAPACITY, "capacity is constant");
     }
 }
