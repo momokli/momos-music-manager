@@ -1,7 +1,8 @@
-//! Integration tests for the track "tagged-complete" flag (#345, T5-1 / F1).
+//! Integration tests for the tag "skip" flag (#345).
 //!
 //! A track counts as complete when every configured describing family has a
-//! resolved tag (`auto`) or the user manually marked it done (`manual`).
+//! resolved tag (`auto`) or the user skipped it (`manual`). The skip action now
+//! lives on the tag-task (`/tag-task/{id}/done`), not the track page.
 
 mod common;
 
@@ -22,124 +23,6 @@ async fn tag_via_http(app: &common::TestApp, cookie: &str, track: i64, name: &st
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-}
-
-#[tokio::test]
-async fn done_requires_login() {
-    let app = common::spawn().await;
-    let resp = app
-        .client()
-        .post(app.url(&format!("/track/{}/done", app.seed.t_all)))
-        .form(&[("scope", "all")])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-    assert_eq!(resp.headers()["location"], "/login");
-}
-
-#[tokio::test]
-async fn manual_done_persists_and_shows() {
-    let app = common::spawn().await;
-    let alice = app.seed.alice;
-    let track = app.seed.t_all;
-    let cookie = app.session_cookie(alice).await;
-
-    let resp = app
-        .client()
-        .post(app.url(&format!("/track/{track}/done")))
-        .header("Cookie", &cookie)
-        .form(&[("scope", "all")])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-    assert_eq!(
-        resp.headers()["location"],
-        format!("/track/{track}?scope=all")
-    );
-
-    // DB row exists.
-    let n: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM hub_track_tag_done WHERE user_id = ?1 AND track_id = ?2",
-    )
-    .bind(alice)
-    .bind(track)
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
-    assert_eq!(n, 1, "manual done row missing");
-
-    // The track view shows the manual "übersprungen" badge.
-    let html = app
-        .client()
-        .get(app.url(&format!("/track/{track}")))
-        .header("Cookie", &cookie)
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert!(
-        html.contains("übersprungen"),
-        "manual 'übersprungen' badge missing"
-    );
-}
-
-#[tokio::test]
-async fn undone_clears() {
-    let app = common::spawn().await;
-    let alice = app.seed.alice;
-    let track = app.seed.t_all;
-    let cookie = app.session_cookie(alice).await;
-
-    app.client()
-        .post(app.url(&format!("/track/{track}/done")))
-        .header("Cookie", &cookie)
-        .form(&[("scope", "all")])
-        .send()
-        .await
-        .unwrap();
-
-    let resp = app
-        .client()
-        .post(app.url(&format!("/track/{track}/undone")))
-        .header("Cookie", &cookie)
-        .form(&[("scope", "all")])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
-    assert_eq!(
-        resp.headers()["location"],
-        format!("/track/{track}?scope=all")
-    );
-
-    let n: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM hub_track_tag_done WHERE user_id = ?1 AND track_id = ?2",
-    )
-    .bind(alice)
-    .bind(track)
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
-    assert_eq!(n, 0, "manual done row not cleared");
-
-    let html = app
-        .client()
-        .get(app.url(&format!("/track/{track}")))
-        .header("Cookie", &cookie)
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    assert!(
-        html.contains("offen"),
-        "badge should be 'offen' after undone"
-    );
 }
 
 #[tokio::test]
@@ -200,28 +83,19 @@ async fn phase_variants_count_as_one_family() {
 }
 
 #[tokio::test]
-async fn manual_overrides_auto() {
+async fn manual_skip_overrides_auto() {
     let app = common::spawn().await;
     let alice = app.seed.alice;
     let track = app.seed.t_all;
-    let cookie = app.session_cookie(alice).await;
 
     // No families tagged at all.
     let before = tagdone::status(&app.pool, alice, track, FAMILIES).await;
     assert!(!before.complete && !before.auto, "initially incomplete");
 
-    let resp = app
-        .client()
-        .post(app.url(&format!("/track/{track}/done")))
-        .header("Cookie", &cookie)
-        .form(&[("scope", "all")])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    tagdone::set_done(&app.pool, alice, track).await.unwrap();
 
     let after = tagdone::status(&app.pool, alice, track, FAMILIES).await;
-    assert!(after.complete, "manual mark overrides the auto rule");
+    assert!(after.complete, "manual skip overrides the auto rule");
     assert!(!after.auto, "auto stays false");
     assert!(after.manual, "manual flag set");
 }

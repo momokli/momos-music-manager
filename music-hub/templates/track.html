@@ -312,30 +312,6 @@ content %}
         <div class="hub-bucket">
             <h2>Tags</h2>
             {% include "_partials/tag_clouds.html" %}
-            <div class="hub-tag-status" style="margin-top: 0.4rem">
-                {% if tag_done_manual %}<span
-                    class="hub-chip"
-                    title="Für die Tagging-Aufgabe übersprungen"
-                    >übersprungen</span
-                >{% else %}{% if tag_complete %}<span
-                    class="hub-chip"
-                    title="Alle beschreibenden Familien sind gesetzt"
-                    >✓ alle Familien gesetzt</span
-                >{% else %}<span class="hub-muted"
-                    >offen — fehlt: {% for m in tag_missing %}{{ m }}{% if !loop.last %},
-                    {% endif %}{% endfor %}</span
-                >{% endif %}{% endif %} {% if tag_done_manual %}
-                <form method="post" action="{{ undone_action }}" style="display: inline">
-                    <input type="hidden" name="scope" value="{{ rec_scope }}" />
-                    <button class="outline" type="submit">Überspringen aufheben</button>
-                </form>
-                {% else %}
-                <form method="post" action="{{ done_action }}" style="display: inline">
-                    <input type="hidden" name="scope" value="{{ rec_scope }}" />
-                    <button class="outline" type="submit">Überspringen</button>
-                </form>
-                {% endif %}
-            </div>
             <form
                 method="post"
                 action="/track/{{ id }}/tag"
