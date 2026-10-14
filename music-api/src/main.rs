@@ -90,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
         analysis_sem: Arc::new(tokio::sync::Semaphore::new(analysis_concurrency)),
         analyzing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         analysis_backoff: Default::default(),
+        artist_ingesting: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
     });
 
     let worker_state = state.clone();

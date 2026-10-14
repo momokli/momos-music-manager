@@ -11,6 +11,18 @@ pub mod state {
     pub const FAILED: &str = "failed";
 }
 
+/// Lifecycle of an artist order (whole-discography download).
+pub mod artist_state {
+    /// Created; not yet accepted by deemix (or deemix was not ready).
+    pub const OPEN: &str = "open";
+    /// Submitted to deemix, download in progress.
+    pub const RUNNING: &str = "running";
+    /// deemix finished and the produced files were ingested into the vault.
+    pub const DONE: &str = "done";
+    /// deemix rejected it, or the download/ingest failed.
+    pub const FAILED: &str = "failed";
+}
+
 /// A track row keyed by `isrc` (the primary key of the whole system). For
 /// non-Deezer sources the key is `<source>:<external_id>` (e.g.
 /// `soundcloud:1837565340`).
@@ -101,6 +113,37 @@ pub struct OrderItem {
     pub artist: Option<String>,
     pub formats: Vec<String>,
     pub error: Option<String>,
+}
+
+/// An artist order: download a whole Deezer artist's discography via deemix.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistOrder {
+    pub id: String,
+    /// The artist as supplied by the caller (id or URL).
+    pub artist: String,
+    /// The canonical Deezer artist URL handed to deemix.
+    pub artist_url: String,
+    pub status: String,
+    /// Higher = processed earlier.
+    pub priority: i64,
+    /// The deemix queue handle to poll while `running`.
+    pub deemix_uuid: Option<String>,
+    /// How many files were ingested into the vault.
+    pub added: i64,
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// `POST /artist-orders` body.
+#[derive(Debug, Deserialize)]
+pub struct CreateArtistOrderRequest {
+    /// Deezer artist id (`12345`) or URL (`https://www.deezer.com/artist/12345`).
+    pub artist: String,
+    /// Higher = processed earlier (default 0).
+    #[serde(default)]
+    pub priority: i64,
 }
 
 /// `POST /orders` body.

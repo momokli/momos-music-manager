@@ -12,13 +12,23 @@ use anyhow::Result;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-use crate::models::{state, MetadataItem, Track};
-use crate::{analyzer, db, deemix, deezer, transcode, vault, AppState};
+use crate::models::{state, ArtistOrder, MetadataItem, Track};
+use crate::{analyzer, db, deemix, deezer, tags, transcode, vault, AppState};
 
 const AUDIO_EXTENSIONS: &[&str] = &["flac", "mp3", "m4a", "opus", "ogg"];
 
 /// How many ready-but-unanalysed tracks to consider per tick (bounded fan-out).
 const ANALYSIS_BATCH: i64 = 25;
+
+/// How many artist orders to submit/poll per tick (bounded fan-out).
+const ARTIST_ORDER_BATCH: i64 = 10;
+
+/// Upper bound on files scanned per artist-order ingest (bounded work).
+const ARTIST_INGEST_MAX_FILES: usize = 2000;
+
+/// A `running` artist order whose deemix item vanished but produced no files is
+/// failed after this long (bounded lifetime).
+const ARTIST_ORDER_STALE_SECS: i64 = 1800;
 
 const LOGIN_BACKOFF_BASE: i64 = 60;
 const LOGIN_BACKOFF_MAX: i64 = 1800;
@@ -79,6 +89,8 @@ async fn tick(state: &Arc<AppState>) -> Result<()> {
     db::recover_expired_leases(&state.pool, &retry_policy(state), db::now()).await?;
     resolve_pending(state).await?;
     advance_downloads(state).await?;
+    // Artist orders (whole-discography downloads) run alongside the ISRC queue.
+    advance_artist_orders(state).await?;
     // Analyse freshly-ready FLACs last, so a `ready` row written this tick is
     // picked up here (or on the next) without blocking downloads.
     analyze_ready(state).await?;
@@ -94,6 +106,39 @@ fn retry_policy(state: &AppState) -> db::RetryPolicy {
     }
 }
 
+/// Ensure a deemix session, honouring the login backoff. Returns whether deemix
+/// is ready to accept `addToQueue`. A missing ARL warns exactly once; a failed
+/// login is backed off (60s → 1800s) so it is not retried every tick.
+pub async fn ensure_deemix_login(state: &Arc<AppState>) -> bool {
+    let now = db::now();
+    if state.config.deemix_arl.is_empty() {
+        if state.deemix_login.warn_missing_arl() {
+            warn!("DEEMIX_ARL is not set — tracks stay pending until it is configured");
+        }
+        return false;
+    }
+    if state.deemix_login.blocked(now) {
+        return false;
+    }
+    match deemix::login(
+        &state.http,
+        &state.config.deemix_url,
+        &state.config.deemix_arl,
+    )
+    .await
+    {
+        Ok(()) => {
+            state.deemix_login.note_success();
+            true
+        }
+        Err(e) => {
+            let delay = state.deemix_login.note_failure(now);
+            warn!("deemix login failed ({e:#}) — next attempt in {delay}s");
+            false
+        }
+    }
+}
+
 /// Phase A: look each pending ISRC up on Deezer and submit it to deemix.
 async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     let policy = retry_policy(state);
@@ -106,33 +151,7 @@ async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     // deemix needs a session before it accepts `addToQueue`. A failed login is
     // backed off so it cannot retry (or log) every tick; metadata resolution
     // below does not need deemix and still runs regardless.
-    let now = db::now();
-    let deemix_ready = if state.config.deemix_arl.is_empty() {
-        if state.deemix_login.warn_missing_arl() {
-            warn!("DEEMIX_ARL is not set — tracks stay pending until it is configured");
-        }
-        false
-    } else if state.deemix_login.blocked(now) {
-        false
-    } else {
-        match deemix::login(
-            &state.http,
-            &state.config.deemix_url,
-            &state.config.deemix_arl,
-        )
-        .await
-        {
-            Ok(()) => {
-                state.deemix_login.note_success();
-                true
-            }
-            Err(e) => {
-                let delay = state.deemix_login.note_failure(now);
-                warn!("deemix login failed ({e:#}) — next attempt in {delay}s");
-                false
-            }
-        }
-    };
+    let deemix_ready = ensure_deemix_login(state).await;
 
     for track in pending {
         // Non-Deezer sources (e.g. SoundCloud) are dispatched to a bounded
@@ -569,6 +588,310 @@ async fn vault_download(
         .await
         {
             warn!("{isrc}: vault download load failed: {e:#}");
+        }
+    }
+}
+
+// ── Artist orders (whole-discography download) ───────────────────────────────
+
+/// Submit an artist order to deemix (login already ensured by the caller).
+/// Returns the resulting status: `running` on success, `failed` on rejection,
+/// `open` when deemix is not ready (the worker retries).
+pub async fn submit_artist_order(
+    state: &Arc<AppState>,
+    order_id: &str,
+    artist_url: &str,
+    deemix_ready: bool,
+) -> String {
+    if !deemix_ready {
+        return "open".to_string();
+    }
+    match deemix::add_to_queue(
+        &state.http,
+        &state.config.deemix_url,
+        artist_url,
+        state.config.deemix_bitrate,
+    )
+    .await
+    {
+        Ok(deemix::AddOutcome::Queued { uuid }) => {
+            let uuid = uuid.unwrap_or_else(|| format!("artist_{order_id}"));
+            let _ = db::mark_artist_order_running(&state.pool, order_id, &uuid).await;
+            state
+                .logs
+                .push("info", format!("artist order {order_id}: queued at deemix"));
+            "running".to_string()
+        }
+        Ok(deemix::AddOutcome::Rejected { errid }) => {
+            let errid = errid.unwrap_or_else(|| "unknown".to_string());
+            let msg = format!("deemix rejected: {errid}");
+            let _ = db::mark_artist_order_failed(&state.pool, order_id, &msg).await;
+            state
+                .logs
+                .push("warn", format!("artist order {order_id}: {msg}"));
+            "failed".to_string()
+        }
+        Err(e) => {
+            warn!("artist order {order_id}: deemix addToQueue failed: {e:#}");
+            "open".to_string()
+        }
+    }
+}
+
+/// Phase D: submit `open` artist orders to deemix and ingest finished ones.
+async fn advance_artist_orders(state: &Arc<AppState>) -> Result<()> {
+    // Submit open orders (bounded). Reuses the deemix login backoff.
+    let open = db::open_artist_orders(&state.pool, ARTIST_ORDER_BATCH).await?;
+    if !open.is_empty() {
+        let deemix_ready = ensure_deemix_login(state).await;
+        if deemix_ready {
+            for order in open {
+                submit_artist_order(state, &order.id, &order.artist_url, true).await;
+            }
+        }
+    }
+
+    // Poll running orders against the deemix queue.
+    let running = db::running_artist_orders(&state.pool, ARTIST_ORDER_BATCH).await?;
+    if running.is_empty() {
+        return Ok(());
+    }
+    let queue = match deemix::queue(&state.http, &state.config.deemix_url).await {
+        Ok(q) => q,
+        Err(e) => {
+            warn!("deemix getQueue failed: {e:#}");
+            return Ok(());
+        }
+    };
+    for order in running {
+        let item = order.deemix_uuid.as_deref().and_then(|u| queue.get(u));
+        match item {
+            Some(item) if deemix::is_terminal_status(&item.status) => {
+                if deemix::is_success_status(&item.status) {
+                    // Terminal success: ingest the produced files (off the tick).
+                    spawn_artist_ingest(state.clone(), order, true);
+                } else {
+                    db::mark_artist_order_failed(
+                        &state.pool,
+                        &order.id,
+                        &format!("deemix status: {}", item.status),
+                    )
+                    .await?;
+                }
+            }
+            Some(_) => {} // still downloading
+            None => {
+                // The item left the queue: it may have finished and been evicted.
+                // Try to ingest; if nothing is there yet, retry until stale.
+                if db::now() - order.updated_at > ARTIST_ORDER_STALE_SECS {
+                    db::mark_artist_order_failed(&state.pool, &order.id, "no files found").await?;
+                } else {
+                    spawn_artist_ingest(state.clone(), order, false);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Run the artist-order ingest on a bounded background task so the tick loop
+/// stays responsive. A per-order guard prevents duplicate work while a job is
+/// live. `terminal` marks the order `done` even when nothing new was ingested
+/// (deemix reported success); otherwise the order stays `running` until files
+/// appear or the stale check fails it.
+fn spawn_artist_ingest(state: Arc<AppState>, order: ArtistOrder, terminal: bool) {
+    {
+        let mut live = state
+            .artist_ingesting
+            .lock()
+            .expect("artist_ingesting mutex");
+        if !live.insert(order.id.clone()) {
+            return; // already ingesting this order
+        }
+    }
+    tokio::spawn(async move {
+        let _permit = state.finalize_sem.acquire().await.ok();
+        match ingest_artist_downloads(&state, &order).await {
+            Ok(added) if added > 0 || terminal => {
+                let _ = db::mark_artist_order_done(&state.pool, &order.id, added as i64).await;
+                info!("artist order {}: {} file(s) ingested", order.id, added);
+                state.logs.push(
+                    "info",
+                    format!("artist order {}: {added} file(s) ingested", order.id),
+                );
+            }
+            Ok(_) => {
+                // Nothing (yet) — leave the order running; the stale check bounds it.
+                debug!("artist order {}: no files ingested yet", order.id);
+            }
+            Err(e) => {
+                warn!("artist order {}: ingest failed: {e:#}", order.id);
+                let _ =
+                    db::mark_artist_order_failed(&state.pool, &order.id, &format!("ingest: {e}"))
+                        .await;
+            }
+        }
+        state
+            .artist_ingesting
+            .lock()
+            .expect("artist_ingesting mutex")
+            .remove(&order.id);
+    });
+}
+
+/// Scan the deemix download dir for files produced by this artist order and load
+/// them into the vault. Bounded: at most `ARTIST_INGEST_MAX_FILES` files, and
+/// only files modified at/after the order was created. Returns how many tracks
+/// (with an ISRC) were ingested.
+async fn ingest_artist_downloads(state: &Arc<AppState>, order: &ArtistOrder) -> Result<usize> {
+    let dir = &state.config.deemix_download_dir;
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut added = 0usize;
+    let mut seen = 0usize;
+    for entry in WalkDir::new(dir)
+        .max_depth(6)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if seen >= ARTIST_INGEST_MAX_FILES {
+            warn!(
+                "artist order {}: ingest capped at {} files",
+                order.id, ARTIST_INGEST_MAX_FILES
+            );
+            break;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let ext_ok = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| AUDIO_EXTENSIONS.iter().any(|a| a.eq_ignore_ascii_case(e)))
+            .unwrap_or(false);
+        if !ext_ok {
+            continue;
+        }
+        // Only files that appeared after the order was placed.
+        if let Some(secs) = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+        {
+            if secs < order.created_at {
+                continue;
+            }
+        }
+        seen += 1;
+        match ingest_one_file(state, order, path).await {
+            Ok(true) => added += 1,
+            Ok(false) => {}
+            Err(e) => warn!(
+                "artist order {}: {} ingest failed: {e:#}",
+                order.id,
+                path.display()
+            ),
+        }
+    }
+    Ok(added)
+}
+
+/// Read one downloaded file's tags and load it into the vault + the operational
+/// `tracks` ledger. Returns `true` when a track (with an ISRC) was ingested.
+async fn ingest_one_file(state: &Arc<AppState>, order: &ArtistOrder, path: &Path) -> Result<bool> {
+    let Some(tags) = tags::read_tags(&state.config.ffprobe, path).await else {
+        return Ok(false);
+    };
+    let Some(isrc) = tags.isrc.as_deref() else {
+        // No ISRC — best effort only (the vault is keyed by ISRC).
+        debug!(
+            "artist order {}: {} has no ISRC — skipped",
+            order.id,
+            path.display()
+        );
+        return Ok(false);
+    };
+
+    // Place the file in our store so the analysis worker can read it.
+    let (source_format, path_flac, path_320, path_128) =
+        store_downloaded(state, isrc, path).await?;
+
+    // Vault load: hubs, links and the metadata satellite (insert-only).
+    {
+        let mut conn = state.pool.acquire().await?;
+        vault::ingest_file_tags(
+            &mut conn,
+            isrc,
+            tags.title.as_deref(),
+            tags.artist.as_deref(),
+            tags.album.as_deref(),
+            tags.duration_ms,
+            "deemix",
+        )
+        .await?;
+    }
+
+    // Operational ledger row: `ready` with the FLAC path, so the analysis worker
+    // picks it up on the next tick.
+    db::ingest_ready_track(
+        &state.pool,
+        isrc,
+        &source_format,
+        path_flac.as_deref(),
+        path_320.as_deref(),
+        path_128.as_deref(),
+    )
+    .await?;
+    db::add_artist_order_item(&state.pool, &order.id, isrc).await?;
+    Ok(true)
+}
+
+/// Copy a downloaded file into our store (`flac`/`320`/`128`) keyed by ISRC,
+/// mirroring the track finalize path. Returns
+/// `(source_format, path_flac, path_320, path_128)`.
+async fn store_downloaded(
+    state: &Arc<AppState>,
+    isrc: &str,
+    src: &Path,
+) -> Result<(String, Option<String>, Option<String>, Option<String>)> {
+    let cfg = &state.config;
+    let is_flac = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("flac"))
+        .unwrap_or(false);
+
+    if is_flac {
+        let dst = cfg.flac_dir().join(format!("{isrc}.flac"));
+        tokio::fs::create_dir_all(cfg.flac_dir()).await?;
+        tokio::fs::copy(src, &dst).await?;
+        Ok((
+            "flac".to_string(),
+            Some(dst.display().to_string()),
+            None,
+            None,
+        ))
+    } else {
+        // Lossy: classify by the actual bit rate (the ARL tier decides).
+        let probed = transcode::probe_bitrate(&cfg.ffprobe, src).await;
+        let is_320 = probed.map(|b| b >= 256_000).unwrap_or(true);
+        let (dir, fmt) = if is_320 {
+            (cfg.mp3_320_dir(), "mp3-320")
+        } else {
+            (cfg.mp3_128_dir(), "mp3-128")
+        };
+        let dst = dir.join(format!("{isrc}.mp3"));
+        tokio::fs::create_dir_all(&dir).await?;
+        tokio::fs::copy(src, &dst).await?;
+        let p = Some(dst.display().to_string());
+        if is_320 {
+            Ok((fmt.to_string(), None, p, None))
+        } else {
+            Ok((fmt.to_string(), None, None, p))
         }
     }
 }

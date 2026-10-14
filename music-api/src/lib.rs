@@ -14,6 +14,7 @@ pub mod deezer;
 pub mod logbuf;
 pub mod models;
 pub mod store;
+pub mod tags;
 pub mod transcode;
 pub mod vault;
 pub mod worker;
@@ -63,6 +64,8 @@ pub struct AppState {
     pub analyzing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Backoff for analyzer calls so a dead analyzer is not retried every tick.
     pub analysis_backoff: worker::LoginBackoff,
+    /// Artist-order ids with an ingest task currently in flight (dedupe guard).
+    pub artist_ingesting: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Build the fully-stated router: public `/health`, everything else behind the

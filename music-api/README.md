@@ -79,6 +79,38 @@ lands on whatever the ARL's Deezer tier allows.
 | `GET`  | `/logs?limit=n`           | recent service events, newest first                        |
 | `GET`  | `/tracks?isrcs=a,b,c`     | bulk metadata/state for many ISRCs                         |
 
+### Artist orders (whole discography)
+
+An **artist order** downloads a whole Deezer artist's discography through deemix
+and loads the produced files into the vault. deemix accepts artist URLs
+(`https://www.deezer.com/artist/<id>`) and expands them to the full catalogue.
+
+| Method | Path                  | Use                                                        |
+| ------ | --------------------- | ---------------------------------------------------------- | ------- | ---- | -------- |
+| `POST` | `/artist-orders`      | `{ "artist": "<deezer-artist-id-or-url>", "priority": 0 }` |
+| `GET`  | `/artist-orders`      | list artist orders (`?status=open                          | running | done | failed`) |
+| `GET`  | `/artist-orders/{id}` | status + `added`/`error` + the ingested ISRCs              |
+
+`artist` is a bare Deezer artist id (`12345`) or a URL; a Deezer artist URL is
+canonicalised, any other URL is passed to deemix unchanged. The order is stored
+in `artist_orders` (additive) and submitted to deemix at `DEEMIX_BITRATE`.
+
+Status is `open` (created, not yet accepted by deemix — the worker retries),
+`running` (submitted, downloading), `done` (finished and ingested) or `failed`
+(rejected/errored, with a reason). Priority and the per-tick batch bound mirror
+the ISRC queue.
+
+**Ingest.** When an artist order reaches a terminal deemix success, the worker
+scans the deemix download dir (bounded: files newer than the order, capped at 2000) and, per file, reads its tags with **`ffprobe`** (`format.tags` → ISRC,
+title, artist, album; `format.duration` → ms). A file with an ISRC is loaded into
+the vault (`hub_track` + `sat_track_meta` with duration + `hub_artist`/`hub_album`
+
+- links, via the existing `vault::*` loaders), copied into the store
+  (`flac`/`320`/`128`, keyed by ISRC) and written to the operational `tracks` ledger
+  as `ready` with its `path_flac` — so the analysis worker picks it up on the next
+  tick. A file **without** an ISRC is a best-effort skip (the vault is keyed by
+  ISRC), never a hard failure.
+
 ### Per-ISRC metadata (BPM/key authority)
 
 The service is also the ISRC → {bpm, key, camelot} authority for a **range** of
@@ -251,6 +283,8 @@ globally paused):
 3. **analyze** — for each `ready` track with a FLAC and no `essentia` metadata
    yet, call the analyzer (bounded, off the tick loop) and upsert BPM/key. Skipped
    entirely when `ANALYZER_URL` is unset.
+4. **artist orders** — submit `open` artist orders to deemix and, on terminal
+   success, ingest the produced files into the vault (see _Artist orders_ above).
 
 Lossless source → `flac/` + `320/` + `128/`. When deemix had to fall back to
 MP3 (no lossless master, or a Deezer tier that caps quality), the delivered file
@@ -323,14 +357,15 @@ The tier is a property of the ARL, not of this service.
 cargo test
 ````
 
-53 tests: unit tests for ISRC normalisation, order-status derivation, retry
+62 tests: unit tests for ISRC normalisation, order-status derivation, retry
 backoff, deemix and Deezer payload parsing, constant-time token compare,
-download-file matching and the vault hashing/normalisation primitives; plus
-integration tests over the real router (auth, order create/read/list, `/isrc`
-status, file delivery, order flipping to `done`, the durable queue: retry, lease
-recovery, worker status and queue counts, the per-ISRC metadata upsert/merge/range
-read, and the Data Vault: precedence resolution, hub/link/satellite ingest and the
-batched, idempotent backfill).
+download-file matching, the vault hashing/normalisation primitives and the
+`ffprobe` tag parser; plus integration tests over the real router (auth, order
+create/read/list, `/isrc` status, file delivery, order flipping to `done`, the
+durable queue: retry, lease recovery, worker status and queue counts, the
+per-ISRC metadata upsert/merge/range read, artist-order create/read, the
+ffprobe-fixture ingest into the vault, and the Data Vault: precedence
+resolution, hub/link/satellite ingest and the batched, idempotent backfill).
 
 ## v1 scope / known limits
 

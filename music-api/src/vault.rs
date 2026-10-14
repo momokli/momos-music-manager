@@ -360,7 +360,49 @@ pub async fn load_track_meta(
     Ok(true)
 }
 
-/// Analysis satellite — one row per `(track, analyzer, load_date)`. This is the
+/// Track metadata satellite including the duration. Same insert-only,
+/// hash_diff-gated contract as [`load_track_meta`]; kept separate so the existing
+/// callers' hash (title/artist/album only) is unchanged.
+#[allow(clippy::too_many_arguments)]
+pub async fn load_track_meta_full(
+    conn: &mut SqliteConnection,
+    track_hk: &str,
+    title: Option<&str>,
+    artist: Option<&str>,
+    album: Option<&str>,
+    duration_ms: Option<i64>,
+    record_source: &str,
+) -> Result<bool> {
+    let hd = hash_diff(&[
+        opt_str(title),
+        opt_str(artist),
+        opt_str(album),
+        duration_ms.map(|x| x.to_string()),
+    ]);
+    if latest_diff(conn, "sat_track_meta", "track_hk", track_hk, None, None)
+        .await?
+        .as_deref()
+        == Some(hd.as_str())
+    {
+        return Ok(false);
+    }
+    sqlx::query(
+        "INSERT OR IGNORE INTO sat_track_meta
+            (track_hk, load_date, hash_diff, title, artist, album, duration_ms, record_source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(track_hk)
+    .bind(load_date())
+    .bind(&hd)
+    .bind(title)
+    .bind(artist)
+    .bind(album)
+    .bind(duration_ms)
+    .bind(record_source)
+    .execute(&mut *conn)
+    .await?;
+    Ok(true)
+}
 /// point of the vault: "these were the analysis results" stays visible.
 #[allow(clippy::too_many_arguments)]
 pub async fn load_analysis(
@@ -730,6 +772,49 @@ pub async fn ingest_metadata(pool: &Pool<Sqlite>, items: &[MetadataItem]) -> Res
         n += 1;
     }
     Ok(n)
+}
+
+/// Ingest one downloaded file's tags into the vault: the track hub (by ISRC),
+/// the artist/album hubs, the links, and the metadata satellite (with duration).
+/// Returns the `track_hk`, or `None` when there is no ISRC — the vault is keyed
+/// by ISRC, so a file without one is a best-effort skip, not an error.
+#[allow(clippy::too_many_arguments)]
+pub async fn ingest_file_tags(
+    conn: &mut SqliteConnection,
+    isrc: &str,
+    title: Option<&str>,
+    artist: Option<&str>,
+    album: Option<&str>,
+    duration_ms: Option<i64>,
+    record_source: &str,
+) -> Result<Option<String>> {
+    let bk = db::normalize_isrc(isrc);
+    if bk.is_empty() {
+        return Ok(None);
+    }
+    let track_hk = load_track(conn, &bk, record_source).await?;
+
+    if let Some(name) = artist.filter(|s| !s.trim().is_empty()) {
+        if let Some(artist_hk) = load_artist(conn, name, record_source).await? {
+            link_track_artist(conn, &track_hk, &artist_hk, 0, record_source).await?;
+        }
+    }
+    if let Some(title) = album.filter(|s| !s.trim().is_empty()) {
+        if let Some(album_hk) = load_album(conn, title, None, record_source).await? {
+            link_track_album(conn, &track_hk, &album_hk, record_source).await?;
+        }
+    }
+    load_track_meta_full(
+        conn,
+        &track_hk,
+        title,
+        artist,
+        album,
+        duration_ms,
+        record_source,
+    )
+    .await?;
+    Ok(Some(track_hk))
 }
 
 // ── Consumer resolution (precedence over the latest per-analyzer rows) ───────
