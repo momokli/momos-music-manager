@@ -4,6 +4,8 @@
 //!
 //! * `auto`   — every configured describing tag-type *family* has at least one
 //!   resolved tag on the track (`hub_track_resolved_tags`, all sources).
+//!   Families whose type is toggled off via `engine_describes_*` (#348) are
+//!   skipped so a disabled type never becomes a dead requirement.
 //! * `manual` — the user explicitly marked it done (`hub_track_tag_done`).
 //!
 //! `complete = auto || manual`; a manual mark overrides a missing family.
@@ -27,8 +29,26 @@ pub struct TagDoneStatus {
     pub missing: Vec<String>,
 }
 
+/// The representative tag type for a describing *family* name (canonical,
+/// uppercase). `PHASE` maps to `Phase1` (the family is shared by all phases).
+/// `None` for unknown family names.
+pub fn family_primary_type(family: &str) -> Option<TagType> {
+    Some(match family.trim().to_ascii_uppercase().as_str() {
+        "MOOD" => TagType::Mood,
+        "GENRE" => TagType::Genre,
+        "VIBE" => TagType::Vibe,
+        "PHASE" => TagType::Phase1,
+        "MERKMAL" => TagType::Merkmal,
+        _ => return None,
+    })
+}
+
 /// Read the configured describing families from settings. Falls back to the
 /// built-in `DESCRIBE_FAMILIES` when the setting is unset or empty.
+///
+/// Since #348 a family whose representative type is toggled off via
+/// `engine_describes_*` is dropped, so a disabled type never becomes a dead
+/// "required" family. Unknown family tokens are kept as-is (no type to look up).
 pub async fn configured_families(pool: &SqlitePool) -> Vec<String> {
     let raw = settings::get(pool, ENGINE_TAG_DONE_TYPES).await;
     let mut parsed: Vec<String> = Vec::new();
@@ -40,10 +60,16 @@ pub async fn configured_families(pool: &SqlitePool) -> Vec<String> {
         }
     }
     if parsed.is_empty() {
-        DESCRIBE_FAMILIES.iter().map(|s| s.to_string()).collect()
-    } else {
-        parsed
+        parsed = DESCRIBE_FAMILIES.iter().map(|s| s.to_string()).collect();
     }
+    // Keep only families whose representative type currently describes a track.
+    let describes = crate::tagtypes::describes_map(pool).await;
+    parsed.retain(|fam| {
+        family_primary_type(fam)
+            .map(|t| describes.get(&t).copied().unwrap_or_else(|| t.describes()))
+            .unwrap_or(true)
+    });
+    parsed
 }
 
 /// The describing *family* for a raw tag-type string (canonical form; `PHASE_1..5`
@@ -142,5 +168,46 @@ pub async fn status(
         auto,
         manual,
         missing,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn family_primary_type_maps_canonical_families() {
+        assert_eq!(family_primary_type("MOOD"), Some(TagType::Mood));
+        assert_eq!(family_primary_type("genre"), Some(TagType::Genre));
+        assert_eq!(family_primary_type("Vibe"), Some(TagType::Vibe));
+        assert_eq!(family_primary_type("PHASE"), Some(TagType::Phase1));
+        assert_eq!(family_primary_type("MERKMAL"), Some(TagType::Merkmal));
+        assert_eq!(family_primary_type("SETLIST"), None);
+        assert_eq!(family_primary_type("bogus"), None);
+    }
+
+    #[tokio::test]
+    async fn configured_families_default_to_builtin() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let fams = configured_families(&pool).await;
+        assert_eq!(
+            fams,
+            DESCRIBE_FAMILIES.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_families_drop_disabled_types() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        // Turn MOOD and setlist describing off; MOOD must drop from the list.
+        settings::set(&pool, settings::ENGINE_DESCRIBES_MOOD, "0")
+            .await
+            .unwrap();
+        let fams = configured_families(&pool).await;
+        assert!(!fams.iter().any(|f| f == "MOOD"), "MOOD should be dropped");
+        assert!(fams.iter().any(|f| f == "GENRE"));
+        assert!(fams.iter().any(|f| f == "PHASE"));
+        // Setlist is not a describe family; unrelated toggles leave it absent.
+        assert!(!fams.iter().any(|f| f == "SETLIST"));
     }
 }

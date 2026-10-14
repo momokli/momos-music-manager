@@ -2,15 +2,22 @@
 //! former flexible group subsystem.
 //!
 //! A tag has exactly one type (nullable while migrating). Types are fixed in
-//! code + a CHECK constraint on `hub_tags.type`; there is no user CRUD. The
-//! "describes the song" distinction is inherent: MOOD / GENRE / VIBE /
-//! PHASE_1..5 / MERKMAL describe a track, SETLIST / RUMPELKISTE only sort it.
+//! code + a CHECK constraint on `hub_tags.type`; there is no user CRUD. Whether
+//! a type *describes the song* is configurable per type via the
+//! `engine_describes_*` settings (#348): `describes()` stays the built-in
+//! default (MOOD / GENRE / VIBE / PHASE_1..5 / MERKMAL describe a track,
+//! SETLIST / RUMPELKISTE only sort it), while `describes_map()` resolves the
+//! live, admin-editable value with that default as fallback.
 //!
 //! A "phase" is encoded by PHASE_1..PHASE_5 (energy 1..5), replacing the old
 //! ranked Phase group.
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use sqlx::SqlitePool;
+
+use crate::settings;
 
 /// All valid type strings, in canonical (display) order.
 pub const TYPE_NAMES: &[&str] = &[
@@ -113,9 +120,29 @@ impl TagType {
         }
     }
 
-    /// True when a tag of this type *describes* a track (vs. merely sorting it).
+    /// Built-in default for whether a tag of this type *describes* a track
+    /// (vs. merely sorting it). Kept as the fallback for `describes_map()`
+    /// when the corresponding `engine_describes_*` setting is unset.
     pub fn describes(self) -> bool {
         !matches!(self, TagType::Setlist | TagType::Rumpelkiste)
+    }
+
+    /// The `hub_settings` key holding this type's "describes" toggle (#348).
+    /// `PHASE_1..5` share `engine_describes_phase` (analogous to the weight).
+    pub fn describe_key(self) -> &'static str {
+        match self {
+            TagType::Mood => settings::ENGINE_DESCRIBES_MOOD,
+            TagType::Genre => settings::ENGINE_DESCRIBES_GENRE,
+            TagType::Vibe => settings::ENGINE_DESCRIBES_VIBE,
+            TagType::Phase1
+            | TagType::Phase2
+            | TagType::Phase3
+            | TagType::Phase4
+            | TagType::Phase5 => settings::ENGINE_DESCRIBES_PHASE,
+            TagType::Merkmal => settings::ENGINE_DESCRIBES_MERKMAL,
+            TagType::Setlist => settings::ENGINE_DESCRIBES_SETLIST,
+            TagType::Rumpelkiste => settings::ENGINE_DESCRIBES_RUMPELKISTE,
+        }
     }
 
     /// Engine weight: how much a match via a tag of this type counts.
@@ -172,6 +199,30 @@ impl TagType {
     }
 }
 
+/// Parse a stored setting value as a boolean; unset/unknown -> `default`.
+/// Accepts the same truthy spellings as the settings validator (`1/true/on/yes`).
+fn parse_bool(raw: Option<&str>, default: bool) -> bool {
+    match raw.map(|v| v.trim().to_lowercase()) {
+        Some(v) => matches!(v.as_str(), "1" | "true" | "on" | "yes"),
+        None => default,
+    }
+}
+
+/// Resolve the current "describes" state for every tag type from
+/// `hub_settings`, falling back to the built-in `TagType::describes()` when a
+/// key is unset. Loaded once per request by callers (artists view, tagdone).
+pub async fn describes_map(pool: &SqlitePool) -> HashMap<TagType, bool> {
+    let all = settings::load_all(pool).await;
+    TYPE_NAMES
+        .iter()
+        .filter_map(|n| TagType::parse(n))
+        .map(|t| {
+            let raw = all.get(t.describe_key()).map(String::as_str);
+            (t, parse_bool(raw, t.describes()))
+        })
+        .collect()
+}
+
 /// All types as a display-ready list of `(value, label, icon)`.
 pub fn options() -> Vec<(&'static str, &'static str, &'static str)> {
     TYPE_NAMES
@@ -216,6 +267,99 @@ pub async fn set(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn describe_key_covers_all_types() {
+        for name in TYPE_NAMES {
+            let ty = TagType::parse(name).unwrap();
+            let key = ty.describe_key();
+            assert!(
+                key.starts_with("engine_describes_"),
+                "{name} key {key} not namespaced"
+            );
+            assert!(
+                settings::spec(key).is_some(),
+                "{name} key {key} not registered"
+            );
+        }
+        // PHASE_1..5 share a single key.
+        for p in [
+            TagType::Phase1,
+            TagType::Phase2,
+            TagType::Phase3,
+            TagType::Phase4,
+            TagType::Phase5,
+        ] {
+            assert_eq!(p.describe_key(), settings::ENGINE_DESCRIBES_PHASE);
+        }
+    }
+
+    #[test]
+    fn describe_key_unique_per_semantic_type() {
+        let mut keys: Vec<&str> = TYPE_NAMES
+            .iter()
+            .filter_map(|n| TagType::parse(n))
+            .map(TagType::describe_key)
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), 7, "expected 7 distinct describe keys");
+    }
+
+    #[test]
+    fn parse_bool_handles_truthy_and_fallback() {
+        assert!(parse_bool(Some("1"), false));
+        assert!(parse_bool(Some("TRUE"), false));
+        assert!(parse_bool(Some(" on "), false));
+        assert!(parse_bool(Some("yes"), false));
+        assert!(!parse_bool(Some("0"), true));
+        assert!(!parse_bool(Some("false"), true));
+        assert!(!parse_bool(Some("nope"), true), "unknown -> false when parsed");
+        assert!(parse_bool(None, true), "unset -> default");
+        assert!(!parse_bool(None, false), "unset -> default");
+    }
+
+    #[test]
+    fn describes_map_defaults_to_builtin() {
+        // Unset path: parse_bool(None, d) == d, i.e. the built-in default.
+        for name in TYPE_NAMES {
+            let ty = TagType::parse(name).unwrap();
+            assert!(!ty.describe_key().is_empty());
+            assert_eq!(parse_bool(None, ty.describes()), ty.describes());
+        }
+        assert!(parse_bool(None, TagType::Mood.describes()));
+        assert!(!parse_bool(None, TagType::Setlist.describes()));
+        assert!(!parse_bool(None, TagType::Rumpelkiste.describes()));
+    }
+
+    #[tokio::test]
+    async fn describes_map_reads_settings_with_builtin_fallback() {
+        // Empty store -> every type equals its built-in default.
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let defaults = describes_map(&pool).await;
+        assert_eq!(defaults.len(), TYPE_NAMES.len());
+        assert_eq!(defaults[&TagType::Mood], true);
+        assert_eq!(defaults[&TagType::Setlist], false);
+        assert_eq!(defaults[&TagType::Rumpelkiste], false);
+        for name in TYPE_NAMES {
+            let ty = TagType::parse(name).unwrap();
+            assert_eq!(defaults[&ty], ty.describes(), "{name} default mismatch");
+        }
+
+        // Toggle two types; the rest must stay on their built-in default.
+        settings::set(&pool, settings::ENGINE_DESCRIBES_SETLIST, "1")
+            .await
+            .unwrap();
+        settings::set(&pool, settings::ENGINE_DESCRIBES_MOOD, "0")
+            .await
+            .unwrap();
+        let map = describes_map(&pool).await;
+        assert_eq!(map[&TagType::Setlist], true);
+        assert_eq!(map[&TagType::Mood], false);
+        // PHASE_1..5 share one key.
+        assert_eq!(map[&TagType::Phase3], true);
+        assert_eq!(map[&TagType::Genre], true);
+    }
 
     #[test]
     fn describe_family_covers_all_types() {

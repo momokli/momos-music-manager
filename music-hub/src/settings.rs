@@ -77,6 +77,17 @@ pub const ENGINE_W_MERKMAL: &str = "engine_w_merkmal";
 pub const ENGINE_W_PHASE: &str = "engine_w_phase";
 pub const ENGINE_W_SETLIST: &str = "engine_w_setlist";
 pub const ENGINE_W_RUMPELKISTE: &str = "engine_w_rumpelkiste";
+// Per-tag-type "describes the song" toggles (#348). One knob per semantic type;
+// the five PHASE levels share `engine_describes_phase`. Defaults mirror the
+// former hard-wired rule (SETLIST/RUMPELKISTE = off, all others = on). These are
+// the live values behind `tagtypes::describes_map`.
+pub const ENGINE_DESCRIBES_MOOD: &str = "engine_describes_mood";
+pub const ENGINE_DESCRIBES_GENRE: &str = "engine_describes_genre";
+pub const ENGINE_DESCRIBES_VIBE: &str = "engine_describes_vibe";
+pub const ENGINE_DESCRIBES_PHASE: &str = "engine_describes_phase";
+pub const ENGINE_DESCRIBES_MERKMAL: &str = "engine_describes_merkmal";
+pub const ENGINE_DESCRIBES_SETLIST: &str = "engine_describes_setlist";
+pub const ENGINE_DESCRIBES_RUMPELKISTE: &str = "engine_describes_rumpelkiste";
 // Digging/overlap ranking (#223): how strongly similarity v2 and ripeness pull.
 pub const ENGINE_SIM_FACTOR: &str = "engine_sim_factor";
 pub const ENGINE_RIPENESS_FACTOR: &str = "engine_ripeness_factor";
@@ -439,6 +450,22 @@ pub const SETTINGS: &[SettingSpec] = &[
         "0.1",
         0.0,
         100.0,
+    ),
+    // ── Per-Typ "Beschreibt den Song" (#348) ────────────────────────────────
+    flag(ENGINE_DESCRIBES_MOOD, "Beschreibt: Mood", "1"),
+    flag(ENGINE_DESCRIBES_GENRE, "Beschreibt: Genre", "1"),
+    flag(ENGINE_DESCRIBES_VIBE, "Beschreibt: Vibe", "1"),
+    flag(
+        ENGINE_DESCRIBES_PHASE,
+        "Beschreibt: Phase (alle Stufen)",
+        "1",
+    ),
+    flag(ENGINE_DESCRIBES_MERKMAL, "Beschreibt: Merkmal", "1"),
+    flag(ENGINE_DESCRIBES_SETLIST, "Beschreibt: Setlist", "0"),
+    flag(
+        ENGINE_DESCRIBES_RUMPELKISTE,
+        "Beschreibt: Rumpelkiste",
+        "0",
     ),
     num(
         ENGINE_SIM_FACTOR,
@@ -810,6 +837,24 @@ mod tests {
         assert_eq!(e.type_weight("unknown"), 0.0);
         e.w_mood = 4.2;
         assert_eq!(e.type_weight("MOOD"), 4.2);
+    }
+
+    #[test]
+    fn describe_toggles_are_registered() {
+        let expect: &[(&str, &str)] = &[
+            (ENGINE_DESCRIBES_MOOD, "1"),
+            (ENGINE_DESCRIBES_GENRE, "1"),
+            (ENGINE_DESCRIBES_VIBE, "1"),
+            (ENGINE_DESCRIBES_PHASE, "1"),
+            (ENGINE_DESCRIBES_MERKMAL, "1"),
+            (ENGINE_DESCRIBES_SETLIST, "0"),
+            (ENGINE_DESCRIBES_RUMPELKISTE, "0"),
+        ];
+        for (key, default) in expect {
+            let s = spec(key).unwrap_or_else(|| panic!("setting {key} missing from registry"));
+            assert_eq!(s.kind, SettingKind::Bool, "{key} must be a bool flag");
+            assert_eq!(s.default, *default, "{key} default mismatch");
+        }
     }
 
     #[test]

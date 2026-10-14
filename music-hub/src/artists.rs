@@ -1307,6 +1307,8 @@ async fn artist_page(
     let total_plays: i64 = traktor_rows.iter().map(|r| r.2).sum();
 
     // ── AR3: tags of the artist's tracks ─────────────────────────────────────
+    // Live "describes" state per type (#348), resolved once for this view.
+    let describes = crate::tagtypes::describes_map(&st.pool).await;
     let mut tag_types: Vec<TypeDist> = Vec::new();
     let mut top_tags: Vec<TagCount> = Vec::new();
     let mut artist_tag_ids: HashSet<i64> = HashSet::new();
@@ -1328,8 +1330,9 @@ async fn artist_page(
                 .filter_map(|r| {
                     let ty: String = r.get("type");
                     let t = crate::tagtypes::TagType::parse(&ty)?;
-                    // Only types that *describe* a track belong in this view.
-                    if !t.describes() {
+                    // Only types that *describe* a track belong in this view
+                    // (admin-configurable; falls back to the built-in default).
+                    if !describes.get(&t).copied().unwrap_or_else(|| t.describes()) {
                         return None;
                     }
                     Some(TypeDist {
