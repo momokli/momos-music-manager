@@ -70,7 +70,7 @@ async fn manual_done_persists_and_shows() {
     .unwrap();
     assert_eq!(n, 1, "manual done row missing");
 
-    // The track view shows the manual "fertig" badge.
+    // The track view shows the manual "übersprungen" badge.
     let html = app
         .client()
         .get(app.url(&format!("/track/{track}")))
@@ -81,7 +81,10 @@ async fn manual_done_persists_and_shows() {
         .text()
         .await
         .unwrap();
-    assert!(html.contains("fertig"), "manual 'fertig' badge missing");
+    assert!(
+        html.contains("übersprungen"),
+        "manual 'übersprungen' badge missing"
+    );
 }
 
 #[tokio::test]
@@ -133,7 +136,10 @@ async fn undone_clears() {
         .text()
         .await
         .unwrap();
-    assert!(html.contains("offen"), "badge should be 'offen' after undone");
+    assert!(
+        html.contains("offen"),
+        "badge should be 'offen' after undone"
+    );
 }
 
 #[tokio::test]

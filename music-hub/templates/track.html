@@ -101,8 +101,8 @@ content %}
             </table>
         </div>
 
-        {# ── RESOLVED: the vault's chosen BPM/key/energy + its source ─────── #}
-        {% if has_isrc %}
+        {# ── RESOLVED: the vault's chosen BPM/key/energy + its source ─────── #} {% if
+        has_isrc %}
         <div class="hub-bucket">
             <h2>Resolved</h2>
             {% if has_vault %} {% if vault.has_resolved %}
@@ -133,9 +133,7 @@ content %}
             <p class="hub-muted">music-api-Vault nicht erreichbar.</p>
             {% endif %}
         </div>
-        {% endif %}
-
-        {# ── LINKS: artists, album, playlists, sources — all clickable ──────
+        {% endif %} {# ── LINKS: artists, album, playlists, sources — all clickable ──────
         #}
         <div class="hub-bucket">
             <h2>Links</h2>
@@ -201,8 +199,8 @@ content %}
     </section>
 
     <section>
-        {# ── SATELLITES: transparent per-source buckets ───────────────────── #}
-        {% if has_isrc %}
+        {# ── SATELLITES: transparent per-source buckets ───────────────────── #} {% if
+        has_isrc %}
         <div class="hub-bucket">
             <h2>Satellites</h2>
             {% if has_vault %}
@@ -309,38 +307,32 @@ content %}
             <p class="hub-muted">music-api-Vault nicht erreichbar.</p>
             {% endif %}
         </div>
-        {% endif %}
-
-        {# ── Tags (hub-own) ─────────────────────────────────────────────────
+        {% endif %} {# ── Tags (hub-own) ─────────────────────────────────────────────────
         #}
         <div class="hub-bucket">
             <h2>Tags</h2>
             {% include "_partials/tag_clouds.html" %}
             <div class="hub-tag-status" style="margin-top: 0.4rem">
-                {% if tag_complete %}{% if tag_done_auto %}<span
+                {% if tag_done_manual %}<span
                     class="hub-chip"
-                    title="Alle beschreibenden Familien sind getaggt"
-                    >✓ vollständig getaggt</span
-                >{% else %}<span class="hub-chip" title="Manuell als fertig markiert"
-                    >✓ fertig (manuell)</span
-                >{% endif %}{% else %}<span class="hub-muted"
+                    title="Für die Tagging-Aufgabe übersprungen"
+                    >übersprungen</span
+                >{% else %}{% if tag_complete %}<span
+                    class="hub-chip"
+                    title="Alle beschreibenden Familien sind gesetzt"
+                    >✓ alle Familien gesetzt</span
+                >{% else %}<span class="hub-muted"
                     >offen — fehlt: {% for m in tag_missing %}{{ m }}{% if !loop.last %},
                     {% endif %}{% endfor %}</span
-                >{% endif %} {% if tag_done_manual %}
+                >{% endif %}{% endif %} {% if tag_done_manual %}
                 <form method="post" action="{{ undone_action }}" style="display: inline">
                     <input type="hidden" name="scope" value="{{ rec_scope }}" />
-                    <button class="outline" type="submit">Markierung entfernen</button>
+                    <button class="outline" type="submit">Überspringen aufheben</button>
                 </form>
                 {% else %}
                 <form method="post" action="{{ done_action }}" style="display: inline">
                     <input type="hidden" name="scope" value="{{ rec_scope }}" />
-                    {% if tag_complete %}
-                    <button class="outline" type="submit">Als fertig markieren</button>
-                    {% else %}
-                    <button class="outline" type="submit">
-                        Trotzdem als fertig markieren
-                    </button>
-                    {% endif %}
+                    <button class="outline" type="submit">Überspringen</button>
                 </form>
                 {% endif %}
             </div>
