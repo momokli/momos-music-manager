@@ -1,0 +1,32 @@
+{% if rows.is_empty() %}
+<p class="hub-muted">Keine Ereignisse.</p>
+{% else %}
+<div class="overflow-auto hub-scroll-y">
+    <table class="hub-dense-table">
+        <caption class="hub-visually-hidden">
+            Hub-Worker-Ereignisse (Issue #350)
+        </caption>
+        <thead>
+            <tr>
+                <th scope="col">Zeit</th>
+                <th scope="col">Loop</th>
+                <th scope="col">Status</th>
+                <th scope="col">Fehler</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for l in rows %}
+            <tr>
+                <td>{{ l.time }}</td>
+                <td>{{ l.loop_name }}</td>
+                <td>
+                    {% if l.worked %}<span class="hub-badge hub-badge-ok">Arbeit</span>
+                    {% else %}<span class="hub-badge">idle</span>{% endif %}
+                </td>
+                <td>{% if l.error != "" %}<span class="hub-badge hub-badge-no">{{ l.error }}</span>{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}

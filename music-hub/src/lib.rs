@@ -33,6 +33,7 @@ pub mod features;
 pub mod freqblog;
 pub mod genres;
 pub mod history;
+pub mod hub_ops;
 pub mod ingest;
 pub mod lastfm;
 pub mod listening;
