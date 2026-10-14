@@ -20,6 +20,8 @@ pub struct TestApp {
     pub base: String,
     pub pool: SqlitePool,
     pub seed: Seed,
+    /// The resolved config the router was booted with (e.g. a mock Spotify base).
+    pub cfg: Arc<Config>,
     client: reqwest::Client,
     _dir: tempfile::TempDir,
 }
@@ -91,7 +93,9 @@ pub async fn spawn() -> TestApp {
 pub async fn spawn_with(dir: tempfile::TempDir, cfg: Config) -> TestApp {
     let url = cfg.database_url.clone();
 
-    let pool = music_hub::db::connect(&url).await.expect("connect + migrate");
+    let pool = music_hub::db::connect(&url)
+        .await
+        .expect("connect + migrate");
     let ro_pool = music_hub::db::connect_readonly(&url)
         .await
         .expect("connect readonly");
@@ -103,7 +107,7 @@ pub async fn spawn_with(dir: tempfile::TempDir, cfg: Config) -> TestApp {
     let state = AppState {
         pool: pool.clone(),
         ro_pool,
-        cfg,
+        cfg: cfg.clone(),
         oauth_states: Arc::new(Mutex::new(HashMap::new())),
     };
 
@@ -121,6 +125,7 @@ pub async fn spawn_with(dir: tempfile::TempDir, cfg: Config) -> TestApp {
         base: format!("http://{addr}"),
         pool,
         seed,
+        cfg,
         client: http(),
         _dir: dir,
     }

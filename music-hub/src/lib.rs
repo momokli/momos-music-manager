@@ -15,6 +15,7 @@ pub const LONG_VERSION: &str =
     concat!(env!("BUILD_VERSION"), " (", env!("BUILD_GIT_DESCRIBE"), ")");
 
 pub mod albums;
+pub mod analysis;
 pub mod analyze;
 pub mod analyzer;
 pub mod api;
@@ -24,6 +25,7 @@ pub mod backpacks;
 pub mod clusters;
 pub mod config;
 pub mod cosine;
+pub mod crawl;
 pub mod curate;
 pub mod db;
 pub mod digging;

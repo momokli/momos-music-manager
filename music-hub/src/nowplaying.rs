@@ -112,14 +112,23 @@ pub async fn current(pool: &SqlitePool, cfg: &Config, user_id: i64) -> Result<Op
     let playing = v["is_playing"].as_bool().unwrap_or(false);
     if playing {
         if let Some(tid) = hub_track_id {
-            let _ = record_listen(
+            let new_session = record_listen(
                 pool,
                 user_id,
                 tid,
                 v["progress_ms"].as_i64().unwrap_or(0),
                 item["duration_ms"].as_i64().unwrap_or(0),
             )
-            .await;
+            .await
+            .unwrap_or(false);
+            // Fast-lane order at music-api once per session (not every poll).
+            if new_session {
+                let pool = pool.clone();
+                let cfg = cfg.clone();
+                tokio::spawn(async move {
+                    let _ = crate::crawl::order_now_playing(&pool, &cfg, tid).await;
+                });
+            }
         }
     }
     Ok(Some(Now {
@@ -141,14 +150,15 @@ pub async fn current(pool: &SqlitePool, cfg: &Config, user_id: i64) -> Result<Op
 
 /// Record a listening event, coalescing consecutive polls of the same track
 /// into a single row (a "session", extended while it keeps playing) so the
-/// 20 s polling does not flood the table (#319).
+/// 20 s polling does not flood the table (#319). Returns `true` when a new
+/// session row was inserted (used to fire the now-playing fast-lane order once).
 pub async fn record_listen(
     pool: &SqlitePool,
     user_id: i64,
     track_id: i64,
     progress_ms: i64,
     duration_ms: i64,
-) -> Result<()> {
+) -> Result<bool> {
     let now = chrono::Utc::now();
     let now_iso = now.to_rfc3339();
     let last: Option<(i64, i64, String)> = sqlx::query_as(
@@ -168,7 +178,7 @@ pub async fn record_listen(
             .bind(progress_ms)
             .execute(pool)
             .await?;
-            return Ok(());
+            return Ok(false);
         }
     }
     sqlx::query(
@@ -183,7 +193,7 @@ pub async fn record_listen(
     .bind(duration_ms)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(true)
 }
 
 /// Whether a stored `played_at` is close enough in time to extend the same
