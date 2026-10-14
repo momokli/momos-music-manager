@@ -4,6 +4,7 @@
 //!   music-hub auth   --user <slug>   # one-time loopback Spotify link
 //!   music-hub ingest --user <slug>   # pull likes + playlists right now
 //!   music-hub backfill               # queue a full initial load (worker does it)
+//!   music-hub backfill-artists       # backfill artist/album entities (batched)
 //!   music-hub query  "<sql>"         # run a read-only query from the terminal
 //!   music-hub users                  # list hub users
 
@@ -17,8 +18,8 @@ use tokio::net::TcpListener;
 
 use music_hub::config::Config;
 use music_hub::{
-    analyze, analyzer, api, audio, db, features, freqblog, genres, ingest, mmm_import, music_api,
-    settings, spotify, tags, traktor, worker,
+    analyze, analyzer, api, artists, audio, db, features, freqblog, genres, ingest, mmm_import,
+    music_api, settings, spotify, tags, traktor, worker,
 };
 
 #[derive(Parser)]
@@ -63,6 +64,8 @@ enum Command {
     },
     /// Queue a full initial load: enable all playlists + (re)fetch likes for all users.
     Backfill,
+    /// Backfill artist/album entities from the historical free-text columns.
+    BackfillArtists,
     /// Backfill audio features (BPM/key/energy) via ReccoBeats.
     Features {
         #[arg(long, default_value_t = 2000)]
@@ -158,6 +161,7 @@ async fn main() -> Result<()> {
         Command::FetchPlaylists { user } => cmd_fetch_playlists(cfg, &user).await,
         Command::SetPassword { user, password } => cmd_set_password(cfg, &user, &password).await,
         Command::Backfill => cmd_backfill(cfg).await,
+        Command::BackfillArtists => cmd_backfill_artists(cfg).await,
         Command::Features { limit } => cmd_features(cfg, limit).await,
         Command::Freqblog { limit } => cmd_freqblog(cfg, limit).await,
         Command::ImportMmmTags { db, user } => cmd_import_mmm_tags(cfg, &db, &user).await,
@@ -509,6 +513,26 @@ async fn cmd_backfill(cfg: Config) -> Result<()> {
         accounts.rows_affected()
     );
     println!("  Der Worker arbeitet im Hintergrund (429-schonend) — Fortschritt auf der Webseite.");
+    Ok(())
+}
+
+/// Batched, transactional, resumable backfill of `hub_artists` / `hub_albums`
+/// from the historical free-text `hub_tracks.artists` / `hub_tracks.album`
+/// columns. Prints progress per batch; safe to re-run (already-linked tracks are
+/// skipped).
+async fn cmd_backfill_artists(cfg: Config) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    let _ = settings::overlay_config(&pool, cfg).await;
+    let mut total = 0usize;
+    loop {
+        let n = artists::backfill_artist_entities_batch(&pool, 1000).await?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+        println!("backfill: {total} Tracks verarbeitet …");
+    }
+    println!("✓ Artist/Album-Backfill abgeschlossen: {total} Tracks verarbeitet.");
     Ok(())
 }
 

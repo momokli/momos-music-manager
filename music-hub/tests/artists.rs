@@ -409,3 +409,40 @@ async fn artist_references_are_visible_per_selected_user() {
     assert!(html.contains("Kai"), "carol's reference Kai missing");
     assert!(html.contains("@carol"), "user selector chip missing");
 }
+
+// ── backfill (batched + resumable) ───────────────────────────────────────────
+
+#[tokio::test]
+async fn backfill_batch_is_resumable() {
+    let app = common::spawn().await;
+    let p = &app.pool;
+
+    // A fresh track with no artist links yet.
+    insert_track(p, 71001, "Fresh; New", "Fresh Track", Some("Fresh Album")).await;
+
+    // First batch links the new track (and anything else still unlinked).
+    let n = music_hub::artists::backfill_artist_entities_batch(p, 1000)
+        .await
+        .unwrap();
+    assert!(n >= 1, "expected at least the new track to be processed");
+
+    // Both split artists are linked, and the album is assigned.
+    let links: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM hub_track_artists WHERE track_id = 71001")
+            .fetch_one(p)
+            .await
+            .unwrap();
+    assert_eq!(links, 2);
+    let album_id: Option<i64> =
+        sqlx::query_scalar("SELECT album_id FROM hub_tracks WHERE id = 71001")
+            .fetch_one(p)
+            .await
+            .unwrap();
+    assert!(album_id.is_some(), "album_id should be set");
+
+    // Nothing left to do → the second call is a no-op (resumable/idempotent).
+    let n2 = music_hub::artists::backfill_artist_entities_batch(p, 1000)
+        .await
+        .unwrap();
+    assert_eq!(n2, 0);
+}
