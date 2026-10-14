@@ -33,7 +33,7 @@ NOT already done: kein PR/Branch referenziert #348.
 
 ## Developer-Ergebnis (Stage 3)
 
-Commit: `<pending>` (wird nach dem Commit eingetragen; Checkpoint-Commit).
+Commit: `af6e29f` — `feat(#348): make per-type 'describes the song' semantics configurable.`
 
 ### Umgesetzt (S1–S6)
 - **S1** `settings.rs`: 7 Keys `ENGINE_DESCRIBES_{MOOD,GENRE,VIBE,PHASE,MERKMAL,SETLIST,RUMPELKISTE}`
