@@ -8,8 +8,27 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ## [Unreleased]
 
+## [0.28.0] — 2026-10-15
+
+**hub-ops** — The Hub becomes operable: a read-only health/metrics status endpoint for
+Hub worker loops and backlog, an admin/ops console to pause/resume workers, retry failed
+jobs and watch an event log, and a polished import-history UI.
+
 ### Added
 
+- **Observability — worker/metric health** (#353, PR #438): new session-guarded
+  `GET /api/hub/status` reports `data.status` (`ok`/`degraded`), per-loop Hub worker
+  health (`hub.workers[]`: name/lastRunAt/lastWorked/iterations/lastError for the 5
+  loops), on-demand backlog counts (`hub.backlog`), and the proxied music-api
+  worker/queue block (`musicApi`; never 500s when unconfigured/unreachable). In-memory
+  `worker::WorkerHealth` registry; admin/ops panel `GET /api/hub/status/panel` embedded
+  in `/admin` (`hx-trigger="load, every 15s"`, `_partials/hub_status.html`).
+  `/api/hub/health` is unchanged.
+- **Admin/ops console** (#350, PR #439): `/admin` gains actions — pause/resume the 5
+  worker loops (in-memory `WorkerHealth::set_paused`, checked before each iteration),
+  a bounded (capacity 200) in-memory event ring-buffer with log view
+  `GET /api/hub/ops/logs` (`_partials/hub_logs.html`), and `POST /api/hub/ops/retry` to
+  requeue failed `hub_playlists` / `hub_service_accounts` rows.
 - **Import-history change-count badges** (#351, PR #440): the runs table shows per-run
   added/changed/removed counts as coloured `+n` / `~n` / `−n` badges, plus a change-count
   event list with kind-filtering and a diff column.
