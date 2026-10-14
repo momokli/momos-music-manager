@@ -246,8 +246,10 @@ async fn upsert_playlist_meta(
 }
 
 /// Replace a playlist's membership with `items` (tracks upserted by service id).
+/// Newly upserted tracks are immediately touched (ordered + artist frontier).
 pub(crate) async fn store_playlist_items(
     pool: &SqlitePool,
+    cfg: &Config,
     local_playlist_id: i64,
     items: &[Value],
 ) -> Result<usize> {
@@ -257,6 +259,7 @@ pub(crate) async fn store_playlist_items(
         .await?;
     let mut count = 0usize;
     let mut position = 0i64;
+    let mut ids: Vec<i64> = Vec::new();
     for entry in items {
         let Some(t) = track_object(entry) else {
             continue;
@@ -278,7 +281,9 @@ pub(crate) async fn store_playlist_items(
         .await?;
         count += 1;
         position += 1;
+        ids.push(track_id);
     }
+    crate::crawl::touch_tracks(pool, cfg, &ids).await?;
     Ok(count)
 }
 
@@ -320,9 +325,11 @@ pub async fn fetch_playlists(pool: &SqlitePool, cfg: &Config, slug: &str) -> Res
     Ok(out)
 }
 
-/// Replace a user's liked tracks with `entries` (saved-track objects).
+/// Replace a user's liked tracks with `entries` (saved-track objects). Newly
+/// upserted tracks are immediately touched (ordered + artist frontier).
 pub(crate) async fn store_likes(
     pool: &SqlitePool,
+    cfg: &Config,
     user_id: i64,
     entries: &[Value],
 ) -> Result<usize> {
@@ -331,6 +338,7 @@ pub(crate) async fn store_likes(
         .execute(pool)
         .await?;
     let mut count = 0usize;
+    let mut ids: Vec<i64> = Vec::new();
     for entry in entries {
         let Some(t) = track_object(entry) else {
             continue;
@@ -348,7 +356,9 @@ pub(crate) async fn store_likes(
         .execute(pool)
         .await?;
         count += 1;
+        ids.push(track_id);
     }
+    crate::crawl::touch_tracks(pool, cfg, &ids).await?;
     Ok(count)
 }
 
@@ -365,7 +375,7 @@ pub async fn ingest_user(pool: &SqlitePool, cfg: &Config, slug: &str) -> Result<
     // ── Likes ────────────────────────────────────────────────────────────────
     let likes =
         spotify::get_all_items(&cfg.spotify_api_base, &token, "/me/tracks?limit=50").await?;
-    summary.liked_tracks = store_likes(pool, user_id, &likes).await?;
+    summary.liked_tracks = store_likes(pool, cfg, user_id, &likes).await?;
 
     // ── Playlists + their items ──────────────────────────────────────────────
     let playlists =
@@ -407,7 +417,7 @@ pub async fn ingest_user(pool: &SqlitePool, cfg: &Config, slug: &str) -> Result<
             next = page["next"].as_str().map(str::to_string);
         }
 
-        summary.memberships += store_playlist_items(pool, local_playlist_id, &items).await?;
+        summary.memberships += store_playlist_items(pool, cfg, local_playlist_id, &items).await?;
 
         sqlx::query("UPDATE hub_playlists SET items_available = 1, fetched_at = ?2 WHERE id = ?1")
             .bind(local_playlist_id)

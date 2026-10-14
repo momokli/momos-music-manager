@@ -193,7 +193,7 @@ async fn sync_likes_jobs(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
         .await?
         {
             Outcome::Ok(items) => {
-                let n = ingest::store_likes(pool, user_id, &items).await?;
+                let n = ingest::store_likes(pool, cfg, user_id, &items).await?;
                 sqlx::query(
                     "UPDATE hub_service_accounts
                         SET likes_synced_at = ?2, likes_status = 'done', likes_error = NULL
@@ -288,7 +288,7 @@ async fn playlist_jobs(pool: &SqlitePool, cfg: &Config) -> Result<bool> {
         );
         match paged(&token, &url).await? {
             Outcome::Ok(items) => {
-                let n = ingest::store_playlist_items(pool, local_id, &items).await?;
+                let n = ingest::store_playlist_items(pool, cfg, local_id, &items).await?;
                 sqlx::query(
                     "UPDATE hub_playlists
                         SET items_available = 1, fetched_at = ?2,

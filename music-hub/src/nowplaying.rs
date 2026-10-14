@@ -121,12 +121,15 @@ pub async fn current(pool: &SqlitePool, cfg: &Config, user_id: i64) -> Result<Op
             )
             .await
             .unwrap_or(false);
-            // Fast-lane order at music-api once per session (not every poll).
+            // Fast-lane order at music-api once per session (not every poll),
+            // plus seed the track's artists into the crawl frontier so the
+            // cascade starts immediately.
             if new_session {
                 let pool = pool.clone();
                 let cfg = cfg.clone();
                 tokio::spawn(async move {
                     let _ = crate::crawl::order_now_playing(&pool, &cfg, tid).await;
+                    let _ = crate::crawl::seed_artist_frontier(&pool, &[tid]).await;
                 });
             }
         }
