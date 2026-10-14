@@ -14,7 +14,7 @@ content %}
     {% endif %}
     <div class="hub-now-page-body">
         <div class="hub-now-page-title">{{ title }}</div>
-        <div class="hub-muted">{{ artists }}</div>
+        <div class="hub-muted">{{ artists_html|safe }}</div>
         <div class="hub-muted">{{ album }}</div>
         <div
             class="hub-now-bar"

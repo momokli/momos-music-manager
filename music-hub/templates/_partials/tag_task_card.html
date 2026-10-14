@@ -5,7 +5,7 @@ missing: [{label, icon}], my_types: [{value, label}] } #}
         <span class="hub-tag-task-rank" aria-label="Platz {{ card.rank }}">#{{ card.rank }}</span>
         <strong>{{ card.title }}</strong>
         <a href="/track/{{ card.id }}" class="hub-x" title="Track-Home öffnen">↗</a>
-        <span class="hub-muted hub-tag-task-artists">{{ card.artists }}</span>
+        <span class="hub-muted hub-tag-task-artists">{{ card.artists_html|safe }}</span>
         <span class="hub-muted hub-tag-task-plays">{{ card.plays }} Plays</span>
     </header>
 

@@ -581,6 +581,10 @@ async fn upsert_track(pool: &SqlitePool, t: &Value) -> Result<Option<i64>> {
     .bind(now_iso())
     .fetch_one(pool)
     .await?;
+    // Atomic artist/album entities (plan P0). The joined `artists` string above
+    // stays as a display cache; the entity tables are the source of truth.
+    crate::artists::upsert_track_artists(pool, id, &t["artists"]).await?;
+    crate::artists::upsert_track_album(pool, id, &t["album"]).await?;
     Ok(Some(id))
 }
 
@@ -634,11 +638,14 @@ async fn upsert_track_from_ytdlp(
     .bind(service)
     .bind(service_track_id)
     .bind(title)
-    .bind(artists)
+    .bind(&artists)
     .bind(duration_ms)
     .bind(now_iso())
     .fetch_one(pool)
     .await?;
+    // yt-dlp carries no artist ids: link a single name-keyed artist (documented
+    // limitation — no splitting here).
+    crate::artists::link_track_artist_name(pool, id, &artists).await?;
     Ok(Some(id))
 }
 
@@ -815,6 +822,8 @@ async fn upsert_track_from_soundcloud(pool: &SqlitePool, t: &Value) -> Result<Op
     .bind(now_iso())
     .fetch_one(pool)
     .await?;
+    // SoundCloud carries no artist ids: link a single name-keyed artist.
+    crate::artists::link_track_artist_name(pool, id, artists).await?;
     Ok(Some(id))
 }
 

@@ -35,10 +35,6 @@ fn album_href(name: &str) -> String {
     format!("/album/{}", urlencoding::encode(name))
 }
 
-fn artist_href(name: &str) -> String {
-    format!("/artist/{}", urlencoding::encode(name))
-}
-
 /// Append a #331 scope predicate `{lhs} IN (SELECT value FROM json_each(?))`
 /// to `qb`.
 ///
@@ -100,7 +96,7 @@ struct AlbumsPage {
 struct AlbumRow {
     name: String,
     href: String,
-    artists: String,
+    artists_html: String,
     tracks: i64,
     cover: String,
 }
@@ -163,7 +159,7 @@ async fn albums_page(
             AlbumRow {
                 href: album_href(&name),
                 name,
-                artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
+                artists_html: String::new(),
                 tracks: r.get::<Option<i64>, _>("tracks").unwrap_or(0),
                 cover: r.get::<Option<String>, _>("cover").unwrap_or_default(),
             }
@@ -172,6 +168,13 @@ async fn albums_page(
     let total = rows.len();
     let mut rows = rows;
     rows.truncate(600);
+
+    // Link artist names (entity-based).
+    let album_names: Vec<String> = rows.iter().map(|r| r.name.clone()).collect();
+    let mut artists_html = crate::artists::artists_html_by_album(&st.pool, &album_names).await;
+    for r in rows.iter_mut() {
+        r.artists_html = artists_html.remove(&r.name).unwrap_or_default();
+    }
 
     let rawq = raw.as_deref().unwrap_or("");
     let s_album = crate::table::sort_head(rawq, "album", "Album", &sort, &dir);
@@ -195,6 +198,7 @@ struct AlbumTrack {
     id: i64,
     title: String,
     artists: String,
+    artists_html: String,
     duration: String,
     duration_ms: i64,
 }
@@ -254,33 +258,39 @@ async fn album_page(
     }
 
     let mut cover = String::new();
-    let mut artists: Vec<ArtistLink> = Vec::new();
     let mut tracks: Vec<AlbumTrack> = Vec::new();
+    let ids: Vec<i64> = rows.iter().map(|r| r.get::<i64, _>("id")).collect();
+    let mut html = crate::artists::artists_html_for_tracks(&st.pool, &ids).await;
     for r in &rows {
         if cover.is_empty() {
             cover = r.get::<Option<String>, _>("image_url").unwrap_or_default();
         }
         let a = r.get::<String, _>("artists");
-        if !a.trim().is_empty() && !artists.iter().any(|x| x.name == a) {
-            artists.push(ArtistLink {
-                href: artist_href(&a),
-                name: a.clone(),
-            });
-        }
         let ms = r.get::<Option<i64>, _>("duration_ms").unwrap_or(0);
         let duration = if ms > 0 {
             format!("{}:{:02}", ms / 60000, (ms % 60000) / 1000)
         } else {
             String::new()
         };
+        let id = r.get::<i64, _>("id");
         tracks.push(AlbumTrack {
-            id: r.get("id"),
+            id,
             title: r.get("title"),
             artists: a,
+            artists_html: html.remove(&id).unwrap_or_default(),
             duration,
             duration_ms: ms,
         });
     }
+    // Header artist list from the entity tables (id-based links).
+    let artists: Vec<ArtistLink> = crate::artists::album_artists(&st.pool, &name)
+        .await
+        .into_iter()
+        .map(|(id, n)| ArtistLink {
+            href: format!("/artist/{id}"),
+            name: n,
+        })
+        .collect();
 
     // Server-side sort of the (bounded) in-memory track list.
     let ci = |s: &str| s.to_lowercase();

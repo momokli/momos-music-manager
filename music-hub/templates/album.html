@@ -66,9 +66,7 @@ content %}
             <tr>
                 <td>{{ loop.index }}</td>
                 <td><a href="/track/{{ t.id }}">{{ t.title }}</a></td>
-                <td class="hub-cell-pl">
-                    <a href="/artist/{{ t.artists }}">{{ t.artists }}</a>
-                </td>
+                <td class="hub-cell-pl">{{ t.artists_html|safe }}</td>
                 <td>{% if t.duration != "" %}{{ t.duration }}{% else %}—{% endif %}</td>
             </tr>
             {% endfor %}

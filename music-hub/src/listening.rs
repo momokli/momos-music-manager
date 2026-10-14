@@ -53,13 +53,13 @@ struct ListenRow {
     who: String,
     track_id: i64,
     title: String,
-    artists: String,
+    artists_html: String,
     album: String,
 }
 
 struct CountRow {
     label: String,
-    sub: String,
+    sub_html: String,
     count: i64,
     track_id: i64,
 }
@@ -112,20 +112,25 @@ async fn listening_page(
         .await
     }
     .unwrap_or_default();
-    let recent = recent_rows
+    let mut recent: Vec<ListenRow> = recent_rows
         .into_iter()
         .map(|r| ListenRow {
             when: fmt_ts(r.get::<Option<String>, _>("played_at")),
             who: r.get::<Option<String>, _>("who").unwrap_or_default(),
             track_id: r.get::<Option<i64>, _>("track_id").unwrap_or(0),
             title: r.get::<Option<String>, _>("title").unwrap_or_default(),
-            artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
+            artists_html: String::new(),
             album: r.get::<Option<String>, _>("album").unwrap_or_default(),
         })
         .collect();
+    let recent_ids: Vec<i64> = recent.iter().map(|r| r.track_id).collect();
+    let mut recent_html = crate::artists::artists_html_for_tracks(&st.pool, &recent_ids).await;
+    for r in recent.iter_mut() {
+        r.artists_html = recent_html.remove(&r.track_id).unwrap_or_default();
+    }
 
-    let top_tracks = sqlx::query(
-        "SELECT t.id AS track_id, t.title, t.artists, COUNT(*) AS c
+    let mut top_tracks: Vec<CountRow> = sqlx::query(
+        "SELECT t.id AS track_id, t.title, COUNT(*) AS c
            FROM hub_listening_history h
            JOIN hub_tracks t ON t.id = h.track_id
           WHERE h.user_id = ?1
@@ -140,11 +145,16 @@ async fn listening_page(
     .into_iter()
     .map(|r| CountRow {
         label: r.get::<Option<String>, _>("title").unwrap_or_default(),
-        sub: r.get::<Option<String>, _>("artists").unwrap_or_default(),
+        sub_html: String::new(),
         count: r.get::<Option<i64>, _>("c").unwrap_or(0),
         track_id: r.get::<Option<i64>, _>("track_id").unwrap_or(0),
     })
     .collect();
+    let top_ids: Vec<i64> = top_tracks.iter().map(|r| r.track_id).collect();
+    let mut top_html = crate::artists::artists_html_for_tracks(&st.pool, &top_ids).await;
+    for r in top_tracks.iter_mut() {
+        r.sub_html = top_html.remove(&r.track_id).unwrap_or_default();
+    }
 
     let top_artists = sqlx::query(
         "SELECT t.artists AS artist, COUNT(*) AS c
@@ -162,7 +172,7 @@ async fn listening_page(
     .into_iter()
     .map(|r| CountRow {
         label: r.get::<Option<String>, _>("artist").unwrap_or_default(),
-        sub: String::new(),
+        sub_html: String::new(),
         count: r.get::<Option<i64>, _>("c").unwrap_or(0),
         track_id: 0,
     })

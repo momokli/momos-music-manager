@@ -87,7 +87,7 @@ content %}
                 </tr>
                 <tr>
                     <th scope="row">Artists</th>
-                    <td>{{ artists }}</td>
+                    <td>{% if artists_html != "" %}{{ artists_html|safe }}{% else %}{{ artists }}{% endif %}</td>
                 </tr>
                 <tr>
                     <th scope="row">Album</th>

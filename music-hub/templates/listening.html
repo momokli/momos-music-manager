@@ -37,7 +37,7 @@
             <td class="hub-nowrap hub-muted">{{ r.when }}</td>
             {% if scope == "all" %}<td>@{{ r.who }}</td>{% endif %}
             <td><a href="/track/{{ r.track_id }}">{{ r.title }}</a></td>
-            <td>{{ r.artists }}</td>
+            <td>{{ r.artists_html|safe }}</td>
             <td class="hub-muted">{{ r.album }}</td>
         </tr>
         {% endfor %}
@@ -65,7 +65,7 @@
                     <td class="hub-muted">{{ loop.index }}</td>
                     <td>
                         <a href="/track/{{ t.track_id }}">{{ t.label }}</a>
-                        <span class="hub-muted">{{ t.sub }}</span>
+                        <span class="hub-muted">{{ t.sub_html|safe }}</span>
                     </td>
                     <td>{{ t.count }}</td>
                 </tr>

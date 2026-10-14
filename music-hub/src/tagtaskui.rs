@@ -84,7 +84,7 @@ struct CardView {
     id: i64,
     rank: i64,
     title: String,
-    artists: String,
+    artists_html: String,
     plays: i64,
     missing: Vec<Chip>,
     my_types: Vec<TypeOption>,
@@ -173,11 +173,16 @@ async fn build_cards(st: &AppState, user_id: i64, task_id: i64) -> Vec<CardView>
             id: track_id,
             rank: r.get("rank"),
             title: r.get("title"),
-            artists: r.get("artists"),
+            artists_html: String::new(),
             plays: r.get("plays"),
             missing,
             my_types: my_types.clone(),
         });
+    }
+    let ids: Vec<i64> = cards.iter().map(|c| c.id).collect();
+    let mut html = crate::artists::artists_html_for_tracks(&st.pool, &ids).await;
+    for c in cards.iter_mut() {
+        c.artists_html = html.remove(&c.id).unwrap_or_default();
     }
     cards
 }
@@ -201,7 +206,7 @@ async fn tag_task_page(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Task-Fehler: {e}"),
             )
-                .into_response()
+                .into_response();
         }
     };
     let cards = build_cards(&st, nav.id, task.id).await;

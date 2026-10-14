@@ -11,6 +11,18 @@ async fn seed_album(pool: &sqlx::SqlitePool) {
     .execute(pool)
     .await
     .unwrap();
+    // Populate the artist/album entities (normally done at ingest / startup).
+    music_hub::artists::backfill_artist_entities(pool)
+        .await
+        .unwrap();
+}
+
+async fn artist_id(pool: &sqlx::SqlitePool, name: &str) -> i64 {
+    sqlx::query_scalar("SELECT id FROM hub_artists WHERE name = ?1 COLLATE NOCASE")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -54,7 +66,11 @@ async fn albums_list_and_detail_render() {
         html.contains("Alpha") && html.contains("Beta"),
         "tracklist missing"
     );
-    assert!(html.contains("/artist/Arti"), "artist link missing");
+    let arti = artist_id(&app.pool, "Arti").await;
+    assert!(
+        html.contains(&format!("/artist/{arti}")),
+        "artist link missing"
+    );
     assert!(html.contains("/track/70001"), "track link missing");
 }
 

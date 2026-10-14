@@ -4,19 +4,20 @@
 //!
 //! * `GET /artists`      — list of every artist with server-side filters
 //!   (name search, "played by me", "tagged", "in playlists") and sorting.
-//! * `GET /artist/{name}` — profile: most played tracks per user, tag
+//! * `GET /artist/{id}` — profile: most played tracks per user, tag
 //!   distribution, playlist membership, collaborations / b2b / album
-//!   co-artists and reference scoring.
+//!   co-artists and reference scoring. `/artist/{name}` redirects to the id.
 //!
-//! Artists are not a table: they are derived from the free-text
-//! `hub_tracks.artists` column by splitting on `;`, `,`, `&` and ` feat. `
-//! (case-insensitive). Play counts come from the per-user Traktor ingest
-//! (`hub_traktor_tracks`); tags from the materialized `hub_track_resolved_tags`
-//! joined to `hub_tags` (bucketed by tag type).
+//! Artists are **first-class entities** (`hub_artists`, migration 047): tracks
+//! link to them via `hub_track_artists` (M:N, ordered). The free-text
+//! `hub_tracks.artists` column is kept as a display cache only. Play counts come
+//! from the per-user Traktor ingest (`hub_traktor_tracks`); tags from the
+//! materialized `hub_track_resolved_tags` joined to `hub_tags` (bucketed by type).
 //!
 //! Assumptions / limitations (documented in the PR):
-//! * Splitting a comma inside a single artist name (`Earth, Wind & Fire`) is a
-//!   known, accepted limitation — the plan explicitly requires those delimiters.
+//! * URLs are **id-based** (`/artist/{id}`); `/artist/{name}` redirects to the id.
+//! * Splitting the historical free-text artist strings happens **once**, in
+//!   [`backfill_artist_entities`] — nowhere else in application code.
 //! * "b2b" is best-effort: Traktor playlists whose name contains `b2b`
 //!   (case-insensitive) that contain at least one track by the artist.
 //! * Reference coefficients are constants for now; a follow-up makes them
@@ -24,6 +25,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use anyhow::Result;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Path, Query, RawQuery, State};
@@ -31,6 +33,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use serde::Deserialize;
+use serde_json::Value;
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
 use crate::api::AppState;
@@ -47,7 +50,9 @@ const REF_B2B_W: f64 = 1.0;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/artists", get(artists_page))
-        .route("/artist/{name}", get(artist_page))
+        // Canonical, id-based route. A name is resolved and redirected to the id
+        // (see `artist_page`).
+        .route("/artist/{key}", get(artist_page))
         .with_state(state)
 }
 
@@ -74,12 +79,9 @@ fn not_found(msg: &str) -> Response {
         .into_response()
 }
 
-fn artist_key(s: &str) -> String {
-    s.trim().to_lowercase()
-}
-
-fn artist_href(name: &str) -> String {
-    format!("/artist/{}", urlencoding::encode(name))
+/// Canonical, id-based artist URL (collision-safe).
+fn artist_href(id: i64) -> String {
+    format!("/artist/{id}")
 }
 
 fn spotify_href(name: &str) -> String {
@@ -150,22 +152,521 @@ fn bind_ids(qb: &mut QueryBuilder<'_, Sqlite>, ids: &[i64]) {
     qb.push(")");
 }
 
+// ── entity helpers (plan P0: artists/albums as first-class rows) ─────────────
+
+fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+/// Minimal HTML escaping for text embedded in a template via `|safe`.
+pub fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Render `[(artist_id, name)]` as comma-separated links to `/artist/{id}`.
+pub fn artist_links_html(artists: &[(i64, String)]) -> String {
+    artists
+        .iter()
+        .map(|(id, name)| format!("<a href=\"/artist/{id}\">{}</a>", escape_html(name)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Resolve an artist id by (case-insensitive) name. `None` when unknown.
+pub async fn artist_id_by_name(pool: &SqlitePool, name: &str) -> Option<i64> {
+    sqlx::query_scalar(
+        "SELECT id FROM hub_artists WHERE name = ?1 COLLATE NOCASE ORDER BY id LIMIT 1",
+    )
+    .bind(name.trim())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Find-or-create an artist by name (case-insensitive). Returns its id.
+pub async fn upsert_artist_by_name(pool: &SqlitePool, name: &str) -> Result<i64> {
+    let name = name.trim();
+    let now = now_iso();
+    sqlx::query(
+        "INSERT OR IGNORE INTO hub_artists (name, first_seen_at, updated_at) VALUES (?1, ?2, ?2)",
+    )
+    .bind(name)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    let id: i64 = sqlx::query_scalar(
+        "SELECT id FROM hub_artists WHERE name = ?1 COLLATE NOCASE ORDER BY id LIMIT 1",
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
+}
+
+/// Upsert an artist keyed by its Spotify id (the real identity), refreshing the
+/// display name and recording the external id. Falls back to name matching when
+/// the Spotify id is new but the name already exists.
+pub async fn upsert_artist_by_spotify(
+    pool: &SqlitePool,
+    spotify_id: &str,
+    name: &str,
+) -> Result<i64> {
+    let name = name.trim();
+    let now = now_iso();
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT artist_id FROM hub_artist_external_ids
+          WHERE service = 'spotify' AND external_id = ?1 LIMIT 1",
+    )
+    .bind(spotify_id)
+    .fetch_optional(pool)
+    .await?;
+    let id = match existing {
+        Some(id) => {
+            sqlx::query("UPDATE hub_artists SET name = ?2, updated_at = ?3 WHERE id = ?1")
+                .bind(id)
+                .bind(name)
+                .bind(&now)
+                .execute(pool)
+                .await?;
+            id
+        }
+        None => upsert_artist_by_name(pool, name).await?,
+    };
+    sqlx::query(
+        "INSERT INTO hub_artist_external_ids (artist_id, service, external_id, url, source, fetched_at)
+         VALUES (?1, 'spotify', ?2, ?3, 'ingest', ?4)
+         ON CONFLICT(artist_id, service, external_id) DO UPDATE SET
+             url = excluded.url, fetched_at = excluded.fetched_at",
+    )
+    .bind(id)
+    .bind(spotify_id)
+    .bind(format!("https://open.spotify.com/artist/{spotify_id}"))
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(id)
+}
+
+/// Find-or-create an album by title (case-insensitive). Used by the backfill.
+pub async fn upsert_album_by_title(pool: &SqlitePool, title: &str) -> Result<i64> {
+    let title = title.trim();
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM hub_albums WHERE title = ?1 COLLATE NOCASE ORDER BY id LIMIT 1",
+    )
+    .bind(title)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    let now = now_iso();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_albums (title, first_seen_at, updated_at) VALUES (?1, ?2, ?2) RETURNING id",
+    )
+    .bind(title)
+    .bind(&now)
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
+}
+
+/// Upsert an album from a Spotify album object (title/type/release/tracks/cover/
+/// label) and record its external id. Returns the album id (or `None` when the
+/// object carries no usable title).
+pub async fn upsert_album(pool: &SqlitePool, album: &Value) -> Result<Option<i64>> {
+    let title = album["name"].as_str().unwrap_or("").trim();
+    if title.is_empty() {
+        return Ok(None);
+    }
+    let spotify_id = album["id"].as_str().filter(|s| !s.is_empty());
+    let album_type = album["album_type"].as_str();
+    let release_date = album["release_date"].as_str();
+    let total_tracks = album["total_tracks"].as_i64();
+    let label = album["label"].as_str();
+    let image_url = album["images"]
+        .as_array()
+        .and_then(|i| i.first())
+        .and_then(|x| x["url"].as_str());
+    let now = now_iso();
+
+    let mut id: Option<i64> = None;
+    if let Some(sid) = spotify_id {
+        id = sqlx::query_scalar(
+            "SELECT album_id FROM hub_album_external_ids
+              WHERE service = 'spotify' AND external_id = ?1 LIMIT 1",
+        )
+        .bind(sid)
+        .fetch_optional(pool)
+        .await?;
+    }
+    if id.is_none() {
+        id = sqlx::query_scalar(
+            "SELECT id FROM hub_albums WHERE title = ?1 COLLATE NOCASE ORDER BY id LIMIT 1",
+        )
+        .bind(title)
+        .fetch_optional(pool)
+        .await?;
+    }
+    let id = match id {
+        Some(id) => {
+            sqlx::query(
+                "UPDATE hub_albums SET title = ?2,
+                     album_type   = COALESCE(?3, album_type),
+                     release_date = COALESCE(?4, release_date),
+                     total_tracks = COALESCE(?5, total_tracks),
+                     label        = COALESCE(?6, label),
+                     image_url    = COALESCE(?7, image_url),
+                     updated_at   = ?8
+                   WHERE id = ?1",
+            )
+            .bind(id)
+            .bind(title)
+            .bind(album_type)
+            .bind(release_date)
+            .bind(total_tracks)
+            .bind(label)
+            .bind(image_url)
+            .bind(&now)
+            .execute(pool)
+            .await?;
+            id
+        }
+        None => {
+            sqlx::query_scalar(
+                "INSERT INTO hub_albums
+                     (title, album_type, release_date, total_tracks, label, image_url, first_seen_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7) RETURNING id",
+            )
+            .bind(title)
+            .bind(album_type)
+            .bind(release_date)
+            .bind(total_tracks)
+            .bind(label)
+            .bind(image_url)
+            .bind(&now)
+            .fetch_one(pool)
+            .await?
+        }
+    };
+    if let Some(sid) = spotify_id {
+        sqlx::query(
+            "INSERT INTO hub_album_external_ids (album_id, service, external_id, url, source, fetched_at)
+             VALUES (?1, 'spotify', ?2, ?3, 'ingest', ?4)
+             ON CONFLICT(album_id, service, external_id) DO UPDATE SET
+                 url = excluded.url, fetched_at = excluded.fetched_at",
+        )
+        .bind(id)
+        .bind(sid)
+        .bind(format!("https://open.spotify.com/album/{sid}"))
+        .bind(&now)
+        .execute(pool)
+        .await?;
+    }
+    Ok(Some(id))
+}
+
+/// Atomically upsert a track's artists from a Spotify `artists[]` array and link
+/// them (position = array index). No string splitting — each entry is atomic.
+pub async fn upsert_track_artists(pool: &SqlitePool, track_id: i64, artists: &Value) -> Result<()> {
+    let Some(arr) = artists.as_array() else {
+        return Ok(());
+    };
+    for (pos, a) in arr.iter().enumerate() {
+        let name = a["name"].as_str().unwrap_or("").trim();
+        if name.is_empty() {
+            continue;
+        }
+        let sid = a["id"].as_str().filter(|s| !s.is_empty());
+        let aid = match sid {
+            Some(sid) => upsert_artist_by_spotify(pool, sid, name).await?,
+            None => upsert_artist_by_name(pool, name).await?,
+        };
+        sqlx::query(
+            "INSERT INTO hub_track_artists (track_id, artist_id, position) VALUES (?1, ?2, ?3)
+             ON CONFLICT(track_id, artist_id) DO UPDATE SET position = excluded.position",
+        )
+        .bind(track_id)
+        .bind(aid)
+        .bind(pos as i64)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Upsert a track's album from a Spotify album object and set `hub_tracks.album_id`.
+pub async fn upsert_track_album(pool: &SqlitePool, track_id: i64, album: &Value) -> Result<()> {
+    if album.is_null() {
+        return Ok(());
+    }
+    if let Some(aid) = upsert_album(pool, album).await? {
+        sqlx::query("UPDATE hub_tracks SET album_id = ?1 WHERE id = ?2")
+            .bind(aid)
+            .bind(track_id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Link a track to a single name-keyed artist (no provider id). Used by
+/// non-Spotify sources (yt-dlp / SoundCloud) which carry no artist ids.
+pub async fn link_track_artist_name(pool: &SqlitePool, track_id: i64, name: &str) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(());
+    }
+    let aid = upsert_artist_by_name(pool, name).await?;
+    sqlx::query(
+        "INSERT INTO hub_track_artists (track_id, artist_id, position) VALUES (?1, ?2, 0)
+         ON CONFLICT(track_id, artist_id) DO NOTHING",
+    )
+    .bind(track_id)
+    .bind(aid)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// One-time (idempotent) backfill: create `hub_artists` / `hub_albums` rows from
+/// the historical free-text `hub_tracks.artists` / `hub_tracks.album` columns and
+/// link them. This is the **only** place application code splits artist strings.
+///
+/// Processes only tracks that have no `hub_track_artists` rows yet, so it is safe
+/// to call repeatedly (e.g. after test seeds).
+pub async fn backfill_artist_entities(pool: &SqlitePool) -> Result<usize> {
+    let rows = sqlx::query(
+        "SELECT t.id AS id, COALESCE(t.artists, '') AS artists, COALESCE(t.album, '') AS album
+           FROM hub_tracks t
+          WHERE NOT EXISTS (SELECT 1 FROM hub_track_artists ta WHERE ta.track_id = t.id)",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut n = 0usize;
+    for r in rows {
+        let tid: i64 = r.get("id");
+        let artists_raw: String = r.get("artists");
+        let album: String = r.get("album");
+        for (pos, name) in split_artists(&artists_raw).iter().enumerate() {
+            let aid = upsert_artist_by_name(pool, name).await?;
+            sqlx::query(
+                "INSERT INTO hub_track_artists (track_id, artist_id, position) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(track_id, artist_id) DO NOTHING",
+            )
+            .bind(tid)
+            .bind(aid)
+            .bind(pos as i64)
+            .execute(pool)
+            .await?;
+        }
+        if !album.trim().is_empty() {
+            let aid = upsert_album_by_title(pool, &album).await?;
+            sqlx::query("UPDATE hub_tracks SET album_id = ?1 WHERE id = ?2 AND album_id IS NULL")
+                .bind(aid)
+                .bind(tid)
+                .execute(pool)
+                .await?;
+        }
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Startup hook: backfill only when no artist entities exist yet (the plan's
+/// "run once, when `hub_artists` is empty" trigger).
+pub async fn backfill_artist_entities_if_empty(pool: &SqlitePool) -> Result<usize> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_artists")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    if count > 0 {
+        return Ok(0);
+    }
+    backfill_artist_entities(pool).await
+}
+
+/// Load a track's artists as `(artist_id, name)`, ordered by position.
+pub async fn artists_for_track(pool: &SqlitePool, track_id: i64) -> Vec<(i64, String)> {
+    sqlx::query(
+        "SELECT a.id AS id, a.name AS name
+           FROM hub_track_artists ta JOIN hub_artists a ON a.id = ta.artist_id
+          WHERE ta.track_id = ?1
+          ORDER BY ta.position, a.name",
+    )
+    .bind(track_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .iter()
+    .map(|r| {
+        (
+            r.get::<i64, _>("id"),
+            r.get::<Option<String>, _>("name").unwrap_or_default(),
+        )
+    })
+    .collect()
+}
+
+/// Batch: track id -> linked-artist HTML. Tracks without entity links fall back
+/// to the escaped display-cache string (`hub_tracks.artists`), so pages never
+/// render empty while the entity tables are still being populated.
+pub async fn artists_html_for_tracks(pool: &SqlitePool, ids: &[i64]) -> HashMap<i64, String> {
+    let mut out: HashMap<i64, String> = HashMap::new();
+    if ids.is_empty() {
+        return out;
+    }
+    let mut by_track: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
+    for chunk in ids.chunks(CHUNK) {
+        let mut qb = QueryBuilder::new(
+            "SELECT ta.track_id AS track_id, a.id AS id, a.name AS name
+               FROM hub_track_artists ta JOIN hub_artists a ON a.id = ta.artist_id
+              WHERE ta.track_id IN ",
+        );
+        bind_ids(&mut qb, chunk);
+        qb.push(" ORDER BY ta.track_id, ta.position, a.name");
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            by_track
+                .entry(r.get::<i64, _>("track_id"))
+                .or_default()
+                .push((
+                    r.get::<i64, _>("id"),
+                    r.get::<Option<String>, _>("name").unwrap_or_default(),
+                ));
+        }
+    }
+    let mut fallback: HashMap<i64, String> = HashMap::new();
+    for chunk in ids.chunks(CHUNK) {
+        let mut qb = QueryBuilder::new(
+            "SELECT id, COALESCE(artists, '') AS artists FROM hub_tracks WHERE id IN ",
+        );
+        bind_ids(&mut qb, chunk);
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            fallback.insert(
+                r.get::<i64, _>("id"),
+                r.get::<Option<String>, _>("artists").unwrap_or_default(),
+            );
+        }
+    }
+    for id in ids {
+        let html = match by_track.get(id) {
+            Some(list) if !list.is_empty() => artist_links_html(list),
+            _ => escape_html(fallback.get(id).map(String::as_str).unwrap_or("")),
+        };
+        out.insert(*id, html);
+    }
+    out
+}
+
+/// Distinct artists across an album's tracks (entity-based), ordered by name.
+pub async fn album_artists(pool: &SqlitePool, album: &str) -> Vec<(i64, String)> {
+    sqlx::query(
+        "SELECT DISTINCT a.id AS id, a.name AS name
+           FROM hub_tracks t
+           JOIN hub_track_artists ta ON ta.track_id = t.id
+           JOIN hub_artists a ON a.id = ta.artist_id
+          WHERE t.album = ?1 COLLATE NOCASE
+          ORDER BY a.name",
+    )
+    .bind(album)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .iter()
+    .map(|r| {
+        (
+            r.get::<i64, _>("id"),
+            r.get::<Option<String>, _>("name").unwrap_or_default(),
+        )
+    })
+    .collect()
+}
+
+/// Batch: album title -> linked-artist HTML (entity-based).
+pub async fn artists_html_by_album(
+    pool: &SqlitePool,
+    albums: &[String],
+) -> HashMap<String, String> {
+    let mut by_album: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+    for chunk in albums.chunks(CHUNK) {
+        let mut qb = QueryBuilder::new(
+            "SELECT DISTINCT t.album AS album, a.id AS id, a.name AS name
+               FROM hub_tracks t
+               JOIN hub_track_artists ta ON ta.track_id = t.id
+               JOIN hub_artists a ON a.id = ta.artist_id
+              WHERE t.album IN (",
+        );
+        {
+            let mut sep = qb.separated(", ");
+            for a in chunk {
+                sep.push_bind(a.clone());
+            }
+        }
+        qb.push(") ORDER BY t.album, a.name");
+        for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+            by_album
+                .entry(r.get::<Option<String>, _>("album").unwrap_or_default())
+                .or_default()
+                .push((
+                    r.get::<i64, _>("id"),
+                    r.get::<Option<String>, _>("name").unwrap_or_default(),
+                ));
+        }
+    }
+    by_album
+        .into_iter()
+        .map(|(album, list)| (album, artist_links_html(&list)))
+        .collect()
+}
+
 struct TrackInfo {
     id: i64,
     album: String,
-    artists: String,
+    artists: Vec<(i64, String)>,
 }
 
 async fn load_tracks(pool: &SqlitePool) -> Vec<TrackInfo> {
-    let rows = sqlx::query("SELECT id, title, album, artists FROM hub_tracks")
+    let rows = sqlx::query("SELECT id, album FROM hub_tracks")
         .fetch_all(pool)
         .await
         .unwrap_or_default();
+    let mut by_track: HashMap<i64, Vec<(i64, String)>> = HashMap::new();
+    for r in sqlx::query(
+        "SELECT ta.track_id AS track_id, a.id AS id, a.name AS name
+           FROM hub_track_artists ta JOIN hub_artists a ON a.id = ta.artist_id
+          ORDER BY ta.track_id, ta.position, a.name",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    {
+        by_track
+            .entry(r.get::<i64, _>("track_id"))
+            .or_default()
+            .push((
+                r.get::<i64, _>("id"),
+                r.get::<Option<String>, _>("name").unwrap_or_default(),
+            ));
+    }
     rows.iter()
-        .map(|r| TrackInfo {
-            id: r.get::<i64, _>("id"),
-            album: r.get::<Option<String>, _>("album").unwrap_or_default(),
-            artists: r.get::<Option<String>, _>("artists").unwrap_or_default(),
+        .map(|r| {
+            let id = r.get::<i64, _>("id");
+            TrackInfo {
+                id,
+                album: r.get::<Option<String>, _>("album").unwrap_or_default(),
+                artists: by_track.remove(&id).unwrap_or_default(),
+            }
         })
         .collect()
 }
@@ -219,6 +720,7 @@ struct ArtistRow {
 }
 
 struct ArtistAgg {
+    id: i64,
     name: String,
     track_ids: Vec<i64>,
     tagged: i64,
@@ -300,13 +802,13 @@ async fn artists_page(
             })
             .collect();
 
-    // Fold every track into its (possibly several) artists.
-    let mut map: HashMap<String, ArtistAgg> = HashMap::new();
+    // Fold every track into its (possibly several) artists (entity ids).
+    let mut map: HashMap<i64, ArtistAgg> = HashMap::new();
     for t in &tracks {
-        for name in split_artists(&t.artists) {
-            let key = artist_key(&name);
-            let a = map.entry(key).or_insert_with(|| ArtistAgg {
-                name,
+        for (aid, name) in &t.artists {
+            let a = map.entry(*aid).or_insert_with(|| ArtistAgg {
+                id: *aid,
+                name: name.clone(),
                 track_ids: Vec::new(),
                 tagged: 0,
                 in_playlists: 0,
@@ -351,7 +853,7 @@ async fn artists_page(
             let all_plays: i64 = a.plays_by_user.values().sum();
             ArtistRow {
                 spotify: spotify_href(&a.name),
-                href: artist_href(&a.name),
+                href: artist_href(a.id),
                 tracks: a.track_ids.len() as i64,
                 tagged: a.tagged,
                 in_playlists: a.in_playlists,
@@ -597,7 +1099,7 @@ fn sort_playlists(rows: &mut [PlaylistRow], field: &str, dir: &str) {
 
 async fn artist_page(
     State(st): State<AppState>,
-    Path(name): Path<String>,
+    Path(key): Path<String>,
     Query(f): Query<ArtistQuery>,
     RawQuery(raw): RawQuery,
     headers: HeaderMap,
@@ -606,7 +1108,26 @@ async fn artist_page(
         return Redirect::to("/login").into_response();
     };
     let me = nav.id;
-    let target = artist_key(&name);
+
+    // Canonical route is `/artist/{id}` (numeric). A name is resolved and
+    // redirected to the id; an unknown key 404s.
+    let target_id: i64 = if let Ok(id) = key.trim().parse::<i64>() {
+        match sqlx::query_scalar::<_, i64>("SELECT id FROM hub_artists WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&st.pool)
+            .await
+            .ok()
+            .flatten()
+        {
+            Some(id) => id,
+            None => return not_found("Künstler nicht gefunden."),
+        }
+    } else {
+        match artist_id_by_name(&st.pool, &key).await {
+            Some(id) => return Redirect::to(&format!("/artist/{id}")).into_response(),
+            None => return not_found("Künstler nicht gefunden."),
+        }
+    };
 
     // Per-table whitelists (disjoint field names so the shared `?sort=` only
     // ever activates one table; the others keep their own default order).
@@ -648,24 +1169,24 @@ async fn artist_page(
     let tracks = load_tracks(&st.pool).await;
     let artist_tracks: Vec<&TrackInfo> = tracks
         .iter()
-        .filter(|t| {
-            split_artists(&t.artists)
-                .iter()
-                .any(|n| artist_key(n) == target)
-        })
+        .filter(|t| t.artists.iter().any(|(id, _)| *id == target_id))
         .collect();
     if artist_tracks.is_empty() {
         return not_found("Künstler nicht gefunden.");
     }
-    let display_name = artist_tracks
-        .iter()
-        .find_map(|t| {
-            split_artists(&t.artists)
-                .into_iter()
-                .find(|n| artist_key(n) == target)
-        })
-        .unwrap_or_else(|| name.clone());
+    let display_name: String =
+        sqlx::query_scalar::<_, String>("SELECT name FROM hub_artists WHERE id = ?1")
+            .bind(target_id)
+            .fetch_optional(&st.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| key.clone());
     let artist_ids: Vec<i64> = artist_tracks.iter().map(|t| t.id).collect();
+
+    // track -> artists (entity ids), for the collab/b2b/album/reference panels.
+    let artists_by_track: HashMap<i64, Vec<(i64, String)>> =
+        tracks.iter().map(|t| (t.id, t.artists.clone())).collect();
 
     // Users (id ↔ slug) for grouping / selectors.
     let users: Vec<(i64, String)> = sqlx::query("SELECT id, slug FROM hub_users ORDER BY slug")
@@ -880,33 +1401,32 @@ async fn artist_page(
         .collect();
 
     // ── AR5a: collaboration partners ─────────────────────────────────────────
-    // key -> (name, tracks, plays, track ids)
-    let mut collab: HashMap<String, (String, i64, i64, HashSet<i64>)> = HashMap::new();
+    // artist id -> (name, tracks, plays, track ids)
+    let mut collab: HashMap<i64, (String, i64, i64, HashSet<i64>)> = HashMap::new();
     for t in &artist_tracks {
-        let toks = split_artists(&t.artists);
-        if toks.len() < 2 {
+        if t.artists.len() < 2 {
             continue;
         }
         let plays: i64 = plays_by_track
             .get(&t.id)
             .map(|v| v.iter().map(|(_, p)| *p).sum())
             .unwrap_or(0);
-        for tok in &toks {
-            if artist_key(tok) == target {
+        for (aid, name) in &t.artists {
+            if *aid == target_id {
                 continue;
             }
             let e = collab
-                .entry(artist_key(tok))
-                .or_insert((tok.clone(), 0, 0, HashSet::new()));
+                .entry(*aid)
+                .or_insert((name.clone(), 0, 0, HashSet::new()));
             e.1 += 1;
             e.2 += plays;
             e.3.insert(t.id);
         }
     }
     let mut collabs: Vec<CollabRow> = collab
-        .values()
-        .map(|(name, t, p, _)| CollabRow {
-            href: artist_href(name),
+        .iter()
+        .map(|(aid, (name, t, p, _))| CollabRow {
+            href: artist_href(*aid),
             name: name.clone(),
             tracks: *t,
             plays: *p,
@@ -916,12 +1436,12 @@ async fn artist_page(
 
     // ── AR5b: b2b sets (Traktor playlists named *b2b*) ───────────────────────
     let mut b2b: Vec<B2bRow> = Vec::new();
-    // partner key -> (set count, track ids, display name) for the AR6 candidate pool.
-    let mut b2b_pairs: HashMap<String, (i64, HashSet<i64>, String)> = HashMap::new();
+    // partner artist id -> (set count, track ids, display name) for the AR6 pool.
+    let mut b2b_pairs: HashMap<i64, (i64, HashSet<i64>, String)> = HashMap::new();
     for chunk in artist_ids.chunks(CHUNK) {
         let mut qb = QueryBuilder::new(
             "SELECT p.user_id AS user_id, p.id AS pid, p.name AS pname,
-                    u.slug AS slug, t.id AS track_id, t.artists AS artists
+                    u.slug AS slug, t.id AS track_id
                FROM hub_traktor_playlists p
                JOIN hub_users u ON u.id = p.user_id
                JOIN hub_traktor_playlist_tracks pt
@@ -949,15 +1469,18 @@ async fn artist_page(
                     HashSet::new(),
                 )
             });
-            for tok in split_artists(&r.get::<Option<String>, _>("artists").unwrap_or_default()) {
-                let k = artist_key(&tok);
-                if k == target {
+            for (aid, name) in artists_by_track
+                .get(&track_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+            {
+                if *aid == target_id {
                     entry.2 += 1;
                 } else {
-                    entry.3.insert(tok.clone());
+                    entry.3.insert(name.clone());
                     let bp = b2b_pairs
-                        .entry(k)
-                        .or_insert((0, HashSet::new(), tok.clone()));
+                        .entry(*aid)
+                        .or_insert((0, HashSet::new(), name.clone()));
                     bp.0 += 1;
                     bp.1.insert(track_id);
                 }
@@ -1000,7 +1523,7 @@ async fn artist_page(
     let album_list: Vec<String> = album_set.into_iter().collect();
     let mut album_others: HashMap<String, HashSet<String>> = HashMap::new();
     for chunk in album_list.chunks(CHUNK) {
-        let mut qb = QueryBuilder::new("SELECT album, artists FROM hub_tracks WHERE album IN (");
+        let mut qb = QueryBuilder::new("SELECT id, album FROM hub_tracks WHERE album IN (");
         {
             let mut sep = qb.separated(", ");
             for a in chunk {
@@ -1010,9 +1533,13 @@ async fn artist_page(
         qb.push(")");
         for r in qb.build().fetch_all(&st.pool).await.unwrap_or_default() {
             let album: String = r.get::<Option<String>, _>("album").unwrap_or_default();
-            for tok in split_artists(&r.get::<Option<String>, _>("artists").unwrap_or_default()) {
-                if artist_key(&tok) != target {
-                    album_others.entry(album.clone()).or_default().insert(tok);
+            let tid: i64 = r.get("id");
+            for (aid, name) in artists_by_track.get(&tid).map(Vec::as_slice).unwrap_or(&[]) {
+                if *aid != target_id {
+                    album_others
+                        .entry(album.clone())
+                        .or_default()
+                        .insert(name.clone());
                 }
             }
         }
@@ -1045,44 +1572,46 @@ async fn artist_page(
     }
 
     // ── AR6: reference artists ───────────────────────────────────────────────
-    // shared-tag candidates → candidate -> (name, shared tag ids, track ids)
-    let mut cand: HashMap<String, (String, HashSet<i64>, HashSet<i64>)> = HashMap::new();
+    // shared-tag candidates → artist id -> (name, shared tag ids, track ids)
+    let mut cand: HashMap<i64, (String, HashSet<i64>, HashSet<i64>)> = HashMap::new();
     let tag_id_list: Vec<i64> = artist_tag_ids.iter().copied().collect();
     for chunk in tag_id_list.chunks(CHUNK) {
         let mut qb = QueryBuilder::new(
-            "SELECT rt.tag_id AS tag_id, rt.track_id AS track_id, t.artists AS artists
+            "SELECT rt.tag_id AS tag_id, rt.track_id AS track_id
                FROM hub_track_resolved_tags rt
-               JOIN hub_tracks t ON t.id = rt.track_id
               WHERE rt.tag_id IN ",
         );
         bind_ids(&mut qb, chunk);
         for r in qb.build().fetch_all(&st.pool).await.unwrap_or_default() {
             let tag_id: i64 = r.get("tag_id");
             let track_id: i64 = r.get("track_id");
-            for tok in split_artists(&r.get::<Option<String>, _>("artists").unwrap_or_default()) {
-                let k = artist_key(&tok);
-                if k == target {
+            for (aid, name) in artists_by_track
+                .get(&track_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+            {
+                if *aid == target_id {
                     continue;
                 }
                 let e = cand
-                    .entry(k)
-                    .or_insert_with(|| (tok.clone(), HashSet::new(), HashSet::new()));
+                    .entry(*aid)
+                    .or_insert_with(|| (name.clone(), HashSet::new(), HashSet::new()));
                 e.1.insert(tag_id);
                 e.2.insert(track_id);
             }
         }
     }
     // collaboration partners feed the same candidate pool.
-    for (key, (name, _, _, tids)) in &collab {
+    for (aid, (name, _, _, tids)) in &collab {
         let e = cand
-            .entry(key.clone())
+            .entry(*aid)
             .or_insert_with(|| (name.clone(), HashSet::new(), HashSet::new()));
         e.2.extend(tids.iter().copied());
     }
     // b2b co-artists feed the same pool.
-    for (key, (_, tids, name)) in &b2b_pairs {
+    for (aid, (_, tids, name)) in &b2b_pairs {
         let e = cand
-            .entry(key.clone())
+            .entry(*aid)
             .or_insert_with(|| (name.clone(), HashSet::new(), HashSet::new()));
         e.2.extend(tids.iter().copied());
     }
@@ -1130,29 +1659,28 @@ async fn artist_page(
                 .insert(r.get::<i64, _>("user_id"));
         }
     }
-    let cand_users: HashMap<String, HashSet<i64>> = cand
+    let cand_users: HashMap<i64, HashSet<i64>> = cand
         .iter()
-        .map(|(k, (_, _, tids))| {
+        .map(|(aid, (_, _, tids))| {
             let mut u: HashSet<i64> = HashSet::new();
             for tid in tids {
                 if let Some(set) = track_users.get(tid) {
                     u.extend(set.iter().copied());
                 }
             }
-            (k.clone(), u)
+            (*aid, u)
         })
         .collect();
 
     // Deterministic score over shared tags + collaborations + b2b.
-    let mut scored: Vec<(String, String, f64, i64, i64, i64)> = cand
-        .values()
-        .map(|(name, tags, _)| {
-            let key = artist_key(name);
+    let mut scored: Vec<(i64, String, f64, i64, i64, i64)> = cand
+        .iter()
+        .map(|(aid, (name, tags, _))| {
             let shared = tags.len() as i64;
-            let c = collab.get(&key).map(|(_, t, _, _)| *t).unwrap_or(0);
-            let b = b2b_pairs.get(&key).map(|(cnt, _, _)| *cnt).unwrap_or(0);
+            let c = collab.get(aid).map(|(_, t, _, _)| *t).unwrap_or(0);
+            let b = b2b_pairs.get(aid).map(|(cnt, _, _)| *cnt).unwrap_or(0);
             let score = REF_TAG_W * shared as f64 + REF_COLLAB_W * c as f64 + REF_B2B_W * b as f64;
-            (key, name.clone(), score, shared, c, b)
+            (*aid, name.clone(), score, shared, c, b)
         })
         .collect();
     scored.sort_by(|a, b| {
@@ -1202,7 +1730,7 @@ async fn artist_page(
         .take(30)
         .map(|row| RefRow {
             name: row.1.clone(),
-            href: artist_href(&row.1),
+            href: artist_href(row.0),
             score: format!("{:.1}", row.2),
             shared_tags: row.3,
             collab: row.4,
@@ -1225,12 +1753,12 @@ async fn artist_page(
     render(&ArtistPage {
         nav,
         flash: String::new(),
-        name: display_name,
+        name: display_name.clone(),
         track_count: artist_ids.len() as i64,
         total_plays,
         user_count,
-        spotify: spotify_href(&name),
-        self_href: artist_href(&name),
+        spotify: spotify_href(&display_name),
+        self_href: artist_href(target_id),
         has_me,
         my_plays,
         others,
@@ -1279,8 +1807,17 @@ mod tests {
     }
 
     #[test]
-    fn hrefs_are_encoded() {
-        assert_eq!(artist_href("A B"), "/artist/A%20B");
+    fn hrefs_are_id_based() {
+        assert_eq!(artist_href(42), "/artist/42");
         assert!(spotify_href("A/B").starts_with("https://open.spotify.com/search/"));
+    }
+
+    #[test]
+    fn links_are_escaped() {
+        let html = artist_links_html(&[(1, "A & B".into()), (2, "<X>".into())]);
+        assert_eq!(
+            html,
+            "<a href=\"/artist/1\">A &amp; B</a>, <a href=\"/artist/2\">&lt;X&gt;</a>"
+        );
     }
 }

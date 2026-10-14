@@ -24,7 +24,7 @@ content %}
 </form>
 {% else %}
 <p class="hub-muted">
-    Seed: <a href="/track/{{ seed_id }}">{{ seed_artists }} — {{ seed_title }}</a> {% if
+    Seed: {{ seed_artists_html|safe }} — <a href="/track/{{ seed_id }}">{{ seed_title }}</a> {% if
     seed_bpm != "" %}· {{ seed_bpm }} BPM{% endif %} {% if seed_key != "" %}· {{ seed_key
     }}{% endif %} · Quellen: Hub-intern, ReccoBeats, cosine.club{% if lastfm_enabled %},
     Last.fm{% endif %}
@@ -146,9 +146,9 @@ content %}
             {% for r in rows %}
             <tr>
                 <td class="hub-dig-track">
-                    {% if r.matched %}<a href="/track/{{ r.track_id }}"
-                        >{{ r.artists }} — {{ r.title }}</a
-                    >{% else %}{{ r.artists }} — {{ r.title }}
+                    {% if r.matched %}{{ r.artists_html|safe }} — <a href="/track/{{ r.track_id }}"
+                        >{{ r.title }}</a
+                    >{% else %}{{ r.artists_html|safe }} — {{ r.title }}
                     <span class="hub-muted">(nicht im Hub)</span>{% endif %}
                 </td>
                 <td>
