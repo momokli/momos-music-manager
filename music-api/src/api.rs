@@ -388,14 +388,14 @@ async fn get_vault_tracks(
     }
 }
 
-/// `GET /vault/track/{isrc}` — the resolved analysis for one ISRC (`404` if the
-/// ISRC is unknown to the vault).
+/// `GET /vault/track/{isrc}` — the **atomic** view of one track: hub, links and
+/// every satellite, transparently. `404` if the ISRC is unknown to the vault.
 async fn get_vault_track(State(state): State<Arc<AppState>>, Path(isrc): Path<String>) -> Response {
-    match crate::vault::resolve_track(&state.pool, &isrc, &state.config.analysis_precedence).await {
+    match crate::vault::track_detail(&state.pool, &isrc, &state.config.analysis_precedence).await {
         Ok(Some(t)) => Json(t).into_response(),
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown ISRC"),
         Err(e) => {
-            tracing::error!("resolve_track failed: {e:#}");
+            tracing::error!("track_detail failed: {e:#}");
             error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read vault")
         }
     }

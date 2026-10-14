@@ -878,17 +878,31 @@ async fn vault_resolves_bpm_by_precedence() {
     assert_eq!(status, StatusCode::OK);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["isrc"], "USQX91201487");
-    assert_eq!(v["bpm"], 128.0, "traktor outranks essentia");
-    assert_eq!(v["key"], "8A");
-    assert_eq!(v["camelot"], "8A");
+    assert_eq!(v["resolved"]["bpm"], 128.0, "traktor outranks essentia");
+    assert_eq!(v["resolved"]["key"], "8A");
+    assert_eq!(v["resolved"]["camelot"], "8A");
     assert_eq!(
-        v["source"], "traktor",
+        v["resolved"]["source"], "traktor",
         "source = analyzer of the chosen BPM"
     );
-    assert!(v["updatedAt"].is_string());
-    // Frozen shape: exactly these seven fields.
+
+    // satellites.analysis is transparent: every analyzer, newest per analyzer.
+    let analysis = v["satellites"]["analysis"].as_array().unwrap();
+    assert_eq!(analysis.len(), 2, "essentia + traktor");
+    let bpm_of = |name: &str| -> f64 {
+        analysis
+            .iter()
+            .find(|a| a["analyzer"] == name)
+            .unwrap_or_else(|| panic!("analyzer {name} missing"))["bpm"]
+            .as_f64()
+            .unwrap()
+    };
+    assert_eq!(bpm_of("traktor"), 128.0);
+    assert_eq!(bpm_of("essentia"), 124.0);
+
+    // Frozen top-level shape: exactly isrc/hub/resolved/links/satellites.
     let obj = v.as_object().unwrap();
-    assert_eq!(obj.len(), 7, "unexpected fields: {obj:?}");
+    assert_eq!(obj.len(), 5, "unexpected fields: {obj:?}");
 }
 
 #[tokio::test]
@@ -965,9 +979,10 @@ async fn vault_analysis_worker_writes_satellite() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["bpm"], 123.0);
-    assert_eq!(v["key"], "8A");
-    assert_eq!(v["source"], "essentia");
+    assert_eq!(v["resolved"]["bpm"], 123.0);
+    assert_eq!(v["resolved"]["key"], "8A");
+    assert_eq!(v["resolved"]["source"], "essentia");
+    assert_eq!(v["satellites"]["analysis"][0]["analyzer"], "essentia");
 }
 
 #[tokio::test]
@@ -1028,6 +1043,104 @@ async fn vault_ingest_writes_hubs_links_and_satellites() {
     drop(conn);
     assert_eq!(count(&h, "SELECT COUNT(*) FROM hub_track").await, 1);
     assert_eq!(count(&h, "SELECT COUNT(*) FROM sat_track_meta").await, 1);
+}
+
+#[tokio::test]
+async fn vault_track_detail_is_transparent_and_complete() {
+    let h = harness().await;
+
+    // Resolve path: hubs + links + extids + the metadata satellite (source deezer).
+    let mut conn = h.state.pool.acquire().await.unwrap();
+    music_api::vault::ingest_deezer(
+        &mut conn,
+        "USQX91201487",
+        "836932812",
+        "Sudno",
+        "Molchat Doma",
+        "Etazhi",
+        Some("1234"),
+        Some("5678"),
+    )
+    .await
+    .unwrap();
+    // Download-state snapshot (ready, all three formats).
+    music_api::vault::load_download(
+        &mut conn,
+        "USQX91201487",
+        "ready",
+        Some("flac"),
+        "flac,320,128",
+        "hub",
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    // Two analyzers land in the analysis satellite.
+    let (status, _) = send(
+        &h.app,
+        authed("POST", "/metadata")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [
+                    { "isrc": "USQX91201487", "bpm": 124.0, "key": "8A", "camelot": "8A", "source": "traktor" },
+                    { "isrc": "USQX91201487", "bpm": 123.0, "source": "essentia" }
+                ]
+            })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/vault/track/USQX91201487")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // Frozen top-level shape.
+    assert_eq!(v["isrc"], "USQX91201487");
+    assert_eq!(v.as_object().unwrap().len(), 5);
+
+    // hub ← the newest sat_track_meta.
+    assert_eq!(v["hub"]["title"], "Sudno");
+
+    // resolved ← precedence (traktor outranks essentia).
+    assert_eq!(v["resolved"]["bpm"], 124.0);
+    assert_eq!(v["resolved"]["key"], "8A");
+    assert_eq!(v["resolved"]["source"], "traktor");
+
+    // links ← link_track_artist / link_track_album + *_extid satellites. The
+    // hubs' business keys are normalised, so names come back uppercased.
+    assert_eq!(v["links"]["artists"][0]["name"], "MOLCHAT DOMA");
+    assert_eq!(v["links"]["artists"][0]["externalIds"]["deezer"], "1234");
+    assert_eq!(v["links"]["album"]["title"], "ETAZHI");
+    assert_eq!(v["links"]["album"]["externalIds"]["deezer"], "5678");
+
+    // satellites ← transparent: every analyzer, newest per analyzer.
+    let analysis = v["satellites"]["analysis"].as_array().unwrap();
+    assert_eq!(analysis.len(), 2, "traktor + essentia");
+    assert!(analysis.iter().any(|a| a["analyzer"] == "traktor"));
+    assert!(analysis.iter().any(|a| a["analyzer"] == "essentia"));
+
+    // satellites.meta ← the deezer source (the pushes above carried no meta).
+    let meta = v["satellites"]["meta"].as_array().unwrap();
+    assert_eq!(meta.len(), 1);
+    assert_eq!(meta[0]["recordSource"], "deezer");
+    assert_eq!(meta[0]["title"], "Sudno");
+    assert_eq!(meta[0]["artist"], "Molchat Doma");
+
+    // satellites.download ← the newest snapshot, formats as a list.
+    assert_eq!(v["satellites"]["download"]["state"], "ready");
+    assert_eq!(v["satellites"]["download"]["sourceFormat"], "flac");
+    assert_eq!(
+        v["satellites"]["download"]["formats"],
+        serde_json::json!(["flac", "320", "128"])
+    );
 }
 
 #[tokio::test]
@@ -1123,6 +1236,6 @@ async fn vault_backfill_is_idempotent_and_batched() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["bpm"], 124.0);
-    assert_eq!(v["source"], "traktor");
+    assert_eq!(v["resolved"]["bpm"], 124.0);
+    assert_eq!(v["resolved"]["source"], "traktor");
 }

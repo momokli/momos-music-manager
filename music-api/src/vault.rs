@@ -864,6 +864,386 @@ pub async fn resolve_track(
         .next())
 }
 
+// ── Consumer detail view (the atomic track resource) ─────────────────────────
+//
+// The fully-assembled view of one track: the hub (business key + newest
+// metadata), the links (artists/album with their external ids) and *all*
+// satellites — transparently, so a consumer can render HUB + LINKS + SATELLITES
+// and pick the value it trusts. `resolved` mirrors `/vault/tracks`.
+
+/// `GET /vault/track/{isrc}` payload.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultTrackDetail {
+    pub isrc: String,
+    pub hub: VaultHub,
+    pub resolved: VaultResolved,
+    pub links: VaultLinks,
+    pub satellites: VaultSatellites,
+}
+
+/// `hub_track` + the newest `sat_track_meta`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultHub {
+    pub title: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub explicit: Option<bool>,
+}
+
+/// The best BPM/key/key-selector picked by precedence — the same resolution
+/// `/vault/tracks` uses (the `isrc`/`updatedAt` envelope fields are dropped here,
+/// since the ISRC is the top-level key of the detail view).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultResolved {
+    pub bpm: Option<f64>,
+    pub key: Option<String>,
+    pub camelot: Option<String>,
+    pub energy: Option<f64>,
+    pub source: Option<String>,
+}
+
+/// Relationships out of the track hub.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultLinks {
+    pub artists: Vec<VaultArtistLink>,
+    pub album: Option<VaultAlbumLink>,
+}
+
+/// `link_track_artist` + `hub_artist` + the newest `sat_artist_extid` per service.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultArtistLink {
+    /// The artist hub's business key — **normalised** (collapsed, uppercased).
+    pub name: Option<String>,
+    pub external_ids: BTreeMap<String, String>,
+}
+
+/// `link_track_album` + `hub_album` + the newest `sat_album_extid` per service.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultAlbumLink {
+    /// The title part of the album hub's business key (**normalised**).
+    pub title: Option<String>,
+    pub release_date: Option<String>,
+    pub external_ids: BTreeMap<String, String>,
+}
+
+/// Every satellite of the track — nothing resolved away.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultSatellites {
+    pub analysis: Vec<VaultAnalysis>,
+    pub download: Option<VaultDownload>,
+    pub meta: Vec<VaultMeta>,
+}
+
+/// One analysis source — the **newest row per analyzer** (`traktor`, `essentia`,
+/// `reccobeats`, …), all of them, so a consumer sees every truth.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultAnalysis {
+    pub analyzer: String,
+    pub bpm: Option<f64>,
+    pub key: Option<String>,
+    pub camelot: Option<String>,
+    pub energy: Option<f64>,
+    pub load_date: String,
+}
+
+/// The newest `sat_track_download` snapshot.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultDownload {
+    pub state: Option<String>,
+    pub source_format: Option<String>,
+    pub formats: Vec<String>,
+    pub load_date: String,
+}
+
+/// One metadata source — the newest `sat_track_meta` row **per `record_source`**.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultMeta {
+    pub record_source: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub load_date: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct HubMetaRow {
+    title: Option<String>,
+    duration_ms: Option<i64>,
+    explicit: Option<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+struct AnalysisSatRow {
+    analyzer: String,
+    bpm: Option<f64>,
+    musical_key: Option<String>,
+    camelot: Option<String>,
+    energy: Option<f64>,
+    load_date: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct DownloadSatRow {
+    state: Option<String>,
+    source_format: Option<String>,
+    formats: Option<String>,
+    load_date: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct MetaSatRow {
+    record_source: String,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    duration_ms: Option<i64>,
+    load_date: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct ArtistLinkRow {
+    artist_hk: String,
+    artist_name: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct ExtIdRow {
+    service: String,
+    external_id: String,
+}
+
+/// Assemble the atomic detail view of one track. `None` when the ISRC is unknown
+/// to the vault (no `hub_track` row) — the caller turns that into a `404`.
+pub async fn track_detail(
+    pool: &Pool<Sqlite>,
+    isrc: &str,
+    precedence: &[String],
+) -> Result<Option<VaultTrackDetail>> {
+    let isrc = db::normalize_isrc(isrc);
+    let track_hk: Option<String> =
+        sqlx::query_scalar("SELECT track_hk FROM hub_track WHERE isrc = ?")
+            .bind(&isrc)
+            .fetch_optional(pool)
+            .await?;
+    let Some(track_hk) = track_hk else {
+        return Ok(None);
+    };
+
+    // hub ← the newest `sat_track_meta`.
+    let hub_row = sqlx::query_as::<_, HubMetaRow>(
+        "SELECT title, duration_ms, explicit FROM sat_track_meta
+          WHERE track_hk = ? ORDER BY load_date DESC LIMIT 1",
+    )
+    .bind(&track_hk)
+    .fetch_optional(pool)
+    .await?;
+    let hub = VaultHub {
+        title: hub_row.as_ref().and_then(|r| r.title.clone()),
+        duration_ms: hub_row.as_ref().and_then(|r| r.duration_ms),
+        explicit: hub_row.as_ref().and_then(|r| r.explicit).map(|e| e != 0),
+    };
+
+    // resolved ← the same precedence resolver as `/vault/tracks`.
+    let resolved = resolve_tracks(pool, std::slice::from_ref(&isrc), precedence)
+        .await?
+        .into_iter()
+        .next()
+        .map(|r| VaultResolved {
+            bpm: r.bpm,
+            key: r.key,
+            camelot: r.camelot,
+            energy: r.energy,
+            source: r.source,
+        })
+        .unwrap_or(VaultResolved {
+            bpm: None,
+            key: None,
+            camelot: None,
+            energy: None,
+            source: None,
+        });
+
+    // satellites.analysis ← the newest row per analyzer (all analyzers).
+    let analysis = sqlx::query_as::<_, AnalysisSatRow>(
+        "SELECT analyzer, bpm, musical_key, camelot, energy, load_date
+           FROM sat_track_analysis a
+          WHERE track_hk = ?
+            AND load_date = (SELECT MAX(load_date) FROM sat_track_analysis b
+                              WHERE b.track_hk = a.track_hk AND b.analyzer = a.analyzer)
+          ORDER BY analyzer",
+    )
+    .bind(&track_hk)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| VaultAnalysis {
+        analyzer: r.analyzer,
+        bpm: r.bpm,
+        key: r.musical_key,
+        camelot: r.camelot,
+        energy: r.energy,
+        load_date: r.load_date,
+    })
+    .collect();
+
+    // satellites.download ← the newest snapshot.
+    let download = sqlx::query_as::<_, DownloadSatRow>(
+        "SELECT state, source_format, formats, load_date FROM sat_track_download
+          WHERE track_hk = ? ORDER BY load_date DESC LIMIT 1",
+    )
+    .bind(&track_hk)
+    .fetch_optional(pool)
+    .await?
+    .map(|r| VaultDownload {
+        state: r.state,
+        source_format: r.source_format,
+        formats: r.formats.as_deref().map(split_formats).unwrap_or_default(),
+        load_date: r.load_date,
+    });
+
+    // satellites.meta ← the newest row per record_source (all sources).
+    let meta = sqlx::query_as::<_, MetaSatRow>(
+        "SELECT record_source, title, artist, album, duration_ms, load_date
+           FROM sat_track_meta a
+          WHERE track_hk = ?
+            AND load_date = (SELECT MAX(load_date) FROM sat_track_meta b
+                              WHERE b.track_hk = a.track_hk AND b.record_source = a.record_source)
+          ORDER BY record_source",
+    )
+    .bind(&track_hk)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| VaultMeta {
+        record_source: r.record_source,
+        title: r.title,
+        artist: r.artist,
+        album: r.album,
+        duration_ms: r.duration_ms,
+        load_date: r.load_date,
+    })
+    .collect();
+
+    // links.artists ← link_track_artist + hub_artist + newest `sat_artist_extid`.
+    let artist_rows = sqlx::query_as::<_, ArtistLinkRow>(
+        "SELECT ha.artist_hk, ha.artist_name
+           FROM link_track_artist l
+           JOIN hub_artist ha ON ha.artist_hk = l.artist_hk
+          WHERE l.track_hk = ?
+          ORDER BY l.position, ha.artist_name",
+    )
+    .bind(&track_hk)
+    .fetch_all(pool)
+    .await?;
+    let mut artists = Vec::with_capacity(artist_rows.len());
+    for a in artist_rows {
+        let extids = sqlx::query_as::<_, ExtIdRow>(
+            "SELECT service, external_id FROM sat_artist_extid x
+              WHERE artist_hk = ?
+                AND load_date = (SELECT MAX(load_date) FROM sat_artist_extid y
+                                  WHERE y.artist_hk = x.artist_hk AND y.service = x.service)
+              ORDER BY service",
+        )
+        .bind(&a.artist_hk)
+        .fetch_all(pool)
+        .await?;
+        artists.push(VaultArtistLink {
+            name: Some(a.artist_name),
+            external_ids: extids
+                .into_iter()
+                .map(|e| (e.service, e.external_id))
+                .collect(),
+        });
+    }
+
+    // links.album ← link_track_album + hub_album + newest `sat_album_extid`.
+    let album = match sqlx::query_scalar::<_, String>(
+        "SELECT album_hk FROM link_track_album WHERE track_hk = ? ORDER BY load_date DESC LIMIT 1",
+    )
+    .bind(&track_hk)
+    .fetch_optional(pool)
+    .await?
+    {
+        Some(album_hk) => Some(album_link(pool, &album_hk).await?),
+        None => None,
+    };
+
+    Ok(Some(VaultTrackDetail {
+        isrc,
+        hub,
+        resolved,
+        links: VaultLinks { artists, album },
+        satellites: VaultSatellites {
+            analysis,
+            download,
+            meta,
+        },
+    }))
+}
+
+/// Build the album link: the title/release date from the hub's business key
+/// (`TITLE|DATE`), the release date preferred from the newest `sat_album_meta`,
+/// and the newest `sat_album_extid` per service.
+async fn album_link(pool: &Pool<Sqlite>, album_hk: &str) -> Result<VaultAlbumLink> {
+    let album_key: Option<String> =
+        sqlx::query_scalar("SELECT album_key FROM hub_album WHERE album_hk = ?")
+            .bind(album_hk)
+            .fetch_optional(pool)
+            .await?;
+    let (title, key_date) = match album_key.as_deref() {
+        Some(k) => match k.split_once('|') {
+            Some((t, d)) => (Some(t.to_string()), Some(d.to_string())),
+            None => (Some(k.to_string()), None),
+        },
+        None => (None, None),
+    };
+    let sat_date: Option<String> = sqlx::query_scalar(
+        "SELECT release_date FROM sat_album_meta
+          WHERE album_hk = ? AND release_date IS NOT NULL
+          ORDER BY load_date DESC LIMIT 1",
+    )
+    .bind(album_hk)
+    .fetch_optional(pool)
+    .await?;
+    let extids = sqlx::query_as::<_, ExtIdRow>(
+        "SELECT service, external_id FROM sat_album_extid x
+          WHERE album_hk = ?
+            AND load_date = (SELECT MAX(load_date) FROM sat_album_extid y
+                              WHERE y.album_hk = x.album_hk AND y.service = x.service)
+          ORDER BY service",
+    )
+    .bind(album_hk)
+    .fetch_all(pool)
+    .await?;
+    Ok(VaultAlbumLink {
+        title,
+        release_date: sat_date.or(key_date),
+        external_ids: extids
+            .into_iter()
+            .map(|e| (e.service, e.external_id))
+            .collect(),
+    })
+}
+
+/// Split the stored comma-joined `formats` column into a list (empty when blank).
+fn split_formats(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 // ── Backfill (off the boot path, batched, transactional, idempotent) ─────────
 
 #[derive(Debug, Default, Clone, Copy)]
