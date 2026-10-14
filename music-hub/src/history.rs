@@ -385,6 +385,7 @@ fn count_class(kind: &str, n: i64) -> String {
     match kind {
         "added" => "hub-badge-ok".to_string(),
         "removed" => "hub-badge-no".to_string(),
+        "changed" => "hub-badge-warn".to_string(),
         _ => String::new(),
     }
 }
@@ -687,9 +688,10 @@ async fn history_page(
     let run_count = runs.len();
     let event_count = events.len();
 
-    let events_filter_active = run.is_some() || change.is_some();
+    let events_filter_active =
+        run.is_some() || change.is_some() || !q.is_empty() || !source.is_empty() || !user.is_empty();
     let run_filter_active = run.is_some();
-    let events_reset_href = hist_url(&query_drop(rawq, &["run", "change"]));
+    let events_reset_href = hist_url(&query_drop(rawq, &["run", "change", "source", "user", "q"]));
     let run_chip_href = hist_url(&query_with(rawq, "run", None));
     let run_chip_label = run.map(|id| format!("Run #{id}")).unwrap_or_default();
 

@@ -494,6 +494,10 @@ async fn history_change_counts_badges() {
     // The badge classes carry the change kind.
     assert!(html.contains("hub-badge-ok"), "added badge class missing");
     assert!(html.contains("hub-badge-no"), "removed badge class missing");
+    assert!(
+        html.contains("hub-badge-warn"),
+        "changed badge class missing (hub-badge-warn)"
+    );
 }
 
 #[tokio::test]
@@ -551,6 +555,47 @@ async fn history_filtered_empty_state() {
     assert!(
         !html.contains("Keine Änderungen."),
         "generic empty state must not appear with an active filter"
+    );
+}
+
+#[tokio::test]
+async fn history_empty_state_for_freetext_and_source_filters() {
+    let app = common::spawn().await;
+    let (_, _) = seed_history(&app).await;
+    let alice = alice_of(&app);
+
+    // A free-text filter matching nothing → filter-aware empty state, not the
+    // generic one, and the reset link clears every filter back to /history.
+    let html = fetch(&app, alice, "/history?q=NOMATCHZZZ").await;
+    assert!(
+        html.contains("Keine Änderungen für diesen Filter"),
+        "filter-aware empty state missing for q filter"
+    );
+    assert!(
+        !html.contains("Keine Änderungen."),
+        "generic empty state must not appear with an active q filter"
+    );
+    assert!(
+        html.contains("href=\"/history\""),
+        "reset link for q filter must clear back to /history"
+    );
+
+    // A source filter matching nothing → filter-aware empty state as well.
+    let html = fetch(&app, alice, "/history?source=nosuchsource").await;
+    assert!(
+        html.contains("Keine Änderungen für diesen Filter"),
+        "filter-aware empty state missing for source filter"
+    );
+    assert!(
+        html.contains("href=\"/history\""),
+        "reset link for source filter must clear back to /history"
+    );
+
+    // Reset from a combined filter drops q/source/user/run/change together.
+    let html = fetch(&app, alice, "/history?source=srcalpha&q=NOMATCHZZZ").await;
+    assert!(
+        html.contains("href=\"/history\""),
+        "reset link must drop all filter params"
     );
 }
 
