@@ -637,7 +637,10 @@ pub async fn ready_flac_unaanalyzed(pool: &Pool<Sqlite>, limit: i64) -> anyhow::
             AND NOT EXISTS (
                 SELECT 1 FROM track_metadata m
                  WHERE m.isrc = t.isrc AND m.source = 'essentia')
-          ORDER BY t.updated_at ASC
+          ORDER BY COALESCE((SELECT MAX(o.priority) FROM order_items oi
+                              JOIN orders o ON o.id = oi.order_id
+                             WHERE oi.isrc = t.isrc), 0) DESC,
+                   t.updated_at ASC
           LIMIT ?",
     )
     .bind(limit)
