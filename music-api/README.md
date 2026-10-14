@@ -131,16 +131,77 @@ vault — the worker writes _loads_ into it.
 
 **Consumer surface** (the hub is only a consumer):
 
-| Method | Path                      | Use                                                      |
-| ------ | ------------------------- | -------------------------------------------------------- |
-| `GET`  | `/vault/tracks?isrcs=a,b` | resolved analysis for many ISRCs (unknown ISRCs omitted) |
-| `GET`  | `/vault/track/{isrc}`     | resolved analysis for one ISRC (`404` if unknown)        |
+| Method | Path                      | Use                                                                         |
+| ------ | ------------------------- | --------------------------------------------------------------------------- |
+| `GET`  | `/vault/tracks?isrcs=a,b` | resolved analysis for many ISRCs (unknown ISRCs omitted)                    |
+| `GET`  | `/vault/track/{isrc}`     | the **atomic** track view — hub + links + all satellites (`404` if unknown) |
 
-Each row is `{isrc, bpm, key, camelot, energy, source, updatedAt}`. BPM/key/camelot
-are picked **per field by precedence** over the latest per-analyzer satellite rows
-(default `traktor > essentia > reccobeats`, configurable via `ANALYSIS_PRECEDENCE`);
-`source` is the analyzer that provided the chosen BPM. A trash value stays in the
-model — it is simply not chosen.
+Every `/vault/tracks` row is `{isrc, bpm, key, camelot, energy, source, updatedAt}`.
+BPM/key/camelot are picked **per field by precedence** over the latest per-analyzer
+satellite rows (default `traktor > essentia > reccobeats`, configurable via
+`ANALYSIS_PRECEDENCE`); `source` is the analyzer that provided the chosen BPM. A
+trash value stays in the model — it is simply not chosen.
+
+`GET /vault/track/{isrc}` returns the fully-assembled view, so a consumer can render
+HUB + LINKS + SATELLITES and pick the truth it trusts:
+
+```json
+{
+  "isrc": "GBKQU2538819",
+  "hub": { "title": "…", "durationMs": 343414, "explicit": false },
+  "resolved": {
+    "bpm": 124.0,
+    "key": "8A",
+    "camelot": "8A",
+    "energy": 0.8,
+    "source": "traktor"
+  },
+  "links": {
+    "artists": [{ "name": "BINARYH", "externalIds": { "deezer": "10725209" } }],
+    "album": {
+      "title": "HOZHO NAASHA",
+      "releaseDate": "2025-05-09",
+      "externalIds": { "deezer": "747377661" }
+    }
+  },
+  "satellites": {
+    "analysis": [
+      {
+        "analyzer": "traktor",
+        "bpm": 124.0,
+        "key": "8A",
+        "camelot": "8A",
+        "energy": null,
+        "loadDate": "…"
+      }
+    ],
+    "download": {
+      "state": "ready",
+      "sourceFormat": "flac",
+      "formats": ["flac", "320", "128"],
+      "loadDate": "…"
+    },
+    "meta": [
+      {
+        "recordSource": "deezer",
+        "title": "…",
+        "artist": "…",
+        "album": "…",
+        "durationMs": 343414,
+        "loadDate": "…"
+      }
+    ]
+  }
+}
+```
+
+- `hub` — from `hub_track` + the **newest** `sat_track_meta`.
+- `resolved` — the same precedence resolution as `/vault/tracks` (envelope fields dropped).
+- `links` — from `link_track_artist`/`link_track_album` + the `*_extid` satellites.
+  Names are the hubs' **normalised** business keys (collapsed, uppercased).
+- `satellites.analysis` — **all** analyzers (the newest row per analyzer).
+- `satellites.download` — the newest `sat_track_download` (`null` if none).
+- `satellites.meta` — every `record_source` (the newest row per source).
 
 **Ingest** happens on the resolve path (Deezer → hubs/links/extids/`sat_track_meta`),
 on `ready` (`sat_track_download`), on the analysis job (`sat_track_analysis`,
