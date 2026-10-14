@@ -23,7 +23,7 @@ NOT already done: kein PR/Branch referenziert #348.
 | 1 | planner | done | Plan erstellt (S1–S6) |
 | 2 | setup | done | Baseline grün (build + test --no-run) |
 | 3 | developer | done | S1–S6 implementiert, build+test grün (11 neue Tests) |
-| 4 | verifier | pending | |
+| 4 | verifier | done | PASS — Diff/AK geprüft, `cargo test` grün (alle Targets 0 failed, Lib 75 passed) |
 | 5 | tester | pending | |
 | 6 | developer (PR) | pending | |
 | 7 | reviewer | pending | |
@@ -70,6 +70,49 @@ Commit: `af6e29f` — `feat(#348): make per-type 'describes the song' semantics 
 ### Betroffene Dateien
 `music-hub/src/settings.rs`, `music-hub/src/tagtypes.rs`, `music-hub/src/artists.rs`,
 `music-hub/src/tagdone.rs`. Keine Migration, nur `music-hub/**`.
+
+## Verify-Ergebnis (Stage 4)
+
+**Entscheidung: PASS** — Diff gegen AK S1–S6 geprüft, keine Blocker.
+
+### Test-Summary (`cd music-hub && cargo test`, Host planet)
+- Exit-Code **0**; alle ~39 Test-Targets **0 failed**.
+- Lib: **75 passed / 0 failed**; UI-Integration: 53 passed; views: 5 passed; Doc-tests: 0.
+- Neue #348-Tests vorhanden und grün:
+  `settings::tests::describe_toggles_are_registered`,
+  `tagtypes::tests::{describe_key_covers_all_types, describe_key_unique_per_semantic_type,
+  parse_bool_handles_truthy_and_fallback, describes_map_defaults_to_builtin,
+  describes_map_reads_settings_with_builtin_fallback}`,
+  `tagdone::tests::{family_primary_type_maps_canonical_families,
+  configured_families_default_to_builtin, configured_families_drop_disabled_types}`.
+- `cargo build`: grün; nur vorbestehende dead_code-Warnung (`web.rs:997`, unabhängig von #348).
+
+### AK-Check
+- **S1** `settings.rs`: 7 `ENGINE_DESCRIBES_*`-Konstanten; alle via `flag(...)` (`SettingKind::Bool`)
+  registriert. Defaults mood/genre/vibe/phase/merkmal=`1`, setlist/rumpelkiste=`0` — verifiziert
+  (Code + Test). ✅
+- **S2** `tagtypes.rs`: `describes()` unverändert (built-in Default); `describe_key()` mappt alle
+  Typen, PHASE_1..5 → `ENGINE_DESCRIBES_PHASE`; `parse_bool()` akzeptiert `1/true/on/yes`,
+  unset⇒Default; `describes_map()` liest `settings::load_all`, Fallback `describes()`. ✅
+- **S3** `artists.rs:1311`: `describes_map` einmal vor der Type-Dist-Schleife geladen;
+  Filter `artists.rs:1335` nutzt Setting-Wert mit Fallback. Leerer Store ⇒ identisch zu vorher. ✅
+- **S4** `tagdone.rs`: `family_primary_type()` (MOOD/GENRE/VIBE/PHASE→Phase1/MERKMAL);
+  `configured_families()` retained nur Familien mit aktivem `describes`; unbekannte Tokens bleiben. ✅
+- **S5** Admin-UI: `templates/admin.html:28` rendert `kind=="bool"` generisch (Name=f.key);
+  `pages.rs:3919` `admin_save` schreibt **alle** Bool-Specs unbedingt; `checked` aus Store/Default
+  (`pages.rs:3859`). Kein Template-/Handler-Edit nötig. ✅
+- **S6** Doc-Kommentare in `tagtypes.rs`/`settings.rs`/`tagdone.rs` korrigiert (kein „inherent/
+  hard-wired"). ✅
+- **Hygiene**: nur `music-hub/**` + Progress; **keine Migration**, keine fremden Module, kein
+  `unsafe`, keine Secrets/Debug-Prints, kein `unwrap()` in neuen Produktionspfaden. ✅
+
+### Findings
+Keine blockierenden Findings. Randnotiz (nicht #348, aus dem Plan bestätigt):
+`SettingKind::Csv` parst nur Zahlen, daher ist `engine_tag_done_types` (Familien-CSV) im Admin
+faktisch nicht speicherbar — für #348 irrelevant (Bool-Toggles), ggf. separates Issue.
+
+### Empfehlung
+Weiter zu Stage 5 (Tester).
 
 ## Setup-Baseline
 
