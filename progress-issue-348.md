@@ -24,7 +24,7 @@ NOT already done: kein PR/Branch referenziert #348.
 | 2 | setup | done | Baseline grün (build + test --no-run) |
 | 3 | developer | done | S1–S6 implementiert, build+test grün (11 neue Tests) |
 | 4 | verifier | done | PASS — Diff/AK geprüft, `cargo test` grün (alle Targets 0 failed, Lib 75 passed) |
-| 5 | tester | pending | |
+| 5 | tester | done | PASS — Integrations-Test ergänzt (Settings-Persistenz→tagdone), `cargo test` grün (398 passed / 0 failed) |
 | 6 | developer (PR) | pending | |
 | 7 | reviewer | pending | |
 
@@ -240,3 +240,45 @@ Bug-Fix-Kern; S4 hält das System kohärent, S6 Doku.
 - **Cache:** Map pro Request einmal geladen; keine Persistenz-/Migrationsänderung nötig.
 
 ### Geschätzte Gesamt-LOC: ~120 (ohne Tests), nur `music-hub/**`.
+
+## Test-Ergebnis (Stage 5 — Tester)
+
+Commit: `1b0aff5` — `test(#348): cover describes toggle via settings persistence in tagdone.`
+
+**Abdeckung der im Plan genannten Integrations-Tests (sqlx in-memory):**
+- „Toggle aus → Typ erscheint nicht mehr als beschreibend“ — durch
+  `tagtypes::tests::describes_map_reads_settings_with_builtin_fallback` (in-memory) abgedeckt:
+  `SETLIST` an + `MOOD` aus persistiert via `settings::set`, `describes_map` liest zurück
+  (MOOD=false, SETLIST=true, Rest = built-in Default). Genau der Seam, den `artists.rs`
+  konsumiert (Filter `describes.get(&t)...unwrap_or_else(describes)`). Explizit begründet:
+  keine handler-/HTTP-Abhängigkeit nötig, der Handler ruft ausschließlich `describes_map`.
+- „Merkmal-Toggle abgeschaltet → nicht mehr gefordert (tagdone)“ — vorher **nicht** direkt
+  abgedeckt (nur MOOD). **Neu ergänzt:** `tagdone::tests::describes_toggle_end_to_end_drops_merkmal_requirement`
+  (echter End-to-End über die Persistenz): seeded Track ist auf allen Familien außer MERKMAL
+  mit resolved Tags belegt → Default-`status` nicht `auto` (MERKMAL missing) → `settings::set(ENGINE_DESCRIBES_MERKMAL,"0")`
+  (derselbe Aufruf wie im `admin_save`-Pfad) → `configured_families` droppt MERKMAL,
+  unabhängige Familien bleiben, `status.auto/complete==true`, `missing==[]`.
+  Deckt zugleich „Setlist/Merkmal abgeschaltet“ + Settings-Persistenz-Belegbarkeit ab.
+- Hinweis: Die reine Handler-Verdrahtung `artists.rs` (Type-Dist-Schleife) ist nur über den
+  axum-Handler erreichbar; ihr Verhalten ist identisch zur per-Unit belegten `describes_map`-Semantik
+  (Fallback auf built-in bei leerem Store — durch `describes_map_defaults_to_builtin` gesichert).
+
+**Gesamtlauf:** `cd music-hub && cargo test` (Host planet) → **Exit 0**.
+- Alle ~39 Test-Targets **0 failed**; Doc-tests 0.
+- Summe: **398 passed / 0 failed** (Lib 76 — inkl. der 11 #348-Tests + 1 neuer Integrations-Test;
+  UI-Integration 53; views 5; alle übrigen Targets grün).
+- Neue #348-Tests grün: `settings::tests::describe_toggles_are_registered`;
+  `tagtypes::tests::{describe_key_covers_all_types, describe_key_unique_per_semantic_type,
+  parse_bool_handles_truthy_and_fallback, describes_map_defaults_to_builtin,
+  describes_map_reads_settings_with_builtin_fallback}`;
+  `tagdone::tests::{family_primary_type_maps_canonical_families,
+  configured_families_default_to_builtin, configured_families_drop_disabled_types,
+  describes_toggle_end_to_end_drops_merkmal_requirement}`.
+
+**Edge Cases geprüft:** leere DB ⇒ Verhalten identisch zu altem Hard-wired (Fallback);
+unbekannte Family-Tokens bleiben erhalten (`family_primary_type`→`None`⇒retain true);
+`1/true/on/yes` vs `0/false/unknown`; PHASE_1..5 teilen einen Key.
+
+**Stage-Status 5 → done (PASS).** Keine blockierenden Findings; Randnotiz (nicht #348):
+`SettingKind::Csv` parst nur Zahlen → `engine_tag_done_types` im Admin faktisch nicht
+speicherbar (aus Stage 4 bestätigt, separates Issue).
