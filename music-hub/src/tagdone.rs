@@ -210,4 +210,95 @@ mod tests {
         // Setlist is not a describe family; unrelated toggles leave it absent.
         assert!(!fams.iter().any(|f| f == "SETLIST"));
     }
+
+    const TS: &str = "2026-01-01T00:00:00+00:00";
+
+    async fn seed_tag(pool: &SqlitePool, owner: i64, slug: &str, ty: &str) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO hub_tags (owner_user_id, slug, name, created_at, type)
+             VALUES (?1, ?2, ?2, ?3, ?4) RETURNING id",
+        )
+        .bind(owner)
+        .bind(slug)
+        .bind(TS)
+        .bind(ty)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn resolve_tag(pool: &SqlitePool, track_id: i64, tag_id: i64) {
+        sqlx::query(
+            "INSERT INTO hub_track_resolved_tags (track_id, tag_id) VALUES (?1, ?2)
+             ON CONFLICT(track_id, tag_id) DO NOTHING",
+        )
+        .bind(track_id)
+        .bind(tag_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// End-to-end via the settings store: a track covered on every describing
+    /// family *except* MERKMAL is not `auto`-done by default; persisting the
+    /// MERKMAL toggle off (the same `settings::set` call `admin_save` uses) drops
+    /// MERKMAL from the required families and flips the track to `auto`/complete.
+    #[tokio::test]
+    async fn describes_toggle_end_to_end_drops_merkmal_requirement() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let uid: i64 = sqlx::query_scalar(
+            "INSERT INTO hub_users (slug, display_name, created_at)
+             VALUES ('u', 'u', ?1) RETURNING id",
+        )
+        .bind(TS)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let tid: i64 = sqlx::query_scalar(
+            "INSERT INTO hub_tracks (service, service_track_id, title, artists, first_seen_at)
+             VALUES ('spotify', 't1', 'T', 'A', ?1) RETURNING id",
+        )
+        .bind(TS)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Cover every describing family except MERKMAL.
+        for (slug, ty) in [
+            ("mood", "MOOD"),
+            ("genre", "GENRE"),
+            ("vibe", "VIBE"),
+            ("phase", "PHASE_1"),
+        ] {
+            let tag = seed_tag(&pool, uid, slug, ty).await;
+            resolve_tag(&pool, tid, tag).await;
+        }
+
+        // Defaults: MERKMAL is still a required describing family -> not auto.
+        let fams = configured_families(&pool).await;
+        let refs: Vec<&str> = fams.iter().map(String::as_str).collect();
+        let before = status(&pool, uid, tid, &refs).await;
+        assert!(!before.auto, "MERKMAL still required by default");
+        assert!(before.missing.iter().any(|m| m == "MERKMAL"));
+        assert!(!before.complete);
+
+        // Persist the toggle off, exactly as the admin save path does.
+        settings::set(&pool, settings::ENGINE_DESCRIBES_MERKMAL, "0")
+            .await
+            .unwrap();
+
+        let fams = configured_families(&pool).await;
+        assert!(
+            !fams.iter().any(|f| f == "MERKMAL"),
+            "MERKMAL no longer required once toggled off"
+        );
+        // Unrelated families survive the toggle.
+        assert!(fams.iter().any(|f| f == "MOOD"));
+        assert!(fams.iter().any(|f| f == "GENRE"));
+        let refs: Vec<&str> = fams.iter().map(String::as_str).collect();
+        let after = status(&pool, uid, tid, &refs).await;
+        assert!(after.auto, "auto passes once MERKMAL is toggled off");
+        assert!(after.complete);
+        assert!(after.missing.is_empty());
+    }
 }
