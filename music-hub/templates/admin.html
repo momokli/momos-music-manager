@@ -9,6 +9,10 @@
     </p>
 </hgroup>
 
+<section hx-get="/api/hub/status/panel" hx-trigger="load, every 15s" hx-swap="innerHTML">
+    <p class="hub-muted">Ops-Status wird geladen …</p>
+</section>
+
 <form method="post" action="/admin">
     <table class="hub-dense-table">
         <caption class="hub-visually-hidden">

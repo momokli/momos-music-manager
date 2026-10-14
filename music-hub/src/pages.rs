@@ -56,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .route("/digging", get(digging_page))
         .route("/digging/enrich", post(digging_enrich))
         .route("/admin", get(admin_page).post(admin_save))
+        .route("/api/hub/status/panel", get(status_panel))
         .route("/settings", get(settings_page))
         .route("/import", get(import_page).post(import_submit))
         .route("/import/traktor", post(import_traktor_submit))
@@ -3704,6 +3705,83 @@ async fn digging_enrich(
         let _ = crate::freqblog::enrich_tracks(&st.pool, &st.cfg, &ids, 40).await;
     }
     Redirect::to(&format!("/digging?seed={sid}")).into_response()
+}
+
+// ── ops status panel (issue #353) ───────────────────────────────────────────
+
+#[derive(Template)]
+#[template(path = "_partials/hub_status.html")]
+struct HubStatusFrag {
+    workers: Vec<WorkerRow>,
+    backlog: Vec<BacklogRow>,
+    music_api_configured: bool,
+    music_api_reachable: bool,
+    worker_paused: bool,
+    interval_secs: u64,
+    max_attempts: i64,
+    queue_depth: i64,
+}
+
+struct WorkerRow {
+    name: String,
+    last_run: String,
+    last_worked: bool,
+    iterations: u64,
+    last_error: String,
+}
+
+struct BacklogRow {
+    label: String,
+    count: i64,
+}
+
+/// `GET /api/hub/status/panel` — admin-only htmx fragment for `/admin`.
+async fn status_panel(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "admin").await else {
+        return Redirect::to("/login").into_response();
+    };
+    if !nav.is_admin {
+        return (StatusCode::FORBIDDEN, "Nur Admins.").into_response();
+    }
+
+    let snap = st.worker_health.snapshot();
+    let workers: Vec<WorkerRow> = snap
+        .loops
+        .iter()
+        .map(|l| WorkerRow {
+            name: l.name.to_string(),
+            last_run: l.last_run_at.clone().unwrap_or_else(|| "—".to_string()),
+            last_worked: l.last_worked,
+            iterations: l.iterations,
+            last_error: l.last_error.clone().unwrap_or_default(),
+        })
+        .collect();
+
+    let b = crate::api::backlog_counts(&st.ro_pool).await;
+    let backlog = vec![
+        BacklogRow { label: "Features".to_string(), count: b.features_pending },
+        BacklogRow { label: "Requests".to_string(), count: b.feature_requests },
+        BacklogRow { label: "Genres".to_string(), count: b.genres_pending },
+        BacklogRow { label: "Crawl".to_string(), count: b.crawl_pending },
+        BacklogRow { label: "Curation fällig".to_string(), count: b.curation_due },
+        BacklogRow { label: "Likes".to_string(), count: b.likes_queued },
+        BacklogRow { label: "Playlists".to_string(), count: b.playlists_pending },
+    ];
+
+    let configured = st.cfg.music_api_token.is_some();
+    let wi = crate::music_api::worker_info(&st.cfg).await;
+    let (items, _err, _counts) = crate::music_api::live_queue(&st.cfg).await;
+
+    render(&HubStatusFrag {
+        workers,
+        backlog,
+        music_api_configured: configured,
+        music_api_reachable: wi.ok,
+        worker_paused: wi.paused,
+        interval_secs: wi.interval_secs,
+        max_attempts: wi.max_attempts,
+        queue_depth: items.len() as i64,
+    })
 }
 
 // ── admin (settings) ────────────────────────────────────────────────────────

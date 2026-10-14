@@ -190,14 +190,16 @@ async fn cmd_serve(cfg: Config, host: Option<String>, port: Option<u16>) -> Resu
     let pool = db::connect(&cfg.database_url).await?;
     let ro_pool = db::connect_readonly(&cfg.database_url).await?;
     let cfg = settings::overlay_config(&pool, cfg).await;
+    // Start the loops first so the health registry is shared with the API.
+    let worker_health = worker::spawn(pool.clone(), Arc::new(cfg.clone()));
     let state = api::AppState {
         pool,
         ro_pool,
         cfg: Arc::new(cfg.clone()),
         oauth_states: Arc::new(Mutex::new(HashMap::new())),
+        worker_health,
     };
     let app = api::app(state.clone());
-    worker::spawn(state.pool.clone(), state.cfg.clone());
 
     let listener = TcpListener::bind((host.as_str(), port)).await?;
     let addr = listener.local_addr()?;
@@ -206,6 +208,7 @@ async fn cmd_serve(cfg: Config, host: Option<String>, port: Option<u16>) -> Resu
     println!("  Web-UI:              GET  /");
     println!("  Spotify verbinden:   GET  /api/hub/services/spotify/connect");
     println!("  GET  /api/hub/health");
+    println!("  GET  /api/hub/status         (Ops-Status: Worker-Loops + Backlog + music-api)");
     println!("  GET  /api/hub/users");
     println!("  GET  /api/hub/playlists");
     println!("  GET  /api/hub/overlap");
