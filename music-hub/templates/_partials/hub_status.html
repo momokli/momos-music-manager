@@ -1,0 +1,56 @@
+<section class="hub-status-panel" aria-label="Ops-Status">
+    <h3>Hub-Worker</h3>
+    <div class="overflow-auto hub-scroll-y">
+        <table class="hub-dense-table">
+            <caption class="hub-visually-hidden">
+                Hub-Worker-Loops (Issue #353)
+            </caption>
+            <thead>
+                <tr>
+                    <th scope="col">Loop</th>
+                    <th scope="col">Letzter Lauf</th>
+                    <th scope="col">Iterationen</th>
+                    <th scope="col">Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for w in workers %}
+                <tr>
+                    <td>{{ w.name }}</td>
+                    <td>{{ w.last_run }}</td>
+                    <td>{{ w.iterations }}</td>
+                    <td>
+                        {% if w.last_worked %}<span class="hub-badge hub-badge-ok">läuft</span>
+                        {% else %}<span class="hub-badge">idle</span>{% endif %} {% if
+                        w.last_error != "" %}<span class="hub-badge hub-badge-no">{{ w.last_error }}</span>{%
+                        endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <h3>Backlog</h3>
+    <p class="hub-muted">
+        {% for b in backlog %}{{ b.label }}: {{ b.count }}{% if !loop.last %} · {% endif %}{% endfor %}
+    </p>
+
+    <h3>music-api</h3>
+    <p>
+        {% if music_api_configured %} {% if music_api_reachable %} {% if worker_paused %}
+        <span class="hub-badge hub-badge-no">Worker pausiert</span>
+        {% else %}
+        <span class="hub-badge hub-badge-ok">Worker läuft</span>
+        {% endif %}
+        <span class="hub-muted"
+            >Intervall {{ interval_secs }}s · max. Versuche {{ max_attempts }} · Queue-Tiefe
+            {{ queue_depth }}</span
+        >
+        {% else %}
+        <span class="hub-badge hub-badge-no">nicht erreichbar</span>
+        {% endif %} {% else %}
+        <span class="hub-badge">nicht konfiguriert</span>
+        {% endif %}
+    </p>
+</section>
