@@ -2007,3 +2007,71 @@ gefüllt — die api→hub-Backfill-Richtung fehlte.
 - Ein Miss legt eine `found=0`-Row an, die den ReccoBeats-`f.track_id IS NULL`-Pfad
   für dieses Track künftig ausschließt — bewusst: die ISRC-Autorität hatte keine
   Werte. Bei Bedarf später über eine kombinierte Selektion revisiten.
+
+---
+
+---
+
+## ADR-081: kellner — lokaler Agent: Authority-Split, Pairing, Tagging, Transport, Form
+
+**Date**: 2026-10-15
+**Status**: Accepted (entscheidet `plans/proposed/kellner-0.1.0.md` §10; Issue #361)
+**Relates**: ADR-013 (Local-First), ADR-060 (Mirror statt Append), ADR-061 (Rate-Limit/
+Backoff), ADR-062 (tolerante Verifikation), ADR-065 (music-api = Download-Autorität),
+ADR-074 (Hub, lokale Accounts), ADR-075 (Spelunke Tag-Layer), ADR-079 (music-api =
+ISRC→{BPM,Key}-Autorität)
+
+**Context**: `kellner` ist der lokale, plattformübergreifende Companion **pro Maschine**
+(Mac/PC). Er hält jede Maschine mit den always-on-Servern synchron: Traktor-
+`collection.nml` hochladen, aktive Backpacks herunterladen (fehlende Tracks via music-api
+ordern, flach ablegen, Tags in den Comment schreiben), die Bibliothek in music-apis Object
+Store sichern, Zustand melden. Der Plan `plans/proposed/kellner-0.1.0.md` ließ sechs
+Entscheidungen in §10 offen; Issue **#361** war das ADR-Gate, das den Fokus-Milestone
+`kellner-0.1.0` (**#37**) und damit die Runner-Kette blockierte.
+
+**Decision**:
+
+1. **Authority-Split (bestätigt).** Intrinsische Fakten (Audio, Analyse, Object Store) →
+   **music-api** Vault; zugeschriebene Fakten (Identität, Tags, Playlists, Backpacks) →
+   **music-hub**; kellner führt beides **lokal** zusammen und leitet nichts neu ab.
+2. **Pairing = Link-als-Capability.** kellner erzeugt beim ersten Start ein
+   **Device-Token** und öffnet den Browser auf `https://hub.zukkafabrik.de/kellner/anheuern`
+   (Default-Host; überschreibbar via `~/.config/kellner/config.toml`). Wer den Link mit
+   einem eingeloggten Account öffnet und **„diesen kellner anheuern?“ → Ja** drückt, bindet
+   das Device an diesen User. Kein Code-Tippen, kein Copy-Paste — der Link selbst ist die
+   Berechtigung (Interception bewusst akzeptiert und als Feature nutzbar). Zwei
+   Sicherungs-Eigenschaften: der Endpoint verlangt eine **eingeloggte Session**, und das
+   Token wird **nach dem Binden entwertet** (+ Ablauf unbenutzt) — damit kann ein später
+   geleaktes Link einen bereits angeheuerten kellner nicht re-hijacken.
+3. **Null Feature-Config auf dem Gerät.** Traktor-Upload an/aus, Backpack-Sync an/aus und
+   **welche Backpacks pro Device** gelten — alles im Hub (`hub_devices` + per-Device-
+   Settings, #363/#369). `config.toml` existiert nur für den Hub-Host-Override.
+   Tray-Rechtsklick = genau **„feierabend“** (beenden) und **„re-auth“**.
+4. **Comment-Write + Hash.** Tags werden via `lofty` in die **Datei** geschrieben **und** in
+   `collection.nml` gespiegelt (Traktor-Guard: nur wenn Traktor geschlossen ist, sonst
+   nächster Lauf; atomar temp+rename). Der stabile Backup-Hash ist die **SHA-256 der
+   kanonisierten Datei** (Comment geleert) — identisch zur Object-Store-Key-Semantik
+   (`legacy/mmm/src/store.rs`, Migration 028). Comment-Schreiben bricht die Dedup damit
+   **nicht**; die frühere „breaks dedup“-Notiz (Plan §5.2/§8) war stale (Raw-File-Hash).
+5. **Backup-Transport (v1).** Ganze Datei per idempotentem `PUT /objects/{sha256}`;
+   vorhandene Objekte per `POST /objects/check` übersprungen. Chunked/Resumable ist v2.
+6. **Traktor-Upload-Pfad.** Neuer token-gated `POST /api/hub/traktor/import`
+   (Bearer Device-Token, nml im Body); die Hub-CLI `import-traktor` bleibt für manuelles /
+   Server-seitiges Importieren.
+7. **Sequencing.** Die per-Device-Backpack-Zuordnung ist v1-kritisch → **#369** (+ **#363**)
+   **vor** dem Backpack-Sync. Order: `#361 → #363 → #369 → #362 → #364 → #365 → …`
+8. **Form.** kellner v1 ist ein **Tray-/Menu-Bar-Widget** (battery-freundlich), kein
+   CLI-first. **#368** (Service + Tray) ist v1-Scope, nicht spätes P5.
+
+**Consequences**:
+
+- Die vier `question`-Issues **#362–#365** sind nicht mehr decision-gated; der Triage-
+  Runner kann sie nach #361 dispatchen — der Fokus-Milestone #37 läuft wieder an.
+- Plan §5.2/§6/§8/§10 und `kellner/AGENT.md` §5 sind entsprechend korrigiert; §5.2/§8
+  (content_hash-Risiko) waren stale.
+- Per-Device-Konfiguration im Hub macht **#363** zur harten Vorbedingung der Pairing-/
+  Sync-Kette; **#369** rückt vor **#365**.
+- Der Multi-User-Fall hängt an der Link-Disziplin: wer den Link während des offenen
+  Pairing-Fensters abfängt, kann das Device an sich binden — akzeptiert; nach dem Binden
+  ist Re-Hijack durch Token-Entwertung ausgeschlossen.
+- kellner bleibt ohne Provider-Credentials; er spricht nur Hub + music-api.
