@@ -59,6 +59,7 @@ pub mod tagtasks;
 pub mod tagtaskui;
 pub mod tagtypes;
 pub mod traktor;
+pub mod traktor_api;
 pub mod ui;
 pub mod viewstate;
 pub mod web;

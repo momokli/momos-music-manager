@@ -6,10 +6,15 @@
 //! hub) — never to Deezer / Spotify / SoundCloud / YouTube directly (see
 //! `AGENT.md`).
 
+mod client;
 mod config;
 mod pairing;
+mod state;
+mod sync;
 
-use anyhow::Result;
+use std::path::Path;
+
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -33,8 +38,8 @@ enum Command {
     Backpack,
     /// Back up the local music library to music-api.
     Backup,
-    /// Upload a Traktor `collection.nml` to music-api.
-    TraktorUpload,
+    /// Upload a Traktor `collection.nml` to the hub (device-token gated).
+    TraktorUpload(TraktorUploadArgs),
     /// Show the state of downloads and the Backpack.
     Downloads,
 }
@@ -61,6 +66,19 @@ struct PairArgs {
     force: bool,
 }
 
+#[derive(Debug, Args)]
+struct TraktorUploadArgs {
+    /// Explicit `collection.nml` path (default: config value, else platform autodetect).
+    #[arg(long)]
+    collection_nml: Option<std::path::PathBuf>,
+    /// Upload at most once and exit (no watch loop).
+    #[arg(long)]
+    once: bool,
+    /// Poll interval in seconds (default: config value, else 300).
+    #[arg(long)]
+    interval_secs: Option<u64>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -68,7 +86,7 @@ fn main() -> Result<()> {
         Command::Pair(args) => return pair(args),
         Command::Backpack => not_yet("backpack"),
         Command::Backup => not_yet("backup"),
-        Command::TraktorUpload => not_yet("traktor-upload"),
+        Command::TraktorUpload(args) => return traktor_upload(args),
         Command::Downloads => not_yet("downloads"),
     }
 
@@ -93,6 +111,68 @@ fn pair(args: PairArgs) -> Result<()> {
         let transport = pairing::HttpHubTransport::new(hub_url);
         pairing::run_pair(&mut cfg, &transport, &opts).await
     })
+}
+
+fn traktor_upload(args: TraktorUploadArgs) -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        let cfg = config::load()?;
+        let device = cfg.device.clone().ok_or_else(|| {
+            anyhow::anyhow!("this device is not paired yet — run `kellner pair` first")
+        })?;
+        let hub_url = cfg.hub_url();
+        let interval = args
+            .interval_secs
+            .or(cfg.traktor_poll_secs)
+            .unwrap_or(300)
+            .max(1);
+        let override_nml = args.collection_nml.clone().or(cfg.traktor_nml.clone());
+        let client = client::hub::HubClient::new(hub_url, device.device_token);
+
+        loop {
+            if let Err(e) = sync_once(&client, override_nml.as_deref()).await {
+                eprintln!("kellner: traktor upload failed: {e:#}");
+            }
+            if args.once {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+        }
+        Ok(())
+    })
+}
+
+/// One detection + change-check + (maybe) upload cycle.
+async fn sync_once(client: &client::hub::HubClient, override_nml: Option<&Path>) -> Result<()> {
+    let Some(path) = sync::traktor::detect(override_nml) else {
+        println!(
+            "kellner: Traktor collection.nml not found (pass --collection-nml or set KELLNER_TRAKTOR_NML)"
+        );
+        return Ok(());
+    };
+    let mtime = sync::traktor::mtime_nanos(&path)
+        .ok_or_else(|| anyhow::anyhow!("cannot stat {}", path.display()))?;
+    let state = state::load()?;
+    if !state::needs_upload(&state, mtime) {
+        println!("kellner: {} unchanged since last upload — nothing to do", path.display());
+        return Ok(());
+    }
+    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let stats = client
+        .upload_traktor(bytes)
+        .await
+        .context("uploading collection.nml")?;
+    let mut state = state;
+    state.last_upload_mtime = Some(mtime);
+    state::save(&state)?;
+    println!(
+        "kellner: uploaded {} ({} entries, {} matched, {} playlists)",
+        path.display(),
+        stats.entries,
+        stats.matched,
+        stats.playlists
+    );
+    Ok(())
 }
 
 fn default_hostname() -> String {
@@ -152,7 +232,7 @@ mod tests {
             let got = match cli.command {
                 Command::Backpack => "backpack",
                 Command::Backup => "backup",
-                Command::TraktorUpload => "traktor-upload",
+                Command::TraktorUpload(_) => "traktor-upload",
                 Command::Downloads => "downloads",
                 Command::Pair(_) => "pair",
             };

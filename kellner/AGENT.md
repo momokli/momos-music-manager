@@ -1,12 +1,17 @@
 # kellner — Agent Handover
 
-> **Last updated**: 2026-10-15 · §5 decisions locked (ADR-081, #361)
+> **Last updated**: 2026-10-15 · traktor-upload implemented (#364); §5 decisions
+> locked (ADR-081, #361)
 > Keep this file current. It is the entry point for any agent working on `kellner/`.
 >
-> **Status: pairing implemented (#362).** `src/config.rs` (config + device identity,
-> `0600`, redacted) and `src/pairing.rs` (token gen, hub register, approval URL,
-> persist) exist, plus `kellner pair`. The remaining commands (`backpack`, `backup`,
-> `traktor-upload`, `downloads`) are still stubs.
+> **Status: pairing implemented (#362), traktor-upload implemented (#364).**
+> `src/config.rs` (config + device identity, `0600`, redacted) and `src/pairing.rs`
+> (token gen, hub register, approval URL, persist) exist, plus `kellner pair`.
+> `kellner traktor-upload` detects the local Traktor `collection.nml`
+> (`src/sync/traktor.rs`), watches it for **mtime** changes (`src/state.rs` skips an
+> unchanged file) and uploads it to the **hub** via the device-token-gated
+> `POST /api/hub/traktor/import` (`src/client/hub.rs`). The remaining commands
+> (`backpack`, `backup`, `downloads`) are still stubs.
 
 ---
 
@@ -41,8 +46,10 @@ member — it declares its own empty `[workspace]`).
   “diesen kellner anheuern?” and stores the token locally.
 - **backups** — walk the local music library, hash files, upload to `music-api`'s
   object store; content-hash dedup.
-- **uploads** — Traktor `collection.nml` → `music-api` (playcount / rating /
-  playlists).
+- **uploads** — kellner uploads the local Traktor `collection.nml` to the **hub**
+  (`POST /api/hub/traktor/import`, device-token-gated; ADR-081 **Entscheidung 6**);
+  the hub calls `traktor::import_str` internally to persist playcount / rating /
+  playlists. (Not a direct `music-api` call.)
 - **downloads** — pull ordered ISRCs / Backpack contents back down.
 - **service/tray** — runs as a **tray / menu-bar widget** (v1, battery-friendly) on top of
   launchd (macOS) / systemd (Linux) / Task Scheduler (Windows); right-click shows exactly
@@ -56,9 +63,16 @@ kellner/
 ├── README.md
 ├── AGENT.md       # this file
 └── src/
-    ├── main.rs    # clap CLI: pair (+ backpack / backup / traktor-upload / downloads stubs)
+    ├── main.rs    # clap CLI: pair, traktor-upload (+ backpack / backup / downloads stubs)
     ├── config.rs  # ~/.config/kellner/config.toml + persisted device identity
-    └── pairing.rs # token gen, hub register, approval URL, browser open, confirm
+    ├── pairing.rs # token gen, hub register, approval URL, browser open, confirm
+    ├── state.rs   # minimal JSON sync state (state.json, `last_upload_mtime`)
+    ├── sync/
+    │   ├── mod.rs
+    │   └── traktor.rs # collection.nml detection (macOS/Windows defaults + override) + mtime watch
+    └── client/
+        ├── mod.rs
+        └── hub.rs     # upload via `Authorization: Bearer <device_token>` + bounded retry/backoff
 ```
 
 ## 5. Decisions (locked 2026-10-15 — ADR-081, #361)
@@ -77,6 +91,11 @@ All open points below are now **resolved**; treat them as intent to implement, n
   - **Binding confirmation is user-driven** (open URL + press Enter / `--wait`): the
     merged hub (#363) exposes **no device-gated route**, so kellner cannot poll.
     Auto-poll is deferred to **#364** — do not invent a hub endpoint.
+- **Traktor-upload transport** — **implemented (#364).** kellner watches the local
+  `collection.nml` (mtime; unchanged files are skipped via `state.json`) and `POST`s it
+  to the hub's token-gated `POST /api/hub/traktor/import` (ADR-081 **Entscheidung 6**);
+  the hub runs `traktor::import_str` itself. The body is capped at **16 MiB**
+  (`MAX_NML_BYTES` in `music-hub/src/traktor_api.rs`; larger collections get `413`).
 - **Config location** — `~/.config/kellner/config.toml` exists **only** for the hub-host
   override (default `hub.zukkafabrik.de`). **No feature config on the device**: the
   Traktor-upload / backpack-sync toggles and the per-device backpack set live in the Hub
