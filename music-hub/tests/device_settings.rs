@@ -243,6 +243,39 @@ async fn over_long_template_is_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
 }
 
+// (f3) empty body {} → 200, nothing changed (all fields absent = unchanged) ───
+
+#[tokio::test]
+async fn empty_body_changes_nothing() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("ds-alice", "1234").await;
+    let did = bound_device(&app, uid, "kellner-1", &"a".repeat(64)).await;
+    let bp = backpack(&app, uid, "bp-a").await;
+
+    let (s, _) = put(
+        &app,
+        &cookie,
+        did,
+        json!({ "preferred_format": "mp3", "comment_template": "keep", "active_backpack_ids": [bp] }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // PUT {} is a no-op: 200 and every field preserved.
+    let (status, v) = put(&app, &cookie, did, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["preferred_format"], "mp3");
+    assert_eq!(v["comment_template"], "keep");
+    assert_eq!(v["active_backpack_ids"], json!([bp]));
+
+    // And it really persisted (GET reflects the same state).
+    let (status, v) = get(&app, Some(&cookie), did).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["preferred_format"], "mp3");
+    assert_eq!(v["comment_template"], "keep");
+    assert_eq!(v["active_backpack_ids"], json!([bp]));
+}
+
 // (g) owner scope: foreign device → 404 on GET and PUT; unknown → 404 ────────
 
 #[tokio::test]
