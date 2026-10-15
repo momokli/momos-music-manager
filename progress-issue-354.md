@@ -113,3 +113,13 @@ Stage 3 umgesetzt nach `plan-issue-354.md` (US-1..US-6, §Z). Kein `git commit` 
 - **PR #442**: https://github.com/momokli/momos-music-manager/pull/442 (base `main`).
 - PR-Body enthält `Closes #354` (verifiziert via `pr view --json body`).
 - Merge-Status: **OPEN**, kein Merge ausgeführt (auftragsgemäß).
+
+## Review (Stage 7, 2026-10-15)
+- review=APPROVE — Diff gegen `plan-issue-354.md` vollständig geprüft (13 Dateien, music-api unverändert).
+  Lokale Reproduktion: `cd music-hub && cargo test --locked` → alle Suiten 0 failed, `features_metadata` 11/11.
+  Mechanisches Gate: Required-Check „Build + Test (cargo)“ (Hub CI / CI (PR)) noch `in_progress` → `mergeStateStatus=BLOCKED`,
+  kein Content-Blocker. Kein Merge/Kommentar ausgeführt.
+
+## Rework (Screenshot-Beleg, 2026-10-15)
+- Blocker "Frontend ohne Screenshot" adressiert: `/music-api`-Console gerendert (Test-DB + Session, MUSIC_API_TOKEN gesetzt),
+  Button „BPM/Key holen" sichtbar. PNG: `docs/screenshots/music-api-metadata-backfill.png`, im PR-Body eingebettet.
