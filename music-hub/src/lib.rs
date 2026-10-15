@@ -29,6 +29,7 @@ pub mod cosine;
 pub mod crawl;
 pub mod curate;
 pub mod db;
+pub mod device_settings;
 pub mod devices;
 pub mod digging;
 pub mod features;
