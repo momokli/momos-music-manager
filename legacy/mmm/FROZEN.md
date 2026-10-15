@@ -5,11 +5,12 @@
 
 ## What this means
 
-- **No new features.** Do **not** add features to `legacy/mmm/src/`,
-  `legacy/mmm/frontend/` or `legacy/mmm/migrations/`.
+- **No new features.** The whole `legacy/mmm/` tree is frozen — every path under it
+  except `*.md` docs/changelog is off-limits.
 - **Bug fixes only** — and only those needed to keep MMM **running** until the
   migration is done (startup, crashes, data integrity, migration-critical paths).
-- **Docs/changelog** under `legacy/mmm/` (e.g. `CHANGELOG.md`, `*.md`) are allowed.
+- **Docs/changelog only** are the one allowed change under `legacy/mmm/` — a `*.md`
+  edit (e.g. `CHANGELOG.md`, `FROZEN.md`). Everything else needs the `mmm:unfreeze` label.
 
 ## Where the future is
 
@@ -24,8 +25,8 @@ The replacement lives in the music stack — build new functionality there, not 
 ## Enforcement
 
 The `.github/workflows/mmm-freeze.yml` **MMM freeze guard** fails any PR that touches
-the MMM feature surface (`src/`, `frontend/`, `migrations/`, `Cargo.toml`, `Cargo.lock`,
-`build.rs`).
+**any** path under `legacy/mmm/`, **except** docs/changelog (`*.md`, e.g. `CHANGELOG.md`,
+`FROZEN.md`).
 
 **Escape hatch:** a migration-critical fix can be unblocked by adding the PR label
 **`mmm:unfreeze`**. That label is the *only* way past the guard — use it deliberately.

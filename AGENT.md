@@ -67,8 +67,10 @@ PRs against `main` are gated by required status checks (branch protection):
 - `Build + Test (cargo)` (`ci-pr.yml`) — `cargo build --locked` + `cargo test --locked`
   (with `flac` / `ffmpeg` / `exiftool` installed for the media paths).
 - `Conventional-Commit-Titel` and `Issue-Referenz im PR` (`pr-quality.yml`).
-- `MMM freeze guard` (`mmm-freeze.yml`) — fails any PR touching the frozen MMM
-  feature surface; the label `mmm:unfreeze` is the **only** escape for the freeze guard.
+
+> **Note:** `MMM freeze guard` (`mmm-freeze.yml`) — workflow vorhanden (fails any PR
+> touching the frozen MMM feature surface); die Required-Check-Registrierung auf
+> `main` folgt via `mmm-pr-gate`. Label `mmm:unfreeze` ist der **einzige** Escape.
 
 `cargo fmt` and `cargo clippy` run informationally only (`continue-on-error`) — the
 codebase is not rustfmt-/clippy-clean yet (provisional figure: `cargo fmt --check`
