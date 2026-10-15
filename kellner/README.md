@@ -5,8 +5,9 @@ on each Mac / PC and keeps the local machine in sync with the always-on servers
 [`music-api`](../music-api/) (downloads, object store, BPM/key authority) and
 [`music-hub`](../music-hub/) (multi-user web UI + DB).
 
-> **Status: skeleton.** The crate exists and the CLI surface is stubbed — every
-> subcommand currently prints `not yet implemented`. Nothing talks to a server yet.
+> **Status: pairing implemented (#362).** `kellner pair` registers this device with
+> the hub and stores the device token. The remaining subcommands (`backpack`,
+> `backup`, `traktor-upload`, `downloads`) still print `not yet implemented`.
 
 ## What it will do
 
@@ -29,11 +30,20 @@ single authority for downloads and metadata.
 cd kellner
 cargo run -- --help
 cargo run -- --version
+# Pair this device: opens the approval URL; the user approves in the browser
+# and presses Enter. The raw token is never printed.
+cargo run -- pair
+cargo run -- pair --no-open            # just print the approval URL
+cargo run -- pair --print-only         # register + print, no binding/persist (CI)
 cargo run -- backpack
 cargo run -- backup
 cargo run -- traktor-upload
 cargo run -- downloads
 ```
+
+Config lives in `~/.config/kellner/config.toml` (hub-host override + device
+identity, file mode `0600`). Override the path with `KELLNER_CONFIG`; override
+the hub with `KELLNER_HUB_URL`.
 
 ## Planned first features (kellner-0.1.0)
 
