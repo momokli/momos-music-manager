@@ -21,4 +21,5 @@ url = "2"
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# `net`+`io-util` are needed by the offline mock-hub integration tests (tests/pair_flow.rs).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
