@@ -1,5 +1,7 @@
 //! HTTP surface: orders, per-ISRC status, and file delivery.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -32,6 +34,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/orders/{id}", get(get_order))
         .route("/orders/{id}/cancel", post(cancel_order))
         .route("/orders/{id}/priority", post(set_priority))
+        // Whole-playlist download: one request → one ZIP of the order (#358).
+        .route("/orders/{id}/archive", get(get_order_archive))
         // Artist orders: download a whole Deezer artist's discography.
         .route(
             "/artist-orders",
@@ -653,11 +657,54 @@ async fn get_isrc(State(state): State<Arc<AppState>>, Path(isrc): Path<String>) 
 }
 
 /// `GET /isrc/{isrc}/objects` — resolve an ISRC to its object variants (#359).
-async fn get_isrc_objects(
-    state: State<Arc<AppState>>,
-    Path(isrc): Path<String>,
-) -> Response {
+async fn get_isrc_objects(state: State<Arc<AppState>>, Path(isrc): Path<String>) -> Response {
     crate::store::isrc_objects(state, Path(isrc)).await
+}
+
+/// Where a single track's bytes can currently be served from (#358).
+enum Servable {
+    /// An openable file under `data_dir` (`X-Source: local`).
+    Local(PathBuf),
+    /// A content-addressed object in the backup store (`X-Source: store`).
+    Store(String),
+}
+
+/// Resolve `isrc` + delivery `format` to a servable source. Local-first: an
+/// openable data_dir file wins; otherwise the permanent object store (#359).
+/// `None` when neither is available. Shared by the single-file download and the
+/// order archive so both expose the same "servable" view.
+async fn resolve_servable(
+    state: &Arc<AppState>,
+    track: Option<&crate::models::Track>,
+    isrc: &str,
+    format: &str,
+) -> Option<Servable> {
+    if let Some(t) = track {
+        if let Some(path) = t.path_for(format) {
+            match tokio::fs::File::open(path).await {
+                Ok(_) => return Some(Servable::Local(PathBuf::from(path))),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::error!("open {path} failed: {e:#}"),
+            }
+        }
+    }
+    let obj = crate::store::resolve_isrc_object(&state.pool, &state.store, isrc, format).await?;
+    Some(Servable::Store(obj.hash))
+}
+
+/// First servable format from `formats` (in order), as `(format, source)`.
+async fn resolve_first(
+    state: &Arc<AppState>,
+    track: Option<&crate::models::Track>,
+    isrc: &str,
+    formats: &[&str],
+) -> Option<(String, Servable)> {
+    for format in formats {
+        if let Some(s) = resolve_servable(state, track, isrc, format).await {
+            return Some(((*format).to_string(), s));
+        }
+    }
+    None
 }
 
 /// `GET /isrc/{isrc}/{flac|320|128}` — stream the delivered file. Local-first:
@@ -688,46 +735,254 @@ async fn get_file(
         "audio/mpeg"
     };
 
-    // Local-first: only a present, openable file counts. A missing local file
-    // (or no recorded path) falls through to the store.
-    if let Some(t) = &track {
-        if let Some(path) = t.path_for(&format) {
-            match tokio::fs::File::open(path).await {
-                Ok(file) => {
-                    let stream = ReaderStream::new(file);
-                    let mut resp = Body::from_stream(stream).into_response();
-                    resp.headers_mut().insert(
-                        header::CONTENT_TYPE,
-                        header::HeaderValue::from_static(content_type),
-                    );
-                    resp.headers_mut()
-                        .insert("x-source", header::HeaderValue::from_static("local"));
-                    return resp;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    tracing::error!("open {path} failed: {e:#}");
-                    return error(StatusCode::INTERNAL_SERVER_ERROR, "file missing on disk");
-                }
+    match resolve_servable(&state, track.as_ref(), &isrc, &format).await {
+        Some(Servable::Local(path)) => match tokio::fs::File::open(&path).await {
+            Ok(file) => {
+                let stream = ReaderStream::new(file);
+                let mut resp = Body::from_stream(stream).into_response();
+                resp.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    header::HeaderValue::from_static(content_type),
+                );
+                resp.headers_mut()
+                    .insert("x-source", header::HeaderValue::from_static("local"));
+                resp
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                error(StatusCode::NOT_FOUND, format!("no {format} for this ISRC"))
+            }
+            Err(e) => {
+                tracing::error!("open {} failed: {e:#}", path.display());
+                error(StatusCode::INTERNAL_SERVER_ERROR, "file missing on disk")
+            }
+        },
+        // Store fallback: the content-addressed object is the permanent source.
+        Some(Servable::Store(hash)) => {
+            let mut resp =
+                crate::store::stream_object(&state.store, &hash, content_type, &headers).await;
+            if matches!(resp.status(), StatusCode::OK | StatusCode::PARTIAL_CONTENT) {
+                resp.headers_mut()
+                    .insert("x-source", header::HeaderValue::from_static("store"));
+            }
+            resp
+        }
+        None if track.is_none() => error(StatusCode::NOT_FOUND, "unknown ISRC"),
+        None => error(StatusCode::NOT_FOUND, format!("no {format} for this ISRC")),
+    }
+}
+
+/// `GET /orders/{id}/archive[?format=flac|320|128]` — the whole order as one
+/// ZIP (#358). Tracks that are not currently servable are skipped; `format`
+/// pins a single delivery format, otherwise each track contributes its
+/// best-available one (`flac` → `320` → `128`).
+#[derive(Debug, Deserialize)]
+struct ArchiveQuery {
+    format: Option<String>,
+}
+
+async fn get_order_archive(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<ArchiveQuery>,
+) -> Response {
+    // Validate the optional format up front (400 before touching the order).
+    let requested = match q.format.as_deref() {
+        None => None,
+        Some(f) => {
+            let f = f.to_lowercase();
+            if !matches!(f.as_str(), "flac" | "320" | "128") {
+                return error(StatusCode::BAD_REQUEST, "format must be flac, 320 or 128");
+            }
+            Some(f)
+        }
+    };
+
+    match db::get_order(&state.pool, &id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return error(StatusCode::NOT_FOUND, "order not found"),
+        Err(e) => {
+            tracing::error!("get_order_archive get_order failed: {e:#}");
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read order");
         }
     }
 
-    // Store fallback: the content-addressed object is the permanent source (#359).
-    if let Some(obj) =
-        crate::store::resolve_isrc_object(&state.pool, &state.store, &isrc, &format).await
-    {
-        let mut resp =
-            crate::store::stream_object(&state.store, &obj.hash, content_type, &headers).await;
-        if matches!(resp.status(), StatusCode::OK | StatusCode::PARTIAL_CONTENT) {
-            resp.headers_mut()
-                .insert("x-source", header::HeaderValue::from_static("store"));
+    let items = match db::order_items(&state.pool, &id).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::error!("get_order_archive order_items failed: {e:#}");
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to read order items",
+            );
         }
-        return resp;
+    };
+
+    // Resolve each item to `(zip entry name, on-disk source path)`. Items that
+    // are not servable in the selected/best format are skipped, and colliding
+    // entry names get a ` (n)` suffix.
+    const BEST_AVAILABLE: [&str; 3] = ["flac", "320", "128"];
+    let mut entries: Vec<(String, PathBuf)> = Vec::new();
+    let mut used: HashMap<String, u32> = HashMap::new();
+    for item in &items {
+        let track = match db::get_track(&state.pool, &item.isrc).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("get_order_archive get_track failed: {e:#}");
+                return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read track");
+            }
+        };
+        let one: [&str; 1];
+        let formats: &[&str] = match &requested {
+            Some(f) => {
+                one = [f.as_str()];
+                &one
+            }
+            None => &BEST_AVAILABLE,
+        };
+        let Some((format, servable)) =
+            resolve_first(&state, track.as_ref(), &item.isrc, formats).await
+        else {
+            continue; // not currently servable → skip silently
+        };
+        let path = match servable {
+            Servable::Local(p) => p,
+            Servable::Store(hash) => state.store.path_for(&hash),
+        };
+        let stem = sanitize_filename(&track_stem(
+            &item.isrc,
+            track.as_ref().and_then(|t| t.artist.as_deref()),
+            track.as_ref().and_then(|t| t.title.as_deref()),
+        ));
+        let name = unique_entry_name(&mut used, &stem, entry_ext(&format));
+        entries.push((name, path));
     }
 
-    if track.is_none() {
-        return error(StatusCode::NOT_FOUND, "unknown ISRC");
+    if entries.is_empty() {
+        return error(StatusCode::CONFLICT, "no downloadable tracks");
     }
-    error(StatusCode::NOT_FOUND, format!("no {format} for this ISRC"))
+
+    // Build the ZIP into a temp file (Stored, no recompression), then stream it.
+    let tmp_dir = state.config.data_dir.join("tmp");
+    if let Err(e) = tokio::fs::create_dir_all(&tmp_dir).await {
+        tracing::error!("archive tmp dir failed: {e:#}");
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to build archive");
+    }
+    let tmp_path = tmp_dir.join(format!("order-archive-{}.zip", uuid::Uuid::new_v4()));
+    let build_path = tmp_path.clone();
+    let len = match tokio::task::spawn_blocking(move || build_zip(&build_path, &entries)).await {
+        Ok(Ok(len)) => len,
+        Ok(Err(e)) => {
+            tracing::error!("archive zip build failed: {e:#}");
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to build archive");
+        }
+        Err(e) => {
+            tracing::error!("archive zip task failed: {e:#}");
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to build archive");
+        }
+    };
+
+    let file = match tokio::fs::File::open(&tmp_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::error!("archive tmp open failed: {e:#}");
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to build archive");
+        }
+    };
+    // Unlink before streaming: the open fd stays valid on Linux, so the temp
+    // file cannot leak once the response ends (mirrors the hub's zip_response).
+    let _ = tokio::fs::remove_file(&tmp_path).await;
+
+    let stream = ReaderStream::new(file);
+    let mut resp = Body::from_stream(stream).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/zip"),
+    );
+    resp.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        header::HeaderValue::from_str(&format!("attachment; filename=\"order-{id}.zip\"")).unwrap(),
+    );
+    resp.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        header::HeaderValue::from_str(&len.to_string()).unwrap(),
+    );
+    resp
+}
+
+/// File extension for a delivery format (`flac` → `.flac`, else `.mp3`).
+fn entry_ext(format: &str) -> &'static str {
+    if format == "flac" {
+        "flac"
+    } else {
+        "mp3"
+    }
+}
+
+/// `<artist> - <title>`, falling back to the track key when both are empty.
+fn track_stem(isrc: &str, artist: Option<&str>, title: Option<&str>) -> String {
+    let parts: Vec<&str> = [artist, title]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        isrc.to_string()
+    } else {
+        parts.join(" - ")
+    }
+}
+
+/// Strip path/control characters, collapse whitespace, trim and cap length so
+/// the result is a safe ZIP entry name.
+fn sanitize_filename(raw: &str) -> String {
+    let mut cleaned = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+            cleaned.push('_');
+        } else {
+            cleaned.push(c);
+        }
+    }
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim_matches(|c: char| c == '.' || c == ' ');
+    let mut out: String = trimmed.chars().take(150).collect();
+    if out.is_empty() {
+        out.push_str("track");
+    }
+    out
+}
+
+/// Unique `{stem}.{ext}` within the archive, appending ` (n)` from 2 on.
+fn unique_entry_name(used: &mut HashMap<String, u32>, stem: &str, ext: &str) -> String {
+    let key = format!("{stem}.{ext}");
+    let n = used.entry(key.clone()).or_insert(0);
+    *n += 1;
+    if *n == 1 {
+        key
+    } else {
+        format!("{stem} ({}).{ext}", *n)
+    }
+}
+
+/// Write a Stored ZIP of `entries` to `path` (blocking; run on a worker thread).
+/// Returns the finished file's byte length.
+fn build_zip(path: &std::path::Path, entries: &[(String, PathBuf)]) -> anyhow::Result<u64> {
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    use zip::CompressionMethod;
+
+    let file = std::fs::File::create(path)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    for (name, src) in entries {
+        let bytes = std::fs::read(src)?;
+        zip.start_file(name.as_str(), opts)?;
+        zip.write_all(&bytes)?;
+    }
+    zip.finish()?;
+    Ok(std::fs::metadata(path)?.len())
 }
