@@ -1,20 +1,6 @@
 {# Quick-tag form loaded into `.hub-ta` on click (#318). #}
 <div class="hub-ta hub-ta-open hub-ta-tag">
-    <form
-        hx-post="/track/{{ id }}/actions/tag"
-        hx-target="closest .hub-ta"
-        hx-swap="innerHTML"
-        class="hub-ta-tagform"
-    >
-        <input type="text" name="name" placeholder="Tag…" autocomplete="off" required />
-        <select name="type" aria-label="Tag-Typ">
-            <option value="">Typ…</option>
-            {% for t in my_types %}
-            <option value="{{ t.value }}">{{ t.label }}</option>
-            {% endfor %}
-        </select>
-        <button type="submit" class="hub-ta-btn hub-ta-primary">Taggen</button>
-    </form>
+    {% include "_partials/tag_input.html" %}
     <button
         type="button"
         class="hub-ta-btn hub-ta-cancel"

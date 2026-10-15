@@ -10,6 +10,14 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **unified tag input** (#449) — one fuzzy combobox replaces the
+  `name + type + „Taggen“` form on every track-tagging surface (track page, tag-queue
+  detail, tag-task card, track actions, tags page). New session-guarded
+  `GET /tags/search?q=&limit=` ranks the caller's **own** tags (exact > prefix >
+  word-prefix > substring > fuzzy) and returns `{id,name,typeName,typeLabel,icon}`; the
+  tag-add endpoints additionally accept `tag_id` (link an existing tag) or
+  `name`+`type` (create-and-link). Shared `_partials/tag_input.html` + inline JS
+  (debounced search, ↑/↓/Enter/Esc, native `<dialog>` create modal).
 - feat: hub_devices registry — device pairing endpoints (#363)
 - **BPM/key backfill from music-api** (#354): `hub_track_features` is now filled from
   music-api's ISRC authority (`GET /metadata?isrcs=`), closing ReccoBeats gaps. New
@@ -53,7 +61,7 @@ jobs and watch an event log, and a polished import-history UI.
 
 ## [0.27.0] — 2026-10-14
 
-**hub-tagging** — Tagging workflow: a track counts as *tagged-complete* when the
+**hub-tagging** — Tagging workflow: a track counts as _tagged-complete_ when the
 describing tag families (MOOD/GENRE/VIBE/PHASE/MERKMAL) are set, or the user forces
 it; a daily/weekly tagging task surfaces the most-played uncomplete tracks as a
 card queue; per-type „describes the song" toggles refine which types count as
@@ -85,7 +93,7 @@ describing.
   untagged filter now counts every resolved tag, not only typed ones; tag-task cards
   show resolved tags, a play button, and update in place (htmx).
 - **Tag „fertig" reframed as „überspringen"** (#432, PR #433): the manual flag means
-  *skip this track in the tagging task*, not *done*; wording and buttons updated.
+  _skip this track in the tagging task_, not _done_; wording and buttons updated.
 - **Tag skip action moved off the track page onto the tag-task** (#434, PR #435): the
   track page drops the tag-status block; the task gains an „Übersprungene" view with
   undo.
@@ -118,7 +126,7 @@ defaults to the viewer's own references, with other users selectable.
 
 **hub-recs** — Similarity v2 (cross-type tag overlap, Rumpelkiste-aware) drives the
 digging and overlap ranks; cluster-driven tag recommendations respect a per-user
-scope (my contribution vs whole cluster) and explain *why* each tag/cluster is
+scope (my contribution vs whole cluster) and explain _why_ each tag/cluster is
 recommended.
 
 ### Added

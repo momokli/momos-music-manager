@@ -7,8 +7,8 @@ mod common;
 /// and the scope toggle carries `aria-current` + `scope=` links.
 #[tokio::test]
 async fn queue_detail_honours_scope_for_cluster_recs() {
-    use music_hub::tagtypes::{TagType, set as set_type};
     use music_hub::tags;
+    use music_hub::tagtypes::{TagType, set as set_type};
     let app = common::spawn().await;
     let alice = app.seed.alice;
     let bob = app.seed.bob;
@@ -133,7 +133,7 @@ async fn detail_partial_renders_track() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let html = resp.text().await.unwrap();
-    assert!(html.contains("Taggen"), "tag form missing");
+    assert!(html.contains("data-taginput"), "tag input missing");
 }
 
 #[tokio::test]
@@ -250,15 +250,24 @@ async fn detail_shows_all_meta_and_relations() {
         .text()
         .await
         .unwrap();
-    for label in ["Album", "ISRC", "BPM", "Key", "Energy", "Genres", "Tags", "In Playlists"] {
+    for label in [
+        "Album",
+        "ISRC",
+        "BPM",
+        "Key",
+        "Energy",
+        "Genres",
+        "Tags",
+        "In Playlists",
+    ] {
         assert!(html.contains(label), "detail missing {label}");
     }
 }
 
 /// A cluster sibling owned by someone else, shared by the two scope tests.
 async fn seed_other_owner_cluster(app: &common::TestApp) -> i64 {
-    use music_hub::tagtypes::{TagType, set as set_type};
     use music_hub::tags;
+    use music_hub::tagtypes::{TagType, set as set_type};
     let alice = app.seed.alice;
     let bob = app.seed.bob;
     let dark = tags::ensure_tag(&app.pool, alice, "Dark").await.unwrap();
@@ -321,7 +330,7 @@ async fn queue_tag_preserves_selected_scope() {
         "scope=mine must survive a queue tag mutation"
     );
     assert!(
-        mine_html.contains("name=\"scope\" value=\"mine\""),
+        mine_html.contains("data-scope=\"mine\""),
         "the fragment must carry the preserved scope for follow-up mutations"
     );
 
@@ -351,7 +360,9 @@ async fn queue_untag_preserves_selected_scope() {
     let alice = app.seed.alice;
     let track = app.seed.t_all;
     let extra = tags::ensure_tag(&app.pool, alice, "Extra").await.unwrap();
-    tags::tag_track(&app.pool, alice, track, extra).await.unwrap();
+    tags::tag_track(&app.pool, alice, track, extra)
+        .await
+        .unwrap();
     let cookie = app.session_cookie(alice).await;
 
     let mine_html = app

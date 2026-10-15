@@ -994,7 +994,6 @@ struct TrackPage {
     users: Vec<UserGroup>,
     fetchable: bool,
     external_ids: Vec<ExternalId>,
-    tags: Vec<TrackTag>,
     genres: Vec<String>,
     flash: String,
     music_api: bool,
@@ -1008,19 +1007,21 @@ struct TrackPage {
     ripeness_trak: String,
     meta_present: Vec<(String, bool)>,
     // Core-element additions: direct tagging + player + recommendations.
-    my_tags: Vec<(i64, String)>,
     recommended: Vec<RecTag>,
     rec_scope: String,
     rec_scope_mine_url: String,
     rec_scope_all_url: String,
     can_stream: bool,
-    me: String,
     spotify_id: String,
     tag_clouds: Vec<TagCloudRow>,
     untag_action: String,
     tag_action: String,
+    /// htmx swap target for the unified tag input ("" = native POST/reload).
+    tag_target: String,
+    /// Scope value carried through the tag add (empty = none).
+    tag_scope: String,
     htmx: bool,
-    my_types: Vec<TypeOption>,
+    my_types: Vec<(String, String)>,
 }
 
 struct TagCloudRow {
@@ -1035,16 +1036,10 @@ struct TagChipRow {
     mine: bool,
 }
 
-/// A pickable tag type for the "add tag" form.
-struct TypeOption {
-    value: &'static str,
-    label: &'static str,
-}
-
-fn type_options() -> Vec<TypeOption> {
+fn type_options() -> Vec<(String, String)> {
     crate::tagtypes::options()
         .into_iter()
-        .map(|(value, label, _icon)| TypeOption { value, label })
+        .map(|(value, label, _icon)| (value.to_string(), label.to_string()))
         .collect()
 }
 
@@ -1195,7 +1190,10 @@ struct PlaylistMini {
 #[template(path = "_partials/track_tag_form.html")]
 struct TrackTagFormPartial {
     id: i64,
-    my_types: Vec<TypeOption>,
+    tag_action: String,
+    tag_target: String,
+    tag_scope: String,
+    my_types: Vec<(String, String)>,
 }
 
 /// Full-screen "Now Playing" page (`/now`), rendered when the current track has
@@ -1605,7 +1603,6 @@ async fn build_track_page(
 
     let e = crate::settings::engine(&st.pool).await;
     let rip = crate::scoring::ripeness(&st.pool, id, &e).await;
-    let my_tags = crate::tags::list_user_tags(&st.pool, nav.id).await;
     let recommended: Vec<RecTag> =
         crate::recommend::recommend_tags(&st.pool, id, 12, nav.id, scope)
             .await
@@ -1693,7 +1690,6 @@ async fn build_track_page(
         users,
         fetchable,
         external_ids,
-        tags,
         genres,
         flash,
         music_api: st.cfg.music_api_token.is_some(),
@@ -1704,17 +1700,17 @@ async fn build_track_page(
         ripeness_meta: rip.meta_score.round() as i64,
         ripeness_trak: format!("{:.2}", rip.traktor_score),
         meta_present: rip.meta_present,
-        my_tags,
         recommended,
-        rec_scope,
+        rec_scope: rec_scope.clone(),
         rec_scope_mine_url,
         rec_scope_all_url,
         can_stream,
-        me,
         spotify_id,
         tag_clouds,
         untag_action: format!("/track/{id}/untag"),
         tag_action: format!("/track/{id}/tag"),
+        tag_target: String::new(),
+        tag_scope: rec_scope.clone(),
         htmx: false,
         my_types,
     })
@@ -1739,9 +1735,13 @@ fn track_not_found() -> Response {
 
 #[derive(Deserialize)]
 struct TrackTagForm {
+    #[serde(default)]
     name: String,
     #[serde(default, rename = "type")]
     tag_type: Option<String>,
+    /// Existing tag to link (the unified tag input, #449).
+    #[serde(default)]
+    tag_id: Option<i64>,
     /// Recommendation scope to preserve across the redirect (`mine` | `all`).
     #[serde(default)]
     scope: Option<String>,
@@ -1757,17 +1757,16 @@ async fn track_tag(
     let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
         return Redirect::to("/login").into_response();
     };
-    if !f.name.trim().is_empty() {
-        if let Ok(tag_id) = crate::tags::ensure_tag(&st.pool, nav.id, &f.name).await {
-            if let Some(ty) = f
-                .tag_type
-                .as_deref()
-                .and_then(crate::tagtypes::TagType::parse)
-            {
-                let _ = crate::tagtypes::set(&st.pool, nav.id, tag_id, Some(ty)).await;
-            }
-            let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
-        }
+    if let Some(tag_id) = crate::tags::resolve_tag_for_add(
+        &st.pool,
+        nav.id,
+        f.tag_id,
+        Some(&f.name),
+        f.tag_type.as_deref(),
+    )
+    .await
+    {
+        let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
     }
     let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
     Redirect::to(&format!("/track/{id}?scope={}", scope.as_str())).into_response()
@@ -2173,6 +2172,9 @@ async fn track_actions_tag_frag(
     }
     render(&TrackTagFormPartial {
         id,
+        tag_action: format!("/track/{id}/actions/tag"),
+        tag_target: "closest .hub-ta".to_string(),
+        tag_scope: String::new(),
         my_types: type_options(),
     })
 }
@@ -2308,9 +2310,13 @@ async fn add_to_spotify_playlist(
 
 #[derive(Deserialize)]
 struct AddTagForm {
+    #[serde(default)]
     name: String,
     #[serde(default, rename = "type")]
     tag_type: Option<String>,
+    /// Existing tag to link (the unified tag input, #449).
+    #[serde(default)]
+    tag_id: Option<i64>,
 }
 
 async fn track_actions_tag_post(
@@ -2322,25 +2328,20 @@ async fn track_actions_tag_post(
     let Some(nav) = crate::ui::nav(&st, &headers, "track").await else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let (msg, kind) = if f.name.trim().is_empty() {
-        ("Kein Tag-Name angegeben".to_string(), "err")
-    } else {
-        match crate::tags::ensure_tag(&st.pool, nav.id, &f.name).await {
-            Ok(tag_id) => {
-                if let Some(ty) = f
-                    .tag_type
-                    .as_deref()
-                    .and_then(crate::tagtypes::TagType::parse)
-                {
-                    let _ = crate::tagtypes::set(&st.pool, nav.id, tag_id, Some(ty)).await;
-                }
-                match crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await {
-                    Ok(_) => (format!("Tag „{}“ hinzugefügt", f.name.trim()), "ok"),
-                    Err(e) => (format!("Fehler: {e}"), "err"),
-                }
-            }
+    let (msg, kind) = match crate::tags::resolve_tag_for_add(
+        &st.pool,
+        nav.id,
+        f.tag_id,
+        Some(&f.name),
+        f.tag_type.as_deref(),
+    )
+    .await
+    {
+        Some(tag_id) => match crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await {
+            Ok(_) => ("Tag hinzugefügt".to_string(), "ok"),
             Err(e) => (format!("Fehler: {e}"), "err"),
-        }
+        },
+        None => ("Kein Tag angegeben".to_string(), "err"),
     };
     with_toast(render(&TrackActions { id }), &msg, kind)
 }

@@ -41,33 +41,9 @@
         <span class="hub-chip">{{ t }}</span>
         {% endfor %}
     </div>
-    {% endif %}
-
-    <form
-        method="post"
-        action="/tag-task/{{ card.id }}/tag"
-        class="hub-tag-task-form"
-        hx-post="/tag-task/{{ card.id }}/tag"
-        hx-target="closest .hub-tag-task-card"
-        hx-swap="outerHTML"
-    >
-        <input type="hidden" name="cadence" value="{{ card.cadence }}" />
-        <input
-            type="text"
-            name="name"
-            placeholder="Tag…"
-            autocomplete="off"
-            required
-            aria-label="Tag-Name"
-        />
-        <select name="type" aria-label="Tag-Typ">
-            <option value="">Typ…</option>
-            {% for t in card.my_types %}
-            <option value="{{ t.value }}">{{ t.label }}</option>
-            {% endfor %}
-        </select>
-        <button type="submit">Taggen</button>
-    </form>
+    {% endif %} {% let tag_action = card.tag_action %} {% let tag_target = card.tag_target
+    %} {% let tag_scope = card.tag_scope %} {% let my_types = card.my_types %} {% include
+    "_partials/tag_input.html" %}
 
     <form
         method="post"

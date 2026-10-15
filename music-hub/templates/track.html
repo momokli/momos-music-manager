@@ -311,40 +311,8 @@ content %}
         #}
         <div class="hub-bucket">
             <h2>Tags</h2>
-            {% include "_partials/tag_clouds.html" %}
-            <form
-                method="post"
-                action="/track/{{ id }}/tag"
-                style="
-                    display: flex;
-                    gap: 0.3rem;
-                    margin-top: 0.4rem;
-                    align-items: center;
-                "
-            >
-                <input type="hidden" name="scope" value="{{ rec_scope }}" />
-                <input
-                    type="text"
-                    name="name"
-                    list="my-tags"
-                    placeholder="Tag hinzufügen …"
-                    aria-label="Tag"
-                    required
-                />
-                <datalist id="my-tags">
-                    {% for t in my_tags %}
-                    <option value="{{ t.1 }}"></option>
-                    {% endfor %}
-                </datalist>
-                <select name="type" aria-label="Typ (optional)" style="width: 9rem">
-                    <option value="">Typ: keiner</option>
-                    {% for t in my_types %}
-                    <option value="{{ t.value }}">{{ t.label }}</option>
-                    {% endfor %}
-                </select>
-                <button type="submit">Taggen</button>
-            </form>
-            {% include "_partials/rec_tags.html" %}
+            {% include "_partials/tag_clouds.html" %} {% include
+            "_partials/tag_input.html" %} {% include "_partials/rec_tags.html" %}
         </div>
 
         {# ── In Playlists (hub-own) ───────────────────────────────────────── #}

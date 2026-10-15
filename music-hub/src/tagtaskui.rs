@@ -82,12 +82,6 @@ struct Chip {
     icon: String,
 }
 
-#[derive(Clone)]
-struct TypeOption {
-    value: &'static str,
-    label: &'static str,
-}
-
 struct CardView {
     id: i64,
     rank: i64,
@@ -100,9 +94,11 @@ struct CardView {
     tags: Vec<String>,
     /// Whether the track can be streamed (music-api configured + ISRC present).
     playable: bool,
-    /// Cadence of the task this card belongs to (carried through the htmx form).
-    cadence: String,
-    my_types: Vec<TypeOption>,
+    /// Unified tag input (#449): action URL (with cadence), htmx target, scope.
+    tag_action: String,
+    tag_target: String,
+    tag_scope: String,
+    my_types: Vec<(String, String)>,
 }
 
 /// One task item joined with its track — the row shape `build_cards`/`card_for`
@@ -178,7 +174,7 @@ async fn card_from(
     r: ItemRow,
     music_api: bool,
     cadence: &str,
-    my_types: &[TypeOption],
+    my_types: &[(String, String)],
 ) -> CardView {
     // Display reactivity (US3): keep the task's families as the base, but drop
     // those a tag applied during the period already resolved.
@@ -212,7 +208,9 @@ async fn card_from(
         missing,
         tags,
         playable: music_api && !r.isrc.trim().is_empty(),
-        cadence: cadence.to_string(),
+        tag_action: format!("/tag-task/{}/tag?cadence={}", r.track_id, cadence),
+        tag_target: "closest .hub-tag-task-card".to_string(),
+        tag_scope: String::new(),
         my_types: my_types.to_vec(),
     }
 }
@@ -241,9 +239,9 @@ async fn build_cards(
     .unwrap_or_default();
 
     let music_api = st.cfg.music_api_token.is_some();
-    let my_types: Vec<TypeOption> = crate::tagtypes::options()
+    let my_types: Vec<(String, String)> = crate::tagtypes::options()
         .into_iter()
-        .map(|(value, label, _icon)| TypeOption { value, label })
+        .map(|(value, label, _icon)| (value.to_string(), label.to_string()))
         .collect();
 
     // Tracks in my playlists (for the "mine" filter).
@@ -308,9 +306,9 @@ async fn card_for(
     .ok()
     .flatten()?;
     let music_api = st.cfg.music_api_token.is_some();
-    let my_types: Vec<TypeOption> = crate::tagtypes::options()
+    let my_types: Vec<(String, String)> = crate::tagtypes::options()
         .into_iter()
-        .map(|(value, label, _icon)| TypeOption { value, label })
+        .map(|(value, label, _icon)| (value.to_string(), label.to_string()))
         .collect();
     let mut card = card_from(st, user_id, row, music_api, cadence.as_str(), &my_types).await;
     let mut html = crate::artists::artists_html_for_tracks(&st.pool, &[card.id]).await;
@@ -386,9 +384,13 @@ async fn tag_task_page(
 
 #[derive(Deserialize)]
 struct TagForm {
+    #[serde(default)]
     name: String,
     #[serde(default, rename = "type")]
     tag_type: Option<String>,
+    /// Existing tag to link (the unified tag input, #449).
+    #[serde(default)]
+    tag_id: Option<i64>,
     /// Cadence of the task the card belongs to (carried through the htmx form).
     #[serde(default)]
     cadence: Option<String>,
@@ -406,17 +408,16 @@ async fn tag_task_tag(
     let Some(nav) = crate::ui::nav(&st, &headers, "tag-task").await else {
         return Redirect::to("/login").into_response();
     };
-    if !f.name.trim().is_empty() {
-        if let Ok(tag_id) = crate::tags::ensure_tag(&st.pool, nav.id, &f.name).await {
-            if let Some(ty) = f
-                .tag_type
-                .as_deref()
-                .and_then(crate::tagtypes::TagType::parse)
-            {
-                let _ = crate::tagtypes::set(&st.pool, nav.id, tag_id, Some(ty)).await;
-            }
-            let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
-        }
+    if let Some(tag_id) = crate::tags::resolve_tag_for_add(
+        &st.pool,
+        nav.id,
+        f.tag_id,
+        Some(&f.name),
+        f.tag_type.as_deref(),
+    )
+    .await
+    {
+        let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
     }
     if is_htmx(&headers) {
         let cadence = cadence_for(&st, f.cadence.as_deref()).await;
