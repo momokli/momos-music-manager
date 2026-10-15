@@ -24,6 +24,11 @@ pub struct SyncState {
     /// Per-ISRC provenance of files already fetched into the collection (#366).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub downloads: BTreeMap<String, DownloadRecord>,
+    /// Per-ISRC backpack membership (#367): files kellner placed on behalf of an
+    /// active backpack. Only these entries may be pruned; user `downloads` are
+    /// never touched.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub backpack_membership: BTreeMap<String, MembershipRecord>,
 }
 
 /// One `POST /orders` remembered for the status report (#366).
@@ -41,6 +46,21 @@ pub struct OrderRecord {
     /// Last known per-ISRC state from polling (`ready`/`pending`/`failed`/…).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub states: BTreeMap<String, String>,
+}
+
+/// Backpack provenance of one flat file (#367).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipRecord {
+    /// Flat target path (`<isrc>.<ext>`) as written.
+    pub path: PathBuf,
+    /// Active backpack this file was synced for.
+    pub backpack_id: i64,
+    /// Rendered Comment text written into the file.
+    pub tags_rendered: String,
+    /// Canonical content hash (Comment cleared) of the file.
+    pub content_hash: String,
+    /// Unix epoch seconds of the successful fetch + tag.
+    pub downloaded_at: i64,
 }
 
 /// Provenance of one fetched file (#366).
@@ -85,6 +105,16 @@ impl SyncState {
     /// Remember a placed order.
     pub fn record_order(&mut self, order: OrderRecord) {
         self.orders.push(order);
+    }
+
+    /// `true` when the ISRC is currently recorded as a backpack member (#367).
+    pub fn is_backpack_member(&self, isrc: &str) -> bool {
+        self.backpack_membership.contains_key(isrc)
+    }
+
+    /// Record (or replace) a backpack membership (idempotent per ISRC).
+    pub fn record_membership(&mut self, isrc: &str, record: MembershipRecord) {
+        self.backpack_membership.insert(isrc.to_string(), record);
     }
 }
 
@@ -166,6 +196,42 @@ mod tests {
         assert_eq!(rec.format, "flac");
         assert_eq!(rec.order_id, "o1");
         assert_eq!(rec.fetched_at, 222);
+    }
+
+    #[test]
+    fn old_state_without_backpack_fields_still_parses() {
+        // A state.json written before #367 must stay readable.
+        let parsed: SyncState = serde_json::from_str(r#"{"last_upload_mtime":7}"#).unwrap();
+        assert!(parsed.backpack_membership.is_empty());
+        assert!(!parsed.is_backpack_member("ABCDEFGHIJKL"));
+    }
+
+    #[test]
+    fn record_membership_roundtrips() {
+        let mut s = SyncState::default();
+        s.record_membership(
+            "A",
+            MembershipRecord {
+                path: PathBuf::from("/music/A.flac"),
+                backpack_id: 1,
+                tags_rendered: "Techno".into(),
+                content_hash: "deadbeef".into(),
+                downloaded_at: 123,
+            },
+        );
+        assert!(s.is_backpack_member("A"));
+        assert!(!s.is_backpack_member("B"));
+
+        let text = serde_json::to_string(&s).unwrap();
+        let back: SyncState = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn empty_backpack_membership_is_not_serialised() {
+        let s = SyncState::default();
+        let text = serde_json::to_string(&s).unwrap();
+        assert!(!text.contains("backpack_membership"), "got {text}");
     }
 
     #[test]

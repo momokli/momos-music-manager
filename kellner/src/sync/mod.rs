@@ -7,5 +7,6 @@
 //! delivered bytes flat into the collection (#366).
 
 pub mod backup;
+pub mod backpack;
 pub mod downloads;
 pub mod traktor;
