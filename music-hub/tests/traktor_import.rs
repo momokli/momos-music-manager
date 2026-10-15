@@ -228,3 +228,56 @@ async fn malformed_bodies_get_400() {
     let (status, _) = post_nml(&app, Some(&token), "<NML><BROKEN</NML>").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+// (e) 413: a body past the 16 MiB cap is rejected by the body limit ─────────
+
+#[tokio::test]
+async fn oversized_body_gets_413() {
+    use music_hub::traktor_api::MAX_NML_BYTES;
+
+    let app = common::spawn().await;
+    let alice = app.seed.alice;
+    let token = raw('g');
+    bind_device(&app, alice, &token).await;
+
+    // One byte past the cap → `DefaultBodyLimit` short-circuits before the
+    // handler runs (no valid NML needed).
+    let mut big = String::with_capacity(MAX_NML_BYTES + 64);
+    big.push_str("<NML>");
+    big.push_str(&"x".repeat(MAX_NML_BYTES));
+    big.push_str("</NML>");
+
+    let resp = app
+        .client()
+        .post(app.url("/api/hub/traktor/import"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(big)
+        .send()
+        .await
+        .expect("import request");
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+// (f) 400: a body that is not valid UTF-8 is rejected ───────────────────────
+
+#[tokio::test]
+async fn non_utf8_body_gets_400() {
+    let app = common::spawn().await;
+    let alice = app.seed.alice;
+    let token = raw('h');
+    bind_device(&app, alice, &token).await;
+
+    // Contains `<NML` but an invalid UTF-8 byte follows.
+    let mut body = b"<NML>".to_vec();
+    body.extend_from_slice(&[0xff, 0xfe, 0x80]);
+
+    let resp = app
+        .client()
+        .post(app.url("/api/hub/traktor/import"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(body)
+        .send()
+        .await
+        .expect("import request");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
