@@ -1241,11 +1241,12 @@
         </li>
         <li>
           <details class="dropdown">
-            <summary {% if nav.active == "import" || nav.active == "downloads" || nav.active == "history" || nav.active == "sql" %}aria-current="page"{% endif %}>Daten</summary>
+            <summary {% if nav.active == "import" || nav.active == "downloads" || nav.active == "history" || nav.active == "sql" || nav.active == "kellner" %}aria-current="page"{% endif %}>Daten</summary>
             <ul>
               <li><a href="/import">Import</a></li>
               <li><a href="/downloads">Downloads</a></li>
               <li><a href="/history">Historie</a></li>
+              <li><a href="/kellner" {% if nav.active == "kellner" %}aria-current="page"{% endif %}>Kellner</a></li>
               <li><a href="/music-api">music-api</a></li>
               <li><a href="/sql">SQL</a></li>
             </ul>

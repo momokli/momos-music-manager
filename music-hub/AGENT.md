@@ -28,6 +28,16 @@
 > vault — music-api is the Data Vault of music. See
 > `plans/proposed/hub-crawl-everything.md` and
 > `plans/proposed/music-api-data-vault.md`.
+>
+> **New in this batch (per-device Kellner settings, #369):** migration `052`
+> (`hub_device_settings` + `hub_device_backpacks`, additive, both FKs
+> `ON DELETE CASCADE`) and the new module `src/device_settings.rs` — per-device
+> `preferred_format` (`flac|mp3|wav|m4a`) / `comment_template` (trim, ≤1024) /
+> `active_backpack_ids`. JSON `GET`/`PUT /api/hub/devices/{id}/settings`
+> (web-session gated, owner-scoped via `devices::find_owned`; foreign/unknown →
+> `404`) + the HTML page `/kellner` (form POST `/kellner/{id}/settings`). Settings
+> are authoritative in the Hub; a device without a row reads as the defaults.
+> `wav`/`m4a` are selectable but not yet served by music-api.
 
 ---
 

@@ -288,17 +288,25 @@ pub async fn list_for_user(pool: &SqlitePool, user_id: i64) -> sqlx::Result<Vec<
     Ok(rows.iter().map(Device::from_row).collect())
 }
 
+/// The device when it belongs to `user_id`, else `None`. Foreign and unknown
+/// ids are indistinguishable (both `None`) — the basis for the owner-scoped
+/// `404` on the per-device settings routes (#369).
+pub async fn find_owned(pool: &SqlitePool, id: i64, user_id: i64) -> sqlx::Result<Option<Device>> {
+    let row = sqlx::query(&format!(
+        "SELECT {DEVICE_COLS} FROM hub_devices WHERE id = ?1 AND user_id = ?2"
+    ))
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.as_ref().map(Device::from_row))
+}
+
 /// Revoke a device owned by `user_id`. Idempotent: a second call leaves the
 /// original `revoked_at` untouched. Returns `false` when the id is unknown or
 /// owned by another user (no existence leak).
 pub async fn revoke(pool: &SqlitePool, id: i64, user_id: i64) -> sqlx::Result<bool> {
-    let owned: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM hub_devices WHERE id = ?1 AND user_id = ?2")
-            .bind(id)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await?;
-    if owned.is_none() {
+    if find_owned(pool, id, user_id).await?.is_none() {
         return Ok(false);
     }
     sqlx::query("UPDATE hub_devices SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL")
