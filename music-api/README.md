@@ -88,6 +88,44 @@ lands on whatever the ARL's Deezer tier allows.
 
 ### `GET /isrc/{isrc}/{flac|320|128}` — stream the file.
 
+**Local-first, store-backed (#359).** An openable data_dir file is streamed as
+before with `X-Source: local`. When no local file is present (or no path is
+recorded), the file is served from the permanent, content-addressed object
+store with `X-Source: store` — same `Content-Type` (`audio/flac` / `audio/mpeg`)
+and single-range support. Neither local file nor store object → `404`; an
+unknown format is still a `400`. `320` and `128` both resolve to the newest
+stored `mp3` object (the store keeps no bitrate).
+
+### `GET /isrc/{isrc}/objects` — resolve an ISRC to its object variants (#359).
+
+Read-only view of the backup store for one ISRC. The ISRC is normalised first.
+
+```json
+{
+  "isrc": "AEA0D1846146",
+  "count": 3,
+  "variants": [
+    { "hash": "…", "kind": "flac", "size": 123, "contentType": "audio/flac",
+      "name": "AEA0D1846146.flac", "originalPath": null,
+      "stemType": null, "groupKey": null, "createdAt": 1700000000 }
+  ],
+  "groups": [ { "groupKey": "grp-1", "stems": [ /* … */ ] } ]
+}
+```
+
+`kind` is derived read-only: `stem` when the object carries a `stem_type`,
+otherwise from the extension of `name`/`original_path` (`flac`, `mp3`, `audio`
+for m4a/wav/aiff/ogg, else `other`). `groups` links stems best-effort via the
+`group_key` of this ISRC's own objects (no filename heuristics). `404` only when
+the ISRC is entirely unknown (no track **and** no object); a known-but-empty
+ISRC answers `200` with `count: 0`.
+
+### Object store upload metadata
+
+`PUT /objects/{sha256}` accepts optional `X-ISRC`, `X-Original-Path`, `X-Name`
+and (since #359) `X-Group-Key` / `X-Stem-Type` for stem grouping. Re-uploading an
+existing object never wipes these: group/stem columns are merged with `COALESCE`.
+
 ### Queue control (transparent, hub-facing)
 
 | Method | Path                      | Use                                                        |

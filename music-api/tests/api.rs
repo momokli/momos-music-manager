@@ -2375,3 +2375,366 @@ async fn download_kind_tracks_the_tracks_ledger() {
     let hi = items.iter().find(|i| i.reference == "DLHIGH").unwrap();
     assert_eq!(hi.state, "done");
 }
+
+// ── Backup-store as permanent source: variants + fallback (#359) ─────────────
+
+/// Upload `bytes` under its own digest with the given extra headers.
+async fn put_object_h(app: &Router, bytes: &[u8], headers: &[(&str, &str)]) -> String {
+    let hash = sha256_hex(bytes);
+    let mut b = authed("PUT", &format!("/objects/{hash}"));
+    for (k, v) in headers {
+        b = b.header(*k, *v);
+    }
+    let (status, _) = send(app, b.body(Body::from(bytes.to_vec())).unwrap()).await;
+    assert!(
+        status == StatusCode::CREATED || status == StatusCode::OK,
+        "unexpected PUT status: {status}"
+    );
+    hash
+}
+
+async fn get_json(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    let (status, body) = send(app, authed("GET", uri).body(Body::empty()).unwrap()).await;
+    let v = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    (status, v)
+}
+
+#[tokio::test]
+async fn object_list_exposes_isrc_group_and_stem() {
+    let h = harness().await;
+    let hash = put_object_h(
+        &h.app,
+        b"listing-object",
+        &[
+            (header::CONTENT_TYPE.as_str(), "audio/flac"),
+            ("x-isrc", "AEA0D1846146"),
+            ("x-group-key", "grp-1"),
+            ("x-stem-type", "vocals"),
+            ("x-name", "vocals.flac"),
+        ],
+    )
+    .await;
+
+    let (status, v) = get_json(&h.app, "/objects?limit=1000").await;
+    assert_eq!(status, StatusCode::OK);
+    let obj = v["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["hash"] == serde_json::json!(hash))
+        .expect("uploaded object listed");
+    assert_eq!(obj["isrc"], "AEA0D1846146");
+    assert_eq!(obj["groupKey"], "grp-1");
+    assert_eq!(obj["stemType"], "vocals");
+    // Existing shape is preserved.
+    assert!(obj["size"].is_number());
+    assert!(v["total"].is_number());
+}
+
+#[tokio::test]
+async fn object_put_persists_stem_headers_and_coalesces() {
+    let h = harness().await;
+    let bytes = b"coalesce-object";
+    let hash = put_object_h(
+        &h.app,
+        bytes,
+        &[
+            (header::CONTENT_TYPE.as_str(), "audio/flac"),
+            ("x-isrc", "AEA0D1846146"),
+            ("x-group-key", "grp-9"),
+            ("x-stem-type", "bass"),
+        ],
+    )
+    .await;
+
+    // A bare re-upload (object already present) must NOT wipe the columns.
+    let (status, _) = send(
+        &h.app,
+        authed("PUT", &format!("/objects/{hash}"))
+            .body(Body::from(bytes.to_vec()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, v) = get_json(&h.app, "/objects?limit=1000").await;
+    let obj = v["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["hash"] == serde_json::json!(hash))
+        .unwrap();
+    assert_eq!(obj["groupKey"], "grp-9");
+    assert_eq!(obj["stemType"], "bass");
+}
+
+#[tokio::test]
+async fn isrc_objects_lists_variants_and_stem_groups() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+
+    put_object_h(
+        &h.app,
+        b"track-flac",
+        &[
+            ("x-isrc", "AEA0D1846146"),
+            ("x-name", "AEA0D1846146.flac"),
+        ],
+    )
+    .await;
+    put_object_h(
+        &h.app,
+        b"track-mp3",
+        &[
+            ("x-isrc", "AEA0D1846146"),
+            ("x-name", "AEA0D1846146.mp3"),
+        ],
+    )
+    .await;
+    put_object_h(
+        &h.app,
+        b"stem-vocals",
+        &[
+            ("x-isrc", "AEA0D1846146"),
+            ("x-group-key", "grp-1"),
+            ("x-stem-type", "vocals"),
+            ("x-name", "vocals.flac"),
+        ],
+    )
+    .await;
+
+    let (status, v) = get_json(&h.app, "/isrc/aea0d1846146/objects").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["isrc"], "AEA0D1846146");
+    assert_eq!(v["count"], 3);
+    let kinds: Vec<&str> = v["variants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"flac"));
+    assert!(kinds.contains(&"mp3"));
+    assert!(kinds.contains(&"stem"));
+
+    let groups = v["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["groupKey"], "grp-1");
+    let stems = groups[0]["stems"].as_array().unwrap();
+    assert_eq!(stems.len(), 1);
+    assert_eq!(stems[0]["stemType"], "vocals");
+    assert_eq!(stems[0]["kind"], "stem");
+}
+
+#[tokio::test]
+async fn isrc_objects_unknown_is_404_known_empty_is_200() {
+    let h = harness().await;
+
+    // Entirely unknown → 404.
+    let (status, _) = send(
+        &h.app,
+        authed("GET", "/isrc/ZZZZZZZZZZZZ/objects")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Known track but no objects → 200 with count 0.
+    create_order(&h.app, &["AEA0D1846146"]).await;
+    let (status, v) = get_json(&h.app, "/isrc/AEA0D1846146/objects").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["count"], 0);
+    assert_eq!(v["variants"].as_array().unwrap().len(), 0);
+
+    // Auth still required.
+    let (_status, _) = send(
+        &h.app,
+        Request::builder()
+            .method("GET")
+            .uri("/isrc/AEA0D1846146/objects")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/isrc/AEA0D1846146/objects")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn get_file_falls_back_to_the_store() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+
+    let bytes = b"STORE-FLAC-BYTES".to_vec();
+    put_object_h(
+        &h.app,
+        &bytes,
+        &[
+            (header::CONTENT_TYPE.as_str(), "audio/flac"),
+            ("x-isrc", "AEA0D1846146"),
+            ("x-name", "AEA0D1846146.flac"),
+        ],
+    )
+    .await;
+
+    // No local path recorded → served from the store.
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            authed("GET", "/isrc/AEA0D1846146/flac")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["x-source"], "store");
+    assert_eq!(resp.headers()[header::CONTENT_TYPE], "audio/flac");
+    let got = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    assert_eq!(got, bytes);
+
+    // The store also answers range requests.
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            authed("GET", "/isrc/AEA0D1846146/flac")
+                .header(header::RANGE, "bytes=0-4")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(resp.headers()["x-source"], "store");
+}
+
+#[tokio::test]
+async fn get_file_prefers_local_over_store() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+
+    // A local file is on disk AND a store object exists: local wins.
+    let mp3_320 = write_file(
+        &h.state.config.mp3_320_dir(),
+        "AEA0D1846146.mp3",
+        b"LOCAL-MP3",
+    );
+    db::mark_ready(
+        &h.state.pool,
+        "AEA0D1846146",
+        "mp3",
+        None,
+        Some(&mp3_320.display().to_string()),
+        None,
+    )
+    .await
+    .unwrap();
+    put_object_h(
+        &h.app,
+        b"STORE-MP3",
+        &[
+            (header::CONTENT_TYPE.as_str(), "audio/mpeg"),
+            ("x-isrc", "AEA0D1846146"),
+            ("x-name", "AEA0D1846146.mp3"),
+        ],
+    )
+    .await;
+
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            authed("GET", "/isrc/AEA0D1846146/320")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["x-source"], "local");
+    let got = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    assert_eq!(got, b"LOCAL-MP3");
+}
+
+#[tokio::test]
+async fn get_file_is_404_when_local_and_store_both_miss() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+
+    let (status, _) = send(
+        &h.app,
+        authed("GET", "/isrc/AEA0D1846146/flac")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Unknown format is still a 400.
+    let (status, _) = send(
+        &h.app,
+        authed("GET", "/isrc/AEA0D1846146/ogg")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn tracks_objects_include_kind_and_stem_type() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+
+    put_object_h(
+        &h.app,
+        b"tracks-flac",
+        &[
+            ("x-isrc", "AEA0D1846146"),
+            ("x-name", "AEA0D1846146.flac"),
+        ],
+    )
+    .await;
+    put_object_h(
+        &h.app,
+        b"tracks-stem",
+        &[
+            ("x-isrc", "AEA0D1846146"),
+            ("x-group-key", "grp-7"),
+            ("x-stem-type", "drums"),
+            ("x-name", "drums.flac"),
+        ],
+    )
+    .await;
+
+    let (status, v) = get_json(&h.app, "/tracks?isrcs=AEA0D1846146").await;
+    assert_eq!(status, StatusCode::OK);
+    let track = &v["tracks"][0];
+    let objects = track["objects"].as_array().unwrap();
+    assert_eq!(objects.len(), 2);
+    assert!(objects.iter().all(|o| o["hash"].is_string() && o["size"].is_number()));
+    let stem = objects
+        .iter()
+        .find(|o| o["kind"] == serde_json::json!("stem"))
+        .expect("stem object present");
+    assert_eq!(stem["stemType"], "drums");
+    let flac = objects
+        .iter()
+        .find(|o| o["kind"] == serde_json::json!("flac"))
+        .expect("flac object present");
+    assert!(flac["stemType"].is_null());
+}

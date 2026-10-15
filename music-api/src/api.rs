@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -39,6 +39,7 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/artist-orders/{id}", get(get_artist_order))
         .route("/isrc/{isrc}", get(get_isrc))
+        .route("/isrc/{isrc}/objects", get(get_isrc_objects))
         .route("/isrc/{isrc}/retry", post(retry_isrc))
         .route("/isrc/{isrc}/{format}", get(get_file))
         // Bulk metadata/state for many ISRCs at once (hub enrichment).
@@ -378,15 +379,25 @@ async fn get_tracks(State(state): State<Arc<AppState>>, Query(q): Query<TracksQu
     for isrc in &isrcs {
         match db::get_track(&state.pool, isrc).await {
             Ok(Some(t)) => {
-                let objects: Vec<serde_json::Value> = sqlx::query_as::<_, (String, i64)>(
-                    "SELECT hash, size FROM store_objects WHERE isrc = ?1 ORDER BY created_at DESC",
+                let objects: Vec<serde_json::Value> = sqlx::query_as::<
+                    _,
+                    (String, i64, Option<String>, Option<String>, Option<String>),
+                >(
+                    "SELECT hash, size, name, original_path, stem_type FROM store_objects WHERE isrc = ?1 ORDER BY created_at DESC",
                 )
                 .bind(isrc)
                 .fetch_all(&state.pool)
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(hash, size)| json!({ "hash": hash, "size": size }))
+                .map(|(hash, size, name, original_path, stem_type)| {
+                    let kind = crate::store::classify_kind(
+                        stem_type.as_deref(),
+                        name.as_deref(),
+                        original_path.as_deref(),
+                    );
+                    json!({ "hash": hash, "size": size, "kind": kind, "stemType": stem_type })
+                })
                 .collect();
                 out.push(json!({
                     "isrc": t.isrc,
@@ -641,10 +652,21 @@ async fn get_isrc(State(state): State<Arc<AppState>>, Path(isrc): Path<String>) 
     }
 }
 
-/// `GET /isrc/{isrc}/{flac|320|128}` — stream the delivered file.
+/// `GET /isrc/{isrc}/objects` — resolve an ISRC to its object variants (#359).
+async fn get_isrc_objects(
+    state: State<Arc<AppState>>,
+    Path(isrc): Path<String>,
+) -> Response {
+    crate::store::isrc_objects(state, Path(isrc)).await
+}
+
+/// `GET /isrc/{isrc}/{flac|320|128}` — stream the delivered file. Local-first:
+/// an openable data_dir file wins (`X-Source: local`); otherwise fall back to
+/// the permanent object store (`X-Source: store`). Neither → `404` (#359).
 async fn get_file(
     State(state): State<Arc<AppState>>,
     Path((isrc, format)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     let isrc = db::normalize_key(&isrc);
     let format = format.to_lowercase();
@@ -653,26 +675,10 @@ async fn get_file(
     }
 
     let track = match db::get_track(&state.pool, &isrc).await {
-        Ok(Some(t)) => t,
-        Ok(None) => return error(StatusCode::NOT_FOUND, "unknown ISRC"),
+        Ok(t) => t,
         Err(e) => {
             tracing::error!("get_file failed: {e:#}");
             return error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read track");
-        }
-    };
-
-    let Some(path) = track.path_for(&format) else {
-        return error(
-            StatusCode::NOT_FOUND,
-            format!("no {format} for this ISRC (state: {})", track.state),
-        );
-    };
-
-    let file = match tokio::fs::File::open(path).await {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::error!("open {path} failed: {e:#}");
-            return error(StatusCode::INTERNAL_SERVER_ERROR, "file missing on disk");
         }
     };
 
@@ -682,11 +688,46 @@ async fn get_file(
         "audio/mpeg"
     };
 
-    let stream = ReaderStream::new(file);
-    let mut resp = Body::from_stream(stream).into_response();
-    resp.headers_mut().insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static(content_type),
-    );
-    resp
+    // Local-first: only a present, openable file counts. A missing local file
+    // (or no recorded path) falls through to the store.
+    if let Some(t) = &track {
+        if let Some(path) = t.path_for(&format) {
+            match tokio::fs::File::open(path).await {
+                Ok(file) => {
+                    let stream = ReaderStream::new(file);
+                    let mut resp = Body::from_stream(stream).into_response();
+                    resp.headers_mut().insert(
+                        header::CONTENT_TYPE,
+                        header::HeaderValue::from_static(content_type),
+                    );
+                    resp.headers_mut()
+                        .insert("x-source", header::HeaderValue::from_static("local"));
+                    return resp;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::error!("open {path} failed: {e:#}");
+                    return error(StatusCode::INTERNAL_SERVER_ERROR, "file missing on disk");
+                }
+            }
+        }
+    }
+
+    // Store fallback: the content-addressed object is the permanent source (#359).
+    if let Some(obj) =
+        crate::store::resolve_isrc_object(&state.pool, &state.store, &isrc, &format).await
+    {
+        let mut resp =
+            crate::store::stream_object(&state.store, &obj.hash, content_type, &headers).await;
+        if matches!(resp.status(), StatusCode::OK | StatusCode::PARTIAL_CONTENT) {
+            resp.headers_mut()
+                .insert("x-source", header::HeaderValue::from_static("store"));
+        }
+        return resp;
+    }
+
+    if track.is_none() {
+        return error(StatusCode::NOT_FOUND, "unknown ISRC");
+    }
+    error(StatusCode::NOT_FOUND, format!("no {format} for this ISRC"))
 }
