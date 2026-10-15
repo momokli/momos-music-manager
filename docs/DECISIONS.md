@@ -1970,3 +1970,40 @@ ADR-075 angelegt), fehlte die Speicher- und Read-Seite.
   music-api leer. Kein automatischer Sync (out of scope).
 - Merge ist monoton: Werte werden ergänzt, nicht gelöscht — ein `null`-Feld im Push
   bleibt ein No-op.
+
+
+## ADR-080: Spelunke-Hub — api→hub BPM/key-Backfill (musicalKey→Camelot-Ableitung)
+
+**Status**: Accepted (implementiert, #354)
+**Relates**: ADR-079 (music-api als ISRC→{BPM,Key}-Autorität), ADR-064 (hub_track_features)
+
+**Context**: Nach ADR-079 ist music-api die ISRC-Autorität, aber der Hub hatte nur die
+Push-Richtung (hub→api). `hub_track_features` wurde allein von ReccoBeats/FreqBlog
+gefüllt — die api→hub-Backfill-Richtung fehlte.
+
+**Decision**:
+
+- **Range-Read** `music_api::metadata_range(cfg, isrcs)` liest
+  `GET /metadata?isrcs=` (`items` + `missing`); `None` bei transientem Fehler,
+  `Some((leer, leer))` bei leerem Input — analog `vault_tracks`.
+- **Backfill** `features::backfill_from_music_api(pool, cfg, limit)`: Selektion
+  bounded (Tracks mit ISRC ohne brauchbares BPM/camelot, TTL 7 Tage via
+  Migration 050 `hub_track_features.metadata_checked_at`), Chunking (~100).
+  Transienter Fehler ⇒ `continue` (kein „no data"-Poisoning). Hit ⇒ UPSERT mit
+  `COALESCE` (bpm, camelot, key_pitch, key_mode, isrc), `found=1`,
+  `source='music-api'`. Miss ⇒ nur `metadata_checked_at` (found=0-Row), ohne
+  `source` zu verändern.
+- **§Z-Ableitung** `musicalKey` ist nicht kanonisch. `music_api::parse_musical_key`
+  parst Camelot (`8A`), Traktor (`8m`→`8A`, `8d`→`8B`) und Notennamen (`C`→`8B`,
+  `Am`→`8A`, `F#m`→`11A`) → Camelot. Die Inversion `camelot→(key_pitch,key_mode)`
+  liegt in `features::camelot_to_pitch_mode` (bijektiv zu `features::camelot`),
+  Round-Trip-Test über alle 24 Keys. `camelot` bevorzugt, sonst aus `musicalKey`.
+
+**Consequences**:
+
+- ReccoBeats-TTL und music-api-TTL sind getrennt (`fetched_at` vs.
+  `metadata_checked_at`), damit ein music-api-Miss den ReccoBeats-Zyklus nicht verkürzt.
+- `source` ist einwertig; ein daten-beitragender Write setzt `source='music-api'`.
+- Ein Miss legt eine `found=0`-Row an, die den ReccoBeats-`f.track_id IS NULL`-Pfad
+  für dieses Track künftig ausschließt — bewusst: die ISRC-Autorität hatte keine
+  Werte. Bei Bedarf später über eine kombinierte Selektion revisiten.

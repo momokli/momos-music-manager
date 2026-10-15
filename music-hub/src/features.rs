@@ -65,6 +65,34 @@ pub fn camelot(pitch: i64, mode: i64) -> String {
     (if major { table_major[p] } else { table_minor[p] }).to_string()
 }
 
+/// Inverse of [`camelot`]: Camelot notation -> `(pitch_class, mode)`
+/// (`mode`: 1=major, 0=minor). `None` when the value is not canonical Camelot
+/// (`1..=12` + `A`/`B`). Using the inverse tables guarantees
+/// `camelot(pitch, mode)` round-trips to the input value.
+///
+/// Reference: `8A` -> `(9, 0)` (A minor); `8B` -> `(0, 1)` (C major).
+pub fn camelot_to_pitch_mode(camelot: &str) -> Option<(i64, i64)> {
+    const TABLE_MAJOR: [&str; 12] = [
+        "8B", "3B", "10B", "5B", "12B", "7B", "2B", "9B", "4B", "11B", "6B", "1B",
+    ];
+    const TABLE_MINOR: [&str; 12] = [
+        "5A", "12A", "7A", "2A", "9A", "4A", "11A", "6A", "1A", "8A", "3A", "10A",
+    ];
+    let s = camelot.trim().to_uppercase();
+    let letter = s.chars().last()?;
+    let (table, mode): (&[&str; 12], i64) = match letter {
+        'A' => (&TABLE_MINOR, 0),
+        'B' => (&TABLE_MAJOR, 1),
+        _ => return None,
+    };
+    let num: i64 = s[..s.len() - 1].parse().ok()?;
+    if !(1..=12).contains(&num) {
+        return None;
+    }
+    let pitch = table.iter().position(|t| *t == s.as_str())? as i64;
+    Some((pitch, mode))
+}
+
 /// Pitch class -> note name (sharps), for display.
 pub fn key_name(pitch: i64) -> &'static str {
     const NAMES: [&str; 12] = [
@@ -434,9 +462,195 @@ pub async fn backfill(pool: &SqlitePool, cfg: &Config, max_tracks: usize) -> Res
     Ok((done, false))
 }
 
+// ── music-api metadata backfill (ISRC → BPM/key authority) ──────────────────
+
+/// How long a music-api "queried, no data" marker is trusted before re-checking.
+const METADATA_RECHECK_DAYS: i64 = 7;
+/// ISRCs sent per `GET /metadata?isrcs=` request.
+const METADATA_API_BATCH: usize = 100;
+
+/// Canonicalise a raw `camelot` value from music-api (`8A` / `8a`) to `8A`.
+fn canonical_camelot(s: &str) -> Option<String> {
+    let s = s.trim().to_uppercase();
+    let letter = s.chars().last()?;
+    if !matches!(letter, 'A' | 'B') {
+        return None;
+    }
+    let num: i64 = s[..s.len() - 1].parse().ok()?;
+    if (1..=12).contains(&num) {
+        Some(s)
+    } else {
+        None
+    }
+}
+
+/// Record a music-api "queried, no data" marker: only `metadata_checked_at`,
+/// never existing values or `source`. Creates a `found = 0` row when absent.
+async fn mark_metadata_checked(pool: &SqlitePool, track_id: i64) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO hub_track_features (track_id, found, metadata_checked_at)
+         VALUES (?1, 0, ?2)
+         ON CONFLICT(track_id) DO UPDATE SET metadata_checked_at = excluded.metadata_checked_at",
+    )
+    .bind(track_id)
+    .bind(now_iso())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// UPSERT one music-api metadata row into `hub_track_features`. Returns whether
+/// the row contributed data (BPM or a parseable key). Existing values are kept
+/// via `COALESCE`; a row without usable values only records the check marker.
+async fn store_metadata_row(
+    pool: &SqlitePool,
+    track_id: i64,
+    row: &crate::music_api::MetadataRow,
+) -> Result<bool> {
+    let bpm = row.bpm.filter(|b| *b > 0.0);
+    // Prefer a well-formed `camelot`; otherwise derive it from `musicalKey`.
+    let camelot = row
+        .camelot
+        .as_deref()
+        .and_then(canonical_camelot)
+        .or_else(|| {
+            row.musical_key()
+                .and_then(crate::music_api::parse_musical_key)
+        });
+    let (key_pitch, key_mode) = match camelot.as_deref().and_then(camelot_to_pitch_mode) {
+        Some((p, m)) => (Some(p), Some(m)),
+        None => (None, None),
+    };
+
+    if bpm.is_none() && camelot.is_none() {
+        // Nothing usable: record the check only (do not change `source`).
+        mark_metadata_checked(pool, track_id).await?;
+        return Ok(false);
+    }
+
+    sqlx::query(
+        "INSERT INTO hub_track_features
+             (track_id, found, isrc, bpm, key_pitch, key_mode, camelot, source,
+              fetched_at, metadata_checked_at)
+         VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, 'music-api', ?7, ?7)
+         ON CONFLICT(track_id) DO UPDATE SET
+             found = 1,
+             isrc = COALESCE(excluded.isrc, hub_track_features.isrc),
+             bpm = COALESCE(excluded.bpm, hub_track_features.bpm),
+             key_pitch = COALESCE(excluded.key_pitch, hub_track_features.key_pitch),
+             key_mode = COALESCE(excluded.key_mode, hub_track_features.key_mode),
+             camelot = COALESCE(excluded.camelot, hub_track_features.camelot),
+             source = 'music-api',
+             fetched_at = excluded.fetched_at,
+             metadata_checked_at = excluded.metadata_checked_at",
+    )
+    .bind(track_id)
+    .bind(&row.isrc)
+    .bind(bpm)
+    .bind(key_pitch)
+    .bind(key_mode)
+    .bind(&camelot)
+    .bind(now_iso())
+    .execute(pool)
+    .await?;
+    Ok(true)
+}
+
+/// Backfill BPM/key into `hub_track_features` from music-api's ISRC authority
+/// (`GET /metadata?isrcs=`). Selection is bounded (tracks with an ISRC and no
+/// usable BPM/key, re-checked after [`METADATA_RECHECK_DAYS`]) and chunked; a
+/// transient failure skips the chunk (`continue`) so a "no data" marker never
+/// poisons a row. Returns the number of rows that contributed data.
+pub async fn backfill_from_music_api(
+    pool: &SqlitePool,
+    cfg: &Config,
+    limit: usize,
+) -> Result<usize> {
+    if cfg.music_api_token.is_none() || limit == 0 {
+        return Ok(0);
+    }
+    let ttl = (chrono::Utc::now() - chrono::Duration::days(METADATA_RECHECK_DAYS)).to_rfc3339();
+    let rows = sqlx::query(
+        "SELECT t.id AS id, t.isrc AS isrc
+           FROM hub_tracks t
+           LEFT JOIN hub_track_features f ON f.track_id = t.id
+          WHERE t.isrc IS NOT NULL AND TRIM(t.isrc) <> ''
+            AND (f.track_id IS NULL
+                 OR (f.bpm IS NULL AND f.camelot IS NULL
+                     AND (f.metadata_checked_at IS NULL OR f.metadata_checked_at < ?1)))
+          ORDER BY t.id
+          LIMIT ?2",
+    )
+    .bind(&ttl)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut by_isrc: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut isrcs: Vec<String> = Vec::new();
+    for r in &rows {
+        let isrc: String = r.get("isrc");
+        by_isrc.insert(isrc.to_uppercase(), r.get("id"));
+        isrcs.push(isrc);
+    }
+
+    let mut written = 0usize;
+    for chunk in isrcs.chunks(METADATA_API_BATCH) {
+        // A transient failure must not poison rows with a "no data" marker.
+        let Some((items, _missing)) = crate::music_api::metadata_range(cfg, chunk).await else {
+            continue;
+        };
+        let hit: std::collections::HashMap<String, &crate::music_api::MetadataRow> = items
+            .iter()
+            .map(|m| (m.isrc.to_uppercase(), m))
+            .collect();
+        for isrc in chunk {
+            let key = isrc.to_uppercase();
+            let Some(&tid) = by_isrc.get(&key) else {
+                continue;
+            };
+            match hit.get(&key) {
+                Some(row) => {
+                    if store_metadata_row(pool, tid, row).await? {
+                        written += 1;
+                    }
+                }
+                // In `missing` (or not returned): mark the check, keep data.
+                None => mark_metadata_checked(pool, tid).await?,
+            }
+        }
+    }
+    Ok(written)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{camelot, camelot_compatible, key_name, spotify_id_from_href};
+    use super::{camelot, camelot_compatible, camelot_to_pitch_mode, key_name, spotify_id_from_href};
+
+    #[test]
+    fn camelot_inverse_matches_reference() {
+        assert_eq!(camelot_to_pitch_mode("8A"), Some((9, 0))); // A minor
+        assert_eq!(camelot_to_pitch_mode("8B"), Some((0, 1))); // C major
+        assert_eq!(camelot_to_pitch_mode("8a"), Some((9, 0))); // case-insensitive
+        assert_eq!(camelot_to_pitch_mode("13A"), None);
+        assert_eq!(camelot_to_pitch_mode("8"), None);
+        assert_eq!(camelot_to_pitch_mode(""), None);
+    }
+
+    #[test]
+    fn camelot_inverse_round_trips_all_24_keys() {
+        for pitch in 0..12 {
+            for mode in [0, 1] {
+                let c = camelot(pitch, mode);
+                let (p, m) = camelot_to_pitch_mode(&c).expect("invertible");
+                assert_eq!((p, m), (pitch, mode), "round-trip for {c}");
+                assert_eq!(camelot(p, m), c);
+            }
+        }
+    }
 
     #[test]
     fn camelot_wheel_matches_reference() {

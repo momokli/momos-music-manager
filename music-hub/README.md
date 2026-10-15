@@ -105,6 +105,19 @@ music-hub push-metadata --limit 50000     # CLI
 or the **„BPM/Key pushen“** button in the `/music-api` console. Read a range back
 with `GET {MUSIC_API_BASE}/metadata?isrcs=a,b,c` (returns `items` + `missing`).
 
+### Backfill from music-api
+
+music-api is the ISRC authority. The hub can pull BPM/key **back** into
+`hub_track_features` (`source='music-api'`) to close ReccoBeats gaps — bounded,
+chunked, and safe against transient outages (a failed request never writes a
+"no data" row; a truthful miss only sets the 7-day `metadata_checked_at` TTL):
+
+```bash
+music-hub metadata-backfill --limit 2000     # CLI
+```
+
+or the **„BPM/Key holen“** button in the `/music-api` console.
+
 ## JSON API
 
 ```

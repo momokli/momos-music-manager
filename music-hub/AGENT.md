@@ -199,6 +199,15 @@ Migrations **001–024** (see `migrations/`). Highlights:
   - `hub_collectives(id, slug, name, icon, owner_user_id)` + `hub_collective_members`.
 - Other: `hub_settings`, `hub_task_history`, `hub_api_usage` (FreqBlog quota), `hub_deemix_downloads`.
 - Crawl-everything (048/049): `hub_track_audio(track_id, bpm, musical_key, camelot, energy, source, updated_at)` — flat read-model of the **vault's resolved best value** (music-api owns the vault; the hub only consumes `GET /vault/tracks?isrcs=`); `hub_crawl_state(kind, ref, state, …)` — TTL'd touch-cascade frontier (`kind` ∈ `artist` | `artist_top` | `album`); `hub_order_state(track_id, priority, ordered_at)` — idempotency ledger for music-api download-priority orders.
+- Metadata backfill (#354, migration **050**): `hub_track_features.metadata_checked_at TEXT` — TTL marker (7 days) for the api→hub BPM/key backfill. `music_api::metadata_range` reads
+  `GET /metadata?isrcs=` and `features::backfill_from_music_api` UPSERTs hits into
+  `hub_track_features` (`source='music-api'`, `COALESCE` on bpm/camelot/key_pitch/key_mode,
+  bounded + chunked, `continue` on a transient error — never a "no data" write). CLI
+  `metadata-backfill --limit 2000`; console button „BPM/Key holen“. **music-api is the ISRC
+  authority** for BPM/key: push hub analysis with `push-metadata`, pull the resolved range
+  back with the backfill. `musicalKey` is parsed to Camelot by `music_api::parse_musical_key`
+  (Camelot / Traktor `8m`/`8d` / note names `Am`, `F#m`), inverted by
+  `features::camelot_to_pitch_mode` (§Z mapping).
 
 Views of interest: `hub_v_track_presence`, `hub_v_track_playlists`, `hub_v_shared_tracks`,
 `hub_v_user_overlap`, `v_track_audio`, `hub_v_track_tags`.
