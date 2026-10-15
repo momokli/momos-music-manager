@@ -260,3 +260,10 @@ Diff `origin/main...HEAD` = 4 Dateien, exakt wie geplant: `mmm-freeze.yml` (neu,
 
 ### Empfehlung
 Merge-fähig (Squash). Required-Check-Eintrag `MMM freeze guard` bleibt Aufgabe des `mmm-pr-gate` (nicht Teil dieses Issues). Keine Blocker.
+
+## Rework (2026-10-15, adressiert Review-Blocker)
+- Commit `d81db3f` auf `feat/371-mmm-feature-freeze`, gepusht (kein neuer PR/Branch).
+- Blocker 1: Blocklist invertiert — alles unter `legacy/mmm/` außer `*.md` ist Hit; site/tests/examples/scripts/deploy/resources/vendor abgedeckt.
+- Blocker 2: AGENT.md-Wortlaut entschärft (Required-Check-Registrierung folgt via `mmm-pr-gate`).
+- Hinweis: Release-Regex case-insensitiv; FROZEN.md Enforcement angeglichen.
+- Verifier-Stage: PASS. PR-Body aktualisiert; Review-Antwort auf #463 gepostet.
