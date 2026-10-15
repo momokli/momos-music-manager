@@ -135,6 +135,74 @@ fn parse_request(buf: &[u8]) -> Captured {
     }
 }
 
+/// Like [`start_mock`] but replies with a scripted sequence of HTTP status
+/// codes (last code repeats once the script runs out); the body is a success
+/// payload for `200` and an error payload otherwise.
+async fn start_scripted_mock(statuses: Vec<u16>) -> (String, Hits) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}");
+    let hits: Hits = Arc::new(Mutex::new(Vec::new()));
+    let sink = hits.clone();
+    let script = Arc::new(statuses);
+
+    tokio::spawn(async move {
+        let mut idx = 0usize;
+        loop {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                match sock.read(&mut chunk).await {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                }
+                if let Some(he) = find_sub(&buf, b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&buf[..he]);
+                    let want = content_length(&headers);
+                    if buf.len() >= he + 4 + want {
+                        break;
+                    }
+                }
+            }
+
+            sink.lock().unwrap().push(parse_request(&buf));
+
+            let code = *script
+                .get(idx)
+                .or_else(|| script.last())
+                .unwrap_or(&200);
+            idx += 1;
+            let (reason, body) = match code {
+                200 => (
+                    "OK",
+                    r#"{"ok":true,"stats":{"entries":1,"matched":1,"playlists":1,"with_bpm":0,"with_key":0}}"#
+                        .to_string(),
+                ),
+                429 => ("Too Many Requests", r#"{"error":"slow down"}"#.to_string()),
+                503 => (
+                    "Service Unavailable",
+                    r#"{"error":"unavailable"}"#.to_string(),
+                ),
+                _ => ("Internal Server Error", r#"{"error":"boom"}"#.to_string()),
+            };
+            let resp = format!(
+                "HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.flush().await;
+            let _ = sock.shutdown().await;
+        }
+    });
+
+    (url, hits)
+}
+
 /// Spawn the built `kellner` binary with a hard 30 s hang guard.
 fn run_kellner(args: &[&str], config_path: &std::path::Path) -> (i32, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_kellner"));
@@ -294,4 +362,62 @@ async fn missing_nml_reports_not_found_without_panic() {
     assert_eq!(code, 0, "missing NML is not an error: {out}");
     assert!(out.to_lowercase().contains("not found"), "clear message: {out}");
     assert_eq!(hits.lock().unwrap().len(), 0, "nothing uploaded");
+}
+
+// (P1-3) bounded retry: transient 5xx is retried, then a success is accepted ─
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_5xx_is_retried_then_succeeds() {
+    let (url, hits) = start_scripted_mock(vec![500, 503, 200]).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("kellner").join("config.toml");
+    write_config(&cfg, &url);
+
+    let nml = tmp.path().join("collection.nml");
+    std::fs::write(&nml, NML).unwrap();
+    let nml_arg = nml.to_string_lossy().to_string();
+
+    let (code, out) = tokio::task::spawn_blocking({
+        let cfg = cfg.clone();
+        move || run_kellner(&["traktor-upload", "--collection-nml", &nml_arg, "--once"], &cfg)
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(code, 0, "run output: {out}");
+    assert_eq!(
+        hits.lock().unwrap().len(),
+        3,
+        "two transient failures retried, then accepted"
+    );
+    assert!(out.contains("uploaded"), "success message after retry: {out}");
+}
+
+// (P1-3) the retry loop is bounded: persistent 5xx stops at MAX_ATTEMPTS ────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_5xx_stops_after_bounded_attempts() {
+    let (url, hits) = start_scripted_mock(vec![500; 20]).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("kellner").join("config.toml");
+    write_config(&cfg, &url);
+
+    let nml = tmp.path().join("collection.nml");
+    std::fs::write(&nml, NML).unwrap();
+    let nml_arg = nml.to_string_lossy().to_string();
+
+    let (code, out) = tokio::task::spawn_blocking({
+        let cfg = cfg.clone();
+        move || run_kellner(&["traktor-upload", "--collection-nml", &nml_arg, "--once"], &cfg)
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(code, 0, "run output: {out}");
+    assert_eq!(
+        hits.lock().unwrap().len(),
+        3,
+        "bounded to 3 attempts (1 initial + 2 retries), never unbounded"
+    );
+    assert!(out.contains("failed"), "failure surfaced to the operator: {out}");
 }
