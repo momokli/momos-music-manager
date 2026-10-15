@@ -10,6 +10,7 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: hub_devices registry — device pairing endpoints (#363)
 - **BPM/key backfill from music-api** (#354): `hub_track_features` is now filled from
   music-api's ISRC authority (`GET /metadata?isrcs=`), closing ReccoBeats gaps. New
   `music_api::metadata_range` client, `features::backfill_from_music_api`

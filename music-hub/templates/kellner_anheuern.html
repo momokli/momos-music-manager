@@ -1,0 +1,25 @@
+{% extends "base.html" %} {% block title %}Kellner anheuern — Spelunke{% endblock %} {% block
+content %} {% if done %}
+<hgroup>
+    <h1>Kellner angeheuert</h1>
+    <p class="hub-muted">
+        „{{ device_name }}" ist jetzt mit deinem Konto verbunden und kann sich ab sofort als
+        dein Gerät ausweisen.
+    </p>
+</hgroup>
+<p><a href="/">← Zur Startseite</a></p>
+{% else %}
+<hgroup>
+    <h1>diesen kellner anheuern?</h1>
+    <p class="hub-muted">
+        Ein Gerät möchte sich mit deinem Konto verbinden. Erst nach deiner Bestätigung darf
+        es in deinem Namen handeln.
+    </p>
+</hgroup>
+<p>Gerät: <strong>{{ device_name }}</strong></p>
+<form method="post" action="/kellner/anheuern" style="display: flex; gap: 0.5rem; align-items: center">
+    <input type="hidden" name="token" value="{{ token }}" />
+    <button type="submit" name="decision" value="ja">Ja, anheuern</button>
+    <button type="submit" name="decision" value="nein" class="secondary">Nein</button>
+</form>
+{% endif %} {% endblock %}
