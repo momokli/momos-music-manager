@@ -29,6 +29,13 @@ pub struct Config {
     /// Local music collection directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection_dir: Option<PathBuf>,
+    /// Explicit Traktor `collection.nml` path (env `KELLNER_TRAKTOR_NML`).
+    /// Needed on Linux, which has no default Traktor location.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traktor_nml: Option<PathBuf>,
+    /// Traktor upload poll interval in seconds (env `KELLNER_TRAKTOR_POLL_SECS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traktor_poll_secs: Option<u64>,
     /// Persisted device identity, set after a successful `pair`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<DeviceIdentity>,
@@ -120,6 +127,12 @@ fn apply_env(cfg: &mut Config) {
     }
     if let Some(v) = env_nonempty("KELLNER_COLLECTION_DIR") {
         cfg.collection_dir = Some(PathBuf::from(v));
+    }
+    if let Some(v) = env_nonempty("KELLNER_TRAKTOR_NML") {
+        cfg.traktor_nml = Some(PathBuf::from(v));
+    }
+    if let Some(v) = env_nonempty("KELLNER_TRAKTOR_POLL_SECS") {
+        cfg.traktor_poll_secs = v.trim().parse().ok();
     }
 }
 
@@ -227,6 +240,8 @@ mod tests {
             hub_url: Some("https://hub.example.test".into()),
             music_api_url: None,
             collection_dir: None,
+            traktor_nml: None,
+            traktor_poll_secs: None,
             device: Some(identity("deadbeef")),
         };
         save(&cfg).unwrap();
