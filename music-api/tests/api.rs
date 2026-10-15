@@ -103,7 +103,9 @@ async fn harness_with(analyzer_url: Option<String>) -> Harness {
     });
 
     // Mirror production startup: create the store table + tmp dir.
-    music_api::store::init(&state.pool, &state.store).await.unwrap();
+    music_api::store::init(&state.pool, &state.store)
+        .await
+        .unwrap();
 
     Harness {
         app: build_router(state.clone()),
@@ -692,7 +694,11 @@ async fn object_prune_dry_run_then_real() {
     let missing = v["missing"].as_array().unwrap();
     assert!(missing.contains(&serde_json::json!(absent)));
     assert!(missing.contains(&serde_json::json!("garbage")));
-    assert_eq!(head_status(&h, &hash).await, StatusCode::OK, "dryRun kept the object");
+    assert_eq!(
+        head_status(&h, &hash).await,
+        StatusCode::OK,
+        "dryRun kept the object"
+    );
 
     // Real prune frees the bytes.
     let (status, resp) = send(
@@ -756,7 +762,9 @@ async fn object_orphans_reconcile() {
         &h.app,
         authed("POST", "/objects/prune/orphans")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(serde_json::json!({ "dryRun": true, "minAgeSecs": 0 })))
+            .body(json_body(
+                serde_json::json!({ "dryRun": true, "minAgeSecs": 0 }),
+            ))
             .unwrap(),
     )
     .await;
@@ -774,7 +782,9 @@ async fn object_orphans_reconcile() {
         &h.app,
         authed("POST", "/objects/prune/orphans")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(serde_json::json!({ "dryRun": false, "minAgeSecs": 0 })))
+            .body(json_body(
+                serde_json::json!({ "dryRun": false, "minAgeSecs": 0 }),
+            ))
             .unwrap(),
     )
     .await;
@@ -791,7 +801,9 @@ async fn object_orphans_reconcile() {
         &h.app,
         authed("POST", "/objects/prune/orphans")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(serde_json::json!({ "dryRun": false, "minAgeSecs": 0 })))
+            .body(json_body(
+                serde_json::json!({ "dryRun": false, "minAgeSecs": 0 }),
+            ))
             .unwrap(),
     )
     .await;
@@ -852,7 +864,10 @@ async fn tmp_sweep_removes_only_stale_files() {
 
     let stale = tmp.join("stale-partial");
     std::fs::write(&stale, b"stale").unwrap();
-    let f = std::fs::OpenOptions::new().write(true).open(&stale).unwrap();
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&stale)
+        .unwrap();
     f.set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
         .unwrap();
     drop(f);
@@ -883,10 +898,7 @@ async fn prune(h: &Harness, body: serde_json::Value) -> (StatusCode, serde_json:
     (status, serde_json::from_slice(&resp).unwrap())
 }
 
-async fn prune_orphans(
-    h: &Harness,
-    body: serde_json::Value,
-) -> (StatusCode, serde_json::Value) {
+async fn prune_orphans(h: &Harness, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
     let (status, resp) = send(
         &h.app,
         authed("POST", "/objects/prune/orphans")
@@ -922,11 +934,7 @@ async fn object_prune_empty_list_is_a_noop() {
     let hash = put_object(&h, b"keep-me").await;
 
     for dry in [false, true] {
-        let (status, v) = prune(
-            &h,
-            serde_json::json!({ "hashes": [], "dryRun": dry }),
-        )
-        .await;
+        let (status, v) = prune(&h, serde_json::json!({ "hashes": [], "dryRun": dry })).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(v["deleted"].as_array().unwrap().len(), 0);
         assert_eq!(v["missing"].as_array().unwrap().len(), 0);
@@ -993,7 +1001,10 @@ async fn object_orphans_include_tmp_sweeps_only_when_not_dry() {
     std::fs::create_dir_all(&tmp).unwrap();
     let stale = tmp.join("stale-orphan");
     std::fs::write(&stale, b"stalebytes").unwrap();
-    let f = std::fs::OpenOptions::new().write(true).open(&stale).unwrap();
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&stale)
+        .unwrap();
     f.set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
         .unwrap();
     drop(f);
@@ -1020,11 +1031,7 @@ async fn object_orphans_include_tmp_sweeps_only_when_not_dry() {
     assert!(!stale.exists());
 
     // Second real run changes nothing.
-    let (status, v) = prune_orphans(
-        &h,
-        serde_json::json!({ "includeTmp": true }),
-    )
-    .await;
+    let (status, v) = prune_orphans(&h, serde_json::json!({ "includeTmp": true })).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["filesRemoved"], 0);
     assert_eq!(v["rowsRemoved"], 0);
@@ -1058,13 +1065,22 @@ async fn object_orphans_respect_grace_period() {
 
     let (status, v) = prune_orphans(&h, serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["filesRemoved"], 0, "young orphan file survives the grace window");
-    assert_eq!(v["rowsRemoved"], 0, "young orphan row survives the grace window");
+    assert_eq!(
+        v["filesRemoved"], 0,
+        "young orphan file survives the grace window"
+    );
+    assert_eq!(
+        v["rowsRemoved"], 0,
+        "young orphan row survives the grace window"
+    );
     assert!(fresh_path.exists());
     assert_eq!(object_row_count(&h, &fresh_row).await, 1);
 
     // Age both past the grace window → both are reclaimed.
-    let f = std::fs::OpenOptions::new().write(true).open(&fresh_path).unwrap();
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&fresh_path)
+        .unwrap();
     f.set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
         .unwrap();
     drop(f);
@@ -2476,19 +2492,13 @@ async fn isrc_objects_lists_variants_and_stem_groups() {
     put_object_h(
         &h.app,
         b"track-flac",
-        &[
-            ("x-isrc", "AEA0D1846146"),
-            ("x-name", "AEA0D1846146.flac"),
-        ],
+        &[("x-isrc", "AEA0D1846146"), ("x-name", "AEA0D1846146.flac")],
     )
     .await;
     put_object_h(
         &h.app,
         b"track-mp3",
-        &[
-            ("x-isrc", "AEA0D1846146"),
-            ("x-name", "AEA0D1846146.mp3"),
-        ],
+        &[("x-isrc", "AEA0D1846146"), ("x-name", "AEA0D1846146.mp3")],
     )
     .await;
     put_object_h(
@@ -2603,7 +2613,13 @@ async fn get_file_falls_back_to_the_store() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(resp.headers()["x-source"], "store");
     assert_eq!(resp.headers()[header::CONTENT_TYPE], "audio/flac");
-    let got = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let got = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     assert_eq!(got, bytes);
 
     // The store also answers range requests.
@@ -2666,7 +2682,13 @@ async fn get_file_prefers_local_over_store() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(resp.headers()["x-source"], "local");
-    let got = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let got = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     assert_eq!(got, b"LOCAL-MP3");
 }
 
@@ -2703,10 +2725,7 @@ async fn tracks_objects_include_kind_and_stem_type() {
     put_object_h(
         &h.app,
         b"tracks-flac",
-        &[
-            ("x-isrc", "AEA0D1846146"),
-            ("x-name", "AEA0D1846146.flac"),
-        ],
+        &[("x-isrc", "AEA0D1846146"), ("x-name", "AEA0D1846146.flac")],
     )
     .await;
     put_object_h(
@@ -2726,7 +2745,9 @@ async fn tracks_objects_include_kind_and_stem_type() {
     let track = &v["tracks"][0];
     let objects = track["objects"].as_array().unwrap();
     assert_eq!(objects.len(), 2);
-    assert!(objects.iter().all(|o| o["hash"].is_string() && o["size"].is_number()));
+    assert!(objects
+        .iter()
+        .all(|o| o["hash"].is_string() && o["size"].is_number()));
     let stem = objects
         .iter()
         .find(|o| o["kind"] == serde_json::json!("stem"))
@@ -2745,7 +2766,11 @@ async fn get_file_falls_back_when_local_file_is_gone() {
     create_order(&h.app, &["AEA0D1846146"]).await;
 
     // A local path is recorded, but the file is gone from disk.
-    let local = write_file(&h.state.config.mp3_320_dir(), "AEA0D1846146.mp3", b"LOCAL-MP3");
+    let local = write_file(
+        &h.state.config.mp3_320_dir(),
+        "AEA0D1846146.mp3",
+        b"LOCAL-MP3",
+    );
     db::mark_ready(
         &h.state.pool,
         "AEA0D1846146",
@@ -2783,7 +2808,13 @@ async fn get_file_falls_back_when_local_file_is_gone() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(resp.headers()["x-source"], "store");
     assert_eq!(resp.headers()[header::CONTENT_TYPE], "audio/mpeg");
-    let got = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let got = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     assert_eq!(got, bytes);
 }
 
@@ -2938,4 +2969,403 @@ async fn object_routes_require_a_token() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ── Order archive: whole-playlist download (#358) ────────────────────────────
+
+/// Parse a ZIP body into entry-name → bytes.
+fn read_zip(bytes: &[u8]) -> std::collections::HashMap<String, Vec<u8>> {
+    use std::io::Read;
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).expect("valid zip");
+    let mut out = std::collections::HashMap::new();
+    for i in 0..archive.len() {
+        let mut f = archive.by_index(i).unwrap();
+        let name = f.name().to_string();
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).unwrap();
+        out.insert(name, buf);
+    }
+    out
+}
+
+async fn get_archive(app: &Router, uri: &str) -> axum::response::Response {
+    app.clone()
+        .oneshot(authed("GET", uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+async fn body_bytes(resp: axum::response::Response) -> Vec<u8> {
+    resp.into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec()
+}
+
+/// Set artist/title on a track (drives the archive entry-name schema).
+async fn set_track_meta(pool: &sqlx::SqlitePool, isrc: &str, artist: &str, title: &str) {
+    sqlx::query("UPDATE tracks SET artist = ?, title = ? WHERE isrc = ?")
+        .bind(artist)
+        .bind(title)
+        .bind(isrc)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn archive_contains_all_ready_tracks() {
+    let h = harness().await;
+    let order = create_order(&h.app, &["AAAA", "BBBB"]).await;
+
+    let a = write_file(&h.state.config.flac_dir(), "AAAA.flac", b"AAA-FLAC");
+    let b = write_file(&h.state.config.flac_dir(), "BBBB.flac", b"BBB-FLAC");
+    db::mark_ready(
+        &h.state.pool,
+        "AAAA",
+        "flac",
+        Some(&a.display().to_string()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    db::mark_ready(
+        &h.state.pool,
+        "BBBB",
+        "flac",
+        Some(&b.display().to_string()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()[header::CONTENT_TYPE], "application/zip");
+    let cd = resp.headers()[header::CONTENT_DISPOSITION]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(cd.starts_with("attachment"), "disposition: {cd}");
+    assert!(
+        cd.contains(&format!("order-{order}.zip")),
+        "disposition: {cd}"
+    );
+    assert!(resp.headers().contains_key(header::CONTENT_LENGTH));
+
+    let entries = read_zip(&body_bytes(resp).await);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries["AAAA.flac"], b"AAA-FLAC");
+    assert_eq!(entries["BBBB.flac"], b"BBB-FLAC");
+}
+
+#[tokio::test]
+async fn archive_skips_not_ready_tracks() {
+    let h = harness().await;
+    let order = create_order(&h.app, &["AAAA", "BBBB"]).await;
+
+    let a = write_file(&h.state.config.flac_dir(), "AAAA.flac", b"AAA-FLAC");
+    db::mark_ready(
+        &h.state.pool,
+        "AAAA",
+        "flac",
+        Some(&a.display().to_string()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    // BBBB stays pending → skipped.
+
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let entries = read_zip(&body_bytes(resp).await);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries["AAAA.flac"], b"AAA-FLAC");
+}
+
+#[tokio::test]
+async fn archive_unknown_order_is_404() {
+    let h = harness().await;
+    let resp = get_archive(&h.app, "/orders/does-not-exist/archive").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn archive_without_servable_tracks_is_409() {
+    let h = harness().await;
+    let order = create_order(&h.app, &["AAAA"]).await;
+    // Track stays pending → nothing servable.
+
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive")).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    assert_eq!(v["error"], "no downloadable tracks");
+}
+
+#[tokio::test]
+async fn archive_format_param_selects_format() {
+    let h = harness().await;
+    let order = create_order(&h.app, &["AAAA"]).await;
+
+    let p = write_file(&h.state.config.mp3_320_dir(), "AAAA.mp3", b"AAA-MP3");
+    db::mark_ready(
+        &h.state.pool,
+        "AAAA",
+        "mp3",
+        None,
+        Some(&p.display().to_string()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // 320 is servable → an .mp3 entry.
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive?format=320")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let entries = read_zip(&body_bytes(resp).await);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries["AAAA.mp3"], b"AAA-MP3");
+
+    // flac was never delivered → 409.
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive?format=flac")).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn archive_invalid_format_is_400() {
+    let h = harness().await;
+    let order = create_order(&h.app, &["AAAA"]).await;
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive?format=ogg")).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn archive_defaults_to_best_available_per_track() {
+    let h = harness().await;
+    let order = create_order(&h.app, &["AAAA", "BBBB"]).await;
+
+    // A: flac only. B: 320 only.
+    let a = write_file(&h.state.config.flac_dir(), "AAAA.flac", b"A-FLAC");
+    let b = write_file(&h.state.config.mp3_320_dir(), "BBBB.mp3", b"B-MP3");
+    db::mark_ready(
+        &h.state.pool,
+        "AAAA",
+        "flac",
+        Some(&a.display().to_string()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    db::mark_ready(
+        &h.state.pool,
+        "BBBB",
+        "mp3",
+        None,
+        Some(&b.display().to_string()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let entries = read_zip(&body_bytes(resp).await);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries["AAAA.flac"], b"A-FLAC");
+    assert_eq!(entries["BBBB.mp3"], b"B-MP3");
+}
+
+#[tokio::test]
+async fn archive_dedupes_identical_filenames() {
+    let h = harness().await;
+    let order = create_order(&h.app, &["AAAA", "BBBB"]).await;
+
+    for isrc in ["AAAA", "BBBB"] {
+        let p = write_file(
+            &h.state.config.flac_dir(),
+            &format!("{isrc}.flac"),
+            isrc.as_bytes(),
+        );
+        db::mark_ready(
+            &h.state.pool,
+            isrc,
+            "flac",
+            Some(&p.display().to_string()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        set_track_meta(&h.state.pool, isrc, "Same Artist", "Same Title").await;
+    }
+
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let entries = read_zip(&body_bytes(resp).await);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries["Same Artist - Same Title.flac"], b"AAAA");
+    assert_eq!(entries["Same Artist - Same Title (2).flac"], b"BBBB");
+}
+
+#[tokio::test]
+async fn archive_falls_back_to_store_object() {
+    let h = harness().await;
+    let order = create_order(&h.app, &["AAAA"]).await;
+
+    // No local path recorded; bytes live only in the object store.
+    put_object_h(
+        &h.app,
+        b"STORE-FLAC-BYTES",
+        &[
+            (header::CONTENT_TYPE.as_str(), "audio/flac"),
+            ("x-isrc", "AAAA"),
+            ("x-name", "AAAA.flac"),
+        ],
+    )
+    .await;
+
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let entries = read_zip(&body_bytes(resp).await);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries["AAAA.flac"], b"STORE-FLAC-BYTES");
+}
+
+#[tokio::test]
+async fn archive_requires_a_token() {
+    let h = harness().await;
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/orders/anything/archive")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn archive_filename_sanitizes_key_fallback() {
+    let h = harness().await;
+    // A composite key (soundcloud:…) is the fallback name: `:` must be sanitized.
+    let (status, body) = send(
+        &h.app,
+        authed("POST", "/orders")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [ { "source": "soundcloud", "externalId": "1837565340" } ]
+            })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let order = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["orderId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let key = "soundcloud:1837565340";
+    let p = write_file(&h.state.config.mp3_320_dir(), "sc.mp3", b"SC-MP3");
+    db::mark_ready(
+        &h.state.pool,
+        key,
+        "mp3",
+        None,
+        Some(&p.display().to_string()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let entries = read_zip(&body_bytes(resp).await);
+    assert_eq!(entries.len(), 1);
+    let name = entries.keys().next().unwrap();
+    assert!(!name.contains('/'), "name has slash: {name}");
+    assert!(!name.contains(':'), "name has colon: {name}");
+    assert_eq!(name, "soundcloud_1837565340.mp3");
+    assert_eq!(entries[name.as_str()], b"SC-MP3");
+}
+
+#[tokio::test]
+async fn archive_skips_track_with_missing_file() {
+    let h = harness().await;
+    let order = create_order(&h.app, &["AAAA", "BBBB"]).await;
+
+    // AAAA is ready with a real file.
+    let a = write_file(&h.state.config.flac_dir(), "AAAA.flac", b"AAA-FLAC");
+    db::mark_ready(
+        &h.state.pool,
+        "AAAA",
+        "flac",
+        Some(&a.display().to_string()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    // BBBB is marked ready but its recorded local file is gone (and no store
+    // object exists) → not servable, must be skipped rather than erroring.
+    let absent = h.state.config.flac_dir().join("BBBB.flac");
+    assert!(!absent.exists());
+    db::mark_ready(
+        &h.state.pool,
+        "BBBB",
+        "flac",
+        Some(&absent.display().to_string()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let entries = read_zip(&body_bytes(resp).await);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries["AAAA.flac"], b"AAA-FLAC");
+}
+
+#[tokio::test]
+async fn archive_serves_128_when_only_128_available() {
+    let h = harness().await;
+    let order = create_order(&h.app, &["AAAA"]).await;
+
+    // Only a 128 asset exists.
+    let p = write_file(&h.state.config.mp3_128_dir(), "AAAA.mp3", b"AAA-128");
+    db::mark_ready(
+        &h.state.pool,
+        "AAAA",
+        "mp3",
+        None,
+        None,
+        Some(&p.display().to_string()),
+    )
+    .await
+    .unwrap();
+
+    // Best-available default reaches the third tier (128) → an .mp3 entry.
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let entries = read_zip(&body_bytes(resp).await);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries["AAAA.mp3"], b"AAA-128");
+
+    // An explicit ?format=128 selects it directly.
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive?format=128")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let entries = read_zip(&body_bytes(resp).await);
+    assert_eq!(entries["AAAA.mp3"], b"AAA-128");
 }

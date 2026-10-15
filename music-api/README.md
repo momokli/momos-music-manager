@@ -82,6 +82,36 @@ final file is resolved by yt-dlp (`api.soundcloud.com/tracks/<id>` /
 file (ffprobe), not from what was requested, because deemix's bitrate fallback
 lands on whatever the ARL's Deezer tier allows.
 
+### `GET /orders/{orderId}/archive[?format=flac|320|128]` — whole order as one ZIP (#358)
+
+One request → one `application/zip` attachment (`Content-Disposition:
+attachment; filename="order-<orderId>.zip"`), instead of pulling `GET
+/isrc/{isrc}/{format}` per track. The ZIP is built into a temp file under
+`data_dir/tmp/`, then streamed (`Content-Length` set); audio entries are stored
+**without recompression** (`CompressionMethod::Stored`).
+
+Tracks that are not currently servable (not ready, file missing) are **skipped
+silently** — the archive never fails because of one missing track.
+
+| Query `format` | Behaviour |
+|----------------|-----------|
+| `flac` / `320` / `128` | Only that format; tracks without it are skipped. |
+| *(omitted)* | Best-available per track: `flac` → `320` → `128`. |
+
+Entry names are cosmetic: `"<artist> - <title>"` sanitised (path/control
+characters stripped, whitespace collapsed, ~150 chars max), falling back to the
+track key when both are empty; collisions get a ` (n)` suffix. The extension
+follows the format used (`.flac` / `.mp3`). The client keeps its own
+ISRC↔file mapping.
+
+| Status | When |
+|--------|------|
+| `200` | Order exists and ≥1 track is servable → ZIP. |
+| `400` | `format` is set but not `flac`/`320`/`128`. |
+| `404` | Order id is unknown. |
+| `409` | Order exists but no track is servable in the selected (or best-available) format. Body: `{"error":"no downloadable tracks"}`. |
+| `500` | DB/IO error (temp file, ZIP write). |
+
 ### `GET /orders?status=open|done|partial&limit=50`
 
 ### `GET /isrc/{isrc}` — single-ISRC state.
