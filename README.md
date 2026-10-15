@@ -15,7 +15,7 @@
 | **music-hub** (codename _spelunke_) | [`music-hub/`](music-hub/)                                            | Multi-user web UI + DB over Spotify / SoundCloud / YouTube / Traktor. Tags, playlists, collectives, digging, discovery, now-playing.               | always-on server | [`music-hub/AGENT.md`](music-hub/AGENT.md)                                       |
 | **music-api**                       | [`music-api/`](music-api/)                                            | The **authority**: ISRC/order → download service (Deezer / deemix / yt-dlp / spotDL), object store, and the **BPM/key/metadata catalogue**.        | always-on server | [`music-api/README.md`](music-api/README.md)                                     |
 | **kellner**                         | [`kellner/`](kellner/)                                                | Local **cross-platform companion**: Backpack upkeep, **backups of the music library → music-api**, Traktor `collection.nml` **upload**, downloads. | each Mac / PC    | [`kellner/AGENT.md`](kellner/AGENT.md)                                           |
-| ~~MMM~~                             | `legacy/mmm/` (`src/`, `frontend/`, `migrations/`, `tests/`, `site/`) | The original single-user Mac app. **Sunset.**                                                                                                      | —                | [`docs/legacy/mmm-README.md`](docs/legacy/mmm-README.md), [`AGENT.md`](AGENT.md) |
+| ~~MMM~~                             | `legacy/mmm/` (`src/`, `frontend/`, `migrations/`, `tests/`, `site/`) | The original single-user Mac app. **Sunset.**                                                                                                      | —                | [`docs/legacy/mmm-README.md`](docs/legacy/mmm-README.md), [`legacy/mmm/FROZEN.md`](legacy/mmm/FROZEN.md) |
 
 **How they relate:** the hub _orders_ and _reads_; **music-api downloads, analyses,
 remembers and expands**; kellner keeps the local machines in sync with music-api.
@@ -77,4 +77,4 @@ was the starting point of everything above. It is **decommissioned**:
 - migration target: **music-hub** (+ **music-api** for downloads/metadata)
 
 Treat MMM as read-only unless a fix is needed to keep it running through the
-transition.
+transition — see [`legacy/mmm/FROZEN.md`](legacy/mmm/FROZEN.md) (frozen; escape label `mmm:unfreeze`).

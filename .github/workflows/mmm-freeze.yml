@@ -1,0 +1,74 @@
+name: MMM freeze
+
+# Feature-freeze guard for the legacy MMM app (legacy/mmm/).
+#
+# MMM is sunset: only bug fixes that keep it running through the data migration
+# are allowed — no new features. This guard fails any PR that touches the MMM
+# feature surface unless the PR carries the escape label `mmm:unfreeze`.
+# Marker: legacy/mmm/FROZEN.md.
+#
+# Scope: the whole legacy/mmm/ tree is frozen except *.md docs/changelog.
+#
+# Convention: no `paths:` filter — a skipped check is not green. The guard runs
+# on every PR and passes when the diff is outside the MMM feature surface.
+# `labeled`/`unlabeled` are included so adding/removing `mmm:unfreeze` re-evaluates.
+# Least privilege: contents:read (diff only).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  mmm-freeze-guard:
+    name: MMM freeze guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: MMM freeze guard
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+
+          # Release-PRs bump legacy/mmm/Cargo.toml legitimately — exempt them,
+          # using the same rule as pr-quality.yml (title `chore(release)` or `release:*`).
+          if [[ "${PR_TITLE,,}" =~ ^chore\(release\) ]] || grep -qE '(^|,)release' <<<"$PR_LABELS"; then
+            echo "::notice::Release-PR (chore(release)/release:*) — MMM freeze guard skipped."
+            exit 0
+          fi
+
+          # Escape hatch for migration-critical fixes.
+          if grep -qE '(^|,)mmm:unfreeze(,|$)' <<<"$PR_LABELS"; then
+            echo "::notice::Label 'mmm:unfreeze' set — MMM freeze not enforced for this PR."
+            exit 0
+          fi
+
+          base="origin/${BASE_REF}"
+          echo "Diffing ${base}...HEAD"
+          changed="$(git diff --name-only "${base}...HEAD")"
+
+          # Blocklist: the MMM feature surface is the whole legacy/mmm/ tree,
+          # except docs/changelog (*.md). Any other path under legacy/mmm/ is a hit.
+          hits="$(grep -E '^legacy/mmm/' <<<"$changed" | grep -Ev '\.md$' || true)"
+
+          if [[ -n "$hits" ]]; then
+            echo "::error::MMM is frozen — this PR touches the MMM feature surface:"
+            echo "$hits"
+            echo
+            echo "MMM only accepts bug fixes that keep it running until the data"
+            echo "migration completes. The feature surface (everything under legacy/mmm/"
+            echo "except *.md docs) is frozen — no new features."
+            echo
+            echo "If this is a migration-critical fix, add the PR label 'mmm:unfreeze'."
+            echo "See legacy/mmm/FROZEN.md."
+            exit 1
+          fi
+
+          echo "No MMM feature-surface changes — MMM freeze guard passed."
