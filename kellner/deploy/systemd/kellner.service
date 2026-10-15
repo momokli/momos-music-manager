@@ -1,0 +1,20 @@
+# Reference unit for the Linux **user** service.
+#
+# `kellner service install` writes the same shape, but with the absolute path of
+# the running binary. Keep this template in sync with `systemd_user_unit()` in
+# ../../src/service.rs.
+
+[Unit]
+Description=kellner — local music-stack companion
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/kellner run
+Restart=on-failure
+RestartSec=30
+Nice=10
+
+[Install]
+WantedBy=default.target

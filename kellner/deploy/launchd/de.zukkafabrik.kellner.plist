@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Reference LaunchAgent for macOS.
+
+  `kellner service install` writes the same shape to
+  ~/Library/LaunchAgents/de.zukkafabrik.kellner.plist with the absolute path of
+  the running binary and the user's log paths. Keep this template in sync with
+  `launchd_plist()` in ../../src/service.rs.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>de.zukkafabrik.kellner</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/kellner</string>
+        <string>run</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/you/Library/Logs/kellner/kellner.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/you/Library/Logs/kellner/kellner.err.log</string>
+</dict>
+</plist>
