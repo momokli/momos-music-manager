@@ -2738,3 +2738,204 @@ async fn tracks_objects_include_kind_and_stem_type() {
         .expect("flac object present");
     assert!(flac["stemType"].is_null());
 }
+
+#[tokio::test]
+async fn get_file_falls_back_when_local_file_is_gone() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+
+    // A local path is recorded, but the file is gone from disk.
+    let local = write_file(&h.state.config.mp3_320_dir(), "AEA0D1846146.mp3", b"LOCAL-MP3");
+    db::mark_ready(
+        &h.state.pool,
+        "AEA0D1846146",
+        "mp3",
+        None,
+        Some(&local.display().to_string()),
+        None,
+    )
+    .await
+    .unwrap();
+    std::fs::remove_file(&local).unwrap();
+
+    let bytes = b"STORE-MP3-BYTES".to_vec();
+    put_object_h(
+        &h.app,
+        &bytes,
+        &[
+            (header::CONTENT_TYPE.as_str(), "audio/mpeg"),
+            ("x-isrc", "AEA0D1846146"),
+            ("x-name", "AEA0D1846146.mp3"),
+        ],
+    )
+    .await;
+
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            authed("GET", "/isrc/AEA0D1846146/320")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["x-source"], "store");
+    assert_eq!(resp.headers()[header::CONTENT_TYPE], "audio/mpeg");
+    let got = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    assert_eq!(got, bytes);
+}
+
+#[tokio::test]
+async fn get_file_store_fallback_maps_both_mp3_formats() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+
+    put_object_h(
+        &h.app,
+        b"STORE-MP3",
+        &[
+            (header::CONTENT_TYPE.as_str(), "audio/mpeg"),
+            ("x-isrc", "AEA0D1846146"),
+            ("x-name", "AEA0D1846146.mp3"),
+        ],
+    )
+    .await;
+
+    // 320 and 128 both map to the store's mp3 object (no bitrate in the store).
+    for format in ["320", "128"] {
+        let resp = h
+            .app
+            .clone()
+            .oneshot(
+                authed("GET", &format!("/isrc/AEA0D1846146/{format}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "format {format}");
+        assert_eq!(resp.headers()["x-source"], "store", "format {format}");
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "audio/mpeg");
+    }
+}
+
+#[tokio::test]
+async fn object_put_fills_null_stem_columns_on_later_upload() {
+    let h = harness().await;
+    let bytes = b"late-stem-object";
+
+    // First upload carries no stem metadata → columns stay NULL.
+    let hash = put_object_h(&h.app, bytes, &[]).await;
+
+    // A later upload of the same object supplies the headers: COALESCE fills
+    // the previously NULL columns.
+    let hash2 = put_object_h(
+        &h.app,
+        bytes,
+        &[("x-group-key", "grp-late"), ("x-stem-type", "keys")],
+    )
+    .await;
+    assert_eq!(hash, hash2);
+
+    let (_, v) = get_json(&h.app, "/objects?limit=1000").await;
+    let obj = v["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["hash"] == serde_json::json!(hash))
+        .unwrap();
+    assert_eq!(obj["groupKey"], "grp-late");
+    assert_eq!(obj["stemType"], "keys");
+}
+
+#[tokio::test]
+async fn isrc_objects_links_stems_by_group_key_without_isrc() {
+    let h = harness().await;
+    create_order(&h.app, &["AEA0D1846146"]).await;
+
+    // Primary object anchors the group_key; the stem carries only the group_key
+    // (no isrc) — linkage is best-effort over group_key.
+    put_object_h(
+        &h.app,
+        b"anchor-flac",
+        &[
+            ("x-isrc", "AEA0D1846146"),
+            ("x-group-key", "grp-5"),
+            ("x-name", "AEA0D1846146.flac"),
+        ],
+    )
+    .await;
+    put_object_h(
+        &h.app,
+        b"stem-no-isrc",
+        &[
+            ("x-group-key", "grp-5"),
+            ("x-stem-type", "vocals"),
+            ("x-name", "vocals.flac"),
+        ],
+    )
+    .await;
+
+    let (status, v) = get_json(&h.app, "/isrc/AEA0D1846146/objects").await;
+    assert_eq!(status, StatusCode::OK);
+    // Only the anchor object is a direct variant.
+    assert_eq!(v["count"], 1);
+    let groups = v["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["groupKey"], "grp-5");
+    let stems = groups[0]["stems"].as_array().unwrap();
+    assert_eq!(stems.len(), 1);
+    assert_eq!(stems[0]["stemType"], "vocals");
+}
+
+#[tokio::test]
+async fn object_routes_require_a_token() {
+    let h = harness().await;
+
+    // GET /objects
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/objects")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // PUT /objects/{hash}
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/objects/deadbeef")
+                .body(Body::from("x"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // GET /isrc/{isrc}/{format}
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/isrc/AEA0D1846146/flac")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
