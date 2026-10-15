@@ -3298,3 +3298,74 @@ async fn archive_filename_sanitizes_key_fallback() {
     assert_eq!(name, "soundcloud_1837565340.mp3");
     assert_eq!(entries[name.as_str()], b"SC-MP3");
 }
+
+#[tokio::test]
+async fn archive_skips_track_with_missing_file() {
+    let h = harness().await;
+    let order = create_order(&h.app, &["AAAA", "BBBB"]).await;
+
+    // AAAA is ready with a real file.
+    let a = write_file(&h.state.config.flac_dir(), "AAAA.flac", b"AAA-FLAC");
+    db::mark_ready(
+        &h.state.pool,
+        "AAAA",
+        "flac",
+        Some(&a.display().to_string()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    // BBBB is marked ready but its recorded local file is gone (and no store
+    // object exists) → not servable, must be skipped rather than erroring.
+    let absent = h.state.config.flac_dir().join("BBBB.flac");
+    assert!(!absent.exists());
+    db::mark_ready(
+        &h.state.pool,
+        "BBBB",
+        "flac",
+        Some(&absent.display().to_string()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let entries = read_zip(&body_bytes(resp).await);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries["AAAA.flac"], b"AAA-FLAC");
+}
+
+#[tokio::test]
+async fn archive_serves_128_when_only_128_available() {
+    let h = harness().await;
+    let order = create_order(&h.app, &["AAAA"]).await;
+
+    // Only a 128 asset exists.
+    let p = write_file(&h.state.config.mp3_128_dir(), "AAAA.mp3", b"AAA-128");
+    db::mark_ready(
+        &h.state.pool,
+        "AAAA",
+        "mp3",
+        None,
+        None,
+        Some(&p.display().to_string()),
+    )
+    .await
+    .unwrap();
+
+    // Best-available default reaches the third tier (128) → an .mp3 entry.
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let entries = read_zip(&body_bytes(resp).await);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries["AAAA.mp3"], b"AAA-128");
+
+    // An explicit ?format=128 selects it directly.
+    let resp = get_archive(&h.app, &format!("/orders/{order}/archive?format=128")).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let entries = read_zip(&body_bytes(resp).await);
+    assert_eq!(entries["AAAA.mp3"], b"AAA-128");
+}
