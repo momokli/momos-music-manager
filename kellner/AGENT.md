@@ -1,7 +1,7 @@
 # kellner — Agent Handover
 
-> **Last updated**: 2026-10-15 · downloads implemented (#366); backup (#365);
-> traktor-upload (#364); §5 decisions locked (ADR-081, #361)
+> **Last updated**: 2026-10-15 · service + tray implemented (#368); downloads
+> (#366); backup (#365); traktor-upload (#364); §5 decisions locked (ADR-081, #361)
 > Keep this file current. It is the entry point for any agent working on `kellner/`.
 >
 > **Status: pairing (#362), traktor-upload (#364), backup (#365) implemented.**
@@ -24,6 +24,15 @@
 > flac→320→128 fallback; provenance (path/format/order) + idempotency live in
 > `state.json`; no arguments → read-only status report (no network). The only
 > remaining stub is `backpack`.
+>
+> **Service + tray (#368, P5).** `kellner run` (`src/sync/run.rs`) is the
+> background loop the OS service executes; it scales its interval by power source
+> (`src/power.rs`, macOS `pmset`) and stops on Ctrl-C. `kellner service
+> install|uninstall|status` (`src/service.rs`) writes the launchd plist /
+> systemd user unit (Task Scheduler hint on Windows) via pure, snapshot-tested
+> builders. The tray / menu-bar widget (`src/tray.rs`; `feierabend` + `re-auth`)
+> sits behind the **off-by-default** `tray` cargo feature so headless hosts /
+> CI build without GTK.
 
 ---
 
@@ -65,9 +74,10 @@ member — it declares its own empty `[workspace]`).
 - **downloads** — **implemented (#366)**: `kellner downloads --isrc …` orders the
   ISRCs at music-api, polls until ready and files the delivered bytes flat into
   the collection (see §4). The Backpack-driven variant (diff/tag) is **#367**.
-- **service/tray** — runs as a **tray / menu-bar widget** (v1, battery-friendly) on top of
-  launchd (macOS) / systemd (Linux) / Task Scheduler (Windows); right-click shows exactly
-  “feierabend” (quit) and “re-auth”.
+- **service/tray** — **implemented (#368)**: `kellner run` is the background
+  loop, driven as launchd (macOS) / systemd user unit (Linux) / Task Scheduler
+  (Windows). The tray / menu-bar widget (v1, battery-friendly) is opt-in via the
+  `tray` feature; right-click shows exactly “feierabend” (quit) and “re-auth”.
 
 ## 4. Source layout (current)
 
@@ -77,12 +87,16 @@ kellner/
 ├── README.md
 ├── AGENT.md       # this file
 └── src/
-    ├── main.rs    # clap CLI: pair, traktor-upload (+ backpack / backup / downloads stubs)
+    ├── main.rs    # clap CLI: pair, traktor-upload, backup, downloads, run, service (+ backpack stub)
     ├── config.rs  # ~/.config/kellner/config.toml + persisted device identity
     ├── pairing.rs # token gen, hub register, approval URL, browser open, confirm
+    ├── power.rs   # power-source detection (macOS pmset) + adaptive interval (#368)
+    ├── service.rs # launchd plist / systemd unit builders + install/uninstall/status (#368)
+    ├── tray.rs    # tray / menu-bar widget, behind the off-by-default `tray` feature (#368)
     ├── state.rs   # minimal JSON sync state (state.json: `last_upload_mtime`, `orders`, `downloads`)
     ├── sync/
     │   ├── mod.rs
+    │   ├── run.rs      # background loop (`kellner run`): power-aware, Ctrl-C, task select (#368)
     │   ├── traktor.rs  # collection.nml detection (macOS/Windows defaults + override) + mtime watch
     │   ├── backup.rs   # walk + canonicalise (Comment cleared) + SHA-256 + dedup/upload (#365)
     │   └── downloads.rs # order → poll → stream → flat file + provenance (#366)
@@ -122,8 +136,16 @@ All open points below are now **resolved**; treat them as intent to implement, n
   SHA-256 of the **canonicalised** file (comment cleared) → dedup-safe.
 - **Backup transport** — v1 whole-file idempotent `PUT /objects/{sha256}` + `POST
 /objects/check` skip; chunked/resumable is v2.
-- **Tray/service** — tray/menu-bar widget is **v1** (battery-friendly), not a later
-  add-on; keep battery-awareness in mind (cf. `plans/proposed/battery-friendly-tray.md`).
+- **Tray/service** — **implemented (#368).** `kellner run` is the loop the unit
+  runs (power-aware: AC×1 / AC+idle×2 / battery×3 / battery+idle×6, 30 s floor via
+  `src/power.rs`). `kellner service` writes the launchd plist (with `ProcessType`,
+  `Nice`, `LowPriorityIO`) or the systemd user unit; Windows gets a `schtasks`
+  hint. The tray/menu-bar widget (`feierabend` + `re-auth`) is opt-in behind the
+  `tray` feature (needs GTK on Linux) — see `plans/proposed/battery-friendly-tray.md`.
+  The loop stops promptly on SIGINT, SIGTERM and the `feierabend` flag (its sleep
+  is interruptible, polled every 500 ms) — no waiting out the current interval.
+  Screenshot exemption: the tray is a native non-web widget (no headless render),
+  so its contract is pinned by the `MENU_LABELS` unit test, not a screenshot.
 - **Repo rules** — one issue = one branch = one PR; see the root
   [`AGENT.md`](../AGENT.md) and [`docs/ROADMAP.md`](../docs/ROADMAP.md)
   (milestone **kellner-0.1.0**).

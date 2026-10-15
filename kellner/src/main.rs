@@ -9,11 +9,14 @@
 mod client;
 mod config;
 mod pairing;
+mod power;
+mod service;
 mod state;
 mod sync;
 mod tag;
+mod tray;
 
-use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -43,6 +46,10 @@ enum Command {
     TraktorUpload(TraktorUploadArgs),
     /// Order + download ISRCs, or show the download state without arguments.
     Downloads(DownloadsArgs),
+    /// Run the background sync loop (the entry point the OS service executes).
+    Run(RunArgs),
+    /// Install / uninstall / inspect the launchd or systemd unit.
+    Service(ServiceArgs),
 }
 
 #[derive(Debug, Args)]
@@ -131,6 +138,58 @@ struct DownloadsArgs {
 }
 
 #[derive(Debug, Args)]
+struct RunArgs {
+    /// Run a single pass and exit (no loop).
+    #[arg(long)]
+    once: bool,
+    /// Base poll interval in seconds (default: config value, else 300).
+    #[arg(long)]
+    interval_secs: Option<u64>,
+    /// Tasks to run (repeatable; default: traktor-upload).
+    #[arg(long = "tasks", value_name = "TASK")]
+    tasks: Vec<String>,
+    /// Use a fixed interval instead of scaling it on battery.
+    #[arg(long)]
+    no_power_awareness: bool,
+    /// Explicit `collection.nml` path (default: config value, else platform autodetect).
+    #[arg(long)]
+    collection_nml: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ServiceArgs {
+    #[command(subcommand)]
+    action: ServiceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    /// Write the unit file (macOS plist / Linux user unit) or print the Windows hint.
+    Install(ServiceInstallArgs),
+    /// Remove the installed unit file.
+    Uninstall(ServiceUninstallArgs),
+    /// Report whether a unit file is installed.
+    Status,
+}
+
+#[derive(Debug, Args)]
+struct ServiceInstallArgs {
+    /// Print the unit text only; write nothing.
+    #[arg(long)]
+    print: bool,
+    /// Show what would be written without touching the filesystem.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+struct ServiceUninstallArgs {
+    /// Show what would be removed without touching the filesystem.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
 struct TraktorUploadArgs {
     /// Explicit `collection.nml` path (default: config value, else platform autodetect).
     #[arg(long)]
@@ -152,6 +211,8 @@ fn main() -> Result<()> {
         Command::Backup(args) => return backup(args),
         Command::TraktorUpload(args) => return traktor_upload(args),
         Command::Downloads(args) => return downloads(args),
+        Command::Run(args) => return run_cmd(args),
+        Command::Service(args) => return service_cmd(args),
     }
 }
 
@@ -349,59 +410,153 @@ fn traktor_upload(args: TraktorUploadArgs) -> Result<()> {
         let device = cfg.device.clone().ok_or_else(|| {
             anyhow::anyhow!("this device is not paired yet — run `kellner pair` first")
         })?;
-        let hub_url = cfg.hub_url();
+        let hub = client::hub::HubClient::new(cfg.hub_url(), device.device_token);
         let interval = args
             .interval_secs
             .or(cfg.traktor_poll_secs)
             .unwrap_or(300)
             .max(1);
         let override_nml = args.collection_nml.clone().or(cfg.traktor_nml.clone());
-        let client = client::hub::HubClient::new(hub_url, device.device_token);
-
-        loop {
-            if let Err(e) = sync_once(&client, override_nml.as_deref()).await {
-                eprintln!("kellner: traktor upload failed: {e:#}");
-            }
-            if args.once {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
-        }
-        Ok(())
+        let opts = sync::run::RunOptions {
+            tasks: vec![sync::run::Task::TraktorUpload],
+            base_interval: Duration::from_secs(interval),
+            once: args.once,
+            power_aware: false,
+            idle: false,
+            hub: &hub,
+            traktor_nml: override_nml,
+            stop: None,
+        };
+        sync::run::run(opts).await
     })
 }
 
-/// One detection + change-check + (maybe) upload cycle.
-async fn sync_once(client: &client::hub::HubClient, override_nml: Option<&Path>) -> Result<()> {
-    let Some(path) = sync::traktor::detect(override_nml) else {
-        println!(
-            "kellner: Traktor collection.nml not found (pass --collection-nml or set KELLNER_TRAKTOR_NML)"
-        );
-        return Ok(());
-    };
-    let mtime = sync::traktor::mtime_nanos(&path)
-        .ok_or_else(|| anyhow::anyhow!("cannot stat {}", path.display()))?;
-    let state = state::load()?;
-    if !state::needs_upload(&state, mtime) {
-        println!("kellner: {} unchanged since last upload — nothing to do", path.display());
-        return Ok(());
+/// `kellner run` — the background loop the OS service executes.
+fn run_cmd(args: RunArgs) -> Result<()> {
+    #[cfg(feature = "tray")]
+    if !args.once {
+        return run_with_tray(args);
     }
-    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-    let stats = client
-        .upload_traktor(bytes)
-        .await
-        .context("uploading collection.nml")?;
-    let mut state = state;
-    state.last_upload_mtime = Some(mtime);
-    state::save(&state)?;
-    println!(
-        "kellner: uploaded {} ({} entries, {} matched, {} playlists)",
-        path.display(),
-        stats.entries,
-        stats.matched,
-        stats.playlists
-    );
-    Ok(())
+
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        let cfg = config::load()?;
+        let device = cfg.device.clone().ok_or_else(|| {
+            anyhow::anyhow!("this device is not paired yet — run `kellner pair` first")
+        })?;
+        let tasks = sync::run::parse_tasks(&args.tasks)?;
+        let base = args
+            .interval_secs
+            .or(cfg.traktor_poll_secs)
+            .unwrap_or(300)
+            .max(1);
+        let override_nml = args.collection_nml.clone().or(cfg.traktor_nml.clone());
+        let hub = client::hub::HubClient::new(cfg.hub_url(), device.device_token);
+        let opts = sync::run::RunOptions {
+            tasks,
+            base_interval: Duration::from_secs(base),
+            once: args.once,
+            power_aware: !args.no_power_awareness,
+            idle: false,
+            hub: &hub,
+            traktor_nml: override_nml,
+            stop: None,
+        };
+        sync::run::run(opts).await
+    })
+}
+
+/// `kellner service …` — writes/inspects the launchd / systemd unit.
+fn service_cmd(args: ServiceArgs) -> Result<()> {
+    let opts = match args.action {
+        ServiceCommand::Install(a) => service::ServiceOptions {
+            action: service::ServiceAction::Install,
+            print: a.print,
+            dry_run: a.dry_run,
+        },
+        ServiceCommand::Uninstall(a) => service::ServiceOptions {
+            action: service::ServiceAction::Uninstall,
+            print: false,
+            dry_run: a.dry_run,
+        },
+        ServiceCommand::Status => service::ServiceOptions {
+            action: service::ServiceAction::Status,
+            print: false,
+            dry_run: false,
+        },
+    };
+    service::run(&opts)
+}
+
+/// With the `tray` feature, run the sync loop on a worker thread and the
+/// menu-bar widget on the main thread; "feierabend" stops both.
+#[cfg(feature = "tray")]
+fn run_with_tray(args: RunArgs) -> Result<()> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_loop = stop.clone();
+    let worker = std::thread::spawn(move || -> Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async move {
+            let cfg = config::load()?;
+            let device = cfg.device.clone().ok_or_else(|| {
+                anyhow::anyhow!("this device is not paired yet — run `kellner pair` first")
+            })?;
+            let tasks = sync::run::parse_tasks(&args.tasks)?;
+            let base = args
+                .interval_secs
+                .or(cfg.traktor_poll_secs)
+                .unwrap_or(300)
+                .max(1);
+            let override_nml = args.collection_nml.clone().or(cfg.traktor_nml.clone());
+            let hub = client::hub::HubClient::new(cfg.hub_url(), device.device_token);
+            let opts = sync::run::RunOptions {
+                tasks,
+                base_interval: Duration::from_secs(base),
+                once: false,
+                power_aware: !args.no_power_awareness,
+                idle: false,
+                hub: &hub,
+                traktor_nml: override_nml,
+                stop: Some(stop_loop),
+            };
+            sync::run::run(opts).await
+        })
+    });
+
+    let stop_tray = stop.clone();
+    let on_reauth = || {
+        if let Err(e) = re_auth() {
+            eprintln!("kellner: re-auth failed: {e:#}");
+        }
+    };
+    let tray_result = tray::run(stop_tray, on_reauth);
+    stop.store(true, Ordering::SeqCst);
+    let _ = worker.join();
+    tray_result
+}
+
+/// Re-run pairing (the tray's "re-auth" action): same flow as `kellner pair --force`.
+#[cfg(feature = "tray")]
+fn re_auth() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        let mut cfg = config::load()?;
+        let hub_url = cfg.hub_url();
+        let opts = pairing::PairOptions {
+            hub_url: hub_url.clone(),
+            name: default_hostname(),
+            no_open: false,
+            print_only: false,
+            wait: true,
+            force: true,
+            interactive: true,
+        };
+        let transport = pairing::HttpHubTransport::new(hub_url);
+        pairing::run_pair(&mut cfg, &transport, &opts).await
+    })
 }
 
 fn default_hostname() -> String {
@@ -465,6 +620,8 @@ mod tests {
                 Command::TraktorUpload(_) => "traktor-upload",
                 Command::Downloads(_) => "downloads",
                 Command::Pair(_) => "pair",
+                Command::Run(_) => "run",
+                Command::Service(_) => "service",
             };
             assert_eq!(got, expected);
         }
@@ -477,10 +634,70 @@ mod tests {
         match cli.command {
             Command::Backup(args) => {
                 assert!(args.dry_run);
-                assert_eq!(args.root.as_deref(), Some(Path::new("/music")));
+                assert_eq!(args.root.as_deref(), Some(std::path::Path::new("/music")));
                 assert!(args.once);
             }
             other => panic!("expected Backup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_run_flags() {
+        let cli = Cli::try_parse_from([
+            "kellner",
+            "run",
+            "--once",
+            "--interval-secs",
+            "120",
+            "--tasks",
+            "traktor-upload",
+            "--no-power-awareness",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Run(args) => {
+                assert!(args.once);
+                assert_eq!(args.interval_secs, Some(120));
+                assert_eq!(args.tasks, vec!["traktor-upload".to_string()]);
+                assert!(args.no_power_awareness);
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_service_install_flags() {
+        let cli =
+            Cli::try_parse_from(["kellner", "service", "install", "--print", "--dry-run"]).unwrap();
+        match cli.command {
+            Command::Service(args) => match args.action {
+                ServiceCommand::Install(a) => {
+                    assert!(a.print);
+                    assert!(a.dry_run);
+                }
+                other => panic!("expected Install, got {other:?}"),
+            },
+            other => panic!("expected Service, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_service_uninstall_and_status() {
+        let uninstall = Cli::try_parse_from(["kellner", "service", "uninstall", "--dry-run"]).unwrap();
+        match uninstall.command {
+            Command::Service(args) => match args.action {
+                ServiceCommand::Uninstall(a) => assert!(a.dry_run),
+                other => panic!("expected Uninstall, got {other:?}"),
+            },
+            other => panic!("expected Service, got {other:?}"),
+        }
+
+        let status = Cli::try_parse_from(["kellner", "service", "status"]).unwrap();
+        match status.command {
+            Command::Service(args) => {
+                assert!(matches!(args.action, ServiceCommand::Status));
+            }
+            other => panic!("expected Service, got {other:?}"),
         }
     }
 }

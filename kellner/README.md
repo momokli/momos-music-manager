@@ -5,9 +5,11 @@ on each Mac / PC and keeps the local machine in sync with the always-on servers
 [`music-api`](../music-api/) (downloads, object store, BPM/key authority) and
 [`music-hub`](../music-hub/) (multi-user web UI + DB).
 
-> **Status: pairing implemented (#362).** `kellner pair` registers this device with
-> the hub and stores the device token. The remaining subcommands (`backpack`,
-> `backup`, `traktor-upload`, `downloads`) still print `not yet implemented`.
+> **Status: sync loop + service/tray implemented (#368).** `kellner pair`
+> registers this device with the hub; `traktor-upload`, `backpack`, `backup` and
+> `downloads` sync; `kellner run` is the background loop the OS service executes,
+> and `kellner service install|uninstall|status` writes the launchd / systemd
+> unit (Task Scheduler hint on Windows).
 
 ## What it will do
 
@@ -39,11 +41,57 @@ cargo run -- backpack
 cargo run -- backup
 cargo run -- traktor-upload
 cargo run -- downloads
+
+# Background loop (what the OS service runs) — power-aware on battery
+cargo run -- run
+cargo run -- run --once                       # single pass, then exit
+cargo run -- run --no-power-awareness         # fixed interval
+
+# Install / inspect the OS service unit
+cargo run -- service install                  # writes the unit + prints the enable command
+cargo run -- service install --print          # print the unit text, write nothing
+cargo run -- service status
+cargo run -- service uninstall
+```
+
+The tray / menu-bar widget (right-click: `feierabend`, `re-auth`) is behind the
+**off-by-default** `tray` cargo feature, so headless hosts and the CI build keep
+working without GTK / appindicator system libraries:
+
+```bash
+cargo run --features tray -- run
 ```
 
 Config lives in `~/.config/kellner/config.toml` (hub-host override + device
 identity, file mode `0600`). Override the path with `KELLNER_CONFIG`; override
 the hub with `KELLNER_HUB_URL`.
+
+## Service units (macOS / Linux / Windows)
+
+`kellner service install` writes:
+
+- **macOS** — `~/Library/LaunchAgents/de.zukkafabrik.kellner.plist`
+  (battery-friendly: `ProcessType=Background`, `Nice=10`, `LowPriorityIO`,
+  `RunAtLoad`, `KeepAlive`), then prints `launchctl load -w …`.
+- **Linux** — `$XDG_CONFIG_HOME/systemd/user/kellner.service` (else
+  `~/.config/…`), then prints `systemctl --user enable --now kellner.service`.
+- **Windows** — no file is written; a `schtasks /Create …` hint is printed.
+
+`kellner run` scales its poll interval by power source
+(`power::interval_for`): AC×1, AC+idle×2, battery×3, battery+idle×6, with a 30 s
+floor — so a laptop on battery polls noticeably less often. The sleep itself is
+interruptible: `Ctrl-C` (SIGINT), `SIGTERM` (how `systemctl --user stop kellner`
+stops a unit) and the tray's `feierabend` all stop the loop within ~500 ms
+instead of waiting out the current interval.
+
+### Tray screenshots
+
+The tray / menu-bar widget is a **native, non-web** UI (`tray.rs`) that needs a
+running GTK/appindicator (Linux) or macOS window server and a paired pointer,
+so it cannot be rendered in headless CI. It is therefore **exempt from the
+screenshot requirement** for UI changes; its observable contract — exactly the
+menu entries `feierabend` and `re-auth` — is pinned by the unit test
+`tray::tests::menu_has_exactly_feierabend_and_reauth` instead.
 
 ## Planned first features (kellner-0.1.0)
 
