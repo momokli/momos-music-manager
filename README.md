@@ -78,3 +78,5 @@ was the starting point of everything above. It is **decommissioned**:
 
 Treat MMM as read-only unless a fix is needed to keep it running through the
 transition — see [`legacy/mmm/FROZEN.md`](legacy/mmm/FROZEN.md) (frozen; escape label `mmm:unfreeze`).
+
+Deprecation & Umstieg: [`docs/DEPRECATION.md`](docs/DEPRECATION.md).

@@ -45,7 +45,8 @@ Next slices:
 
 ### mmm (sunset)
 
-- **mmm-sunset-1.19.0** — feature freeze, data migration to Hub, deprecation docs.
+- **mmm-sunset-1.19.0** — feature freeze, data migration to Hub, deprecation docs
+  (see [`DEPRECATION.md`](DEPRECATION.md) for the user-facing "where to go instead").
 
 ### infra
 

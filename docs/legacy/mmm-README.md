@@ -3,6 +3,8 @@
 > [root README](../../README.md) for the current stack (music-hub · music-api ·
 > kellner). The MMM code now lives under `legacy/mmm/`; **paths and links below are
 > written relative to the repo root** (this file sits in `docs/legacy/`).
+>
+> Deprecation & Umstieg: [`docs/DEPRECATION.md`](../DEPRECATION.md).
 
 # momo's music manager
 
