@@ -28,6 +28,7 @@ pub mod cosine;
 pub mod crawl;
 pub mod curate;
 pub mod db;
+pub mod devices;
 pub mod digging;
 pub mod features;
 pub mod freqblog;

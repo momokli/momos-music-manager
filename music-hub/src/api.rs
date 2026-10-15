@@ -47,6 +47,7 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::music_ops::router(state.clone()))
         .merge(crate::hub_ops::router(state.clone()))
         .merge(crate::tagqueue::router(state.clone()))
+        .merge(crate::devices::router(state.clone()))
         .merge(crate::tagtaskui::router(state))
 }
 
