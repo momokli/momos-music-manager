@@ -1,7 +1,7 @@
 # kellner — Agent Handover
 
-> **Last updated**: 2026-10-15 · backup implemented (#365); traktor-upload (#364);
-> §5 decisions locked (ADR-081, #361)
+> **Last updated**: 2026-10-15 · downloads implemented (#366); backup (#365);
+> traktor-upload (#364); §5 decisions locked (ADR-081, #361)
 > Keep this file current. It is the entry point for any agent working on `kellner/`.
 >
 > **Status: pairing (#362), traktor-upload (#364), backup (#365) implemented.**
@@ -15,7 +15,15 @@
 > file (Comment cleared via `lofty`), and mirrors missing objects to music-api's object
 > store (`src/client/api.rs`): one bulk `POST /objects/check`, then idempotent
 > `PUT /objects/{sha256}` for the missing ones; `--dry-run` / `--root` / `--once`
-> supported. The remaining commands (`backpack`, `downloads`) are still stubs.
+> supported.
+> `kellner downloads` (`src/sync/downloads.rs`) places one `POST /orders` for the
+> requested ISRCs (`--isrc`/`--isrcs`), polls `GET /tracks` until every ISRC is
+> terminal or `--timeout-secs` elapses, then streams each ready file
+> (`GET /isrc/{isrc}/{format}`) and writes it **flat** into `collection_dir` as
+> `<isrc>.<ext>` (temp + rename). Format pref `--format` (flac default) with
+> flac→320→128 fallback; provenance (path/format/order) + idempotency live in
+> `state.json`; no arguments → read-only status report (no network). The only
+> remaining stub is `backpack`.
 
 ---
 
@@ -54,7 +62,9 @@ member — it declares its own empty `[workspace]`).
   (`POST /api/hub/traktor/import`, device-token-gated; ADR-081 **Entscheidung 6**);
   the hub calls `traktor::import_str` internally to persist playcount / rating /
   playlists. (Not a direct `music-api` call.)
-- **downloads** — pull ordered ISRCs / Backpack contents back down.
+- **downloads** — **implemented (#366)**: `kellner downloads --isrc …` orders the
+  ISRCs at music-api, polls until ready and files the delivered bytes flat into
+  the collection (see §4). The Backpack-driven variant (diff/tag) is **#367**.
 - **service/tray** — runs as a **tray / menu-bar widget** (v1, battery-friendly) on top of
   launchd (macOS) / systemd (Linux) / Task Scheduler (Windows); right-click shows exactly
   “feierabend” (quit) and “re-auth”.
@@ -70,15 +80,16 @@ kellner/
     ├── main.rs    # clap CLI: pair, traktor-upload (+ backpack / backup / downloads stubs)
     ├── config.rs  # ~/.config/kellner/config.toml + persisted device identity
     ├── pairing.rs # token gen, hub register, approval URL, browser open, confirm
-    ├── state.rs   # minimal JSON sync state (state.json, `last_upload_mtime`)
+    ├── state.rs   # minimal JSON sync state (state.json: `last_upload_mtime`, `orders`, `downloads`)
     ├── sync/
     │   ├── mod.rs
-    │   ├── traktor.rs # collection.nml detection (macOS/Windows defaults + override) + mtime watch
-    │   └── backup.rs  # walk + canonicalise (Comment cleared) + SHA-256 + dedup/upload (#365)
+    │   ├── traktor.rs  # collection.nml detection (macOS/Windows defaults + override) + mtime watch
+    │   ├── backup.rs   # walk + canonicalise (Comment cleared) + SHA-256 + dedup/upload (#365)
+    │   └── downloads.rs # order → poll → stream → flat file + provenance (#366)
     └── client/
         ├── mod.rs
         ├── hub.rs     # traktor upload via `Authorization: Bearer <device_token>` + bounded retry/backoff
-        └── api.rs     # music-api object store: `POST /objects/check` + `PUT /objects/{sha256}` (#365)
+        └── api.rs     # music-api: object store (#365) + orders/tracks/file delivery (#366)
 ```
 
 ## 5. Decisions (locked 2026-10-15 — ADR-081, #361)

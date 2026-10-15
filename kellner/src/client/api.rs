@@ -22,6 +22,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::pairing::auth_header;
 
+/// Delivery formats music-api can serve, in kellner's preference order.
+pub const DELIVERY_FORMATS: &[&str] = &["flac", "320", "128"];
+
 /// Upload attempts for transient failures (1 initial + 2 retries).
 const MAX_ATTEMPTS: u32 = 3;
 /// Base backoff; doubles per attempt (200 ms, 400 ms, …).
@@ -60,6 +63,70 @@ struct CheckRequest<'a> {
 struct PutResponse {
     #[serde(default)]
     stored: bool,
+}
+
+/// One order line (`POST /orders`): an ISRC to acquire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OrderItem {
+    pub isrc: String,
+}
+
+#[derive(Serialize)]
+struct OrderRequest {
+    items: Vec<OrderItem>,
+    priority: i64,
+}
+
+/// Accepted order echoed by `POST /orders`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OrderResponse {
+    #[serde(rename = "orderId")]
+    pub order_id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub count: usize,
+}
+
+/// Per-ISRC status row from `GET /tracks?isrcs=…`.
+///
+/// `unknown: true` rows carry no other field (the server never omits them, so
+/// indexes stay aligned). Absence of `formats`/`state` is tolerated.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct TrackStatus {
+    #[serde(default)]
+    pub isrc: String,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub formats: Vec<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub unknown: bool,
+}
+
+impl TrackStatus {
+    /// `true` once the file is servable.
+    pub fn is_ready(&self) -> bool {
+        self.state.as_deref() == Some("ready") && !self.unknown
+    }
+
+    /// Non-recoverable outcome (explicit failure, error text or unknown ISRC) —
+    /// neither ready nor still pending.
+    pub fn is_failed(&self) -> bool {
+        if self.unknown || self.error.as_deref().is_some_and(|e| !e.is_empty()) {
+            return true;
+        }
+        matches!(self.state.as_deref(), Some("failed" | "error" | "absent"))
+    }
+}
+
+/// Bulk answer from `GET /tracks`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct TracksResponse {
+    #[serde(default)]
+    pub tracks: Vec<TrackStatus>,
 }
 
 /// A failure that remembers whether a retry could help.
@@ -190,6 +257,144 @@ impl ApiClient {
             });
         }
         Err(classify(status, &format!("objects/{hash}"), &body))
+    }
+
+    /// Place one order for `isrcs` (`POST /orders`).
+    ///
+    /// The ISRCs are sorted + deduplicated so the request body is
+    /// deterministic regardless of caller order; `priority` is passed through.
+    pub async fn order(&self, isrcs: &[String], priority: i64) -> Result<OrderResponse> {
+        let mut sorted: Vec<String> = isrcs.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        let req = OrderRequest {
+            items: sorted.into_iter().map(|isrc| OrderItem { isrc }).collect(),
+            priority,
+        };
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            match self.order_once(&req).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) if e.retryable && attempt < MAX_ATTEMPTS => {
+                    let backoff = BASE_BACKOFF_MS * (1 << (attempt - 1));
+                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                }
+                Err(e) => return Err(e.source),
+            }
+        }
+    }
+
+    async fn order_once(&self, req: &OrderRequest) -> std::result::Result<OrderResponse, ApiError> {
+        let url = format!("{}/orders", self.base);
+        let auth = auth_header(&self.token).map_err(ApiError::fatal)?;
+        let resp = self
+            .client
+            .post(&url)
+            .header(AUTHORIZATION, auth)
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| ApiError::retryable(e.into()))?;
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            let parsed: OrderResponse = serde_json::from_str(&body)
+                .with_context(|| format!("parsing music-api order response: {}", body.trim()))
+                .map_err(ApiError::fatal)?;
+            return Ok(parsed);
+        }
+        Err(classify(status, "orders", &body))
+    }
+
+    /// Bulk status for `isrcs` (`GET /tracks?isrcs=…`), one round trip per call.
+    pub async fn tracks(&self, isrcs: &[String]) -> Result<TracksResponse> {
+        let mut sorted: Vec<String> = isrcs.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        let csv = sorted.join(",");
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            match self.tracks_once(&csv).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) if e.retryable && attempt < MAX_ATTEMPTS => {
+                    let backoff = BASE_BACKOFF_MS * (1 << (attempt - 1));
+                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                }
+                Err(e) => return Err(e.source),
+            }
+        }
+    }
+
+    async fn tracks_once(&self, csv: &str) -> std::result::Result<TracksResponse, ApiError> {
+        let url = format!("{}/tracks", self.base);
+        let auth = auth_header(&self.token).map_err(ApiError::fatal)?;
+        let resp = self
+            .client
+            .get(&url)
+            .header(AUTHORIZATION, auth)
+            .query(&[("isrcs", csv)])
+            .send()
+            .await
+            .map_err(|e| ApiError::retryable(e.into()))?;
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            let parsed: TracksResponse = serde_json::from_str(&body)
+                .with_context(|| format!("parsing music-api tracks response: {}", body.trim()))
+                .map_err(ApiError::fatal)?;
+            return Ok(parsed);
+        }
+        Err(classify(status, "tracks", &body))
+    }
+
+    /// Stream one delivered file (`GET /isrc/{isrc}/{format}`) into memory.
+    ///
+    /// `format` ∈ `flac|320|128`; a `404` means nothing is servable in that
+    /// format. Transient `429`/`5xx` are retried like every other route.
+    pub async fn fetch_file(&self, isrc: &str, format: &str) -> Result<Vec<u8>> {
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            match self.fetch_file_once(isrc, format).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) if e.retryable && attempt < MAX_ATTEMPTS => {
+                    let backoff = BASE_BACKOFF_MS * (1 << (attempt - 1));
+                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                }
+                Err(e) => return Err(e.source),
+            }
+        }
+    }
+
+    async fn fetch_file_once(
+        &self,
+        isrc: &str,
+        format: &str,
+    ) -> std::result::Result<Vec<u8>, ApiError> {
+        let url = format!("{}/isrc/{}/{}", self.base, isrc, format);
+        let auth = auth_header(&self.token).map_err(ApiError::fatal)?;
+        let resp = self
+            .client
+            .get(&url)
+            .header(AUTHORIZATION, auth)
+            .send()
+            .await
+            .map_err(|e| ApiError::retryable(e.into()))?;
+
+        let status = resp.status();
+        if status.is_success() {
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| ApiError::retryable(e.into()))?;
+            return Ok(bytes.to_vec());
+        }
+        let body = resp.text().await.unwrap_or_default();
+        Err(classify(status, &format!("isrc/{isrc}/{format}"), &body))
     }
 }
 
