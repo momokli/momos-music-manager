@@ -60,11 +60,15 @@ pub fn router() -> Router<Arc<AppState>> {
         // Content-addressed object store (Backpack backup / file home).
         .route("/objects", get(crate::store::list))
         .route("/objects/check", post(crate::store::check))
+        .route("/objects/prune", post(crate::store::prune))
+        .route("/objects/prune/orphans", post(crate::store::prune_orphans))
+        .route("/objects/stats", get(crate::store::stats))
         .route(
             "/objects/{hash}",
             put(crate::store::put)
                 .head(crate::store::head)
-                .get(crate::store::get),
+                .get(crate::store::get)
+                .delete(crate::store::delete),
         )
 }
 
