@@ -34,10 +34,11 @@ Deliverable:
 - [x] setup — Branch `feat/deprecation-docs-373` von `origin/main`
 - [x] developer — Docs schreiben
 - [x] verifier — PASS (Links, freeze-konform, Inhalt, Commit-Titel geprüft)
-- [ ] developer — push + PR (`Closes #373`)
+- [x] developer — push + PR (`Closes #373`)
 
 ## Log
 
 - setup: Branch `feat/deprecation-docs-373` von `origin/main` (Base-Commit 74eb149) angelegt; Working Tree sauber (nur untracked progress-*/plan-*/target/-Dateien).
 - verifier: **PASS**. Scope exakt (M README.md, M docs/ROADMAP.md, M docs/legacy/mmm-README.md, ?? docs/DEPRECATION.md). Keine Änderung unter `legacy/mmm/` → freeze-guard-regex (`^legacy/mmm/` minus `*.md`) hat 0 Treffer. Alle 11 relativen Links resolven (`test -e` grün). Hub + Kellner + music-api genannt, read-only-bis-Migration (#372) korrekt. Titel `docs(mmm): …` matcht pr-quality-Typen (`docs`). Hinweis: `(#373)` im Titel ist KEIN Closing-Keyword → `Closes #373` muss in den PR-Body.
+- developer (PR): Commit `6e885d3` gepusht (`feat/deprecation-docs-373`); PR #465 https://github.com/momokli/momos-music-manager/pull/465 (Base `main`, `Closes #373`). mergeStateStatus BLOCKED (CI pending — `mmm-freeze.yml`, `pr-quality.yml`).
 - developer: `docs/DEPRECATION.md` neu (Sunset + „Wohin statt MMM"-Tabelle Hub/Kellner/music-api + Umstieg); README-Abschnitt „Legacy: MMM — sunset", `docs/legacy/mmm-README.md`-Banner und `docs/ROADMAP.md` (`mmm (sunset)`) verlinken `DEPRECATION.md`. Nur die 4 erlaubten Dateien berührt, nichts unter `legacy/mmm/`. Kein Commit.
