@@ -102,6 +102,9 @@ async fn harness_with(analyzer_url: Option<String>) -> Harness {
         artist_ingesting: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
     });
 
+    // Mirror production startup: create the store table + tmp dir.
+    music_api::store::init(&state.pool, &state.store).await.unwrap();
+
     Harness {
         app: build_router(state.clone()),
         state,
@@ -547,6 +550,292 @@ async fn object_store_rejects_a_wrong_digest() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ── Object store: delete / prune / orphans / stats / tmp sweep (#355) ───────
+
+async fn put_object(h: &Harness, bytes: &[u8]) -> String {
+    let hash = sha256_hex(bytes);
+    let (status, _) = send(
+        &h.app,
+        authed("PUT", &format!("/objects/{hash}"))
+            .body(Body::from(bytes.to_vec()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    hash
+}
+
+async fn head_status(h: &Harness, hash: &str) -> StatusCode {
+    send(
+        &h.app,
+        authed("HEAD", &format!("/objects/{hash}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .0
+}
+
+async fn object_row_count(h: &Harness, hash: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM store_objects WHERE hash = ?")
+        .bind(hash)
+        .fetch_one(&h.state.pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn object_delete_removes_file_and_row() {
+    let h = harness().await;
+    let hash = put_object(&h, b"delete-me").await;
+
+    // Invalid key.
+    let (status, _) = send(
+        &h.app,
+        authed("DELETE", "/objects/not-a-hash")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Delete once: file and row gone.
+    let (status, _) = send(
+        &h.app,
+        authed("DELETE", &format!("/objects/{hash}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(head_status(&h, &hash).await, StatusCode::NOT_FOUND);
+    assert_eq!(object_row_count(&h, &hash).await, 0);
+
+    // Idempotent: a second delete is a 404.
+    let (status, _) = send(
+        &h.app,
+        authed("DELETE", &format!("/objects/{hash}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Unknown key → 404.
+    let unknown = sha256_hex(b"never-stored");
+    let (status, _) = send(
+        &h.app,
+        authed("DELETE", &format!("/objects/{unknown}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn object_prune_dry_run_then_real() {
+    let h = harness().await;
+    let body = b"prunable-object";
+    let hash = put_object(&h, body).await;
+    let absent = sha256_hex(b"absent");
+
+    // dryRun reports but deletes nothing.
+    let (status, resp) = send(
+        &h.app,
+        authed("POST", "/objects/prune")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "hashes": [hash, absent, "garbage"],
+                "dryRun": true
+            })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+    assert_eq!(v["dryRun"], true);
+    assert_eq!(v["deleted"].as_array().unwrap(), &[serde_json::json!(hash)]);
+    assert_eq!(v["freedBytes"], body.len() as u64);
+    let missing = v["missing"].as_array().unwrap();
+    assert!(missing.contains(&serde_json::json!(absent)));
+    assert!(missing.contains(&serde_json::json!("garbage")));
+    assert_eq!(head_status(&h, &hash).await, StatusCode::OK, "dryRun kept the object");
+
+    // Real prune frees the bytes.
+    let (status, resp) = send(
+        &h.app,
+        authed("POST", "/objects/prune")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "hashes": [hash],
+                "dryRun": false
+            })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+    assert_eq!(v["dryRun"], false);
+    assert_eq!(v["freedBytes"], body.len() as u64);
+    assert_eq!(head_status(&h, &hash).await, StatusCode::NOT_FOUND);
+
+    // Idempotent: now it is "missing".
+    let (status, resp) = send(
+        &h.app,
+        authed("POST", "/objects/prune")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({ "hashes": [hash] })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+    assert_eq!(v["dryRun"], false, "dryRun defaults to false");
+    assert_eq!(v["deleted"].as_array().unwrap().len(), 0);
+    assert_eq!(v["missing"].as_array().unwrap(), &[serde_json::json!(hash)]);
+    assert_eq!(v["freedBytes"], 0);
+}
+
+#[tokio::test]
+async fn object_orphans_reconcile() {
+    let h = harness().await;
+    let healthy = put_object(&h, b"healthy").await;
+
+    // (a) An object file in valid layout with no row.
+    let orphan_file = sha256_hex(b"orphan-file");
+    let orphan_path = h.state.store.path_for(&orphan_file);
+    std::fs::create_dir_all(orphan_path.parent().unwrap()).unwrap();
+    std::fs::write(&orphan_path, b"orphan-bytes").unwrap();
+
+    // (b) A row with no file.
+    let orphan_row = sha256_hex(b"orphan-row");
+    sqlx::query("INSERT INTO store_objects (hash, size, created_at) VALUES (?, ?, ?)")
+        .bind(&orphan_row)
+        .bind(7_i64)
+        .bind(0_i64)
+        .execute(&h.state.pool)
+        .await
+        .unwrap();
+
+    // dryRun: counts both, changes nothing.
+    let (status, resp) = send(
+        &h.app,
+        authed("POST", "/objects/prune/orphans")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({ "dryRun": true })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+    assert_eq!(v["dryRun"], true);
+    assert_eq!(v["filesRemoved"], 1);
+    assert_eq!(v["rowsRemoved"], 1);
+    assert_eq!(v["freedBytes"], 12 + 7);
+    assert!(orphan_path.exists());
+    assert_eq!(object_row_count(&h, &orphan_row).await, 1);
+
+    // Real reconcile removes both, keeps the healthy object.
+    let (status, resp) = send(
+        &h.app,
+        authed("POST", "/objects/prune/orphans")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({ "dryRun": false })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+    assert_eq!(v["filesRemoved"], 1);
+    assert_eq!(v["rowsRemoved"], 1);
+    assert!(!orphan_path.exists());
+    assert_eq!(object_row_count(&h, &orphan_row).await, 0);
+    assert_eq!(head_status(&h, &healthy).await, StatusCode::OK);
+
+    // Idempotent.
+    let (status, resp) = send(
+        &h.app,
+        authed("POST", "/objects/prune/orphans")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({ "dryRun": false })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+    assert_eq!(v["filesRemoved"], 0);
+    assert_eq!(v["rowsRemoved"], 0);
+}
+
+#[tokio::test]
+async fn object_stats_track_count_and_bytes() {
+    let h = harness().await;
+
+    let (status, resp) = send(
+        &h.app,
+        authed("GET", "/objects/stats").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+    assert_eq!(v["count"], 0);
+    assert_eq!(v["totalBytes"], 0);
+
+    let body = b"stats-object";
+    let hash = put_object(&h, body).await;
+    let (_, resp) = send(
+        &h.app,
+        authed("GET", "/objects/stats").body(Body::empty()).unwrap(),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+    assert_eq!(v["count"], 1);
+    assert_eq!(v["totalBytes"], body.len() as u64);
+
+    let (status, _) = send(
+        &h.app,
+        authed("DELETE", &format!("/objects/{hash}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, resp) = send(
+        &h.app,
+        authed("GET", "/objects/stats").body(Body::empty()).unwrap(),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+    assert_eq!(v["count"], 0);
+    assert_eq!(v["totalBytes"], 0);
+}
+
+#[tokio::test]
+async fn tmp_sweep_removes_only_stale_files() {
+    let h = harness().await;
+    let tmp = h.state.store.tmp_dir();
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let stale = tmp.join("stale-partial");
+    std::fs::write(&stale, b"stale").unwrap();
+    let f = std::fs::OpenOptions::new().write(true).open(&stale).unwrap();
+    f.set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
+        .unwrap();
+    drop(f);
+
+    let fresh = tmp.join("fresh-partial");
+    std::fs::write(&fresh, b"fresh").unwrap();
+
+    let (files, bytes) = music_api::store::sweep_tmp(&h.state.store, Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!(files, 1);
+    assert_eq!(bytes, 5);
+    assert!(!stale.exists());
+    assert!(fresh.exists());
 }
 
 // ── Durable queue: retries, lease recovery, counts ──────────────────────────
