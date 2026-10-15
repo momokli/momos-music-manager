@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_HUB_URL: &str = "https://hub.zukkafabrik.de";
 
 /// Parsed `config.toml` (all fields optional; defaults apply when absent).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written so the music-api token can never leak via `{:?}`.
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     /// Hub base URL override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -26,6 +28,10 @@ pub struct Config {
     /// music-api base URL override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub music_api_url: Option<String>,
+    /// music-api Bearer token (env `KELLNER_MUSIC_API_TOKEN`). A credential:
+    /// redacted in `Debug`, never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music_api_token: Option<String>,
     /// Local music collection directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection_dir: Option<PathBuf>,
@@ -39,6 +45,23 @@ pub struct Config {
     /// Persisted device identity, set after a successful `pair`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<DeviceIdentity>,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("hub_url", &self.hub_url)
+            .field("music_api_url", &self.music_api_url)
+            .field(
+                "music_api_token",
+                &self.music_api_token.as_ref().map(|_| "***"),
+            )
+            .field("collection_dir", &self.collection_dir)
+            .field("traktor_nml", &self.traktor_nml)
+            .field("traktor_poll_secs", &self.traktor_poll_secs)
+            .field("device", &self.device)
+            .finish()
+    }
 }
 
 impl Config {
@@ -124,6 +147,9 @@ fn apply_env(cfg: &mut Config) {
     }
     if let Some(v) = env_nonempty("KELLNER_MUSIC_API_URL") {
         cfg.music_api_url = Some(v);
+    }
+    if let Some(v) = env_nonempty("KELLNER_MUSIC_API_TOKEN") {
+        cfg.music_api_token = Some(v);
     }
     if let Some(v) = env_nonempty("KELLNER_COLLECTION_DIR") {
         cfg.collection_dir = Some(PathBuf::from(v));
@@ -239,6 +265,7 @@ mod tests {
         let cfg = Config {
             hub_url: Some("https://hub.example.test".into()),
             music_api_url: None,
+            music_api_token: None,
             collection_dir: None,
             traktor_nml: None,
             traktor_poll_secs: None,
@@ -276,6 +303,34 @@ mod tests {
         let dbg = format!("{id:?}");
         assert!(!dbg.contains("super-secret-token-value"));
         assert!(dbg.contains("***"));
+    }
+
+    #[test]
+    fn debug_redacts_music_api_token() {
+        let cfg = Config {
+            music_api_token: Some("music-api-super-secret".into()),
+            ..Config::default()
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("music-api-super-secret"), "leaked: {dbg}");
+        assert!(dbg.contains("***"));
+    }
+
+    #[test]
+    fn env_overrides_music_api_token() {
+        let _guard = test_support::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "music_api_url = \"https://api.test\"\n").unwrap();
+        unsafe {
+            std::env::set_var("KELLNER_CONFIG", &path);
+            std::env::set_var("KELLNER_MUSIC_API_TOKEN", "from-env-token");
+        }
+        let cfg = load().unwrap();
+        assert_eq!(cfg.music_api_token.as_deref(), Some("from-env-token"));
+        unsafe {
+            std::env::remove_var("KELLNER_MUSIC_API_TOKEN");
+        }
     }
 
     #[test]
