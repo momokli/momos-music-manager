@@ -34,7 +34,7 @@ Previous `[BLOCKED]` comment on #370 is outdated. **#370 is the last open leaf �
 | ------- | ------- | ------ |
 | plan    | done    | plan in "## Plan" (verbatim below) |
 | dev     | done    | US1–US4 implemented; `cargo build --locked && cargo test --locked` green (87 lib + 5 int suites = 119 tests, 0 fail) |
-| verify  | pending | |
+| verify  | done    | PASS — all 5 checkpoints green (see below); `cargo build+test --locked` EXIT=0 (119 tests), `smoke.sh` EXIT=0, e2e 3× stable, install.sh idempotent |
 | test    | pending | |
 | pr      | pending | |
 | review  | pending | |
@@ -68,6 +68,33 @@ Previous `[BLOCKED]` comment on #370 is outdated. **#370 is the last open leaf �
 Validation: `cd kellner && cargo build --locked` (exit 0) and `cargo test --locked`
 (exit 0; `grep "^test result"`: 87 + 3 + 4 + 9 + 1 + 7 + 4 + 4 = 119 passed, 0 failed).
 No tray feature. No other crates touched; no migrations.
+
+### verify — done (2026-10-15)
+
+Independent re-run on `planet`, diff `origin/main..HEAD`:
+
+1. **Scope — PASS.** Touched files: `kellner/**`, `plans/**` (incl. moves
+   `plans/{=>done}/kellner/issues.md`, `plans/{proposed=>done}/kellner-0.1.0.md`),
+   `docs/ROADMAP.md`, `.github/workflows/ci-pr.yml`, progress file only. No other
+   crates, no migrations; `kellner/src/tray.rs` untouched (empty diff).
+2. **e2e harness — PASS.** `kellner/tests/e2e.rs`: one `TcpListener` on
+   `127.0.0.1:0` serves `/api/hub/…` (device token) + music-api (music-api token)
+   with per-role `401`; no external network (only loopback); fixed
+   ISRC/tags/BPM/key; full loop + idempotency (2nd pass orders/fetches/uploads
+   nothing); canonical Comment-cleared hash is the dedup key. 3 consecutive runs
+   stable (0.10–0.11s).
+3. **Packaging — PASS.** `smoke.sh` offline (version/help/`service install
+   --print --dry-run` writes nothing) → `smoke: PASS` EXIT=0; `install.sh` run 2×
+   → EXIT=0 both, binary at prefix, no network; deploy templates consistent with
+   `src/service.rs` (`systemd_user_unit`/`launchd_plist`); CI smoke step added
+   after the kellner build (no required-check broken).
+4. **Security — PASS.** No secrets/PII (test tokens only); both scripts
+   `set -euo pipefail`, quoted expansions, no path escapes.
+5. **Docs — PASS.** README/AGENT/CHANGELOG/ROADMAP/plans-index updated; plan +
+   issues moved to `plans/done/`; relative links fixed; counter 56→57 done ·
+   25→24 proposed consistent.
+
+**Overall: PASS.**
 
 ## Guardrails
 
