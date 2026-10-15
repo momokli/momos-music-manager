@@ -720,12 +720,13 @@ async fn object_orphans_reconcile() {
         .await
         .unwrap();
 
-    // dryRun: counts both, changes nothing.
+    // dryRun: counts both, changes nothing. `minAgeSecs: 0` disables the grace
+    // window so the freshly written file is eligible.
     let (status, resp) = send(
         &h.app,
         authed("POST", "/objects/prune/orphans")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(serde_json::json!({ "dryRun": true })))
+            .body(json_body(serde_json::json!({ "dryRun": true, "minAgeSecs": 0 })))
             .unwrap(),
     )
     .await;
@@ -743,7 +744,7 @@ async fn object_orphans_reconcile() {
         &h.app,
         authed("POST", "/objects/prune/orphans")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(serde_json::json!({ "dryRun": false })))
+            .body(json_body(serde_json::json!({ "dryRun": false, "minAgeSecs": 0 })))
             .unwrap(),
     )
     .await;
@@ -760,7 +761,7 @@ async fn object_orphans_reconcile() {
         &h.app,
         authed("POST", "/objects/prune/orphans")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(json_body(serde_json::json!({ "dryRun": false })))
+            .body(json_body(serde_json::json!({ "dryRun": false, "minAgeSecs": 0 })))
             .unwrap(),
     )
     .await;
@@ -998,6 +999,58 @@ async fn object_orphans_include_tmp_sweeps_only_when_not_dry() {
     assert_eq!(v["filesRemoved"], 0);
     assert_eq!(v["rowsRemoved"], 0);
     assert_eq!(v["freedBytes"], 0);
+}
+
+#[tokio::test]
+async fn object_orphans_respect_grace_period() {
+    let h = harness().await;
+
+    // A freshly written file with no row must survive the default grace window:
+    // an in-flight `PUT` may not have published its row+file pair yet.
+    let fresh = sha256_hex(b"fresh-orphan-file");
+    let fresh_path = h.state.store.path_for(&fresh);
+    std::fs::create_dir_all(fresh_path.parent().unwrap()).unwrap();
+    std::fs::write(&fresh_path, b"fresh-bytes").unwrap();
+
+    // A row with no file, inserted now, is protected on the row side too.
+    let fresh_row = sha256_hex(b"fresh-orphan-row");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    sqlx::query("INSERT INTO store_objects (hash, size, created_at) VALUES (?, ?, ?)")
+        .bind(&fresh_row)
+        .bind(3_i64)
+        .bind(now)
+        .execute(&h.state.pool)
+        .await
+        .unwrap();
+
+    let (status, v) = prune_orphans(&h, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["filesRemoved"], 0, "young orphan file survives the grace window");
+    assert_eq!(v["rowsRemoved"], 0, "young orphan row survives the grace window");
+    assert!(fresh_path.exists());
+    assert_eq!(object_row_count(&h, &fresh_row).await, 1);
+
+    // Age both past the grace window → both are reclaimed.
+    let f = std::fs::OpenOptions::new().write(true).open(&fresh_path).unwrap();
+    f.set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
+        .unwrap();
+    drop(f);
+    sqlx::query("UPDATE store_objects SET created_at = ? WHERE hash = ?")
+        .bind(now - 7200)
+        .bind(&fresh_row)
+        .execute(&h.state.pool)
+        .await
+        .unwrap();
+
+    let (status, v) = prune_orphans(&h, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["filesRemoved"], 1);
+    assert_eq!(v["rowsRemoved"], 1);
+    assert!(!fresh_path.exists());
+    assert_eq!(object_row_count(&h, &fresh_row).await, 0);
 }
 
 #[tokio::test]

@@ -216,11 +216,38 @@ pub async fn put(
     }
     let dest = state.store.path_for(&hash);
 
+    let hdr = |k: &str| {
+        headers
+            .get(k)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    };
+
     // Idempotent: an existing object is never rewritten. Drain the body so the
     // client sees a clean response.
-    if tokio::fs::metadata(&dest).await.is_ok() {
+    if let Ok(meta) = tokio::fs::metadata(&dest).await {
         let mut stream = body.into_data_stream();
         while stream.next().await.is_some() {}
+        // The file is the source of truth for `GET`; ensure a row exists so
+        // orphan-prune cannot later reclaim a live object (e.g. after an earlier
+        // insert failed). An existing row is left untouched.
+        if let Err(e) = sqlx::query(
+            "INSERT INTO store_objects (hash, size, content_type, original_path, isrc, name, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(hash) DO NOTHING",
+        )
+        .bind(&hash)
+        .bind(meta.len() as i64)
+        .bind(hdr("content-type"))
+        .bind(hdr("x-original-path"))
+        .bind(hdr("x-isrc"))
+        .bind(hdr("x-name"))
+        .bind(crate::db::now())
+        .execute(&state.pool)
+        .await
+        {
+            return internal(format!("recording object: {e}"));
+        }
         return (
             StatusCode::OK,
             Json(serde_json::json!({ "stored": false, "present": true })),
@@ -286,18 +313,13 @@ pub async fn put(
             return internal(format!("creating object dir: {e}"));
         }
     }
-    if let Err(e) = tokio::fs::rename(&tmp, &dest).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return internal(format!("moving object into place: {e}"));
-    }
 
-    let hdr = |k: &str| {
-        headers
-            .get(k)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-    };
-    let _ = sqlx::query(
+    // Record the row *before* publishing the file: "file without a row" is the
+    // one state orphan-prune reclaims, so the row must never be the step that
+    // fails silently. If it does, the PUT fails and nothing is published
+    // (concurrent scans are additionally covered by the grace period in
+    // `prune_orphans`).
+    if let Err(e) = sqlx::query(
         "INSERT INTO store_objects (hash, size, content_type, original_path, isrc, name, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(hash) DO NOTHING",
@@ -310,7 +332,22 @@ pub async fn put(
     .bind(hdr("x-name"))
     .bind(crate::db::now())
     .execute(&state.pool)
-    .await;
+    .await
+    {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return internal(format!("recording object: {e}"));
+    }
+
+    if let Err(e) = tokio::fs::rename(&tmp, &dest).await {
+        // The bytes were never published; drop the row we just wrote so we do
+        // not leave a dangling row behind.
+        let _ = sqlx::query("DELETE FROM store_objects WHERE hash = ?")
+            .bind(&hash)
+            .execute(&state.pool)
+            .await;
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return internal(format!("moving object into place: {e}"));
+    }
 
     (
         StatusCode::CREATED,
@@ -453,11 +490,14 @@ pub struct ListQuery {
 pub async fn list(State(state): State<Arc<AppState>>, Query(q): Query<ListQuery>) -> Response {
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     let offset = q.offset.unwrap_or(0).max(0);
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM store_objects")
+    let total: i64 = match sqlx::query_scalar("SELECT COUNT(*) FROM store_objects")
         .fetch_one(&state.pool)
         .await
-        .unwrap_or(0);
-    let objects: Vec<ObjectMeta> = sqlx::query_as(
+    {
+        Ok(n) => n,
+        Err(e) => return internal(format!("counting objects: {e}")),
+    };
+    let objects: Vec<ObjectMeta> = match sqlx::query_as(
         "SELECT hash, size, content_type, original_path, isrc, name, created_at
            FROM store_objects ORDER BY created_at DESC LIMIT ? OFFSET ?",
     )
@@ -465,7 +505,10 @@ pub async fn list(State(state): State<Arc<AppState>>, Query(q): Query<ListQuery>
     .bind(offset)
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    {
+        Ok(o) => o,
+        Err(e) => return internal(format!("listing objects: {e}")),
+    };
 
     Json(serde_json::json!({ "objects": objects, "total": total })).into_response()
 }
@@ -476,15 +519,12 @@ pub async fn list(State(state): State<Arc<AppState>>, Query(q): Query<ListQuery>
 /// abandoned uploads by [`sweep_tmp`].
 pub const DEFAULT_TMP_MAX_AGE_SECS: u64 = 60 * 60;
 
-/// Does a `store_objects` row exist for `hash`?
-async fn row_exists(pool: &Pool<Sqlite>, hash: &str) -> bool {
-    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM store_objects WHERE hash = ?")
-        .bind(hash)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0)
-        > 0
-}
+/// Default grace period during which reconcile ([`prune_orphans`]) leaves
+/// file-/row-side-only objects alone. A `PUT` publishes its row and file a
+/// moment apart, so a just-started upload can legitimately look like a
+/// half-object to a concurrent scan; within the grace window nothing is
+/// reclaimed.
+pub const DEFAULT_ORPHAN_MIN_AGE_SECS: u64 = 60 * 60;
 
 /// Size of an object in bytes, preferring the file on disk and falling back to
 /// the recorded row. `None` when neither file nor row exists.
@@ -504,8 +544,10 @@ pub async fn object_size(pool: &Pool<Sqlite>, store: &Store, hash: &str) -> Opti
 /// Remove the object file **and** its `store_objects` row.
 ///
 /// Returns `true` when something was removed, `false` when neither file nor row
-/// existed. A file-removal error other than "not found" propagates unchanged,
-/// leaving the DB row intact — there is no half-deleted state.
+/// existed. A file-removal error other than "not found" propagates unchanged and
+/// leaves the row in place. The reverse is best-effort: if the `DELETE` fails
+/// after the file is already gone, the row is left dangling (file removed, row
+/// present) — a non-destructive half-state that [`prune_orphans`] reconciles.
 pub async fn delete_object(
     pool: &Pool<Sqlite>,
     store: &Store,
@@ -604,6 +646,15 @@ pub struct PruneOrphansRequest {
     /// Opt-in: also sweep abandoned uploads under `tmp/` (never on `dryRun`).
     #[serde(default)]
     pub include_tmp: bool,
+    /// Grace period: only reconcile objects older than this many seconds.
+    /// Defaults to [`DEFAULT_ORPHAN_MIN_AGE_SECS`]; `0` disables the grace
+    /// window.
+    #[serde(default = "default_orphan_min_age_secs")]
+    pub min_age_secs: u64,
+}
+
+fn default_orphan_min_age_secs() -> u64 {
+    DEFAULT_ORPHAN_MIN_AGE_SECS
 }
 
 fn hex2(s: &str) -> bool {
@@ -621,9 +672,25 @@ pub async fn prune_orphans(
     Json(req): Json<PruneOrphansRequest>,
 ) -> Response {
     let dry = req.dry_run;
+    let grace = std::time::Duration::from_secs(req.min_age_secs);
+    let now_secs = crate::db::now();
     let mut files_removed: u64 = 0;
     let mut rows_removed: u64 = 0;
     let mut freed_bytes: u64 = 0;
+
+    // Load the full row set up front and fail closed: a DB hiccup must never be
+    // read as "no row" for a live file. If the rows cannot be read, abort the
+    // run before deleting anything.
+    let rows: Vec<(String, i64, i64)> =
+        match sqlx::query_as("SELECT hash, size, created_at FROM store_objects")
+            .fetch_all(&state.pool)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return internal(format!("listing objects for orphan scan: {e}")),
+        };
+    let known: std::collections::HashSet<String> =
+        rows.iter().map(|(h, _, _)| h.clone()).collect();
 
     // (a) Object files without a row: walk <root>/<aa>/<bb>/<hash>.
     if let Ok(mut aa_dir) = tokio::fs::read_dir(&state.store.root).await {
@@ -656,10 +723,26 @@ pub async fn prune_orphans(
                         Ok(n) if valid_hash(&n) => n,
                         _ => continue,
                     };
-                    if row_exists(&state.pool, &hash).await {
+                    if known.contains(hash.as_str()) {
                         continue;
                     }
-                    let size = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+                    // Grace period: an in-flight `PUT` may not have published
+                    // its row+file pair yet, so leave young files alone. An
+                    // unreadable mtime counts as too young (fail-closed).
+                    let meta = match entry.metadata().await {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    let too_young = meta
+                        .modified()
+                        .ok()
+                        .and_then(|m| std::time::SystemTime::now().duration_since(m).ok())
+                        .map(|age| age < grace)
+                        .unwrap_or(true);
+                    if too_young {
+                        continue;
+                    }
+                    let size = meta.len();
                     if dry {
                         files_removed += 1;
                         freed_bytes += size;
@@ -673,12 +756,7 @@ pub async fn prune_orphans(
     }
 
     // (b) Rows without a file.
-    let rows: Vec<(String, i64)> =
-        sqlx::query_as("SELECT hash, size FROM store_objects")
-            .fetch_all(&state.pool)
-            .await
-            .unwrap_or_default();
-    for (hash, size) in rows {
+    for (hash, size, created_at) in rows {
         let present = match tokio::fs::metadata(state.store.path_for(&hash)).await {
             Ok(_) => true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
@@ -687,6 +765,11 @@ pub async fn prune_orphans(
             Err(_) => true,
         };
         if present {
+            continue;
+        }
+        // Same grace period on the row side: `PUT` writes its row just before
+        // the file lands, so a row this young is not an orphan yet.
+        if now_secs.saturating_sub(created_at) < req.min_age_secs as i64 {
             continue;
         }
         if dry {
@@ -765,13 +848,17 @@ pub async fn sweep_tmp(
 
 /// `GET /objects/stats` — object count and total stored bytes.
 pub async fn stats(State(state): State<Arc<AppState>>) -> Response {
-    let (count, total): (i64, i64) = sqlx::query_as(
+    match sqlx::query_as::<_, (i64, i64)>(
         "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM store_objects",
     )
     .fetch_one(&state.pool)
     .await
-    .unwrap_or((0, 0));
-    Json(serde_json::json!({ "count": count, "totalBytes": total })).into_response()
+    {
+        Ok((count, total)) => {
+            Json(serde_json::json!({ "count": count, "totalBytes": total })).into_response()
+        }
+        Err(e) => internal(format!("reading object stats: {e}")),
+    }
 }
 
 fn internal(msg: impl std::fmt::Display) -> Response {
