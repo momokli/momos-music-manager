@@ -142,6 +142,10 @@ All open points below are now **resolved**; treat them as intent to implement, n
   `Nice`, `LowPriorityIO`) or the systemd user unit; Windows gets a `schtasks`
   hint. The tray/menu-bar widget (`feierabend` + `re-auth`) is opt-in behind the
   `tray` feature (needs GTK on Linux) — see `plans/proposed/battery-friendly-tray.md`.
+  The loop stops promptly on SIGINT, SIGTERM and the `feierabend` flag (its sleep
+  is interruptible, polled every 500 ms) — no waiting out the current interval.
+  Screenshot exemption: the tray is a native non-web widget (no headless render),
+  so its contract is pinned by the `MENU_LABELS` unit test, not a screenshot.
 - **Repo rules** — one issue = one branch = one PR; see the root
   [`AGENT.md`](../AGENT.md) and [`docs/ROADMAP.md`](../docs/ROADMAP.md)
   (milestone **kellner-0.1.0**).

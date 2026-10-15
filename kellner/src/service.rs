@@ -114,15 +114,14 @@ fn xml_escape(s: &str) -> String {
 pub fn systemd_user_unit(p: &SystemdParams) -> String {
     let exec = std::iter::once(p.program.clone())
         .chain(p.args.iter().cloned())
+        .map(|t| systemd_quote(&t))
         .collect::<Vec<_>>()
         .join(" ");
-    // ExecStart with the program folded into one quoted token list is fragile;
-    // systemd accepts plain space-separated argv here (no shell involved).
     format!(
         "[Unit]\n\
          Description={description}\n\
-         After=network-online.target\n\
-         Wants=network-online.target\n\
+         After=network.target\n\
+         Wants=network.target\n\
          \n\
          [Service]\n\
          Type=simple\n\
@@ -136,6 +135,32 @@ pub fn systemd_user_unit(p: &SystemdParams) -> String {
         description = p.description,
         exec = exec,
     )
+}
+
+/// Quote one argv token for a systemd `ExecStart=` line.
+///
+/// systemd splits `ExecStart` on whitespace but honours double quotes, so an
+/// absolute path containing a space (e.g. `/Users/foo bar/kellner`) would
+/// otherwise be split into two arguments. Tokens made only of "safe"
+/// characters stay unquoted, keeping the common case readable.
+fn systemd_quote(arg: &str) -> String {
+    let safe = !arg.is_empty()
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':' | '@' | '+')
+        });
+    if safe {
+        return arg.to_string();
+    }
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    for c in arg.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
 }
 
 /// Human-readable hint for the Windows Task Scheduler (no file is written).
@@ -421,6 +446,35 @@ mod tests {
         assert!(text.contains("ExecStart=/usr/local/bin/kellner run"));
         assert!(text.contains("Restart=on-failure"));
         assert!(text.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn systemd_uses_network_target_not_network_online() {
+        // A *user* unit cannot order against the system-wide
+        // network-online.target; network.target is the correct target there.
+        let text = systemd_user_unit(&systemd_fixture());
+        assert!(text.contains("After=network.target"));
+        assert!(text.contains("Wants=network.target"));
+        assert!(!text.contains("network-online.target"));
+    }
+
+    #[test]
+    fn systemd_quotes_program_path_with_spaces() {
+        let mut p = systemd_fixture();
+        p.program = "/Users/foo bar/kellner".to_string();
+        let text = systemd_user_unit(&p);
+        assert!(
+            text.contains("ExecStart=\"/Users/foo bar/kellner\" run"),
+            "exec line must quote the spaced path:\n{text}"
+        );
+    }
+
+    #[test]
+    fn systemd_quote_leaves_safe_tokens_alone() {
+        assert_eq!(systemd_quote("/usr/local/bin/kellner"), "/usr/local/bin/kellner");
+        assert_eq!(systemd_quote("run"), "run");
+        assert_eq!(systemd_quote("a b"), "\"a b\"");
+        assert_eq!(systemd_quote("say\"hi"), "\"say\\\"hi\"");
     }
 
     #[test]

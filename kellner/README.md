@@ -79,7 +79,19 @@ the hub with `KELLNER_HUB_URL`.
 
 `kellner run` scales its poll interval by power source
 (`power::interval_for`): AC×1, AC+idle×2, battery×3, battery+idle×6, with a 30 s
-floor — so a laptop on battery polls noticeably less often.
+floor — so a laptop on battery polls noticeably less often. The sleep itself is
+interruptible: `Ctrl-C` (SIGINT), `SIGTERM` (how `systemctl --user stop kellner`
+stops a unit) and the tray's `feierabend` all stop the loop within ~500 ms
+instead of waiting out the current interval.
+
+### Tray screenshots
+
+The tray / menu-bar widget is a **native, non-web** UI (`tray.rs`) that needs a
+running GTK/appindicator (Linux) or macOS window server and a paired pointer,
+so it cannot be rendered in headless CI. It is therefore **exempt from the
+screenshot requirement** for UI changes; its observable contract — exactly the
+menu entries `feierabend` and `re-auth` — is pinned by the unit test
+`tray::tests::menu_has_exactly_feierabend_and_reauth` instead.
 
 ## Planned first features (kellner-0.1.0)
 

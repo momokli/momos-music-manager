@@ -4,19 +4,26 @@
 //! runs the selected sync tasks (currently only the Traktor upload) and then
 //! sleeps — with the sleep stretched by [`crate::power::interval_for`] when the
 //! host runs on battery. A failing cycle is logged and never aborts the loop;
-//! `Ctrl-C` (SIGINT) stops it.
+//! `Ctrl-C` (SIGINT), a `SIGTERM` (how systemd stops a user unit) or the tray's
+//! `stop` flag stop it — the sleep itself is interruptible, so none of these
+//! waits out the current interval.
 //!
 //! The loop and the cycle live here (not in `main.rs`) so they can be exercised
 //! by tests without the full CLI.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 
 use crate::client::hub::HubClient;
-use crate::power::{PowerMode, interval_for};
+use crate::power::{MIN_INTERVAL, PowerMode, interval_for};
 use crate::{state, sync};
+
+/// How often the loop re-checks the `stop` flag while sleeping.
+const STOP_POLL: Duration = Duration::from_millis(500);
 
 /// A sync task the loop can run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,8 +81,8 @@ pub struct RunOptions<'a> {
     pub hub: &'a HubClient,
     /// Explicit `collection.nml` override (else platform autodetect).
     pub traktor_nml: Option<PathBuf>,
-    /// External stop flag (the tray's "feierabend" sets it); `None` = only Ctrl-C.
-    pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// External stop flag (the tray's "feierabend" sets it); `None` = only signals.
+    pub stop: Option<Arc<AtomicBool>>,
 }
 
 /// Run the selected tasks forever (or once), power-aware, until `Ctrl-C`
@@ -83,7 +90,7 @@ pub struct RunOptions<'a> {
 pub async fn run(opts: RunOptions<'_>) -> Result<()> {
     loop {
         if let Some(stop) = &opts.stop
-            && stop.load(std::sync::atomic::Ordering::SeqCst)
+            && stop.load(Ordering::SeqCst)
         {
             break;
         }
@@ -105,18 +112,73 @@ pub async fn run(opts: RunOptions<'_>) -> Result<()> {
             let mode = PowerMode::detect();
             interval_for(mode, opts.base_interval, opts.idle)
         } else {
-            opts.base_interval
+            // Apply the same hard floor `interval_for` enforces, so
+            // `--no-power-awareness --interval-secs 1` cannot spin below it.
+            opts.base_interval.max(MIN_INTERVAL)
         };
 
         tokio::select! {
-            _ = tokio::time::sleep(wait) => {}
-            _ = tokio::signal::ctrl_c() => {
+            stopped = sleep_or_stop(wait, opts.stop.as_ref()) => {
+                if stopped {
+                    println!("kellner: shutdown requested — stopping");
+                    break;
+                }
+            }
+            _ = shutdown_signal() => {
                 println!("kellner: shutdown requested — stopping");
                 break;
             }
         }
     }
     Ok(())
+}
+
+/// Sleep for `wait`, returning `true` early if `stop` becomes set.
+///
+/// The flag is polled every [`STOP_POLL`] so the tray's "feierabend" takes
+/// effect promptly; checking it only at the loop head (the previous behaviour)
+/// let a quit hang for a whole power-scaled interval. Without a flag this is a
+/// plain sleep that always returns `false`.
+async fn sleep_or_stop(wait: Duration, stop: Option<&Arc<AtomicBool>>) -> bool {
+    let Some(flag) = stop else {
+        tokio::time::sleep(wait).await;
+        return false;
+    };
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        if flag.load(Ordering::SeqCst) {
+            return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        tokio::time::sleep(STOP_POLL.min(deadline - now)).await;
+    }
+}
+
+/// Resolve on SIGINT (Ctrl-C) or, on Unix, SIGTERM — how `systemctl --user
+/// stop kellner` terminates a unit by default.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// One detection + change-check + (maybe) upload cycle for `collection.nml`.
@@ -200,6 +262,34 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(30),
             "--once must not sleep the 60s interval"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_flag_interrupts_the_sleep() {
+        // The tray's "feierabend" sets this flag; the loop must react promptly
+        // instead of waiting out the whole (here hour-long) interval.
+        let stop = Arc::new(AtomicBool::new(false));
+        let setter = stop.clone();
+        let opts = RunOptions {
+            tasks: vec![Task::TraktorUpload],
+            base_interval: Duration::from_secs(3600),
+            once: false,
+            power_aware: false,
+            idle: false,
+            hub: &crate::client::hub::HubClient::new("http://127.0.0.1:1", "token"),
+            traktor_nml: None,
+            stop: Some(stop),
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            setter.store(true, Ordering::SeqCst);
+        });
+        let start = std::time::Instant::now();
+        run(opts).await.unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "stop flag must interrupt the 3600s sleep promptly"
         );
     }
 }
