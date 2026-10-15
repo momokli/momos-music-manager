@@ -1,6 +1,6 @@
 # kellner — Epic, Iteration Templates & Leaf-Issue Backlog
 
-> Companion to [`plans/proposed/kellner-0.1.0.md`](../proposed/kellner-0.1.0.md) — the
+> Companion to [`plans/done/kellner-0.1.0.md`](../kellner-0.1.0.md) — the
 > plan is authoritative; on any conflict the plan wins. Endpoint names, table names and
 > the authority split are copied verbatim from it.
 >
