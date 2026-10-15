@@ -32,12 +32,42 @@ Previous `[BLOCKED]` comment on #370 is outdated. **#370 is the last open leaf �
 
 | Stage   | Status  | Result |
 | ------- | ------- | ------ |
-| plan    | pending | |
-| dev     | pending | |
+| plan    | done    | plan in "## Plan" (verbatim below) |
+| dev     | done    | US1–US4 implemented; `cargo build --locked && cargo test --locked` green (87 lib + 5 int suites = 119 tests, 0 fail) |
 | verify  | pending | |
 | test    | pending | |
 | pr      | pending | |
 | review  | pending | |
+
+### dev — done (2026-10-15)
+
+- **US1+US2** `test(kellner): end-to-end harness (mock hub + music-api)` — **da95146**
+  `kellner/tests/e2e.rs`: one in-process mock on 127.0.0.1:0 serves hub (`/api/hub/…`,
+  device token) + music-api (orders/tracks/isrc/objects, music-api token) with
+  per-role `401`; 30 s hang guard; `KELLNER_CONFIG`/`KELLNER_MUSIC_API_URL`/`KELLNER_MUSIC_API_TOKEN`.
+  Full loop (upload → export → order → fetch → tag → backup) deterministically 
+  (fixed ISRC/tags/BPM/key): one Traktor import (device Bearer + NML body); one
+  order + one fetch; flat `coll/DEABC1234567.flac` with Comment `a, b  BPM 128 | A-Minor | Energy 7`;
+  `backpack_membership` set; one `POST /objects/check` + one `PUT /objects/{sha256}`;
+  mock store holds the **canonical** (Comment-cleared) hash == membership `content_hash`;
+  second pass orders/fetches/uploads nothing. 4 consecutive runs stable.
+- **US3** `chore(kellner): install script + offline smoke test` — **4eb34da**
+  `kellner/scripts/smoke.sh` (offline: `--version`, `--help` lists all 7 subcommands,
+  `service install --print --dry-run` prints a unit and writes nothing; `KELLNER_SMOKE_RUN=1`
+  optional paired pass), `kellner/scripts/install.sh` (release build w/o tray →
+  `${PREFIX:-$HOME/.local}/bin/kellner`, `--service`), `kellner/deploy/{README.md,
+  systemd/kellner.service, launchd/de.zukkafabrik.kellner.plist}`, CI step
+  `bash scripts/smoke.sh` after the kellner build. Smoke PASS locally.
+- **US4** `docs(kellner): README/AGENT/ROADMAP/CHANGELOG close-out` — **3a31e6d**
+  new `kellner/CHANGELOG.md` (`## [0.1.0]`); README status → 0.1.0 shipped + Install/Smoke/Tests;
+  AGENT all commands implemented + e2e/smoke refs; `docs/ROADMAP.md` kellner `new`→`active`
+  + milestone shipped; `plans/README.md` 57 done · 24 proposed, kellner-0.1.0 done;
+  plan-lifecycle moves `plans/kellner/` → `plans/done/kellner/`, `plans/proposed/kellner-0.1.0.md`
+  → `plans/done/kellner-0.1.0.md` (stale relative links fixed).
+
+Validation: `cd kellner && cargo build --locked` (exit 0) and `cargo test --locked`
+(exit 0; `grep "^test result"`: 87 + 3 + 4 + 9 + 1 + 7 + 4 + 4 = 119 passed, 0 failed).
+No tray feature. No other crates touched; no migrations.
 
 ## Guardrails
 
