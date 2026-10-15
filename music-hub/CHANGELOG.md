@@ -8,6 +8,15 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ## [Unreleased]
 
+### Added
+
+- **BPM/key backfill from music-api** (#354): `hub_track_features` is now filled from
+  music-api's ISRC authority (`GET /metadata?isrcs=`), closing ReccoBeats gaps. New
+  `music_api::metadata_range` client, `features::backfill_from_music_api`
+  (`source='music-api'`, bounded + chunked, transient-failure-safe), CLI
+  `metadata-backfill --limit 2000`, and a "BPM/Key holen" button on the music-api
+  console. Migration `050` adds `hub_track_features.metadata_checked_at` (7-day TTL).
+
 ## [0.28.0] — 2026-10-15
 
 **hub-ops** — The Hub becomes operable: a read-only health/metrics status endpoint for

@@ -34,6 +34,14 @@ content %}
     >
         BPM/Key pushen
     </button>
+    <button
+        hx-post="/music-api/backfill-metadata"
+        hx-swap="none"
+        hx-disabled-elt="this"
+        class="secondary"
+    >
+        BPM/Key holen
+    </button>
     <span class="hub-muted"
         >{{ tracks_with_isrc }} Tracks mit ISRC · {{ ready }} ready · {{ errors }}
         Fehler</span

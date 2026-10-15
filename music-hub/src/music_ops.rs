@@ -23,6 +23,10 @@ pub fn router(state: AppState) -> Router {
         .route("/music-api/refresh", post(refresh))
         .route("/music-api/order-missing", post(order_missing))
         .route("/music-api/push-metadata", post(push_metadata_action))
+        .route(
+            "/music-api/backfill-metadata",
+            post(backfill_metadata_action),
+        )
         .route("/music-api/worker/pause", post(worker_pause))
         .route("/music-api/worker/resume", post(worker_resume))
         .route("/music-api/order/cancel", post(order_cancel))
@@ -264,6 +268,32 @@ async fn push_metadata_action(State(st): State<AppState>, headers: HeaderMap) ->
         Ok(n) => action_response(
             &headers,
             &format!("{n} ISRC-Metadaten gepusht"),
+            "ok",
+            "/music-api",
+        ),
+        Err(e) => action_response(&headers, &format!("Fehler: {e}"), "err", "/music-api"),
+    }
+}
+
+/// Pull BPM/key from music-api's ISRC authority into `hub_track_features`
+/// (the api→hub backfill direction, bounded to 2000 tracks per click).
+async fn backfill_metadata_action(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if crate::ui::nav(&st, &headers, "music-api").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    if st.cfg.music_api_token.is_none() {
+        return action_response(
+            &headers,
+            "music-api nicht konfiguriert",
+            "err",
+            "/music-api",
+        );
+    }
+    match crate::features::backfill_from_music_api(&st.pool, &st.cfg, 2000).await {
+        Ok(0) => action_response(&headers, "Keine offenen Tracks", "info", "/music-api"),
+        Ok(n) => action_response(
+            &headers,
+            &format!("{n} Tracks angereichert"),
             "ok",
             "/music-api",
         ),

@@ -872,6 +872,167 @@ pub async fn push_analysis(pool: &SqlitePool, cfg: &Config, limit: usize) -> Res
     push_metadata(cfg, &items).await
 }
 
+// ── metadata range read (ISRC → BPM/key authority) ──────────────────────────
+
+/// One row of music-api's `GET /metadata?isrcs=` response. camelCase like the
+/// API (`musicalKey`, `updatedAt`); robust against missing fields.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct MetadataRow {
+    #[serde(default)]
+    pub isrc: String,
+    #[serde(default)]
+    pub bpm: Option<f64>,
+    /// Canonical key field (`musicalKey`).
+    #[serde(default)]
+    pub musical_key: Option<String>,
+    /// Output alias the API also echoes (`key`) — same value as `musical_key`.
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub camelot: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+impl MetadataRow {
+    /// The musical key, preferring `musicalKey` and falling back to the `key`
+    /// output alias (the API sends both).
+    pub fn musical_key(&self) -> Option<&str> {
+        self.musical_key.as_deref().or(self.key.as_deref())
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct MetadataRangeResp {
+    #[serde(default)]
+    items: Vec<MetadataRow>,
+    #[serde(default)]
+    missing: Vec<String>,
+}
+
+/// `GET /metadata?isrcs=a,b,c` — BPM/key for a set of ISRCs from the ISRC
+/// authority. Returns `None` when the request could not be made or failed (so
+/// callers can tell a transient outage from an all-unknown result),
+/// `Some((items, missing))` otherwise; empty input yields `Some((vec![], vec![]))`.
+pub async fn metadata_range(
+    cfg: &Config,
+    isrcs: &[String],
+) -> Option<(Vec<MetadataRow>, Vec<String>)> {
+    if isrcs.is_empty() {
+        return Some((Vec::new(), Vec::new()));
+    }
+    let t = token(cfg).ok()?;
+    let url = format!("{}/metadata", cfg.music_api_base);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(t)
+        .query(&[("isrcs", isrcs.join(","))])
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = resp.json::<MetadataRangeResp>().await.ok()?;
+    Some((body.items, body.missing))
+}
+
+// ── musicalKey → Camelot (§Z) ────────────────────────────────────────────────
+
+/// Pitch class (sharps, C=0) for a root note letter + optional `#`/`b`.
+fn note_pitch(letter: char, accidental: Option<char>) -> Option<i64> {
+    let base = match letter.to_ascii_uppercase() {
+        'C' => 0,
+        'D' => 2,
+        'E' => 4,
+        'F' => 5,
+        'G' => 7,
+        'A' => 9,
+        'B' => 11,
+        _ => return None,
+    };
+    Some(match accidental {
+        Some('#') => base + 1,
+        Some('b') => base - 1,
+        Some(_) => return None,
+        None => base,
+    })
+}
+
+/// Camelot notation (`^([1-9]|1[0-2])[AB]$`, case-insensitive) -> canonical.
+fn split_camelot(s: &str) -> Option<String> {
+    let up = s.trim().to_uppercase();
+    let letter = up.chars().last()?;
+    if !matches!(letter, 'A' | 'B') {
+        return None;
+    }
+    let num: u8 = up[..up.len() - 1].parse().ok()?;
+    if (1..=12).contains(&num) {
+        Some(format!("{num}{letter}"))
+    } else {
+        None
+    }
+}
+
+/// Traktor notation (`^([1-9]|1[0-2])[md]$`) -> Camelot (`m`→`A`, `d`→`B`).
+fn split_traktor(s: &str) -> Option<String> {
+    let up = s.trim().to_uppercase();
+    let letter = match up.chars().last()? {
+        'M' => 'A',
+        'D' => 'B',
+        _ => return None,
+    };
+    let num: u8 = up[..up.len() - 1].parse().ok()?;
+    if (1..=12).contains(&num) {
+        Some(format!("{num}{letter}"))
+    } else {
+        None
+    }
+}
+
+/// Parse a `musicalKey` value into canonical Camelot notation, or `None` when it
+/// is not a recognised key. Handles Camelot (`8A`), Traktor (`8m`/`8d`) and note
+/// names (`C`, `Am`, `F#m`, `A-Minor`, `Db`), case-insensitively. Consistent with
+/// [`crate::features::camelot`] (the inverse lives in
+/// [`crate::features::camelot_to_pitch_mode`]).
+pub fn parse_musical_key(s: &str) -> Option<String> {
+    let raw = s.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some(c) = split_camelot(raw) {
+        return Some(c);
+    }
+    if let Some(c) = split_traktor(raw) {
+        return Some(c);
+    }
+    // Note name: root letter + optional accidental + optional mode ending.
+    let mut chars = raw.chars();
+    let letter = chars.next()?;
+    let mut accidental = None;
+    let mut rest = String::new();
+    let tail: Vec<char> = chars.collect();
+    let mut idx = 0;
+    if let Some(&c) = tail.first() {
+        if c == '#' || c == 'b' {
+            accidental = Some(c);
+            idx = 1;
+        }
+    }
+    rest.extend(tail[idx..].iter());
+    let pitch = note_pitch(letter, accidental)?;
+    let mode = match rest.trim_start_matches(['-', ' ']).to_ascii_lowercase().as_str() {
+        "" | "major" | "maj" | "d" | "dur" => 1,
+        "m" | "min" | "minor" => 0,
+        _ => return None,
+    };
+    Some(crate::features::camelot(pitch.rem_euclid(12), mode))
+}
+
 /// `GET /vault/tracks?isrcs=a,b,c` — the vault's resolved best BPM/key per ISRC.
 ///
 /// music-api is the Data Vault of music; it resolves the "right" value per track
@@ -1050,7 +1211,77 @@ pub async fn vault_track(cfg: &Config, isrc: &str) -> Option<VaultTrack> {
 
 #[cfg(test)]
 mod tests {
-    use super::{VaultTrack, order_item};
+    use super::{MetadataRow, VaultTrack, order_item, parse_musical_key};
+
+    #[test]
+    fn metadata_row_deserialises_camelcase() {
+        let r: MetadataRow = serde_json::from_value(serde_json::json!({
+            "isrc": "USAAA0000009",
+            "bpm": 126.0,
+            "musicalKey": "11m",
+            "key": "11m",
+            "camelot": "8A",
+            "source": "essentia",
+            "updatedAt": 1700000000
+        }))
+        .expect("deserialise metadata row");
+        assert_eq!(r.isrc, "USAAA0000009");
+        assert_eq!(r.bpm, Some(126.0));
+        assert_eq!(r.musical_key.as_deref(), Some("11m"));
+        assert_eq!(r.musical_key(), Some("11m"));
+        assert_eq!(r.camelot.as_deref(), Some("8A"));
+        assert_eq!(r.source.as_deref(), Some("essentia"));
+        assert_eq!(r.updated_at, 1700000000);
+    }
+
+    #[test]
+    fn metadata_row_tolerates_missing_fields() {
+        let r: MetadataRow = serde_json::from_value(serde_json::json!({ "isrc": "X" }))
+            .expect("minimal metadata row");
+        assert_eq!(r.isrc, "X");
+        assert_eq!(r.bpm, None);
+        assert!(r.camelot.is_none());
+        assert_eq!(r.updated_at, 0);
+    }
+
+    #[test]
+    fn metadata_row_falls_back_to_key_alias() {
+        let r: MetadataRow =
+            serde_json::from_value(serde_json::json!({ "isrc": "X", "key": "8A" }))
+                .expect("key alias");
+        assert_eq!(r.musical_key, None);
+        assert_eq!(r.musical_key(), Some("8A"));
+    }
+
+    #[test]
+    fn parse_musical_key_handles_known_notations() {
+        assert_eq!(parse_musical_key("8A").as_deref(), Some("8A"));
+        assert_eq!(parse_musical_key("8a").as_deref(), Some("8A"));
+        assert_eq!(parse_musical_key("8m").as_deref(), Some("8A")); // Traktor minor
+        assert_eq!(parse_musical_key("8d").as_deref(), Some("8B")); // Traktor major
+        assert_eq!(parse_musical_key("11m").as_deref(), Some("11A"));
+        assert_eq!(parse_musical_key("C").as_deref(), Some("8B")); // C major
+        assert_eq!(parse_musical_key("Am").as_deref(), Some("8A")); // A minor
+        assert_eq!(parse_musical_key("F#m").as_deref(), Some("11A")); // F# minor
+        assert_eq!(parse_musical_key("A-Minor").as_deref(), Some("8A"));
+        assert_eq!(parse_musical_key("Db").as_deref(), Some("3B")); // Db major
+        assert_eq!(parse_musical_key("").as_deref(), None);
+        assert_eq!(parse_musical_key("xx").as_deref(), None);
+        assert_eq!(parse_musical_key("13A").as_deref(), None);
+    }
+
+    #[test]
+    fn parse_musical_key_round_trips_camelot_wheel() {
+        for pitch in 0..12 {
+            for mode in [0, 1] {
+                let c = crate::features::camelot(pitch, mode);
+                assert_eq!(parse_musical_key(&c).as_deref(), Some(c.as_str()));
+                let (p, m) = crate::features::camelot_to_pitch_mode(&c).unwrap();
+                assert_eq!(parse_musical_key(&c).as_deref(), Some(c.as_str()));
+                assert_eq!(crate::features::camelot(p, m), c);
+            }
+        }
+    }
 
     #[test]
     fn order_item_splits_composite_keys() {

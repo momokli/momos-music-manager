@@ -132,6 +132,11 @@ enum Command {
         #[arg(long, default_value_t = 50000)]
         limit: usize,
     },
+    /// Backfill BPM/key from music-api (ISRC authority) into hub_track_features.
+    MetadataBackfill {
+        #[arg(long, default_value_t = 2000)]
+        limit: usize,
+    },
 }
 
 #[tokio::main]
@@ -180,6 +185,7 @@ async fn main() -> Result<()> {
         }
         Command::ImportTraktor { user, file } => cmd_import_traktor(cfg, &user, &file).await,
         Command::PushMetadata { limit } => cmd_push_metadata(cfg, limit).await,
+        Command::MetadataBackfill { limit } => cmd_metadata_backfill(cfg, limit).await,
     }
 }
 
@@ -467,6 +473,20 @@ async fn cmd_push_metadata(cfg: Config, limit: usize) -> Result<()> {
     }
     let n = music_api::push_metadata(&cfg, &items).await?;
     println!("✓ {n} ISRC-Metadaten an music-api gepusht");
+    Ok(())
+}
+
+/// Pull BPM/key from music-api's ISRC authority into the hub's
+/// `hub_track_features` (the api→hub backfill direction).
+async fn cmd_metadata_backfill(cfg: Config, limit: usize) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    let cfg = settings::overlay_config(&pool, cfg).await;
+    if cfg.music_api_token.is_none() {
+        bail!("MUSIC_API_TOKEN nicht gesetzt");
+    }
+    println!("Hole BPM/Key aus music-api (ISRC-Autorität) … max {limit}");
+    let n = features::backfill_from_music_api(&pool, &cfg, limit).await?;
+    println!("✓ {n} Tracks aus music-api angereichert");
     Ok(())
 }
 
