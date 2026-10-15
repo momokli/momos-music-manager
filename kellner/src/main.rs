@@ -40,8 +40,8 @@ enum Command {
     Backup(BackupArgs),
     /// Upload a Traktor `collection.nml` to the hub (device-token gated).
     TraktorUpload(TraktorUploadArgs),
-    /// Show the state of downloads and the Backpack.
-    Downloads,
+    /// Order + download ISRCs, or show the download state without arguments.
+    Downloads(DownloadsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -80,6 +80,31 @@ struct BackupArgs {
 }
 
 #[derive(Debug, Args)]
+struct DownloadsArgs {
+    /// ISRC to order and fetch (repeatable).
+    #[arg(long = "isrc", value_name = "ISRC")]
+    isrc: Vec<String>,
+    /// File with ISRCs — one per line and/or comma-separated.
+    #[arg(long = "isrcs", value_name = "FILE")]
+    isrcs: Option<std::path::PathBuf>,
+    /// Preferred delivery format: flac, 320 or 128 (default flac).
+    #[arg(long)]
+    format: Option<String>,
+    /// Order priority (default 0).
+    #[arg(long, default_value_t = 0)]
+    priority: i64,
+    /// Poll interval in seconds (default 5).
+    #[arg(long, default_value_t = 5)]
+    poll_secs: u64,
+    /// Give up polling after this many seconds (default 600).
+    #[arg(long, default_value_t = 600)]
+    timeout_secs: u64,
+    /// Collection directory (default: config `collection_dir`, env KELLNER_COLLECTION_DIR).
+    #[arg(long)]
+    root: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
 struct TraktorUploadArgs {
     /// Explicit `collection.nml` path (default: config value, else platform autodetect).
     #[arg(long)]
@@ -100,7 +125,7 @@ fn main() -> Result<()> {
         Command::Backpack => not_yet("backpack"),
         Command::Backup(args) => return backup(args),
         Command::TraktorUpload(args) => return traktor_upload(args),
-        Command::Downloads => not_yet("downloads"),
+        Command::Downloads(args) => return downloads(args),
     }
 
     Ok(())
@@ -162,6 +187,80 @@ fn backup(args: BackupArgs) -> Result<()> {
         let stats = sync::backup::run_backup(&client, &opts).await?;
         if stats.failed > 0 {
             anyhow::bail!("backup finished with {} failure(s)", stats.failed);
+        }
+        Ok(())
+    })
+}
+
+fn downloads(args: DownloadsArgs) -> Result<()> {
+    // Collect ISRCs from --isrc and --isrcs <file> (lines and/or commas).
+    let mut isrcs: Vec<String> = args.isrc.clone();
+    if let Some(file) = &args.isrcs {
+        let text = std::fs::read_to_string(file)
+            .with_context(|| format!("reading ISRC file {}", file.display()))?;
+        for line in text.lines() {
+            for part in line.split(',') {
+                let t = part.trim();
+                if !t.is_empty() {
+                    isrcs.push(t.to_string());
+                }
+            }
+        }
+    }
+
+    // US4: no ISRCs → read-only status report, no network call.
+    if isrcs.is_empty() {
+        let state = state::load()?;
+        sync::downloads::report_status(&state);
+        return Ok(());
+    }
+
+    let preferred = args.format.clone();
+    let priority = args.priority;
+    let poll_secs = args.poll_secs.max(1);
+    let timeout_secs = args.timeout_secs;
+    let root_arg = args.root.clone();
+
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        let cfg = config::load()?;
+        let base = cfg.music_api_url().ok_or_else(|| {
+            anyhow::anyhow!(
+                "music-api URL not configured — set KELLNER_MUSIC_API_URL (or `music_api_url` in config)"
+            )
+        })?;
+        let token = cfg.music_api_token.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "music-api token not configured — set KELLNER_MUSIC_API_TOKEN (or `music_api_token` in config)"
+            )
+        })?;
+        let root = root_arg.or(cfg.collection_dir.clone()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "collection directory not configured — pass --root or set KELLNER_COLLECTION_DIR"
+            )
+        })?;
+        if !root.is_dir() {
+            anyhow::bail!("collection directory {} does not exist", root.display());
+        }
+
+        let client = client::api::ApiClient::new(base, token);
+        let opts = sync::downloads::DownloadOptions {
+            isrcs,
+            format: preferred,
+            priority,
+            poll_secs,
+            timeout_secs,
+            root,
+        };
+        let stats = sync::downloads::run_downloads(&client, &opts).await?;
+        if stats.failed > 0 {
+            anyhow::bail!("downloads finished with {} failure(s)", stats.failed);
+        }
+        if stats.pending > 0 {
+            anyhow::bail!(
+                "{} ISRC(s) still pending after {}s",
+                stats.pending, timeout_secs
+            );
         }
         Ok(())
     })
@@ -287,7 +386,7 @@ mod tests {
                 Command::Backpack => "backpack",
                 Command::Backup(_) => "backup",
                 Command::TraktorUpload(_) => "traktor-upload",
-                Command::Downloads => "downloads",
+                Command::Downloads(_) => "downloads",
                 Command::Pair(_) => "pair",
             };
             assert_eq!(got, expected);
