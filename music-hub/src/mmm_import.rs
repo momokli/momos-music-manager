@@ -11,6 +11,24 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 use crate::tagtypes::TagType;
 
+/// Open a MMM `library.db` read-only (single connection). Shared by all MMM
+/// importers so the connection setup stays in one place.
+async fn open_mmm(mmm_db: &str) -> Result<SqlitePool> {
+    let url = if mmm_db.starts_with("sqlite:") {
+        mmm_db.to_string()
+    } else {
+        format!("sqlite:{mmm_db}")
+    };
+    let opts = SqliteConnectOptions::new()
+        .filename(url.trim_start_matches("sqlite:"))
+        .read_only(true);
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .with_context(|| format!("open MMM db {mmm_db}"))
+}
+
 /// Map an MMM category name to a hub tag type. Phase categories map to
 /// `PHASE_3` as a base; the concrete energy level is applied per tag below.
 fn type_for_category(name: &str) -> Option<TagType> {
@@ -49,19 +67,7 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
         bail!("hub user '{user_slug}' not found");
     };
 
-    let url = if mmm_db.starts_with("sqlite:") {
-        mmm_db.to_string()
-    } else {
-        format!("sqlite:{mmm_db}")
-    };
-    let opts = SqliteConnectOptions::new()
-        .filename(url.trim_start_matches("sqlite:"))
-        .read_only(true);
-    let mmm = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(opts)
-        .await
-        .with_context(|| format!("open MMM db {mmm_db}"))?;
+    let mmm = open_mmm(mmm_db).await?;
 
     // Categories -> tag types.
     let cats = sqlx::query_as::<_, (i64, String, String)>(
@@ -172,5 +178,244 @@ pub async fn import_tags(hub: &SqlitePool, mmm_db: &str, user_slug: &str) -> Res
     }
 
     crate::tags::rebuild(hub).await?;
+    Ok(summary)
+}
+
+// ── Playlists ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default)]
+pub struct PlaylistSummary {
+    /// hub_playlists rows upserted.
+    pub playlists: usize,
+    /// Of those, liked-mirror playlists (`is_liked = 1`).
+    pub liked: usize,
+    /// hub_playlist_tracks rows upserted.
+    pub linked: usize,
+    /// MMM memberships resolved to a hub track.
+    pub matched: usize,
+    /// MMM memberships with no matching hub track (left out).
+    pub unmatched: usize,
+    /// `playlist_kind = 'generated'` playlists skipped.
+    pub skipped_playlists: usize,
+    /// Archived memberships (`deleted_at IS NOT NULL`) skipped.
+    pub skipped_tracks: usize,
+}
+
+/// Import service playlists + memberships from `mmm_db` into the hub user
+/// `user_slug`. Idempotent via `UNIQUE(user_id, service, playlist_id)` and the
+/// `(playlist_id, track_id)` membership PK. Tracks are matched by
+/// `(service, service_track_id)`; unmatched memberships are counted, not
+/// written.
+pub async fn import_playlists(
+    hub: &SqlitePool,
+    mmm_db: &str,
+    user_slug: &str,
+) -> Result<PlaylistSummary> {
+    let user_id: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM hub_users WHERE slug = ?1 COLLATE NOCASE LIMIT 1")
+            .bind(user_slug)
+            .fetch_optional(hub)
+            .await
+            .ok()
+            .flatten();
+    let Some(user_id) = user_id else {
+        bail!("hub user '{user_slug}' not found");
+    };
+
+    let mmm = open_mmm(mmm_db).await?;
+
+    let playlists = sqlx::query_as::<_, (i64, String, String, String, String, String)>(
+        "SELECT id, service, playlist_id, name, COALESCE(description,''), \
+                COALESCE(playlist_kind,'curated')
+           FROM service_playlists ORDER BY id",
+    )
+    .fetch_all(&mmm)
+    .await
+    .context("read service_playlists (is this a MMM db?)")?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut summary = PlaylistSummary::default();
+
+    for (mmm_pl_id, service, playlist_id, name, description, kind) in playlists {
+        // Local generated packs are MMM output, not source data.
+        if kind == "generated" {
+            summary.skipped_playlists += 1;
+            continue;
+        }
+        let is_liked = kind == "liked";
+
+        // Archived memberships are skipped (counted, not written).
+        let archived: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM service_playlist_tracks
+              WHERE playlist_id = ?1 AND deleted_at IS NOT NULL",
+        )
+        .bind(mmm_pl_id)
+        .fetch_one(&mmm)
+        .await
+        .unwrap_or(0);
+        summary.skipped_tracks += archived as usize;
+
+        // Active memberships, in playlist order, joined to their service track.
+        let members = sqlx::query_as::<_, (String, String, Option<i64>)>(
+            "SELECT st.service, st.service_id, spt.position
+               FROM service_playlist_tracks spt
+               JOIN service_tracks st ON st.id = spt.track_id
+              WHERE spt.playlist_id = ?1 AND spt.deleted_at IS NULL
+              ORDER BY spt.position",
+        )
+        .bind(mmm_pl_id)
+        .fetch_all(&mmm)
+        .await
+        .unwrap_or_default();
+
+        // Resolve each membership to a hub track by (service, service_track_id).
+        let mut resolved: Vec<(i64, Option<i64>)> = Vec::new();
+        for (svc, sid, position) in members {
+            let hub_track: Option<i64> = sqlx::query_scalar(
+                "SELECT id FROM hub_tracks
+                  WHERE service = ?1 AND service_track_id = ?2 LIMIT 1",
+            )
+            .bind(&svc)
+            .bind(&sid)
+            .fetch_optional(hub)
+            .await
+            .ok()
+            .flatten();
+            match hub_track {
+                Some(tid) => {
+                    summary.matched += 1;
+                    resolved.push((tid, position));
+                }
+                None => summary.unmatched += 1,
+            }
+        }
+
+        // Upsert the playlist (idempotent on the UNIQUE constraint).
+        let items_available = resolved.len() as i64;
+        let hub_pl_id: i64 = sqlx::query_scalar(
+            "INSERT INTO hub_playlists
+                (user_id, service, playlist_id, name, description, is_liked, items_available, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(user_id, service, playlist_id) DO UPDATE SET
+                name            = excluded.name,
+                description     = excluded.description,
+                is_liked        = excluded.is_liked,
+                items_available = excluded.items_available,
+                fetched_at      = excluded.fetched_at
+             RETURNING id",
+        )
+        .bind(user_id)
+        .bind(&service)
+        .bind(&playlist_id)
+        .bind(&name)
+        .bind(&description)
+        .bind(is_liked as i64)
+        .bind(items_available)
+        .bind(&now)
+        .fetch_one(hub)
+        .await?;
+        summary.playlists += 1;
+        if is_liked {
+            summary.liked += 1;
+        }
+
+        // Upsert memberships on the (playlist_id, track_id) PK.
+        for (track_id, position) in resolved {
+            sqlx::query(
+                "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position, added_at)
+                 VALUES (?1, ?2, ?3, NULL)
+                 ON CONFLICT(playlist_id, track_id) DO UPDATE SET position = excluded.position",
+            )
+            .bind(hub_pl_id)
+            .bind(track_id)
+            .bind(position)
+            .execute(hub)
+            .await?;
+            summary.linked += 1;
+        }
+    }
+
+    Ok(summary)
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default)]
+pub struct SettingsSummary {
+    pub imported: usize,
+    pub skipped_operational: usize,
+    pub skipped_unknown: usize,
+}
+
+/// MMM settings key → `hub_settings` key (whitelist). Only non-operational,
+/// non-secret keys are migrated; every imported key gets a `mmm.` prefix so it
+/// cannot collide with hub-native settings.
+const SETTINGS_MAP: &[(&str, &str)] = &[
+    ("backpack.sync_enabled", "mmm.backpack_sync_enabled"),
+    (
+        "spotify.liked_sync_interval_secs",
+        "mmm.liked_sync_interval_secs",
+    ),
+    ("bpmkey.enabled", "mmm.bpmkey.enabled"),
+    ("bpmkey.name_template", "mmm.bpmkey.name_template"),
+    ("bpmkey.name_prefix", "mmm.bpmkey.name_prefix"),
+    ("bpmkey.min_tracks", "mmm.bpmkey.min_tracks"),
+    ("bpmkey.public", "mmm.bpmkey.public"),
+    ("bpmkey.key_style", "mmm.bpmkey.key_style"),
+    ("bpmkey.strict", "mmm.bpmkey.strict"),
+    ("bpmkey.schedule_enabled", "mmm.bpmkey.schedule_enabled"),
+    (
+        "bpmkey.schedule_interval_secs",
+        "mmm.bpmkey.schedule_interval_secs",
+    ),
+];
+
+/// Operational keys are desktop/runtime state, not user preferences.
+fn is_operational(key: &str) -> bool {
+    key.starts_with("autoupdate.") || key.starts_with("telemetry.") || key.contains("last_")
+}
+
+/// Resolve the whitelist mapping without writing anything (used by `--dry-run`).
+/// Returns the mapped `(hub_key, value)` rows plus the skip counters.
+pub async fn plan_settings(mmm_db: &str) -> Result<(Vec<(String, String)>, SettingsSummary)> {
+    let mmm = open_mmm(mmm_db).await?;
+    let rows = sqlx::query_as::<_, (String, String)>("SELECT key, value FROM settings ORDER BY key")
+        .fetch_all(&mmm)
+        .await
+        .context("read settings (is this a MMM db?)")?;
+
+    let mut out = Vec::new();
+    let mut summary = SettingsSummary::default();
+    for (key, value) in rows {
+        if let Some((_, hub_key)) = SETTINGS_MAP.iter().find(|(m, _)| *m == key) {
+            out.push(((*hub_key).to_string(), value));
+            summary.imported += 1;
+        } else if is_operational(&key) {
+            summary.skipped_operational += 1;
+        } else {
+            summary.skipped_unknown += 1;
+        }
+    }
+    Ok((out, summary))
+}
+
+/// Import non-operational settings from `mmm_db` into `hub_settings`
+/// (idempotent upsert). Secrets/tokens are never copied — only whitelisted keys
+/// are considered, and MMM keeps tokens in `service_config`, not here.
+pub async fn import_settings(hub: &SqlitePool, mmm_db: &str) -> Result<SettingsSummary> {
+    let (rows, summary) = plan_settings(mmm_db).await?;
+    let now = chrono::Utc::now().to_rfc3339();
+    for (key, value) in rows {
+        sqlx::query(
+            "INSERT INTO hub_settings (key, value, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        )
+        .bind(&key)
+        .bind(&value)
+        .bind(&now)
+        .execute(hub)
+        .await?;
+    }
     Ok(summary)
 }
