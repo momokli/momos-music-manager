@@ -75,6 +75,8 @@ pub struct ObjectMeta {
     pub original_path: Option<String>,
     pub isrc: Option<String>,
     pub name: Option<String>,
+    pub group_key: Option<String>,
+    pub stem_type: Option<String>,
     pub created_at: i64,
 }
 
@@ -223,6 +225,11 @@ pub async fn put(
             .map(|s| s.to_string())
     };
 
+    // Optional stem-grouping metadata (#359). Absent headers leave the columns
+    // untouched (COALESCE), so a bare re-upload never wipes them.
+    let group_key = hdr("x-group-key");
+    let stem_type = hdr("x-stem-type");
+
     // Idempotent: an existing object is never rewritten. Drain the body so the
     // client sees a clean response.
     if let Ok(meta) = tokio::fs::metadata(&dest).await {
@@ -232,9 +239,11 @@ pub async fn put(
         // orphan-prune cannot later reclaim a live object (e.g. after an earlier
         // insert failed). An existing row is left untouched.
         if let Err(e) = sqlx::query(
-            "INSERT INTO store_objects (hash, size, content_type, original_path, isrc, name, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(hash) DO NOTHING",
+            "INSERT INTO store_objects (hash, size, content_type, original_path, isrc, name, group_key, stem_type, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(hash) DO UPDATE SET
+               group_key = COALESCE(store_objects.group_key, excluded.group_key),
+               stem_type = COALESCE(store_objects.stem_type, excluded.stem_type)",
         )
         .bind(&hash)
         .bind(meta.len() as i64)
@@ -242,6 +251,8 @@ pub async fn put(
         .bind(hdr("x-original-path"))
         .bind(hdr("x-isrc"))
         .bind(hdr("x-name"))
+        .bind(&group_key)
+        .bind(&stem_type)
         .bind(crate::db::now())
         .execute(&state.pool)
         .await
@@ -320,9 +331,11 @@ pub async fn put(
     // (concurrent scans are additionally covered by the grace period in
     // `prune_orphans`).
     if let Err(e) = sqlx::query(
-        "INSERT INTO store_objects (hash, size, content_type, original_path, isrc, name, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(hash) DO NOTHING",
+        "INSERT INTO store_objects (hash, size, content_type, original_path, isrc, name, group_key, stem_type, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(hash) DO UPDATE SET
+           group_key = COALESCE(store_objects.group_key, excluded.group_key),
+           stem_type = COALESCE(store_objects.stem_type, excluded.stem_type)",
     )
     .bind(&hash)
     .bind(written as i64)
@@ -330,6 +343,8 @@ pub async fn put(
     .bind(hdr("x-original-path"))
     .bind(hdr("x-isrc"))
     .bind(hdr("x-name"))
+    .bind(&group_key)
+    .bind(&stem_type)
     .bind(crate::db::now())
     .execute(&state.pool)
     .await
@@ -385,57 +400,7 @@ pub async fn get(
     if !valid_hash(&hash) {
         return bad_request("key must be a 64-char lowercase hex sha256");
     }
-    let path = state.store.path_for(&hash);
-    let mut file = match tokio::fs::File::open(&path).await {
-        Ok(f) => f,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
-    };
-    let total = match file.metadata().await {
-        Ok(m) => m.len(),
-        Err(e) => return internal(format!("stat object: {e}")),
-    };
-
-    // Single `bytes=start-end` range; anything else is served whole.
-    if let Some((start, end)) = parse_range(&headers, total) {
-        if start >= total || start > end {
-            return (
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                [(
-                    header::CONTENT_RANGE,
-                    format!("bytes */{total}"),
-                )],
-            )
-                .into_response();
-        }
-        if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
-            return internal("seeking object");
-        }
-        let len = end - start + 1;
-        let stream = ReaderStream::new(file.take(len));
-        let mut resp = Body::from_stream(stream).into_response();
-        resp.headers_mut()
-            .insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/octet-stream"));
-        resp.headers_mut().insert(
-            header::CONTENT_RANGE,
-            header::HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")).unwrap(),
-        );
-        resp.headers_mut().insert(
-            header::CONTENT_LENGTH,
-            header::HeaderValue::from_str(&len.to_string()).unwrap(),
-        );
-        *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
-        return resp;
-    }
-
-    let stream = ReaderStream::new(file);
-    let mut resp = Body::from_stream(stream).into_response();
-    resp.headers_mut()
-        .insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/octet-stream"));
-    resp.headers_mut().insert(
-        header::CONTENT_LENGTH,
-        header::HeaderValue::from_str(&total.to_string()).unwrap(),
-    );
-    resp
+    stream_object(&state.store, &hash, "application/octet-stream", &headers).await
 }
 
 fn parse_range(headers: &HeaderMap, total: u64) -> Option<(u64, u64)> {
@@ -498,7 +463,7 @@ pub async fn list(State(state): State<Arc<AppState>>, Query(q): Query<ListQuery>
         Err(e) => return internal(format!("counting objects: {e}")),
     };
     let objects: Vec<ObjectMeta> = match sqlx::query_as(
-        "SELECT hash, size, content_type, original_path, isrc, name, created_at
+        "SELECT hash, size, content_type, original_path, isrc, name, group_key, stem_type, created_at
            FROM store_objects ORDER BY created_at DESC LIMIT ? OFFSET ?",
     )
     .bind(limit)
@@ -511,6 +476,224 @@ pub async fn list(State(state): State<Arc<AppState>>, Query(q): Query<ListQuery>
     };
 
     Json(serde_json::json!({ "objects": objects, "total": total })).into_response()
+}
+
+// ── ISRC → object variants + store-backed file fallback (#359) ───────────────
+
+/// Read-only variant kind used by the `/isrc/{isrc}/objects` view (#359).
+///
+/// An object with a `stem_type` is a `stem`; otherwise the kind is derived from
+/// the extension of `name`/`original_path` (`flac`, `mp3`, `audio` for
+/// m4a/wav/aiff/ogg, else `other`). No fuzzy derivation from file names.
+pub fn classify_kind(
+    stem_type: Option<&str>,
+    name: Option<&str>,
+    original_path: Option<&str>,
+) -> &'static str {
+    if stem_type.map(|s| !s.trim().is_empty()).unwrap_or(false) {
+        return "stem";
+    }
+    let ext_of = |p: Option<&str>| -> Option<String> {
+        let p = p?;
+        let base = p.rsplit('/').next().unwrap_or(p);
+        let (_, e) = base.rsplit_once('.')?;
+        Some(e.to_ascii_lowercase())
+    };
+    match ext_of(name).or_else(|| ext_of(original_path)).as_deref() {
+        Some("flac") => "flac",
+        Some("mp3") => "mp3",
+        Some("m4a") | Some("wav") | Some("aiff") | Some("ogg") => "audio",
+        _ => "other",
+    }
+}
+
+fn variant_json(o: &ObjectMeta) -> serde_json::Value {
+    let kind = classify_kind(
+        o.stem_type.as_deref(),
+        o.name.as_deref(),
+        o.original_path.as_deref(),
+    );
+    serde_json::json!({
+        "hash": o.hash,
+        "kind": kind,
+        "size": o.size,
+        "contentType": o.content_type,
+        "name": o.name,
+        "originalPath": o.original_path,
+        "stemType": o.stem_type,
+        "groupKey": o.group_key,
+        "createdAt": o.created_at,
+    })
+}
+
+const OBJECT_COLUMNS: &str = "hash, size, content_type, original_path, isrc, name, group_key, stem_type, created_at";
+
+/// `GET /isrc/{isrc}/objects` — resolve an ISRC to its object variants (#359).
+///
+/// `404` only when the ISRC is entirely unknown (no track **and** no object); a
+/// known-but-empty ISRC answers `200` with `count: 0`.
+pub async fn isrc_objects(
+    State(state): State<Arc<AppState>>,
+    UrlPath(isrc): UrlPath<String>,
+) -> Response {
+    let isrc = crate::db::normalize_key(&isrc);
+    let track = crate::db::get_track(&state.pool, &isrc).await.ok().flatten();
+
+    let primary: Vec<ObjectMeta> = match sqlx::query_as(&format!(
+        "SELECT {OBJECT_COLUMNS} FROM store_objects WHERE isrc = ? ORDER BY created_at DESC"
+    ))
+    .bind(&isrc)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return internal(format!("listing isrc objects: {e}")),
+    };
+
+    if track.is_none() && primary.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    // Stems are linked best-effort via the group_key of this ISRC's own objects
+    // (set by `store_import`). No filename heuristics.
+    let mut group_keys: Vec<String> = primary.iter().filter_map(|o| o.group_key.clone()).collect();
+    group_keys.sort();
+    group_keys.dedup();
+
+    let mut stems: Vec<ObjectMeta> = Vec::new();
+    for gk in &group_keys {
+        let rows: Vec<ObjectMeta> = sqlx::query_as(&format!(
+            "SELECT {OBJECT_COLUMNS} FROM store_objects
+              WHERE stem_type IS NOT NULL AND group_key = ?
+              ORDER BY created_at DESC"
+        ))
+        .bind(gk)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+        stems.extend(rows);
+    }
+
+    let variants: Vec<serde_json::Value> = primary.iter().map(variant_json).collect();
+    let groups: Vec<serde_json::Value> = group_keys
+        .iter()
+        .map(|gk| {
+            let gstems: Vec<serde_json::Value> = stems
+                .iter()
+                .filter(|s| s.group_key.as_deref() == Some(gk.as_str()))
+                .map(variant_json)
+                .collect();
+            (gk, gstems)
+        })
+        .filter(|(_, s)| !s.is_empty())
+        .map(|(gk, s)| serde_json::json!({ "groupKey": gk, "stems": s }))
+        .collect();
+
+    Json(
+        serde_json::json!({ "isrc": isrc, "count": variants.len(), "variants": variants, "groups": groups }),
+    )
+    .into_response()
+}
+
+/// The store object backing `GET /isrc/{isrc}/{format}` when no local file is
+/// available (#359). `flac` → kind `flac`; `320`/`128` → kind `mp3` (the newest
+/// such object: the store keeps no bitrate).
+pub struct ResolvedFile {
+    pub hash: String,
+    pub content_type: Option<String>,
+}
+
+/// Resolve an ISRC + delivery format to a servable store object (#359).
+/// `None` when nothing matches or the object file is absent.
+pub async fn resolve_isrc_object(
+    pool: &Pool<Sqlite>,
+    store: &Store,
+    isrc: &str,
+    format: &str,
+) -> Option<ResolvedFile> {
+    let want = match format {
+        "flac" => "flac",
+        "320" | "128" => "mp3",
+        _ => return None,
+    };
+    let rows: Vec<ObjectMeta> = sqlx::query_as(&format!(
+        "SELECT {OBJECT_COLUMNS} FROM store_objects WHERE isrc = ? ORDER BY created_at DESC"
+    ))
+    .bind(isrc)
+    .fetch_all(pool)
+    .await
+    .ok()?;
+    for o in rows {
+        if classify_kind(o.stem_type.as_deref(), o.name.as_deref(), o.original_path.as_deref())
+            != want
+        {
+            continue;
+        }
+        if tokio::fs::metadata(store.path_for(&o.hash)).await.is_ok() {
+            return Some(ResolvedFile {
+                hash: o.hash,
+                content_type: o.content_type,
+            });
+        }
+    }
+    None
+}
+
+/// Stream an object file with single-range support and an explicit
+/// `Content-Type`. Returns `404` when the file is absent.
+pub async fn stream_object(
+    store: &Store,
+    hash: &str,
+    content_type: &'static str,
+    headers: &HeaderMap,
+) -> Response {
+    let path = store.path_for(hash);
+    let mut file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let total = match file.metadata().await {
+        Ok(m) => m.len(),
+        Err(e) => return internal(format!("stat object: {e}")),
+    };
+
+    if let Some((start, end)) = parse_range(headers, total) {
+        if start >= total || start > end {
+            return (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [(header::CONTENT_RANGE, format!("bytes */{total}"))],
+            )
+                .into_response();
+        }
+        if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+            return internal("seeking object");
+        }
+        let len = end - start + 1;
+        let stream = ReaderStream::new(file.take(len));
+        let mut resp = Body::from_stream(stream).into_response();
+        resp.headers_mut()
+            .insert(header::CONTENT_TYPE, header::HeaderValue::from_static(content_type));
+        resp.headers_mut().insert(
+            header::CONTENT_RANGE,
+            header::HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")).unwrap(),
+        );
+        resp.headers_mut().insert(
+            header::CONTENT_LENGTH,
+            header::HeaderValue::from_str(&len.to_string()).unwrap(),
+        );
+        *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
+        return resp;
+    }
+
+    let stream = ReaderStream::new(file);
+    let mut resp = Body::from_stream(stream).into_response();
+    resp.headers_mut()
+        .insert(header::CONTENT_TYPE, header::HeaderValue::from_static(content_type));
+    resp.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        header::HeaderValue::from_str(&total.to_string()).unwrap(),
+    );
+    resp
 }
 
 // ── Prune: delete / bulk prune / orphan reconcile / tmp sweep / stats ────────
