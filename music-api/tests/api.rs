@@ -838,6 +838,199 @@ async fn tmp_sweep_removes_only_stale_files() {
     assert!(fresh.exists());
 }
 
+// ── Object store: prune/delete edge cases (#355) ───────────────────────────
+
+async fn prune(h: &Harness, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    let (status, resp) = send(
+        &h.app,
+        authed("POST", "/objects/prune")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(body))
+            .unwrap(),
+    )
+    .await;
+    (status, serde_json::from_slice(&resp).unwrap())
+}
+
+async fn prune_orphans(
+    h: &Harness,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let (status, resp) = send(
+        &h.app,
+        authed("POST", "/objects/prune/orphans")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(body))
+            .unwrap(),
+    )
+    .await;
+    (status, serde_json::from_slice(&resp).unwrap())
+}
+
+#[tokio::test]
+async fn object_delete_rejects_non_hex_keys() {
+    let h = harness().await;
+    // 64 chars but uppercase → still invalid (must be lowercase hex).
+    let upper = "A".repeat(64);
+    for key in [upper.as_str(), "short", &sha256_hex(b"x")[..63]] {
+        let (status, _) = send(
+            &h.app,
+            authed("DELETE", &format!("/objects/{key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "key {key:?}");
+    }
+}
+
+#[tokio::test]
+async fn object_prune_empty_list_is_a_noop() {
+    let h = harness().await;
+    // Seed an object to prove an empty batch touches nothing.
+    let hash = put_object(&h, b"keep-me").await;
+
+    for dry in [false, true] {
+        let (status, v) = prune(
+            &h,
+            serde_json::json!({ "hashes": [], "dryRun": dry }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["deleted"].as_array().unwrap().len(), 0);
+        assert_eq!(v["missing"].as_array().unwrap().len(), 0);
+        assert_eq!(v["freedBytes"], 0);
+        assert_eq!(v["dryRun"], dry);
+    }
+    assert_eq!(head_status(&h, &hash).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn object_prune_mixed_batch_partitions_and_frees() {
+    let h = harness().await;
+    let a = b"prune-a".to_vec();
+    let b = b"prune-bb".to_vec();
+    let ha = put_object(&h, &a).await;
+    let hb = put_object(&h, &b).await;
+    let absent = sha256_hex(b"not-there");
+
+    // Real run over present + absent + invalid + a duplicate of an existing key.
+    let (status, v) = prune(
+        &h,
+        serde_json::json!({
+            "hashes": [ha, absent, "zzz", hb, ha],
+            "dryRun": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let deleted = v["deleted"].as_array().unwrap();
+    assert_eq!(deleted.len(), 2);
+    assert!(deleted.contains(&serde_json::json!(ha)));
+    assert!(deleted.contains(&serde_json::json!(hb)));
+    let missing = v["missing"].as_array().unwrap();
+    assert_eq!(missing.len(), 3);
+    assert!(missing.contains(&serde_json::json!(absent)));
+    assert!(missing.contains(&serde_json::json!("zzz")));
+    // The duplicate occurrence is reported as missing (already gone).
+    assert!(missing.contains(&serde_json::json!(ha)));
+    assert_eq!(v["freedBytes"], (a.len() + b.len()) as u64);
+    assert_eq!(head_status(&h, &ha).await, StatusCode::NOT_FOUND);
+    assert_eq!(head_status(&h, &hb).await, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn object_prune_all_missing_or_invalid_is_idempotent() {
+    let h = harness().await;
+    let absent = sha256_hex(b"ghost");
+    let body = serde_json::json!({ "hashes": [absent, "bad", ""] });
+
+    for _ in 0..2 {
+        let (status, v) = prune(&h, body.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["deleted"].as_array().unwrap().len(), 0);
+        assert_eq!(v["missing"].as_array().unwrap().len(), 3);
+        assert_eq!(v["freedBytes"], 0);
+        assert_eq!(v["dryRun"], false);
+    }
+}
+
+#[tokio::test]
+async fn object_orphans_include_tmp_sweeps_only_when_not_dry() {
+    let h = harness().await;
+    let tmp = h.state.store.tmp_dir();
+    std::fs::create_dir_all(&tmp).unwrap();
+    let stale = tmp.join("stale-orphan");
+    std::fs::write(&stale, b"stalebytes").unwrap();
+    let f = std::fs::OpenOptions::new().write(true).open(&stale).unwrap();
+    f.set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
+        .unwrap();
+    drop(f);
+
+    // dryRun + includeTmp must not sweep abandoned uploads.
+    let (status, v) = prune_orphans(
+        &h,
+        serde_json::json!({ "dryRun": true, "includeTmp": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["filesRemoved"], 0);
+    assert!(stale.exists(), "dryRun must keep the stale tmp file");
+
+    // Real run with includeTmp sweeps it.
+    let (status, v) = prune_orphans(
+        &h,
+        serde_json::json!({ "dryRun": false, "includeTmp": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["filesRemoved"], 1);
+    assert_eq!(v["freedBytes"], 10);
+    assert!(!stale.exists());
+
+    // Second real run changes nothing.
+    let (status, v) = prune_orphans(
+        &h,
+        serde_json::json!({ "includeTmp": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["filesRemoved"], 0);
+    assert_eq!(v["rowsRemoved"], 0);
+    assert_eq!(v["freedBytes"], 0);
+}
+
+#[tokio::test]
+async fn object_stats_sums_multiple_objects() {
+    let h = harness().await;
+    let a = put_object(&h, b"one").await;
+    let b = put_object(&h, b"two-two").await;
+
+    let (status, resp) = send(
+        &h.app,
+        authed("GET", "/objects/stats").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+    assert_eq!(v["count"], 2);
+    assert_eq!(v["totalBytes"], 10);
+
+    // Prune one away; counters follow.
+    let (status, v) = prune(&h, serde_json::json!({ "hashes": [a] })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["deleted"].as_array().unwrap().len(), 1);
+    let (_, resp) = send(
+        &h.app,
+        authed("GET", "/objects/stats").body(Body::empty()).unwrap(),
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+    assert_eq!(v["count"], 1);
+    assert_eq!(v["totalBytes"], 7);
+    assert_eq!(head_status(&h, &b).await, StatusCode::OK);
+}
+
 // ── Durable queue: retries, lease recovery, counts ──────────────────────────
 
 #[tokio::test]
