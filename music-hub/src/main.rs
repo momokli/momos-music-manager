@@ -83,6 +83,20 @@ enum Command {
         #[arg(long)]
         user: String,
     },
+    /// Import service playlists + memberships from a MMM `library.db` into a hub user.
+    ImportMmmPlaylists {
+        #[arg(long)]
+        db: String,
+        #[arg(long)]
+        user: String,
+    },
+    /// Import non-operational settings from a MMM db into `hub_settings`.
+    ImportMmmSettings {
+        #[arg(long)]
+        db: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Compute EffNet embeddings + local BPM/key for tracks that lack them.
     Analyze {
         #[arg(long, default_value_t = 50)]
@@ -170,6 +184,12 @@ async fn main() -> Result<()> {
         Command::Features { limit } => cmd_features(cfg, limit).await,
         Command::Freqblog { limit } => cmd_freqblog(cfg, limit).await,
         Command::ImportMmmTags { db, user } => cmd_import_mmm_tags(cfg, &db, &user).await,
+        Command::ImportMmmPlaylists { db, user } => {
+            cmd_import_mmm_playlists(cfg, &db, &user).await
+        }
+        Command::ImportMmmSettings { db, dry_run } => {
+            cmd_import_mmm_settings(cfg, &db, dry_run).await
+        }
         Command::Analyze { limit } => cmd_analyze(cfg, limit).await,
         Command::ResolveTags => cmd_resolve_tags(cfg).await,
         Command::Genres { limit } => cmd_genres(cfg, limit).await,
@@ -439,6 +459,43 @@ async fn cmd_import_mmm_tags(cfg: Config, db_path: &str, user: &str) -> Result<(
     println!(
         "✓ importiert: {} Gruppen, {} Tags, {} mit Playlist verlinkt, {} Parent-/Alias-Tags, {} Energy-Ränge, {} übersprungen",
         s.groups, s.tags, s.linked, s.parents, s.ranked, s.skipped
+    );
+    Ok(())
+}
+
+async fn cmd_import_mmm_playlists(cfg: Config, db_path: &str, user: &str) -> Result<()> {
+    let pool = db::connect(&cfg.database_url).await?;
+    let s = mmm_import::import_playlists(&pool, db_path, user).await?;
+    println!(
+        "✓ Playlists: {} importiert ({} liked), {} Tracks verlinkt, {} gematcht, {} ungematcht, {} Playlists übersprungen, {} archivierte Tracks übersprungen",
+        s.playlists,
+        s.liked,
+        s.linked,
+        s.matched,
+        s.unmatched,
+        s.skipped_playlists,
+        s.skipped_tracks
+    );
+    Ok(())
+}
+
+async fn cmd_import_mmm_settings(cfg: Config, db_path: &str, dry_run: bool) -> Result<()> {
+    if dry_run {
+        let (rows, s) = mmm_import::plan_settings(db_path).await?;
+        println!(
+            "(dry-run) würde {} Settings importieren, {} operational übersprungen, {} unbekannt übersprungen",
+            s.imported, s.skipped_operational, s.skipped_unknown
+        );
+        for (key, value) in rows {
+            println!("  {key} = {value}");
+        }
+        return Ok(());
+    }
+    let pool = db::connect(&cfg.database_url).await?;
+    let s = mmm_import::import_settings(&pool, db_path).await?;
+    println!(
+        "✓ Settings: {} importiert, {} operational übersprungen, {} unbekannt übersprungen",
+        s.imported, s.skipped_operational, s.skipped_unknown
     );
     Ok(())
 }
