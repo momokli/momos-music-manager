@@ -42,7 +42,7 @@ Fokus-Milestone: music-api-0.3.0 (#35) · Order: #357 → **#354** → #355 → 
 5. Docs (music-hub AGENT/README, evtl. ADR) + CHANGELOG-Notiz.
 
 ## Pipeline-Stages
-- [x] plan · [x] setup · [~] develop · [ ] verify · [ ] test · [ ] pr · [ ] review
+- [x] plan · [x] setup · [x] develop · [x] verify · [x] test · [x] pr · [ ] review
 
 ## Setup (done)
 - Branch-Stand verifiziert (Host `planet`, lokal ausführbar):
@@ -105,3 +105,11 @@ Stage 3 umgesetzt nach `plan-issue-354.md` (US-1..US-6, §Z). Kein `git commit` 
 - verify=PASS (Stage 4, 2026-10-15): cargo build/test --locked grün, 430 passed/0 failed (+11 neue Tests); Mapping §Z round-trip-konsistent, kein no-data-Poisoning, COALESCE, parametrisierte SQL, keine Token-Leaks.
 
 - test=PASS (Stage 5, 2026-10-15): `cd music-hub && cargo test --locked` → 437 passed / 0 failed; `features_metadata.rs` 5 → 11 Tests (+6 direkte `metadata_range`-Fälle: Happy/Missing, leere Eingabe, kein Token, 500→None, malformed Body→None, leere Antwort→Some(empty); +1 No-Poisoning bei transientem 500). Kein Commit.
+
+## PR (Stage 6, done)
+- Commit: `4a0621f` — `feat(music-api): BPM/key backfill from metadata authority into hub_track_features (#354)`
+  (13 Dateien, +1250/-2). Co-authored-by: momo-clanker[bot].
+- Branch: `feat/music-api-metadata-backfill` → `origin` gepusht (upstream gesetzt).
+- **PR #442**: https://github.com/momokli/momos-music-manager/pull/442 (base `main`).
+- PR-Body enthält `Closes #354` (verifiziert via `pr view --json body`).
+- Merge-Status: **OPEN**, kein Merge ausgeführt (auftragsgemäß).
