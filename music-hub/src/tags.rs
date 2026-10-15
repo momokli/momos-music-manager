@@ -519,6 +519,120 @@ pub async fn list_user_tags(pool: &SqlitePool, user_id: i64) -> Vec<(i64, String
     .unwrap_or_default()
 }
 
+/// One ranked tag-search hit (for the unified tag input, #449).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagHit {
+    pub id: i64,
+    pub name: String,
+    /// Raw type (e.g. `MOOD`), if any.
+    pub type_name: Option<String>,
+    /// Display label (e.g. `Mood`), empty when untyped.
+    pub type_label: String,
+    /// Icon for the type, empty when untyped.
+    pub icon: String,
+}
+
+/// Rank a tag name against a (lowercased) needle. Higher = better; `None` = no match.
+/// Exact > prefix > word-prefix > substring > fuzzy (`table::matches_typo`).
+fn tag_rank(name_lc: &str, needle: &str) -> Option<i32> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if name_lc == needle {
+        return Some(100);
+    }
+    if name_lc.starts_with(needle) {
+        return Some(80);
+    }
+    if name_lc
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| !w.is_empty() && w.starts_with(needle))
+    {
+        return Some(70);
+    }
+    if name_lc.contains(needle) {
+        return Some(60);
+    }
+    if crate::table::matches_typo(name_lc, &[needle.to_string()]) {
+        return Some(40);
+    }
+    None
+}
+
+/// Fuzzy search over the user's **own** tags (the ones they may add), best match
+/// first. `tag_track` requires ownership, so other users' tags are not offered.
+pub async fn search_user_tags(
+    pool: &SqlitePool,
+    user_id: i64,
+    needle: &str,
+    limit: usize,
+) -> Vec<TagHit> {
+    let rows = sqlx::query_as::<_, (i64, String, Option<String>)>(
+        "SELECT id, name, type FROM hub_tags WHERE owner_user_id = ?1 ORDER BY name COLLATE NOCASE",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let n = needle.trim().to_lowercase();
+    let mut scored: Vec<(i32, TagHit)> = rows
+        .into_iter()
+        .filter_map(|(id, name, ty)| {
+            let score = tag_rank(&name.to_lowercase(), &n)?;
+            let parsed = ty.as_deref().and_then(crate::tagtypes::TagType::parse);
+            Some((
+                score,
+                TagHit {
+                    id,
+                    name,
+                    type_name: ty,
+                    type_label: parsed.map(|t| t.label().to_string()).unwrap_or_default(),
+                    icon: parsed.map(|t| t.icon().to_string()).unwrap_or_default(),
+                },
+            ))
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()))
+    });
+    scored.into_iter().take(limit).map(|(_, h)| h).collect()
+}
+
+/// Resolve the tag to add from a form: an explicit `tag_id` (an existing tag the
+/// user owns) or a `name` (+ optional `type`) to create. `None` = nothing to add.
+pub async fn resolve_tag_for_add(
+    pool: &SqlitePool,
+    user_id: i64,
+    tag_id: Option<i64>,
+    name: Option<&str>,
+    ty: Option<&str>,
+) -> Option<i64> {
+    if let Some(tid) = tag_id {
+        let owned = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2",
+        )
+        .bind(tid)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+        return owned.map(|_| tid);
+    }
+    let name = name?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let tid = ensure_tag(pool, user_id, name).await.ok()?;
+    if let Some(ty) = ty.and_then(crate::tagtypes::TagType::parse) {
+        let _ = crate::tagtypes::set(pool, user_id, tid, Some(ty)).await;
+    }
+    Some(tid)
+}
+
 /// Ids of tags (any owner) whose name contains `needle`, **plus all of their
 /// descendant tags** (transitively), so filtering by a broad/parent tag also
 /// matches its children (e.g. "house" -> "Beatport Top 100 - Progressive House").

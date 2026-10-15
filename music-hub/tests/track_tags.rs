@@ -51,7 +51,7 @@ async fn tagging_from_track_view_persists() {
         .await
         .unwrap();
     assert!(html.contains("Dark"), "tag not shown on track page");
-    assert!(html.contains("Taggen"), "tag form missing");
+    assert!(html.contains("data-taginput"), "tag input missing");
 
     // Untag removes it again.
     let resp = app
@@ -233,7 +233,9 @@ async fn track_view_shows_cluster_rec_and_scope_toggle() {
 
     let dark = tags::ensure_tag(&app.pool, alice, "Dark").await.unwrap();
     let duester = tags::ensure_tag(&app.pool, bob, "Düster").await.unwrap();
-    set_type(&app.pool, alice, dark, Some(TagType::Mood)).await.unwrap();
+    set_type(&app.pool, alice, dark, Some(TagType::Mood))
+        .await
+        .unwrap();
     set_type(&app.pool, bob, duester, Some(TagType::Mood))
         .await
         .unwrap();
@@ -339,7 +341,7 @@ async fn track_tag_redirect_preserves_scope() {
 /// The rendered track view embeds the active scope as a hidden field on every
 /// mutating form, so tag/untag round-trips keep the chosen scope.
 #[tokio::test]
-async fn track_view_emits_scope_hidden_field() {
+async fn track_view_emits_active_scope() {
     let app = common::spawn().await;
     let cookie = app.session_cookie(app.seed.alice).await;
     let html = app
@@ -353,7 +355,7 @@ async fn track_view_emits_scope_hidden_field() {
         .await
         .unwrap();
     assert!(
-        html.contains("name=\"scope\" value=\"mine\""),
+        html.contains("data-scope=\"mine\""),
         "track view must embed the active scope for mutations"
     );
 }

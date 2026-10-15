@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/backpacks/{id}/active", post(backpack_toggle_active))
         .route("/backpacks/{id}/export", get(backpack_export))
         .route("/tags/create", post(tag_create))
+        .route("/tags/search", get(tag_search))
         .route("/tag-search", get(tag_search_page))
         .route("/revisit", get(revisit_page))
         .route("/tag/{id}", get(tag_detail_page))
@@ -4420,6 +4421,28 @@ async fn tag_create(
         }
     }
     Redirect::to("/tags").into_response()
+}
+
+/// `GET /tags/search?q=&limit=` — fuzzy search over **my** tags (JSON, for the
+/// unified tag input #449). Best match first.
+async fn tag_search(
+    State(st): State<AppState>,
+    Query(q): Query<TagInputSearchQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let needle = q.q.unwrap_or_default();
+    let limit = q.limit.unwrap_or(8).clamp(1, 25);
+    let tags = crate::tags::search_user_tags(&st.pool, nav.id, &needle, limit).await;
+    axum::Json(serde_json::json!({ "tags": tags })).into_response()
+}
+
+#[derive(Deserialize)]
+struct TagInputSearchQuery {
+    q: Option<String>,
+    limit: Option<usize>,
 }
 
 /// Extract the path portion of a `Referer` header (absolute or relative).

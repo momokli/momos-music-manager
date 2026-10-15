@@ -1,0 +1,47 @@
+{# Unified tag input (#449) — fuzzy combobox + create-new modal. Context (provided by the
+including page): tag_action: POST URL to add the tag (existing tag_id or new name+type)
+tag_target: htmx swap target (CSS selector) tag_scope: optional scope value (empty = none)
+my_types: Vec<(value, label)> for the create modal #}
+<div
+    class="hub-taginput"
+    data-taginput
+    data-action="{{ tag_action }}"
+    data-target="{{ tag_target }}"
+    data-scope="{{ tag_scope }}"
+>
+    <input
+        type="text"
+        class="hub-taginput-q"
+        placeholder="Tag suchen …"
+        autocomplete="off"
+        aria-label="Tag suchen"
+    />
+    <div class="hub-taginput-results" hidden></div>
+    <dialog class="hub-taginput-modal">
+        <form class="hub-taginput-create">
+            <h3>Neuer Tag</h3>
+            <input
+                type="text"
+                name="name"
+                class="hub-taginput-newname"
+                placeholder="Tag-Name"
+                required
+                aria-label="Tag-Name"
+            />
+            <select name="type" aria-label="Typ">
+                <option value="">Typ: keiner</option>
+                {% for t in my_types %}
+                <option value="{{ t.0 }}">{{ t.1 }}</option>
+                {% endfor %}
+            </select>
+            <menu>
+                <button type="button" class="secondary hub-taginput-cancel">
+                    Abbrechen
+                </button>
+                <button type="button" class="hub-ta-primary hub-taginput-save">
+                    Anlegen
+                </button>
+            </menu>
+        </form>
+    </dialog>
+</div>

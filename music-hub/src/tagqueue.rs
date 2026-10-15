@@ -199,16 +199,6 @@ struct TagCloud {
     chips: Vec<TagChip>,
 }
 
-/// A pickable tag type for the "add tag" form.
-struct TypeOption {
-    value: &'static str,
-    label: &'static str,
-}
-
-struct DetailGroupTag {
-    name: String,
-}
-
 struct DetailLink {
     name: String,
     href: String,
@@ -243,10 +233,13 @@ struct QueueDetail {
     tag_clouds: Vec<TagCloud>,
     untag_action: String,
     tag_action: String,
+    /// htmx swap target for the unified tag input.
+    tag_target: String,
+    /// Scope value carried through the tag add.
+    tag_scope: String,
     htmx: bool,
     playlists: Vec<PlRow>,
-    my_tags: Vec<DetailGroupTag>,
-    my_types: Vec<TypeOption>,
+    my_types: Vec<(String, String)>,
     recommended: Vec<RecChip>,
     rec_scope: String,
     rec_scope_mine_url: String,
@@ -389,14 +382,9 @@ async fn build_detail(
     })
     .collect();
 
-    let my_tags: Vec<DetailGroupTag> = crate::tags::list_user_tags(&st.pool, me)
-        .await
+    let my_types: Vec<(String, String)> = crate::tagtypes::options()
         .into_iter()
-        .map(|(_, name)| DetailGroupTag { name })
-        .collect();
-    let my_types: Vec<TypeOption> = crate::tagtypes::options()
-        .into_iter()
-        .map(|(value, label, _icon)| TypeOption { value, label })
+        .map(|(value, label, _icon)| (value.to_string(), label.to_string()))
         .collect();
     let recommended: Vec<RecChip> = crate::recommend::recommend_tags(&st.pool, id, 16, me, scope)
         .await
@@ -449,9 +437,10 @@ async fn build_detail(
         tag_clouds,
         untag_action: format!("/tag-queue/{id}/untag"),
         tag_action: format!("/tag-queue/{id}/tag"),
+        tag_target: "#queue-detail".to_string(),
+        tag_scope: rec_scope.clone(),
         htmx: true,
         playlists,
-        my_tags,
         my_types,
         recommended,
         rec_scope,
@@ -478,10 +467,14 @@ async fn queue_detail(
 
 #[derive(Deserialize)]
 struct TagForm {
+    #[serde(default)]
     name: String,
     /// Optional tag type (e.g. "MOOD") to apply to the new tag.
     #[serde(default, rename = "type")]
     tag_type: Option<String>,
+    /// Existing tag to link (the unified tag input, #449).
+    #[serde(default)]
+    tag_id: Option<i64>,
     /// Recommendation scope to preserve across the mutation (`mine` | `all`).
     #[serde(default)]
     scope: Option<String>,
@@ -496,17 +489,16 @@ async fn queue_tag(
     let Some(nav) = crate::ui::nav(&st, &headers, "queue").await else {
         return Redirect::to("/login").into_response();
     };
-    if !f.name.trim().is_empty() {
-        if let Ok(tag_id) = crate::tags::ensure_tag(&st.pool, nav.id, &f.name).await {
-            if let Some(ty) = f
-                .tag_type
-                .as_deref()
-                .and_then(crate::tagtypes::TagType::parse)
-            {
-                let _ = crate::tagtypes::set(&st.pool, nav.id, tag_id, Some(ty)).await;
-            }
-            let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
-        }
+    if let Some(tag_id) = crate::tags::resolve_tag_for_add(
+        &st.pool,
+        nav.id,
+        f.tag_id,
+        Some(&f.name),
+        f.tag_type.as_deref(),
+    )
+    .await
+    {
+        let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
     }
     let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
     match build_detail(&st, nav.id, id, scope).await {
