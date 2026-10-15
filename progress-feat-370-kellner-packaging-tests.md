@@ -35,7 +35,7 @@ Previous `[BLOCKED]` comment on #370 is outdated. **#370 is the last open leaf �
 | plan    | done    | plan in "## Plan" (verbatim below) |
 | dev     | done    | US1–US4 implemented; `cargo build --locked && cargo test --locked` green (87 lib + 5 int suites = 119 tests, 0 fail) |
 | verify  | done    | PASS — all 5 checkpoints green (see below); `cargo build+test --locked` EXIT=0 (119 tests), `smoke.sh` EXIT=0, e2e 3× stable, install.sh idempotent |
-| test    | pending | |
+| test    | done    | PASS — full `build+test --locked` EXIT=0 (119 tests, 0 fail); `smoke.sh` EXIT=0; e2e 3× stable; CI smoke step present |
 | pr      | pending | |
 | review  | pending | |
 
@@ -93,6 +93,32 @@ Independent re-run on `planet`, diff `origin/main..HEAD`:
 5. **Docs — PASS.** README/AGENT/CHANGELOG/ROADMAP/plans-index updated; plan +
    issues moved to `plans/done/`; relative links fixed; counter 56→57 done ·
    25→24 proposed consistent.
+
+**Overall: PASS.**
+
+### test — done (2026-10-15)
+
+Integration/E2E stage on `planet`, branch `feat/370-kellner-packaging-tests`:
+
+1. **Full suite — PASS.** `cd kellner && cargo build --locked && cargo test --locked`
+   → **EXIT=0**. `grep "^test result"`: 87 + 3 + 4 + 9 + 1 + 7 + 4 + 4 = **119 passed,
+   0 failed** across lib + 7 integration suites (incl. `e2e.rs`, 1 test, 0.10–0.13 s).
+2. **Smoke — PASS.** `bash kellner/scripts/smoke.sh` → `smoke: PASS`, **EXIT=0**;
+   version/help/`service install --print --dry-run` OK; git tree clean afterwards
+   (nothing written).
+3. **Determinism — PASS.** `cargo test --locked --test e2e` 3× → EXIT=0 each
+   (`1 passed` every run; 0.13/0.11/0.11 s). No flakes → no origin/main comparison needed.
+4. **Loop coverage — PASS.** `full_loop_upload_export_order_fetch_tag_backup` asserts the
+   whole chain: exactly one device-token `POST /api/hub/traktor/import` (NML body);
+   export → exactly one `POST /orders` + one `GET /isrc/{isrc}/flac`; flat
+   `coll/<isrc>.flac`; Comment tag == `"a, b  BPM 128 | A-Minor | Energy 7"`
+   (`lofty::read_from_path`); `backpack_membership` set with 64-hex `content_hash`;
+   backup → one `POST /objects/check` + one `PUT /objects/{sha256}` with the
+   **canonical** (Comment-cleared) hash in the mock store; second pass orders/fetches/
+   uploads nothing (idempotency).
+5. **CI — PASS.** `.github/workflows/ci-pr.yml` kellner job: `bash scripts/smoke.sh`
+   (`working-directory: kellner`) runs **after** `cargo build + test (kellner)`; fmt/clippy
+   remain step-level `continue-on-error` informativ → no required-check broken.
 
 **Overall: PASS.**
 
