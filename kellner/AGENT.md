@@ -3,8 +3,10 @@
 > **Last updated**: 2026-10-15 · §5 decisions locked (ADR-081, #361)
 > Keep this file current. It is the entry point for any agent working on `kellner/`.
 >
-> **Status: skeleton.** Only `src/main.rs` (a stubbed clap CLI) exists. Everything
-> below is a _sketch_ — treat it as intent, not as implemented behaviour.
+> **Status: pairing implemented (#362).** `src/config.rs` (config + device identity,
+> `0600`, redacted) and `src/pairing.rs` (token gen, hub register, approval URL,
+> persist) exist, plus `kellner pair`. The remaining commands (`backpack`, `backup`,
+> `traktor-upload`, `downloads`) are still stubs.
 
 ---
 
@@ -50,23 +52,31 @@ member — it declares its own empty `[workspace]`).
 
 ```
 kellner/
-├── Cargo.toml     # package kellner, edition 2024, deps: clap (derive) + anyhow
+├── Cargo.toml     # package kellner, edition 2024, own empty [workspace]
 ├── README.md
 ├── AGENT.md       # this file
 └── src/
-    └── main.rs    # stubbed clap CLI (backpack / backup / traktor-upload / downloads)
+    ├── main.rs    # clap CLI: pair (+ backpack / backup / traktor-upload / downloads stubs)
+    ├── config.rs  # ~/.config/kellner/config.toml + persisted device identity
+    └── pairing.rs # token gen, hub register, approval URL, browser open, confirm
 ```
 
 ## 5. Decisions (locked 2026-10-15 — ADR-081, #361)
 
 All open points below are now **resolved**; treat them as intent to implement, not forks.
 
-- **Pairing/auth** — kellner creates a **device token** and opens
-  `https://hub.zukkafabrik.de/kellner/anheuern` (default hub host). A logged-in user
-  answers “diesen kellner anheuern?” Ja/Nein; “Ja” binds the device to that user and
-  issues the token. The link _is_ the capability; the endpoint needs a logged-in session
-  and the token is invalidated after binding. kellner then presents the token to the hub
-  **and** for its delegated `music-api` calls. No provider credentials ever live here.
+- **Pairing/auth** — **implemented (#362).** kellner creates a crypto-random
+  **device token** and a **pairing token**, registers both via
+  `POST {hub_url}/api/hub/devices` (raw hex; the hub hashes), and opens the returned
+  `approval_path` (`/kellner/anheuern?token=…`, default host `hub.zukkafabrik.de`). A
+  logged-in user answers “diesen kellner anheuern?” Ja/Nein; “Ja” binds the device and
+  the hub rotates the pairing hash to the device-token hash (single-use). The link
+  _is_ the capability. The device token is stored `0600`, never logged, and is later
+  presented to the hub **and** for delegated `music-api` calls. No provider credentials
+  ever live here.
+  - **Binding confirmation is user-driven** (open URL + press Enter / `--wait`): the
+    merged hub (#363) exposes **no device-gated route**, so kellner cannot poll.
+    Auto-poll is deferred to **#364** — do not invent a hub endpoint.
 - **Config location** — `~/.config/kellner/config.toml` exists **only** for the hub-host
   override (default `hub.zukkafabrik.de`). **No feature config on the device**: the
   Traktor-upload / backpack-sync toggles and the per-device backpack set live in the Hub
