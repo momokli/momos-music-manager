@@ -36,7 +36,7 @@ Previous `[BLOCKED]` comment on #370 is outdated. **#370 is the last open leaf �
 | dev     | done    | US1–US4 implemented; `cargo build --locked && cargo test --locked` green (87 lib + 5 int suites = 119 tests, 0 fail) |
 | verify  | done    | PASS — all 5 checkpoints green (see below); `cargo build+test --locked` EXIT=0 (119 tests), `smoke.sh` EXIT=0, e2e 3× stable, install.sh idempotent |
 | test    | done    | PASS — full `build+test --locked` EXIT=0 (119 tests, 0 fail); `smoke.sh` EXIT=0; e2e 3× stable; CI smoke step present |
-| pr      | pending | |
+| pr      | done    | PR #462 (https://github.com/momokli/momos-music-manager/pull/462), base `main`, body `Closes #370`; CI running (Issue-Referenz + Conventional-Commit-Titel pass) |
 | review  | pending | |
 
 ### dev — done (2026-10-15)
@@ -121,6 +121,14 @@ Integration/E2E stage on `planet`, branch `feat/370-kellner-packaging-tests`:
    remain step-level `continue-on-error` informativ → no required-check broken.
 
 **Overall: PASS.**
+
+### pr — done (2026-10-15)
+
+- `clanker-git fetch origin` → `origin/main` **unchanged** (`0` behind, `6` ahead) → no rebase, no force-push.
+- PR **#462** created against `main` (head `feat/370-kellner-packaging-tests`); title `test(kellner): packaging + tests`; body carries `Closes #370`.
+  Verified: `baseRefName=main`, `mergeable=MERGEABLE`, `mergeStateStatus=BLOCKED` (awaiting checks).
+- CI started: `Issue-Referenz im PR` pass, `Conventional-Commit-Titel` pass; `Build + Test (cargo)`, `cargo fmt` (informativ), `cargo clippy` (informativ) pending.
+- Commits: da95146, 4eb34da, 3a31e6d, 9b23651, 6f13185, 19b7c0e (+ this progress commit).
 
 ## Guardrails
 
