@@ -36,6 +36,26 @@ state, so a re-order never re-downloads.
 
 Response: `{ "orderId": "<uuid>", "status": "open", "count": 1 }`
 
+#### Non-Deezer sources (SoundCloud, YouTube)
+
+Tracks that only exist off Deezer can be ordered by naming their acquisition
+`source` and the `externalId` within that source (the key becomes
+`<source>:<id>`):
+
+```json
+{ "items": [{ "source": "soundcloud", "externalId": "1837565340" }] }
+```
+
+```json
+{ "items": [{ "source": "youtube", "externalId": "dQw4w9WgXcQ" }] }
+```
+
+`externalId` is the SoundCloud numeric track id or the YouTube video id — the
+final file is resolved by yt-dlp (`api.soundcloud.com/tracks/<id>` /
+`youtube.com/watch?v=<id>`). These are lossy sources: the download lands as
+`mp3-320` (the 128 is derived by the transcode queue), never FLAC. Omitting
+`source` (or setting `deezer`) keeps the ISRC path above.
+
 ### `GET /orders/{orderId}`
 
 ```json

@@ -29,7 +29,7 @@ pub struct Config {
     pub ffmpeg: String,
     /// ffprobe binary used to classify the delivered lossy file.
     pub ffprobe: String,
-    /// yt-dlp binary, used to acquire non-Deezer sources (e.g. SoundCloud).
+    /// yt-dlp binary, used to acquire non-Deezer sources (e.g. SoundCloud, YouTube).
     pub ytdlp: String,
     /// Scratch dir yt-dlp downloads into (below `data_dir` by default).
     pub ytdlp_dir: PathBuf,

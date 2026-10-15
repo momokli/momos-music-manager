@@ -25,12 +25,12 @@ pub mod artist_state {
 
 /// A track row keyed by `isrc` (the primary key of the whole system). For
 /// non-Deezer sources the key is `<source>:<external_id>` (e.g.
-/// `soundcloud:1837565340`).
+/// `soundcloud:1837565340`, `youtube:dQw4w9WgXcQ`).
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Track {
     pub isrc: String,
-    /// `deezer` | `soundcloud` | …
+    /// `deezer` | `soundcloud` | `youtube` | …
     #[serde(default)]
     pub source: String,
     pub deezer_id: Option<String>,
@@ -160,7 +160,7 @@ pub struct OrderItemRequest {
     /// Deezer/ISRC path (kept optional so non-Deezer sources can omit it).
     #[serde(default)]
     pub isrc: Option<String>,
-    /// Non-Deezer source, e.g. `soundcloud`.
+    /// Non-Deezer source, e.g. `soundcloud` or `youtube`.
     #[serde(default)]
     pub source: Option<String>,
     /// External id within that source (alias `externalId`).
