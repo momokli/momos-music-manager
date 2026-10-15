@@ -11,6 +11,7 @@ mod config;
 mod pairing;
 mod state;
 mod sync;
+mod tag;
 
 use std::path::Path;
 
@@ -35,7 +36,7 @@ enum Command {
     /// Pair this device with the hub (device token).
     Pair(PairArgs),
     /// Backpack upkeep — keep the local Backpack in sync.
-    Backpack,
+    Backpack(BackpackArgs),
     /// Back up the local music library to music-api.
     Backup(BackupArgs),
     /// Upload a Traktor `collection.nml` to the hub (device-token gated).
@@ -64,6 +65,31 @@ struct PairArgs {
     /// Re-pair even if a device identity is already stored.
     #[arg(long)]
     force: bool,
+}
+
+#[derive(Debug, Args)]
+struct BackpackArgs {
+    /// Collection directory (default: config `collection_dir`, env KELLNER_COLLECTION_DIR).
+    #[arg(long)]
+    root: Option<std::path::PathBuf>,
+    /// Preferred delivery format: flac, 320 or 128 (default flac).
+    #[arg(long)]
+    format: Option<String>,
+    /// Order priority (default 0).
+    #[arg(long, default_value_t = 0)]
+    priority: i64,
+    /// Poll interval in seconds (default 5).
+    #[arg(long, default_value_t = 5)]
+    poll_secs: u64,
+    /// Give up polling after this many seconds (default 600).
+    #[arg(long, default_value_t = 600)]
+    timeout_secs: u64,
+    /// Classify only: no order/fetch/tag/prune.
+    #[arg(long)]
+    dry_run: bool,
+    /// Do not write the Comment tag.
+    #[arg(long)]
+    no_tags: bool,
 }
 
 #[derive(Debug, Args)]
@@ -122,13 +148,11 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Pair(args) => return pair(args),
-        Command::Backpack => not_yet("backpack"),
+        Command::Backpack(args) => return backpack(args),
         Command::Backup(args) => return backup(args),
         Command::TraktorUpload(args) => return traktor_upload(args),
         Command::Downloads(args) => return downloads(args),
     }
-
-    Ok(())
 }
 
 fn pair(args: PairArgs) -> Result<()> {
@@ -148,6 +172,58 @@ fn pair(args: PairArgs) -> Result<()> {
         };
         let transport = pairing::HttpHubTransport::new(hub_url);
         pairing::run_pair(&mut cfg, &transport, &opts).await
+    })
+}
+
+fn backpack(args: BackpackArgs) -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        let cfg = config::load()?;
+        let device = cfg.device.clone().ok_or_else(|| {
+            anyhow::anyhow!("this device is not paired yet — run `kellner pair` first")
+        })?;
+        let hub_url = cfg.hub_url();
+        let base = cfg.music_api_url().ok_or_else(|| {
+            anyhow::anyhow!(
+                "music-api URL not configured — set KELLNER_MUSIC_API_URL (or `music_api_url` in config)"
+            )
+        })?;
+        let token = cfg.music_api_token.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "music-api token not configured — set KELLNER_MUSIC_API_TOKEN (or `music_api_token` in config)"
+            )
+        })?;
+        let root = args.root.clone().or(cfg.collection_dir.clone()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "collection directory not configured — pass --root or set KELLNER_COLLECTION_DIR"
+            )
+        })?;
+        if !root.is_dir() {
+            anyhow::bail!("collection directory {} does not exist", root.display());
+        }
+
+        let hub = client::hub::HubClient::new(hub_url, device.device_token);
+        let api = client::api::ApiClient::new(base, token);
+        let opts = sync::backpack::BackpackOptions {
+            root,
+            format: args.format.clone(),
+            priority: args.priority,
+            poll_secs: args.poll_secs.max(1),
+            timeout_secs: args.timeout_secs,
+            dry_run: args.dry_run,
+            write_tags: !args.no_tags,
+        };
+        let stats = sync::backpack::run_backpack(&hub, &api, &opts).await?;
+        if stats.failed > 0 {
+            anyhow::bail!("backpack finished with {} failure(s)", stats.failed);
+        }
+        if stats.pending > 0 {
+            anyhow::bail!(
+                "{} ISRC(s) still pending after {}s",
+                stats.pending, args.timeout_secs
+            );
+        }
+        Ok(())
     })
 }
 
@@ -337,6 +413,7 @@ fn default_hostname() -> String {
 }
 
 /// Placeholder for a command that is not implemented yet.
+#[allow(dead_code)]
 fn not_yet(command: &str) {
     println!("kellner {command}: not yet implemented");
 }
@@ -383,7 +460,7 @@ mod tests {
         ] {
             let cli = Cli::try_parse_from(["kellner", argv]).unwrap();
             let got = match cli.command {
-                Command::Backpack => "backpack",
+                Command::Backpack(_) => "backpack",
                 Command::Backup(_) => "backup",
                 Command::TraktorUpload(_) => "traktor-upload",
                 Command::Downloads(_) => "downloads",
