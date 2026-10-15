@@ -1,8 +1,10 @@
-//! yt-dlp acquisition for non-Deezer sources (e.g. SoundCloud).
+//! yt-dlp acquisition for non-Deezer sources (SoundCloud, YouTube).
 //!
 //! Deezer tracks go through deemix; sources that give us only an external id
-//! (SoundCloud numeric track id) are downloaded here. yt-dlp resolves the
-//! numeric id via the `api.soundcloud.com/tracks/<id>` endpoint.
+//! (a SoundCloud numeric track id or a YouTube video id) are downloaded here.
+//! yt-dlp resolves the SoundCloud numeric id via the
+//! `api.soundcloud.com/tracks/<id>` endpoint and the YouTube video id via the
+//! canonical `youtube.com/watch?v=<id>` URL.
 
 use std::path::{Path, PathBuf};
 
@@ -11,6 +13,11 @@ use anyhow::{Context, Result};
 /// Canonical yt-dlp URL for a numeric SoundCloud track id.
 pub fn soundcloud_url(id: &str) -> String {
     format!("https://api.soundcloud.com/tracks/{}", id.trim())
+}
+
+/// Canonical yt-dlp URL for a YouTube video id.
+pub fn youtube_url(id: &str) -> String {
+    format!("https://www.youtube.com/watch?v={}", id.trim())
 }
 
 /// Download the best audio stream for `url` into `<base>/<stem>/audio.*` and
@@ -54,7 +61,7 @@ fn find_output(dir: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::soundcloud_url;
+    use super::{soundcloud_url, youtube_url};
 
     #[test]
     fn builds_soundcloud_api_url() {
@@ -65,6 +72,18 @@ mod tests {
         assert_eq!(
             soundcloud_url(" 42 "),
             "https://api.soundcloud.com/tracks/42"
+        );
+    }
+
+    #[test]
+    fn builds_youtube_watch_url() {
+        assert_eq!(
+            youtube_url("dQw4w9WgXcQ"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        );
+        assert_eq!(
+            youtube_url(" dQw4w9WgXcQ "),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
         );
     }
 }

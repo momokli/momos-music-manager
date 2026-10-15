@@ -288,6 +288,36 @@ async fn create_soundcloud_order_uses_composite_key() {
 }
 
 #[tokio::test]
+async fn create_youtube_order_uses_composite_key() {
+    let h = harness().await;
+    let (status, body) = send(
+        &h.app,
+        authed("POST", "/orders")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(json_body(serde_json::json!({
+                "items": [ { "source": "youtube", "externalId": "dQw4w9WgXcQ" } ]
+            })))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create youtube order failed");
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let order_id = v["orderId"].as_str().unwrap().to_string();
+
+    let (st, b) = send(
+        &h.app,
+        authed("GET", &format!("/orders/{order_id}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let ov: serde_json::Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(ov["items"][0]["isrc"], "youtube:dQw4w9WgXcQ");
+    assert_eq!(ov["items"][0]["state"], "pending");
+}
+
+#[tokio::test]
 async fn order_listing_filters_by_status() {
     let h = harness().await;
     create_order(&h.app, &["AEA0D1846146"]).await;

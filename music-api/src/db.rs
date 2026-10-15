@@ -171,7 +171,7 @@ pub async fn init(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
         .execute(pool)
         .await;
 
-    // Additive: acquisition source (`deezer` default; e.g. `soundcloud`).
+    // Additive: acquisition source (`deezer` default; e.g. `soundcloud`, `youtube`).
     let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN source TEXT NOT NULL DEFAULT 'deezer'")
         .execute(pool)
         .await;

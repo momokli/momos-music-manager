@@ -347,7 +347,8 @@ pub async fn resolve_pending(state: &Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
-/// Dispatch a non-Deezer (SoundCloud) download onto a bounded background task.
+/// Dispatch a non-Deezer (SoundCloud, YouTube) download onto a bounded
+/// background task.
 ///
 /// The caller has already marked the row `downloading` with a lease, so it has
 /// left the due set. Concurrency is capped by a shared semaphore; the reaper
@@ -378,28 +379,24 @@ fn spawn_non_deezer(state: Arc<AppState>, track: Track) {
 
 /// The actual non-Deezer acquisition, run on the background task.
 async fn run_non_deezer(state: &Arc<AppState>, track: &Track) -> Result<()> {
-    match track.source() {
-        "soundcloud" => {
-            let id = crate::models::track_external_id(&track.isrc);
-            let url = crate::ytdlp::soundcloud_url(id);
-            let safe = track.isrc.replace([':', '/'], "_");
-            let src = crate::ytdlp::download_audio(
-                &state.config.ytdlp,
-                &url,
-                &state.config.ytdlp_dir,
-                &safe,
-            )
-            .await?;
-            finalize_soundcloud(state, track, &src).await?;
-            Ok(())
-        }
+    let source = track.source();
+    let id = crate::models::track_external_id(&track.isrc);
+    let url = match source {
+        "soundcloud" => crate::ytdlp::soundcloud_url(id),
+        "youtube" => crate::ytdlp::youtube_url(id),
         other => anyhow::bail!("unsupported source '{other}'"),
-    }
+    };
+    let safe = track.isrc.replace([':', '/'], "_");
+    let src =
+        crate::ytdlp::download_audio(&state.config.ytdlp, &url, &state.config.ytdlp_dir, &safe)
+            .await?;
+    finalize_external(state, track, &src).await?;
+    Ok(())
 }
 
 /// Transcode a yt-dlp download into our 320 store and mark it ready (the 128 is
 /// derived by the `transcode` queue kind). No FLAC — the source is lossy.
-async fn finalize_soundcloud(state: &Arc<AppState>, track: &Track, src: &Path) -> Result<()> {
+async fn finalize_external(state: &Arc<AppState>, track: &Track, src: &Path) -> Result<()> {
     let cfg = &state.config;
     let base = track.isrc.replace([':', '/'], "_");
     let mp3_320 = cfg.mp3_320_dir().join(format!("{base}.mp3"));
@@ -415,10 +412,15 @@ async fn finalize_soundcloud(state: &Arc<AppState>, track: &Track, src: &Path) -
     )
     .await?;
     vault_download(state, &track.isrc, "ready", Some("mp3-320"), "320").await;
-    info!("{}: ready (soundcloud 320) — 128 queued", track.isrc);
-    state
-        .logs
-        .push("info", format!("{}: ready (soundcloud)", track.isrc));
+    info!(
+        "{}: ready ({} 320) — 128 queued",
+        track.isrc,
+        track.source()
+    );
+    state.logs.push(
+        "info",
+        format!("{}: ready ({})", track.isrc, track.source()),
+    );
     let _ = tokio::fs::remove_file(src).await;
     enqueue_transcode(state, &track.isrc).await;
     Ok(())
