@@ -37,7 +37,7 @@ enum Command {
     /// Backpack upkeep — keep the local Backpack in sync.
     Backpack,
     /// Back up the local music library to music-api.
-    Backup,
+    Backup(BackupArgs),
     /// Upload a Traktor `collection.nml` to the hub (device-token gated).
     TraktorUpload(TraktorUploadArgs),
     /// Show the state of downloads and the Backpack.
@@ -67,6 +67,19 @@ struct PairArgs {
 }
 
 #[derive(Debug, Args)]
+struct BackupArgs {
+    /// Classify only: run the presence check but upload nothing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Collection directory (default: config `collection_dir`, env KELLNER_COLLECTION_DIR).
+    #[arg(long)]
+    root: Option<std::path::PathBuf>,
+    /// Run once and exit. Accepted for forward-compat; v1 is always a one-shot.
+    #[arg(long)]
+    once: bool,
+}
+
+#[derive(Debug, Args)]
 struct TraktorUploadArgs {
     /// Explicit `collection.nml` path (default: config value, else platform autodetect).
     #[arg(long)]
@@ -85,7 +98,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Pair(args) => return pair(args),
         Command::Backpack => not_yet("backpack"),
-        Command::Backup => not_yet("backup"),
+        Command::Backup(args) => return backup(args),
         Command::TraktorUpload(args) => return traktor_upload(args),
         Command::Downloads => not_yet("downloads"),
     }
@@ -110,6 +123,47 @@ fn pair(args: PairArgs) -> Result<()> {
         };
         let transport = pairing::HttpHubTransport::new(hub_url);
         pairing::run_pair(&mut cfg, &transport, &opts).await
+    })
+}
+
+fn backup(args: BackupArgs) -> Result<()> {
+    let _ = args.once; // v1 is a one-shot; the flag is accepted for the future loop.
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        let cfg = config::load()?;
+        let base = cfg.music_api_url().ok_or_else(|| {
+            anyhow::anyhow!(
+                "music-api URL not configured — set KELLNER_MUSIC_API_URL (or `music_api_url` in config)"
+            )
+        })?;
+        let token = cfg.music_api_token.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "music-api token not configured — set KELLNER_MUSIC_API_TOKEN (or `music_api_token` in config)"
+            )
+        })?;
+        let root = args
+            .root
+            .clone()
+            .or(cfg.collection_dir.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "collection directory not configured — pass --root or set KELLNER_COLLECTION_DIR"
+                )
+            })?;
+        if !root.is_dir() {
+            anyhow::bail!("collection directory {} does not exist", root.display());
+        }
+
+        let client = client::api::ApiClient::new(base, token);
+        let opts = sync::backup::BackupOptions {
+            root,
+            dry_run: args.dry_run,
+        };
+        let stats = sync::backup::run_backup(&client, &opts).await?;
+        if stats.failed > 0 {
+            anyhow::bail!("backup finished with {} failure(s)", stats.failed);
+        }
+        Ok(())
     })
 }
 
@@ -231,12 +285,26 @@ mod tests {
             let cli = Cli::try_parse_from(["kellner", argv]).unwrap();
             let got = match cli.command {
                 Command::Backpack => "backpack",
-                Command::Backup => "backup",
+                Command::Backup(_) => "backup",
                 Command::TraktorUpload(_) => "traktor-upload",
                 Command::Downloads => "downloads",
                 Command::Pair(_) => "pair",
             };
             assert_eq!(got, expected);
+        }
+    }
+
+    #[test]
+    fn cli_parses_backup_flags() {
+        let cli = Cli::try_parse_from(["kellner", "backup", "--dry-run", "--root", "/music", "--once"])
+            .unwrap();
+        match cli.command {
+            Command::Backup(args) => {
+                assert!(args.dry_run);
+                assert_eq!(args.root.as_deref(), Some(Path::new("/music")));
+                assert!(args.once);
+            }
+            other => panic!("expected Backup, got {other:?}"),
         }
     }
 }

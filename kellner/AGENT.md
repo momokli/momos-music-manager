@@ -1,17 +1,21 @@
 # kellner — Agent Handover
 
-> **Last updated**: 2026-10-15 · traktor-upload implemented (#364); §5 decisions
-> locked (ADR-081, #361)
+> **Last updated**: 2026-10-15 · backup implemented (#365); traktor-upload (#364);
+> §5 decisions locked (ADR-081, #361)
 > Keep this file current. It is the entry point for any agent working on `kellner/`.
 >
-> **Status: pairing implemented (#362), traktor-upload implemented (#364).**
-> `src/config.rs` (config + device identity, `0600`, redacted) and `src/pairing.rs`
-> (token gen, hub register, approval URL, persist) exist, plus `kellner pair`.
+> **Status: pairing (#362), traktor-upload (#364), backup (#365) implemented.**
+> `src/config.rs` (config + device identity + `music_api_token`, `0600`, redacted) and
+> `src/pairing.rs` (token gen, hub register, approval URL, persist) exist, plus `kellner pair`.
 > `kellner traktor-upload` detects the local Traktor `collection.nml`
 > (`src/sync/traktor.rs`), watches it for **mtime** changes (`src/state.rs` skips an
 > unchanged file) and uploads it to the **hub** via the device-token-gated
-> `POST /api/hub/traktor/import` (`src/client/hub.rs`). The remaining commands
-> (`backpack`, `backup`, `downloads`) are still stubs.
+> `POST /api/hub/traktor/import` (`src/client/hub.rs`).
+> `kellner backup` walks the collection (`src/sync/backup.rs`), canonicalises each audio
+> file (Comment cleared via `lofty`), and mirrors missing objects to music-api's object
+> store (`src/client/api.rs`): one bulk `POST /objects/check`, then idempotent
+> `PUT /objects/{sha256}` for the missing ones; `--dry-run` / `--root` / `--once`
+> supported. The remaining commands (`backpack`, `downloads`) are still stubs.
 
 ---
 
@@ -69,10 +73,12 @@ kellner/
     ├── state.rs   # minimal JSON sync state (state.json, `last_upload_mtime`)
     ├── sync/
     │   ├── mod.rs
-    │   └── traktor.rs # collection.nml detection (macOS/Windows defaults + override) + mtime watch
+    │   ├── traktor.rs # collection.nml detection (macOS/Windows defaults + override) + mtime watch
+    │   └── backup.rs  # walk + canonicalise (Comment cleared) + SHA-256 + dedup/upload (#365)
     └── client/
         ├── mod.rs
-        └── hub.rs     # upload via `Authorization: Bearer <device_token>` + bounded retry/backoff
+        ├── hub.rs     # traktor upload via `Authorization: Bearer <device_token>` + bounded retry/backoff
+        └── api.rs     # music-api object store: `POST /objects/check` + `PUT /objects/{sha256}` (#365)
 ```
 
 ## 5. Decisions (locked 2026-10-15 — ADR-081, #361)
