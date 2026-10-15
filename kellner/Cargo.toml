@@ -18,8 +18,17 @@ directories = "5"
 rand = "0.8"
 hex = "0.4"
 url = "2"
+# Library backup (#365): canonicalise (clear Comment) + SHA-256 object key.
+lofty = "0.20"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+# Integration tests build comment-variant fixtures with the same tag writer.
+lofty = "0.20"
+# The offline mock re-hashes PUT bodies + parses the check body.
+sha2 = "0.10"
+hex = "0.4"
+serde_json = "1"
 # `net`+`io-util` are needed by the offline mock-hub integration tests (tests/pair_flow.rs).
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
