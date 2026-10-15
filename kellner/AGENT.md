@@ -1,10 +1,11 @@
 # kellner — Agent Handover
 
-> **Last updated**: 2026-10-15 · service + tray implemented (#368); downloads
-> (#366); backup (#365); traktor-upload (#364); §5 decisions locked (ADR-081, #361)
+> **Last updated**: 2026-10-15 · **0.1.0 shipped** (packaging + tests, #370);
+> backpack (#367); service + tray (#368); downloads (#366); backup (#365);
+> traktor-upload (#364); §5 decisions locked (ADR-081, #361)
 > Keep this file current. It is the entry point for any agent working on `kellner/`.
 >
-> **Status: pairing (#362), traktor-upload (#364), backup (#365) implemented.**
+> **Status: the whole P0–P6 slice is implemented — no stubs remain.**
 > `src/config.rs` (config + device identity + `music_api_token`, `0600`, redacted) and
 > `src/pairing.rs` (token gen, hub register, approval URL, persist) exist, plus `kellner pair`.
 > `kellner traktor-upload` detects the local Traktor `collection.nml`
@@ -22,8 +23,16 @@
 > (`GET /isrc/{isrc}/{format}`) and writes it **flat** into `collection_dir` as
 > `<isrc>.<ext>` (temp + rename). Format pref `--format` (flac default) with
 > flac→320→128 fallback; provenance (path/format/order) + idempotency live in
-> `state.json`; no arguments → read-only status report (no network). The only
-> remaining stub is `backpack`.
+> `state.json`; no arguments → read-only status report (no network).
+> `kellner backpack` (`src/sync/backpack.rs`, #367) exports the active backpacks,
+> unions their tracks by ISRC, orders + fetches the missing ones flat, renders the
+> deterministic Comment tag and soft-prunes membership that left every backpack.
+>
+> **Packaging + tests (#370).** The full loop (upload → export → order → fetch →
+> tag → backup) is driven against one in-process mock hub + music-api in
+> [`tests/e2e.rs`](tests/e2e.rs); `scripts/smoke.sh` is the offline CLI check and
+> `scripts/install.sh` installs the binary; reference service templates live under
+> [`deploy/`](deploy/). CI runs `bash scripts/smoke.sh` after the kellner build.
 >
 > **Service + tray (#368, P5).** `kellner run` (`src/sync/run.rs`) is the
 > background loop the OS service executes; it scales its interval by power source
@@ -87,7 +96,7 @@ kellner/
 ├── README.md
 ├── AGENT.md       # this file
 └── src/
-    ├── main.rs    # clap CLI: pair, traktor-upload, backup, downloads, run, service (+ backpack stub)
+    ├── main.rs    # clap CLI: pair, backpack, backup, traktor-upload, downloads, run, service
     ├── config.rs  # ~/.config/kellner/config.toml + persisted device identity
     ├── pairing.rs # token gen, hub register, approval URL, browser open, confirm
     ├── power.rs   # power-source detection (macOS pmset) + adaptive interval (#368)
@@ -99,7 +108,8 @@ kellner/
     │   ├── run.rs      # background loop (`kellner run`): power-aware, Ctrl-C, task select (#368)
     │   ├── traktor.rs  # collection.nml detection (macOS/Windows defaults + override) + mtime watch
     │   ├── backup.rs   # walk + canonicalise (Comment cleared) + SHA-256 + dedup/upload (#365)
-    │   └── downloads.rs # order → poll → stream → flat file + provenance (#366)
+    │   ├── downloads.rs # order → poll → stream → flat file + provenance (#366)
+    │   └── backpack.rs  # export → diff → order → tag → soft-prune (#367)
     └── client/
         ├── mod.rs
         ├── hub.rs     # traktor upload via `Authorization: Bearer <device_token>` + bounded retry/backoff

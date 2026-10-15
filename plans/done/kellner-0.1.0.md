@@ -8,7 +8,7 @@
 **Parent epic**: (to be created) `epic: kellner`
 **Methodology**: milestone = one iteration = one release; only leaf issues are worked.
 
-> **Detailed design / leaf-issue backlog** lives in [`plans/kellner/issues.md`](../kellner/issues.md)
+> **Detailed design / leaf-issue backlog** lives in [`plans/done/kellner/issues.md`](kellner/issues.md)
 > — iteration templates (`P0`–`P6`), the mapping to the GitHub issues, write sets,
 > acceptance criteria and a dependency/order table.
 >

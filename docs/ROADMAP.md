@@ -14,7 +14,7 @@ moved **away from MMM** toward the Hub + music-api, with a small local agent
 | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
 | **music-api**                                       | ISRC/order → Deezer/SoundCloud download service, object store, metadata authority (BPM/key). Rust, systemd, port 8710.                                   | active           |
 | **music-hub** (codename _spelunke_, dir `music-hub/`) | Multi-user web UI + DB over Spotify/SoundCloud/YouTube/Traktor: tagging, digging, clusters, curated playlists, now-playing. Rust/Axum/SQLite, port 8080. | active (primary) |
-| **kellner**                                         | Local agent on Mac/PC: Traktor upload, backups, downloads, backpack upkeep. launchd/systemd.                                                             | **new**          |
+| **kellner**                                         | Local agent on Mac/PC: Traktor upload, backups, downloads, backpack upkeep. launchd/systemd.                                                             | **active**       |
 | **mmm**                                             | Momo’s Music Manager (original local app).                                                                                                               | **sunset**       |
 
 ## Milestones (GitHub) and their intent
@@ -39,9 +39,9 @@ Next slices:
 - **hub-tagging-0.27.0** — daily/weekly tag task, completeness flag, tag-page insights polish.
 - **hub-ops-0.28.0** — engine/scoring settings UI, admin/ops console, import-history polish, music-api native surface.
 
-### kellner (new)
+### kellner (active)
 
-- **kellner-0.1.0** — pairing, Traktor upload, backups, downloads, backpack upkeep, service/tray.
+- **kellner-0.1.0** — **shipped**: pairing, Traktor upload, backups, downloads, backpack upkeep, service/tray, packaging + tests (P0–P6).
 
 ### mmm (sunset)
 
@@ -59,7 +59,7 @@ Next slices:
 4. **hub-recs-0.25.0** — build on clusters (#261) + backpacks for “why recommended”.
 5. **hub-artist-album-0.26.0** — explorer depth.
 6. **hub-tagging-0.27.0** — completeness + daily/weekly task.
-7. **kellner-0.1.0** — local automation on top of a stable Hub API.
+7. **kellner-0.1.0** — **shipped**: local automation on top of a stable Hub API.
 8. **hub-ops-0.28.0** + **infra-deploy-1.0.0** — configurability & runbooks.
 9. **music-api-0.4.0** + **mmm-sunset-1.19.0** — finish the move off MMM.
 

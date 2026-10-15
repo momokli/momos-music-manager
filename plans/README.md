@@ -1,12 +1,11 @@
 # Active Plans
 
-**56 done** · **0 in progress** · **25 proposed**
+**57 done** · **0 in progress** · **24 proposed**
 
 ## Proposed
 
 - [unified-work-queue](proposed/unified-work-queue.md) — `feat/music-api-work-queue` (one priority queue in music-api for download/transcode/analyze/`crawl:<source>` leads; `next(kind)` applies priority; `MAX_INFLIGHT` per kind — primitive + `/work` API + first consumer landed; see §Open decisions)
 - [hub-crawl-everything](proposed/hub-crawl-everything.md) — `feat/music-api-catalogue` + `feat/hub-catalogue-client` (music-api as authority: permanent request log + idle catalogue growth + default BPM/key analysis; hub orders & reads; now-playing shows BPM/key; needs decisions in §12)
-- [kellner-0.1.0](proposed/kellner-0.1.0.md) — `feat/kellner-0.1.0` (**approved** — §10 locked, ADR-081; local cross-platform companion: pairing, Traktor upload, backpack pull + comment tagging, backup, service/tray)
 - [music-hub](proposed/music-hub.md) — `feat/music-hub` (M1–M4 largely done: schema, local accounts/sessions, per-user Spotify ingest, background worker and exploration UI/API implemented; tests/docs in progress)
 - [rediscovery-engine](proposed/rediscovery-engine.md) — `feat/rediscovery-engine` (M1–M5)
 - [liked-songs-sync](proposed/liked-songs-sync.md) — `feat/liked-songs-sync` (Rediscovery M1)
@@ -33,6 +32,7 @@
 
 ## Done
 
+- [kellner-0.1.0](done/kellner-0.1.0.md) — `feat/kellner-0.1.0` (local cross-platform companion: pairing, Traktor upload, backpack pull + comment tagging, backup, service/tray, packaging + tests — plans [`done/kellner/issues.md`](done/kellner/issues.md))
 - [rolling-channel-update-offer](done/rolling-channel-update-offer.md) — `fix/rolling-channel-update-offer`
 
 - [backpack-playlist-push](done/backpack-playlist-push.md) — `feat/backpack-playlist-push`

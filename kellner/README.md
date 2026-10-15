@@ -5,13 +5,14 @@ on each Mac / PC and keeps the local machine in sync with the always-on servers
 [`music-api`](../music-api/) (downloads, object store, BPM/key authority) and
 [`music-hub`](../music-hub/) (multi-user web UI + DB).
 
-> **Status: sync loop + service/tray implemented (#368).** `kellner pair`
+> **Status: 0.1.0 shipped — all plan phases P0–P6 implemented.** `kellner pair`
 > registers this device with the hub; `traktor-upload`, `backpack`, `backup` and
 > `downloads` sync; `kellner run` is the background loop the OS service executes,
 > and `kellner service install|uninstall|status` writes the launchd / systemd
-> unit (Task Scheduler hint on Windows).
+> unit (Task Scheduler hint on Windows). An opt-in tray / menu-bar widget
+> (`--features tray`) shows `feierabend` / `re-auth`. See [`CHANGELOG.md`](CHANGELOG.md).
 
-## What it will do
+## What it does
 
 - **Backpack upkeep** — keep the local Backpack (the selection of playlists/tags
   the user cares about) in sync.
@@ -26,7 +27,7 @@ kellner talks **only to `music-api`** (and, where needed, the hub). It never tal
 to Deezer / Spotify / SoundCloud / YouTube providers directly — `music-api` is the
 single authority for downloads and metadata.
 
-## Usage (skeleton)
+## Usage
 
 ```bash
 cd kellner
@@ -93,7 +94,30 @@ screenshot requirement** for UI changes; its observable contract — exactly the
 menu entries `feierabend` and `re-auth` — is pinned by the unit test
 `tray::tests::menu_has_exactly_feierabend_and_reauth` instead.
 
-## Planned first features (kellner-0.1.0)
+## Install & smoke test
 
-Pairing, Traktor upload, backups, downloads, Backpack upkeep, service/tray.
-See [`AGENT.md`](AGENT.md) and [`../docs/ROADMAP.md`](../docs/ROADMAP.md).
+Build a release binary (no tray feature) and install it, or verify an existing
+build offline:
+
+```bash
+./scripts/install.sh                  # -> ${PREFIX:-$HOME/.local}/bin/kellner
+PREFIX=/usr/local ./scripts/install.sh --service   # install + register the unit
+./scripts/smoke.sh                    # offline CLI check (no network, no pairing)
+```
+
+`scripts/smoke.sh` asserts `--version`, `--help` (all subcommands) and
+`service install --print --dry-run` (prints a unit, writes nothing); a paired
+pass is opt-in via `KELLNER_SMOKE_RUN=1`. Reference unit templates live under
+[`deploy/`](deploy/).
+
+## Tests
+
+The end-to-end loop (upload → export → order → fetch → tag → backup) is driven
+against one in-process mock hub + music-api in [`tests/e2e.rs`](tests/e2e.rs);
+the per-command flows live in the sibling `tests/*.rs`. Run them with
+`cargo test --locked`.
+
+## Release
+
+The 0.1.0 slice (P0–P6) is shipped. See [`CHANGELOG.md`](CHANGELOG.md),
+[`AGENT.md`](AGENT.md) and [`../docs/ROADMAP.md`](../docs/ROADMAP.md).
