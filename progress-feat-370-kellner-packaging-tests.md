@@ -37,7 +37,7 @@ Previous `[BLOCKED]` comment on #370 is outdated. **#370 is the last open leaf �
 | verify  | done    | PASS — all 5 checkpoints green (see below); `cargo build+test --locked` EXIT=0 (119 tests), `smoke.sh` EXIT=0, e2e 3× stable, install.sh idempotent |
 | test    | done    | PASS — full `build+test --locked` EXIT=0 (119 tests, 0 fail); `smoke.sh` EXIT=0; e2e 3× stable; CI smoke step present |
 | pr      | done    | PR #462 (https://github.com/momokli/momos-music-manager/pull/462), base `main`, body `Closes #370`; CI running (Issue-Referenz + Conventional-Commit-Titel pass) |
-| review  | pending | |
+| review  | done    | APPROVE — e2e + smoke re-run green; scope/security/docs clean |
 
 ### dev — done (2026-10-15)
 
@@ -129,6 +129,32 @@ Integration/E2E stage on `planet`, branch `feat/370-kellner-packaging-tests`:
   Verified: `baseRefName=main`, `mergeable=MERGEABLE`, `mergeStateStatus=BLOCKED` (awaiting checks).
 - CI started: `Issue-Referenz im PR` pass, `Conventional-Commit-Titel` pass; `Build + Test (cargo)`, `cargo fmt` (informativ), `cargo clippy` (informativ) pending.
 - Commits: da95146, 4eb34da, 3a31e6d, 9b23651, 6f13185, 19b7c0e (+ this progress commit).
+
+### review — done (2026-10-15)
+
+Independent final review (subagent `review-370`) against `main`, diff `origin/main..HEAD` (15 files, +1166/−22), head `392a4bb`.
+
+- **Verdict: APPROVE.** No changes made.
+- **AK coverage — PASS.** P6-1 `kellner/tests/e2e.rs` present: one in-process mock on
+  `127.0.0.1:0` (hub device-token `/api/hub/…` + music-api token), full loop
+  upload→export→order→fetch→tag→backup + idempotency (2nd pass orders/fetches/uploads 0),
+  canonical Comment-cleared hash == membership `content_hash`. Packaging/Install+Smoke:
+  `scripts/install.sh`, `scripts/smoke.sh` (offline), `deploy/{systemd,launchd}` + CI smoke
+  step. P6-2 docs close-out: `CHANGELOG.md`, README, AGENT, ROADMAP, plans/README, plan moves.
+- **Independent re-run:** `cargo test --locked --test e2e` → `1 passed` EXIT=0;
+  `bash scripts/smoke.sh` → `smoke: PASS` EXIT=0.
+- **Scope — PASS.** Only `kellner/**`, `plans/**` (incl. `{=>done}` moves), `docs/ROADMAP.md`,
+  `.github/workflows/ci-pr.yml`, progress file. No other crates, no migrations; `src/tray.rs` untouched.
+- **Security — PASS.** No secrets/PII; only fixed test tokens; scripts `set -euo pipefail`.
+- **Docs — PASS (2 non-blocking notes).** Plan-move relative links inside `plans/done/**` +
+  `plans/README.md` fixed. Notes: (1) `docs/DECISIONS.md:2018,2028` still names the old
+  `plans/proposed/kellner-0.1.0.md` (inline code-span, not a hyperlink; outside declared scope).
+  (2) `plans/README.md` counter deltas (56→57 done, 25→24 proposed) are correct as deltas, but
+  the absolute counts (57/24) already disagreed with the file counts on `main` (58/29) — pre-existing.
+- **PR metadata — PASS.** `test(kellner): packaging + tests`, base `main`, body carries `Closes #370`,
+  `mergeable=MERGEABLE`, `mergeStateStatus=BLOCKED`.
+- **CI [pending].** `PR Quality` (Issue-Referenz, Conventional-Commit-Titel) green; `CI (PR)`
+  `Build + Test (cargo)` still in progress at review time → required check not yet green. No retry/merge.
 
 ## Guardrails
 
