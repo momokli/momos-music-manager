@@ -243,6 +243,39 @@ pub async fn bind_device(pool: &SqlitePool, id: i64, user_id: i64) -> sqlx::Resu
     Ok(res.rows_affected() == 1)
 }
 
+/// Look up a **bound** device by its device-token hash (issue #364): the row
+/// must be bound to a user, paired, and not revoked. Unknown / pending / revoked
+/// tokens all yield `None` (no existence leak).
+///
+/// This is the authentication primitive for the device-gated routes (#364+):
+/// a raw `Bearer` device token is hashed with [`hash_token`] and looked up here.
+pub async fn find_bound_by_token_hash(
+    pool: &SqlitePool,
+    token_hash: &str,
+) -> sqlx::Result<Option<Device>> {
+    let row = sqlx::query(&format!(
+        "SELECT {DEVICE_COLS} FROM hub_devices
+          WHERE token_hash = ?1 AND user_id IS NOT NULL
+            AND revoked_at IS NULL AND paired_at IS NOT NULL
+          LIMIT 1"
+    ))
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.as_ref().map(Device::from_row))
+}
+
+/// Record that a bound device just used a device-gated route (#364).
+/// Best-effort: the caller logs but never fails on an error here.
+pub async fn touch_last_seen(pool: &SqlitePool, id: i64) -> sqlx::Result<()> {
+    sqlx::query("UPDATE hub_devices SET last_seen_at = ?1 WHERE id = ?2")
+        .bind(now_iso())
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// All devices owned by `user_id` (revoked ones included, so a client can show
 /// history); never exposes token hashes.
 pub async fn list_for_user(pool: &SqlitePool, user_id: i64) -> sqlx::Result<Vec<Device>> {
