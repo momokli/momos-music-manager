@@ -28,12 +28,6 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Changed
 
-- **Per-User-Tag-Scope `own` ⇄ `collective`** (#267): neues globales Nutzer-Setting
-  `tag_scope ∈ {own, collective}` (Default `own`), editierbar unter `/settings`. Wirkt
-  einheitlich in similarity/scoring/digging/overlap/tagqueue/recommend/track-detail; der
-  Query-Param `?tag_scope=` schlägt das gespeicherte Setting und wirkt ohne Reload. Neue
-  additive Migration `053_hub_user_settings` (Tabelle `hub_user_settings`); ohne Zeile
-  gilt der Registry-Default — kein Row wird materialisiert.
 - **Track-page download UX** (#460): the bare `FLAC laden` / `MP3 laden` links are gone.
   The `Download`-Bucket offers **one button per format the vault says is ready**
   („FLAC", „MP3 320", „MP3 128") and a **passive hint** while nothing is ready — no dead
@@ -53,6 +47,41 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   `hub_track_audio`-Read-Model, der hinterherhinkt (gedeckter Backfill, `ORDER BY id`, 7-Tage-TTL
   für „no data"), und zeigte deshalb „—", während die Track-Page den Vault-Wert hatte. Beide
   lesen jetzt denselben `resolved`-Block über `music_api::resolved_audio`.
+
+## [0.18.0] — 2026-10-17
+
+**hub-tag-clusters** — Semantische Tag-Cluster als Schicht zwischen Gruppe und Tag
+(deterministische Namensähnlichkeit als Baseline), collective-gesteuert, plus ein
+Per-User Tag-Scope (eigenes vs. Collective).
+
+### Added
+
+- **Tag-Cluster-Schema** (#262, PR #326): additive Migration `043_tag_clusters.sql` legt
+  `hub_tag_clusters` + `hub_tag_cluster_members` an (`tag_type`, `label`,
+  `ON DELETE CASCADE`); bestehende Migrationen unverändert.
+- **Auto Tag-Cluster-Builder** (#264, PR #326): `clusters::rebuild` gruppiert semantisch
+  verwandte Tags **desselben Typs** über eine deterministische Namensähnlichkeit
+  (normalisieren + Prefix/Edit-Distanz/Token); pure Funktionen, unit-getestet.
+- **Cluster-Sicht + Scope-Toggle** (#265, PR #326): Seite `/tag-clusters`
+  (Nav → Bibliothek → Cluster) mit Typ-Filter, Scope-Umschaltung (Meine/Alle) und
+  „Neu berechnen"; pro Cluster Rename, Tag entfernen, Tag hinzufügen (nur eigene Tags),
+  Cluster löschen.
+- **Cluster-Steuerung durch Collective-Members** (#266, PR #326): POST-Handler
+  `rename` / `member/add` / `member/remove` / `delete` mit htmx + Toast-Feedback
+  (`HX-Trigger`); manuelle Edits gewinnen bis zum nächsten Rebuild.
+- **Verifikation Cluster + Scope** (#268, PR #479): Integrationstests
+  `music-hub/tests/clusters_steering.rs` (8 Tests) — Login-Guard, Schema + CASCADE,
+  Scope-Read (`mine`/`all`), Rename, Member add/remove mit Owner-Guard, Delete + CASCADE,
+  Rebuild-Determinismus. `cargo test -p music-hub` → 580 passed / 0 failed.
+
+### Changed
+
+- **Per-User Tag-Scope `own` ⇄ `collective`** (#267, PR #478): neues globales
+  Nutzer-Setting `tag_scope ∈ {own, collective}` (Default `own`), editierbar unter
+  `/settings`. Wirkt einheitlich in similarity/scoring/digging/overlap/tagqueue/recommend/
+  track-detail; der Query-Param `?tag_scope=` schlägt das gespeicherte Setting und wirkt
+  ohne Reload. Neue additive Migration `053_hub_user_settings` (Tabelle
+  `hub_user_settings`); ohne Zeile gilt der Registry-Default — kein Row wird materialisiert.
 
 ## [0.28.0] — 2026-10-15
 
