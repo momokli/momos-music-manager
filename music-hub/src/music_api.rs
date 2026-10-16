@@ -1209,6 +1209,21 @@ pub async fn vault_track(cfg: &Config, isrc: &str) -> Option<VaultTrack> {
     resp.json::<VaultTrack>().await.ok()
 }
 
+/// The vault's **resolved** BPM/key/energy for one ISRC — the single source for
+/// every *display* of audio values (#466).
+///
+/// A thin wrapper over [`vault_track`], so the track page (which renders the
+/// atomic view) and the now-playing widget can never drift: both read the same
+/// `resolved` block from the same endpoint. Deliberately **not** the
+/// `hub_track_audio` read-model, which lags behind (bounded backfill + a 7-day
+/// TTL for its "no data" rows).
+pub async fn resolved_audio(cfg: &Config, isrc: &str) -> Option<VaultResolved> {
+    if isrc.trim().is_empty() {
+        return None;
+    }
+    vault_track(cfg, isrc).await.map(|v| v.resolved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{MetadataRow, VaultTrack, order_item, parse_musical_key};

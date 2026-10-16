@@ -26,6 +26,13 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   `metadata-backfill --limit 2000`, and a "BPM/Key holen" button on the music-api
   console. Migration `050` adds `hub_track_features.metadata_checked_at` (7-day TTL).
 
+### Fixed
+
+- **Now-Playing zeigt BPM/Key live aus dem Vault** (#466) — das Widget las den
+  `hub_track_audio`-Read-Model, der hinterherhinkt (gedeckter Backfill, `ORDER BY id`, 7-Tage-TTL
+  für „no data"), und zeigte deshalb „—", während die Track-Page den Vault-Wert hatte. Beide
+  lesen jetzt denselben `resolved`-Block über `music_api::resolved_audio`.
+
 ## [0.28.0] — 2026-10-15
 
 **hub-ops** — The Hub becomes operable: a read-only health/metrics status endpoint for
