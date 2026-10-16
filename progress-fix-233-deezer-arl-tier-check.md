@@ -35,7 +35,7 @@ Root-Cause (aus Issue-Kommentaren, 2026-10-10):
 - [x] setup (feature-dev-setup)
 - [x] develop (feature-dev-developer)
 - [ ] verify (feature-dev-verifier)
-- [ ] test (feature-dev-tester)
+- [x] test (feature-dev-tester)
 - [ ] pr (feature-dev-developer)
 - [ ] review (feature-dev-reviewer)
 
@@ -102,6 +102,23 @@ Root-Cause (aus Issue-Kommentaren, 2026-10-10):
 - `README.md` + `.env.example`: `/account`, `DEEZER_GW_BASE`, FLAC braucht Premium/HiFi-ARL.
 - `cargo test --manifest-path music-api/Cargo.toml` → **120 passed, 0 failed**
   (40 lib + 80 integration).
+
+### Stage test (2026-10-16, feature-dev-tester)
+- `cargo test --manifest-path music-api/Cargo.toml` auf planet → **122 passed, 0 failed**
+  (40 lib + 82 integration, 0 ignored).
+- Integration/E2E über `build_router` mit gw-light-Mock (`music-api/tests/api.rs`):
+  - `GET /account` ohne Bearer → **401** (`account_requires_auth`) ✓
+  - Bearer + Mock `Deezer Free` (lossless=false) → **200**, canStreamFlac=false
+    (`account_reports_free_tier_without_flac`, **neu ergänzt**) ✓
+  - Bearer + Mock HiFi (lossless=true) → **200**, canStreamFlac=true
+    (`account_reports_hi_tier_from_gw_light`, inkl. Cache-Hit) ✓
+  - ARL nicht gesetzt → **409** (`account_without_arl_is_conflict`) ✓
+  - gw-light down/Timeout → **502**
+    (`account_returns_bad_gateway_when_gw_light_unreachable`, **neu ergänzt**) ✓
+- Neue Tests: 2 (Free-Tier-Payload + erreichbar/unerreichbarer gw-light-Mock), 74 Zeilen.
+- Commit: `12f8842` (momo-clanker[bot]).
+- Findings: keine Blocker. Request-Pfad über `build_router` verhält sich wie spezifiziert;
+  cache-first + on-demand-Fetch korrekt, 409/502-Pfade sauber getrennt.
 
 ### Stage setup (2026-10-16, feature-dev-setup)
 - `clanker-git fetch origin` — origin/main aktuell (kein neuer Commit).
