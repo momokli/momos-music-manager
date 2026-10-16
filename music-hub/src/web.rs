@@ -2062,16 +2062,7 @@ async fn now_tag(
         }
     };
 
-    let mut resp = render_now(&st, &nav).await;
-    let trigger = format!(
-        "{{\"toast\":{{\"msg\":{},\"kind\":\"{}\"}}}}",
-        serde_json::to_string(&msg).unwrap_or_else(|_| "\"\"".into()),
-        kind
-    );
-    if let Ok(v) = HeaderValue::from_str(&trigger) {
-        resp.headers_mut().insert("HX-Trigger", v);
-    }
-    resp
+    crate::toast::apply(render_now(&st, &nav).await, &msg, kind)
 }
 
 /// Full-screen Now Playing page (`/now`): renders the live track's real track
@@ -2167,16 +2158,8 @@ fn now_external(nav: crate::ui::Nav, n: &crate::nowplaying::Now, _known: bool) -
 // ── uniform track actions (#318) ────────────────────────────────
 
 /// Add an `HX-Trigger` toast header to a response.
-fn with_toast(mut resp: Response, msg: &str, kind: &str) -> Response {
-    let trigger = format!(
-        "{{\"toast\":{{\"msg\":{},\"kind\":\"{}\"}}}}",
-        serde_json::to_string(msg).unwrap_or_else(|_| "\"\"".into()),
-        kind
-    );
-    if let Ok(v) = HeaderValue::from_str(&trigger) {
-        resp.headers_mut().insert("HX-Trigger", v);
-    }
-    resp
+fn with_toast(resp: Response, msg: &str, kind: &str) -> Response {
+    crate::toast::apply(resp, msg, kind)
 }
 
 /// Displayed BPM + key for a hub track.

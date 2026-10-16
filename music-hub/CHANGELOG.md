@@ -39,6 +39,10 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Fixed
 
+- **Toasts mit Nicht-ASCII-Texten** (#469): der `HX-Trigger`-Toast-Wert wurde bei
+  Nicht-ASCII-Zeichen (`—`, `…`, Umlauten) verworfen, bevor er den Browser erreichte —
+  der Toast feuerte still nicht. Alle Toast-Pfade gehen jetzt über `crate::toast`
+  (ASCII-escaptes JSON, das clientseitig identisch dekodiert).
 - **Now-Playing zeigt BPM/Key live aus dem Vault** (#466) — das Widget las den
   `hub_track_audio`-Read-Model, der hinterherhinkt (gedeckter Backfill, `ORDER BY id`, 7-Tage-TTL
   für „no data"), und zeigte deshalb „—", während die Track-Page den Vault-Wert hatte. Beide
