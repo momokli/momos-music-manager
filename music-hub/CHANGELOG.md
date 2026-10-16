@@ -28,6 +28,12 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Changed
 
+- **Per-User-Tag-Scope `own` ⇄ `collective`** (#267): neues globales Nutzer-Setting
+  `tag_scope ∈ {own, collective}` (Default `own`), editierbar unter `/settings`. Wirkt
+  einheitlich in similarity/scoring/digging/overlap/tagqueue/recommend/track-detail; der
+  Query-Param `?tag_scope=` schlägt das gespeicherte Setting und wirkt ohne Reload. Neue
+  additive Migration `053_hub_user_settings` (Tabelle `hub_user_settings`); ohne Zeile
+  gilt der Registry-Default — kein Row wird materialisiert.
 - **Track-page download UX** (#460): the bare `FLAC laden` / `MP3 laden` links are gone.
   The `Download`-Bucket offers **one button per format the vault says is ready**
   („FLAC", „MP3 320", „MP3 128") and a **passive hint** while nothing is ready — no dead

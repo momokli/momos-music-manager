@@ -28,6 +28,30 @@ content %}
     </tbody>
 </table>
 
+<h2>Engine</h2>
+<form method="post" action="/settings" class="hub-actions">
+    <label style="display: inline-flex; gap: 0.4rem; align-items: center">
+        Tag-Scope
+        <select name="tag_scope" aria-label="Tag-Scope">
+            <option value="own" {% if tag_scope_own_selected %}selected{% endif %}>
+                Eigene Tags
+            </option>
+            <option
+                value="collective"
+                {% if tag_scope_collective_selected %}selected{% endif %}
+            >
+                Collective
+            </option>
+        </select>
+    </label>
+    <button type="submit">Speichern</button>
+</form>
+<p class="hub-muted">
+    Aktuell: <strong>{{ tag_scope }}</strong>. Steuert, welche Tags die Engine
+    (Similarity, Ripeness, Digging, Overlap, Empfehlungen) auswertet — die
+    Sichtbarkeit der Tags bleibt unverändert.
+</p>
+
 <h2>Spotify</h2>
 {% if nav.spotify_connected %}
 <p>

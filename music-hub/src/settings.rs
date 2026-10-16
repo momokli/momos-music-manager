@@ -210,6 +210,14 @@ const fn one_of(
 
 pub const COOC_METRICS: &[&str] = &["lift", "jaccard"];
 
+// ── Per-user settings (#267) ────────────────────────────────────────────────
+/// Engine tag scope, per **user**: which owners' tags the engine evaluates.
+/// `own` = only the viewer's tags, `collective` = the viewer + everyone sharing
+/// a collective with them. Stored in `hub_user_settings`, not `hub_settings`.
+pub const TAG_SCOPE: &str = "tag_scope";
+/// The allowed `tag_scope` values.
+pub const TAG_SCOPES: &[&str] = &["own", "collective"];
+
 /// The typed registry of every known setting (secrets + ranking engine).
 pub const SETTINGS: &[SettingSpec] = &[
     text(LASTFM_API_KEY, "Last.fm API-Key", true),
@@ -524,9 +532,25 @@ pub const SETTINGS: &[SettingSpec] = &[
     ),
 ];
 
-/// Find the registry entry for a key, if any.
+/// The typed registry of **per-user** settings (#267). These are stored in
+/// `hub_user_settings` (keyed by user) and edited on `/settings`; they are
+/// deliberately **not** part of [`SETTINGS`] so they never show up in the
+/// global `/admin` mask.
+pub const USER_SETTINGS: &[SettingSpec] = &[one_of(
+    TAG_SCOPE,
+    "Tag-Scope (eigene vs. Collective)",
+    "own",
+    TAG_SCOPES,
+)];
+
+/// Find the registry entry for a global setting key, if any.
 pub fn spec(key: &str) -> Option<&'static SettingSpec> {
     SETTINGS.iter().find(|s| s.key == key)
+}
+
+/// Find the registry entry for a per-user setting key, if any.
+pub fn user_spec(key: &str) -> Option<&'static SettingSpec> {
+    USER_SETTINGS.iter().find(|s| s.key == key)
 }
 
 /// Validate + normalise a raw admin input for `spec`. Returns the value to store

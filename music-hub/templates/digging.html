@@ -49,6 +49,26 @@ content %}
     </ul>
 </nav>
 
+<nav class="hub-filter hub-scope-toggle" aria-label="Tag-Scope">
+    <ul>
+        <li><span class="hub-muted">Tag-Scope</span></li>
+        <li>
+            <a
+                href="{{ tag_scope_own_url }}"
+                {% if tag_scope == "own" %}aria-current="page"{% endif %}
+                >Eigene Tags</a
+            >
+        </li>
+        <li>
+            <a
+                href="{{ tag_scope_collective_url }}"
+                {% if tag_scope == "collective" %}aria-current="page"{% endif %}
+                >Collective</a
+            >
+        </li>
+    </ul>
+</nav>
+
 <nav class="hub-filter" aria-label="BPM-Toleranz (BPM)">
     <ul>
         <li><span class="hub-muted">BPM-Toleranz</span></li>

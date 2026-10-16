@@ -76,6 +76,7 @@ async fn similarity_to_seed_scores_shared_cross_type_tags() {
         app.seed.t_pl,
         &[app.seed.t_all, app.seed.t_carol],
         &e,
+        &[],
     )
     .await;
 
@@ -108,10 +109,10 @@ async fn ripeness_many_matches_single_track_scoring() {
     resolved(&app.pool, app.seed.t_all, b).await;
 
     let e = music_hub::settings::engine(&app.pool).await;
-    let single = music_hub::scoring::ripeness(&app.pool, app.seed.t_all, &e)
+    let single = music_hub::scoring::ripeness(&app.pool, app.seed.t_all, &e, &[])
         .await
         .total;
-    let many = music_hub::scoring::ripeness_many(&app.pool, &[app.seed.t_all], &e).await;
+    let many = music_hub::scoring::ripeness_many(&app.pool, &[app.seed.t_all], &e, &[]).await;
     let got = many.get(&app.seed.t_all).copied().unwrap_or(-1.0);
     assert!(
         (single - got).abs() < 1e-6,

@@ -97,6 +97,9 @@ struct CardView {
     /// Unified tag input (#449): action URL (with cadence), htmx target, scope.
     tag_action: String,
     tag_target: String,
+    /// Legacy recommendation scope for the tag input `data-scope`.
+    rec_scope_param: String,
+    /// Engine tag scope (#267) for the tag input `data-tag-scope`.
     tag_scope: String,
     my_types: Vec<(String, String)>,
 }
@@ -210,6 +213,7 @@ async fn card_from(
         playable: music_api && !r.isrc.trim().is_empty(),
         tag_action: format!("/tag-task/{}/tag?cadence={}", r.track_id, cadence),
         tag_target: "closest .hub-tag-task-card".to_string(),
+        rec_scope_param: String::new(),
         tag_scope: String::new(),
         my_types: my_types.to_vec(),
     }

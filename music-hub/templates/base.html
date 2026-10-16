@@ -1506,9 +1506,11 @@
             var action = el.dataset.action;
             var target = el.dataset.target;
             var scope = el.dataset.scope || "";
+            var tagScope = el.dataset.tagScope || "";
             var timer = null;
             function post(values) {
               if (scope) values.scope = scope;
+              if (tagScope) values.tag_scope = tagScope;
               // No target → native form POST (full reload, e.g. the track page).
               if (!target) {
                 var f = document.createElement("form");

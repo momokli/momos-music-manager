@@ -312,17 +312,29 @@ async fn similar(
     Ok(Json(json!({ "data": data })))
 }
 
+#[derive(Deserialize, Default)]
+struct RipenessQuery {
+    /// `own` | `collective` (#267); absent = the caller's stored setting.
+    #[serde(default)]
+    tag_scope: Option<String>,
+}
+
 /// `GET /api/hub/tracks/{id}/ripeness` — on-the-fly ripeness score (issue #214).
+/// The tag contribution honours the caller's tag scope (`?tag_scope=` > setting
+/// > `own`, #267).
 async fn track_ripeness(
     State(st): State<AppState>,
     Path(id): Path<i64>,
+    Query(q): Query<RipenessQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    if crate::web::current_user(&st, &headers).await.is_none() {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
         return Err(err(StatusCode::UNAUTHORIZED, "login required"));
-    }
+    };
     let e = crate::settings::engine(&st.pool).await;
-    let r = crate::scoring::ripeness(&st.pool, id, &e).await;
+    let (_scope, owners) =
+        crate::scope::effective_owners(&st.pool, uid, q.tag_scope.as_deref()).await;
+    let r = crate::scoring::ripeness(&st.pool, id, &e, &owners).await;
     let groups: Vec<Value> = r
         .tags_per_group
         .iter()

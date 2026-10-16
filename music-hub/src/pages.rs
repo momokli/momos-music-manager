@@ -58,7 +58,7 @@ pub fn router(state: AppState) -> Router {
         .route("/digging/enrich", post(digging_enrich))
         .route("/admin", get(admin_page).post(admin_save))
         .route("/api/hub/status/panel", get(status_panel))
-        .route("/settings", get(settings_page))
+        .route("/settings", get(settings_page).post(settings_save))
         .route("/import", get(import_page).post(import_submit))
         .route("/import/traktor", post(import_traktor_submit))
         .route("/user/{slug}", get(user_page))
@@ -1828,6 +1828,8 @@ struct CompareQuery {
     q: Option<String>,
     /// Substring match on a resolved tag name (any user).
     tag: Option<String>,
+    /// Engine tag scope `own` | `collective` (#267); absent = stored setting.
+    tag_scope: Option<String>,
     /// Flash message (success/error) shown after a redirect.
     msg: Option<String>,
 }
@@ -1848,6 +1850,7 @@ struct OverlapFilters {
     pl: Vec<i64>,
     q: String,
     tag: String,
+    tag_scope: String,
 }
 
 impl OverlapFilters {
@@ -1899,6 +1902,9 @@ impl OverlapFilters {
         }
         if !self.tag.is_empty() {
             url.push_str(&format!("&tag={}", urlencoding::encode(&self.tag)));
+        }
+        if !self.tag_scope.is_empty() {
+            url.push_str(&format!("&tag_scope={}", urlencoding::encode(&self.tag_scope)));
         }
         url
     }
@@ -1980,6 +1986,10 @@ struct OverlapPage {
     q: String,
     tag: String,
     tag_options: Vec<String>,
+    /// Engine tag scope (#267): current value + toggle links.
+    tag_scope: String,
+    tag_scope_own_url: String,
+    tag_scope_collective_url: String,
 }
 
 struct PlaylistOpt {
@@ -2163,18 +2173,28 @@ fn text_matches(title: &str, artists: &str, q: &str) -> bool {
 
 /// Ids from `candidate_ids` that resolve to a tag matching `needle` — either a
 /// tag whose name contains it or one of its descendants (hierarchy-aware).
+/// `owners` restricts the matching tags to those owners (`&[]` = all) — the
+/// tag-scope filter (#267).
 async fn tagged_track_ids(
     pool: &sqlx::SqlitePool,
     candidate_ids: &[i64],
     needle: &str,
+    owners: &[i64],
 ) -> HashSet<i64> {
     let mut set = HashSet::new();
-    let tag_ids: Vec<i64> = crate::tags::matching_tag_ids(pool, needle)
+    let mut tag_ids: Vec<i64> = crate::tags::matching_tag_ids(pool, needle)
         .await
         .into_iter()
         .collect();
     if tag_ids.is_empty() {
         return set;
+    }
+    if !owners.is_empty() {
+        let allowed = restrict_tag_ids_to_owners(pool, &tag_ids, owners).await;
+        tag_ids.retain(|id| allowed.contains(id));
+        if tag_ids.is_empty() {
+            return set;
+        }
     }
     for chunk in candidate_ids.chunks(300) {
         let mut qb = QueryBuilder::new(
@@ -2193,6 +2213,41 @@ async fn tagged_track_ids(
         for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
             set.insert(r.get::<i64, _>("track_id"));
         }
+    }
+    set
+}
+
+/// The subset of `ids` whose tag rows belong to `owners`. `&[]` returns `ids`
+/// unchanged (no filter).
+async fn restrict_tag_ids_to_owners(
+    pool: &sqlx::SqlitePool,
+    ids: &[i64],
+    owners: &[i64],
+) -> HashSet<i64> {
+    let mut set = HashSet::new();
+    if ids.is_empty() {
+        return set;
+    }
+    if owners.is_empty() {
+        return ids.iter().copied().collect();
+    }
+    let mut qb = QueryBuilder::new("SELECT id FROM hub_tags WHERE owner_user_id IN (");
+    {
+        let mut sep = qb.separated(", ");
+        for o in owners {
+            sep.push_bind(*o);
+        }
+    }
+    qb.push(") AND id IN (");
+    {
+        let mut sep = qb.separated(", ");
+        for id in ids {
+            sep.push_bind(*id);
+        }
+    }
+    qb.push(")");
+    for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
+        set.insert(r.get::<i64, _>("id"));
     }
     set
 }
@@ -2220,6 +2275,10 @@ async fn overlap_page(
         Some("contributed") => "contributed",
         _ => "all",
     };
+
+    // Engine tag scope (#267): query param > stored setting > own.
+    let (engine_scope, owners) =
+        crate::scope::effective_owners(&st.pool, nav.id, q.tag_scope.as_deref()).await;
 
     // BPM / key filters.
     let bpm_min_raw = q.bpm_min.clone().unwrap_or_default().trim().to_string();
@@ -2286,6 +2345,7 @@ async fn overlap_page(
         pl: pl_ids.clone(),
         q: q_text.clone(),
         tag: tag.clone(),
+        tag_scope: engine_scope.as_str().to_string(),
     };
 
     // Selected users: default all; otherwise the csv (existing ids only).
@@ -2310,7 +2370,7 @@ async fn overlap_page(
         HashSet::new()
     } else {
         let ids: Vec<i64> = acc.keys().copied().collect();
-        tagged_track_ids(&st.pool, &ids, &tag).await
+        tagged_track_ids(&st.pool, &ids, &tag, &owners).await
     };
 
     // Per-track audio (BPM / key / energy) for filtering + display. Chunked because
@@ -2492,7 +2552,7 @@ async fn overlap_page(
     if sort == "ripeness" && !rows.is_empty() {
         let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
         let e = crate::settings::engine(&st.pool).await;
-        let ripe = crate::scoring::ripeness_many(&st.pool, &ids, &e).await;
+        let ripe = crate::scoring::ripeness_many(&st.pool, &ids, &e, &owners).await;
         for r in rows.iter_mut() {
             r.ripeness_num = ripe.get(&r.id).copied().unwrap_or(0.0);
             r.ripeness_disp = format!("{:.0}", r.ripeness_num);
@@ -2661,6 +2721,13 @@ async fn overlap_page(
         .map(|(_, slug)| ColumnUser { slug: slug.clone() })
         .collect();
 
+    let mut filters_own = filters.clone();
+    filters_own.tag_scope = "own".to_string();
+    let mut filters_coll = filters.clone();
+    filters_coll.tag_scope = "collective".to_string();
+    let tag_scope_own_url = filters_own.href(&current_ids);
+    let tag_scope_collective_url = filters_coll.href(&current_ids);
+
     render(&OverlapPage {
         nav,
         flash: q.msg.clone().unwrap_or_default(),
@@ -2695,6 +2762,9 @@ async fn overlap_page(
         q: q_text,
         tag,
         tag_options,
+        tag_scope: engine_scope.as_str().to_string(),
+        tag_scope_own_url,
+        tag_scope_collective_url,
     })
 }
 
@@ -2801,6 +2871,7 @@ async fn overlap_enrich(State(st): State<AppState>, headers: HeaderMap, body: St
         pl: pl_ids,
         q: get("q"),
         tag: get("tag"),
+        tag_scope: get("tag_scope"),
     };
     let back = filters.href(&selected_ids);
     flash_redirect(
@@ -3069,6 +3140,8 @@ struct DiggingQuery {
     /// Filter: minimum tag weight (group-weight signal).
     #[serde(default, deserialize_with = "crate::table::qnum::opt_f64")]
     wmin: Option<f64>,
+    /// Engine tag scope `own` | `collective` (#267); absent = stored setting.
+    tag_scope: Option<String>,
 }
 
 /// A `<select>` option with a precomputed `selected` flag.
@@ -3105,6 +3178,10 @@ struct DiggingPage {
     harm: bool,
     tol: i64,
     reset_href: String,
+    /// Engine tag scope (#267): current value + toggle links.
+    tag_scope: String,
+    tag_scope_own_url: String,
+    tag_scope_collective_url: String,
 }
 
 struct DigRow {
@@ -3357,7 +3434,13 @@ async fn digging_page(
         0
     };
 
+    // Engine tag scope (#267): which owners' tags the engine evaluates.
+    let (engine_scope, owners) =
+        crate::scope::effective_owners(&st.pool, nav.id, q.tag_scope.as_deref()).await;
+    let tag_scope_val = engine_scope.as_str().to_string();
+
     let mut has_seed = false;
+
     let (mut seed_id, mut seed_title) = (0i64, String::new());
     let mut seed_tag_ids: HashSet<i64> = HashSet::new();
     let mut cand: HashMap<String, DigRow> = HashMap::new();
@@ -3532,9 +3615,15 @@ async fn digging_page(
 
         // Ranking signals (#223): similarity v2 (seed↔candidate, Rumpelkiste-aware)
         // and ripeness (data completeness), both fed by the configurable engine.
-        let sim_map =
-            crate::similarity::similarity_to_seed(&st.pool, seed_id, &matched_ids, &engine).await;
-        let ripe_map = crate::scoring::ripeness_many(&st.pool, &matched_ids, &engine).await;
+        let sim_map = crate::similarity::similarity_to_seed(
+            &st.pool,
+            seed_id,
+            &matched_ids,
+            &engine,
+            &owners,
+        )
+        .await;
+        let ripe_map = crate::scoring::ripeness_many(&st.pool, &matched_ids, &engine, &owners).await;
         for r in cand.values_mut() {
             if !r.matched {
                 continue;
@@ -3616,7 +3705,13 @@ async fn digging_page(
     let tag_ids: HashSet<i64> = if tag.is_empty() {
         HashSet::new()
     } else {
-        crate::tags::matching_tag_ids(&st.pool, &tag).await
+        let mut ids = crate::tags::matching_tag_ids(&st.pool, &tag).await;
+        if !owners.is_empty() {
+            let list: Vec<i64> = ids.iter().copied().collect();
+            let allowed = restrict_tag_ids_to_owners(&st.pool, &list, &owners).await;
+            ids.retain(|id| allowed.contains(id));
+        }
+        ids
     };
     // Absolute BPM tolerance in whole BPM (0 = rounded-equal).
     let tol = q
@@ -3854,6 +3949,10 @@ async fn digging_page(
         s
     };
 
+    let scope_base = link(mine_only, bpm_only, harm_only, tol);
+    let tag_scope_own_url = format!("{scope_base}&tag_scope=own");
+    let tag_scope_collective_url = format!("{scope_base}&tag_scope=collective");
+
     render(&DiggingPage {
         nav,
         flash: String::new(),
@@ -3881,6 +3980,9 @@ async fn digging_page(
         harm: harm_only,
         tol,
         reset_href,
+        tag_scope: tag_scope_val,
+        tag_scope_own_url,
+        tag_scope_collective_url,
     })
 }
 
@@ -5902,17 +6004,70 @@ async fn collective_page(
 struct SettingsPage {
     nav: crate::ui::Nav,
     flash: String,
+    /// Current engine tag scope (`own` | `collective`) for the select (#267).
+    tag_scope: String,
+    tag_scope_own_selected: bool,
+    tag_scope_collective_selected: bool,
 }
 
-async fn settings_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+#[derive(Deserialize, Default)]
+struct SettingsQuery {
+    msg: Option<String>,
+}
+
+async fn settings_page(
+    State(st): State<AppState>,
+    Query(q): Query<SettingsQuery>,
+    headers: HeaderMap,
+) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "settings").await else {
         return Redirect::to("/login").into_response();
     };
 
+    let raw = crate::user_settings::get(&st.pool, nav.id, crate::user_settings::TAG_SCOPE).await;
+    let tag_scope = crate::scope::TagScope::from_setting(raw.as_deref());
+
     render(&SettingsPage {
         nav,
-        flash: String::new(),
+        flash: q.msg.unwrap_or_default(),
+        tag_scope: tag_scope.as_str().to_string(),
+        tag_scope_own_selected: tag_scope == crate::scope::TagScope::Own,
+        tag_scope_collective_selected: tag_scope == crate::scope::TagScope::Collective,
     })
+}
+
+#[derive(Deserialize)]
+struct SettingsForm {
+    #[serde(default)]
+    tag_scope: Option<String>,
+}
+
+/// `POST /settings` — validate + persist the per-user engine settings (#267).
+async fn settings_save(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<SettingsForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "settings").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(raw) = f.tag_scope else {
+        return Redirect::to("/settings?msg=Keine+Auswahl").into_response();
+    };
+    match crate::user_settings::set_validated(
+        &st.pool,
+        nav.id,
+        crate::user_settings::TAG_SCOPE,
+        &raw,
+    )
+    .await
+    {
+        Ok(_) => Redirect::to("/settings?msg=Gespeichert").into_response(),
+        Err(e) => {
+            let enc = urlencoding::encode(&format!("Fehler: {e}")).to_string();
+            Redirect::to(&format!("/settings?msg={enc}")).into_response()
+        }
+    }
 }
 
 // ── manual import (YouTube / SoundCloud) ─────────────────────────────────────

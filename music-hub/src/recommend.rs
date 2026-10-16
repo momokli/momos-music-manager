@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use sqlx::SqlitePool;
 
+use crate::scope;
 use crate::settings::Engine;
 
 /// Visibility scope for recommendations: only the viewer's own tags, or all
@@ -110,8 +111,9 @@ fn label(kind: &str) -> &'static str {
 
 /// Recommend tags for `track_id`, ranked by weighted score, with reasons.
 ///
-/// `scope` restricts candidates to the viewer's own tags (`Mine`) or keeps every
-/// owner (`All`); the filter applies uniformly to all neighbourhoods.
+/// `scope` is the legacy recommendation filter: `Mine` keeps only the viewer's
+/// tags, `All` keeps every owner. It is a thin adapter over
+/// [`recommend_tags_scoped`].
 pub async fn recommend_tags(
     pool: &SqlitePool,
     track_id: i64,
@@ -119,14 +121,31 @@ pub async fn recommend_tags(
     viewer_id: i64,
     scope: RecScope,
 ) -> Vec<Recommendation> {
-    let e = crate::settings::engine(pool).await;
-    let owner_filter = if scope.is_mine() {
-        "AND t.owner_user_id = ?2"
+    let owners: Vec<i64> = if scope.is_mine() {
+        vec![viewer_id]
     } else {
-        ""
+        Vec::new()
     };
-    let sql = format!(
-        "WITH s AS (SELECT ?1 AS id),
+    recommend_tags_scoped(pool, track_id, limit, &owners).await
+}
+
+/// Recommend tags for `track_id`, restricted to candidates owned by `owners`
+/// (`&[]` = every owner, the legacy behaviour). The owner filter applies
+/// uniformly to all neighbourhoods.
+pub async fn recommend_tags_scoped(
+    pool: &SqlitePool,
+    track_id: i64,
+    limit: usize,
+    owners: &[i64],
+) -> Vec<Recommendation> {
+    let e = crate::settings::engine(pool).await;
+    // Owner ids are bound as parameters (consistent with similarity/scoring/pages).
+    let mut qb = sqlx::QueryBuilder::new(
+        "WITH s AS (SELECT ",
+    );
+    qb.push_bind(track_id);
+    qb.push(
+        " AS id),
               seed_tags AS (SELECT tag_id FROM hub_track_resolved_tags WHERE track_id = (SELECT id FROM s)),
               cand AS (
                  SELECT rt2.tag_id AS tag_id, 'tag' AS kind
@@ -168,15 +187,15 @@ pub async fn recommend_tags(
            JOIN hub_users u ON u.id = t.owner_user_id
           WHERE x.tag_id NOT IN (SELECT tag_id FROM seed_tags)
             AND x.tag_id NOT IN (
-                 SELECT id FROM hub_tags WHERE type IN ('SETLIST', 'RUMPELKISTE'))
-            {owner_filter}
-          GROUP BY x.tag_id, t.name, u.slug, x.kind"
+                 SELECT id FROM hub_tags WHERE type IN ('SETLIST', 'RUMPELKISTE'))",
     );
-    let mut query = sqlx::query_as::<_, (i64, String, String, String, i64)>(&sql).bind(track_id);
-    if scope.is_mine() {
-        query = query.bind(viewer_id);
-    }
-    let rows = query.fetch_all(pool).await.unwrap_or_default();
+    scope::owner_clause(&mut qb, owners);
+    qb.push(" GROUP BY x.tag_id, t.name, u.slug, x.kind");
+    let rows = qb
+        .build_query_as::<(i64, String, String, String, i64)>()
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
 
     let mut map: HashMap<i64, Recommendation> = HashMap::new();
     for (tag_id, name, owner, kind, cnt) in rows {
