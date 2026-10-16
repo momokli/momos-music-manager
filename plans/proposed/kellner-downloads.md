@@ -107,6 +107,33 @@ On each OS: download via the hub link, run `<file> --version`, run
 - [ ] The unsigned-binary caveat is visible in the UI, with the bypass command
 - [ ] `cargo test` (music-hub) stays green; no migration
 
+### Measured (CI, 2026-10-16, PR #474)
+
+All seven legs green. Raw = the binary the leg built, packed = the artefact a user
+downloads. The macOS headless reference is what `scripts/install.sh` builds locally:
+**7,504,128 → 3,687,056 bytes (−51 %)** after the profile change.
+
+| Leg                 | Raw       | Packed    |
+| ------------------- | --------- | --------- |
+| macos-arm64-tray    | 3,959,584 | 4,027,269 |
+| macos-x86_64-tray   | 4,190,920 | 4,196,631 |
+| windows-x86_64-tray | 4,878,336 | 4,258,202 |
+| linux-x86_64-gnu    | 4,201,240 | 4,015,402 |
+| linux-aarch64-gnu   | 3,742,280 | 3,800,066 |
+| linux-x86_64-musl   | 4,336,208 | 4,179,172 |
+| linux-aarch64-musl  | 3,717,056 | 3,915,819 |
+
+Two legs are deliberately `smoke: skip` (the binary cannot be executed on the build
+host). Both were verified **by hand** anyway: the macos-x86_64 artefact runs on an
+arm64 Mac under Rosetta, and the aarch64-musl artefact runs in an arm64 Alpine
+container — which is also how the cross-leg version bug was caught (`0.1.0
+(unknown)`: `cross` builds in a container with no `.git` and no `KELLNER_VERSION`;
+fixed by injecting both through cargo's `[env]` table).
+
+**Not proven yet:** the `release` job (tag → attach assets + `SHA256SUMS`). It is
+gated on a real `kellner-v*` tag, so every PR run skips it. Proving it means cutting
+a tag.
+
 ### Decisions (settled 2026-10-16)
 
 1. **Target set** — macOS arm64 + x86_64, Windows x86_64, Linux x86_64 **and arm64,
