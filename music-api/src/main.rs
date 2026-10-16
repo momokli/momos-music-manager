@@ -91,10 +91,16 @@ async fn main() -> anyhow::Result<()> {
         analyzing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         analysis_backoff: Default::default(),
         artist_ingesting: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        arl_tier: Arc::new(tokio::sync::RwLock::new(None)),
     });
 
     let worker_state = state.clone();
     tokio::spawn(async move { worker::run(worker_state).await });
+
+    // Tier probe is deliberately off the boot path: a spawned task with its own
+    // timeout, so a slow/dead Deezer gw-light never blocks startup.
+    let arl_state = state.clone();
+    tokio::spawn(async move { music_api::init_arl_tier(&arl_state).await });
 
     let listener = tokio::net::TcpListener::bind(&state.config.bind).await?;
     info!(

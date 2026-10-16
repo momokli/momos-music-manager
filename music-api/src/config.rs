@@ -25,6 +25,9 @@ pub struct Config {
     pub store_max_upload_bytes: u64,
     /// Deezer public API base (no auth required for ISRC lookups).
     pub deezer_base: String,
+    /// Deezer gw-light endpoint used to probe the ARL's account tier
+    /// (`deezer.getUserData`).
+    pub deezer_gw_base: String,
     /// ffmpeg binary used for the 320/128 transcodes.
     pub ffmpeg: String,
     /// ffprobe binary used to classify the delivered lossy file.
@@ -105,6 +108,10 @@ impl Config {
             ),
             deezer_base: std::env::var("DEEZER_BASE")
                 .unwrap_or_else(|_| "https://api.deezer.com".to_string())
+                .trim_end_matches('/')
+                .to_string(),
+            deezer_gw_base: std::env::var("DEEZER_GW_BASE")
+                .unwrap_or_else(|_| "https://www.deezer.com/ajax/gw-light.php".to_string())
                 .trim_end_matches('/')
                 .to_string(),
             ffmpeg: std::env::var("FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string()),

@@ -166,6 +166,23 @@ existing object never wipes these: group/stem columns are merged with `COALESCE`
 | `POST` | `/isrc/{isrc}/retry`      | reset a failed/stranded ISRC to `pending` (`409` if ready) |
 | `GET`  | `/logs?limit=n`           | recent service events, newest first                        |
 | `GET`  | `/tracks?isrcs=a,b,c`     | bulk metadata/state for many ISRCs                         |
+| `GET`  | `/account`                | Deezer account tier behind `DEEMIX_ARL`                    |
+
+### Deezer account tier (`GET /account`)
+
+Returns the tier of the account behind `DEEMIX_ARL`, so the hub can warn when
+FLAC is impossible:
+
+```json
+{ "offer": "Deezer HiFi", "lossless": true, "high": true, "low": true,
+  "userId": 1234567, "canStreamFlac": true }
+```
+
+The tier is probed once at startup (spawned, off the boot path) and cached; the
+handler re-probes on demand if the cache is still empty. FLAC downloads require
+a Premium/HiFi ARL — a Free ARL (`lossless: false`) silently falls back to a
+lower bitrate, and `DEEMIX_BITRATE=9` then logs a startup warning. Responses:
+`409` when `DEEMIX_ARL` is unset, `502` when the tier probe fails.
 
 ### Artist orders (whole discography)
 
@@ -403,6 +420,12 @@ unset/blank disables it. `ANALYSIS_CONCURRENCY` (default `1`) caps concurrent
 analyzer calls. `ANALYSIS_PRECEDENCE` (default `traktor,essentia,reccobeats`) sets
 the vault resolver's per-field precedence. The one-shot backfill reads
 `VAULT_BACKFILL_BATCH` (default `500`).
+
+Deezer tier probe: `DEEZER_GW_BASE` (default
+`https://www.deezer.com/ajax/gw-light.php`) is the gw-light endpoint used to read
+the account tier behind `DEEMIX_ARL`. FLAC requires a Premium/HiFi ARL; with a
+Free ARL and `DEEMIX_BITRATE=9` the service logs a warning at startup. See
+[`GET /account`](#deezer-account-tier-get-account).
 
 ## Deploy
 

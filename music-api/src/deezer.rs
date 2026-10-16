@@ -1,6 +1,96 @@
 //! Deezer public API: ISRC → track resolution (no auth, no deemix needed).
 
+use std::time::Duration;
+
 use serde::Deserialize;
+
+/// Timeout for the gw-light `deezer.getUserData` probe. Kept short: the tier
+/// check must never stall the boot path (it runs in a spawned task).
+const ARL_TIER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The Deezer account tier behind an ARL, as reported by gw-light's
+/// `deezer.getUserData`. FLAC requires `lossless`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ArlTier {
+    pub offer: String,
+    pub lossless: bool,
+    pub high: bool,
+    pub low: bool,
+    pub user_id: Option<i64>,
+}
+
+impl ArlTier {
+    /// Whether this account tier may stream lossless (FLAC).
+    pub fn can_stream_flac(&self) -> bool {
+        self.lossless
+    }
+}
+
+/// Parse a gw-light `deezer.getUserData` body into an [`ArlTier`]. Pure and
+/// tolerant: missing fields fall back to defaults and never panic. Returns
+/// `None` only when the envelope itself carries no `results` object.
+pub fn parse_user_data(body: &serde_json::Value) -> Option<ArlTier> {
+    let results = body.get("results")?;
+    let offer = results
+        .get("OFFER_NAME")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let quality = results
+        .get("USER")
+        .and_then(|u| u.get("OPTIONS"))
+        .and_then(|o| o.get("web_sound_quality"));
+    let flag = |key: &str| {
+        quality
+            .and_then(|q| q.get(key))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    };
+    let user_id = results
+        .get("USER")
+        .and_then(|u| u.get("USER_ID"))
+        .and_then(|v| v.as_i64());
+    Some(ArlTier {
+        offer,
+        lossless: flag("lossless"),
+        high: flag("high"),
+        low: flag("low"),
+        user_id,
+    })
+}
+
+/// Fetch the account tier for `arl` from the Deezer gw-light endpoint.
+///
+/// A blank/whitespace ARL yields `Ok(None)` without any HTTP call. The request
+/// is bounded by [`ARL_TIER_TIMEOUT`]; the response body is parsed but never
+/// logged.
+pub async fn fetch_arl_tier(
+    http: &reqwest::Client,
+    gw_base: &str,
+    arl: &str,
+) -> anyhow::Result<Option<ArlTier>> {
+    let arl = arl.trim();
+    if arl.is_empty() {
+        return Ok(None);
+    }
+    let url = format!("{gw_base}?method=deezer.getUserData&api_version=1.0&api_token=***");
+    let fut = http
+        .get(&url)
+        .header(reqwest::header::COOKIE, format!("arl={arl}"))
+        .header(
+            reqwest::header::USER_AGENT,
+            "Mozilla/5.0 (compatible; music-api)",
+        )
+        .send();
+    let resp = tokio::time::timeout(ARL_TIER_TIMEOUT, fut)
+        .await
+        .map_err(|_| anyhow::anyhow!("deezer gw-light getUserData timed out"))??;
+    if !resp.status().is_success() {
+        anyhow::bail!("deezer gw-light returned HTTP {}", resp.status());
+    }
+    let body: serde_json::Value = resp.json().await?;
+    Ok(parse_user_data(&body))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct DeezerArtist {
@@ -174,6 +264,69 @@ mod tests {
             deemix_track_url("3135556"),
             "https://www.deezer.com/track/3135556"
         );
+    }
+
+    #[test]
+    fn parses_hifi_tier() {
+        let json = serde_json::json!({
+            "results": {
+                "OFFER_NAME": "Deezer HiFi",
+                "USER": {
+                    "USER_ID": 42,
+                    "OPTIONS": {
+                        "web_sound_quality": { "lossless": true, "high": true, "low": true }
+                    }
+                }
+            }
+        });
+        let tier = parse_user_data(&json).unwrap();
+        assert_eq!(tier.offer, "Deezer HiFi");
+        assert!(tier.lossless);
+        assert!(tier.high);
+        assert!(tier.low);
+        assert_eq!(tier.user_id, Some(42));
+        assert!(tier.can_stream_flac());
+    }
+
+    #[test]
+    fn parses_free_tier_without_lossless() {
+        let json = serde_json::json!({
+            "results": {
+                "OFFER_NAME": "Deezer Free",
+                "USER": {
+                    "USER_ID": 7,
+                    "OPTIONS": {
+                        "web_sound_quality": { "lossless": false, "high": false, "low": true }
+                    }
+                }
+            }
+        });
+        let tier = parse_user_data(&json).unwrap();
+        assert_eq!(tier.offer, "Deezer Free");
+        assert!(!tier.can_stream_flac());
+    }
+
+    #[test]
+    fn parses_missing_fields_with_defaults_without_panic() {
+        let json = serde_json::json!({ "results": {} });
+        let tier = parse_user_data(&json).unwrap();
+        assert_eq!(tier.offer, "unknown");
+        assert!(!tier.lossless);
+        assert!(!tier.high);
+        assert!(!tier.low);
+        assert_eq!(tier.user_id, None);
+        // No `results` envelope at all → no tier.
+        assert!(parse_user_data(&serde_json::json!({})).is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_arl_skips_network() {
+        // Points at a dead URL: the empty ARL must short-circuit before HTTP.
+        let http = reqwest::Client::new();
+        let tier = fetch_arl_tier(&http, "http://127.0.0.1:1", "   ")
+            .await
+            .unwrap();
+        assert!(tier.is_none());
     }
 
     #[test]
