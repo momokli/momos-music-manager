@@ -1,6 +1,6 @@
 # Active Plans
 
-**57 done** · **0 in progress** · **25 proposed**
+**57 done** · **0 in progress** · **26 proposed**
 
 ## Proposed
 
@@ -30,6 +30,7 @@
 - [bpm-key-playlists](proposed/bpm-key-playlists.md) — `feat/bpm-key-playlists`
 - [spotify-api-diet](proposed/spotify-api-diet.md) — `feat/spotify-api-diet`
 - [hub-spotify-queue](proposed/hub-spotify-queue.md) — `feat/hub-spotify-queue` (read the Spotify queue next to now-playing + append a hub track; append-only, Premium + active device required)
+- [kellner-downloads](proposed/kellner-downloads.md) — `feat/kellner-downloads` (publish per-OS kellner binaries — mac/win with tray, linux headless incl. arm64+musl — from CI and offer them on `/kellner`; only the musl toolchain is still open)
 
 ## Done
 
