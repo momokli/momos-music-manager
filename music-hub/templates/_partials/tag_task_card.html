@@ -42,8 +42,8 @@
         {% endfor %}
     </div>
     {% endif %} {% let tag_action = card.tag_action %} {% let tag_target = card.tag_target
-    %} {% let tag_scope = card.tag_scope %} {% let my_types = card.my_types %} {% include
-    "_partials/tag_input.html" %}
+    %} {% let rec_scope_param = card.rec_scope_param %} {% let tag_scope = card.tag_scope %}
+    {% let my_types = card.my_types %} {% include "_partials/tag_input.html" %}
 
     <form
         method="post"

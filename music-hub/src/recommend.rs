@@ -110,8 +110,9 @@ fn label(kind: &str) -> &'static str {
 
 /// Recommend tags for `track_id`, ranked by weighted score, with reasons.
 ///
-/// `scope` restricts candidates to the viewer's own tags (`Mine`) or keeps every
-/// owner (`All`); the filter applies uniformly to all neighbourhoods.
+/// `scope` is the legacy recommendation filter: `Mine` keeps only the viewer's
+/// tags, `All` keeps every owner. It is a thin adapter over
+/// [`recommend_tags_scoped`].
 pub async fn recommend_tags(
     pool: &SqlitePool,
     track_id: i64,
@@ -119,11 +120,35 @@ pub async fn recommend_tags(
     viewer_id: i64,
     scope: RecScope,
 ) -> Vec<Recommendation> {
-    let e = crate::settings::engine(pool).await;
-    let owner_filter = if scope.is_mine() {
-        "AND t.owner_user_id = ?2"
+    let owners: Vec<i64> = if scope.is_mine() {
+        vec![viewer_id]
     } else {
-        ""
+        Vec::new()
+    };
+    recommend_tags_scoped(pool, track_id, limit, &owners).await
+}
+
+/// Recommend tags for `track_id`, restricted to candidates owned by `owners`
+/// (`&[]` = every owner, the legacy behaviour). The owner filter applies
+/// uniformly to all neighbourhoods.
+pub async fn recommend_tags_scoped(
+    pool: &SqlitePool,
+    track_id: i64,
+    limit: usize,
+    owners: &[i64],
+) -> Vec<Recommendation> {
+    let e = crate::settings::engine(pool).await;
+    // Owner ids are `i64` (never user text) so inlining the list is
+    // injection-safe and keeps the single-CTE query readable.
+    let owner_filter = if owners.is_empty() {
+        String::new()
+    } else {
+        let list = owners
+            .iter()
+            .map(|o| o.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("AND t.owner_user_id IN ({list})")
     };
     let sql = format!(
         "WITH s AS (SELECT ?1 AS id),
@@ -172,10 +197,7 @@ pub async fn recommend_tags(
             {owner_filter}
           GROUP BY x.tag_id, t.name, u.slug, x.kind"
     );
-    let mut query = sqlx::query_as::<_, (i64, String, String, String, i64)>(&sql).bind(track_id);
-    if scope.is_mine() {
-        query = query.bind(viewer_id);
-    }
+    let query = sqlx::query_as::<_, (i64, String, String, String, i64)>(&sql).bind(track_id);
     let rows = query.fetch_all(pool).await.unwrap_or_default();
 
     let mut map: HashMap<i64, Recommendation> = HashMap::new();

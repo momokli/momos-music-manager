@@ -117,6 +117,45 @@ pub async fn effective_owners(
     (scope, owners)
 }
 
+/// The explicitly requested or stored engine scope, or `None` when there is
+/// neither a valid query param nor a stored setting. Used by the track/queue
+/// detail, which keeps its legacy "all owners" default when the scope was never
+/// configured (so existing recommendation links stay backwards compatible).
+pub async fn requested(
+    pool: &SqlitePool,
+    viewer_id: i64,
+    query: Option<&str>,
+) -> Option<TagScope> {
+    if let Some(scope) = TagScope::parse(query) {
+        return Some(scope);
+    }
+    let raw = user_settings::get(pool, viewer_id, user_settings::TAG_SCOPE).await;
+    raw.as_deref().and_then(|r| TagScope::parse(Some(r)))
+}
+
+/// Owners for the track/queue detail recommendation + ripeness path.
+///
+/// `rec_mine` is the legacy `?scope=mine` toggle (always the viewer only).
+/// `requested` is the engine scope from [`requested`]; `None` means neither a
+/// param nor a setting exists -> legacy "all owners" (`&[]` = no filter).
+pub async fn detail_owners(
+    pool: &SqlitePool,
+    viewer_id: i64,
+    rec_mine: bool,
+    requested: Option<TagScope>,
+) -> Vec<i64> {
+    if rec_mine {
+        return vec![viewer_id];
+    }
+    match requested {
+        Some(TagScope::Own) => vec![viewer_id],
+        Some(TagScope::Collective) => {
+            visible_owner_ids(pool, viewer_id, TagScope::Collective).await
+        }
+        None => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -319,6 +319,9 @@ struct Flash {
     /// Recommendation scope (`mine` | `all`); unknown values fall back to `all`.
     #[serde(default)]
     scope: Option<String>,
+    /// Engine tag scope (`own` | `collective`); absent = stored setting (#267).
+    #[serde(default)]
+    tag_scope: Option<String>,
 }
 
 /// Server-side playlist filter (issue #163). Unknown values fall back to `all`.
@@ -1022,8 +1025,12 @@ struct TrackPage {
     tag_action: String,
     /// htmx swap target for the unified tag input ("" = native POST/reload).
     tag_target: String,
-    /// Scope value carried through the tag add (empty = none).
+    /// Legacy recommendation scope carried through the tag input (`mine` | `all`).
+    rec_scope_param: String,
+    /// Engine tag scope (#267) carried through the tag input (`own` | `collective`).
     tag_scope: String,
+    tag_scope_own_url: String,
+    tag_scope_collective_url: String,
     htmx: bool,
     my_types: Vec<(String, String)>,
     /// Ready download formats (label + the `format` param) — empty when nothing
@@ -1211,6 +1218,9 @@ struct TrackTagFormPartial {
     id: i64,
     tag_action: String,
     tag_target: String,
+    /// Legacy recommendation scope for the tag input `data-scope`.
+    rec_scope_param: String,
+    /// Engine tag scope (#267) for the tag input `data-tag-scope`.
     tag_scope: String,
     my_types: Vec<(String, String)>,
 }
@@ -1250,6 +1260,7 @@ async fn track_page(
         id,
         flash.msg.unwrap_or_default(),
         crate::recommend::RecScope::parse(flash.scope.as_deref()),
+        flash.tag_scope.as_deref(),
     )
     .await
     {
@@ -1284,6 +1295,7 @@ async fn build_track_page(
     id: i64,
     flash: String,
     scope: crate::recommend::RecScope,
+    tag_scope_raw: Option<&str>,
 ) -> Option<TrackPage> {
     let row = sqlx::query(
         "SELECT id, title, artists, album, duration_ms, isrc, service, service_track_id,
@@ -1629,9 +1641,11 @@ async fn build_track_page(
     .collect();
 
     let e = crate::settings::engine(&st.pool).await;
-    let rip = crate::scoring::ripeness(&st.pool, id, &e, &[]).await;
+    let requested = crate::scope::requested(&st.pool, nav.id, tag_scope_raw).await;
+    let owners = crate::scope::detail_owners(&st.pool, nav.id, scope.is_mine(), requested).await;
+    let rip = crate::scoring::ripeness(&st.pool, id, &e, &owners).await;
     let recommended: Vec<RecTag> =
-        crate::recommend::recommend_tags(&st.pool, id, 12, nav.id, scope)
+        crate::recommend::recommend_tags_scoped(&st.pool, id, 12, &owners)
             .await
             .into_iter()
             .map(|r| RecTag {
@@ -1643,6 +1657,16 @@ async fn build_track_page(
     let rec_scope = scope.as_str().to_string();
     let rec_scope_mine_url = format!("/track/{id}?scope=mine");
     let rec_scope_all_url = format!("/track/{id}?scope=all");
+    let tag_scope_val = crate::scope::effective(&st.pool, nav.id, tag_scope_raw)
+        .await
+        .as_str()
+        .to_string();
+    let mut tag_scope_own_url = format!("/track/{id}?tag_scope=own");
+    let mut tag_scope_collective_url = format!("/track/{id}?tag_scope=collective");
+    if scope.is_mine() {
+        tag_scope_own_url.push_str("&scope=mine");
+        tag_scope_collective_url.push_str("&scope=mine");
+    }
     let can_stream = st.cfg.music_api_token.is_some() && !isrc.trim().is_empty();
     let me = nav.slug.clone();
     // Bucket the track's tags into clouds by their type.
@@ -1736,7 +1760,10 @@ async fn build_track_page(
         untag_action: format!("/track/{id}/untag"),
         tag_action: format!("/track/{id}/tag"),
         tag_target: String::new(),
-        tag_scope: rec_scope.clone(),
+        rec_scope_param: rec_scope.clone(),
+        tag_scope: tag_scope_val,
+        tag_scope_own_url,
+        tag_scope_collective_url,
         htmx: false,
         my_types,
         download_options,
@@ -1844,6 +1871,9 @@ struct TrackTagForm {
     /// Recommendation scope to preserve across the redirect (`mine` | `all`).
     #[serde(default)]
     scope: Option<String>,
+    /// Engine tag scope to preserve across the redirect (`own` | `collective`).
+    #[serde(default)]
+    tag_scope: Option<String>,
 }
 
 /// Directly tag the track (track view = core element).
@@ -1868,7 +1898,10 @@ async fn track_tag(
         let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
     }
     let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
-    Redirect::to(&format!("/track/{id}?scope={}", scope.as_str())).into_response()
+    let tag_scope_q = crate::scope::TagScope::parse(f.tag_scope.as_deref())
+        .map(|s| format!("&tag_scope={}", s.as_str()))
+        .unwrap_or_default();
+    Redirect::to(&format!("/track/{id}?scope={}{tag_scope_q}", scope.as_str())).into_response()
 }
 
 /// Remove a direct (manual) tag from the track.
@@ -1885,7 +1918,10 @@ async fn track_untag(
         let _ = crate::tags::untag_track(&st.pool, nav.id, id, tag_id).await;
     }
     let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
-    Redirect::to(&format!("/track/{id}?scope={}", scope.as_str())).into_response()
+    let tag_scope_q = crate::scope::TagScope::parse(f.tag_scope.as_deref())
+        .map(|s| format!("&tag_scope={}", s.as_str()))
+        .unwrap_or_default();
+    Redirect::to(&format!("/track/{id}?scope={}{tag_scope_q}", scope.as_str())).into_response()
 }
 
 // ── now playing (issue #293/#294) ───────────────────────────────────────────
@@ -2333,6 +2369,7 @@ async fn now_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
                     id,
                     "Jetzt läuft in Spotify".to_string(),
                     crate::recommend::RecScope::All,
+                    None,
                 )
                 .await
                 {
@@ -2500,6 +2537,7 @@ async fn track_actions_tag_frag(
         id,
         tag_action: format!("/track/{id}/actions/tag"),
         tag_target: "closest .hub-ta".to_string(),
+        rec_scope_param: String::new(),
         tag_scope: String::new(),
         my_types: type_options(),
     })

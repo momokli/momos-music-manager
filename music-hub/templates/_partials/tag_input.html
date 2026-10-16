@@ -1,13 +1,15 @@
 {# Unified tag input (#449) — fuzzy combobox + create-new modal. Context (provided by the
 including page): tag_action: POST URL to add the tag (existing tag_id or new name+type)
-tag_target: htmx swap target (CSS selector) tag_scope: optional scope value (empty = none)
-my_types: Vec<(value, label)> for the create modal #}
+tag_target: htmx swap target (CSS selector) rec_scope_param: legacy recommendation scope
+(empty = none) tag_scope: engine tag scope (empty = none) my_types: Vec<(value, label)>
+for the create modal #}
 <div
     class="hub-taginput"
     data-taginput
     data-action="{{ tag_action }}"
     data-target="{{ tag_target }}"
-    data-scope="{{ tag_scope }}"
+    data-scope="{{ rec_scope_param }}"
+    data-tag-scope="{{ tag_scope }}"
 >
     <input
         type="text"

@@ -81,6 +81,13 @@ async fn seed_world() -> World {
     link(&app.pool, t_y, tag_alice).await;
     link(&app.pool, t_y, tag_bob).await;
 
+    // Track Z shares alice's tag with X but carries a bob-only tag (`T_bob2`)
+    // that X does not have — so it is only recommendable under `collective`.
+    let tag_bob2 = insert_tag(&app.pool, bob, "T_bob2").await;
+    let t_z = insert_track(&app.pool, "tsync-z", "Track Z").await;
+    link(&app.pool, t_z, tag_alice).await;
+    link(&app.pool, t_z, tag_bob2).await;
+
     // alice + bob both like X and Y, so the overlap page considers them shared.
     for uid in [alice, bob] {
         for tid in [t_x, t_y] {
@@ -317,6 +324,78 @@ async fn digging_exposes_scope_toggle() {
         "digging must offer the collective toggle"
     );
     assert!(html.contains("tag_scope=own"), "digging must offer the own toggle");
+}
+
+// ── US5: recommend / tag-queue / track detail ───────────────────────────────
+
+#[tokio::test]
+async fn recommend_scoped_differs_own_vs_collective() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let bob = w.app.seed.bob;
+
+    let own = music_hub::recommend::recommend_tags_scoped(&w.app.pool, w.t_x, 20, &[alice]).await;
+    let coll =
+        music_hub::recommend::recommend_tags_scoped(&w.app.pool, w.t_x, 20, &[alice, bob]).await;
+    let names = |v: &[music_hub::recommend::Recommendation]| {
+        v.iter().map(|r| r.name.clone()).collect::<Vec<_>>()
+    };
+    assert!(
+        !names(&own).iter().any(|n| n == "T_bob2"),
+        "own must not recommend bob's tag: {:?}",
+        names(&own)
+    );
+    assert!(
+        names(&coll).iter().any(|n| n == "T_bob2"),
+        "collective must recommend bob's tag: {:?}",
+        names(&coll)
+    );
+}
+
+#[tokio::test]
+async fn track_detail_recommend_honours_tag_scope_param() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let cookie = w.app.session_cookie(alice).await;
+
+    let own = get(
+        &w.app,
+        &format!("/track/{}?tag_scope=own", w.t_x),
+        &cookie,
+    )
+    .await;
+    assert!(
+        !own.contains("T_bob2"),
+        "own track detail must hide bob's recommendation"
+    );
+
+    let coll = get(
+        &w.app,
+        &format!("/track/{}?tag_scope=collective", w.t_x),
+        &cookie,
+    )
+    .await;
+    assert!(
+        coll.contains("T_bob2"),
+        "collective track detail must show bob's recommendation"
+    );
+}
+
+#[tokio::test]
+async fn track_detail_scope_and_rec_scope_coexist() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let cookie = w.app.session_cookie(alice).await;
+    let html = get(
+        &w.app,
+        &format!("/track/{}?tag_scope=collective&scope=mine", w.t_x),
+        &cookie,
+    )
+    .await;
+    // The legacy rec-scope toggle links and the engine toggle links both exist,
+    // and the mutation redirect keeps both axes.
+    assert!(html.contains("scope=mine"));
+    assert!(html.contains("tag_scope=collective"));
 }
 
 // Keep the imports referenced even before the page tests land.

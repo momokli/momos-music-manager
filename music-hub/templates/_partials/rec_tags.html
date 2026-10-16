@@ -1,6 +1,7 @@
 {# Shared recommended-tags renderer (uniform across track view + tag-queue). Context:
 recommended: [{ name, type_label, reason }], tag_action, htmx,
-rec_scope: "mine" | "all", rec_scope_mine_url, rec_scope_all_url #}
+rec_scope: "mine" | "all", rec_scope_mine_url, rec_scope_all_url,
+tag_scope: "own" | "collective", tag_scope_own_url, tag_scope_collective_url #}
 <div style="margin-top: 0.45rem">
     <span class="hub-cloud-h">Empfohlen — warum</span>
     <span class="hub-scope-toggle" style="margin-left: 0.5rem">
@@ -72,6 +73,43 @@ rec_scope: "mine" | "all", rec_scope_mine_url, rec_scope_all_url #}
         >
         {% endif %}
     </span>
+    <span class="hub-scope-toggle" style="margin-left: 0.5rem" aria-label="Tag-Scope">
+        {% if htmx %}
+        <button
+            type="button"
+            class="hub-chip"
+            hx-get="{{ tag_scope_own_url }}"
+            hx-target="#queue-detail"
+            hx-swap="innerHTML"
+            {% if tag_scope == "own" %}aria-current="true"{% endif %}
+        >
+            Eigene Tags
+        </button>
+        <button
+            type="button"
+            class="hub-chip"
+            hx-get="{{ tag_scope_collective_url }}"
+            hx-target="#queue-detail"
+            hx-swap="innerHTML"
+            {% if tag_scope == "collective" %}aria-current="true"{% endif %}
+        >
+            Collective
+        </button>
+        {% else %}
+        <a
+            href="{{ tag_scope_own_url }}"
+            class="hub-chip"
+            {% if tag_scope == "own" %}aria-current="true"{% endif %}
+            >Eigene Tags</a
+        >
+        <a
+            href="{{ tag_scope_collective_url }}"
+            class="hub-chip"
+            {% if tag_scope == "collective" %}aria-current="true"{% endif %}
+            >Collective</a
+        >
+        {% endif %}
+    </span>
     {% if !recommended.is_empty() %}
     <div class="hub-cloud">
         {% for r in recommended %}
@@ -91,6 +129,7 @@ rec_scope: "mine" | "all", rec_scope_mine_url, rec_scope_all_url #}
         >
             <input type="hidden" name="name" value="{{ r.name }}" />
             <input type="hidden" name="scope" value="{{ rec_scope }}" />
+            <input type="hidden" name="tag_scope" value="{{ tag_scope }}" />
             <button
                 type="submit"
                 class="hub-chip hub-rec"

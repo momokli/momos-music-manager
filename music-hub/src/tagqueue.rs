@@ -235,8 +235,8 @@ struct QueueDetail {
     tag_action: String,
     /// htmx swap target for the unified tag input.
     tag_target: String,
-    /// Scope value carried through the tag add.
-    tag_scope: String,
+    /// Legacy recommendation scope carried through the tag add (`mine` | `all`).
+    rec_scope_param: String,
     htmx: bool,
     playlists: Vec<PlRow>,
     my_types: Vec<(String, String)>,
@@ -244,6 +244,10 @@ struct QueueDetail {
     rec_scope: String,
     rec_scope_mine_url: String,
     rec_scope_all_url: String,
+    /// Engine tag scope (#267): current value + toggle links.
+    tag_scope: String,
+    tag_scope_own_url: String,
+    tag_scope_collective_url: String,
 }
 
 /// Recommendation-scope query for the queue detail fragment.
@@ -251,6 +255,8 @@ struct QueueDetail {
 struct ScopeQuery {
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    tag_scope: Option<String>,
 }
 
 async fn build_detail(
@@ -258,7 +264,10 @@ async fn build_detail(
     me: i64,
     id: i64,
     scope: crate::recommend::RecScope,
+    tag_scope_raw: Option<&str>,
 ) -> Option<QueueDetail> {
+    let requested = crate::scope::requested(&st.pool, me, tag_scope_raw).await;
+    let owners = crate::scope::detail_owners(&st.pool, me, scope.is_mine(), requested).await;
     let row = sqlx::query(
         "SELECT COALESCE(t.title,'') AS title,
                 COALESCE(t.album,'') AS album, t.duration_ms,
@@ -386,18 +395,30 @@ async fn build_detail(
         .into_iter()
         .map(|(value, label, _icon)| (value.to_string(), label.to_string()))
         .collect();
-    let recommended: Vec<RecChip> = crate::recommend::recommend_tags(&st.pool, id, 16, me, scope)
-        .await
-        .into_iter()
-        .map(|r| RecChip {
-            reason: r.why(),
-            type_label: r.type_label,
-            name: r.name,
-        })
-        .collect();
+    let recommended: Vec<RecChip> =
+        crate::recommend::recommend_tags_scoped(&st.pool, id, 16, &owners)
+            .await
+            .into_iter()
+            .map(|r| RecChip {
+                reason: r.why(),
+                type_label: r.type_label,
+                name: r.name,
+            })
+            .collect();
     let rec_scope = scope.as_str().to_string();
     let rec_scope_mine_url = format!("/tag-queue/{id}?scope=mine");
     let rec_scope_all_url = format!("/tag-queue/{id}?scope=all");
+    let tag_scope_val = crate::scope::effective(&st.pool, me, tag_scope_raw)
+        .await
+        .as_str()
+        .to_string();
+    let mut q_own = format!("/tag-queue/{id}?tag_scope=own");
+    let mut q_coll = format!("/tag-queue/{id}?tag_scope=collective");
+    // Preserve the legacy recommendation toggle across the engine-scope toggle.
+    if scope.is_mine() {
+        q_own.push_str("&scope=mine");
+        q_coll.push_str("&scope=mine");
+    }
 
     let spotify_id: String = sqlx::query_scalar(
         "SELECT external_id FROM hub_track_external_ids WHERE track_id = ?1 AND service = 'spotify' LIMIT 1",
@@ -438,7 +459,7 @@ async fn build_detail(
         untag_action: format!("/tag-queue/{id}/untag"),
         tag_action: format!("/tag-queue/{id}/tag"),
         tag_target: "#queue-detail".to_string(),
-        tag_scope: rec_scope.clone(),
+        rec_scope_param: rec_scope.clone(),
         htmx: true,
         playlists,
         my_types,
@@ -446,6 +467,9 @@ async fn build_detail(
         rec_scope,
         rec_scope_mine_url,
         rec_scope_all_url,
+        tag_scope: tag_scope_val,
+        tag_scope_own_url: q_own,
+        tag_scope_collective_url: q_coll,
     })
 }
 
@@ -459,7 +483,7 @@ async fn queue_detail(
         return Redirect::to("/login").into_response();
     };
     let scope = crate::recommend::RecScope::parse(q.scope.as_deref());
-    match build_detail(&st, nav.id, id, scope).await {
+    match build_detail(&st, nav.id, id, scope, q.tag_scope.as_deref()).await {
         Some(d) => render(&d),
         None => (StatusCode::NOT_FOUND, "Track nicht gefunden.").into_response(),
     }
@@ -478,6 +502,9 @@ struct TagForm {
     /// Recommendation scope to preserve across the mutation (`mine` | `all`).
     #[serde(default)]
     scope: Option<String>,
+    /// Engine tag scope to preserve across the mutation (`own` | `collective`).
+    #[serde(default)]
+    tag_scope: Option<String>,
 }
 
 async fn queue_tag(
@@ -501,7 +528,7 @@ async fn queue_tag(
         let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
     }
     let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
-    match build_detail(&st, nav.id, id, scope).await {
+    match build_detail(&st, nav.id, id, scope, f.tag_scope.as_deref()).await {
         Some(d) => render(&d),
         None => (StatusCode::NOT_FOUND, "Track nicht gefunden.").into_response(),
     }
@@ -520,7 +547,7 @@ async fn queue_untag(
         let _ = crate::tags::untag_track(&st.pool, nav.id, id, tag_id).await;
     }
     let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
-    match build_detail(&st, nav.id, id, scope).await {
+    match build_detail(&st, nav.id, id, scope, f.tag_scope.as_deref()).await {
         Some(d) => render(&d),
         None => (StatusCode::NOT_FOUND, "Track nicht gefunden.").into_response(),
     }
