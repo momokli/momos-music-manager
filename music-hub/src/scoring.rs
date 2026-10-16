@@ -13,6 +13,20 @@ use crate::settings::Engine;
 
 use std::collections::HashMap;
 
+/// Append `AND t.owner_user_id IN (…)` when `owners` is non-empty; `&[]` means
+/// no owner filter (legacy behaviour).
+fn owner_clause(qb: &mut QueryBuilder<'_, sqlx::Sqlite>, owners: &[i64]) {
+    if owners.is_empty() {
+        return;
+    }
+    qb.push(" AND t.owner_user_id IN (");
+    let mut sep = qb.separated(", ");
+    for o in owners {
+        sep.push_bind(*o);
+    }
+    qb.push(")");
+}
+
 /// Points contributed by a group holding `k` tags. Position `i` (0-based) uses
 /// `points[i]`; beyond the vector the last value repeats.
 pub fn group_points(points: &[f64], k: usize) -> f64 {
@@ -35,23 +49,32 @@ pub struct Ripeness {
     pub meta_present: Vec<(String, bool)>,
 }
 
-/// Compute the ripeness score for a track on the fly.
-pub async fn ripeness(pool: &SqlitePool, track_id: i64, e: &Engine) -> Ripeness {
+/// Compute the ripeness score for a track on the fly. `owners` restricts the
+/// human-tag contribution to those owners (`&[]` = all).
+pub async fn ripeness(pool: &SqlitePool, track_id: i64, e: &Engine, owners: &[i64]) -> Ripeness {
     let mut out = Ripeness::default();
 
     // Human tags, bucketed by type.
-    let rows = sqlx::query_as::<_, (String, i64)>(
+    let mut qb = QueryBuilder::new(
         "SELECT t.type, COUNT(*)
            FROM hub_track_resolved_tags rt
            JOIN hub_tags t ON t.id = rt.tag_id
-          WHERE rt.track_id = ?1 AND t.type IS NOT NULL
-          GROUP BY t.type",
-    )
-    .bind(track_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
-    for (type_name, cnt) in rows {
+          WHERE rt.track_id = ",
+    );
+    qb.push_bind(track_id);
+    qb.push(" AND t.type IS NOT NULL");
+    owner_clause(&mut qb, owners);
+    qb.push(" GROUP BY t.type");
+    let rows = qb
+        .build()
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+    for (type_name, cnt) in rows.into_iter().map(|r| {
+        let ty: String = r.get(0);
+        let cnt: i64 = r.get(1);
+        (ty, cnt)
+    }) {
         let k = cnt.max(0) as usize;
         out.tag_score += group_points(&e.tag_points, k);
         let ty = crate::tagtypes::TagType::parse(&type_name);
@@ -155,7 +178,12 @@ pub async fn ripeness(pool: &SqlitePool, track_id: i64, e: &Engine) -> Ripeness 
 
 /// Ripeness totals (`RIPENESS`) for a specific set of tracks, batched — used by
 /// the Digging/Overlap ranking (#223). Missing tracks simply have no entry.
-pub async fn ripeness_many(pool: &SqlitePool, ids: &[i64], e: &Engine) -> HashMap<i64, f64> {
+pub async fn ripeness_many(
+    pool: &SqlitePool,
+    ids: &[i64],
+    e: &Engine,
+    owners: &[i64],
+) -> HashMap<i64, f64> {
     let mut out: HashMap<i64, f64> = HashMap::new();
     if ids.is_empty() {
         return out;
@@ -176,7 +204,9 @@ pub async fn ripeness_many(pool: &SqlitePool, ids: &[i64], e: &Engine) -> HashMa
                 sep.push_bind(*id);
             }
         }
-        qb.push(") GROUP BY rt.track_id, t.type");
+        qb.push(")");
+        owner_clause(&mut qb, owners);
+        qb.push(" GROUP BY rt.track_id, t.type");
         for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
             let cnt: i64 = r.get(2);
             *tag_score.entry(r.get(0)).or_insert(0.0) +=
@@ -296,7 +326,8 @@ pub struct QueueRow {
 /// Build the tag queue: every track scored by ripeness, ascending (least-ripe
 /// first = most in need of tagging). `max_total` hides tracks already "ripe
 /// enough" (the configurable threshold). `only_untagged` keeps only tracks with
-/// no tags at all.
+/// no tags at all. `owners` restricts the tag-ripeness contribution to those
+/// owners (`&[]` = all).
 pub async fn queue(
     pool: &SqlitePool,
     e: &Engine,
@@ -304,18 +335,30 @@ pub async fn queue(
     only_untagged: bool,
     sort: &str,
     limit: usize,
+    owners: &[i64],
 ) -> Vec<QueueRow> {
     // Tag counts per (track, type) -> position-weighted tag score per track.
-    let tag_rows = sqlx::query_as::<_, (i64, String, i64)>(
+    let mut tag_qb = QueryBuilder::new(
         "SELECT rt.track_id, t.type, COUNT(*)
            FROM hub_track_resolved_tags rt
            JOIN hub_tags t ON t.id = rt.tag_id
-          WHERE t.type IS NOT NULL
-          GROUP BY rt.track_id, t.type",
-    )
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+          WHERE t.type IS NOT NULL",
+    );
+    owner_clause(&mut tag_qb, owners);
+    tag_qb.push(" GROUP BY rt.track_id, t.type");
+    let tag_rows = tag_qb
+        .build()
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| {
+            let tid: i64 = r.get(0);
+            let ty: String = r.get(1);
+            let cnt: i64 = r.get(2);
+            (tid, ty, cnt)
+        })
+        .collect::<Vec<(i64, String, i64)>>();
     let mut tag_score: HashMap<i64, (f64, i64)> = HashMap::new();
     for (tid, _gid, cnt) in tag_rows {
         let slot = tag_score.entry(tid).or_insert((0.0, 0));

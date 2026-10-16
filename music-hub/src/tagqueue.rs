@@ -118,7 +118,7 @@ async fn queue_page(
         .filter(|s| !s.is_empty())
         .and_then(|s| s.parse::<f64>().ok());
     let mut rows: Vec<QueueRowView> =
-        crate::scoring::queue(&st.pool, &e, max, untagged, &sort, 2000)
+        crate::scoring::queue(&st.pool, &e, max, untagged, &sort, 2000, &[])
             .await
             .into_iter()
             .filter(|r| {

@@ -77,8 +77,24 @@ async fn seed_world() -> World {
     let t_x = insert_track(&app.pool, "tsync-x", "Track X").await;
     let t_y = insert_track(&app.pool, "tsync-y", "Track Y").await;
     link(&app.pool, t_x, tag_alice).await;
+    link(&app.pool, t_x, tag_bob).await;
     link(&app.pool, t_y, tag_alice).await;
     link(&app.pool, t_y, tag_bob).await;
+
+    // alice + bob both like X and Y, so the overlap page considers them shared.
+    for uid in [alice, bob] {
+        for tid in [t_x, t_y] {
+            sqlx::query(
+                "INSERT INTO hub_liked_tracks (user_id, track_id, liked_at)
+                 VALUES (?1, ?2, '2026-01-01T00:00:00+00:00')",
+            )
+            .bind(uid)
+            .bind(tid)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        }
+    }
 
     World {
         app,
@@ -190,10 +206,71 @@ async fn user_settings_get_set_all_roundtrip() {
     );
 }
 
-// Keep the imports referenced even before the engine tests land.
+// ── US3: engine core honours owners ─────────────────────────────────────────
+
+#[tokio::test]
+async fn tag_similarity_differs_own_vs_collective() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let bob = w.app.seed.bob;
+    let e = settings::engine(&w.app.pool).await;
+
+    let own = similarity::tag_similarity(&w.app.pool, w.t_x, w.t_y, &e, &[alice]).await;
+    let coll = similarity::tag_similarity(&w.app.pool, w.t_x, w.t_y, &e, &[alice, bob]).await;
+    assert_eq!(own, 1.0, "own counts only alice's shared tag");
+    assert_eq!(coll, 2.0, "collective counts alice + bob shared tags");
+    assert!(coll > own, "collective must score higher");
+
+    // carol is outside the collective: collective == own for her.
+    let carol = w.app.seed.carol;
+    let own_c = similarity::tag_similarity(&w.app.pool, w.t_x, w.t_y, &e, &[carol]).await;
+    let coll_c = similarity::tag_similarity(&w.app.pool, w.t_x, w.t_y, &e, &[carol]).await;
+    assert_eq!(own_c, coll_c);
+}
+
+#[tokio::test]
+async fn similarity_to_seed_differs_own_vs_collective() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let bob = w.app.seed.bob;
+    let e = settings::engine(&w.app.pool).await;
+
+    let own = similarity::similarity_to_seed(&w.app.pool, w.t_x, &[w.t_y], &e, &[alice]).await;
+    let coll =
+        similarity::similarity_to_seed(&w.app.pool, w.t_x, &[w.t_y], &e, &[alice, bob]).await;
+    assert_eq!(own.get(&w.t_y).copied(), Some(1.0));
+    assert_eq!(coll.get(&w.t_y).copied(), Some(2.0));
+}
+
+#[tokio::test]
+async fn ripeness_differs_own_vs_collective() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let bob = w.app.seed.bob;
+    let e = settings::engine(&w.app.pool).await;
+
+    let own = music_hub::scoring::ripeness(&w.app.pool, w.t_y, &e, &[alice]).await;
+    let coll = music_hub::scoring::ripeness(&w.app.pool, w.t_y, &e, &[alice, bob]).await;
+    assert_eq!(own.tag_score, 100.0, "one alice tag in the MOOD bucket");
+    assert_eq!(coll.tag_score, 150.0, "alice + bob tag -> second tier");
+    assert!(coll.total > own.total);
+
+    let own_many =
+        music_hub::scoring::ripeness_many(&w.app.pool, &[w.t_y], &e, &[alice]).await;
+    let coll_many =
+        music_hub::scoring::ripeness_many(&w.app.pool, &[w.t_y], &e, &[alice, bob]).await;
+    assert!(coll_many.get(&w.t_y).unwrap() > own_many.get(&w.t_y).unwrap());
+}
+
+// Keep the imports referenced even before the page tests land.
 #[allow(dead_code)]
 fn _touch() {
     let _ = settings::TAG_SCOPE;
-    let _ = similarity::rumpelkiste_tag_ids;
     let _: HashSet<i64> = HashSet::new();
+    let _ = w_field();
+}
+
+#[allow(dead_code)]
+fn w_field() -> i64 {
+    0
 }

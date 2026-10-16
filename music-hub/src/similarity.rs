@@ -14,6 +14,20 @@ use sqlx::{QueryBuilder, Row, SqlitePool};
 
 use crate::settings::Engine;
 
+/// Append `AND t.owner_user_id IN (…)` to a query builder when `owners` is
+/// non-empty. An empty slice means **no owner filter** (legacy behaviour).
+fn owner_clause(qb: &mut QueryBuilder<'_, sqlx::Sqlite>, owners: &[i64]) {
+    if owners.is_empty() {
+        return;
+    }
+    qb.push(" AND t.owner_user_id IN (");
+    let mut sep = qb.separated(", ");
+    for o in owners {
+        sep.push_bind(*o);
+    }
+    qb.push(")");
+}
+
 /// Playlist ids that feed at least one `RUMPELKISTE` tag.
 pub async fn rumpelkiste_playlist_ids(pool: &SqlitePool) -> HashSet<i64> {
     sqlx::query_scalar::<_, i64>(
@@ -39,29 +53,35 @@ pub async fn rumpelkiste_tag_ids(pool: &SqlitePool) -> HashSet<i64> {
         .collect()
 }
 
-/// `tag_id -> type` for a track's resolved tags that carry a type.
-async fn tag_types(pool: &SqlitePool, track_id: i64) -> HashMap<i64, String> {
-    let rows = sqlx::query_as::<_, (i64, String)>(
+/// `tag_id -> type` for a track's resolved tags that carry a type, restricted to
+/// `owners` when the slice is non-empty (`&[]` = every owner).
+async fn tag_types(pool: &SqlitePool, track_id: i64, owners: &[i64]) -> HashMap<i64, String> {
+    let mut qb = QueryBuilder::new(
         "SELECT rt.tag_id, t.type
            FROM hub_track_resolved_tags rt
            JOIN hub_tags t ON t.id = rt.tag_id
-          WHERE rt.track_id = ?1 AND t.type IS NOT NULL",
-    )
-    .bind(track_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
-    rows.into_iter().collect()
+          WHERE rt.track_id = ",
+    );
+    qb.push_bind(track_id);
+    qb.push(" AND t.type IS NOT NULL");
+    owner_clause(&mut qb, owners);
+    let rows = qb
+        .build()
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+    rows.into_iter().map(|r| (r.get(0), r.get(1))).collect()
 }
 
 /// `tag_id -> type` for a track's resolved tags, dropping any Rumpelkiste tags
-/// (they must not create similarity — #222).
+/// (they must not create similarity — #222), restricted to `owners`.
 async fn tag_types_filtered(
     pool: &SqlitePool,
     track_id: i64,
     exclude: &HashSet<i64>,
+    owners: &[i64],
 ) -> HashMap<i64, String> {
-    tag_types(pool, track_id)
+    tag_types(pool, track_id, owners)
         .await
         .into_iter()
         .filter(|(t, _)| !exclude.contains(t))
@@ -70,10 +90,18 @@ async fn tag_types_filtered(
 
 /// Tag-overlap similarity: shared tags (base weight) plus a bonus for shared-tag
 /// pairs that have different types. Rumpelkiste tags are ignored.
-pub async fn tag_similarity(pool: &SqlitePool, a: i64, b: i64, e: &Engine) -> f64 {
+///
+/// `owners` restricts the tags that count to the given owners (`&[]` = all).
+pub async fn tag_similarity(
+    pool: &SqlitePool,
+    a: i64,
+    b: i64,
+    e: &Engine,
+    owners: &[i64],
+) -> f64 {
     let rumpel = rumpelkiste_tag_ids(pool).await;
-    let ta = tag_types_filtered(pool, a, &rumpel).await;
-    let tb = tag_types_filtered(pool, b, &rumpel).await;
+    let ta = tag_types_filtered(pool, a, &rumpel, owners).await;
+    let tb = tag_types_filtered(pool, b, &rumpel, owners).await;
     let shared: Vec<i64> = ta.keys().filter(|k| tb.contains_key(k)).copied().collect();
     let base = shared.len() as f64;
     // Count unordered shared-tag pairs whose types differ.
@@ -98,13 +126,14 @@ pub async fn similarity_to_seed(
     seed_id: i64,
     candidates: &[i64],
     e: &Engine,
+    owners: &[i64],
 ) -> HashMap<i64, f64> {
     let mut out: HashMap<i64, f64> = HashMap::new();
     if candidates.is_empty() {
         return out;
     }
     let rumpel = rumpelkiste_tag_ids(pool).await;
-    let ta = tag_types_filtered(pool, seed_id, &rumpel).await;
+    let ta = tag_types_filtered(pool, seed_id, &rumpel, owners).await;
     if ta.is_empty() {
         return out;
     }
@@ -124,7 +153,9 @@ pub async fn similarity_to_seed(
                 sep.push_bind(*id);
             }
         }
-        qb.push(") GROUP BY rt.track_id, rt.tag_id, t.type");
+        qb.push(")");
+        owner_clause(&mut qb, owners);
+        qb.push(" GROUP BY rt.track_id, rt.tag_id, t.type");
         for r in qb.build().fetch_all(pool).await.unwrap_or_default() {
             let tag: i64 = r.get(1);
             if rumpel.contains(&tag) {

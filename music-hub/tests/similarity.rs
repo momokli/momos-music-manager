@@ -49,9 +49,11 @@ async fn cross_type_matches_score_higher_than_same_type() {
 
     let e = music_hub::settings::engine(&app.pool).await;
     let cross =
-        music_hub::similarity::tag_similarity(&app.pool, app.seed.t_all, app.seed.t_two, &e).await;
+        music_hub::similarity::tag_similarity(&app.pool, app.seed.t_all, app.seed.t_two, &e, &[])
+            .await;
     let same =
-        music_hub::similarity::tag_similarity(&app.pool, app.seed.t_pl, app.seed.t_alice, &e).await;
+        music_hub::similarity::tag_similarity(&app.pool, app.seed.t_pl, app.seed.t_alice, &e, &[])
+            .await;
     assert!(
         cross > same,
         "cross-type {cross} should beat same-type {same}"

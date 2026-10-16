@@ -124,7 +124,7 @@ fn tag_scope_is_a_registered_user_setting() {
 async fn changing_a_meta_weight_changes_ripeness() {
     let app = common::spawn().await;
     let e0 = settings::engine(&app.pool).await;
-    let base = music_hub::scoring::ripeness(&app.pool, app.seed.t_all, &e0)
+    let base = music_hub::scoring::ripeness(&app.pool, app.seed.t_all, &e0, &[])
         .await
         .meta_score;
     // t_all has title + artist -> at least 2.0 with the default weights.
@@ -135,7 +135,7 @@ async fn changing_a_meta_weight_changes_ripeness() {
         .await
         .unwrap();
     let e1 = settings::engine(&app.pool).await;
-    let bumped = music_hub::scoring::ripeness(&app.pool, app.seed.t_all, &e1)
+    let bumped = music_hub::scoring::ripeness(&app.pool, app.seed.t_all, &e1, &[])
         .await
         .meta_score;
     assert!(

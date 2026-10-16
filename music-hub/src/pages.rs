@@ -2492,7 +2492,7 @@ async fn overlap_page(
     if sort == "ripeness" && !rows.is_empty() {
         let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
         let e = crate::settings::engine(&st.pool).await;
-        let ripe = crate::scoring::ripeness_many(&st.pool, &ids, &e).await;
+        let ripe = crate::scoring::ripeness_many(&st.pool, &ids, &e, &[]).await;
         for r in rows.iter_mut() {
             r.ripeness_num = ripe.get(&r.id).copied().unwrap_or(0.0);
             r.ripeness_disp = format!("{:.0}", r.ripeness_num);
@@ -3533,8 +3533,9 @@ async fn digging_page(
         // Ranking signals (#223): similarity v2 (seed↔candidate, Rumpelkiste-aware)
         // and ripeness (data completeness), both fed by the configurable engine.
         let sim_map =
-            crate::similarity::similarity_to_seed(&st.pool, seed_id, &matched_ids, &engine).await;
-        let ripe_map = crate::scoring::ripeness_many(&st.pool, &matched_ids, &engine).await;
+            crate::similarity::similarity_to_seed(&st.pool, seed_id, &matched_ids, &engine, &[])
+                .await;
+        let ripe_map = crate::scoring::ripeness_many(&st.pool, &matched_ids, &engine, &[]).await;
         for r in cand.values_mut() {
             if !r.matched {
                 continue;

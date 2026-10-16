@@ -1629,7 +1629,7 @@ async fn build_track_page(
     .collect();
 
     let e = crate::settings::engine(&st.pool).await;
-    let rip = crate::scoring::ripeness(&st.pool, id, &e).await;
+    let rip = crate::scoring::ripeness(&st.pool, id, &e, &[]).await;
     let recommended: Vec<RecTag> =
         crate::recommend::recommend_tags(&st.pool, id, 12, nav.id, scope)
             .await
