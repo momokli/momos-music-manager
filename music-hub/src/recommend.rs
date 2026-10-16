@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use sqlx::SqlitePool;
 
+use crate::scope;
 use crate::settings::Engine;
 
 /// Visibility scope for recommendations: only the viewer's own tags, or all
@@ -188,14 +189,7 @@ pub async fn recommend_tags_scoped(
             AND x.tag_id NOT IN (
                  SELECT id FROM hub_tags WHERE type IN ('SETLIST', 'RUMPELKISTE'))",
     );
-    if !owners.is_empty() {
-        qb.push(" AND t.owner_user_id IN (");
-        let mut sep = qb.separated(", ");
-        for o in owners {
-            sep.push_bind(*o);
-        }
-        qb.push(")");
-    }
+    scope::owner_clause(&mut qb, owners);
     qb.push(" GROUP BY x.tag_id, t.name, u.slug, x.kind");
     let rows = qb
         .build_query_as::<(i64, String, String, String, i64)>()
