@@ -7,7 +7,7 @@
 use askama::Template;
 use axum::Router;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
@@ -41,12 +41,7 @@ fn htmx(headers: &HeaderMap) -> bool {
 
 /// Add an `HX-Trigger` toast to a response header map.
 fn toast_header(msg: &str, kind: &str) -> HeaderMap {
-    let mut h = HeaderMap::new();
-    let body = serde_json::json!({ "toast": { "msg": msg, "kind": kind } }).to_string();
-    if let Ok(hv) = HeaderValue::from_str(&body) {
-        h.insert(HeaderName::from_static("hx-trigger"), hv);
-    }
-    h
+    crate::toast::header(msg, kind)
 }
 
 /// Action response: htmx → 204 + toast header; plain form → redirect with flash.

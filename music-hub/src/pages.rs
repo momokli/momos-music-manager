@@ -1008,30 +1008,6 @@ fn audio_content_type(format: &str) -> &'static str {
     }
 }
 
-/// JSON string literal for `s` with every non-ASCII char `\u`-escaped, so it can
-/// always be placed into an HTTP header value (a raw `—`/`…` makes
-/// `HeaderValue::from_str` fail silently).
-fn json_str_ascii(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c if c.is_ascii() => out.push(c),
-            c => {
-                let mut buf = [0u16; 2];
-                for u in c.encode_utf16(&mut buf).iter() {
-                    out.push_str(&format!("\\u{:04x}", *u));
-                }
-            }
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// htmx-aware reply for a download preflight (#460).
 ///
 /// htmx → `200` + `HX-Trigger` toast, plus an `HX-Redirect` to `url` **when the
@@ -1045,13 +1021,8 @@ fn check_reply(
     kind: &str,
 ) -> Response {
     if headers.contains_key("hx-request") {
-        let trigger = format!(
-            "{{\"toast\":{{\"msg\":{},\"kind\":\"{}\"}}}}",
-            json_str_ascii(msg),
-            kind
-        );
         let mut resp = StatusCode::OK.into_response();
-        if let Ok(v) = axum::http::HeaderValue::from_str(&trigger) {
+        if let Some(v) = crate::toast::value(msg, kind) {
             resp.headers_mut().insert("HX-Trigger", v);
         }
         if let Some(u) = url {
