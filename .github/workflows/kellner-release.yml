@@ -92,6 +92,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `git describe` needs the tags, otherwise build.rs can only fall back to
+          # the bare SHA (the traceability promise in docs/stack-versioning.md).
+          fetch-depth: 0
 
       - name: Install musl toolchain (native x86_64)
         if: matrix.target == 'x86_64-unknown-linux-musl'
@@ -128,8 +132,15 @@ jobs:
             ARGS+=(--features "${{ matrix.features }}")
           fi
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cargo install --list >/dev/null # noop, keeps shellcheck quiet
-            KELLNER_VERSION="$VERSION" cross build --release --locked --target "${{ matrix.target }}"
+            # `cross` builds inside a container that has neither `.git` nor our env,
+            # so version and git metadata are injected through cargo's `[env]` table
+            # — otherwise the artefact reports `0.1.0 (unknown)`.
+            SHA="$(git rev-parse --short=8 HEAD)"
+            DESC="$(git describe --tags --always --dirty --match 'kellner-v*' 2>/dev/null || git describe --tags --always --dirty)"
+            KELLNER_VERSION="$VERSION" cross build --release --locked --target "${{ matrix.target }}" \
+              --config "env.KELLNER_VERSION=\"$VERSION\"" \
+              --config "env.GIT_SHA=\"$SHA\"" \
+              --config "env.GIT_DESCRIBE=\"$DESC\""
             BIN="target/${{ matrix.target }}/release/kellner"
           else
             KELLNER_VERSION="$VERSION" cargo "${ARGS[@]}"
