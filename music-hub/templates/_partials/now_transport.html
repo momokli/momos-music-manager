@@ -1,0 +1,45 @@
+{# Spotify transport controls for the now-playing widget. The play/pause direction is
+decided by the *rendered* playback state, because Spotify has no toggle endpoint
+(`play`/`pause` are separate). Needs the `playing` field in the including template's
+scope. Keep all conditionals as element content. #}
+<div class="hub-xport">
+    <button
+        type="button"
+        class="hub-xport-btn"
+        hx-post="/now-playing/transport/previous"
+        hx-swap="none"
+        title="Vorheriger Track"
+    >
+        ⏮
+    </button>
+    {% if is_playing %}
+    <button
+        type="button"
+        class="hub-xport-btn"
+        hx-post="/now-playing/transport/pause"
+        hx-swap="none"
+        title="Pause"
+    >
+        ⏸
+    </button>
+    {% else %}
+    <button
+        type="button"
+        class="hub-xport-btn"
+        hx-post="/now-playing/transport/play"
+        hx-swap="none"
+        title="Weiter abspielen"
+    >
+        ▶
+    </button>
+    {% endif %}
+    <button
+        type="button"
+        class="hub-xport-btn"
+        hx-post="/now-playing/transport/next"
+        hx-swap="none"
+        title="Nächster Track"
+    >
+        ⏭
+    </button>
+</div>

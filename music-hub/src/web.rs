@@ -49,6 +49,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hub/playlists/{id}/toggle", post(toggle_playlist))
         .route("/api/hub/playlists/{id}/refetch", post(refetch_playlist))
         .route("/now-playing", get(now_playing_frag))
+        .route("/now-playing/queue", get(now_queue_frag))
+        .route("/now-playing/queue/add/{id}", post(now_queue_add))
+        .route("/now-playing/transport/{cmd}", post(now_transport))
+        .route("/now-playing/play/tag/{id}", post(now_play_tag))
+        .route("/now-playing/play/backpack/{id}", post(now_play_backpack))
         .route("/now-playing/tag", post(now_tag))
         .route("/now", get(now_page))
         .route("/curate", get(curate_page).post(curate_create))
@@ -1156,8 +1161,12 @@ struct VaultView {
 struct NowPlaying {
     logged_in: bool,
     connected: bool,
+    /// A Spotify error to show instead of the track (`""` = none).
     error: String,
+    /// We have a track object at all (drives the "nothing playing" branch).
     playing: bool,
+    /// That track is actually playing (not paused) — drives play/pause.
+    is_playing: bool,
     has_track: bool,
     hub_track_id: i64,
     track_url: String,
@@ -1988,6 +1997,7 @@ async fn render_now(st: &AppState, nav: &crate::ui::Nav) -> Response {
                 logged_in: true,
                 connected: true,
                 playing: true,
+                is_playing: n.playing,
                 has_track,
                 hub_track_id,
                 track_url,
@@ -2020,6 +2030,233 @@ async fn now_playing_frag(State(st): State<AppState>, headers: HeaderMap) -> Res
         return StatusCode::UNAUTHORIZED.into_response();
     };
     render_now(&st, &nav).await
+}
+
+/// The Spotify "Next up" queue widget (`_partials/now_queue.html`), with the
+/// per-track append button wired to `POST /now-playing/queue/add/{id}`.
+#[derive(Template, Default)]
+#[template(path = "_partials/now_queue.html")]
+struct NowQueue {
+    logged_in: bool,
+    connected: bool,
+    error: String,
+    items: Vec<QueueRow>,
+}
+
+#[derive(Default)]
+struct QueueRow {
+    /// 0 = the track is not in the hub (renders as plain text, no link).
+    hub_track_id: i64,
+    track_url: String,
+    title: String,
+    artists: String,
+    image: String,
+    duration_disp: String,
+}
+
+/// htmx fragment: the user's Spotify playback queue.
+async fn now_queue_frag(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "now").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    render_now_queue(&st, &nav).await
+}
+
+async fn render_now_queue(st: &AppState, nav: &crate::ui::Nav) -> Response {
+    if !crate::nowplaying::has_queue_scope(&st.pool, nav.id).await {
+        return render(&NowQueue {
+            logged_in: true,
+            ..Default::default()
+        });
+    }
+    match crate::nowplaying::queue(&st.pool, &st.cfg, nav.id).await {
+        Ok(items) => {
+            let rows = items
+                .iter()
+                .map(|i| QueueRow {
+                    hub_track_id: i.hub_track_id.unwrap_or(0),
+                    track_url: i
+                        .hub_track_id
+                        .map(|id| format!("/track/{id}"))
+                        .unwrap_or_default(),
+                    title: i.title.clone(),
+                    artists: i.artists.clone(),
+                    image: i.image.clone(),
+                    duration_disp: i.duration_disp(),
+                })
+                .collect();
+            render(&NowQueue {
+                logged_in: true,
+                connected: true,
+                error: String::new(),
+                items: rows,
+            })
+        }
+        Err(e) => render(&NowQueue {
+            logged_in: true,
+            connected: true,
+            error: format!("Spotify-Fehler: {e}"),
+            ..Default::default()
+        }),
+    }
+}
+
+/// Append a hub track to the Spotify queue (htmx). Responds `204` with no body
+/// — the shell's queue widget refreshes itself off the `hub:queue-changed`
+/// event, so the button works from any page.
+async fn now_queue_add(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(track_id): Path<i64>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "now").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let (msg, kind) = if !crate::nowplaying::has_playback_write_scope(&st.pool, nav.id).await {
+        no_write_scope("Warteschlange")
+    } else if track_id == 0 {
+        ("Kein Track angegeben.".to_string(), "err")
+    } else {
+        match crate::nowplaying::spotify_uri(&st.pool, track_id).await {
+            None => ("Dieser Track hat keine Spotify-ID.".to_string(), "err"),
+            Some(uri) => {
+                match crate::nowplaying::add_to_queue(&st.pool, &st.cfg, nav.id, &uri).await {
+                    Ok(()) => ("In die Spotify-Warteschlange gelegt.".to_string(), "ok"),
+                    Err(e) => (format!("{e}"), "err"),
+                }
+            }
+        }
+    };
+
+    now_queue_changed_response(&msg, kind)
+}
+
+/// Run a player transport command (htmx). `204` + toast; the shell's
+/// now-playing widget refreshes itself off the `hub:now-changed` event.
+async fn now_transport(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(cmd): Path<String>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "now").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let (msg, kind) = match crate::nowplaying::Transport::parse(&cmd) {
+        None => (format!("Unbekannter Player-Befehl: {cmd}"), "err"),
+        Some(t) => {
+            if !crate::nowplaying::has_playback_write_scope(&st.pool, nav.id).await {
+                no_write_scope("Player-Steuerung")
+            } else {
+                match crate::nowplaying::transport(&st.pool, &st.cfg, nav.id, t).await {
+                    Ok(()) => (t.label().to_string(), "ok"),
+                    Err(e) => (format!("{e}"), "err"),
+                }
+            }
+        }
+    };
+
+    now_changed_response(&msg, kind)
+}
+
+/// Play a whole tag as the current Spotify context (`PUT /me/player/play`).
+///
+/// The track list comes from the tag's materialized resolution, the uris from
+/// `nowplaying::spotify_uris` — i.e. the same source of truth as the per-track
+/// queue button.
+async fn now_play_tag(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(tag_id): Path<i64>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "now").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let (msg, kind) = if !crate::nowplaying::has_playback_write_scope(&st.pool, nav.id).await {
+        no_write_scope("Abspielen")
+    } else {
+        let ids = crate::backpacks::tracks_for_tag(&st.pool, tag_id)
+            .await
+            .unwrap_or_default();
+        play_tracks(&st, nav.id, &ids).await
+    };
+    now_changed_response(&msg, kind)
+}
+
+/// Play a whole backpack as the current Spotify context.
+async fn now_play_backpack(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(backpack_id): Path<i64>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "now").await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let (msg, kind) = if !crate::nowplaying::has_playback_write_scope(&st.pool, nav.id).await {
+        no_write_scope("Abspielen")
+    } else {
+        // Owner check first: a backpack someone else owns must not be startable.
+        match crate::backpacks::backpack_owned_by(&st.pool, backpack_id, nav.id).await {
+            Ok(None) => ("Backpack nicht gefunden.".to_string(), "err"),
+            Err(e) => (format!("{e}"), "err"),
+            Ok(Some(_)) => {
+                let ids: Vec<i64> = crate::backpacks::resolve_unbounded(&st.pool, backpack_id)
+                    .await
+                    .map(|rs| rs.into_iter().map(|r| r.track_id).collect())
+                    .unwrap_or_default();
+                play_tracks(&st, nav.id, &ids).await
+            }
+        }
+    };
+    now_changed_response(&msg, kind)
+}
+
+/// The gate failure shared by the "play a collection" endpoints.
+fn no_write_scope(what: &str) -> (String, &'static str) {
+    (
+        format!("Spotify neu verbinden — {what} braucht den Schreib-Scope."),
+        "err",
+    )
+}
+
+/// Map track ids to Spotify uris and start them. Returns the toast `(msg, kind)`.
+async fn play_tracks(st: &AppState, user_id: i64, ids: &[i64]) -> (String, &'static str) {
+    match crate::nowplaying::spotify_uris(&st.pool, ids).await {
+        Err(e) => (format!("{e}"), "err"),
+        Ok(uris) if uris.is_empty() => ("Keine Spotify-Tracks darin.".to_string(), "err"),
+        Ok(uris) => {
+            let total = uris.len();
+            match crate::nowplaying::play_uris(&st.pool, &st.cfg, user_id, &uris).await {
+                Ok(n) if n < total => (
+                    format!("Die ersten {n} von {total} Tracks laufen (unser Limit)."),
+                    "ok",
+                ),
+                Ok(n) => (format!("{n} Tracks laufen."), "ok"),
+                Err(e) => (format!("{e}"), "err"),
+            }
+        }
+    }
+}
+
+/// `204` + toast for the playback endpoints (the now widget refreshes itself).
+/// `204` + toast + `hub:now-changed` for the player endpoints (the now widget
+/// refreshes itself).
+fn now_changed_response(msg: &str, kind: &str) -> Response {
+    crate::toast::apply_with(
+        StatusCode::NO_CONTENT.into_response(),
+        msg,
+        kind,
+        &["hub:now-changed"],
+    )
+}
+
+/// Same, but refreshing the queue widget instead.
+fn now_queue_changed_response(msg: &str, kind: &str) -> Response {
+    crate::toast::apply_with(
+        StatusCode::NO_CONTENT.into_response(),
+        msg,
+        kind,
+        &["hub:queue-changed"],
+    )
 }
 
 #[derive(Deserialize)]

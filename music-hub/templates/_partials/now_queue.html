@@ -1,0 +1,46 @@
+{# Spotify "Next up" queue. Rendered as an htmx fragment by `GET
+/now-playing/queue` and polled by the shell (`base.html`). Read-only: the Spotify
+Web API can *append* to this queue but never reorder or remove — and the list is
+the manually queued items only, not the rest of the current playlist. Keep all
+conditionals as element content — never inside an HTML tag. #} {% if !logged_in %}
+<div class="hub-queue hub-queue-off" aria-live="polite"></div>
+{% else if !connected %}
+<div class="hub-queue hub-queue-off" aria-live="polite">
+    <span class="hub-queue-h">Als Nächstes</span>
+    <span class="hub-muted"
+        >Spotify neu verbinden für die Queue — braucht
+        <code>user-read-playback-state</code>.</span
+    >
+</div>
+{% else if error != "" %}
+<div class="hub-queue hub-queue-err" aria-live="polite">
+    <span class="hub-queue-h">Als Nächstes</span>
+    <span class="hub-muted">{{ error }}</span>
+</div>
+{% else if items.is_empty() %}
+<div class="hub-queue hub-queue-off" aria-live="polite">
+    <span class="hub-queue-h">Als Nächstes</span>
+    <span class="hub-muted">Queue ist leer.</span>
+</div>
+{% else %}
+<div class="hub-queue" aria-live="polite">
+    <span class="hub-queue-h">Als Nächstes · {{ items.len() }}</span>
+    <ol class="hub-queue-list">
+        {% for it in items %}
+        <li class="hub-queue-item">
+            {% if it.image != "" %}
+            <img class="hub-queue-art" src="{{ it.image }}" alt="" width="28" height="28" />
+            {% else %}
+            <span class="hub-queue-art hub-now-art-ph" aria-hidden="true">♪</span>
+            {% endif %} {% if it.hub_track_id != 0 %}
+            <a class="hub-queue-title" href="{{ it.track_url }}">{{ it.title }}</a>
+            {% else %}
+            <span class="hub-queue-title">{{ it.title }}</span>
+            {% endif %}
+            <span class="hub-queue-artists">{{ it.artists }}</span>
+            <span class="hub-queue-dur hub-muted">{{ it.duration_disp }}</span>
+        </li>
+        {% endfor %}
+    </ol>
+</div>
+{% endif %}
