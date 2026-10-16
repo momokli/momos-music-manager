@@ -262,6 +262,63 @@ async fn ripeness_differs_own_vs_collective() {
     assert!(coll_many.get(&w.t_y).unwrap() > own_many.get(&w.t_y).unwrap());
 }
 
+// ── US4: overlap + digging wiring ───────────────────────────────────────────
+
+async fn get(app: &common::TestApp, path: &str, cookie: &str) -> String {
+    app.client()
+        .get(app.url(path))
+        .header("Cookie", cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn overlap_tag_filter_honours_scope() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let bob = w.app.seed.bob;
+    let cookie = w.app.session_cookie(alice).await;
+    let users = format!("{alice},{bob}");
+
+    // `T_bob` is owned by bob. Under `own` (viewer=alice) it is filtered out, so
+    // no shared track matches; under `collective` bob's tag counts.
+    let own = get(
+        &w.app,
+        &format!("/overlap?users={users}&tag=T_bob&tag_scope=own"),
+        &cookie,
+    )
+    .await;
+    assert!(!own.contains("Track X"), "own must exclude bob's tag: {own}");
+
+    let coll = get(
+        &w.app,
+        &format!("/overlap?users={users}&tag=T_bob&tag_scope=collective"),
+        &cookie,
+    )
+    .await;
+    assert!(
+        coll.contains("Track X"),
+        "collective must include bob's tag: {coll}"
+    );
+}
+
+#[tokio::test]
+async fn digging_exposes_scope_toggle() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let cookie = w.app.session_cookie(alice).await;
+    let html = get(&w.app, &format!("/digging?seed={}", w.t_x), &cookie).await;
+    assert!(
+        html.contains("tag_scope=collective"),
+        "digging must offer the collective toggle"
+    );
+    assert!(html.contains("tag_scope=own"), "digging must offer the own toggle");
+}
+
 // Keep the imports referenced even before the page tests land.
 #[allow(dead_code)]
 fn _touch() {

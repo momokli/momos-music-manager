@@ -34,6 +34,26 @@ content %}
     </ul>
 </nav>
 
+<nav class="hub-filter hub-scope-toggle" aria-label="Tag-Scope">
+    <ul>
+        <li><span class="hub-muted">Tag-Scope</span></li>
+        <li>
+            <a
+                href="{{ tag_scope_own_url }}"
+                {% if tag_scope == "own" %}aria-current="page"{% endif %}
+                >Eigene Tags</a
+            >
+        </li>
+        <li>
+            <a
+                href="{{ tag_scope_collective_url }}"
+                {% if tag_scope == "collective" %}aria-current="page"{% endif %}
+                >Collective</a
+            >
+        </li>
+    </ul>
+</nav>
+
 <p class="hub-muted">
     {{ columns.len() }} Nutzer · {{ track_total }} gemeinsame Tracks {% if
     !pairs.is_empty() %}· {% for p in pairs %}<span class="hub-tag"
@@ -46,6 +66,7 @@ content %}
     <input type="hidden" name="scope" value="{{ scope }}" />
     <input type="hidden" name="sort" value="{{ sort_value }}" />
     <input type="hidden" name="dir" value="{{ dir_value }}" />
+    <input type="hidden" name="tag_scope" value="{{ tag_scope }}" />
     <input
         type="number"
         name="bpm_min"
