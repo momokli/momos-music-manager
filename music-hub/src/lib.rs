@@ -64,6 +64,7 @@ pub mod toast;
 pub mod traktor;
 pub mod traktor_api;
 pub mod ui;
+pub mod user_settings;
 pub mod viewstate;
 pub mod web;
 pub mod worker;

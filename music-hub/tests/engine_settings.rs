@@ -91,6 +91,34 @@ fn validation_enforces_ranges_and_types() {
     );
 }
 
+/// The per-user `tag_scope` setting is registered (default `own`, enum
+/// `own|collective`) and is **not** part of the global `/admin` registry (#267).
+#[test]
+fn tag_scope_is_a_registered_user_setting() {
+    let s = settings::user_spec(settings::TAG_SCOPE)
+        .expect("tag_scope must be registered as a user setting");
+    assert_eq!(s.default, "own", "tag_scope default must be own");
+    match s.kind {
+        SettingKind::Enum(allowed) => {
+            assert!(allowed.contains(&"own"));
+            assert!(allowed.contains(&"collective"));
+        }
+        other => panic!("tag_scope must be an enum, got {other:?}"),
+    }
+    assert_eq!(
+        settings::validate(s, "collective").unwrap(),
+        "collective"
+    );
+    assert!(settings::validate(s, "bogus").is_err());
+
+    // Must not leak into the global settings registry (that drives `/admin`).
+    assert!(
+        settings::spec(settings::TAG_SCOPE).is_none(),
+        "tag_scope must not be a global setting"
+    );
+    assert!(!SETTINGS.iter().any(|s| s.key == settings::TAG_SCOPE));
+}
+
 /// Changing a registered weight actually changes results.
 #[tokio::test]
 async fn changing_a_meta_weight_changes_ripeness() {
