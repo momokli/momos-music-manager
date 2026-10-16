@@ -573,6 +573,184 @@ async fn track_detail_default_ripeness_matches_api() {
     assert!(api_coll > api_total, "collective ripeness must exceed own");
 }
 
+// ── #267 tester: HTTP-surface gaps (tag-queue, visibility, param>setting) ──
+
+/// Form-POST helper (returns the raw response so callers can assert the status).
+async fn post_form(
+    app: &common::TestApp,
+    path: &str,
+    cookie: &str,
+    form: &[(&str, &str)],
+) -> reqwest::Response {
+    app.client()
+        .post(app.url(path))
+        .header("Cookie", cookie)
+        .form(form)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// The tag-queue detail is a scope-aware engine surface: under `own` bob's
+/// `T_bob2` must not be recommended, under `collective` it must be.
+#[tokio::test]
+async fn tag_queue_detail_honours_tag_scope_param() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let cookie = w.app.session_cookie(alice).await;
+
+    let own = get(&w.app, &format!("/tag-queue/{}?tag_scope=own", w.t_x), &cookie).await;
+    assert!(
+        !own.contains("T_bob2"),
+        "own tag-queue must not recommend bob's tag"
+    );
+
+    let coll = get(
+        &w.app,
+        &format!("/tag-queue/{}?tag_scope=collective", w.t_x),
+        &cookie,
+    )
+    .await;
+    assert!(
+        coll.contains("T_bob2"),
+        "collective tag-queue must recommend bob's tag: {coll}"
+    );
+
+    // Default (no param, no setting) must be `own`, matching the track page.
+    let plain = get(&w.app, &format!("/tag-queue/{}", w.t_x), &cookie).await;
+    assert!(
+        !plain.contains("T_bob2"),
+        "default tag-queue detail must be `own`"
+    );
+}
+
+/// `?tag_scope` must win over a stored `collective` setting on the track page,
+/// and (without a param) the stored setting must apply on the next request.
+#[tokio::test]
+async fn tag_scope_param_beats_stored_setting_on_track_page() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let cookie = w.app.session_cookie(alice).await;
+
+    let resp = post_form(&w.app, "/settings", &cookie, &[("tag_scope", "collective")]).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+
+    // No param -> stored setting (collective) applies without a reload.
+    let stored = get(&w.app, &format!("/track/{}", w.t_x), &cookie).await;
+    assert!(
+        stored.contains("T_bob2"),
+        "stored collective must apply on the next request"
+    );
+
+    // Explicit param overrides the stored setting.
+    let param = get(
+        &w.app,
+        &format!("/track/{}?tag_scope=own", w.t_x),
+        &cookie,
+    )
+    .await;
+    assert!(
+        !param.contains("T_bob2"),
+        "?tag_scope=own must beat the stored collective setting"
+    );
+
+    // Legacy `?scope=mine` still resolves to `own` for the engine.
+    let mine = get(&w.app, &format!("/track/{}?scope=mine", w.t_x), &cookie).await;
+    assert!(!mine.contains("T_bob2"), "?scope=mine keeps own");
+}
+
+/// Tag *visibility* must be unaffected by the scope: `/tags` and `/tag/{id}`
+/// show every owner's tags regardless of `own`/`collective`.
+#[tokio::test]
+async fn tag_visibility_unaffected_by_scope() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let bob = w.app.seed.bob;
+    let cookie = w.app.session_cookie(alice).await;
+
+    // /tags (default own) lists bob's tag — visibility is global.
+    let list_own = get(&w.app, "/tags", &cookie).await;
+    assert!(list_own.contains("T_bob"), "/tags must list every owner's tags");
+
+    // Store collective; visibility must not change.
+    post_form(&w.app, "/settings", &cookie, &[("tag_scope", "collective")]).await;
+    let list_coll = get(&w.app, "/tags", &cookie).await;
+    assert!(list_coll.contains("T_bob"), "/tags visibility must be scope-independent");
+
+    // /tag/{bob} detail shows the tagged track under both scopes.
+    let detail = get(&w.app, &format!("/tag/{}", w.tag_bob), &cookie).await;
+    assert!(
+        detail.contains("Track X"),
+        "/tag/{{id}} must show the track regardless of scope"
+    );
+    assert_eq!(
+        user_settings::get(&w.app.pool, alice, user_settings::TAG_SCOPE)
+            .await
+            .as_deref(),
+        Some("collective"),
+        "setting persisted (sanity)"
+    );
+    let _ = bob;
+}
+
+/// Overlap: the explicit `?tag_scope` param must beat a stored `own` setting.
+#[tokio::test]
+async fn overlap_param_beats_stored_setting() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let bob = w.app.seed.bob;
+    let cookie = w.app.session_cookie(alice).await;
+
+    // Store `own`: the tag filter must exclude bob's `T_bob` by default.
+    post_form(&w.app, "/settings", &cookie, &[("tag_scope", "own")]).await;
+    let plain = get(
+        &w.app,
+        &format!("/overlap?users={alice},{bob}&tag=T_bob"),
+        &cookie,
+    )
+    .await;
+    assert!(!plain.contains("Track X"), "stored own must exclude bob's tag");
+
+    // Param overrides the stored setting.
+    let coll = get(
+        &w.app,
+        &format!("/overlap?users={alice},{bob}&tag=T_bob&tag_scope=collective"),
+        &cookie,
+    )
+    .await;
+    assert!(
+        coll.contains("Track X"),
+        "?tag_scope=collective must beat the stored own setting"
+    );
+}
+
+/// `/digging?seed=` accepts `tag_scope` and reflects the active scope in its
+/// toggle, under both an explicit param and a stored setting.
+#[tokio::test]
+async fn digging_accepts_tag_scope_param_and_setting() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let cookie = w.app.session_cookie(alice).await;
+
+    for s in ["own", "collective", "bogus"] {
+        let html = get(
+            &w.app,
+            &format!("/digging?seed={}&tag_scope={s}", w.t_x),
+            &cookie,
+        )
+        .await;
+        assert!(!html.is_empty(), "digging?tag_scope={s} must render");
+        assert!(html.contains("tag_scope=collective") && html.contains("tag_scope=own"));
+    }
+
+    post_form(&w.app, "/settings", &cookie, &[("tag_scope", "collective")]).await;
+    let stored = get(&w.app, &format!("/digging?seed={}", w.t_x), &cookie).await;
+    assert!(
+        stored.contains("tag_scope=collective"),
+        "digging must surface the stored scope"
+    );
+}
+
 // Keep the imports referenced even before the page tests land.
 #[allow(dead_code)]
 fn _touch() {
