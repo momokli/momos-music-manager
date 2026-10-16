@@ -51,6 +51,8 @@ pub fn router() -> Router<Arc<AppState>> {
         // Live deemix queue + recent service events + worker control.
         .route("/queue", get(get_queue))
         .route("/logs", get(get_logs))
+        // Deezer account tier behind the configured ARL (protected).
+        .route("/account", get(get_account))
         .route("/worker", get(worker_status))
         .route("/worker/pause", post(worker_pause))
         .route("/worker/resume", post(worker_resume))
@@ -449,6 +451,45 @@ async fn get_queue(State(state): State<Arc<AppState>>) -> Response {
 #[derive(Debug, Deserialize)]
 struct LogsQuery {
     limit: Option<usize>,
+}
+
+/// `GET /account` — the Deezer account tier behind the configured ARL.
+///
+/// Protected route. Serves the cached tier when available, otherwise probes
+/// gw-light on demand (bounded timeout) and caches the result.
+async fn get_account(State(state): State<Arc<AppState>>) -> Response {
+    let arl = state.config.deemix_arl.trim();
+    if arl.is_empty() {
+        return error(StatusCode::CONFLICT, "DEEMIX_ARL not configured");
+    }
+
+    if let Some(tier) = state.arl_tier.read().await.clone() {
+        return account_response(&tier);
+    }
+
+    match crate::deezer::fetch_arl_tier(&state.http, &state.config.deezer_gw_base, arl).await {
+        Ok(Some(tier)) => {
+            *state.arl_tier.write().await = Some(tier.clone());
+            account_response(&tier)
+        }
+        Ok(None) => error(StatusCode::BAD_GATEWAY, "Deezer account data unavailable"),
+        Err(e) => error(
+            StatusCode::BAD_GATEWAY,
+            format!("deezer tier lookup failed: {e}"),
+        ),
+    }
+}
+
+fn account_response(tier: &crate::deezer::ArlTier) -> Response {
+    Json(json!({
+        "offer": tier.offer,
+        "lossless": tier.lossless,
+        "high": tier.high,
+        "low": tier.low,
+        "userId": tier.user_id,
+        "canStreamFlac": tier.can_stream_flac(),
+    }))
+    .into_response()
 }
 
 /// `GET /logs?limit=n` — recent service events, newest first.

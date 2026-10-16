@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use http_body_util::BodyExt;
@@ -26,11 +26,32 @@ struct Harness {
 }
 
 async fn harness() -> Harness {
-    harness_with(None).await
+    harness_opts(HarnessOpts {
+        analyzer_url: None,
+        deemix_arl: String::new(),
+        deezer_gw_base: "http://127.0.0.1:1".to_string(),
+    })
+    .await
 }
 
 /// Harness variant that configures the BPM/key analyzer base URL.
 async fn harness_with(analyzer_url: Option<String>) -> Harness {
+    harness_opts(HarnessOpts {
+        analyzer_url,
+        deemix_arl: String::new(),
+        deezer_gw_base: "http://127.0.0.1:1".to_string(),
+    })
+    .await
+}
+
+struct HarnessOpts {
+    analyzer_url: Option<String>,
+    deemix_arl: String,
+    deezer_gw_base: String,
+}
+
+/// Full-control harness builder (ARL + gw-light base for tier tests).
+async fn harness_opts(opts: HarnessOpts) -> Harness {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
 
@@ -38,13 +59,14 @@ async fn harness_with(analyzer_url: Option<String>) -> Harness {
         token: TOKEN.to_string(),
         bind: "127.0.0.1:0".to_string(),
         deemix_url: "http://127.0.0.1:1".to_string(),
-        deemix_arl: String::new(),
+        deemix_arl: opts.deemix_arl,
         deemix_bitrate: 9,
         deemix_download_dir: root.join("incoming"),
         data_dir: root.clone(),
         store_root: root.join("objects"),
         store_max_upload_bytes: music_api::store::DEFAULT_MAX_UPLOAD_BYTES,
         deezer_base: "http://127.0.0.1:1".to_string(),
+        deezer_gw_base: opts.deezer_gw_base,
         ffmpeg: "ffmpeg".to_string(),
         ffprobe: "ffprobe".to_string(),
         ytdlp: "yt-dlp".to_string(),
@@ -57,7 +79,7 @@ async fn harness_with(analyzer_url: Option<String>) -> Harness {
         queue_retry_base_secs: 60,
         queue_retry_max_secs: 1800,
         max_inflight: 5,
-        analyzer_url,
+        analyzer_url: opts.analyzer_url,
         analysis_concurrency: 1,
         analysis_precedence: vec![
             "traktor".to_string(),
@@ -100,6 +122,7 @@ async fn harness_with(analyzer_url: Option<String>) -> Harness {
         analyzing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         analysis_backoff: Default::default(),
         artist_ingesting: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        arl_tier: Arc::new(tokio::sync::RwLock::new(None)),
     });
 
     // Mirror production startup: create the store table + tmp dir.
@@ -3368,4 +3391,169 @@ async fn archive_serves_128_when_only_128_available() {
     assert_eq!(resp.status(), StatusCode::OK);
     let entries = read_zip(&body_bytes(resp).await);
     assert_eq!(entries["AAAA.mp3"], b"AAA-128");
+}
+
+// ── Deezer account tier (`GET /account`, gw-light mock) ──────────────────────
+
+/// A stand-in for Deezer's gw-light endpoint: answers `deezer.getUserData` with
+/// a fixed HiFi payload. No real network — the mock lives on loopback.
+async fn gw_light_mock() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "results": {
+            "OFFER_NAME": "Deezer HiFi",
+            "USER": {
+                "USER_ID": 1234567,
+                "OPTIONS": {
+                    "web_sound_quality": { "lossless": true, "high": true, "low": true }
+                }
+            }
+        }
+    }))
+}
+
+/// Spawn the mock gw-light on an ephemeral port; returns its base URL.
+async fn spawn_gw_light() -> String {
+    let app = Router::new().route("/ajax/gw-light.php", get(gw_light_mock));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}/ajax/gw-light.php")
+}
+
+#[tokio::test]
+async fn account_requires_auth() {
+    let h = harness().await;
+    let (status, _) = send(
+        &h.app,
+        Request::builder()
+            .method("GET")
+            .uri("/account")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn account_reports_hi_tier_from_gw_light() {
+    let gw = spawn_gw_light().await;
+    let h = harness_opts(HarnessOpts {
+        analyzer_url: None,
+        deemix_arl: "fake-arl".to_string(),
+        deezer_gw_base: gw,
+    })
+    .await;
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/account").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["offer"], "Deezer HiFi");
+    assert_eq!(v["lossless"], true);
+    assert_eq!(v["high"], true);
+    assert_eq!(v["low"], true);
+    assert_eq!(v["userId"], 1234567);
+    assert_eq!(v["canStreamFlac"], true);
+
+    // Second call is served from the cache (same body).
+    let (status2, body2) = send(
+        &h.app,
+        authed("GET", "/account").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status2, StatusCode::OK);
+    assert_eq!(body2, body);
+}
+
+#[tokio::test]
+async fn account_without_arl_is_conflict() {
+    let h = harness().await; // deemix_arl empty
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/account").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "DEEMIX_ARL not configured");
+}
+
+/// Mock gw-light answering with a Deezer Free (no lossless) payload.
+async fn gw_light_mock_free() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "results": {
+            "OFFER_NAME": "Deezer Free",
+            "USER": {
+                "USER_ID": 7,
+                "OPTIONS": {
+                    "web_sound_quality": { "lossless": false, "high": false, "low": true }
+                }
+            }
+        }
+    }))
+}
+
+async fn spawn_gw_light_free() -> String {
+    let app = Router::new().route("/ajax/gw-light.php", get(gw_light_mock_free));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}/ajax/gw-light.php")
+}
+
+#[tokio::test]
+async fn account_reports_free_tier_without_flac() {
+    let gw = spawn_gw_light_free().await;
+    let h = harness_opts(HarnessOpts {
+        analyzer_url: None,
+        deemix_arl: "fake-arl".to_string(),
+        deezer_gw_base: gw,
+    })
+    .await;
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/account").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["offer"], "Deezer Free");
+    assert_eq!(v["lossless"], false);
+    assert_eq!(v["high"], false);
+    assert_eq!(v["low"], true);
+    assert_eq!(v["userId"], 7);
+    assert_eq!(v["canStreamFlac"], false);
+}
+
+#[tokio::test]
+async fn account_returns_bad_gateway_when_gw_light_unreachable() {
+    // Dead port: the on-demand gw-light probe fails → 502.
+    let h = harness_opts(HarnessOpts {
+        analyzer_url: None,
+        deemix_arl: "fake-arl".to_string(),
+        deezer_gw_base: "http://127.0.0.1:1".to_string(),
+    })
+    .await;
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/account").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        v["error"].as_str().unwrap().contains("deezer tier lookup failed"),
+        "error was {:?}",
+        v["error"]
+    );
 }
