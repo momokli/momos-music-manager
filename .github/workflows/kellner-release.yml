@@ -147,7 +147,8 @@ jobs:
           "$BIN" --help | grep -q pair
           "$BIN" service install --print --dry-run >/dev/null
 
-      - name: Package
+      - name: Package (unix)
+        if: matrix.archive != 'zip'
         shell: bash
         env:
           VERSION: ${{ startsWith(github.ref, 'refs/tags/kellner-v') && github.ref_name || 'dev' }}
@@ -156,15 +157,23 @@ jobs:
           VER="${VERSION#kellner-v}"
           NAME="kellner-${VER}-${{ matrix.target }}"
           mkdir -p dist
-          if [ "${{ matrix.archive }}" = "zip" ]; then
-            cp "$BIN.exe" "dist/${NAME}.exe" 2>/dev/null || cp "$BIN" "dist/${NAME}.exe"
-            (cd dist && zip -q "${NAME}.zip" "${NAME}.exe")
-          else
-            cp "$BIN" "dist/${NAME}"
-            (cd dist && tar czf "${NAME}.tar.gz" "${NAME}")
-          fi
+          cp "$BIN" "dist/${NAME}"
+          (cd dist && tar czf "${NAME}.tar.gz" "${NAME}")
           ls -l dist/
-          echo "ARTIFACT=${NAME}.${{ matrix.archive }}" >> "$GITHUB_ENV"
+          echo "ARTIFACT=${NAME}.tar.gz" >> "$GITHUB_ENV"
+
+      # `zip` does not exist on the Windows runner; PowerShell's Compress-Archive
+      # does. Windows users get a .zip, everyone else a .tar.gz.
+      - name: Package (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $ver = "${{ startsWith(github.ref, 'refs/tags/kellner-v') && github.ref_name || 'dev' }}" -replace '^kellner-v',''
+          $name = "kellner-$ver-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/kellner.exe" "dist/$name.exe"
+          Compress-Archive -Path "dist/$name.exe" -DestinationPath "dist/$name.zip" -Force
+          Get-ChildItem dist | Format-Table Name, Length
 
       - uses: actions/upload-artifact@v4
         with:
