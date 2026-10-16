@@ -32,6 +32,12 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # Every `run` step is relative to the crate, like the other kellner jobs do
+    # per step (`ci-pr.yml`). `uses` steps are NOT affected, so the artefact path
+    # below is spelled from the repo root on purpose.
+    defaults:
+      run:
+        working-directory: kellner
     strategy:
       fail-fast: false
       matrix:
@@ -100,6 +106,8 @@ jobs:
         run: cargo install cross --locked
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kellner -> target
 
       - name: Compile the tests (so a tag cannot publish broken code)
         if: matrix.smoke == 'run'
@@ -161,8 +169,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: |
-            dist/*
+          path: kellner/dist/*
           if-no-files-found: error
 
   # Attaches everything to the release — tag builds only.
