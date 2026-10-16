@@ -91,6 +91,8 @@ content %}
     <form
         method="get"
         action="/playlist/{{ id }}/download"
+        hx-post="/playlist/{{ id }}/download/check"
+        hx-swap="none"
         style="display: inline-flex; gap: 0.3rem; align-items: center"
     >
         <select name="format" aria-label="Format">
@@ -154,7 +156,10 @@ content %}
             {% for t in tracks %}
             <tr>
                 <td>{{ t.position }}</td>
-                <td>{{ t.artists_html|safe }} - <a href="/track/{{ t.id }}">{{ t.title }}</a></td>
+                <td>
+                    {{ t.artists_html|safe }} -
+                    <a href="/track/{{ t.id }}">{{ t.title }}</a>
+                </td>
             </tr>
             {% endfor %}
         </tbody>

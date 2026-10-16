@@ -26,6 +26,17 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   `metadata-backfill --limit 2000`, and a "BPM/Key holen" button on the music-api
   console. Migration `050` adds `hub_track_features.metadata_checked_at` (7-day TTL).
 
+### Changed
+
+- **Track-page download UX** (#460): the bare `FLAC laden` / `MP3 laden` links are gone.
+  The `Download`-Bucket offers **one button per format the vault says is ready**
+  („FLAC", „MP3 320", „MP3 128") and a **passive hint** while nothing is ready — no dead
+  link, no manual „holen" (the demand covers the library, ADR-068). Every click goes
+  through a new htmx preflight `POST /track/{id}/download/check`: ready → `HX-Redirect`
+  to the file, otherwise an **error toast** instead of the raw 502 page. Same for the
+  playlist/tag ZIP (`POST /playlist|tag/{id}/download/check`), and the `mp3-320` /
+  `mp3-128` tokens now survive format validation and get the right extension/MIME.
+
 ### Fixed
 
 - **Now-Playing zeigt BPM/Key live aus dem Vault** (#466) — das Widget las den
