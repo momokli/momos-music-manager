@@ -20,6 +20,7 @@ playing in Spotify and lets them tag it in place. Keep all conditionals as eleme
 <div class="hub-now hub-now-idle" aria-live="polite">
     <span class="hub-now-wave" aria-hidden="true">♪</span>
     <span class="hub-now-sub hub-muted">Gerade läuft nichts in Spotify.</span>
+    {% include "_partials/now_transport.html" %}
 </div>
 {% else %}
 <div class="hub-now" aria-live="polite">
@@ -55,7 +56,8 @@ playing in Spotify and lets them tag it in place. Keep all conditionals as eleme
         </div>
     </div>
 
-    {% if has_track %} {% if !tag_clouds.is_empty() %}
+    {% include "_partials/now_transport.html" %} {% if has_track %} {% if
+    !tag_clouds.is_empty() %}
     <div class="hub-now-tags">
         {% for c in tag_clouds %}
         <span class="hub-now-cloud"

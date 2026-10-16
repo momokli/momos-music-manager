@@ -60,6 +60,31 @@ pub fn json_str_ascii(s: &str) -> String {
     out
 }
 
+/// The `HX-Trigger` value for a toast **plus** `extra` event names set to `true`,
+/// so one response can show a toast and wake a shell widget at the same time
+/// (e.g. `hub:queue-changed` / `hub:now-changed`).
+pub fn value_with(msg: &str, kind: &str, extra: &[&str]) -> Option<HeaderValue> {
+    let mut body = String::from("{\"toast\":{\"msg\":");
+    body.push_str(&json_str_ascii(msg));
+    body.push_str(",\"kind\":");
+    body.push_str(&json_str_ascii(kind));
+    body.push('}');
+    for e in extra {
+        body.push_str(&format!(",\"{e}\":true"));
+    }
+    body.push('}');
+    HeaderValue::from_str(&body).ok()
+}
+
+/// Attach a toast plus `extra` events to `resp` (no-op when it can't be built).
+pub fn apply_with(resp: Response, msg: &str, kind: &str, extra: &[&str]) -> Response {
+    let mut resp = resp;
+    if let Some(v) = value_with(msg, kind, extra) {
+        resp.headers_mut().insert("HX-Trigger", v);
+    }
+    resp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,5 +108,24 @@ mod tests {
             .expect("ascii value");
         assert!(v.is_ascii());
         assert!(v.contains("\"kind\":\"ok\""), "{v}");
+    }
+
+    #[test]
+    fn with_extra_events_stays_valid_json() {
+        let v = value_with("Grüße — …", "ok", &["hub:queue-changed", "hub:now-changed"])
+            .expect("value")
+            .to_str()
+            .expect("ascii value")
+            .to_string();
+        assert!(v.is_ascii(), "{v}");
+        let parsed: serde_json::Value = serde_json::from_str(&v).expect("valid json");
+        assert_eq!(parsed["toast"]["msg"], "Grüße — …");
+        assert_eq!(parsed["toast"]["kind"], "ok");
+        assert_eq!(parsed["hub:queue-changed"], serde_json::Value::Bool(true));
+        assert_eq!(parsed["hub:now-changed"], serde_json::Value::Bool(true));
+        assert!(
+            value_with("x", "ok", &[]).is_some(),
+            "no extras still works"
+        );
     }
 }

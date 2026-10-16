@@ -21,7 +21,14 @@ fail() { echo "smoke: FAIL: $*" >&2; exit 1; }
 if [[ -z "${KELLNER_BIN:-}" ]]; then
   echo "smoke: building kellner (cargo build --locked)"
   cargo build --locked
-  KELLNER_BIN="$ROOT/target/debug/kellner"
+  # Honour CARGO_TARGET_DIR (e.g. a shared ~/.cargo-target); relative values
+  # resolve against $ROOT, exactly like cargo does.
+  TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+  case "$TARGET_DIR" in
+    /*) : ;;
+    *) TARGET_DIR="$ROOT/$TARGET_DIR" ;;
+  esac
+  KELLNER_BIN="$TARGET_DIR/debug/kellner"
 fi
 [[ -x "$KELLNER_BIN" ]] || fail "binary not executable: $KELLNER_BIN"
 
