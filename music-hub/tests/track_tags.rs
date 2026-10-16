@@ -263,8 +263,8 @@ async fn track_view_shows_cluster_rec_and_scope_toggle() {
 
     let cookie = app.session_cookie(alice).await;
 
-    // Default scope = all: Bob's cluster sibling is visible + cluster reason.
-    let html = app
+    // Default (no params) = `own` (#267): Bob's cluster sibling is out of scope.
+    let default_html = app
         .client()
         .get(app.url(&format!("/track/{}", app.seed.t_all)))
         .header("Cookie", &cookie)
@@ -274,14 +274,33 @@ async fn track_view_shows_cluster_rec_and_scope_toggle() {
         .text()
         .await
         .unwrap();
-    assert!(html.contains("Empfohlen"), "recommendation section missing");
+    assert!(
+        default_html.contains("Empfohlen"),
+        "recommendation section missing"
+    );
+    assert!(
+        !default_html.contains("Düster"),
+        "default scope must be `own` and hide another owner's cluster sibling"
+    );
+    assert!(default_html.contains("Meine Tags"), "scope toggle missing");
+    assert!(default_html.contains("scope=mine"), "mine toggle link missing");
+
+    // Explicit legacy `?scope=all` widens to Bob's cluster sibling + reason.
+    let html = app
+        .client()
+        .get(app.url(&format!("/track/{}?scope=all", app.seed.t_all)))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
     assert!(
         html.contains("gleicher Cluster"),
         "cluster reason label missing"
     );
     assert!(html.contains("Düster"), "cluster sibling not shown");
-    assert!(html.contains("Meine Tags"), "scope toggle missing");
-    assert!(html.contains("scope=mine"), "mine toggle link missing");
 
     // Explicit mine: Bob's sibling disappears.
     let mine_html = app

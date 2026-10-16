@@ -498,6 +498,81 @@ async fn setting_takes_effect_without_reload() {
     );
 }
 
+// ── #267 rework: default scope is `own` on detail surfaces ──────────────────
+
+/// Extract the numeric `Ripeness` total rendered on the track page.
+fn page_ripeness_total(html: &str) -> i64 {
+    let idx = html.find("Ripeness").expect("ripeness block present");
+    let rest = &html[idx..];
+    let s = rest.find("<strong>").expect("ripeness strong") + "<strong>".len();
+    let e = rest[s..].find("</strong>").expect("ripeness close") + s;
+    rest[s..e].trim().parse().expect("ripeness is numeric")
+}
+
+/// Default ripeness total from `GET /api/hub/tracks/{id}/ripeness`.
+async fn api_ripeness_total(app: &common::TestApp, track: i64, cookie: &str, q: &str) -> f64 {
+    let body: serde_json::Value = app
+        .client()
+        .get(app.url(&format!("/api/hub/tracks/{track}/ripeness{q}")))
+        .header("Cookie", cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body["data"]["total"].as_f64().expect("ripeness total")
+}
+
+#[tokio::test]
+async fn track_detail_default_scope_is_own() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let cookie = w.app.session_cookie(alice).await;
+
+    // No params, no stored setting -> `own`: bob's tag must not be recommended.
+    let plain = get(&w.app, &format!("/track/{}", w.t_x), &cookie).await;
+    assert!(
+        !plain.contains("T_bob2"),
+        "default track detail must be `own` and hide bob's recommendation"
+    );
+
+    // The explicit legacy `?scope=all` keeps the old "all owners" behaviour.
+    let all = get(&w.app, &format!("/track/{}?scope=all", w.t_x), &cookie).await;
+    assert!(
+        all.contains("T_bob2"),
+        "explicit ?scope=all must still recommend across owners"
+    );
+}
+
+#[tokio::test]
+async fn track_detail_default_ripeness_matches_api() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let cookie = w.app.session_cookie(alice).await;
+
+    // Page default and API default must both resolve to `own` and agree.
+    let page = get(&w.app, &format!("/track/{}", w.t_x), &cookie).await;
+    let page_total = page_ripeness_total(&page);
+    let api_total = api_ripeness_total(&w.app, w.t_x, &cookie, "").await;
+    assert_eq!(
+        page_total,
+        api_total.round() as i64,
+        "default page and API ripeness must agree (both `own`)"
+    );
+
+    // Both surfaces follow the collective scope when explicitly requested.
+    let page_coll = get(
+        &w.app,
+        &format!("/track/{}?tag_scope=collective", w.t_x),
+        &cookie,
+    )
+    .await;
+    let api_coll = api_ripeness_total(&w.app, w.t_x, &cookie, "?tag_scope=collective").await;
+    assert_eq!(page_ripeness_total(&page_coll), api_coll.round() as i64);
+    assert!(api_coll > api_total, "collective ripeness must exceed own");
+}
+
 // Keep the imports referenced even before the page tests land.
 #[allow(dead_code)]
 fn _touch() {

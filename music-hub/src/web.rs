@@ -1260,6 +1260,7 @@ async fn track_page(
         id,
         flash.msg.unwrap_or_default(),
         crate::recommend::RecScope::parse(flash.scope.as_deref()),
+        flash.scope.is_some(),
         flash.tag_scope.as_deref(),
     )
     .await
@@ -1295,6 +1296,7 @@ async fn build_track_page(
     id: i64,
     flash: String,
     scope: crate::recommend::RecScope,
+    scope_explicit: bool,
     tag_scope_raw: Option<&str>,
 ) -> Option<TrackPage> {
     let row = sqlx::query(
@@ -1642,7 +1644,14 @@ async fn build_track_page(
 
     let e = crate::settings::engine(&st.pool).await;
     let requested = crate::scope::requested(&st.pool, nav.id, tag_scope_raw).await;
-    let owners = crate::scope::detail_owners(&st.pool, nav.id, scope.is_mine(), requested).await;
+    let owners = crate::scope::detail_owners(
+        &st.pool,
+        nav.id,
+        scope.is_mine(),
+        scope_explicit,
+        requested,
+    )
+    .await;
     let rip = crate::scoring::ripeness(&st.pool, id, &e, &owners).await;
     let recommended: Vec<RecTag> =
         crate::recommend::recommend_tags_scoped(&st.pool, id, 12, &owners)
@@ -2369,6 +2378,7 @@ async fn now_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
                     id,
                     "Jetzt läuft in Spotify".to_string(),
                     crate::recommend::RecScope::All,
+                    false,
                     None,
                 )
                 .await

@@ -138,20 +138,13 @@ pub async fn recommend_tags_scoped(
     owners: &[i64],
 ) -> Vec<Recommendation> {
     let e = crate::settings::engine(pool).await;
-    // Owner ids are `i64` (never user text) so inlining the list is
-    // injection-safe and keeps the single-CTE query readable.
-    let owner_filter = if owners.is_empty() {
-        String::new()
-    } else {
-        let list = owners
-            .iter()
-            .map(|o| o.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        format!("AND t.owner_user_id IN ({list})")
-    };
-    let sql = format!(
-        "WITH s AS (SELECT ?1 AS id),
+    // Owner ids are bound as parameters (consistent with similarity/scoring/pages).
+    let mut qb = sqlx::QueryBuilder::new(
+        "WITH s AS (SELECT ",
+    );
+    qb.push_bind(track_id);
+    qb.push(
+        " AS id),
               seed_tags AS (SELECT tag_id FROM hub_track_resolved_tags WHERE track_id = (SELECT id FROM s)),
               cand AS (
                  SELECT rt2.tag_id AS tag_id, 'tag' AS kind
@@ -193,12 +186,22 @@ pub async fn recommend_tags_scoped(
            JOIN hub_users u ON u.id = t.owner_user_id
           WHERE x.tag_id NOT IN (SELECT tag_id FROM seed_tags)
             AND x.tag_id NOT IN (
-                 SELECT id FROM hub_tags WHERE type IN ('SETLIST', 'RUMPELKISTE'))
-            {owner_filter}
-          GROUP BY x.tag_id, t.name, u.slug, x.kind"
+                 SELECT id FROM hub_tags WHERE type IN ('SETLIST', 'RUMPELKISTE'))",
     );
-    let query = sqlx::query_as::<_, (i64, String, String, String, i64)>(&sql).bind(track_id);
-    let rows = query.fetch_all(pool).await.unwrap_or_default();
+    if !owners.is_empty() {
+        qb.push(" AND t.owner_user_id IN (");
+        let mut sep = qb.separated(", ");
+        for o in owners {
+            sep.push_bind(*o);
+        }
+        qb.push(")");
+    }
+    qb.push(" GROUP BY x.tag_id, t.name, u.slug, x.kind");
+    let rows = qb
+        .build_query_as::<(i64, String, String, String, i64)>()
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
 
     let mut map: HashMap<i64, Recommendation> = HashMap::new();
     for (tag_id, name, owner, kind, cnt) in rows {

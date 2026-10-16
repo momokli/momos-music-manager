@@ -136,12 +136,18 @@ pub async fn requested(
 /// Owners for the track/queue detail recommendation + ripeness path.
 ///
 /// `rec_mine` is the legacy `?scope=mine` toggle (always the viewer only).
-/// `requested` is the engine scope from [`requested`]; `None` means neither a
-/// param nor a setting exists -> legacy "all owners" (`&[]` = no filter).
+/// `legacy_scope_explicit` is the raw presence of the `?scope` query param:
+/// when it was set explicitly to the legacy "all" value, the old "no owner
+/// filter" behaviour (`&[]` = all owners) is preserved for backwards
+/// compatibility. `requested` is the engine scope from [`requested`].
+///
+/// Default (no `?scope`, no `?tag_scope` and no stored setting) is **`own`**
+/// (#267) — consistent with [`effective_owners`] and the UI toggle.
 pub async fn detail_owners(
     pool: &SqlitePool,
     viewer_id: i64,
     rec_mine: bool,
+    legacy_scope_explicit: bool,
     requested: Option<TagScope>,
 ) -> Vec<i64> {
     if rec_mine {
@@ -152,7 +158,10 @@ pub async fn detail_owners(
         Some(TagScope::Collective) => {
             visible_owner_ids(pool, viewer_id, TagScope::Collective).await
         }
-        None => Vec::new(),
+        // Explicit legacy `?scope=all` keeps the old "all owners" behaviour.
+        None if legacy_scope_explicit => Vec::new(),
+        // Default: own (issue #267).
+        None => vec![viewer_id],
     }
 }
 
