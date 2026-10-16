@@ -58,7 +58,7 @@ pub fn router(state: AppState) -> Router {
         .route("/digging/enrich", post(digging_enrich))
         .route("/admin", get(admin_page).post(admin_save))
         .route("/api/hub/status/panel", get(status_panel))
-        .route("/settings", get(settings_page))
+        .route("/settings", get(settings_page).post(settings_save))
         .route("/import", get(import_page).post(import_submit))
         .route("/import/traktor", post(import_traktor_submit))
         .route("/user/{slug}", get(user_page))
@@ -6004,17 +6004,70 @@ async fn collective_page(
 struct SettingsPage {
     nav: crate::ui::Nav,
     flash: String,
+    /// Current engine tag scope (`own` | `collective`) for the select (#267).
+    tag_scope: String,
+    tag_scope_own_selected: bool,
+    tag_scope_collective_selected: bool,
 }
 
-async fn settings_page(State(st): State<AppState>, headers: HeaderMap) -> Response {
+#[derive(Deserialize, Default)]
+struct SettingsQuery {
+    msg: Option<String>,
+}
+
+async fn settings_page(
+    State(st): State<AppState>,
+    Query(q): Query<SettingsQuery>,
+    headers: HeaderMap,
+) -> Response {
     let Some(nav) = crate::ui::nav(&st, &headers, "settings").await else {
         return Redirect::to("/login").into_response();
     };
 
+    let raw = crate::user_settings::get(&st.pool, nav.id, crate::user_settings::TAG_SCOPE).await;
+    let tag_scope = crate::scope::TagScope::from_setting(raw.as_deref());
+
     render(&SettingsPage {
         nav,
-        flash: String::new(),
+        flash: q.msg.unwrap_or_default(),
+        tag_scope: tag_scope.as_str().to_string(),
+        tag_scope_own_selected: tag_scope == crate::scope::TagScope::Own,
+        tag_scope_collective_selected: tag_scope == crate::scope::TagScope::Collective,
     })
+}
+
+#[derive(Deserialize)]
+struct SettingsForm {
+    #[serde(default)]
+    tag_scope: Option<String>,
+}
+
+/// `POST /settings` — validate + persist the per-user engine settings (#267).
+async fn settings_save(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Form(f): Form<SettingsForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "settings").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(raw) = f.tag_scope else {
+        return Redirect::to("/settings?msg=Keine+Auswahl").into_response();
+    };
+    match crate::user_settings::set_validated(
+        &st.pool,
+        nav.id,
+        crate::user_settings::TAG_SCOPE,
+        &raw,
+    )
+    .await
+    {
+        Ok(_) => Redirect::to("/settings?msg=Gespeichert").into_response(),
+        Err(e) => {
+            let enc = urlencoding::encode(&format!("Fehler: {e}")).to_string();
+            Redirect::to(&format!("/settings?msg={enc}")).into_response()
+        }
+    }
 }
 
 // ── manual import (YouTube / SoundCloud) ─────────────────────────────────────

@@ -398,6 +398,106 @@ async fn track_detail_scope_and_rec_scope_coexist() {
     assert!(html.contains("tag_scope=collective"));
 }
 
+// ── US6: /settings GET/POST ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn settings_get_defaults_to_own_and_post_persists() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let cookie = w.app.session_cookie(alice).await;
+
+    // No setting yet -> `own` preselected.
+    let before = get(&w.app, "/settings", &cookie).await;
+    assert!(before.contains("<strong>own</strong>"), "default must be own");
+
+    let resp = w
+        .app
+        .client()
+        .post(w.app.url("/settings"))
+        .header("Cookie", &cookie)
+        .form(&[("tag_scope", "collective")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    assert!(resp.headers()["location"].to_str().unwrap().starts_with("/settings"));
+
+    let after = get(&w.app, "/settings", &cookie).await;
+    assert!(
+        after.contains("<strong>collective</strong>"),
+        "stored value must be preselected"
+    );
+    assert_eq!(
+        user_settings::get(&w.app.pool, alice, user_settings::TAG_SCOPE)
+            .await
+            .as_deref(),
+        Some("collective")
+    );
+}
+
+#[tokio::test]
+async fn settings_post_validates_and_rejects_bogus() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let cookie = w.app.session_cookie(alice).await;
+
+    let resp = w
+        .app
+        .client()
+        .post(w.app.url("/settings"))
+        .header("Cookie", &cookie)
+        .form(&[("tag_scope", "bogus")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    assert_eq!(
+        user_settings::get(&w.app.pool, alice, user_settings::TAG_SCOPE).await,
+        None,
+        "invalid value must not be stored"
+    );
+}
+
+#[tokio::test]
+async fn setting_takes_effect_without_reload() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let bob = w.app.seed.bob;
+    let cookie = w.app.session_cookie(alice).await;
+
+    // Before saving, the default (no setting) keeps bob's tag out of the tag
+    // filter under the `own` engine scope for overlap.
+    let before = get(
+        &w.app,
+        &format!("/overlap?users={alice},{bob}&tag=T_bob&tag_scope=own"),
+        &cookie,
+    )
+    .await;
+    assert!(!before.contains("Track X"));
+
+    // Save `collective`, then the *same* request without any query param picks it
+    // up immediately (fresh read per request).
+    w.app
+        .client()
+        .post(w.app.url("/settings"))
+        .header("Cookie", &cookie)
+        .form(&[("tag_scope", "collective")])
+        .send()
+        .await
+        .unwrap();
+
+    let after = get(
+        &w.app,
+        &format!("/overlap?users={alice},{bob}&tag=T_bob"),
+        &cookie,
+    )
+    .await;
+    assert!(
+        after.contains("Track X"),
+        "stored collective scope must apply without a reload"
+    );
+}
+
 // Keep the imports referenced even before the page tests land.
 #[allow(dead_code)]
 fn _touch() {
