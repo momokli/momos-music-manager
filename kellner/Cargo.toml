@@ -40,3 +40,15 @@ hex = "0.4"
 serde_json = "1"
 # `net`+`io-util` are needed by the offline mock-hub integration tests (tests/pair_flow.rs).
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+
+# The shipped binaries are downloaded over the network, not built by the user, so
+# build time matters less than size — the release artefacts are what people fetch
+# from the hub (see plans/proposed/kellner-downloads.md). Measured effect is in the
+# release PR: lto + strip + one codegen unit on top of a tuned opt-level.
+# `opt-level = "s"` is the one trade-off here: kellner hashes the whole library
+# during `backup`, so if that ever feels slow, dropping this line is the first knob.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+opt-level = "s"

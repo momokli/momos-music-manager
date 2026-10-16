@@ -1,0 +1,195 @@
+name: kellner release
+
+# Publishes the kellner binary per OS/arch so the hub can offer downloads
+# (plans/proposed/kellner-downloads.md).
+#
+# * `push` on `kellner-v*` is the real trigger: build everything, then attach the
+#   artefacts + SHA256SUMS to the release.
+# * `pull_request` (path-filtered) is how the matrix is *proven before* a release
+#   is cut — the release job is skipped there.
+# * `workflow_dispatch` allows a manual full run (once this file is on the default
+#   branch; a dispatch on a non-default branch is a GitHub limitation).
+#
+# Tray follows the platform: `tray-icon` is native on macOS/Windows but pulls
+# GTK/appindicator on Linux, so Linux artefacts stay headless. See the plan.
+
+on:
+  push:
+    tags: ["kellner-v*"]
+  pull_request:
+    paths:
+      - "kellner/**"
+      - ".github/workflows/kellner-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64-tray
+            os: macos-14
+            target: aarch64-apple-darwin
+            features: tray
+            archive: tar.gz
+            smoke: run
+          - name: macos-x86_64-tray
+            os: macos-14
+            target: x86_64-apple-darwin
+            features: tray
+            archive: tar.gz
+            # Cross-built for the other Mac arch: whether the runner can *execute*
+            # it (Rosetta) is not guaranteed, so it is not gated on that.
+            smoke: skip
+          - name: windows-x86_64-tray
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: tray
+            archive: zip
+            smoke: run
+          - name: linux-x86_64-gnu
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            features: ""
+            archive: tar.gz
+            smoke: run
+          - name: linux-aarch64-gnu
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            features: ""
+            archive: tar.gz
+            smoke: run
+          - name: linux-x86_64-musl
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            features: ""
+            archive: tar.gz
+            smoke: run
+          - name: linux-aarch64-musl
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            features: ""
+            archive: tar.gz
+            cross: true
+            # `cross` runs the build in a container; the foreign binary cannot be
+            # executed on the host, so this leg is build-only.
+            smoke: skip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl toolchain (native x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (foreign-arch builds)
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compile the tests (so a tag cannot publish broken code)
+        if: matrix.smoke == 'run'
+        run: cargo test --locked --target ${{ matrix.target }} --no-run
+        shell: bash
+
+      # `KELLNER_VERSION` from the tag is what build.rs embeds (docs/stack-versioning.md).
+      - name: Build
+        shell: bash
+        env:
+          KELLNER_VERSION: ${{ startsWith(github.ref, 'refs/tags/kellner-v') && github.ref_name || '' }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ startsWith(github.ref, 'refs/tags/kellner-v') && github.ref_name || 'dev' }}"
+          VERSION="${VERSION#kellner-v}"
+          ARGS=(build --release --locked --target "${{ matrix.target }}")
+          if [ -n "${{ matrix.features }}" ]; then
+            ARGS+=(--features "${{ matrix.features }}")
+          fi
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cargo install --list >/dev/null # noop, keeps shellcheck quiet
+            KELLNER_VERSION="$VERSION" cross build --release --locked --target "${{ matrix.target }}"
+            BIN="target/${{ matrix.target }}/release/kellner"
+          else
+            KELLNER_VERSION="$VERSION" cargo "${ARGS[@]}"
+            BIN="target/${{ matrix.target }}/release/kellner"
+          fi
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+          ls -l "$BIN" | awk '{print "size:", $5, "bytes"}'
+
+      - name: Smoke test (run the binary)
+        if: matrix.smoke == 'run'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BIN" --version
+          "$BIN" --help | grep -q pair
+          "$BIN" service install --print --dry-run >/dev/null
+
+      - name: Package
+        shell: bash
+        env:
+          VERSION: ${{ startsWith(github.ref, 'refs/tags/kellner-v') && github.ref_name || 'dev' }}
+        run: |
+          set -euo pipefail
+          VER="${VERSION#kellner-v}"
+          NAME="kellner-${VER}-${{ matrix.target }}"
+          mkdir -p dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            cp "$BIN.exe" "dist/${NAME}.exe" 2>/dev/null || cp "$BIN" "dist/${NAME}.exe"
+            (cd dist && zip -q "${NAME}.zip" "${NAME}.exe")
+          else
+            cp "$BIN" "dist/${NAME}"
+            (cd dist && tar czf "${NAME}.tar.gz" "${NAME}")
+          fi
+          ls -l dist/
+          echo "ARTIFACT=${NAME}.${{ matrix.archive }}" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/*
+          if-no-files-found: error
+
+  # Attaches everything to the release — tag builds only.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/kellner-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          ls -l dist
+          (cd dist && sha256sum ./* > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+            --title "$TAG" --notes "kellner $TAG (see kellner/CHANGELOG.md)"
+          gh release upload "$TAG" dist/* --clobber
