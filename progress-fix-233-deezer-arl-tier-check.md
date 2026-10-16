@@ -34,10 +34,16 @@ Root-Cause (aus Issue-Kommentaren, 2026-10-10):
       GET /account (protected), Bitrate-Validierung.
 - [x] setup (feature-dev-setup)
 - [x] develop (feature-dev-developer)
-- [ ] verify (feature-dev-verifier)
-- [x] test (feature-dev-tester)
-- [x] pr (feature-dev-developer)
-- [ ] review (feature-dev-reviewer)
+- [x] verify (feature-dev-verifier) — PASS
+- [x] test (feature-dev-tester) — PASS (122 passed, 0 failed)
+- [x] pr (feature-dev-developer) — PR #473 gegen main, MERGEABLE
+- [x] review (feature-dev-reviewer) — APPROVE
+
+## ERGEBNIS
+- PR: https://github.com/momokli/momos-music-manager/pull/473 (`Closes #233`, Base main)
+- HEAD: 1a20c11 · Branch fix/233-deezer-arl-tier-check
+- Tests: 122 passed / 0 failed
+- Kein Boot-Pfad-Block, kein body-Logging, /account protected.
 
 ## Spec (aus Plan, für Developer)
 
