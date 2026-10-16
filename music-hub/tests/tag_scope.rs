@@ -6,8 +6,6 @@
 
 mod common;
 
-use std::collections::HashSet;
-
 use music_hub::scope::{self, TagScope};
 use music_hub::settings;
 use music_hub::similarity;
@@ -665,7 +663,6 @@ async fn tag_scope_param_beats_stored_setting_on_track_page() {
 async fn tag_visibility_unaffected_by_scope() {
     let w = seed_world().await;
     let alice = w.app.seed.alice;
-    let bob = w.app.seed.bob;
     let cookie = w.app.session_cookie(alice).await;
 
     // /tags (default own) lists bob's tag — visibility is global.
@@ -690,7 +687,6 @@ async fn tag_visibility_unaffected_by_scope() {
         Some("collective"),
         "setting persisted (sanity)"
     );
-    let _ = bob;
 }
 
 /// Overlap: the explicit `?tag_scope` param must beat a stored `own` setting.
@@ -724,6 +720,54 @@ async fn overlap_param_beats_stored_setting() {
     );
 }
 
+/// Extract the `href` of the "Eigene Tags" (own) toggle on `/overlap`,
+/// unescaping the HTML entity the template emits for `&`.
+fn own_toggle_href(html: &str) -> String {
+    let idx = html.find("Eigene Tags").expect("own toggle present");
+    let before = &html[..idx];
+    let start = before.rfind("href=\"").expect("href before own label") + "href=\"".len();
+    let end = before[start..].find('"').expect("href end") + start;
+    before[start..end]
+        .replace("&#38;", "&")
+        .replace("&amp;", "&")
+}
+
+/// Regression (#267): with the stored setting `collective`, the `/overlap`
+/// "Eigene Tags" toggle must carry an explicit `tag_scope=own`, otherwise the
+/// click sends no param and `scope::effective` falls back to `collective` — the
+/// toggle would be dead.
+#[tokio::test]
+async fn overlap_own_toggle_carries_explicit_param_under_collective_setting() {
+    let w = seed_world().await;
+    let alice = w.app.seed.alice;
+    let bob = w.app.seed.bob;
+    let cookie = w.app.session_cookie(alice).await;
+
+    // Store `collective` so an own-URL without an explicit param would resolve
+    // back to `collective` on click.
+    post_form(&w.app, "/settings", &cookie, &[("tag_scope", "collective")]).await;
+
+    let html = get(
+        &w.app,
+        &format!("/overlap?users={alice},{bob}&tag=T_bob"),
+        &cookie,
+    )
+    .await;
+
+    let own_url = own_toggle_href(&html);
+    assert!(
+        own_url.contains("tag_scope=own"),
+        "own toggle must carry an explicit tag_scope=own: {own_url}"
+    );
+
+    // And clicking it must actually switch to `own` (bob's `T_bob` filtered out).
+    let own = get(&w.app, &own_url, &cookie).await;
+    assert!(
+        !own.contains("Track X"),
+        "own toggle URL must exclude bob's tag: {own}"
+    );
+}
+
 /// `/digging?seed=` accepts `tag_scope` and reflects the active scope in its
 /// toggle, under both an explicit param and a stored setting.
 #[tokio::test]
@@ -749,17 +793,4 @@ async fn digging_accepts_tag_scope_param_and_setting() {
         stored.contains("tag_scope=collective"),
         "digging must surface the stored scope"
     );
-}
-
-// Keep the imports referenced even before the page tests land.
-#[allow(dead_code)]
-fn _touch() {
-    let _ = settings::TAG_SCOPE;
-    let _: HashSet<i64> = HashSet::new();
-    let _ = w_field();
-}
-
-#[allow(dead_code)]
-fn w_field() -> i64 {
-    0
 }

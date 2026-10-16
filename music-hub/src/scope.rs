@@ -14,16 +14,30 @@
 //! `hub_tags.owner_user_id`. Groups (`hub_tag_groups.collective_id`) assign
 //! groups — and via `hub_group_tags` their tags — to a collective, but a tag
 //! need not belong to any group, so the owner mapping is the authoritative
-//! scope definition (see `plan-issue-267.md` §2).
+//! scope definition (see issue #267).
 //!
 //! Resolution order ([`effective`]): `?tag_scope=` query param > live user
 //! setting ([`crate::user_settings`]) > default `own`. The setting is read
 //! fresh on every request, so toggling it works without a reload and without
 //! any session/cache invalidation.
 
-use sqlx::SqlitePool;
+use sqlx::{QueryBuilder, SqlitePool};
 
 use crate::user_settings;
+
+/// Append `AND t.owner_user_id IN (…)` to a query builder when `owners` is
+/// non-empty. An empty slice means **no owner filter** (legacy behaviour).
+pub(crate) fn owner_clause(qb: &mut QueryBuilder<'_, sqlx::Sqlite>, owners: &[i64]) {
+    if owners.is_empty() {
+        return;
+    }
+    qb.push(" AND t.owner_user_id IN (");
+    let mut sep = qb.separated(", ");
+    for o in owners {
+        sep.push_bind(*o);
+    }
+    qb.push(")");
+}
 
 /// Which owners' tags the engine evaluates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

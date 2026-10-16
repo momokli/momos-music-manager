@@ -9,23 +9,10 @@
 
 use sqlx::{QueryBuilder, Row, SqlitePool};
 
+use crate::scope::owner_clause;
 use crate::settings::Engine;
 
 use std::collections::HashMap;
-
-/// Append `AND t.owner_user_id IN (…)` when `owners` is non-empty; `&[]` means
-/// no owner filter (legacy behaviour).
-fn owner_clause(qb: &mut QueryBuilder<'_, sqlx::Sqlite>, owners: &[i64]) {
-    if owners.is_empty() {
-        return;
-    }
-    qb.push(" AND t.owner_user_id IN (");
-    let mut sep = qb.separated(", ");
-    for o in owners {
-        sep.push_bind(*o);
-    }
-    qb.push(")");
-}
 
 /// Points contributed by a group holding `k` tags. Position `i` (0-based) uses
 /// `points[i]`; beyond the vector the last value repeats.

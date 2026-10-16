@@ -12,21 +12,8 @@ use std::collections::{HashMap, HashSet};
 
 use sqlx::{QueryBuilder, Row, SqlitePool};
 
+use crate::scope::owner_clause;
 use crate::settings::Engine;
-
-/// Append `AND t.owner_user_id IN (…)` to a query builder when `owners` is
-/// non-empty. An empty slice means **no owner filter** (legacy behaviour).
-fn owner_clause(qb: &mut QueryBuilder<'_, sqlx::Sqlite>, owners: &[i64]) {
-    if owners.is_empty() {
-        return;
-    }
-    qb.push(" AND t.owner_user_id IN (");
-    let mut sep = qb.separated(", ");
-    for o in owners {
-        sep.push_bind(*o);
-    }
-    qb.push(")");
-}
 
 /// Playlist ids that feed at least one `RUMPELKISTE` tag.
 pub async fn rumpelkiste_playlist_ids(pool: &SqlitePool) -> HashSet<i64> {

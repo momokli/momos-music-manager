@@ -1903,7 +1903,7 @@ impl OverlapFilters {
         if !self.tag.is_empty() {
             url.push_str(&format!("&tag={}", urlencoding::encode(&self.tag)));
         }
-        if self.tag_scope != "own" && !self.tag_scope.is_empty() {
+        if !self.tag_scope.is_empty() {
             url.push_str(&format!("&tag_scope={}", urlencoding::encode(&self.tag_scope)));
         }
         url
