@@ -36,7 +36,7 @@ Root-Cause (aus Issue-Kommentaren, 2026-10-10):
 - [x] develop (feature-dev-developer)
 - [ ] verify (feature-dev-verifier)
 - [x] test (feature-dev-tester)
-- [ ] pr (feature-dev-developer)
+- [x] pr (feature-dev-developer)
 - [ ] review (feature-dev-reviewer)
 
 ## Spec (aus Plan, für Developer)
@@ -127,3 +127,15 @@ Root-Cause (aus Issue-Kommentaren, 2026-10-10):
   (`fix(hub): deliver toasts with non-ASCII text (#469) (#470)`).
 - Baseline `cargo check --manifest-path music-api/Cargo.toml` → **exit 0**, grün
   (`Finished dev profile ... in 16.61s`). Kein Blocker, kein Issue nötig.
+
+### Stage pr (2026-10-16, feature-dev-developer)
+- `clanker-git push -u origin fix/233-deezer-arl-tier-check` → Branch up-to-date auf origin.
+- PR **#473** erstellt: https://github.com/momokli/momos-music-manager/pull/473
+  - Base `main` ← `fix/233-deezer-arl-tier-check`, Titel `feat(music-api): Deezer-ARL-Tier
+    erkennen + GET /account (#233)`.
+  - Body: Root-Cause (Deezer Free ARL → kein FLAC), Änderungen (deezer.rs/config.rs/lib.rs/
+    main.rs/api.rs/tests/README), Test-Beleg (122 passed), Boot-Pfad-Hinweis (nicht blockierend).
+  - Closing-Keyword **`Closes #233`** im Body (kein „Refs"). Keine Secrets/ARL im Body.
+  - Mergeable: MERGEABLE. HEAD-Commit: dc0e023 (3 Commits: 93c69f4, 12f8842, dc0e023).
+  - Checks: Conventional-Commit-Titel pass, Issue-Referenz pass, MMM freeze guard pass,
+    cargo fmt pass; Build+Test (cargo) + clippy (informativ) pending → CI läuft.
