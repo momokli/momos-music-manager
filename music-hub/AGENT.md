@@ -301,8 +301,23 @@ sources·base_sources + shared·shared_factor + candidate·candidate_factor`.
 
 ## 8. Testing
 
+### Testing
+
 ```bash
-cd music-hub && cargo test          # ~145 tests (lib + integration). Must stay green.
+cd music-hub && cargo test          # ~150 tests (lib + integration). Must stay green.
+```
+
+⚠️ **`CARGO_TARGET_DIR` is shared** (`~/.zshrc` exports `$HOME/.cargo-target`), and other
+checkouts/worktrees of this repo build into it too. Cargo then reuses/replays the wrong
+artifacts — symptoms seen: `Dirty … the file src/toast.rs is missing`, a warning for a
+`pages.rs` line that does not exist here, or a `cargo test` linking a stale lib missing
+new symbols. A repo file cannot override it (`CARGO_TARGET_DIR` env > `build.target-dir`).
+When results look impossible, re-verify with an isolated dir:
+
+```bash
+CARGO_TARGET_DIR=/tmp/mh-verify cargo test
+# or, cheaper, drop just this crate's stale fingerprints:
+cargo clean -p music-hub && cargo test
 ```
 
 - Integration harness: `tests/common/mod.rs` → `common::spawn()` boots the real router on a

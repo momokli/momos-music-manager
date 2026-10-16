@@ -994,6 +994,104 @@
         font-size: 0.78rem;
         margin: 0;
       }
+      /* ── spotify queue ("Als Nächstes") ──────────────────────────────── */
+      #hub-queue-host:empty {
+        display: none;
+      }
+      .hub-queue {
+        display: flex;
+        align-items: baseline;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        padding: 0.3rem 0.6rem;
+        margin: 0 0 0.6rem;
+        border: 1px solid var(--pico-muted-border-color);
+        border-left: 3px solid var(--pico-muted-border-color);
+        border-radius: 0.4rem;
+        background: var(--pico-card-background-color, var(--pico-background-color));
+        font-size: 0.78rem;
+        line-height: 1.25;
+      }
+      .hub-queue-off,
+      .hub-queue-err {
+        color: var(--pico-muted-color);
+      }
+      .hub-queue-err {
+        border-left-color: var(--pico-del-color, #c0392b);
+      }
+      .hub-queue-h {
+        font-weight: 600;
+        font-size: 0.68rem;
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+        color: var(--pico-muted-color);
+        flex: 0 0 auto;
+      }
+      .hub-queue-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.3rem 0.8rem;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        min-width: 0;
+      }
+      .hub-queue-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        min-width: 0;
+      }
+      .hub-queue-art {
+        width: 28px;
+        height: 28px;
+        border-radius: 0.25rem;
+        object-fit: cover;
+        flex: 0 0 auto;
+      }
+      .hub-queue-title {
+        font-weight: 600;
+        max-width: 16rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .hub-queue-artists {
+        color: var(--pico-muted-color);
+        max-width: 12rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .hub-queue-dur {
+        font-variant-numeric: tabular-nums;
+      }
+      /* ── player transport controls ───────────────────────────────────── */
+      .hub-xport {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.15rem;
+        flex: 0 0 auto;
+      }
+      .hub-xport-btn {
+        padding: 0.1rem 0.35rem;
+        margin: 0;
+        font-size: 0.85rem;
+        line-height: 1.2;
+        background: none;
+        border: 1px solid var(--pico-muted-border-color);
+        border-radius: 0.25rem;
+        color: var(--pico-color);
+        cursor: pointer;
+      }
+      .hub-xport-btn:hover {
+        border-color: var(--pico-primary);
+        color: var(--pico-primary);
+      }
+      @media (max-width: 48rem) {
+        .hub-queue-title { max-width: 9rem; }
+        .hub-queue-artists { max-width: 8rem; }
+      }
       @media (max-width: 48rem) {
         .hub-now-title { max-width: 10rem; }
         .hub-now-tags { max-width: 100%; }
@@ -1286,9 +1384,16 @@
       <div
         id="hub-now-host"
         hx-get="/now-playing"
-        hx-trigger="load, every 20s"
+        hx-trigger="load, every 20s, hub:now-changed from:body"
         hx-swap="innerHTML"
         aria-label="Now Playing"
+      ></div>
+      <div
+        id="hub-queue-host"
+        hx-get="/now-playing/queue"
+        hx-trigger="load, every 30s, hub:queue-changed from:body"
+        hx-swap="innerHTML"
+        aria-label="Spotify Queue"
       ></div>
       {% block flash %} {% if flash != "" %}
       <div id="hub-flash-init" data-msg="{{ flash }}" hidden></div>

@@ -79,6 +79,15 @@
                 href="/backpacks/{{ c.id }}/export?format=traktor"
                 >Traktor</a
             >
+            <button
+                type="button"
+                hx-post="/now-playing/play/backpack/{{ c.id }}"
+                hx-swap="none"
+                class="secondary outline"
+                title="Diesen Backpack in Spotify abspielen (Premium, aktives Gerät)"
+            >
+                ▶ Abspielen
+            </button>
             <form
                 method="get"
                 action="/backpacks/{{ c.id }}/export"

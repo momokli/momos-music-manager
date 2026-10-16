@@ -698,7 +698,7 @@ fn fold_sources(
 }
 
 /// Hub track ids carrying `tag_id` (via `hub_track_resolved_tags`), id-ordered.
-async fn tracks_for_tag(pool: &SqlitePool, tag_id: i64) -> Result<Vec<i64>> {
+pub(crate) async fn tracks_for_tag(pool: &SqlitePool, tag_id: i64) -> Result<Vec<i64>> {
     Ok(sqlx::query_scalar(
         "SELECT track_id FROM hub_track_resolved_tags WHERE tag_id = ?1 ORDER BY track_id",
     )

@@ -1,6 +1,6 @@
 # Active Plans
 
-**57 done** · **0 in progress** · **24 proposed**
+**57 done** · **0 in progress** · **25 proposed**
 
 ## Proposed
 
@@ -29,6 +29,7 @@
 - [fix-deemix-auto-download-retry](proposed/fix-deemix-auto-download-retry.md) — `fix/deemix-auto-download-retry`
 - [bpm-key-playlists](proposed/bpm-key-playlists.md) — `feat/bpm-key-playlists`
 - [spotify-api-diet](proposed/spotify-api-diet.md) — `feat/spotify-api-diet`
+- [hub-spotify-queue](proposed/hub-spotify-queue.md) — `feat/hub-spotify-queue` (read the Spotify queue next to now-playing + append a hub track; append-only, Premium + active device required)
 
 ## Done
 
