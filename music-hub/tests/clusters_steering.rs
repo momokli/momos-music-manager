@@ -83,7 +83,7 @@ async fn steering_routes_require_login() {
     let cid = insert_cluster(&app.pool, "MOOD", "Original").await;
     insert_member(&app.pool, cid, tag).await;
 
-    let routes: [(&str, &[(&str, &str)]); 4] = [
+    let routes: [(&str, &[(&str, &str)]); 5] = [
         (&format!("/tag-clusters/{cid}/rename"), &[("label", "Hacked")]),
         (
             &format!("/tag-clusters/{cid}/member/add"),
@@ -94,6 +94,8 @@ async fn steering_routes_require_login() {
             &[("tag_id", "1")],
         ),
         (&format!("/tag-clusters/{cid}/delete"), &[]),
+        // Mutating route too (`clusters_rebuild` → `nav()`); must be guarded.
+        ("/tag-clusters/rebuild", &[("type", "MOOD")]),
     ];
 
     for (path, form) in routes {
@@ -163,8 +165,9 @@ async fn clusters_page_scope_mine_vs_all() {
     let bob = app.seed.bob;
     let cookie = app.session_cookie(alice).await;
 
-    // Untyped cluster (`tag_type = ''`) — the page's `type_` query field does
-    // not bind a `type` param, so the empty type is the reliable read path.
+    // Untyped cluster (`tag_type = ''`) — the page reads the `type` query
+    // param (see `ClusterQuery`), and an empty/absent type selects untyped
+    // clusters.
     let mine = insert_tag(&app.pool, alice, "alpha-mine", "").await;
     let other = insert_tag(&app.pool, bob, "beta-other", "").await;
     let cid = insert_cluster(&app.pool, "", "Shared").await;
@@ -191,15 +194,65 @@ async fn clusters_page_scope_mine_vs_all() {
     assert!(mine_html.contains("alpha-mine"), "own tag must show");
     assert!(!mine_html.contains("beta-other"), "foreign tag hidden (mine)");
 
-    let all_html = get("?scope=all").await.text().await.unwrap();
+    let all_resp = get("?scope=all").await;
+    assert_eq!(all_resp.status(), reqwest::StatusCode::OK);
+    let all_html = all_resp.text().await.unwrap();
     assert!(all_html.contains("alpha-mine"), "own tag must show (all)");
     assert!(all_html.contains("beta-other"), "foreign tag visible (all)");
 
     // Missing/unknown scope defaults to `mine`.
-    let default_html = get("").await.text().await.unwrap();
+    let default_resp = get("").await;
+    assert_eq!(default_resp.status(), reqwest::StatusCode::OK);
+    let default_html = default_resp.text().await.unwrap();
+    assert!(
+        default_html.contains("alpha-mine"),
+        "own tag must show when scope defaults to mine"
+    );
     assert!(
         !default_html.contains("beta-other"),
         "missing scope must default to mine"
+    );
+}
+
+// ── 3b. typed read path: ?type=<TYPE> selects that type (regression) ────────
+//
+// Pins the fix for the `ClusterQuery` field rename: the page must bind the
+// `type` query key used by every caller (`tag_clusters.html` links, the
+// rebuild redirect). Before the fix `type_` bound the key `type_`, so
+// `?type=MOOD` silently rendered untyped clusters and typed clusters were
+// unreachable from the UI (Issue #480).
+#[tokio::test]
+async fn clusters_page_typed_read_path() {
+    let app = common::spawn().await;
+    let alice = app.seed.alice;
+    let cookie = app.session_cookie(alice).await;
+
+    let mood_tag = insert_tag(&app.pool, alice, "mood-tag", "MOOD").await;
+    let mood_cid = insert_cluster(&app.pool, "MOOD", "MoodCluster").await;
+    insert_member(&app.pool, mood_cid, mood_tag).await;
+
+    let untyped_tag = insert_tag(&app.pool, alice, "untyped-tag", "").await;
+    let untyped_cid = insert_cluster(&app.pool, "", "UntypedCluster").await;
+    insert_member(&app.pool, untyped_cid, untyped_tag).await;
+
+    let html = app
+        .client()
+        .get(app.url("/tag-clusters?type=MOOD&scope=mine"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        html.contains("MoodCluster"),
+        "?type=MOOD must render the MOOD cluster (Issue #480)"
+    );
+    assert!(
+        !html.contains("UntypedCluster"),
+        "?type=MOOD must not render untyped clusters"
     );
 }
 
