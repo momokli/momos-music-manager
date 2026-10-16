@@ -192,7 +192,10 @@ pub async fn rebuild(pool: &SqlitePool, tag_type: &str) -> anyhow::Result<usize>
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ClusterQuery {
-    /// `''` = untyped, otherwise the tag-type key.
+    /// `''` = untyped, otherwise the tag-type key. Bound to the `type` query
+    /// key (not the Rust field name `type_`) so the `type=` links from
+    /// `tag_clusters.html` and the rebuild redirect actually select a type.
+    #[serde(rename = "type")]
     type_: Option<String>,
     scope: Option<String>,
 }
