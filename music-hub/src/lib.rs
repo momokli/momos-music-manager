@@ -47,6 +47,7 @@ pub mod nowplaying;
 pub mod pages;
 pub mod recommend;
 pub mod scoring;
+pub mod scope;
 pub mod settings;
 pub mod similar;
 pub mod similarity;
