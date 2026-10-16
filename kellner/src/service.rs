@@ -19,6 +19,7 @@ use anyhow::{Context, Result, anyhow};
 #[allow(dead_code)] // only referenced by the macOS code path and tests.
 pub const SERVICE_LABEL: &str = "de.zukkafabrik.kellner";
 /// systemd user unit base name (file `kellner.service`).
+#[allow(dead_code)] // only referenced by the Linux code path and tests.
 pub const SYSTEMD_NAME: &str = "kellner";
 /// The subcommand the service runs.
 pub const SERVICE_ARGS: [&str; 1] = ["run"];
@@ -41,6 +42,7 @@ pub struct LaunchdParams {
 
 /// Parameters for the Linux user unit (no host lookups inside the builder).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // constructed by the Linux code path and by tests.
 pub struct SystemdParams {
     /// Unit base name, e.g. `kellner` (file `kellner.service`).
     pub name: String,
@@ -111,6 +113,7 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// Build the complete Linux **user** systemd unit.
+#[allow(dead_code)] // used on Linux and by tests.
 pub fn systemd_user_unit(p: &SystemdParams) -> String {
     let exec = std::iter::once(p.program.clone())
         .chain(p.args.iter().cloned())
@@ -143,6 +146,7 @@ pub fn systemd_user_unit(p: &SystemdParams) -> String {
 /// absolute path containing a space (e.g. `/Users/foo bar/kellner`) would
 /// otherwise be split into two arguments. Tokens made only of "safe"
 /// characters stay unquoted, keeping the common case readable.
+#[allow(dead_code)] // used on Linux and by tests.
 fn systemd_quote(arg: &str) -> String {
     let safe = !arg.is_empty()
         && arg.chars().all(|c| {

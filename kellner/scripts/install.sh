@@ -38,10 +38,21 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$ROOT"
+
+# Honour CARGO_TARGET_DIR (e.g. a shared ~/.cargo-target): cargo puts the binary
+# there, not in ./target. Relative values resolve against $ROOT, exactly like
+# cargo does, so `CARGO_TARGET_DIR=target ./scripts/install.sh` also works.
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+case "$TARGET_DIR" in
+  /*) : ;;
+  *) TARGET_DIR="$ROOT/$TARGET_DIR" ;;
+esac
+export CARGO_TARGET_DIR="$TARGET_DIR"
+
 echo "install: building kellner (cargo build --release --locked, no tray feature)"
 cargo build --release --locked
 
-BIN="$ROOT/target/release/kellner"
+BIN="$TARGET_DIR/release/kellner"
 DEST_DIR="$PREFIX/bin"
 DEST="$DEST_DIR/kellner"
 
