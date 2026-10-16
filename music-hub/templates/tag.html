@@ -190,6 +190,8 @@ content %}
     <form
         method="get"
         action="/tag/{{ id }}/download"
+        hx-post="/tag/{{ id }}/download/check"
+        hx-swap="none"
         style="display: inline-flex; gap: 0.3rem; align-items: center"
     >
         <select name="format" aria-label="Format">

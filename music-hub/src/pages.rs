@@ -71,10 +71,16 @@ pub fn router(state: AppState) -> Router {
         .route("/playlist/{id}/refresh", post(playlist_refresh))
         .route("/playlist/{id}/progress", get(playlist_progress))
         .route("/playlist/{id}/download", get(playlist_download))
+        .route(
+            "/playlist/{id}/download/check",
+            post(playlist_download_check),
+        )
         .route("/tag/{id}/order", post(tag_order))
         .route("/tag/{id}/download", get(tag_download))
+        .route("/tag/{id}/download/check", post(tag_download_check))
         .route("/tag/{id}/progress", get(tag_progress))
         .route("/track/{id}/download", get(track_download))
+        .route("/track/{id}/download/check", post(track_download_check))
         .route("/downloads", get(downloads_page))
         .route("/downloads/refresh", post(downloads_refresh))
         .route("/downloads/order-all", post(downloads_order_all))
@@ -763,10 +769,29 @@ async fn zip_for(
     zip_response(tmp, format!("{label}.zip")).await
 }
 
+/// The hub's download format token from a query/form value.
+///
+/// Accepts the vault's vocabulary too (`mp3-320` / `mp3-128`), so a format can
+/// never silently degrade to flac just because it contains a hyphen (#460).
 fn valid_format(f: Option<String>) -> String {
     match f {
-        Some(f) if !f.is_empty() && f.chars().all(|c| c.is_ascii_alphanumeric()) => f,
+        Some(f)
+            if !f.is_empty()
+                && f.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') =>
+        {
+            f
+        }
         _ => "flac".to_string(),
+    }
+}
+
+/// Human label for a download format: `flac` → `FLAC`, `mp3-320` → `MP3 320`.
+fn format_label(format: &str) -> String {
+    match format {
+        "mp3" | "320" | "mp3-320" => "MP3 320".to_string(),
+        "128" | "mp3-128" => "MP3 128".to_string(),
+        other => other.to_uppercase(),
     }
 }
 
@@ -942,7 +967,8 @@ async fn track_download(
         Ok(bytes) => {
             let artists = r.get::<Option<String>, _>("artists").unwrap_or_default();
             let title = r.get::<Option<String>, _>("title").unwrap_or_default();
-            let filename = sanitize_filename(&format!("{artists} - {title}.{format}"));
+            let filename =
+                sanitize_filename(&format!("{artists} - {title}.{}", audio_ext(&format)));
             let ct = audio_content_type(&format);
             Response::builder()
                 .header(axum::http::header::CONTENT_TYPE, ct)
@@ -961,14 +987,220 @@ async fn track_download(
     }
 }
 
-fn audio_content_type(format: &str) -> &'static str {
+/// File extension of the bytes `format` will actually deliver.
+fn audio_ext(format: &str) -> &'static str {
     match format {
+        "mp3" | "320" | "128" | "mp3-320" | "mp3-128" => "mp3",
+        "wav" => "wav",
+        "m4a" | "aac" => "m4a",
+        "ogg" => "ogg",
+        _ => "flac",
+    }
+}
+
+fn audio_content_type(format: &str) -> &'static str {
+    match audio_ext(format) {
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",
-        "m4a" | "aac" => "audio/mp4",
+        "m4a" => "audio/mp4",
         "ogg" => "audio/ogg",
         _ => "audio/flac",
     }
+}
+
+/// JSON string literal for `s` with every non-ASCII char `\u`-escaped, so it can
+/// always be placed into an HTTP header value (a raw `—`/`…` makes
+/// `HeaderValue::from_str` fail silently).
+fn json_str_ascii(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c.is_ascii() => out.push(c),
+            c => {
+                let mut buf = [0u16; 2];
+                for u in c.encode_utf16(&mut buf).iter() {
+                    out.push_str(&format!("\\u{:04x}", *u));
+                }
+            }
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// htmx-aware reply for a download preflight (#460).
+///
+/// htmx → `200` + `HX-Trigger` toast, plus an `HX-Redirect` to `url` **when the
+/// download is actually available**. A plain (no-JS) submit instead redirects to
+/// `url`, or back to `back` with the message as a flash.
+fn check_reply(
+    headers: &HeaderMap,
+    back: &str,
+    url: Option<&str>,
+    msg: &str,
+    kind: &str,
+) -> Response {
+    if headers.contains_key("hx-request") {
+        let trigger = format!(
+            "{{\"toast\":{{\"msg\":{},\"kind\":\"{}\"}}}}",
+            json_str_ascii(msg),
+            kind
+        );
+        let mut resp = StatusCode::OK.into_response();
+        if let Ok(v) = axum::http::HeaderValue::from_str(&trigger) {
+            resp.headers_mut().insert("HX-Trigger", v);
+        }
+        if let Some(u) = url {
+            if let Ok(v) = axum::http::HeaderValue::from_str(u) {
+                resp.headers_mut().insert("HX-Redirect", v);
+            }
+        }
+        resp
+    } else {
+        match url {
+            Some(u) => Redirect::to(u).into_response(),
+            None => flash_redirect(back, msg.to_string()),
+        }
+    }
+}
+
+/// `POST /track/{id}/download/check[?format=flac]` — preflight a single-track
+/// download (#460).
+///
+/// Reads the **live vault** (the same source the page's buttons are rendered
+/// from): `ready` → hand over the file URL; otherwise a toast, so the user never
+/// lands on the streaming endpoint's raw 502.
+async fn track_download_check(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<DownloadQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if crate::ui::nav(&st, &headers, "track").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    let format = valid_format(q.format);
+    let back = format!("/track/{id}");
+    let isrc: Option<String> = sqlx::query_scalar(
+        "SELECT isrc FROM hub_tracks WHERE id = ?1 AND isrc IS NOT NULL AND TRIM(isrc) <> ''",
+    )
+    .bind(id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten();
+    let Some(isrc) = isrc else {
+        return check_reply(&headers, &back, None, "Dieser Track hat keine ISRC.", "err");
+    };
+    let download = crate::music_api::vault_track(&st.cfg, &isrc)
+        .await
+        .and_then(|v| v.satellites.download);
+    let ready = matches!(
+        download.as_ref().and_then(|d| d.state.as_deref()),
+        Some("ready")
+    );
+    if ready {
+        let url = format!("/track/{id}/download?format={format}");
+        check_reply(
+            &headers,
+            &back,
+            Some(&url),
+            &format!("{} — Download startet …", format_label(&format)),
+            "ok",
+        )
+    } else {
+        let state = download
+            .as_ref()
+            .and_then(|d| d.state.clone())
+            .unwrap_or_default();
+        let msg = if state.trim().is_empty() {
+            "Noch nicht verfügbar — wird automatisch geholt.".to_string()
+        } else {
+            format!("Noch nicht verfügbar ({}) — wird geholt.", state.trim())
+        };
+        check_reply(&headers, &back, None, &msg, "err")
+    }
+}
+
+/// Ready track count for a ZIP preflight — the hub's music-api state cache, i.e.
+/// the very same source the `x/y bereit` badge shows.
+async fn zip_ready(st: &AppState, tracks: &[sqlx::sqlite::SqliteRow]) -> usize {
+    let (ready, _total) = progress_counts(st, &rows_isrcs(tracks)).await;
+    ready
+}
+
+fn zip_check_reply(headers: &HeaderMap, back: &str, url: &str, ready: usize) -> Response {
+    if ready == 0 {
+        check_reply(
+            headers,
+            back,
+            None,
+            "Keine Dateien verfügbar — wird automatisch geholt.",
+            "err",
+        )
+    } else {
+        check_reply(
+            headers,
+            back,
+            Some(url),
+            &format!("{ready} Dateien — ZIP wird gebaut …"),
+            "ok",
+        )
+    }
+}
+
+/// `POST /playlist/{id}/download/check` — preflight for the playlist ZIP (#460).
+async fn playlist_download_check(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<DownloadQuery>,
+) -> Response {
+    if crate::ui::nav(&st, &headers, "playlist").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    let format = valid_format(f.format);
+    let tracks = sqlx::query(PL_TRACKS_SQL)
+        .bind(id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    let ready = zip_ready(&st, &tracks).await;
+    zip_check_reply(
+        &headers,
+        &format!("/playlist/{id}"),
+        &format!("/playlist/{id}/download?format={format}"),
+        ready,
+    )
+}
+
+/// `POST /tag/{id}/download/check` — preflight for the tag ZIP (#460).
+async fn tag_download_check(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<DownloadQuery>,
+) -> Response {
+    if crate::ui::nav(&st, &headers, "tags").await.is_none() {
+        return Redirect::to("/login").into_response();
+    }
+    let format = valid_format(f.format);
+    let tracks = sqlx::query(TAG_TRACKS_SQL)
+        .bind(id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default();
+    let ready = zip_ready(&st, &tracks).await;
+    zip_check_reply(
+        &headers,
+        &format!("/tag/{id}"),
+        &format!("/tag/{id}/download?format={format}"),
+        ready,
+    )
 }
 
 // ── downloads (music-api queue + cached state overview + all-tracks table) ──

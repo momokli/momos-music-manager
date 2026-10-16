@@ -996,7 +996,6 @@ struct TrackPage {
     external_ids: Vec<ExternalId>,
     genres: Vec<String>,
     flash: String,
-    music_api: bool,
     // Listening (hub-own).
     listening: Vec<ListenRow>,
     listen_total: i64,
@@ -1022,6 +1021,17 @@ struct TrackPage {
     tag_scope: String,
     htmx: bool,
     my_types: Vec<(String, String)>,
+    /// Ready download formats (label + the `format` param) — empty when nothing
+    /// is ready yet (then `download_hint` carries the passive state, #460).
+    download_options: Vec<DownloadOption>,
+    /// Passive hint shown instead of buttons when nothing is available yet.
+    download_hint: String,
+}
+
+/// One ready download format offered on the track page (#460).
+struct DownloadOption {
+    format: String,
+    label: String,
 }
 
 struct TagCloudRow {
@@ -1511,6 +1521,14 @@ async fn build_track_page(
     // Download availability (drives the player's "Jetzt holen" fallback).
     let download_ready = view.has_download && view.download_state == "ready";
     let fetchable = has_isrc && st.cfg.music_api_token.is_some() && !download_ready;
+    // Download controls (#460): buttons only for what the vault says is ready,
+    // otherwise a passive hint — never a bare link that can 502.
+    let (download_options, download_hint) = track_download_options(
+        &view,
+        download_ready,
+        has_isrc,
+        st.cfg.music_api_token.is_some(),
+    );
 
     // External service IDs for this track.
     let external_ids: Vec<ExternalId> = sqlx::query(
@@ -1692,7 +1710,6 @@ async fn build_track_page(
         external_ids,
         genres,
         flash,
-        music_api: st.cfg.music_api_token.is_some(),
         listening,
         listen_total,
         ripeness_total: rip.total.round() as i64,
@@ -1713,6 +1730,79 @@ async fn build_track_page(
         tag_scope: rec_scope.clone(),
         htmx: false,
         my_types,
+        download_options,
+        download_hint,
+    })
+}
+
+/// Download controls for the track page (#460).
+///
+/// Ready formats become buttons — coherent labels, in the vault's own vocabulary;
+/// anything not ready yields a passive hint instead. We already know the state at
+/// render time, so there are never dead buttons (and no manual "holen" — the
+/// demand covers the whole library, ADR-068).
+fn track_download_options(
+    vault: &VaultView,
+    ready: bool,
+    has_isrc: bool,
+    music_api: bool,
+) -> (Vec<DownloadOption>, String) {
+    if !has_isrc {
+        return (Vec::new(), String::new());
+    }
+    if !music_api {
+        return (Vec::new(), "music-api nicht konfiguriert.".to_string());
+    }
+    if !ready {
+        let state = vault.download_state.trim();
+        let hint = if state.is_empty() {
+            "Noch nicht verfügbar — wird automatisch geholt.".to_string()
+        } else {
+            format!("Noch nicht verfügbar ({state}) — wird automatisch geholt.")
+        };
+        return (Vec::new(), hint);
+    }
+    let mut tokens: Vec<&str> = vault
+        .download_formats
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let src = vault.download_format.trim();
+    if !src.is_empty() && !tokens.contains(&src) {
+        tokens.push(src);
+    }
+    let mut out: Vec<DownloadOption> = Vec::new();
+    for tok in tokens {
+        if let Some((format, label)) = download_format(tok) {
+            if !out.iter().any(|o| o.format == format) {
+                out.push(DownloadOption {
+                    format: format.to_string(),
+                    label: label.to_string(),
+                });
+            }
+        }
+    }
+    if out.is_empty() {
+        // Ready, but no format token we recognise: the download endpoint falls
+        // back across formats anyway, so offer one generic control.
+        out.push(DownloadOption {
+            format: "flac".to_string(),
+            label: "Audio".to_string(),
+        });
+    }
+    (out, String::new())
+}
+
+/// Map a vault/download format token to `(hub format param, label)`.
+fn download_format(token: &str) -> Option<(&'static str, &'static str)> {
+    Some(match token {
+        "flac" => ("flac", "FLAC"),
+        "mp3" | "320" | "mp3-320" => ("mp3-320", "MP3 320"),
+        "128" | "mp3-128" => ("mp3-128", "MP3 128"),
+        "wav" => ("wav", "WAV"),
+        "m4a" | "aac" => ("m4a", "M4A"),
+        _ => return None,
     })
 }
 

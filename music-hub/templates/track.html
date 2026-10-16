@@ -12,9 +12,7 @@ content %}
     <a href="/digging?seed={{ id }}">Digging von diesem Track →</a> ·
     <a href="https://digdeeper.fm/" target="_blank" rel="noreferrer"
         >auf digdeeper.fm öffnen (extern)</a
-    >{% if music_api && has_isrc %} ·
-    <a href="/track/{{ id }}/download?format=flac">FLAC laden</a> ·
-    <a href="/track/{{ id }}/download?format=mp3">MP3 laden</a>{% endif %}
+    >
 </p>
 
 {% include "_partials/track_actions.html" %} {% if can_stream %}
@@ -238,7 +236,22 @@ content %}
             {% endif %}
 
             <h3>Download <span class="hub-bucket-src">Objekt-Store</span></h3>
-            {% if vault.has_download %}
+            {% if !download_options.is_empty() %}
+            <div style="display: flex; gap: 0.4rem; margin: 0.2rem 0 0.5rem">
+                {% for o in download_options %}
+                <button
+                    type="button"
+                    class="secondary outline"
+                    hx-post="/track/{{ id }}/download/check?format={{ o.format }}"
+                    hx-swap="none"
+                >
+                    {{ o.label }} laden
+                </button>
+                {% endfor %}
+            </div>
+            {% else if download_hint != "" %}
+            <p class="hub-muted">{{ download_hint }}</p>
+            {% endif %} {% if vault.has_download %}
             <table class="hub-kv">
                 <caption class="hub-visually-hidden">
                     Download-Satellit
