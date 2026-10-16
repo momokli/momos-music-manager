@@ -2089,18 +2089,34 @@ fn with_toast(mut resp: Response, msg: &str, kind: &str) -> Response {
     resp
 }
 
-/// BPM + key for a hub track, from the vault read-model (`hub_track_audio`).
+/// Displayed BPM + key for a hub track.
+///
+/// Reads the **live vault** (`resolved`) — the very same source the track page
+/// renders — so the two can never disagree (#466). The `hub_track_audio`
+/// read-model is deliberately **not** used here: it lags behind, which is why the
+/// now-playing widget used to show „—" while the track page showed a BPM.
 async fn track_bpm_key(st: &AppState, track_id: i64) -> (String, String) {
-    let audio = crate::analysis::get(&st.pool, track_id)
-        .await
-        .unwrap_or_default();
-    (
-        audio
-            .bpm
-            .map(|b| format!("{b:.0}"))
-            .unwrap_or_else(|| "—".into()),
-        audio.key.or(audio.camelot).unwrap_or_else(|| "—".into()),
+    let isrc: Option<String> = sqlx::query_scalar(
+        "SELECT isrc FROM hub_tracks WHERE id = ?1 AND isrc IS NOT NULL AND TRIM(isrc) <> ''",
     )
+    .bind(track_id)
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten();
+    let resolved = match isrc {
+        Some(isrc) => crate::music_api::resolved_audio(&st.cfg, &isrc).await,
+        None => None,
+    };
+    match resolved {
+        Some(r) => (
+            r.bpm
+                .map(|b| format!("{b:.0}"))
+                .unwrap_or_else(|| "—".into()),
+            r.key.or(r.camelot).unwrap_or_else(|| "—".into()),
+        ),
+        None => ("—".into(), "—".into()),
+    }
 }
 
 async fn track_actions_frag(
