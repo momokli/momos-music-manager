@@ -3483,3 +3483,77 @@ async fn account_without_arl_is_conflict() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["error"], "DEEMIX_ARL not configured");
 }
+
+/// Mock gw-light answering with a Deezer Free (no lossless) payload.
+async fn gw_light_mock_free() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "results": {
+            "OFFER_NAME": "Deezer Free",
+            "USER": {
+                "USER_ID": 7,
+                "OPTIONS": {
+                    "web_sound_quality": { "lossless": false, "high": false, "low": true }
+                }
+            }
+        }
+    }))
+}
+
+async fn spawn_gw_light_free() -> String {
+    let app = Router::new().route("/ajax/gw-light.php", get(gw_light_mock_free));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}/ajax/gw-light.php")
+}
+
+#[tokio::test]
+async fn account_reports_free_tier_without_flac() {
+    let gw = spawn_gw_light_free().await;
+    let h = harness_opts(HarnessOpts {
+        analyzer_url: None,
+        deemix_arl: "fake-arl".to_string(),
+        deezer_gw_base: gw,
+    })
+    .await;
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/account").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["offer"], "Deezer Free");
+    assert_eq!(v["lossless"], false);
+    assert_eq!(v["high"], false);
+    assert_eq!(v["low"], true);
+    assert_eq!(v["userId"], 7);
+    assert_eq!(v["canStreamFlac"], false);
+}
+
+#[tokio::test]
+async fn account_returns_bad_gateway_when_gw_light_unreachable() {
+    // Dead port: the on-demand gw-light probe fails → 502.
+    let h = harness_opts(HarnessOpts {
+        analyzer_url: None,
+        deemix_arl: "fake-arl".to_string(),
+        deezer_gw_base: "http://127.0.0.1:1".to_string(),
+    })
+    .await;
+
+    let (status, body) = send(
+        &h.app,
+        authed("GET", "/account").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        v["error"].as_str().unwrap().contains("deezer tier lookup failed"),
+        "error was {:?}",
+        v["error"]
+    );
+}
