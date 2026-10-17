@@ -23,8 +23,8 @@ Milestone: hub-smartplay-0.23.0 (#29) · Base: main @ dc6a472 · Branch: feat/is
 - [x] 3 developer
 - [x] 4 verifier
 - [x] 5 tester
-- [ ] 6 developer (PR)
-- [ ] 7 reviewer
+- [x] 6 developer (PR #486)
+- [~] 7 reviewer (rework: Screenshot+CI grün)
 
 ## Setup
 - Branch: `feat/issue-299-playlist-curation` (ausgecheckt, Basis `main @ dc6a472`).
@@ -231,3 +231,63 @@ Verdikt: **PASS** — Branch: `feat/issue-299-playlist-curation` @ `c1b3cf4`, Ho
 3. **Leere Seeds** → leeres Vorschlagsergebnis ist nicht getestet.
 4. **`viewer_id`-Ausschluss** (Tracks, die der Viewer bereits in eigener kuratierter Playlist hat) ist nicht getestet.
    Diese drei Punkte sind wichtige Edge Cases der neuen `curate::suggestions`-Engine, aber nicht in der Akzeptanzliste; als Lücke dokumentiert.
+
+## Review
+
+Verdikt: **CHANGES-REQUESTED** — Branch `feat/issue-299-playlist-curation` @ `2dd03b8`, PR #486 gegen `main`.
+
+Geprüft: `git diff origin/main...HEAD` (5 Code-/Template-Dateien + progress-Doc), PR-Body,
+`clanker-gh pr view 486 --json mergeable,mergeStateStatus,statusCheckRollup`,
+lokaler Lauf `cargo test --test curate` → **18 passed; 0 failed**.
+
+### Blocker
+1. **Frontend-Regel (Pflicht): keine Screenshots im PR.** Der PR ist eine Frontend-Änderung —
+   neue UI-Sektion `#curate-suggestions` in `curate_detail.html`, neues Fragment
+   `_partials/curate_suggestions.html` (Tabelle Score/Titel/Künstler/Warum/„Übernehmen"),
+   htmx-load/swap. Nach `AGENTS.md` muss der PR Screenshots der betroffenen Ansichten enthalten,
+   sonst gilt er als unvollständig und wird **nicht** gemergt. PR-Body hat keine Screenshots
+   (nur Text/Diff). → Screenshot der Detailseite mit Vorschlagsliste + „Übernehmen" nachreichen.
+2. **Kein Merge möglich bis CI grün.** `mergeStateStatus = BLOCKED`, `mergeable = MERGEABLE`
+   (kein Konflikt, kein Rebase nötig). `statusCheckRollup`:
+   - pass: `Conventional-Commit-Titel`, `Issue-Referenz im PR`, `MMM freeze guard`
+   - **pending**: `Build + Test (cargo)`, `Build + Test (hub)`, `cargo fmt (informativ)`, `cargo clippy (informativ)`
+   CI ist **nicht rot**, sondern noch **ausstehend** → nach Grün erneut entscheiden. Kein Retry-Loop.
+
+### Nicht-blockierende Punkte (für Follow-up / optional)
+3. **Testlücken (vom Tester bereits dokumentiert, hier bestätigt):** explizite `position`
+   (`add_item_at` + Formfeld `position`) ist ungetestet; ebenso Kandidaten-Universum
+   (SETLIST/RUMPELKISTE-Ausschluss), leere Seeds und `viewer_id`-Ausschluss. Keine
+   Akzeptanz-Verletzung, aber Kernpfad von US3 ungetestet.
+4. **Fehler werden still geschluckt:** `camelot_map`, `owned`, `cand_rows`,
+   `internal_suggestions`, `similar::neighbors` nutzen `unwrap_or_default()` — DB-Fehler führen
+   zu leeren Vorschlägen statt Fehler. Bewusst tolerant (Verify), aber mindestens loggen wäre sauber.
+5. **`Suggestion` leitet `Clone` ab**, wird nirgends geklont (toter Derive) — kosmetisch.
+6. **Kandidaten-Universum = alle `hub_tracks`** (minus Junk/Seeds/owned): bei großer Bibliothek
+   ist die Cosine-Stichprobe (`SEED_SAMPLE_CAP = 20`) gedeckelt, aber `similarity_to_seed` läuft
+   pro Seed über die volle Kandidatenliste (20×). Laufzeitrisiko dokumentiert; kein Blocker.
+
+### Bewertung Kriterien
+- **Korrektheit:** Seed-Ausschluss, Rumpelkiste-Awareness, deterministische Sortierung
+  (score→artists→title→id), Idempotenz (`INSERT OR IGNORE`, PK playlist_id+track_id) — Tests grün.
+- **Wartbarkeit:** additiv in `curate.rs`, keine Umbenennung bestehender Fns; Helfer wiederverwendet
+  (`similarity_to_seed`, `internal_suggestions`, `similar::neighbors`, `camelot_map`,
+  `ripeness_many`); Gewichte live aus `settings::engine()` (kein Hardcode). Gut.
+- **Konsistenz mit music-hub:** Muster von `curate_push`/`curate_delete`/`track_actions_*`
+  (Session-Gate → `/login`, unbekannt/fremd → `track_not_found()` 404, Owner-Check);
+  Askama-Falle beachtet (kein `==` in Attributen, vorberechnete Textfelder).
+- **Regression:** `cargo test --test curate` 18/18 grün (13 alt + 5 neu); keine Migration angefasst.
+- **Akzeptanz #299:** Vorschläge-Engine + Übernahme + Integrationstest vorhanden; Closing-Keyword
+  `Closes #299` im PR-Body vorhanden. ✔
+- **Scope:** fokussiert, kein Overreach (US4/Mood bewusst ausgelassen, Traktor-Export nicht angefasst).
+
+### Nächster Schritt
+Screenshots in PR #486 nachreichen/korrigieren; danach CI-Grün abwarten und re-reviewen
+(Task `re-review-<n>`). Danach Squash-Merge + `Closes #299` schließt Issue.
+
+## Review-Rework (Auflösung der Blocker)
+- Blocker 1 (Screenshots fehlten): erledigt — `docs/screenshots/curate-suggestions-299.png`
+  (Commit b34681b) + im PR-Body eingebettet (raw-URL 200).
+- Blocker 2 (CI pending): erledigt — CI **CLEAN**, alle Checks SUCCESS
+  (Build + Test (cargo), Build + Test (hub), MMM freeze, PR Quality, fmt, clippy).
+- Nicht-blockierende Punkte (Testlücken position, Kandidaten-Universum; still geschluckte
+  Fehler; toter Clone-Derive) → Follow-up-Kandidaten, kein Akzeptanz-Blocker.
