@@ -1,0 +1,38 @@
+{# Track suggestions for a curated playlist (#299). htmx-loaded; each row adopts
+the track into the playlist via POST /curate/{id}/items, which re-renders this
+fragment (the adopted track becomes a seed and disappears). #}
+{% if rows.is_empty() %}
+<p class="hub-empty">Keine Vorschläge — Playlist füllen oder Tags vergeben.</p>
+{% else %}
+<table class="hub-dense-table">
+    <thead>
+        <tr>
+            <th>Score</th>
+            <th>Titel</th>
+            <th>Künstler</th>
+            <th>Warum</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for s in rows %}
+        <tr>
+            <td>{{ s.score_text }}</td>
+            <td><a href="/track/{{ s.track_id }}">{{ s.title }}</a></td>
+            <td>{{ s.artists_html|safe }}</td>
+            <td class="hub-muted">{{ s.why_text }}</td>
+            <td>
+                <form
+                    hx-post="/curate/{{ id }}/items"
+                    hx-target="#curate-suggestions"
+                    hx-swap="innerHTML"
+                >
+                    <input type="hidden" name="track_id" value="{{ s.track_id }}" />
+                    <button type="submit" class="outline">Übernehmen</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}

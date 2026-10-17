@@ -506,3 +506,200 @@ async fn daily_due_selects_only_daily_pushed_playlists() {
     let ids: Vec<i64> = rows.iter().map(|c| c.id).collect();
     assert_eq!(ids, vec![due.cp.id]);
 }
+
+// ── suggestions (#299) ──────────────────────────────────────────────────────
+
+async fn add_tag(pool: &SqlitePool, owner: i64, name: &str) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO hub_tags (owner_user_id, slug, name, type, created_at)
+         VALUES (?1, ?2, ?2, 'MOOD', ?3) RETURNING id",
+    )
+    .bind(owner)
+    .bind(name)
+    .bind(NOW)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn resolve_tag(pool: &SqlitePool, track_id: i64, tag_id: i64) {
+    sqlx::query("INSERT INTO hub_track_resolved_tags (track_id, tag_id) VALUES (?1, ?2)")
+        .bind(track_id)
+        .bind(tag_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn reget(fx: &Fixture, id: i64) -> curate::CuratedPlaylist {
+    curate::get(&fx.pool, id).await.unwrap().unwrap()
+}
+
+#[tokio::test]
+async fn suggestions_exclude_existing() {
+    let fx = setup().await;
+    let seed = track(&fx.pool, "seed", "Seed", NOW).await;
+    let cand = track(&fx.pool, "cand", "Candidate", NOW).await;
+    let tag = add_tag(&fx.pool, fx.user_id, "dark").await;
+    resolve_tag(&fx.pool, seed, tag).await;
+    resolve_tag(&fx.pool, cand, tag).await;
+
+    let spec = create_curated(&fx.pool, fx.user_id, "manual", None, None, 50).await;
+    curate::add_item(&fx.pool, spec.cp.id, seed).await.unwrap();
+    let cp = reget(&fx, spec.cp.id).await;
+
+    let sugs = curate::suggestions(&fx.pool, &cp, 25, fx.user_id)
+        .await
+        .unwrap();
+    assert!(
+        sugs.iter().any(|s| s.track_id == cand),
+        "candidate sharing a tag should be suggested"
+    );
+    assert!(
+        !sugs.iter().any(|s| s.track_id == seed),
+        "the seed must never be suggested"
+    );
+}
+
+#[tokio::test]
+async fn suggestions_rank_shared_tag_higher() {
+    let fx = setup().await;
+    let seed = track(&fx.pool, "seed", "Seed", NOW).await;
+    let tag_cand = track(&fx.pool, "cand_a", "Candidate A", NOW).await;
+    let pl_cand = track(&fx.pool, "cand_b", "Candidate B", NOW).await;
+    let tag = add_tag(&fx.pool, fx.user_id, "dark").await;
+    resolve_tag(&fx.pool, seed, tag).await;
+    resolve_tag(&fx.pool, tag_cand, tag).await;
+
+    // pl_cand co-occurs with the seed only in a playlist (no shared tag).
+    let pl: i64 = sqlx::query_scalar(
+        "INSERT INTO hub_playlists (user_id, service, playlist_id, name, is_owned)
+         VALUES (?1, 'spotify', 'plx', 'X', 1) RETURNING id",
+    )
+    .bind(fx.user_id)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    for tid in [seed, pl_cand] {
+        sqlx::query(
+            "INSERT INTO hub_playlist_tracks (playlist_id, track_id, position, added_at)
+             VALUES (?1, ?2, 0, ?3)",
+        )
+        .bind(pl)
+        .bind(tid)
+        .bind(NOW)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    }
+
+    let spec = create_curated(&fx.pool, fx.user_id, "manual", None, None, 50).await;
+    curate::add_item(&fx.pool, spec.cp.id, seed).await.unwrap();
+    let cp = reget(&fx, spec.cp.id).await;
+
+    let sugs = curate::suggestions(&fx.pool, &cp, 25, fx.user_id)
+        .await
+        .unwrap();
+    let a = sugs
+        .iter()
+        .find(|s| s.track_id == tag_cand)
+        .expect("tag-sharing candidate suggested");
+    let b = sugs
+        .iter()
+        .find(|s| s.track_id == pl_cand)
+        .expect("playlist co-occurrence candidate suggested");
+    assert!(
+        a.score > b.score,
+        "shared tag ({}) must rank above shared playlist ({})",
+        a.score,
+        b.score
+    );
+    assert_eq!(sugs[0].track_id, tag_cand, "top suggestion is the tag match");
+}
+
+#[tokio::test]
+async fn suggestions_require_login() {
+    let app = common::spawn().await;
+    let resp = app
+        .client()
+        .get(app.url("/curate/1/suggestions"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers()["location"], "/login");
+}
+
+#[tokio::test]
+async fn suggestions_foreign_playlist_404() {
+    let app = common::spawn().await;
+    let (_, cookie) = app.user_with_password("zoe", "pw").await;
+    let foreign = curate::create_manual(&app.pool, app.seed.alice, "Alien")
+        .await
+        .unwrap();
+
+    let resp = app
+        .client()
+        .get(app.url(&format!("/curate/{foreign}/suggestions")))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn adopt_suggestion_adds_item() {
+    let app = common::spawn().await;
+    let (uid, cookie) = app.user_with_password("zoe", "pw").await;
+    let pid = curate::create_manual(&app.pool, uid, "Adopt")
+        .await
+        .unwrap();
+    let tid = app.seed.t_all;
+
+    let first = app
+        .client()
+        .post(app.url(&format!("/curate/{pid}/items")))
+        .header("Cookie", &cookie)
+        .form(&[("track_id", tid.to_string())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+    assert!(first.headers().contains_key("HX-Trigger"));
+    let html = first.text().await.unwrap();
+    assert!(
+        !html.contains("Shared Anthem"),
+        "adopted track must drop out of the fragment"
+    );
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_curated_items WHERE playlist_id = ?1 AND track_id = ?2",
+    )
+    .bind(pid)
+    .bind(tid)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+
+    // Idempotent: a second adopt does not duplicate the row.
+    let second = app
+        .client()
+        .post(app.url(&format!("/curate/{pid}/items")))
+        .header("Cookie", &cookie)
+        .form(&[("track_id", tid.to_string())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), reqwest::StatusCode::OK);
+    let count2: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_curated_items WHERE playlist_id = ?1 AND track_id = ?2",
+    )
+    .bind(pid)
+    .bind(tid)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(count2, 1, "re-adopting stays idempotent");
+}

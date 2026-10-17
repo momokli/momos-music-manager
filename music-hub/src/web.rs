@@ -60,6 +60,8 @@ pub fn router(state: AppState) -> Router {
         .route("/curate/{id}", get(curate_detail))
         .route("/curate/{id}/update", post(curate_update))
         .route("/curate/{id}/push", post(curate_push))
+        .route("/curate/{id}/suggestions", get(curate_suggestions))
+        .route("/curate/{id}/items", post(curate_add_item))
         .route("/curate/{id}/delete", post(curate_delete))
         .route("/api/hub/playlists/enable-all", post(enable_all))
         .route("/api/hub/playlists/disable-all", post(disable_all))
@@ -2842,6 +2844,45 @@ fn status_class(status: Option<&str>) -> &'static str {
     }
 }
 
+/// One row of the suggestions fragment (#299).
+struct SuggRow {
+    track_id: i64,
+    title: String,
+    artists_html: String,
+    score_text: String,
+    why_text: String,
+}
+
+#[derive(Template)]
+#[template(path = "_partials/curate_suggestions.html")]
+struct CurateSuggestions {
+    id: i64,
+    rows: Vec<SuggRow>,
+}
+
+fn sugg_rows(sugs: Vec<crate::curate::Suggestion>) -> Vec<SuggRow> {
+    sugs.into_iter()
+        .map(|s| SuggRow {
+            track_id: s.track_id,
+            title: s.title,
+            artists_html: s.artists_html,
+            score_text: format!("{:.1}", s.score),
+            why_text: s
+                .why
+                .iter()
+                .map(|(label, count)| {
+                    if *count > 1 {
+                        format!("{label} ×{count}")
+                    } else {
+                        label.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" · "),
+        })
+        .collect()
+}
+
 #[derive(Deserialize)]
 struct CurateForm {
     name: String,
@@ -3165,6 +3206,71 @@ async fn curate_delete(
         .execute(&st.pool)
         .await;
     Redirect::to("/curate").into_response()
+}
+
+#[derive(Deserialize)]
+struct CurateItemForm {
+    track_id: i64,
+    #[serde(default)]
+    position: Option<i64>,
+}
+
+/// htmx fragment: track suggestions for a curated playlist (#299).
+async fn curate_suggestions(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "curate").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(cp) = crate::curate::get(&st.pool, id).await.ok().flatten() else {
+        return track_not_found();
+    };
+    if cp.user_id != nav.id {
+        return track_not_found();
+    }
+    let sugs = crate::curate::suggestions(&st.pool, &cp, 25, nav.id)
+        .await
+        .unwrap_or_default();
+    render(&CurateSuggestions {
+        id: cp.id,
+        rows: sugg_rows(sugs),
+    })
+}
+
+/// Adopt a suggested track into the playlist (idempotent). Responds with the
+/// re-rendered suggestions fragment (the adopted track is now a seed → gone).
+async fn curate_add_item(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<CurateItemForm>,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "curate").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let Some(cp) = crate::curate::get(&st.pool, id).await.ok().flatten() else {
+        return track_not_found();
+    };
+    if cp.user_id != nav.id {
+        return track_not_found();
+    }
+    let res = match f.position {
+        Some(pos) => crate::curate::add_item_at(&st.pool, cp.id, f.track_id, pos).await,
+        None => crate::curate::add_item(&st.pool, cp.id, f.track_id).await,
+    };
+    let sugs = crate::curate::suggestions(&st.pool, &cp, 25, nav.id)
+        .await
+        .unwrap_or_default();
+    let resp = render(&CurateSuggestions {
+        id: cp.id,
+        rows: sugg_rows(sugs),
+    });
+    match res {
+        Ok(_) => with_toast(resp, "Track übernommen", "ok"),
+        Err(e) => with_toast(resp, &format!("Fehler: {e}"), "err"),
+    }
 }
 
 /// A few recently seen tracks for the dashboard.
