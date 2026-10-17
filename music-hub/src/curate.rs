@@ -336,6 +336,26 @@ async fn replace_items(base: &str, token: &str, playlist_id: &str, uris: &[Strin
     Ok(())
 }
 
+/// A failed Spotify playlist write. Carries the HTTP status so callers can tell a
+/// terminal `429`/quota wall apart from a generic failure (→ push status `quota`).
+#[derive(Debug)]
+pub(crate) struct SpotifyWriteError {
+    pub status: u16,
+    pub message: String,
+}
+
+impl std::fmt::Display for SpotifyWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SpotifyWriteError {}
+
+fn write_failed(status: u16, message: String) -> anyhow::Error {
+    anyhow::Error::new(SpotifyWriteError { status, message })
+}
+
 /// Add URIs to a Spotify playlist in batches of 100 (Spotify's per-request cap).
 pub(crate) async fn spotify_add_uris(
     base: &str,
@@ -348,7 +368,10 @@ pub(crate) async fn spotify_add_uris(
         let (status, resp) =
             crate::spotify::post_json(token, &url, &json!({ "uris": chunk })).await?;
         if !(200..300).contains(&status) {
-            bail!("Spotify add items -> {status}: {}", spotify_err(&resp));
+            return Err(write_failed(
+                status,
+                format!("Spotify add items -> {status}: {}", spotify_err(&resp)),
+            ));
         }
     }
     Ok(())
@@ -369,7 +392,10 @@ pub(crate) async fn spotify_remove_uris(
         let (status, resp) =
             crate::spotify::delete_json(token, &url, &json!({ "tracks": tracks })).await?;
         if !(200..300).contains(&status) {
-            bail!("Spotify remove items -> {status}: {}", spotify_err(&resp));
+            return Err(write_failed(
+                status,
+                format!("Spotify remove items -> {status}: {}", spotify_err(&resp)),
+            ));
         }
     }
     Ok(())

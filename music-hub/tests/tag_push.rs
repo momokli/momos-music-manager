@@ -23,6 +23,7 @@ struct Cap {
     removed: Arc<Mutex<Vec<Value>>>,
     attempts: Arc<AtomicUsize>,
     fail_first_429: bool,
+    always_429: bool,
 }
 
 async fn add_items(
@@ -31,11 +32,11 @@ async fn add_items(
     Json(body): Json<Value>,
 ) -> Response {
     let n = cap.attempts.fetch_add(1, Ordering::SeqCst);
-    if cap.fail_first_429 && n == 0 {
+    if cap.always_429 || (cap.fail_first_429 && n == 0) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             [("retry-after", "0")],
-            Json(json!({ "error": { "status": 429 } })),
+            Json(json!({ "error": { "status": 429, "reason": "QUOTA_EXCEEDED" } })),
         )
             .into_response();
     }
@@ -52,9 +53,10 @@ async fn remove_items(
     Json(json!({ "snapshot_id": "s" })).into_response()
 }
 
-async fn mock_spotify(fail_first_429: bool) -> (String, Cap) {
+async fn mock_spotify(fail_first_429: bool, always_429: bool) -> (String, Cap) {
     let cap = Cap {
         fail_first_429,
+        always_429,
         ..Cap::default()
     };
     let app = Router::new()
@@ -80,7 +82,11 @@ struct Fx {
 }
 
 async fn setup(scopes: &str, fail_first_429: bool) -> Fx {
-    let (base, cap) = mock_spotify(fail_first_429).await;
+    setup_full(scopes, fail_first_429, false).await
+}
+
+async fn setup_full(scopes: &str, fail_first_429: bool, always_429: bool) -> Fx {
+    let (base, cap) = mock_spotify(fail_first_429, always_429).await;
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite:{}/hub.db", dir.path().display());
     let pool = db::connect(&url).await.unwrap();
@@ -387,4 +393,21 @@ async fn rate_limit_is_retried_once() {
     assert_eq!(fx.cap.added.lock().unwrap().len(), 1, "succeeded after retry");
     let (status, _, _) = push_status(&fx.pool, pl).await;
     assert_eq!(status, "ok");
+}
+
+#[tokio::test]
+async fn quota_wall_is_marked_quota() {
+    let fx = setup_full("playlist-modify-private", false, true).await;
+    let pl = owned_playlist(&fx.pool, fx.user_id, "rem").await;
+    let tag = synced_tag(&fx.pool, fx.user_id, pl, false).await;
+    let t = track(&fx.pool, "spTRK").await;
+
+    tags::tag_track(&fx.pool, &fx.cfg, fx.user_id, t, tag)
+        .await
+        .unwrap();
+
+    assert_eq!(fx.cap.attempts.load(Ordering::SeqCst), 2, "429 then one retry");
+    let (status, action, _) = push_status(&fx.pool, pl).await;
+    assert_eq!(status, "quota", "terminal 429 -> quota, not generic error");
+    assert_eq!(action, "add");
 }

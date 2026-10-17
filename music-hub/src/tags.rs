@@ -313,6 +313,15 @@ fn short(s: &str) -> String {
     s.chars().take(200).collect()
 }
 
+/// Push status for a failed Spotify write: a terminal `429`/quota wall becomes
+/// `quota`, every other failure stays `error`.
+fn write_error_status(e: &anyhow::Error) -> &'static str {
+    match e.downcast_ref::<crate::curate::SpotifyWriteError>() {
+        Some(w) if w.status == 429 => "quota",
+        _ => "error",
+    }
+}
+
 /// Persist the outcome of the last push attempt for one playlist.
 async fn record_push(
     pool: &SqlitePool,
@@ -430,7 +439,14 @@ pub async fn sync_tag_to_playlists(
         {
             Ok(()) => record_push(pool, s.playlist_id, "ok", None, "add").await,
             Err(e) => {
-                record_push(pool, s.playlist_id, "error", Some(&short(&e.to_string())), "add").await
+                record_push(
+                    pool,
+                    s.playlist_id,
+                    write_error_status(&e),
+                    Some(&short(&e.to_string())),
+                    "add",
+                )
+                .await
             }
         }
     }
@@ -548,8 +564,14 @@ pub async fn unsync_tag_from_playlists(
                 record_push(pool, s.playlist_id, "ok", None, "remove").await;
             }
             Err(e) => {
-                record_push(pool, s.playlist_id, "error", Some(&short(&e.to_string())), "remove")
-                    .await
+                record_push(
+                    pool,
+                    s.playlist_id,
+                    write_error_status(&e),
+                    Some(&short(&e.to_string())),
+                    "remove",
+                )
+                .await
             }
         }
     }
