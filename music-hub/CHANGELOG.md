@@ -25,6 +25,13 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   (`source='music-api'`, bounded + chunked, transient-failure-safe), CLI
   `metadata-backfill --limit 2000`, and a "BPM/Key holen" button on the music-api
   console. Migration `050` adds `hub_track_features.metadata_checked_at` (7-day TTL).
+- feat: **Bi-way playlist sync** (#283) — tag/track changes are written back to the
+  Spotify **source** playlist of a synced tag: adds via `POST /playlists/{id}/items`,
+  removes via `DELETE /playlists/{id}/items`, only for owned/collaborative playlists and
+  gated by the write scope (re-auth hint as `scope_missing`). A final `429`/`QUOTA_EXCEEDED`
+  is surfaced as the `quota` status; writes retry a `429` once (bounded via
+  `Retry-After`). New additive migration `054` adds the `last_push_*` bookkeeping columns
+  to `hub_playlists`.
 
 ### Changed
 
