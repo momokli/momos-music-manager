@@ -382,21 +382,26 @@ pub async fn sync_tag_to_playlists(
     let mut token: Option<String> = None;
     for s in &sources {
         updated.push(s.playlist_id);
-        // Hub-side membership (existing behaviour) — also tells us whether the
-        // track was already known to be in the playlist (idempotency).
-        let inserted = sqlx::query(
-            "INSERT OR IGNORE INTO hub_playlist_tracks (playlist_id, track_id, added_at)
-             VALUES (?1, ?2, ?3)",
+        // Ownership gate first: an unwritable source never gets pushed and (see
+        // below) never gets a hub mirror row from this path.
+        if !(s.is_owned || s.collaborative) {
+            record_push(pool, s.playlist_id, "skipped", None, "add").await;
+            continue;
+        }
+        // Already mirrored (by an earlier successful push or external ingest)?
+        // Then it is already on Spotify — no POST, no duplicate mirror row.
+        let already = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM hub_playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
         )
         .bind(s.playlist_id)
         .bind(track_id)
-        .bind(&now)
-        .execute(pool)
-        .await?
-        .rows_affected()
-            > 0;
-        if !(s.is_owned || s.collaborative) {
-            record_push(pool, s.playlist_id, "skipped", None, "add").await;
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+        if already {
+            record_push(pool, s.playlist_id, "ok", None, "add").await;
             continue;
         }
         let Some(uri) = uri.as_deref() else {
@@ -418,11 +423,6 @@ pub async fn sync_tag_to_playlists(
             record_push(pool, s.playlist_id, "scope_missing", None, "add").await;
             continue;
         }
-        if !inserted {
-            // Already mirrored before this call → already on Spotify.
-            record_push(pool, s.playlist_id, "ok", None, "add").await;
-            continue;
-        }
         if token.is_none() {
             match crate::ingest::access_token(pool, cfg, user_id).await {
                 Ok(t) => token = Some(t),
@@ -437,7 +437,19 @@ pub async fn sync_tag_to_playlists(
         let uris = vec![uri.to_string()];
         match crate::curate::spotify_add_uris(&cfg.spotify_api_base, tok, &s.remote_id, &uris).await
         {
-            Ok(()) => record_push(pool, s.playlist_id, "ok", None, "add").await,
+            Ok(()) => {
+                // Only mirror hub-side after Spotify accepted the write.
+                sqlx::query(
+                    "INSERT OR IGNORE INTO hub_playlist_tracks (playlist_id, track_id, added_at)
+                     VALUES (?1, ?2, ?3)",
+                )
+                .bind(s.playlist_id)
+                .bind(track_id)
+                .bind(&now)
+                .execute(pool)
+                .await?;
+                record_push(pool, s.playlist_id, "ok", None, "add").await
+            }
             Err(e) => {
                 record_push(
                     pool,

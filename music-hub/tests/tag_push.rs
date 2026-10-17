@@ -411,3 +411,63 @@ async fn quota_wall_is_marked_quota() {
     assert_eq!(status, "quota", "terminal 429 -> quota, not generic error");
     assert_eq!(action, "add");
 }
+
+#[tokio::test]
+async fn failed_push_then_retag_posts_again() {
+    // No write scope yet → the first tag attempt cannot push and must NOT leave
+    // a hub mirror row behind (no phantom membership / drift).
+    let fx = setup("user-read-private", false).await;
+    let pl = owned_playlist(&fx.pool, fx.user_id, "rem").await;
+    let tag = synced_tag(&fx.pool, fx.user_id, pl, false).await;
+    let t = track(&fx.pool, "spTRK").await;
+
+    tags::tag_track(&fx.pool, &fx.cfg, fx.user_id, t, tag)
+        .await
+        .unwrap();
+
+    let (status, _, _) = push_status(&fx.pool, pl).await;
+    assert_eq!(status, "scope_missing");
+    assert!(fx.cap.added.lock().unwrap().is_empty(), "no HTTP call");
+    let linked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+    )
+    .bind(pl)
+    .bind(t)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, 0, "failed push must not create a hub mirror row");
+
+    // Simulate re-auth granting the write scope.
+    sqlx::query(
+        "UPDATE hub_service_accounts SET scopes='playlist-modify-private' WHERE user_id = ?1",
+    )
+    .bind(fx.user_id)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+
+    // Re-tagging must now perform a real POST (the earlier failure left no
+    // membership, so this is not mistaken for "already on Spotify").
+    tags::tag_track(&fx.pool, &fx.cfg, fx.user_id, t, tag)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fx.cap.added.lock().unwrap().len(),
+        1,
+        "retag after a failed push performs a real POST"
+    );
+    let (status, action, _) = push_status(&fx.pool, pl).await;
+    assert_eq!(status, "ok");
+    assert_eq!(action, "add");
+    let linked_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+    )
+    .bind(pl)
+    .bind(t)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(linked_after, 1, "mirror row only after a successful push");
+}
