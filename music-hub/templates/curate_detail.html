@@ -71,6 +71,16 @@ content %}
     </form>
 </article>
 
+<h3>Vorschläge</h3>
+<div
+    id="curate-suggestions"
+    hx-get="/curate/{{ id }}/suggestions"
+    hx-trigger="load"
+    hx-swap="innerHTML"
+>
+    <p class="hub-muted">Lade Vorschläge…</p>
+</div>
+
 <h3>Vorschau ({{ preview_total }} Tracks, davon {{ preview_pushable }} auf Spotify)</h3>
 {% if preview.is_empty() %}
 <p class="hub-empty">Keine Tracks — Quelle/Filter prüfen.</p>
