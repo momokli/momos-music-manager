@@ -1910,9 +1910,33 @@ fn build_smart_query(
     Ok(qb)
 }
 
+/// Guard (#298): every id in `tag_ids` must reference a tag owned by
+/// `owner_user_id`. Closes the cross-owner hole in [`build_smart_query`], which
+/// reads `hub_track_resolved_tags WHERE tag_id IN (...)` without any owner
+/// filter, so a foreign tag id would leak another user's tracks.
+async fn ensure_tag_ids_owned(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    tag_ids: &[i64],
+) -> Result<()> {
+    if tag_ids.is_empty() {
+        return Ok(());
+    }
+    let allowed: std::collections::HashSet<i64> = list_user_tags(pool, owner_user_id)
+        .await
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    if tag_ids.iter().any(|id| !allowed.contains(id)) {
+        bail!("tag_ids enthält fremde Tags");
+    }
+    Ok(())
+}
+
 /// Legt einen Smart-Tag an (oder aktualisiert den Filter eines existierenden
-/// Tags gleichen Namens). `ensure_tag` erzeugt/ findet den Tag; optional wird
-/// `ty` gesetzt. Leerer Name oder leerer Filter -> `Err`.
+/// Smart-Tags gleichen Namens). `ensure_tag` erzeugt/ findet den Tag; optional
+/// wird `ty` gesetzt. Leerer Name oder leerer Filter -> `Err`. Ein gleichnamiger
+/// **normaler** Bestandstag wird NICHT still konvertiert -> `Err`.
 pub async fn create_smart_tag(
     pool: &SqlitePool,
     owner_user_id: i64,
@@ -1925,6 +1949,32 @@ pub async fn create_smart_tag(
     }
     if !filter.has_criteria() {
         bail!("smart filter needs at least one criterion");
+    }
+    ensure_tag_ids_owned(pool, owner_user_id, &filter.tag_ids).await?;
+    // Do not silently convert an existing NORMAL tag of the same slug into a
+    // smart tag (#298): only an already-smart tag may have its filter updated.
+    let slug = normalize_name(name.trim());
+    if !slug.is_empty() {
+        let existing: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM hub_tags WHERE owner_user_id = ?1 AND slug = ?2")
+                .bind(owner_user_id)
+                .bind(&slug)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
+        if let Some(existing_id) = existing {
+            let already_smart: Option<i64> =
+                sqlx::query_scalar("SELECT 1 FROM hub_smart_tags WHERE tag_id = ?1 LIMIT 1")
+                    .bind(existing_id)
+                    .fetch_optional(pool)
+                    .await
+                    .ok()
+                    .flatten();
+            if already_smart.is_none() {
+                bail!("Name bereits vergeben");
+            }
+        }
     }
     let tag_id = ensure_tag(pool, owner_user_id, name).await?;
     if let Some(ty) = ty {
@@ -1956,6 +2006,7 @@ pub async fn update_smart_filter(
     if !filter.has_criteria() {
         bail!("smart filter needs at least one criterion");
     }
+    ensure_tag_ids_owned(pool, owner_user_id, &filter.tag_ids).await?;
     let now = chrono::Utc::now().to_rfc3339();
     let rows = sqlx::query(
         "UPDATE hub_smart_tags
@@ -1988,17 +2039,6 @@ pub async fn smart_filter(pool: &SqlitePool, tag_id: i64) -> Option<SmartFilter>
             .ok()
             .flatten();
     raw.and_then(|s| serde_json::from_str(&s).ok())
-}
-
-/// True, wenn `tag_id` eine Zeile in `hub_smart_tags` hat.
-pub async fn is_smart_tag(pool: &SqlitePool, tag_id: i64) -> bool {
-    sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_smart_tags WHERE tag_id = ?1 LIMIT 1")
-        .bind(tag_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .is_some()
 }
 
 /// Smart-Tags eines Owners: `(id, name)` für Picker.

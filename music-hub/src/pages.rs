@@ -4503,9 +4503,10 @@ async fn run_tags(
     }
     qb.push(
         "(SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count,
-                (SELECT 1 FROM hub_smart_tags st WHERE st.tag_id = t.id) AS is_smart
+                st.filter_json AS smart_filter_json
            FROM hub_tags t
            JOIN hub_users u ON u.id = t.owner_user_id
+           LEFT JOIN hub_smart_tags st ON st.tag_id = t.id
           WHERE 1 = 1",
     );
     if mine {
@@ -4555,7 +4556,13 @@ async fn run_tags(
             .map(|t| format!("{} {}", t.icon(), t.label()))
             .unwrap_or_default();
         let id: i64 = r.get::<i64, _>("id");
-        let dynamic = r.get::<Option<i64>, _>("is_smart").is_some();
+        // A tag is "dynamic" only when its stored filter parses; a corrupt
+        // `filter_json` is treated as a normal (non-dynamic) tag, consistently
+        // with the list count (`smart_tag_count` -> 0) and `tag_detail` (#298).
+        let dynamic = r
+            .get::<Option<String>, _>("smart_filter_json")
+            .and_then(|s| serde_json::from_str::<crate::tags::SmartFilter>(&s).ok())
+            .is_some();
         // Smart tags are never materialized: the count comes from the runtime
         // resolution instead of `hub_track_resolved_tags` (#298).
         let track_count = if dynamic {
@@ -4804,7 +4811,7 @@ async fn smart_tag_create(State(st): State<AppState>, headers: HeaderMap, body: 
         .and_then(|s| crate::tagtypes::TagType::parse(s));
     match crate::tags::create_smart_tag(&st.pool, nav.id, &name, ty, &filter).await {
         Ok(id) => Redirect::to(&format!("/tag/{id}")).into_response(),
-        Err(_) => Redirect::to("/tags").into_response(),
+        Err(e) => flash_redirect("/tags", format!("Fehler: {e}")),
     }
 }
 

@@ -399,3 +399,46 @@ async fn empty_filter_rejected() {
         "no smart tag created without a criterion"
     );
 }
+
+// ── 10. a same-named NORMAL tag is not silently converted ──────────────────
+
+#[tokio::test]
+async fn create_does_not_convert_existing_normal_tag() {
+    let w = seed_world().await;
+    // A normal tag created the way the UI does (slug = normalize_name(name)).
+    let normal = tags::ensure_tag(&w.app.pool, w.alice, "Plain Normal").await.unwrap();
+    let res =
+        tags::create_smart_tag(&w.app.pool, w.alice, "Plain Normal", None, &base_filter(&w)).await;
+    assert!(res.is_err(), "same-named normal tag must not be converted");
+
+    // The normal tag stays non-smart.
+    assert!(
+        tags::smart_filter(&w.app.pool, normal).await.is_none(),
+        "normal tag must not gain a smart filter"
+    );
+}
+
+// ── 11. foreign tag ids are rejected (cross-owner guard) ───────────────────
+
+#[tokio::test]
+async fn create_rejects_foreign_tag_ids() {
+    let w = seed_world().await;
+    // A tag owned by bob (a different owner than the caller alice).
+    let bob_tag = insert_tag(&w.app.pool, w.bob, "bob-secret", "Bob Secret", "GENRE").await;
+    let filter = SmartFilter {
+        tag_ids: vec![bob_tag],
+        ..Default::default()
+    };
+    let res = tags::create_smart_tag(&w.app.pool, w.alice, "Foreign Leak", None, &filter).await;
+    assert!(res.is_err(), "foreign tag id must be rejected");
+
+    let row: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_smart_tags st JOIN hub_tags t ON t.id = st.tag_id
+          WHERE t.owner_user_id = ?1 AND t.slug = 'foreign-leak'",
+    )
+    .bind(w.alice)
+    .fetch_one(&w.app.pool)
+    .await
+    .unwrap();
+    assert_eq!(row, 0, "no smart tag row may be written on rejection");
+}
