@@ -5240,12 +5240,16 @@ struct TagTrack {
     artists_html: String,
 }
 
-/// A source playlist feeding a tag, plus its keep-on-remove policy.
+/// A source playlist feeding a tag, plus its keep-on-remove policy and last
+/// bi-way push status (#283).
 struct TagSource {
     id: i64,
     name: String,
     owner: String,
     keep: bool,
+    push_status: String,
+    push_error: String,
+    push_at: String,
 }
 
 /// One row of the "top artists" insight table (pre-formatted percentages).
@@ -5293,6 +5297,8 @@ struct TagDetailPage {
     sources: Vec<TagSource>,
     /// Bi-way sync: mirror tagged tracks onto the source playlists.
     sync: bool,
+    /// Owner's Spotify grant includes a playlist write scope (#283).
+    write_scope: bool,
     q: String,
     tracks: Vec<TagTrack>,
     s_title: crate::table::SortHead,
@@ -5432,26 +5438,44 @@ async fn tag_detail_page(
             support: c.support,
         })
         .collect();
-    let sources: Vec<TagSource> = sqlx::query_as::<_, (i64, String, String, i64)>(
-        "SELECT ts.playlist_id, COALESCE(hp.name,''), COALESCE(u.slug,''),
-                COALESCE(ts.keep_on_remove, 0)
-           FROM hub_tag_sources ts
-           JOIN hub_playlists hp ON hp.id = ts.playlist_id
-           JOIN hub_users u ON u.id = hp.user_id
-          WHERE ts.tag_id = ?1 ORDER BY hp.name",
-    )
-    .bind(id)
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|(id, name, owner, keep)| TagSource {
-        id,
-        name,
-        owner,
-        keep: keep != 0,
-    })
-    .collect();
+    let sources: Vec<TagSource> =
+        sqlx::query_as::<_, (i64, String, String, i64, String, String, String)>(
+            "SELECT ts.playlist_id, COALESCE(hp.name,''), COALESCE(u.slug,''),
+                    COALESCE(ts.keep_on_remove, 0),
+                    COALESCE(hp.last_push_status,''),
+                    COALESCE(hp.last_push_error,''),
+                    COALESCE(hp.last_push_at,'')
+               FROM hub_tag_sources ts
+               JOIN hub_playlists hp ON hp.id = ts.playlist_id
+               JOIN hub_users u ON u.id = hp.user_id
+              WHERE ts.tag_id = ?1 ORDER BY hp.name",
+        )
+        .bind(id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, name, owner, keep, push_status, push_error, push_at)| TagSource {
+            id,
+            name,
+            owner,
+            keep: keep != 0,
+            push_status,
+            push_error,
+            push_at,
+        })
+        .collect();
+    let owner_user_id: Option<i64> =
+        sqlx::query_scalar("SELECT owner_user_id FROM hub_tags WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&st.pool)
+            .await
+            .ok()
+            .flatten();
+    let write_scope = match owner_user_id {
+        Some(uid) => crate::curate::has_write_scope(&st.pool, uid).await,
+        None => false,
+    };
     let sync: bool = sqlx::query_scalar::<_, i64>(
         "SELECT COALESCE(sync_playlist,0) FROM hub_tags WHERE id = ?1",
     )
@@ -5479,6 +5503,7 @@ async fn tag_detail_page(
         source_count: d.source_count,
         sources,
         sync,
+        write_scope,
         q,
         tracks,
         s_title: crate::table::sort_head(
