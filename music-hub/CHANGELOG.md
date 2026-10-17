@@ -48,6 +48,34 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   für „no data"), und zeigte deshalb „—", während die Track-Page den Vault-Wert hatte. Beide
   lesen jetzt denselben `resolved`-Block über `music_api::resolved_audio`.
 
+## [0.23.0] — 2026-10-17
+
+**hub-smartplay** — Smart-Tags/Dynamic Lenses, In-Tool-Playlistbau (Track-Vorschläge für
+kuratierte Playlists) und geplante Daily/Weekly-Playlist-Generierung.
+
+### Added
+
+- **Smart-Tags / Dynamic Lenses** (#298, PR #485): filterbasierte Tag-Zugehörigkeit, deren
+  Track-Menge **zur Laufzeit** berechnet und **nicht materialisiert** wird. Migration `055`
+  legt `hub_smart_tags(tag_id UNIQUE FK, owner, filter_json, created_at, updated_at)` an;
+  `SmartFilter` (in `src/tags.rs`, Defaults/Clamps, JSON-Roundtrip) und `build_smart_query`
+  (durchgängig `QueryBuilder::push_bind` gegen Injection, `ORDER BY` aus festem Whitelist-`match`).
+  `tags::rebuild()` lässt Smart-Tags unberührt (Test `smart_tag_not_materialized`); leerer Filter
+  wird zweifach abgelehnt; `limit` default 100, `clamp(1,1000)`. Server-seitige
+  Ownership-Prüfung `ensure_tag_ids_owned`. `⚡ dynamisch`-Badge in der Tag-Liste und auf der
+  Tag-Detailseite; Routen `POST /tags/smart/create` und `POST /tag/{id}/smart` (owner-gebunden).
+- **Track-Vorschläge für kuratierte Playlists** (#299, PR #486): neu `Suggestion` + `suggestions()`
+  in `music-hub/src/curate.rs` (Seeds via `resolve_track_ids`, Kandidaten = hub_tracks − Seeds −
+  Rumpelkiste; additiver Score aus Similarity / Playlist-Co-Occurrence / EffNet-Cosine / Camelot-Key /
+  Ripeness, Seed-Aggregation **max**, batched ohne N+1, Gewichte live aus `settings::engine()`).
+  Neuer Endpoint `GET /curate/{id}/suggestions` + `POST /curate/{id}/items` (Session-Gate,
+  unbekannt/fremd → 404, Owner-Check); htmx-Sektion `_partials/curate_suggestions.html` in
+  `curate_detail.html`; 5 neue Integrationstests.
+- **Geplante Daily/Weekly-Playlist-Generierung** (#300): Issue #300 wurde geschlossen
+  (Kommentar „Done & deployed (PR merged to feat/mmm-hub)"). Ein entsprechender Merge/PR ist in
+  **diesem** Repository jedoch **nicht** nachweisbar (kein Scheduler-Code unter `music-hub/src`) —
+  Eintrag daher **unbestätigt** (siehe Abnahme des Release-PRs).
+
 ## [0.20.0] — 2026-10-17
 
 **hub-playlist-sync** — Playlist-Fetch/Update pro User: prominenter Fetch-Button,
