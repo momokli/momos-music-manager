@@ -48,6 +48,36 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   für „no data"), und zeigte deshalb „—", während die Track-Page den Vault-Wert hatte. Beide
   lesen jetzt denselben `resolved`-Block über `music_api::resolved_audio`.
 
+## [0.20.0] — 2026-10-17
+
+**hub-playlist-sync** — Playlist-Fetch/Update pro User: prominenter Fetch-Button,
+Playlist-Level last-updated + Change-Detection via Snapshot, inkrementelles Re-Fetch
+(spart API-Calls) und Bi-way-Sync (Hub → Spotify, write-Scope + Re-Auth nötig).
+
+### Added
+
+- **Inkrementelles Playlist-Re-Fetch via Snapshot** (#281, PR #286): Migration `037`
+  fügt `hub_playlists.last_synced_snapshot` hinzu. Der Worker re-fetcht eine Playlist nur
+  noch, wenn sich ihr Remote-Snapshot seit dem letzten Item-Fetch geändert hat (vorher:
+  nie), und schreibt `last_synced_snapshot` bei Erfolg — das spart Spotify-API-Calls /
+  429-Headroom. Neuer Endpoint `POST /api/hub/playlists/{id}/refetch` reiht eine einzelne
+  Playlist in die Worker-Queue ein.
+- **Fetch-Button pro User + Playlist-Status** (#282, PR #286): in `/me/playlists` ein
+  prominenter „Neue Playlists holen“-Button (listet die Playlists neu von der Plattform),
+  eine Spalte „Aktualisiert“, ein Changed-Badge, wenn der Snapshot sich bewegte, und ein
+  Re-Fetch-Button pro Zeile.
+- **Bi-way-Sync: Hub → Spotify** (#283, PR #483): getaggte Tracks werden zurück in die
+  Spotify-**Source-Playlist** geschrieben — Add via `POST /playlists/{id}/items`, Untag
+  entfernt den Track wieder via `DELETE /playlists/{id}/items` (`unsync_tag_from_playlists`).
+  Additive Migration `054` ergänzt `last_push_at` / `last_push_status` / `last_push_error` /
+  `last_push_action` an `hub_playlists`. Gates: nur `is_owned=1` **oder** `collaborative=1`,
+  nur bei vorhandenem `playlist-modify-*`-Scope, nur mit externer Spotify-ID. Idempotenz:
+  die Hub-Spiegel-Zeile (`hub_playlist_tracks`) wird **erst nach erfolgreichem Spotify-Push**
+  eingefügt; `keep_on_remove` archiviert statt zu löschen. Gemeinsamer bounded
+  `429/Retry-After`-Retry (1×, Cap 60s) + neuer `delete_json`-Helper im Spotify-Client.
+- **Push-Status-UI + Re-Auth-Hinweis** (#283, PR #483): Push-Status je Source-Playlist
+  (Badges „Push OK“ / „Scope fehlt“ / Quota / übersprungen / Fehler) und ein Re-Auth-Hinweis
+  bei fehlendem Write-Scope (`pages.rs` / `templates/tag.html`).
 ## [0.19.0] — 2026-10-17
 
 **hub-tag-types** — Hard-wired Tag-Typen ersetzen die flexiblen Gruppen. Ein Tag hat
