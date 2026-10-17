@@ -164,13 +164,25 @@ content %}
         >
             {% if s.keep %}Archiv: AN{% else %}Archiv: aus{% endif %}
         </button>
+        {% if !s.push_status.is_empty() %}
+        <span class="hub-muted" title="{{ s.push_error }}" style="font-size: 0.8em">
+            {% if s.push_status == "ok" %}Push OK{% else if s.push_status == "scope_missing"
+            %}Scope fehlt{% else if s.push_status == "quota" %}Quota{% else if s.push_status ==
+            "skipped" %}übersprungen{% else %}Fehler{% endif %} {% if !s.push_at.is_empty() %}({{ s.push_at }}){% endif %}
+        </span>
+        {% endif %}
     </form>
     <form method="post" action="/tag/{{ id }}/source/keep" style="display: inline">
         <input type="hidden" name="playlist_id" value="{{ s.id }}" />
         <input type="hidden" name="keep" value="0" />
         <button type="submit" class="hub-x" title="Archiv aus">×</button>
     </form>
-    {% endfor %} {% endif %}
+    {% endfor %} {% endif %} {% if sync && !write_scope %}
+    <span class="hub-muted" style="flex-basis: 100%">
+        Spotify hat keinen Schreib-Scope — zum Spiegeln in Playlists
+        <a href="/api/hub/services/spotify/connect">Spotify neu verbinden</a>.
+    </span>
+    {% endif %}
 </section>
 {% endif %} {% if music_api %}
 <section

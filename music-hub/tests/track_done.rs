@@ -68,7 +68,7 @@ async fn phase_variants_count_as_one_family() {
     set_type(&app.pool, alice, tag_id, Some(TagType::Phase1))
         .await
         .unwrap();
-    music_hub::tags::tag_track(&app.pool, alice, track, tag_id)
+    music_hub::tags::tag_track(&app.pool, &app.cfg, alice, track, tag_id)
         .await
         .unwrap();
 

@@ -1904,7 +1904,7 @@ async fn track_tag(
     )
     .await
     {
-        let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
+        let _ = crate::tags::tag_track(&st.pool, &st.cfg, nav.id, id, tag_id).await;
     }
     let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
     let tag_scope_q = crate::scope::TagScope::parse(f.tag_scope.as_deref())
@@ -1924,7 +1924,7 @@ async fn track_untag(
         return Redirect::to("/login").into_response();
     };
     if let Some(tag_id) = crate::tags::find_tag_id_by_name(&st.pool, &f.name).await {
-        let _ = crate::tags::untag_track(&st.pool, nav.id, id, tag_id).await;
+        let _ = crate::tags::untag_track(&st.pool, &st.cfg, nav.id, id, tag_id).await;
     }
     let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
     let tag_scope_q = crate::scope::TagScope::parse(f.tag_scope.as_deref())
@@ -2335,7 +2335,7 @@ async fn now_tag(
                 {
                     let _ = crate::tagtypes::set(&st.pool, nav.id, tag_id, Some(ty)).await;
                 }
-                match crate::tags::tag_track(&st.pool, nav.id, f.track_id, tag_id).await {
+                match crate::tags::tag_track(&st.pool, &st.cfg, nav.id, f.track_id, tag_id).await {
                     Ok(_) => (format!("Tag „{}“ hinzugefügt", f.name.trim()), "ok"),
                     Err(e) => (format!("Fehler: {e}"), "err"),
                 }
@@ -2711,7 +2711,7 @@ async fn track_actions_tag_post(
     )
     .await
     {
-        Some(tag_id) => match crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await {
+        Some(tag_id) => match crate::tags::tag_track(&st.pool, &st.cfg, nav.id, id, tag_id).await {
             Ok(_) => ("Tag hinzugefügt".to_string(), "ok"),
             Err(e) => (format!("Fehler: {e}"), "err"),
         },

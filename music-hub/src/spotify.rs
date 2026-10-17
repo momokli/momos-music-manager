@@ -158,6 +158,25 @@ pub async fn put_query(
     request_json(reqwest::Method::PUT, access_token, url, None, Some(query)).await
 }
 
+/// DELETE a JSON body from a Spotify API URL (e.g. remove playlist items).
+/// Returns `(status, parsed body)`.
+pub async fn delete_json(access_token: &str, url: &str, body: &Value) -> Result<(u16, Value)> {
+    request_json(reqwest::Method::DELETE, access_token, url, Some(body), None).await
+}
+
+/// Upper bound (seconds) for a single bounded `429` wait in the write helpers.
+pub const WRITE_RETRY_CAP_SECS: u64 = 60;
+
+/// Read the `Retry-After` header (seconds) off a Spotify response.
+pub(crate) fn retry_after(resp: &reqwest::Response) -> Option<u64> {
+    resp.headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+}
+
+/// Generic write request. On `429` it waits `min(Retry-After, cap)` **once**
+/// (bounded retry — never an unbounded loop) and retries the same request.
 async fn request_json(
     method: reqwest::Method,
     access_token: &str,
@@ -166,17 +185,28 @@ async fn request_json(
     query: Option<&[(&str, &str)]>,
 ) -> Result<(u16, Value)> {
     let client = reqwest::Client::new();
-    let mut req = client.request(method, url).bearer_auth(access_token);
-    if let Some(q) = query {
-        req = req.query(q);
+    let mut retried = false;
+    loop {
+        let mut req = client.request(method.clone(), url).bearer_auth(access_token);
+        if let Some(q) = query {
+            req = req.query(q);
+        }
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        let resp = req.send().await.with_context(|| format!("request {url}"))?;
+        let status = resp.status().as_u16();
+        if status == 429 && !retried {
+            retried = true;
+            let wait = retry_after(&resp).unwrap_or(1).min(WRITE_RETRY_CAP_SECS);
+            if wait > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            }
+            continue;
+        }
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        return Ok((status, body));
     }
-    if let Some(b) = body {
-        req = req.json(b);
-    }
-    let resp = req.send().await.with_context(|| format!("request {url}"))?;
-    let status = resp.status().as_u16();
-    let body: Value = resp.json().await.unwrap_or(Value::Null);
-    Ok((status, body))
 }
 
 pub fn api_url(base: &str, path: &str) -> String {
@@ -200,11 +230,7 @@ pub async fn get_page(access_token: &str, url: &str) -> Result<Page> {
         .await
         .with_context(|| format!("GET {url}"))?;
     let status = resp.status().as_u16();
-    let retry_after = resp
-        .headers()
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<u64>().ok());
+    let retry_after = retry_after(&resp);
     let body: Value = resp.json().await.unwrap_or(Value::Null);
     let quota_exceeded = body["error"]["reason"].as_str() == Some("QUOTA_EXCEEDED");
     Ok(Page {
