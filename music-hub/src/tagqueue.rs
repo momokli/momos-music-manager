@@ -533,7 +533,7 @@ async fn queue_tag(
     )
     .await
     {
-        let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
+        let _ = crate::tags::tag_track(&st.pool, &st.cfg, nav.id, id, tag_id).await;
     }
     let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
     match build_detail(&st, nav.id, id, scope, f.scope.is_some(), f.tag_scope.as_deref()).await {
@@ -552,7 +552,7 @@ async fn queue_untag(
         return Redirect::to("/login").into_response();
     };
     if let Some(tag_id) = crate::tags::find_tag_id_by_name(&st.pool, &f.name).await {
-        let _ = crate::tags::untag_track(&st.pool, nav.id, id, tag_id).await;
+        let _ = crate::tags::untag_track(&st.pool, &st.cfg, nav.id, id, tag_id).await;
     }
     let scope = crate::recommend::RecScope::parse(f.scope.as_deref());
     match build_detail(&st, nav.id, id, scope, f.scope.is_some(), f.tag_scope.as_deref()).await {

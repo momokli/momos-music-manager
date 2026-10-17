@@ -70,7 +70,7 @@ async fn tagging_syncs_to_linked_playlist() {
     .await
     .unwrap();
     // (The seed may already contain it; record the baseline.)
-    tags::tag_track(&app.pool, alice, track, tag).await.unwrap();
+    tags::tag_track(&app.pool, &app.cfg, alice, track, tag).await.unwrap();
 
     let after: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM hub_playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
@@ -97,7 +97,7 @@ async fn tagging_syncs_to_linked_playlist() {
     .execute(&app.pool)
     .await
     .unwrap();
-    let pushed = tags::sync_tag_to_playlists(&app.pool, alice, tag2, track)
+    let pushed = tags::sync_tag_to_playlists(&app.pool, &app.cfg, alice, tag2, track)
         .await
         .unwrap();
     assert!(pushed.is_empty(), "no sync without the opt-in flag");

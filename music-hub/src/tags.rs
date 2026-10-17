@@ -12,6 +12,8 @@ use anyhow::{Result, bail};
 use sqlx::{QueryBuilder, Row, SqlitePool};
 use std::collections::HashSet;
 
+use crate::config::Config;
+
 /// Lowercase, keep alphanumerics, collapse everything else to single spaces.
 pub fn normalize_name(s: &str) -> String {
     let mut out = String::new();
@@ -98,7 +100,13 @@ pub async fn rebuild(pool: &SqlitePool) -> Result<ResolveSummary> {
 }
 
 /// Tag a track directly (manual link owned by `user_id`). Idempotent.
-pub async fn tag_track(pool: &SqlitePool, user_id: i64, track_id: i64, tag_id: i64) -> Result<()> {
+pub async fn tag_track(
+    pool: &SqlitePool,
+    cfg: &Config,
+    user_id: i64,
+    track_id: i64,
+    tag_id: i64,
+) -> Result<()> {
     let owned =
         sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2")
             .bind(tag_id)
@@ -140,13 +148,14 @@ pub async fn tag_track(pool: &SqlitePool, user_id: i64, track_id: i64, tag_id: i
         .await?;
     rebuild(pool).await?;
     // Bi-way: mirror the tag onto opted-in (owned) source playlists.
-    let _ = sync_tag_to_playlists(pool, user_id, tag_id, track_id).await;
+    let _ = sync_tag_to_playlists(pool, cfg, user_id, tag_id, track_id).await;
     Ok(())
 }
 
 /// Remove a direct (manual) track↔tag link. Idempotent.
 pub async fn untag_track(
     pool: &SqlitePool,
+    cfg: &Config,
     user_id: i64,
     track_id: i64,
     tag_id: i64,
@@ -169,6 +178,8 @@ pub async fn untag_track(
     .execute(pool)
     .await?;
     rebuild(pool).await?;
+    // Bi-way: remove the track from opted-in (owned) source playlists on Spotify.
+    let _ = unsync_tag_from_playlists(pool, cfg, user_id, tag_id, track_id).await;
     Ok(())
 }
 
@@ -260,11 +271,79 @@ pub async fn archive_tag(
     Ok(())
 }
 
-/// Bi-way sync: when a track is tagged, add it to the (owned) source playlists
-/// of tags that opted in via `sync_playlist`. Hub-side membership only; returns
-/// the playlist ids that were updated.
+/// A source playlist eligible for a bi-way push (#283).
+struct PushSource {
+    playlist_id: i64,
+    remote_id: String,
+    is_owned: bool,
+    collaborative: bool,
+    keep_on_remove: bool,
+}
+
+/// Source playlists of a tag owned by `user_id` (Spotify only).
+async fn push_sources(pool: &SqlitePool, user_id: i64, tag_id: i64) -> Vec<PushSource> {
+    let rows = sqlx::query(
+        "SELECT ts.playlist_id AS hub_id,
+                COALESCE(hp.playlist_id, '') AS remote_id,
+                COALESCE(hp.is_owned, 0) AS is_owned,
+                COALESCE(hp.collaborative, 0) AS collaborative,
+                COALESCE(ts.keep_on_remove, 0) AS keep_on_remove
+           FROM hub_tag_sources ts
+           JOIN hub_playlists hp ON hp.id = ts.playlist_id
+          WHERE ts.tag_id = ?1 AND hp.user_id = ?2 AND hp.service = 'spotify'",
+    )
+    .bind(tag_id)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    rows.iter()
+        .map(|r| PushSource {
+            playlist_id: r.get("hub_id"),
+            remote_id: r.get("remote_id"),
+            is_owned: r.get::<i64, _>("is_owned") != 0,
+            collaborative: r.get::<i64, _>("collaborative") != 0,
+            keep_on_remove: r.get::<i64, _>("keep_on_remove") != 0,
+        })
+        .collect()
+}
+
+/// Shorten an error message for storage in `last_push_error`.
+fn short(s: &str) -> String {
+    s.chars().take(200).collect()
+}
+
+/// Persist the outcome of the last push attempt for one playlist.
+async fn record_push(
+    pool: &SqlitePool,
+    playlist_id: i64,
+    status: &str,
+    error: Option<&str>,
+    action: &str,
+) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = sqlx::query(
+        "UPDATE hub_playlists
+            SET last_push_at = ?2, last_push_status = ?3,
+                last_push_error = ?4, last_push_action = ?5
+          WHERE id = ?1",
+    )
+    .bind(playlist_id)
+    .bind(&now)
+    .bind(status)
+    .bind(error)
+    .bind(action)
+    .execute(pool)
+    .await;
+}
+
+/// Bi-way sync (add): when a track is tagged, mirror it into the (owned)
+/// source playlists of tags that opted in via `sync_playlist` — hub-side AND on
+/// Spotify (`POST /playlists/{id}/items`, idempotent). Returns the playlist ids
+/// that were considered.
 pub async fn sync_tag_to_playlists(
     pool: &SqlitePool,
+    cfg: &Config,
     user_id: i64,
     tag_id: i64,
     track_id: i64,
@@ -280,29 +359,201 @@ pub async fn sync_tag_to_playlists(
     if sync == 0 {
         return Ok(Vec::new());
     }
-    let playlists: Vec<i64> = sqlx::query_scalar(
-        "SELECT ts.playlist_id FROM hub_tag_sources ts
-           JOIN hub_playlists hp ON hp.id = ts.playlist_id
-          WHERE ts.tag_id = ?1 AND hp.user_id = ?2",
-    )
-    .bind(tag_id)
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    let sources = push_sources(pool, user_id, tag_id).await;
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
     let now = chrono::Utc::now().to_rfc3339();
-    for pl in &playlists {
-        sqlx::query(
+    let scope_ok = crate::curate::has_write_scope(pool, user_id).await;
+    let uri = crate::curate::spotify_uris(pool, &[track_id])
+        .await?
+        .into_iter()
+        .next();
+    let mut updated = Vec::new();
+    let mut token: Option<String> = None;
+    for s in &sources {
+        updated.push(s.playlist_id);
+        // Hub-side membership (existing behaviour) — also tells us whether the
+        // track was already known to be in the playlist (idempotency).
+        let inserted = sqlx::query(
             "INSERT OR IGNORE INTO hub_playlist_tracks (playlist_id, track_id, added_at)
              VALUES (?1, ?2, ?3)",
         )
-        .bind(pl)
+        .bind(s.playlist_id)
         .bind(track_id)
         .bind(&now)
         .execute(pool)
-        .await?;
+        .await?
+        .rows_affected()
+            > 0;
+        if !(s.is_owned || s.collaborative) {
+            record_push(pool, s.playlist_id, "skipped", None, "add").await;
+            continue;
+        }
+        let Some(uri) = uri.as_deref() else {
+            record_push(pool, s.playlist_id, "skipped", Some("kein Spotify-Track"), "add").await;
+            continue;
+        };
+        if s.remote_id.is_empty() {
+            record_push(
+                pool,
+                s.playlist_id,
+                "error",
+                Some("keine Spotify-Playlist-ID"),
+                "add",
+            )
+            .await;
+            continue;
+        }
+        if !scope_ok {
+            record_push(pool, s.playlist_id, "scope_missing", None, "add").await;
+            continue;
+        }
+        if !inserted {
+            // Already mirrored before this call → already on Spotify.
+            record_push(pool, s.playlist_id, "ok", None, "add").await;
+            continue;
+        }
+        if token.is_none() {
+            match crate::ingest::access_token(pool, cfg, user_id).await {
+                Ok(t) => token = Some(t),
+                Err(e) => {
+                    record_push(pool, s.playlist_id, "error", Some(&short(&e.to_string())), "add")
+                        .await;
+                    continue;
+                }
+            }
+        }
+        let tok = token.as_deref().unwrap();
+        let uris = vec![uri.to_string()];
+        match crate::curate::spotify_add_uris(&cfg.spotify_api_base, tok, &s.remote_id, &uris).await
+        {
+            Ok(()) => record_push(pool, s.playlist_id, "ok", None, "add").await,
+            Err(e) => {
+                record_push(pool, s.playlist_id, "error", Some(&short(&e.to_string())), "add").await
+            }
+        }
     }
-    Ok(playlists)
+    Ok(updated)
+}
+
+/// Bi-way sync (remove): when a manual tag is removed, drop the track from the
+/// (owned) source playlists on Spotify (`DELETE /playlists/{id}/items`). A source
+/// with `keep_on_remove = 1` is *archived* instead and never removed from Spotify.
+pub async fn unsync_tag_from_playlists(
+    pool: &SqlitePool,
+    cfg: &Config,
+    user_id: i64,
+    tag_id: i64,
+    track_id: i64,
+) -> Result<Vec<i64>> {
+    let sync: i64 =
+        sqlx::query_scalar("SELECT COALESCE(sync_playlist,0) FROM hub_tags WHERE id = ?1")
+            .bind(tag_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+    if sync == 0 {
+        return Ok(Vec::new());
+    }
+    let sources = push_sources(pool, user_id, tag_id).await;
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scope_ok = crate::curate::has_write_scope(pool, user_id).await;
+    let uri = crate::curate::spotify_uris(pool, &[track_id])
+        .await?
+        .into_iter()
+        .next();
+    let mut updated = Vec::new();
+    let mut token: Option<String> = None;
+    for s in &sources {
+        updated.push(s.playlist_id);
+        // keep_on_remove: keep the tag link (archive), do NOT touch Spotify.
+        if s.keep_on_remove {
+            let _ = archive_tag(pool, tag_id, track_id, Some(s.playlist_id)).await;
+            record_push(pool, s.playlist_id, "skipped", Some("keep_on_remove"), "remove").await;
+            continue;
+        }
+        let in_playlist = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM hub_playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+        )
+        .bind(s.playlist_id)
+        .bind(track_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+        if !in_playlist {
+            record_push(pool, s.playlist_id, "skipped", Some("nicht in Playlist"), "remove").await;
+            continue;
+        }
+        if !(s.is_owned || s.collaborative) {
+            record_push(pool, s.playlist_id, "skipped", None, "remove").await;
+            continue;
+        }
+        let Some(uri) = uri.as_deref() else {
+            let _ = sqlx::query(
+                "DELETE FROM hub_playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+            )
+            .bind(s.playlist_id)
+            .bind(track_id)
+            .execute(pool)
+            .await;
+            record_push(pool, s.playlist_id, "skipped", Some("kein Spotify-Track"), "remove")
+                .await;
+            continue;
+        };
+        if s.remote_id.is_empty() {
+            record_push(
+                pool,
+                s.playlist_id,
+                "error",
+                Some("keine Spotify-Playlist-ID"),
+                "remove",
+            )
+            .await;
+            continue;
+        }
+        if !scope_ok {
+            record_push(pool, s.playlist_id, "scope_missing", None, "remove").await;
+            continue;
+        }
+        if token.is_none() {
+            match crate::ingest::access_token(pool, cfg, user_id).await {
+                Ok(t) => token = Some(t),
+                Err(e) => {
+                    record_push(pool, s.playlist_id, "error", Some(&short(&e.to_string())), "remove")
+                        .await;
+                    continue;
+                }
+            }
+        }
+        let tok = token.as_deref().unwrap();
+        let uris = vec![uri.to_string()];
+        match crate::curate::spotify_remove_uris(&cfg.spotify_api_base, tok, &s.remote_id, &uris)
+            .await
+        {
+            Ok(()) => {
+                let _ = sqlx::query(
+                    "DELETE FROM hub_playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+                )
+                .bind(s.playlist_id)
+                .bind(track_id)
+                .execute(pool)
+                .await;
+                record_push(pool, s.playlist_id, "ok", None, "remove").await;
+            }
+            Err(e) => {
+                record_push(pool, s.playlist_id, "error", Some(&short(&e.to_string())), "remove")
+                    .await
+            }
+        }
+    }
+    Ok(updated)
 }
 
 /// Create (or update) a tag owned by a user, without a source playlist.

@@ -220,8 +220,8 @@ pub async fn create_manual(pool: &SqlitePool, user_id: i64, name: &str) -> Resul
     Ok(id)
 }
 
-/// Map hub track ids to Spotify track ids (order preserved, duplicates dropped).
-async fn spotify_uris(pool: &SqlitePool, track_ids: &[i64]) -> Result<Vec<String>> {
+/// Map hub track ids to Spotify track URIs (order preserved, duplicates dropped).
+pub(crate) async fn spotify_uris(pool: &SqlitePool, track_ids: &[i64]) -> Result<Vec<String>> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for chunk in track_ids.chunks(500) {
@@ -336,6 +336,45 @@ async fn replace_items(base: &str, token: &str, playlist_id: &str, uris: &[Strin
     Ok(())
 }
 
+/// Add URIs to a Spotify playlist in batches of 100 (Spotify's per-request cap).
+pub(crate) async fn spotify_add_uris(
+    base: &str,
+    token: &str,
+    remote_id: &str,
+    uris: &[String],
+) -> Result<()> {
+    let url = crate::spotify::api_url(base, &format!("/playlists/{remote_id}/items"));
+    for chunk in uris.chunks(100) {
+        let (status, resp) =
+            crate::spotify::post_json(token, &url, &json!({ "uris": chunk })).await?;
+        if !(200..300).contains(&status) {
+            bail!("Spotify add items -> {status}: {}", spotify_err(&resp));
+        }
+    }
+    Ok(())
+}
+
+/// Remove URIs from a Spotify playlist in batches of 100. The post-Feb-2026
+/// endpoint takes `{"tracks":[{"uri":…}]}` in the body.
+pub(crate) async fn spotify_remove_uris(
+    base: &str,
+    token: &str,
+    remote_id: &str,
+    uris: &[String],
+) -> Result<()> {
+    let url = crate::spotify::api_url(base, &format!("/playlists/{remote_id}/items"));
+    for chunk in uris.chunks(100) {
+        let tracks: Vec<serde_json::Value> =
+            chunk.iter().map(|u| json!({ "uri": u })).collect();
+        let (status, resp) =
+            crate::spotify::delete_json(token, &url, &json!({ "tracks": tracks })).await?;
+        if !(200..300).contains(&status) {
+            bail!("Spotify remove items -> {status}: {}", spotify_err(&resp));
+        }
+    }
+    Ok(())
+}
+
 fn spotify_err(body: &serde_json::Value) -> String {
     body["error"]["message"]
         .as_str()
@@ -358,4 +397,45 @@ pub async fn daily_due(pool: &SqlitePool, cutoff_iso: &str) -> Result<Vec<Curate
     .bind(cutoff_iso)
     .fetch_all(pool)
     .await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spotify_add_uris;
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::{Path, State};
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde_json::Value;
+
+    /// 101 URIs must be sent as two batches (100 + 1).
+    #[tokio::test]
+    async fn add_uris_chunks_at_100() {
+        let seen: Arc<Mutex<Vec<usize>>> = Arc::default();
+        async fn add(
+            State(seen): State<Arc<Mutex<Vec<usize>>>>,
+            Path(_id): Path<String>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            seen.lock()
+                .unwrap()
+                .push(body["uris"].as_array().unwrap().len());
+            Json(serde_json::json!({}))
+        }
+        let app = Router::new()
+            .route("/playlists/{id}/items", post(add))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let uris: Vec<String> = (0..101).map(|i| format!("spotify:track:{i}")).collect();
+        spotify_add_uris(&format!("http://{addr}"), "tok", "rem", &uris)
+            .await
+            .unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![100, 1]);
+    }
 }
