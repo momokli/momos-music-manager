@@ -26,6 +26,62 @@
     <button type="submit">Tag anlegen</button>
 </form>
 
+<form method="post" action="/tags/smart/create" class="hub-filter">
+    <input
+        type="text"
+        name="name"
+        placeholder="Neuer Smart-Tag …"
+        aria-label="Smart-Tag-Name"
+        required
+    />
+    <select name="type" aria-label="Typ (optional)">
+        <option value="">Typ: keiner</option>
+        {% for t in type_options %}
+        <option value="{{ t.value }}">{{ t.icon }} {{ t.label }}</option>
+        {% endfor %}
+    </select>
+    <fieldset class="hub-chipset" aria-label="Basis-Tags">
+        <legend class="hub-visually-hidden">Basis-Tags (ODER)</legend>
+        {% for o in smart_tag_options %}
+        <label class="hub-chip"
+            ><input type="checkbox" name="tag_ids" value="{{ o.id }}" /> {{ o.name }}</label
+        >
+        {% endfor %}
+    </fieldset>
+    <input type="number" step="any" name="bpm_min" placeholder="BPM min" aria-label="BPM min" />
+    <input type="number" step="any" name="bpm_max" placeholder="BPM max" aria-label="BPM max" />
+    <input
+        type="number"
+        step="any"
+        name="energy_min"
+        placeholder="Energy min"
+        aria-label="Energy min"
+    />
+    <input
+        type="number"
+        step="any"
+        name="energy_max"
+        placeholder="Energy max"
+        aria-label="Energy max"
+    />
+    <input
+        type="number"
+        name="limit"
+        placeholder="Limit (100)"
+        aria-label="Limit"
+        min="1"
+        max="1000"
+    />
+    <select name="sort" aria-label="Sortierung">
+        {% for s in sort_options %}
+        <option value="{{ s.value }}" {% if s.selected %}selected{% endif %}>
+            {{ s.label }}
+        </option>
+        {% endfor %}
+    </select>
+    <button type="submit">Smart-Tag anlegen</button>
+</form>
+
 <nav aria-label="Filter">
     <ul>
         <li>
@@ -161,7 +217,7 @@
         <tbody>
             {% for t in tags %}
             <tr>
-                <td><a href="/tag/{{ t.id }}">{{ t.name }}</a></td>
+                <td><a href="/tag/{{ t.id }}">{{ t.name }}</a>{% if t.dynamic %} <span class="hub-badge">dynamisch</span>{% endif %}</td>
                 <td>{% if t.parents != "" %}{{ t.parents }}{% else %}—{% endif %}</td>
                 <td>
                     {% if t.type_label != "" %}{{ t.type_label }}{% else %}—{% endif %}

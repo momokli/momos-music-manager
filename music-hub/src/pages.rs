@@ -32,11 +32,13 @@ pub fn router(state: AppState) -> Router {
         .route("/backpacks/{id}/active", post(backpack_toggle_active))
         .route("/backpacks/{id}/export", get(backpack_export))
         .route("/tags/create", post(tag_create))
+        .route("/tags/smart/create", post(smart_tag_create))
         .route("/tags/search", get(tag_search))
         .route("/tag-search", get(tag_search_page))
         .route("/revisit", get(revisit_page))
         .route("/tag/{id}", get(tag_detail_page))
         .route("/tag/{id}/rename", post(tag_rename))
+        .route("/tag/{id}/smart", post(smart_tag_update))
         .route("/tag/{id}/type", post(tag_set_type))
         .route("/tag/{id}/parent/add", post(tag_parent_add))
         .route("/tag/{id}/parent/remove", post(tag_parent_remove))
@@ -4387,6 +4389,10 @@ struct TagsPage {
     types_label: String,
     owner_options: Vec<OwnerOption>,
     collective_options: Vec<ParentOption>,
+    /// Base-tag choices for the smart-tag create form (#298).
+    smart_tag_options: Vec<ParentOption>,
+    /// Sort choices for the smart-tag create form (#298).
+    sort_options: Vec<SelOpt>,
     tags: Vec<TagRow>,
     s_name: crate::table::SortHead,
     s_owner: crate::table::SortHead,
@@ -4404,6 +4410,26 @@ struct TypeOption {
     selected: bool,
 }
 
+/// Sort choices shared by the smart-tag create (#298) and edit forms.
+fn smart_sort_options(selected: &str) -> Vec<SelOpt> {
+    const SORTS: &[(&str, &str)] = &[
+        ("newest", "Neueste zuerst"),
+        ("oldest", "Älteste zuerst"),
+        ("title", "Titel"),
+        ("artists", "Artists"),
+        ("bpm", "BPM"),
+        ("energy", "Energy"),
+    ];
+    SORTS
+        .iter()
+        .map(|(value, label)| SelOpt {
+            value: (*value).to_string(),
+            label: (*label).to_string(),
+            selected: *value == selected,
+        })
+        .collect()
+}
+
 struct TagRow {
     id: i64,
     name: String,
@@ -4412,6 +4438,8 @@ struct TagRow {
     parents: String,
     track_count: i64,
     source_count: i64,
+    /// Smart tag / dynamic lens (#298): shows a "dynamisch" badge.
+    dynamic: bool,
 }
 
 /// Append a #331 scope predicate `{lhs} IN (SELECT value FROM json_each(?))`
@@ -4474,7 +4502,8 @@ async fn run_tags(
         );
     }
     qb.push(
-        "(SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count
+        "(SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count,
+                (SELECT 1 FROM hub_smart_tags st WHERE st.tag_id = t.id) AS is_smart
            FROM hub_tags t
            JOIN hub_users u ON u.id = t.owner_user_id
           WHERE 1 = 1",
@@ -4518,27 +4547,34 @@ async fn run_tags(
     }
     crate::table::order_by(&mut qb, sort, dir, allowed, "name");
     qb.push(" LIMIT ").push_bind(limit);
-    qb.build()
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default()
-        .iter()
-        .map(|r| {
-            let ty: String = r.get::<Option<String>, _>("type_name").unwrap_or_default();
-            let type_label = crate::tagtypes::TagType::parse(&ty)
-                .map(|t| format!("{} {}", t.icon(), t.label()))
-                .unwrap_or_default();
-            TagRow {
-                id: r.get::<i64, _>("id"),
-                name: r.get::<Option<String>, _>("name").unwrap_or_default(),
-                owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
-                type_label,
-                parents: r.get::<Option<String>, _>("parents").unwrap_or_default(),
-                track_count: r.get::<Option<i64>, _>("track_count").unwrap_or(0),
-                source_count: r.get::<Option<i64>, _>("source_count").unwrap_or(0),
-            }
-        })
-        .collect()
+    let rows = qb.build().fetch_all(pool).await.unwrap_or_default();
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let ty: String = r.get::<Option<String>, _>("type_name").unwrap_or_default();
+        let type_label = crate::tagtypes::TagType::parse(&ty)
+            .map(|t| format!("{} {}", t.icon(), t.label()))
+            .unwrap_or_default();
+        let id: i64 = r.get::<i64, _>("id");
+        let dynamic = r.get::<Option<i64>, _>("is_smart").is_some();
+        // Smart tags are never materialized: the count comes from the runtime
+        // resolution instead of `hub_track_resolved_tags` (#298).
+        let track_count = if dynamic {
+            crate::tags::smart_tag_count(pool, id).await.unwrap_or(0)
+        } else {
+            r.get::<Option<i64>, _>("track_count").unwrap_or(0)
+        };
+        out.push(TagRow {
+            id,
+            name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+            owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
+            type_label,
+            parents: r.get::<Option<String>, _>("parents").unwrap_or_default(),
+            track_count,
+            source_count: r.get::<Option<i64>, _>("source_count").unwrap_or(0),
+            dynamic,
+        });
+    }
+    out
 }
 
 async fn tags_page(
@@ -4676,6 +4712,16 @@ async fn tags_page(
     let s_parents = crate::table::sort_head(rawq, "parents", "Parent-Tags", &sort, &dir);
     let s_tracks = crate::table::sort_head(rawq, "tracks", "Tracks", &sort, &dir);
     let s_sources = crate::table::sort_head(rawq, "sources", "Quellen", &sort, &dir);
+    let smart_tag_options: Vec<ParentOption> = crate::tags::list_user_tags(&st.pool, me)
+        .await
+        .into_iter()
+        .map(|(id, name)| ParentOption {
+            id,
+            name,
+            icon: String::new(),
+            selected: false,
+        })
+        .collect();
     render(&TagsPage {
         nav,
         flash: String::new(),
@@ -4685,6 +4731,8 @@ async fn tags_page(
         types_label,
         owner_options,
         collective_options,
+        smart_tag_options,
+        sort_options: smart_sort_options("newest"),
         tags,
         s_name,
         s_owner,
@@ -4726,6 +4774,107 @@ async fn tag_create(
         }
     }
     Redirect::to("/tags").into_response()
+}
+
+/// `POST /tags/smart/create` — create a smart tag (#298).
+///
+/// The form is read as a raw urlencoded body so repeated `tag_ids` checkboxes
+/// (base tags) are handled — `axum::Form` over `serde_urlencoded` cannot
+/// deserialize a repeated key into a `Vec`, so we reuse [`form_params`].
+async fn smart_tag_create(State(st): State<AppState>, headers: HeaderMap, body: String) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let p = form_params(&body);
+    let name = p
+        .get("name")
+        .and_then(|v| v.first())
+        .cloned()
+        .unwrap_or_default();
+    let filter = smart_filter_from_params(&p);
+    // Guard: an empty filter (or name) must not list the whole library.
+    if name.trim().is_empty() || !filter.has_criteria() {
+        return Redirect::to("/tags").into_response();
+    }
+    let ty = p
+        .get("type")
+        .and_then(|v| v.first())
+        .and_then(|s| crate::tagtypes::TagType::parse(s));
+    match crate::tags::create_smart_tag(&st.pool, nav.id, &name, ty, &filter).await {
+        Ok(id) => Redirect::to(&format!("/tag/{id}")).into_response(),
+        Err(_) => Redirect::to("/tags").into_response(),
+    }
+}
+
+/// `POST /tag/{id}/smart` — update a smart tag's filter (owner only, #298).
+async fn smart_tag_update(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let filter = smart_filter_from_params(&form_params(&body));
+    if !filter.has_criteria() {
+        return flash_redirect(
+            &format!("/tag/{id}"),
+            "Filter braucht mindestens ein Kriterium".to_string(),
+        );
+    }
+    let msg = match crate::tags::update_smart_filter(&st.pool, nav.id, id, &filter).await {
+        Ok(()) => "Filter gespeichert".to_string(),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    flash_redirect(&format!("/tag/{id}"), msg)
+}
+
+/// Parse an optional `f64` field from parsed form params (#298).
+fn form_f64(p: &HashMap<String, Vec<String>>, key: &str) -> Option<f64> {
+    p.get(key)
+        .and_then(|v| v.first())
+        .and_then(|s| s.trim().parse::<f64>().ok())
+}
+
+/// Build a [`crate::tags::SmartFilter`] from parsed form params (#298).
+fn smart_filter_from_params(p: &HashMap<String, Vec<String>>) -> crate::tags::SmartFilter {
+    let first = |k: &str| {
+        p.get(k)
+            .and_then(|v| v.first())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+    let tag_ids: Vec<i64> = p
+        .get("tag_ids")
+        .map(|v| {
+            v.iter()
+                .filter_map(|s| s.trim().parse::<i64>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let limit = {
+        let s = first("limit");
+        if s.is_empty() {
+            None
+        } else {
+            s.parse::<i64>().ok()
+        }
+    };
+    let sort = {
+        let s = first("sort");
+        if s.is_empty() { None } else { Some(s) }
+    };
+    crate::tags::SmartFilter {
+        version: 1,
+        tag_ids,
+        bpm_min: form_f64(p, "bpm_min"),
+        bpm_max: form_f64(p, "bpm_max"),
+        energy_min: form_f64(p, "energy_min"),
+        energy_max: form_f64(p, "energy_max"),
+        limit,
+        sort,
+    }
 }
 
 /// `GET /tags/search?q=&limit=` — fuzzy search over **my** tags (JSON, for the
@@ -5292,6 +5441,16 @@ struct TagDetailPage {
     children: Vec<ParentRef>,
     /// True when the tag has the `GENRE` type.
     genre_mode: bool,
+    /// True when this tag is a smart tag / dynamic lens (#298).
+    is_smart: bool,
+    /// Owner's tags as checkboxes for the smart-tag edit form (#298).
+    smart_tag_options: Vec<ParentOption>,
+    smart_bpm_min: String,
+    smart_bpm_max: String,
+    smart_energy_min: String,
+    smart_energy_max: String,
+    smart_limit: i64,
+    sort_options: Vec<SelOpt>,
     source_count: i64,
     /// Source playlists feeding this tag, with their keep-on-remove policy.
     sources: Vec<TagSource>,
@@ -5487,6 +5646,39 @@ async fn tag_detail_page(
     .unwrap_or(0)
         != 0;
     let genre_mode = d.type_name == "GENRE";
+    // Smart tag (#298): expose the stored filter for the owner's edit form.
+    let is_smart = d.dynamic;
+    let smart_tag_ids: Vec<i64> = d
+        .smart
+        .as_ref()
+        .map(|s| s.tag_ids.clone())
+        .unwrap_or_default();
+    let fmt_f = |v: Option<f64>| v.map(|x| format!("{x}")).unwrap_or_default();
+    let smart_bpm_min = fmt_f(d.smart.as_ref().and_then(|s| s.bpm_min));
+    let smart_bpm_max = fmt_f(d.smart.as_ref().and_then(|s| s.bpm_max));
+    let smart_energy_min = fmt_f(d.smart.as_ref().and_then(|s| s.energy_min));
+    let smart_energy_max = fmt_f(d.smart.as_ref().and_then(|s| s.energy_max));
+    let smart_limit = d
+        .smart
+        .as_ref()
+        .map(|s| s.effective_limit())
+        .unwrap_or(100);
+    let smart_sort = d
+        .smart
+        .as_ref()
+        .map(|s| s.effective_sort().to_string())
+        .unwrap_or_else(|| "newest".to_string());
+    let smart_tag_options: Vec<ParentOption> = crate::tags::list_user_tags(&st.pool, nav.id)
+        .await
+        .into_iter()
+        .map(|(id, name)| ParentOption {
+            selected: smart_tag_ids.contains(&id),
+            id,
+            name,
+            icon: String::new(),
+        })
+        .collect();
+    let sort_options = smart_sort_options(&smart_sort);
     render(&TagDetailPage {
         nav,
         flash: msg.msg.unwrap_or_default(),
@@ -5500,6 +5692,14 @@ async fn tag_detail_page(
         parents,
         children,
         genre_mode,
+        is_smart,
+        smart_tag_options,
+        smart_bpm_min,
+        smart_bpm_max,
+        smart_energy_min,
+        smart_energy_max,
+        smart_limit,
+        sort_options,
         source_count: d.source_count,
         sources,
         sync,
