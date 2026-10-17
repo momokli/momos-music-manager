@@ -72,6 +72,39 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   für „no data"), und zeigte deshalb „—", während die Track-Page den Vault-Wert hatte. Beide
   lesen jetzt denselben `resolved`-Block über `music_api::resolved_audio`.
 
+## [0.30.0] — 2026-10-17
+
+**hub-tag-types** — Hard-wired Tag-Typen ersetzen die flexiblen Gruppen (MOOD /
+GENRE / VIBE / PHASE_1..5 / MERKMAL / SETLIST / RUMPELKISTE). Ein Tag hat genau
+einen festen Typ; die Gruppen-Tabellen entfallen, Cluster hängen künftig am Typ.
+Implementiert in PR #278 (Milestone `hub-tag-types-0.19.0`).
+
+### Added
+
+- **Tag-Typ-Schema (Migration `036_tag_types.sql`) + Gruppen-Drop** (#274, PR #278):
+  additiv `hub_tags.type TEXT` (`CHECK` auf die 11 Typen) plus Sammel-Index auf
+  `hub_tags(type)`; Backfill aus den Gruppen per Name (Setlist→SETLIST 301, Vibe→VIBE 104,
+  Mood→MOOD 74, Merkmal→MERKMAL 44, Phase ranked→PHASE_<rank> 6, Rumpelkiste→RUMPELKISTE 1;
+  ungemappte Tags bleiben NULL). `hub_tag_groups` / `hub_group_tags` / `hub_group_members`
+  (+ Indizes) werden entfernt, referenzierende Views vorher neu gebaut.
+- **`src/tagtypes.rs`** (#275, PR #278): `TagType`-Enum + Helper (`describes`, `weight`,
+  `phase_num`, …).
+- **Top-Tags je Typ auf der Künstler-Seite** (#277, PR #278).
+
+### Changed
+
+- **Engine auf Typ statt Gruppe** (#275, PR #278): scoring/similarity/tagqueue/recommend/
+  digging/artists keyen auf den Tag-Typ; Rumpelkiste-Playlist-Ausschluss = Typ RUMPELKISTE;
+  Cross-Group-Bonus → Cross-Type; ranked Phase → PHASE_1..5 (Energy-Mapping 1..5); alle
+  SQL-Joins von `hub_group_tags`/`hub_tag_groups` auf `hub_tags.type` umgestellt.
+- **UI: Gruppen raus, Typ rein** (#276, PR #278): die `/groups`-Seiten (inkl. Nav-Einträge)
+  und die Group-Handler in pages.rs/tags.rs entfernt; `/tags` filtert nach Typ (Multi-Select
+  der 11 Typen); `/tag/{id}` zeigt und editiert den Typ; Künstler-/Track-Ansichten zeigen nur
+  „beschreibende" Typen (SETLIST/RUMPELKISTE ausgeblendet); Templates `groups.html`/
+  `group.html` gelöscht.
+- Per-Typ-Gewichte via `/admin` konfigurierbar (`engine_w_*`-Settings, genutzt vom
+  Digging-Ranking).
+
 ## [0.29.0] — 2026-10-17
 
 **hub-tag-clusters** — Semantische Tag-Cluster als Schicht zwischen Gruppe und Tag
