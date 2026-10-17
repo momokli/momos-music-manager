@@ -21,8 +21,8 @@ Milestone: hub-smartplay-0.23.0 (#29) · Base: main @ dc6a472 · Branch: feat/is
 - [x] 1 planner
 - [x] 2 setup
 - [x] 3 developer
-- [ ] 4 verifier
-- [ ] 5 tester
+- [x] 4 verifier
+- [x] 5 tester
 - [ ] 6 developer (PR)
 - [ ] 7 reviewer
 
@@ -159,3 +159,75 @@ Keine bestehenden Funktionen umbenannt (nur additiv erweitert).
 - **Askama-Falle**: `==` in HTML-Attributen vermeiden (Gotcha in `music-hub/AGENT.md`) → Bools vorberechnen.
 - **Migration-Checksum**: applizierte Migrationen nie editieren; nur `056` neu anlegen.
 - **Rumpelkiste/Smart-Tags**: `similarity`-Helfer sind Rumpelkiste-aware; Smart-Tags (`hub_smart_tags`) haben keine resolved tags → dürfen Seeds verzerren, ggf. Seeds ohne resolved tags tolerieren.
+
+## Verify
+
+Status: **PASS** (Quality Gate bestanden, weiter zu Test).
+
+Geprüft: `git diff origin/main...HEAD` (4 Dateien + progress-Doc), `cargo test --test curate`.
+
+### Sicherheit / Autorisierung
+- `GET /curate/{id}/suggestions` (`web.rs:curate_suggestions`) und `POST /curate/{id}/items`
+  (`web.rs:curate_add_item`): erst `ui::nav` → ohne Session `303 /login`; dann
+  `curate::get(...).ok().flatten()` → unbekannte **und** fremde id → `track_not_found()` = **404**
+  (kein Existenz-/Daten-Leak, konsistent zu `curate_push`/`curate_delete`). Owner-Check `cp.user_id != nav.id`.
+- SQL durchgängig parametrisiert (`bind`/`QueryBuilder::push_bind`, IN-Klausel in 900er-Chunks).
+  Keine String-Interpolation von Nutzereingaben → **keine SQL-Injection**.
+- Kein Zugriff auf fremde Playlists/Tracks möglich; `viewer_id` stammt aus der Session.
+
+### Korrektheit
+- Seed-Ausschluss: `seed_set.contains` im Kandidaten-Loop + Skip in occ/cos → Seeds nie vorgeschlagen (Test belegt).
+- Rumpelkiste/SETLIST-Ausschluss: Kandidaten = untagged ODER ≥1 Nicht-`SETLIST`/`RUMPELKISTE`-Tag; Helfer
+  (`similarity_to_seed`, `internal_suggestions`) zusätzlich Rumpelkiste-aware. Deckt US1 ab.
+- Deterministische Sortierung: score desc → artists → title → id. Embedding-Seed-Stichprobe deterministisch
+  (resolve-Reihenfolge, `SEED_SAMPLE_CAP=20`).
+- Idempotenz: `add_item_at` nutzt `INSERT OR IGNORE` (PK playlist_id+track_id); Test `adopt_suggestion_adds_item`
+  prüft COUNT bleibt 1 nach zweitem POST. `add_item` unverändert.
+- Kein N+1: `similarity_to_seed`/`ripeness_many` batched; Cosine/Occ nur über gecappte Seed-Stichprobe (≤20).
+  Restliche Pro-Seed-Schleifen sind durch den Cap begrenzt — akzeptabel, Laufzeitrisiko dokumentiert.
+- Askama-Falle: `grep '=='` in neuen Templates → **keine** `==` in Attributen; `hx-post="/curate/{{ id }}/items"`.
+- Migrationen: `git diff ... -- migrations` **leer** → unangetastet; US4 (Mood) bewusst weggelassen.
+
+### Akzeptanz #299
+Anlegen/Befüllen (bereits in main) + Vorschläge-Engine + htmx-Fragment/„Übernehmen" + Integrationstest vorhanden.
+
+### Testergebnis
+`cd music-hub && cargo test --test curate` → **18 passed; 0 failed** (13 bestehende + 5 neue:
+`suggestions_require_login`, `suggestions_foreign_playlist_404`, `suggestions_exclude_existing`,
+`suggestions_rank_shared_tag_higher`, `adopt_suggestion_adds_item`).
+
+### Empfehlung
+- Keine Blocker. Optionale Härtung (nicht blockierend): einige `unwrap_or_default()` auf DB-Fehlern
+  (z. B. `camelot_map`, `owned`, `cand_rows`) verschlucken Fehler still → bei DB-Problem leere Vorschläge
+  statt Fehler; bewusst tolerant, aber ggf. später loggen.
+Bottom line: PASS.
+
+## Test
+
+Verdikt: **PASS** — Branch: `feat/issue-299-playlist-curation` @ `c1b3cf4`, Host: planet, Rust stable, `cargo` im PATH.
+
+### Ausgeführt
+- `cd music-hub && cargo test --test curate` → **18 passed; 0 failed** (13 bestehende + 5 neue).
+- `cd music-hub && cargo test` (volle Crate-Suite, alle Binaries) → **exit 0**, **612 passed; 0 failed; 0 ignored**.
+  Keine Regression in `ui.rs` (53), `views.rs` (5), `similar.rs`, `recommend.rs`, `ranking.rs`, `similarity.rs` o. a.
+- Warnungen (nicht blockierend, **vorbestehend**, nicht aus dem neuen Code): `unused variable: cookie` (`tests/ui.rs`),
+  `fields tag_alice/tag_carol never read` (`tests/tag_scope.rs`).
+
+### Abdeckung Akzeptanz #299 (neue Tests `tests/curate.rs`)
+- Login-Gate: `suggestions_require_login` — GET `/curate/1/suggestions` ohne Cookie → **303 `/login`**. ✔
+- Fremd-Playlist: `suggestions_foreign_playlist_404` — fremde Playlist-id → **404**. ✔
+- Seed-Ausschluss: `suggestions_exclude_existing` — Seed (Tag-Teiler) nie in Vorschlägen, Tag-Nachbar schon. ✔
+- Ranking: `suggestions_rank_shared_tag_higher` — Tag-Teiler (`score >`) rankt über Playlist-Co-Occurrence; Top = Tag-Match. ✔
+- Übernahme idempotent: `adopt_suggestion_adds_item` — POST `/curate/{id}/items` legt Zeile an, adoptierter Track fällt aus
+  dem Fragment, zweites POST → COUNT bleibt 1. ✔
+- Anlegen/Befüllen (bereits in main): `create_then_render_detail`, `add_to_existing_playlist_links_item`,
+  `add_to_new_playlist_creates_playlist_and_item`, `picker_lists_playlists` etc. ✔
+
+### Gemeldete Lücken (nicht selbst ergänzt)
+1. **Explizite `position` bei Übernahme** (US3, `add_item_at` + Formfeld `position`) ist **ungetestet**.
+   `adopt_suggestion_adds_item` setzt keine Position; die Setlist-Reihenfolge (explizite Position vs. MAX+1) ist
+   damit nicht abgesichert.
+2. **Kandidaten-Universum**: der Ausschluss reiner `SETLIST`/`RUMPELKISTE`-Tracks (untagged bleiben drin) hat keinen Test.
+3. **Leere Seeds** → leeres Vorschlagsergebnis ist nicht getestet.
+4. **`viewer_id`-Ausschluss** (Tracks, die der Viewer bereits in eigener kuratierter Playlist hat) ist nicht getestet.
+   Diese drei Punkte sind wichtige Edge Cases der neuen `curate::suggestions`-Engine, aber nicht in der Akzeptanzliste; als Lücke dokumentiert.
