@@ -72,7 +72,7 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   für „no data"), und zeigte deshalb „—", während die Track-Page den Vault-Wert hatte. Beide
   lesen jetzt denselben `resolved`-Block über `music_api::resolved_audio`.
 
-## [0.18.0] — 2026-10-17
+## [0.29.0] — 2026-10-17
 
 **hub-tag-clusters** — Semantische Tag-Cluster als Schicht zwischen Gruppe und Tag
 (deterministische Namensähnlichkeit als Baseline), collective-gesteuert, plus ein
