@@ -1499,6 +1499,10 @@ pub struct TagDetail {
     pub type_name: String,
     pub source_count: i64,
     pub tracks: Vec<(i64, String, String)>,
+    /// True when this tag is a smart tag (dynamic lens, #298).
+    pub dynamic: bool,
+    /// The stored filter definition, when this is a smart tag.
+    pub smart: Option<SmartFilter>,
 }
 
 pub async fn tag_detail(pool: &SqlitePool, tag_id: i64) -> Option<TagDetail> {
@@ -1513,15 +1517,23 @@ pub async fn tag_detail(pool: &SqlitePool, tag_id: i64) -> Option<TagDetail> {
     .await
     .ok()
     .flatten()?;
-    let tracks = sqlx::query_as::<_, (i64, String, String)>(
-        "SELECT tr.id, COALESCE(tr.title,''), COALESCE(tr.artists,'')
-           FROM hub_track_resolved_tags r JOIN hub_tracks tr ON tr.id = r.track_id
-          WHERE r.tag_id = ?1 ORDER BY tr.artists, tr.title LIMIT 1000",
-    )
-    .bind(tag_id)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    // Smart tags (#298): the track set is resolved at runtime from the stored
+    // filter, never read from the materialized table (which stays empty).
+    let smart = smart_filter(pool, tag_id).await;
+    let dynamic = smart.is_some();
+    let tracks = if dynamic {
+        resolve_smart_tag_full(pool, tag_id).await.unwrap_or_default()
+    } else {
+        sqlx::query_as::<_, (i64, String, String)>(
+            "SELECT tr.id, COALESCE(tr.title,''), COALESCE(tr.artists,'')
+               FROM hub_track_resolved_tags r JOIN hub_tracks tr ON tr.id = r.track_id
+              WHERE r.tag_id = ?1 ORDER BY tr.artists, tr.title LIMIT 1000",
+        )
+        .bind(tag_id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+    };
     Some(TagDetail {
         id: row.get("id"),
         name: row.get("name"),
@@ -1531,6 +1543,8 @@ pub async fn tag_detail(pool: &SqlitePool, tag_id: i64) -> Option<TagDetail> {
             .unwrap_or_default(),
         source_count: row.get("source_count"),
         tracks,
+        dynamic,
+        smart,
     })
 }
 
@@ -1742,9 +1756,413 @@ pub async fn tag_cooccurrence(
     out
 }
 
+// ── Smart-Tags / Dynamic Lenses (#298) ──────────────────────────────────────
+
+fn default_version() -> u32 {
+    1
+}
+
+/// Versioniertes Filtermodell eines Smart-Tags (#298). AND über Feldgruppen,
+/// OR innerhalb `tag_ids`.
+///
+/// `limit` fehlt -> 100; `limit` außerhalb 1..=1000 wird geclampt. `sort` fehlt
+/// oder ist unbekannt -> `newest`. Ein Filter ohne Kriterium (`limit`/`sort`
+/// zählen nicht) ist ungültig.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SmartFilter {
+    #[serde(default = "default_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub tag_ids: Vec<i64>,
+    #[serde(default)]
+    pub bpm_min: Option<f64>,
+    #[serde(default)]
+    pub bpm_max: Option<f64>,
+    #[serde(default)]
+    pub energy_min: Option<f64>,
+    #[serde(default)]
+    pub energy_max: Option<f64>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub sort: Option<String>,
+}
+
+impl Default for SmartFilter {
+    fn default() -> Self {
+        Self {
+            version: default_version(),
+            tag_ids: Vec::new(),
+            bpm_min: None,
+            bpm_max: None,
+            energy_min: None,
+            energy_max: None,
+            limit: None,
+            sort: None,
+        }
+    }
+}
+
+impl SmartFilter {
+    /// True, sobald mindestens ein echtes Kriterium gesetzt ist (`limit`/`sort`
+    /// zählen nicht — sonst würde ein leerer Filter die ganze Library auflisten).
+    pub fn has_criteria(&self) -> bool {
+        !self.tag_ids.is_empty()
+            || self.bpm_min.is_some()
+            || self.bpm_max.is_some()
+            || self.energy_min.is_some()
+            || self.energy_max.is_some()
+    }
+
+    /// `limit` mit Default (100) und Clamp auf 1..=1000.
+    pub fn effective_limit(&self) -> i64 {
+        self.limit.unwrap_or(100).clamp(1, 1000)
+    }
+
+    /// `sort` mit Default; unbekannte Keys -> `newest`.
+    pub fn effective_sort(&self) -> &'static str {
+        match self.sort.as_deref().map(str::trim) {
+            Some("oldest") => "oldest",
+            Some("title") => "title",
+            Some("artists") => "artists",
+            Some("bpm") => "bpm",
+            Some("energy") => "energy",
+            _ => "newest",
+        }
+    }
+
+    /// JSON-Form mit auf 1 normalisierter Schema-Version.
+    fn to_json(&self) -> String {
+        let mut f = self.clone();
+        f.version = default_version();
+        serde_json::to_string(&f).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+/// Modus des von [`build_smart_query`] erzeugten Statements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmartQueryMode {
+    /// `SELECT t.id`, mit `ORDER BY` + `LIMIT`.
+    Ids,
+    /// `SELECT COUNT(*)`, ohne `ORDER BY`/`LIMIT`.
+    Count,
+}
+
+/// Übersetzt `filter` in ein `SELECT`/`COUNT` auf `hub_tracks`. `Err` bei
+/// leerem Filter. `LEFT JOIN hub_track_audio` nur, wenn ein BPM-/Energy-
+/// Kriterium oder ein Audio-Sort gesetzt ist; fehlende Audio-Zeilen (`a.* IS
+/// NULL`) fallen bei gesetztem Grenzwert korrekt heraus.
+fn build_smart_query(
+    filter: &SmartFilter,
+    mode: SmartQueryMode,
+) -> Result<QueryBuilder<'static, sqlx::Sqlite>> {
+    if !filter.has_criteria() {
+        bail!("smart filter needs at least one criterion");
+    }
+    let needs_audio = filter.bpm_min.is_some()
+        || filter.bpm_max.is_some()
+        || filter.energy_min.is_some()
+        || filter.energy_max.is_some()
+        || matches!(filter.effective_sort(), "bpm" | "energy");
+    let mut qb: QueryBuilder<'static, sqlx::Sqlite> = QueryBuilder::new(match mode {
+        SmartQueryMode::Ids => "SELECT t.id AS id FROM hub_tracks t",
+        SmartQueryMode::Count => "SELECT COUNT(*) AS n FROM hub_tracks t",
+    });
+    if needs_audio {
+        qb.push(" LEFT JOIN hub_track_audio a ON a.track_id = t.id");
+    }
+    qb.push(" WHERE 1 = 1");
+    // Basis-Tags: OR innerhalb der Liste.
+    if !filter.tag_ids.is_empty() {
+        qb.push(" AND t.id IN (SELECT track_id FROM hub_track_resolved_tags WHERE tag_id IN (");
+        {
+            let mut sep = qb.separated(", ");
+            for id in &filter.tag_ids {
+                sep.push_bind(*id);
+            }
+        }
+        qb.push("))");
+    }
+    if let Some(v) = filter.bpm_min {
+        qb.push(" AND a.bpm >= ").push_bind(v);
+    }
+    if let Some(v) = filter.bpm_max {
+        qb.push(" AND a.bpm <= ").push_bind(v);
+    }
+    if let Some(v) = filter.energy_min {
+        qb.push(" AND a.energy >= ").push_bind(v);
+    }
+    if let Some(v) = filter.energy_max {
+        qb.push(" AND a.energy <= ").push_bind(v);
+    }
+    if mode == SmartQueryMode::Ids {
+        let order = match filter.effective_sort() {
+            "oldest" => "t.first_seen_at ASC, t.id ASC",
+            "title" => "t.title COLLATE NOCASE ASC, t.id ASC",
+            "artists" => "t.artists COLLATE NOCASE ASC, t.id ASC",
+            "bpm" => "a.bpm ASC, t.id ASC",
+            "energy" => "a.energy ASC, t.id ASC",
+            _ => "t.first_seen_at DESC, t.id DESC",
+        };
+        qb.push(" ORDER BY ").push(order);
+        qb.push(" LIMIT ").push_bind(filter.effective_limit());
+    }
+    Ok(qb)
+}
+
+/// Guard (#298): every id in `tag_ids` must reference a tag owned by
+/// `owner_user_id`. Closes the cross-owner hole in [`build_smart_query`], which
+/// reads `hub_track_resolved_tags WHERE tag_id IN (...)` without any owner
+/// filter, so a foreign tag id would leak another user's tracks.
+async fn ensure_tag_ids_owned(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    tag_ids: &[i64],
+) -> Result<()> {
+    if tag_ids.is_empty() {
+        return Ok(());
+    }
+    let allowed: std::collections::HashSet<i64> = list_user_tags(pool, owner_user_id)
+        .await
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    if tag_ids.iter().any(|id| !allowed.contains(id)) {
+        bail!("tag_ids enthält fremde Tags");
+    }
+    Ok(())
+}
+
+/// Legt einen Smart-Tag an (oder aktualisiert den Filter eines existierenden
+/// Smart-Tags gleichen Namens). `ensure_tag` erzeugt/ findet den Tag; optional
+/// wird `ty` gesetzt. Leerer Name oder leerer Filter -> `Err`. Ein gleichnamiger
+/// **normaler** Bestandstag wird NICHT still konvertiert -> `Err`.
+pub async fn create_smart_tag(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    name: &str,
+    ty: Option<crate::tagtypes::TagType>,
+    filter: &SmartFilter,
+) -> Result<i64> {
+    if name.trim().is_empty() {
+        bail!("smart tag name required");
+    }
+    if !filter.has_criteria() {
+        bail!("smart filter needs at least one criterion");
+    }
+    ensure_tag_ids_owned(pool, owner_user_id, &filter.tag_ids).await?;
+    // Do not silently convert an existing NORMAL tag of the same slug into a
+    // smart tag (#298): only an already-smart tag may have its filter updated.
+    let slug = normalize_name(name.trim());
+    if !slug.is_empty() {
+        let existing: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM hub_tags WHERE owner_user_id = ?1 AND slug = ?2")
+                .bind(owner_user_id)
+                .bind(&slug)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
+        if let Some(existing_id) = existing {
+            let already_smart: Option<i64> =
+                sqlx::query_scalar("SELECT 1 FROM hub_smart_tags WHERE tag_id = ?1 LIMIT 1")
+                    .bind(existing_id)
+                    .fetch_optional(pool)
+                    .await
+                    .ok()
+                    .flatten();
+            if already_smart.is_none() {
+                bail!("Name bereits vergeben");
+            }
+        }
+    }
+    let tag_id = ensure_tag(pool, owner_user_id, name).await?;
+    if let Some(ty) = ty {
+        // Best-effort: der Tag existiert auch ohne gesetzten Typ.
+        let _ = crate::tagtypes::set(pool, owner_user_id, tag_id, Some(ty)).await;
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO hub_smart_tags (tag_id, filter_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?3)
+         ON CONFLICT(tag_id) DO UPDATE SET filter_json = excluded.filter_json,
+                                           updated_at = excluded.updated_at",
+    )
+    .bind(tag_id)
+    .bind(filter.to_json())
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(tag_id)
+}
+
+/// Aktualisiert die Filterdefinition (nur Owner, nur wenn Smart-Tag).
+pub async fn update_smart_filter(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    tag_id: i64,
+    filter: &SmartFilter,
+) -> Result<()> {
+    if !filter.has_criteria() {
+        bail!("smart filter needs at least one criterion");
+    }
+    ensure_tag_ids_owned(pool, owner_user_id, &filter.tag_ids).await?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let rows = sqlx::query(
+        "UPDATE hub_smart_tags
+            SET filter_json = ?1, updated_at = ?2
+          WHERE tag_id = ?3
+            AND EXISTS (SELECT 1 FROM hub_tags t
+                         WHERE t.id = hub_smart_tags.tag_id
+                           AND t.owner_user_id = ?4)",
+    )
+    .bind(filter.to_json())
+    .bind(&now)
+    .bind(tag_id)
+    .bind(owner_user_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if rows == 0 {
+        bail!("not a smart tag or not yours");
+    }
+    Ok(())
+}
+
+/// Liest die Filterdefinition; `None`, wenn der Tag kein Smart-Tag ist.
+pub async fn smart_filter(pool: &SqlitePool, tag_id: i64) -> Option<SmartFilter> {
+    let raw: Option<String> =
+        sqlx::query_scalar("SELECT filter_json FROM hub_smart_tags WHERE tag_id = ?1")
+            .bind(tag_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    raw.and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// Smart-Tags eines Owners: `(id, name)` für Picker.
+pub async fn list_user_smart_tags(pool: &SqlitePool, owner_user_id: i64) -> Vec<(i64, String)> {
+    sqlx::query_as::<_, (i64, String)>(
+        "SELECT t.id, t.name FROM hub_smart_tags st JOIN hub_tags t ON t.id = st.tag_id
+          WHERE t.owner_user_id = ?1 ORDER BY t.name",
+    )
+    .bind(owner_user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
+/// Geordnete, gelimitete Track-IDs der Laufzeit-Auflösung. Kein Smart-Tag -> leer.
+pub async fn resolve_smart_tag(pool: &SqlitePool, tag_id: i64) -> Result<Vec<i64>> {
+    let Some(filter) = smart_filter(pool, tag_id).await else {
+        return Ok(Vec::new());
+    };
+    let ids = build_smart_query(&filter, SmartQueryMode::Ids)?
+        .build()
+        .fetch_all(pool)
+        .await?
+        .iter()
+        .map(|r| r.get::<i64, _>("id"))
+        .collect();
+    Ok(ids)
+}
+
+/// Wie [`resolve_smart_tag`], zusätzlich `(id, title, artists)` in
+/// Auflösungsreihenfolge (für die Detail-Ansicht).
+pub async fn resolve_smart_tag_full(
+    pool: &SqlitePool,
+    tag_id: i64,
+) -> Result<Vec<(i64, String, String)>> {
+    let ids = resolve_smart_tag(pool, tag_id).await?;
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let json = serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string());
+    let rows = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT tr.id, COALESCE(tr.title,''), COALESCE(tr.artists,'')
+           FROM json_each(?1) j JOIN hub_tracks tr ON tr.id = j.value
+          ORDER BY j.key",
+    )
+    .bind(json)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Anzahl der aufgelösten Tracks ohne Limit (für die Tag-Liste).
+pub async fn smart_tag_count(pool: &SqlitePool, tag_id: i64) -> Result<i64> {
+    let Some(filter) = smart_filter(pool, tag_id).await else {
+        return Ok(0);
+    };
+    let n: i64 = build_smart_query(&filter, SmartQueryMode::Count)?
+        .build()
+        .fetch_one(pool)
+        .await?
+        .get("n");
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_meta_playlist, normalize_name};
+    use super::{SmartFilter, SmartQueryMode, build_smart_query, is_meta_playlist, normalize_name};
+
+    #[test]
+    fn smart_filter_roundtrip_and_defaults() {
+        let f: SmartFilter = serde_json::from_str(
+            r#"{"tag_ids":[1,2],"bpm_min":120.0,"limit":5000,"sort":"bpm"}"#,
+        )
+        .unwrap();
+        assert_eq!(f.version, 1, "missing version -> 1");
+        assert_eq!(f.effective_limit(), 1000, "limit clamped to 1..=1000");
+        assert_eq!(f.effective_sort(), "bpm");
+        assert!(f.has_criteria());
+        assert_eq!(f.bpm_min, Some(120.0));
+        // Roundtrip loses nothing.
+        let s = serde_json::to_string(&f).unwrap();
+        let g: SmartFilter = serde_json::from_str(&s).unwrap();
+        assert_eq!(g.tag_ids, vec![1, 2]);
+        assert_eq!(g.limit, Some(5000));
+        assert_eq!(g.version, 1);
+    }
+
+    #[test]
+    fn smart_filter_limit_default_and_clamp() {
+        let f = SmartFilter::default();
+        assert_eq!(f.effective_limit(), 100);
+        assert!(!f.has_criteria(), "limit/sort are not criteria");
+        let low = SmartFilter {
+            limit: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(low.effective_limit(), 1);
+        let edge = SmartFilter {
+            limit: Some(1000),
+            ..Default::default()
+        };
+        assert_eq!(edge.effective_limit(), 1000);
+    }
+
+    #[test]
+    fn smart_filter_unknown_sort_is_newest() {
+        let f = SmartFilter {
+            sort: Some("nope".into()),
+            ..Default::default()
+        };
+        assert_eq!(f.effective_sort(), "newest");
+        assert_eq!(SmartFilter::default().effective_sort(), "newest");
+    }
+
+    #[test]
+    fn empty_filter_rejected_by_builder() {
+        assert!(build_smart_query(&SmartFilter::default(), SmartQueryMode::Count).is_err());
+        assert!(build_smart_query(&SmartFilter::default(), SmartQueryMode::Ids).is_err());
+        let ok = SmartFilter {
+            tag_ids: vec![3],
+            ..Default::default()
+        };
+        assert!(build_smart_query(&ok, SmartQueryMode::Ids).is_ok());
+    }
 
     #[test]
     fn normalisation() {

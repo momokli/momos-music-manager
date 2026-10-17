@@ -10,6 +10,12 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Smart-Tags / Dynamic Lenses** (#298) — a tag can store a filter
+  definition (base tags, BPM/energy bounds, limit, sort) whose track set is resolved
+  at **runtime** (never materialized), shown like a normal tag with a
+  `⚡ dynamisch` badge in the list **and** on the detail page. Additive migration
+  `055_smart_tags.sql`; create/edit routes `POST /tags/smart/create` and
+  `POST /tag/{id}/smart`.
 - feat: **unified tag input** (#449) — one fuzzy combobox replaces the
   `name + type + „Taggen“` form on every track-tagging surface (track page, tag-queue
   detail, tag-task card, track actions, tags page). New session-guarded
