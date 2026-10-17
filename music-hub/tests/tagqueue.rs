@@ -39,7 +39,7 @@ async fn queue_detail_honours_scope_for_cluster_recs() {
         .await
         .unwrap();
     }
-    tags::tag_track(&app.pool, alice, app.seed.t_all, dark)
+    tags::tag_track(&app.pool, &app.cfg, alice, app.seed.t_all, dark)
         .await
         .unwrap();
 
@@ -149,7 +149,7 @@ async fn tagging_a_track_creates_a_manual_link_and_resolves() {
         .unwrap();
 
     // Direct call surfaces any rebuild error (the HTTP path ignores it).
-    music_hub::tags::tag_track(&app.pool, alice, track, tag)
+    music_hub::tags::tag_track(&app.pool, &app.cfg, alice, track, tag)
         .await
         .expect("tag_track");
 
@@ -296,7 +296,7 @@ async fn seed_other_owner_cluster(app: &common::TestApp) -> i64 {
         .await
         .unwrap();
     }
-    tags::tag_track(&app.pool, alice, app.seed.t_all, dark)
+    tags::tag_track(&app.pool, &app.cfg, alice, app.seed.t_all, dark)
         .await
         .unwrap();
     cid
@@ -360,7 +360,7 @@ async fn queue_untag_preserves_selected_scope() {
     let alice = app.seed.alice;
     let track = app.seed.t_all;
     let extra = tags::ensure_tag(&app.pool, alice, "Extra").await.unwrap();
-    tags::tag_track(&app.pool, alice, track, extra)
+    tags::tag_track(&app.pool, &app.cfg, alice, track, extra)
         .await
         .unwrap();
     let cookie = app.session_cookie(alice).await;

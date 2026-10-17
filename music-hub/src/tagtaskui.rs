@@ -421,7 +421,7 @@ async fn tag_task_tag(
     )
     .await
     {
-        let _ = crate::tags::tag_track(&st.pool, nav.id, id, tag_id).await;
+        let _ = crate::tags::tag_track(&st.pool, &st.cfg, nav.id, id, tag_id).await;
     }
     if is_htmx(&headers) {
         let cadence = cadence_for(&st, f.cadence.as_deref()).await;

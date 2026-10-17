@@ -84,13 +84,13 @@ async fn recommended_tags_appear_from_cooccurrence() {
         .unwrap();
     // t_all has Dark; t_two has Dark + Melancholisch -> Melancholisch is
     // recommended for t_all (via the shared Dark tag).
-    tags::tag_track(&app.pool, alice, app.seed.t_all, dark)
+    tags::tag_track(&app.pool, &app.cfg, alice, app.seed.t_all, dark)
         .await
         .unwrap();
-    tags::tag_track(&app.pool, alice, app.seed.t_two, dark)
+    tags::tag_track(&app.pool, &app.cfg, alice, app.seed.t_two, dark)
         .await
         .unwrap();
-    tags::tag_track(&app.pool, alice, app.seed.t_two, mel)
+    tags::tag_track(&app.pool, &app.cfg, alice, app.seed.t_two, mel)
         .await
         .unwrap();
 
@@ -149,7 +149,7 @@ async fn recommendations_use_relationship_signals() {
     .await
     .unwrap();
     let house = tags::ensure_tag(&app.pool, me, "House").await.unwrap();
-    tags::tag_track(&app.pool, me, 80002, house).await.unwrap();
+    tags::tag_track(&app.pool, &app.cfg, me, 80002, house).await.unwrap();
 
     // 80001 shares artist + album with the tagged 80002 -> House is recommended.
     let recs = music_hub::recommend::recommend_tags(
@@ -199,8 +199,8 @@ async fn recommendations_exclude_setlist_and_rumpelkiste() {
         .unwrap();
 
     // Related track (same artist) carries both tags.
-    tags::tag_track(&app.pool, me, 81002, s_tag).await.unwrap();
-    tags::tag_track(&app.pool, me, 81002, h_tag).await.unwrap();
+    tags::tag_track(&app.pool, &app.cfg, me, 81002, s_tag).await.unwrap();
+    tags::tag_track(&app.pool, &app.cfg, me, 81002, h_tag).await.unwrap();
 
     let recs = music_hub::recommend::recommend_tags(
         &app.pool,
@@ -257,7 +257,7 @@ async fn track_view_shows_cluster_rec_and_scope_toggle() {
         .await
         .unwrap();
     }
-    tags::tag_track(&app.pool, alice, app.seed.t_all, dark)
+    tags::tag_track(&app.pool, &app.cfg, alice, app.seed.t_all, dark)
         .await
         .unwrap();
 

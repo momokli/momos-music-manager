@@ -15,7 +15,7 @@ async fn add_tag(app: &common::TestApp, user: i64, track: i64, name: &str, ty: &
     music_hub::tagtypes::set(&app.pool, user, tag_id, Some(t))
         .await
         .unwrap();
-    music_hub::tags::tag_track(&app.pool, user, track, tag_id)
+    music_hub::tags::tag_track(&app.pool, &app.cfg, user, track, tag_id)
         .await
         .unwrap();
 }

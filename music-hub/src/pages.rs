@@ -32,11 +32,15 @@ pub fn router(state: AppState) -> Router {
         .route("/backpacks/{id}/active", post(backpack_toggle_active))
         .route("/backpacks/{id}/export", get(backpack_export))
         .route("/tags/create", post(tag_create))
+        .route("/tags/smart/create", post(smart_tag_create))
         .route("/tags/search", get(tag_search))
+        .route("/tags/{id}/similar", get(tag_similar))
         .route("/tag-search", get(tag_search_page))
         .route("/revisit", get(revisit_page))
         .route("/tag/{id}", get(tag_detail_page))
         .route("/tag/{id}/rename", post(tag_rename))
+        .route("/tag/{id}/merge", post(tag_merge))
+        .route("/tag/{id}/smart", post(smart_tag_update))
         .route("/tag/{id}/type", post(tag_set_type))
         .route("/tag/{id}/parent/add", post(tag_parent_add))
         .route("/tag/{id}/parent/remove", post(tag_parent_remove))
@@ -4104,6 +4108,8 @@ struct AdminMsg {
     /// Secondary table sort (pages with two tables, e.g. collective members).
     msort: Option<String>,
     mdir: Option<String>,
+    /// Tag-detail: id of an existing tag to suggest merging into (#456).
+    suggest_merge: Option<i64>,
 }
 
 #[derive(Template)]
@@ -4387,6 +4393,10 @@ struct TagsPage {
     types_label: String,
     owner_options: Vec<OwnerOption>,
     collective_options: Vec<ParentOption>,
+    /// Base-tag choices for the smart-tag create form (#298).
+    smart_tag_options: Vec<ParentOption>,
+    /// Sort choices for the smart-tag create form (#298).
+    sort_options: Vec<SelOpt>,
     tags: Vec<TagRow>,
     s_name: crate::table::SortHead,
     s_owner: crate::table::SortHead,
@@ -4404,6 +4414,26 @@ struct TypeOption {
     selected: bool,
 }
 
+/// Sort choices shared by the smart-tag create (#298) and edit forms.
+fn smart_sort_options(selected: &str) -> Vec<SelOpt> {
+    const SORTS: &[(&str, &str)] = &[
+        ("newest", "Neueste zuerst"),
+        ("oldest", "Älteste zuerst"),
+        ("title", "Titel"),
+        ("artists", "Artists"),
+        ("bpm", "BPM"),
+        ("energy", "Energy"),
+    ];
+    SORTS
+        .iter()
+        .map(|(value, label)| SelOpt {
+            value: (*value).to_string(),
+            label: (*label).to_string(),
+            selected: *value == selected,
+        })
+        .collect()
+}
+
 struct TagRow {
     id: i64,
     name: String,
@@ -4412,6 +4442,8 @@ struct TagRow {
     parents: String,
     track_count: i64,
     source_count: i64,
+    /// Smart tag / dynamic lens (#298): shows a "dynamisch" badge.
+    dynamic: bool,
 }
 
 /// Append a #331 scope predicate `{lhs} IN (SELECT value FROM json_each(?))`
@@ -4474,9 +4506,11 @@ async fn run_tags(
         );
     }
     qb.push(
-        "(SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count
+        "(SELECT COUNT(*) FROM hub_tag_sources s WHERE s.tag_id = t.id) AS source_count,
+                st.filter_json AS smart_filter_json
            FROM hub_tags t
            JOIN hub_users u ON u.id = t.owner_user_id
+           LEFT JOIN hub_smart_tags st ON st.tag_id = t.id
           WHERE 1 = 1",
     );
     if mine {
@@ -4518,27 +4552,40 @@ async fn run_tags(
     }
     crate::table::order_by(&mut qb, sort, dir, allowed, "name");
     qb.push(" LIMIT ").push_bind(limit);
-    qb.build()
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default()
-        .iter()
-        .map(|r| {
-            let ty: String = r.get::<Option<String>, _>("type_name").unwrap_or_default();
-            let type_label = crate::tagtypes::TagType::parse(&ty)
-                .map(|t| format!("{} {}", t.icon(), t.label()))
-                .unwrap_or_default();
-            TagRow {
-                id: r.get::<i64, _>("id"),
-                name: r.get::<Option<String>, _>("name").unwrap_or_default(),
-                owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
-                type_label,
-                parents: r.get::<Option<String>, _>("parents").unwrap_or_default(),
-                track_count: r.get::<Option<i64>, _>("track_count").unwrap_or(0),
-                source_count: r.get::<Option<i64>, _>("source_count").unwrap_or(0),
-            }
-        })
-        .collect()
+    let rows = qb.build().fetch_all(pool).await.unwrap_or_default();
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let ty: String = r.get::<Option<String>, _>("type_name").unwrap_or_default();
+        let type_label = crate::tagtypes::TagType::parse(&ty)
+            .map(|t| format!("{} {}", t.icon(), t.label()))
+            .unwrap_or_default();
+        let id: i64 = r.get::<i64, _>("id");
+        // A tag is "dynamic" only when its stored filter parses; a corrupt
+        // `filter_json` is treated as a normal (non-dynamic) tag, consistently
+        // with the list count (`smart_tag_count` -> 0) and `tag_detail` (#298).
+        let dynamic = r
+            .get::<Option<String>, _>("smart_filter_json")
+            .and_then(|s| serde_json::from_str::<crate::tags::SmartFilter>(&s).ok())
+            .is_some();
+        // Smart tags are never materialized: the count comes from the runtime
+        // resolution instead of `hub_track_resolved_tags` (#298).
+        let track_count = if dynamic {
+            crate::tags::smart_tag_count(pool, id).await.unwrap_or(0)
+        } else {
+            r.get::<Option<i64>, _>("track_count").unwrap_or(0)
+        };
+        out.push(TagRow {
+            id,
+            name: r.get::<Option<String>, _>("name").unwrap_or_default(),
+            owner: r.get::<Option<String>, _>("owner").unwrap_or_default(),
+            type_label,
+            parents: r.get::<Option<String>, _>("parents").unwrap_or_default(),
+            track_count,
+            source_count: r.get::<Option<i64>, _>("source_count").unwrap_or(0),
+            dynamic,
+        });
+    }
+    out
 }
 
 async fn tags_page(
@@ -4676,6 +4723,18 @@ async fn tags_page(
     let s_parents = crate::table::sort_head(rawq, "parents", "Parent-Tags", &sort, &dir);
     let s_tracks = crate::table::sort_head(rawq, "tracks", "Tracks", &sort, &dir);
     let s_sources = crate::table::sort_head(rawq, "sources", "Quellen", &sort, &dir);
+    // Base-tag chips for the smart-tag form must mirror the *visible* tag set
+    // (q/types/owner/backpack-scope) — deriving from `list_user_tags` leaked
+    // out-of-scope tag names into the HTML (#298 regression / #331 scope leak).
+    let smart_tag_options: Vec<ParentOption> = tags
+        .iter()
+        .map(|t| ParentOption {
+            id: t.id,
+            name: t.name.clone(),
+            icon: String::new(),
+            selected: false,
+        })
+        .collect();
     render(&TagsPage {
         nav,
         flash: String::new(),
@@ -4685,6 +4744,8 @@ async fn tags_page(
         types_label,
         owner_options,
         collective_options,
+        smart_tag_options,
+        sort_options: smart_sort_options("newest"),
         tags,
         s_name,
         s_owner,
@@ -4726,6 +4787,107 @@ async fn tag_create(
         }
     }
     Redirect::to("/tags").into_response()
+}
+
+/// `POST /tags/smart/create` — create a smart tag (#298).
+///
+/// The form is read as a raw urlencoded body so repeated `tag_ids` checkboxes
+/// (base tags) are handled — `axum::Form` over `serde_urlencoded` cannot
+/// deserialize a repeated key into a `Vec`, so we reuse [`form_params`].
+async fn smart_tag_create(State(st): State<AppState>, headers: HeaderMap, body: String) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let p = form_params(&body);
+    let name = p
+        .get("name")
+        .and_then(|v| v.first())
+        .cloned()
+        .unwrap_or_default();
+    let filter = smart_filter_from_params(&p);
+    // Guard: an empty filter (or name) must not list the whole library.
+    if name.trim().is_empty() || !filter.has_criteria() {
+        return Redirect::to("/tags").into_response();
+    }
+    let ty = p
+        .get("type")
+        .and_then(|v| v.first())
+        .and_then(|s| crate::tagtypes::TagType::parse(s));
+    match crate::tags::create_smart_tag(&st.pool, nav.id, &name, ty, &filter).await {
+        Ok(id) => Redirect::to(&format!("/tag/{id}")).into_response(),
+        Err(e) => flash_redirect("/tags", format!("Fehler: {e}")),
+    }
+}
+
+/// `POST /tag/{id}/smart` — update a smart tag's filter (owner only, #298).
+async fn smart_tag_update(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let filter = smart_filter_from_params(&form_params(&body));
+    if !filter.has_criteria() {
+        return flash_redirect(
+            &format!("/tag/{id}"),
+            "Filter braucht mindestens ein Kriterium".to_string(),
+        );
+    }
+    let msg = match crate::tags::update_smart_filter(&st.pool, nav.id, id, &filter).await {
+        Ok(()) => "Filter gespeichert".to_string(),
+        Err(e) => format!("Fehler: {e}"),
+    };
+    flash_redirect(&format!("/tag/{id}"), msg)
+}
+
+/// Parse an optional `f64` field from parsed form params (#298).
+fn form_f64(p: &HashMap<String, Vec<String>>, key: &str) -> Option<f64> {
+    p.get(key)
+        .and_then(|v| v.first())
+        .and_then(|s| s.trim().parse::<f64>().ok())
+}
+
+/// Build a [`crate::tags::SmartFilter`] from parsed form params (#298).
+fn smart_filter_from_params(p: &HashMap<String, Vec<String>>) -> crate::tags::SmartFilter {
+    let first = |k: &str| {
+        p.get(k)
+            .and_then(|v| v.first())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+    let tag_ids: Vec<i64> = p
+        .get("tag_ids")
+        .map(|v| {
+            v.iter()
+                .filter_map(|s| s.trim().parse::<i64>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let limit = {
+        let s = first("limit");
+        if s.is_empty() {
+            None
+        } else {
+            s.parse::<i64>().ok()
+        }
+    };
+    let sort = {
+        let s = first("sort");
+        if s.is_empty() { None } else { Some(s) }
+    };
+    crate::tags::SmartFilter {
+        version: 1,
+        tag_ids,
+        bpm_min: form_f64(p, "bpm_min"),
+        bpm_max: form_f64(p, "bpm_max"),
+        energy_min: form_f64(p, "energy_min"),
+        energy_max: form_f64(p, "energy_max"),
+        limit,
+        sort,
+    }
 }
 
 /// `GET /tags/search?q=&limit=` — fuzzy search over **my** tags (JSON, for the
@@ -5240,12 +5402,16 @@ struct TagTrack {
     artists_html: String,
 }
 
-/// A source playlist feeding a tag, plus its keep-on-remove policy.
+/// A source playlist feeding a tag, plus its keep-on-remove policy and last
+/// bi-way push status (#283).
 struct TagSource {
     id: i64,
     name: String,
     owner: String,
     keep: bool,
+    push_status: String,
+    push_error: String,
+    push_at: String,
 }
 
 /// One row of the "top artists" insight table (pre-formatted percentages).
@@ -5256,6 +5422,14 @@ struct TopArtist {
     tag_pct: String,
     /// Share of the artist: tagged tracks of this artist / all tracks by them.
     artist_pct: String,
+}
+
+/// One similar-tag suggestion on the tag detail page (#456), owner-only.
+struct TagSimilar {
+    id: i64,
+    name: String,
+    type_label: String,
+    reason: String,
 }
 
 /// One row of the tag co-occurrence table (pre-formatted metric + links).
@@ -5288,11 +5462,23 @@ struct TagDetailPage {
     children: Vec<ParentRef>,
     /// True when the tag has the `GENRE` type.
     genre_mode: bool,
+    /// True when this tag is a smart tag / dynamic lens (#298).
+    is_smart: bool,
+    /// Owner's tags as checkboxes for the smart-tag edit form (#298).
+    smart_tag_options: Vec<ParentOption>,
+    smart_bpm_min: String,
+    smart_bpm_max: String,
+    smart_energy_min: String,
+    smart_energy_max: String,
+    smart_limit: i64,
+    sort_options: Vec<SelOpt>,
     source_count: i64,
     /// Source playlists feeding this tag, with their keep-on-remove policy.
     sources: Vec<TagSource>,
     /// Bi-way sync: mirror tagged tracks onto the source playlists.
     sync: bool,
+    /// Owner's Spotify grant includes a playlist write scope (#283).
+    write_scope: bool,
     q: String,
     tracks: Vec<TagTrack>,
     s_title: crate::table::SortHead,
@@ -5302,6 +5488,11 @@ struct TagDetailPage {
     music_api: bool,
     ready: usize,
     total: usize,
+    /// Owner-only similar-tag suggestions (#456).
+    similar: Vec<TagSimilar>,
+    /// Existing tag id to suggest merging into (0 = none), from a rename clash.
+    suggest_merge_id: i64,
+    suggest_merge_name: String,
 }
 
 async fn tag_detail_page(
@@ -5432,26 +5623,44 @@ async fn tag_detail_page(
             support: c.support,
         })
         .collect();
-    let sources: Vec<TagSource> = sqlx::query_as::<_, (i64, String, String, i64)>(
-        "SELECT ts.playlist_id, COALESCE(hp.name,''), COALESCE(u.slug,''),
-                COALESCE(ts.keep_on_remove, 0)
-           FROM hub_tag_sources ts
-           JOIN hub_playlists hp ON hp.id = ts.playlist_id
-           JOIN hub_users u ON u.id = hp.user_id
-          WHERE ts.tag_id = ?1 ORDER BY hp.name",
-    )
-    .bind(id)
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|(id, name, owner, keep)| TagSource {
-        id,
-        name,
-        owner,
-        keep: keep != 0,
-    })
-    .collect();
+    let sources: Vec<TagSource> =
+        sqlx::query_as::<_, (i64, String, String, i64, String, String, String)>(
+            "SELECT ts.playlist_id, COALESCE(hp.name,''), COALESCE(u.slug,''),
+                    COALESCE(ts.keep_on_remove, 0),
+                    COALESCE(hp.last_push_status,''),
+                    COALESCE(hp.last_push_error,''),
+                    COALESCE(hp.last_push_at,'')
+               FROM hub_tag_sources ts
+               JOIN hub_playlists hp ON hp.id = ts.playlist_id
+               JOIN hub_users u ON u.id = hp.user_id
+              WHERE ts.tag_id = ?1 ORDER BY hp.name",
+        )
+        .bind(id)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, name, owner, keep, push_status, push_error, push_at)| TagSource {
+            id,
+            name,
+            owner,
+            keep: keep != 0,
+            push_status,
+            push_error,
+            push_at,
+        })
+        .collect();
+    let owner_user_id: Option<i64> =
+        sqlx::query_scalar("SELECT owner_user_id FROM hub_tags WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&st.pool)
+            .await
+            .ok()
+            .flatten();
+    let write_scope = match owner_user_id {
+        Some(uid) => crate::curate::has_write_scope(&st.pool, uid).await,
+        None => false,
+    };
     let sync: bool = sqlx::query_scalar::<_, i64>(
         "SELECT COALESCE(sync_playlist,0) FROM hub_tags WHERE id = ?1",
     )
@@ -5463,6 +5672,70 @@ async fn tag_detail_page(
     .unwrap_or(0)
         != 0;
     let genre_mode = d.type_name == "GENRE";
+    // Smart tag (#298): expose the stored filter for the owner's edit form.
+    let is_smart = d.dynamic;
+    let smart_tag_ids: Vec<i64> = d
+        .smart
+        .as_ref()
+        .map(|s| s.tag_ids.clone())
+        .unwrap_or_default();
+    let fmt_f = |v: Option<f64>| v.map(|x| format!("{x}")).unwrap_or_default();
+    let smart_bpm_min = fmt_f(d.smart.as_ref().and_then(|s| s.bpm_min));
+    let smart_bpm_max = fmt_f(d.smart.as_ref().and_then(|s| s.bpm_max));
+    let smart_energy_min = fmt_f(d.smart.as_ref().and_then(|s| s.energy_min));
+    let smart_energy_max = fmt_f(d.smart.as_ref().and_then(|s| s.energy_max));
+    let smart_limit = d
+        .smart
+        .as_ref()
+        .map(|s| s.effective_limit())
+        .unwrap_or(100);
+    let smart_sort = d
+        .smart
+        .as_ref()
+        .map(|s| s.effective_sort().to_string())
+        .unwrap_or_else(|| "newest".to_string());
+    let smart_tag_options: Vec<ParentOption> = crate::tags::list_user_tags(&st.pool, nav.id)
+        .await
+        .into_iter()
+        .map(|(id, name)| ParentOption {
+            selected: smart_tag_ids.contains(&id),
+            id,
+            name,
+            icon: String::new(),
+        })
+        .collect();
+    let sort_options = smart_sort_options(&smart_sort);
+    // Owner-only similar-tag suggestions (#456); never offered for foreign tags.
+    let similar: Vec<TagSimilar> = if is_owner {
+        crate::tags::similar_tags(&st.pool, nav.id, id, 8)
+            .await
+            .into_iter()
+            .map(|s| TagSimilar {
+                id: s.id,
+                name: s.name,
+                type_label: s.type_label,
+                reason: s.reason,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // A rename clash (`?suggest_merge=<id>`) proposes merging into that tag.
+    let suggest_merge_id = msg.suggest_merge.filter(|v| *v != 0).unwrap_or(0);
+    let suggest_merge_name = if suggest_merge_id != 0 {
+        sqlx::query_scalar::<_, String>(
+            "SELECT name FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2",
+        )
+        .bind(suggest_merge_id)
+        .bind(nav.id)
+        .fetch_optional(&st.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    } else {
+        String::new()
+    };
     render(&TagDetailPage {
         nav,
         flash: msg.msg.unwrap_or_default(),
@@ -5476,9 +5749,18 @@ async fn tag_detail_page(
         parents,
         children,
         genre_mode,
+        is_smart,
+        smart_tag_options,
+        smart_bpm_min,
+        smart_bpm_max,
+        smart_energy_min,
+        smart_energy_max,
+        smart_limit,
+        sort_options,
         source_count: d.source_count,
         sources,
         sync,
+        write_scope,
         q,
         tracks,
         s_title: crate::table::sort_head(
@@ -5497,6 +5779,9 @@ async fn tag_detail_page(
         ),
         top_artists,
         cooccur,
+        similar,
+        suggest_merge_id,
+        suggest_merge_name,
         music_api: st.cfg.music_api_token.is_some(),
         ready,
         total,
@@ -5524,11 +5809,66 @@ async fn tag_rename(
     let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
-    let msg = match crate::tags::rename_tag(&st.pool, uid, id, &f.name).await {
-        Ok(()) => "Tag umbenannt".to_string(),
-        Err(e) => format!("Fehler: {e}"),
+    use crate::tags::RenameOutcome;
+    match crate::tags::rename_tag_outcome(&st.pool, uid, id, &f.name).await {
+        Ok(RenameOutcome::Renamed) => flash_redirect(&format!("/tag/{id}"), "Tag umbenannt".into()),
+        // Name already taken by one of my tags: offer a merge instead of failing.
+        Ok(RenameOutcome::Clash { tag_id, name }) => flash_redirect(
+            &format!("/tag/{id}?suggest_merge={tag_id}"),
+            format!("\u{201a}{name}\u{2018} existiert bereits \u{2014} zusammenf\u{fc}hren?"),
+        ),
+        Err(e) => flash_redirect(&format!("/tag/{id}"), format!("Fehler: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct TagMergeForm {
+    /// Target tag id (form field `into`).
+    #[serde(rename = "into")]
+    into: i64,
+}
+
+/// Owner-only: merge this tag (the source) into another of the owner's tags.
+/// Success redirects to the target with a flash; errors flash back to the
+/// source page. Idempotent (already merged -> success).
+async fn tag_merge(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<TagMergeForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
     };
-    flash_redirect(&format!("/tag/{id}"), msg)
+    match crate::tags::merge_tags(&st.pool, uid, id, f.into).await {
+        Ok(s) if s.noop => flash_redirect(
+            &format!("/tag/{}", f.into),
+            "Tags bereits zusammengef\u{fc}hrt".into(),
+        ),
+        Ok(_) => flash_redirect(&format!("/tag/{}", f.into), "Tags zusammengef\u{fc}hrt".into()),
+        Err(e) => flash_redirect(&format!("/tag/{id}"), format!("Fehler: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct TagSimilarQuery {
+    limit: Option<usize>,
+}
+
+/// `GET /tags/{id}/similar?limit=` — the ranked tags of the caller that look
+/// like `{id}` (JSON fragment, mirrors `/tags/search`). Session-guarded.
+async fn tag_similar(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<TagSimilarQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let limit = q.limit.unwrap_or(8).clamp(1, 25);
+    let tags = crate::tags::similar_tags(&st.pool, nav.id, id, limit).await;
+    axum::Json(serde_json::json!({ "tags": tags })).into_response()
 }
 
 #[derive(Deserialize)]

@@ -10,6 +10,23 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Tag hygiene — rename, merge similar tags, suggestions** (#456) — a tag
+  detail page (`/tag/{id}`) now surfaces owner-only **suggestions** for similar
+  own tags (`tags::similar_tags`; ranked by normalised-equal > small edit
+  distance > token/prefix share > fuzzy) and a **merge** action
+  (`tags::merge_tags`) that re-points every tag-referencing table onto the target
+  inside one transaction (idempotent: a missing source is a no-op; no duplicate
+  `hub_track_resolved_tags`; target keeps its type with a fallback to the source
+  and `sync_playlist` OR-ed). A **rename clash** (`tags::rename_tag_outcome`) no
+  longer errors: it proposes merging into the existing tag. New session-guarded
+  JSON route `GET /tags/{id}/similar?limit=` and form routes `POST /tag/{id}/merge`
+  and the extended `POST /tag/{id}/rename`. **No migration, no version bump.**
+- feat: **Smart-Tags / Dynamic Lenses** (#298) — a tag can store a filter
+  definition (base tags, BPM/energy bounds, limit, sort) whose track set is resolved
+  at **runtime** (never materialized), shown like a normal tag with a
+  `⚡ dynamisch` badge in the list **and** on the detail page. Additive migration
+  `055_smart_tags.sql`; create/edit routes `POST /tags/smart/create` and
+  `POST /tag/{id}/smart`.
 - feat: **unified tag input** (#449) — one fuzzy combobox replaces the
   `name + type + „Taggen“` form on every track-tagging surface (track page, tag-queue
   detail, tag-task card, track actions, tags page). New session-guarded
@@ -25,6 +42,13 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   (`source='music-api'`, bounded + chunked, transient-failure-safe), CLI
   `metadata-backfill --limit 2000`, and a "BPM/Key holen" button on the music-api
   console. Migration `050` adds `hub_track_features.metadata_checked_at` (7-day TTL).
+- feat: **Bi-way playlist sync** (#283) — tag/track changes are written back to the
+  Spotify **source** playlist of a synced tag: adds via `POST /playlists/{id}/items`,
+  removes via `DELETE /playlists/{id}/items`, only for owned/collaborative playlists and
+  gated by the write scope (re-auth hint as `scope_missing`). A final `429`/`QUOTA_EXCEEDED`
+  is surfaced as the `quota` status; writes retry a `429` once (bounded via
+  `Retry-After`). New additive migration `054` adds the `last_push_*` bookkeeping columns
+  to `hub_playlists`.
 
 ### Changed
 

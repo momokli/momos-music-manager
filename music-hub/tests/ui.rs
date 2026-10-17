@@ -292,7 +292,7 @@ async fn weighted_tag_search_scores_matching_track() {
     let tag_id = music_hub::tags::ensure_tag(&app.pool, app.seed.alice, "dark")
         .await
         .unwrap();
-    music_hub::tags::tag_track(&app.pool, app.seed.alice, app.seed.t_all, tag_id)
+    music_hub::tags::tag_track(&app.pool, &app.cfg, app.seed.alice, app.seed.t_all, tag_id)
         .await
         .unwrap();
 

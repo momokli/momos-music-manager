@@ -11,7 +11,7 @@ content %}
     <h1>{{ name }}</h1>
     <p class="hub-muted">
         Tag von <a href="/user/{{ owner }}">@{{ owner }}</a> · {{ source_count }} Quellen
-        · {{ tracks.len() }} Tracks
+        · {{ tracks.len() }} Tracks {% if is_smart %}<span class="hub-chip">⚡ dynamisch</span>{% endif %}
     </p>
 </hgroup>
 
@@ -39,6 +39,61 @@ content %}
         <button type="submit">Speichern</button>
     </form>
 </details>
+{% endif %} {% if is_owner && suggest_merge_id != 0 %}
+<section
+    aria-label="Merge-Vorschlag"
+    style="
+        margin: 0.4rem 0;
+        padding: 0.4rem;
+        border: 1px solid var(--pico-primary);
+        border-radius: 0.3rem;
+    "
+>
+    <p style="margin: 0 0 0.4rem">
+        „{{ suggest_merge_name }}“ existiert bereits — zusammenführen?
+    </p>
+    <form
+        method="post"
+        action="/tag/{{ id }}/merge"
+        style="display: inline-flex; gap: 0.3rem; align-items: center"
+    >
+        <input type="hidden" name="into" value="{{ suggest_merge_id }}" />
+        <button type="submit">In „{{ suggest_merge_name }}“ zusammenführen</button>
+    </form>
+</section>
+{% endif %} {% if is_owner && !similar.is_empty() %}
+<section aria-label="Ähnliche Tags" style="margin: 0.4rem 0">
+    <h2 style="font-size: 1rem; margin-bottom: 0.2rem">Ähnliche Tags</h2>
+    <ul
+        style="
+            list-style: none;
+            padding-left: 0;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem;
+        "
+    >
+        {% for s in similar %}
+        <li style="display: inline-flex; gap: 0.3rem; align-items: center">
+            <a href="/tag/{{ s.id }}" class="hub-chip">{{ s.name }}</a>
+            {% if !s.type_label.is_empty() %}
+            <span class="hub-muted" style="font-size: 0.8em">{{ s.type_label }}</span>
+            {% endif %}
+            <span class="hub-muted" style="font-size: 0.8em">{{ s.reason }}</span>
+            <form method="post" action="/tag/{{ id }}/merge" style="display: inline">
+                <input type="hidden" name="into" value="{{ s.id }}" />
+                <button
+                    type="submit"
+                    class="secondary"
+                    title="Mit „{{ s.name }}“ zusammenführen"
+                >
+                    Zusammenführen
+                </button>
+            </form>
+        </li>
+        {% endfor %}
+    </ul>
+</section>
 {% endif %}
 
 <section
@@ -65,6 +120,86 @@ content %}
     </form>
     {% endif %}
 </section>
+
+{% if is_smart && is_owner %}
+<details>
+    <summary>Smart-Filter bearbeiten</summary>
+    <form
+        method="post"
+        action="/tag/{{ id }}/smart"
+        class="hub-filter"
+        style="margin-top: 0.4rem"
+    >
+        <fieldset class="hub-chipset" aria-label="Basis-Tags">
+            <legend class="hub-visually-hidden">Basis-Tags (ODER)</legend>
+            {% for o in smart_tag_options %}
+            <label class="hub-chip"
+                ><input
+                    type="checkbox"
+                    name="tag_ids"
+                    value="{{ o.id }}"
+                    {%
+                    if
+                    o.selected
+                    %}checked{%
+                    endif
+                    %}
+                />
+                {{ o.name }}</label
+            >
+            {% endfor %}
+        </fieldset>
+        <input
+            type="number"
+            step="any"
+            name="bpm_min"
+            value="{{ smart_bpm_min }}"
+            placeholder="BPM min"
+            aria-label="BPM min"
+        />
+        <input
+            type="number"
+            step="any"
+            name="bpm_max"
+            value="{{ smart_bpm_max }}"
+            placeholder="BPM max"
+            aria-label="BPM max"
+        />
+        <input
+            type="number"
+            step="any"
+            name="energy_min"
+            value="{{ smart_energy_min }}"
+            placeholder="Energy min"
+            aria-label="Energy min"
+        />
+        <input
+            type="number"
+            step="any"
+            name="energy_max"
+            value="{{ smart_energy_max }}"
+            placeholder="Energy max"
+            aria-label="Energy max"
+        />
+        <input
+            type="number"
+            name="limit"
+            value="{{ smart_limit }}"
+            min="1"
+            max="1000"
+            aria-label="Limit"
+        />
+        <select name="sort" aria-label="Sortierung">
+            {% for s in sort_options %}
+            <option value="{{ s.value }}" {% if s.selected %}selected{% endif %}>
+                {{ s.label }}
+            </option>
+            {% endfor %}
+        </select>
+        <button type="submit">Filter speichern</button>
+    </form>
+</details>
+{% endif %}
 
 {% if !parents.is_empty() || !children.is_empty() || is_owner %}
 <section
@@ -113,7 +248,7 @@ content %}
     </form>
     {% endif %}
 </section>
-{% endif %} {% if is_owner %}
+{% endif %} {% if is_owner && !is_smart %}
 <section
     aria-label="Quellen &amp; Sync"
     style="
@@ -164,13 +299,25 @@ content %}
         >
             {% if s.keep %}Archiv: AN{% else %}Archiv: aus{% endif %}
         </button>
+        {% if !s.push_status.is_empty() %}
+        <span class="hub-muted" title="{{ s.push_error }}" style="font-size: 0.8em">
+            {% if s.push_status == "ok" %}Push OK{% else if s.push_status == "scope_missing"
+            %}Scope fehlt{% else if s.push_status == "quota" %}Quota{% else if s.push_status ==
+            "skipped" %}übersprungen{% else %}Fehler{% endif %} {% if !s.push_at.is_empty() %}({{ s.push_at }}){% endif %}
+        </span>
+        {% endif %}
     </form>
     <form method="post" action="/tag/{{ id }}/source/keep" style="display: inline">
         <input type="hidden" name="playlist_id" value="{{ s.id }}" />
         <input type="hidden" name="keep" value="0" />
         <button type="submit" class="hub-x" title="Archiv aus">×</button>
     </form>
-    {% endfor %} {% endif %}
+    {% endfor %} {% endif %} {% if sync && !write_scope %}
+    <span class="hub-muted" style="flex-basis: 100%">
+        Spotify hat keinen Schreib-Scope — zum Spiegeln in Playlists
+        <a href="/api/hub/services/spotify/connect">Spotify neu verbinden</a>.
+    </span>
+    {% endif %}
 </section>
 {% endif %} {% if music_api %}
 <section

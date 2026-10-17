@@ -97,7 +97,7 @@ async fn untagged_filter_excludes_tagged_tracks() {
     let tag = music_hub::tags::ensure_tag(&app.pool, alice, "Dark")
         .await
         .unwrap();
-    music_hub::tags::tag_track(&app.pool, alice, app.seed.t_all, tag)
+    music_hub::tags::tag_track(&app.pool, &app.cfg, alice, app.seed.t_all, tag)
         .await
         .unwrap();
 
