@@ -48,6 +48,24 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   für „no data"), und zeigte deshalb „—", während die Track-Page den Vault-Wert hatte. Beide
   lesen jetzt denselben `resolved`-Block über `music_api::resolved_audio`.
 
+## [0.30.0] — 2026-10-17
+
+**hub-tag-hygiene** — Tag-Hygiene auf `hub_tags`: Rename, Merge ähnlicher/Tippfehler-Tags
+und gerankte Similar-Tag-Vorschläge, inkl. UI auf der Tag-Detailseite.
+
+### Added
+
+- **Tag-Hygiene** (#456, PR #488): `GET /tags/{id}/similar` liefert gerankte ähnliche Tags
+des Users (Case-Varianten + Edit-Distanz ≤ 1; fremdes/fehlendes Seed-Tag → leere Liste)
+— `tags.rs::similar_tags`. `POST /tag/{id}/merge` hängt alle Links/Attribute der Quelle auf
+das Ziel um und löscht die Quelle; **idempotent** (`INSERT OR IGNORE`/`UPDATE OR IGNORE`)
+und **transaktional** (eine `pool.begin()` … `tx.commit()`, incl. `rebuild_conn`)
+— `tags.rs::merge_tags`. `POST /tag/{id}/rename`; Konflikt auf existierenden Namen →
+Merge-Vorschlag statt Fehler (Flash `?suggest_merge=<ziel>`). UI auf `/tag/{id}`:
+Suggestions-Liste + Merge-/Rename-Aktionen (`templates/tag.html`). Nur eigene Tags
+(`hub_tags.owner_user_id`), **kein Auto-Apply**. Integrationstests
+`music-hub/tests/tag_hygiene.rs` (7 Tests; voller Crate-Lauf 619 passed / 0 failed).
+
 ## [0.18.0] — 2026-10-17
 
 **hub-tag-clusters** — Semantische Tag-Cluster als Schicht zwischen Gruppe und Tag
