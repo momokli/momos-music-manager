@@ -48,6 +48,40 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
   für „no data"), und zeigte deshalb „—", während die Track-Page den Vault-Wert hatte. Beide
   lesen jetzt denselben `resolved`-Block über `music_api::resolved_audio`.
 
+## [0.19.0] — 2026-10-17
+
+**hub-tag-types** — Hard-wired Tag-Typen ersetzen die flexiblen Gruppen. Ein Tag hat
+jetzt genau **einen** festen Typ (MOOD / GENRE / VIBE / PHASE_1..5 / MERKMAL / SETLIST /
+RUMPELKISTE); die Gruppen-Tabellen und die Gruppen-UI entfallen, der Typ hängt 1:1 am Tag.
+
+### Added
+
+- **`tagtypes`-Modul** (#275, PR #278): `TagType`-Enum + Helfer (`describes`, `weight`,
+  `phase_num`, …); per-Typ-Gewichte über die Settings-Registry (`engine_w_*`) im `/admin`
+  konfigurierbar.
+- **Top-Tags je Typ** (#277, PR #278): die Künstler-Seite zeigt eine Tabelle **welche**
+  Tags je Typ vorkommen und wie oft (Name, Typ, Anzahl), sortierbar.
+
+### Changed
+
+- **Tag-Typ-Schema + Gruppen-Drop** (#274, PR #278): additive Migration
+  `036_tag_types.sql` ergänzt `hub_tags.type` (CHECK über die festen Typen), backfillt die
+  Typen aus `hub_group_tags`/`hub_tag_groups` (setlist→SETLIST, vibe→VIBE, mood→MOOD,
+  merkmal→MERKMAL, rumpelkiste→RUMPELKISTE, genre→GENRE, Kollektiv-Phase ranked →
+  `PHASE_<rank>`) und droppt `hub_group_tags`, `hub_group_members`, `hub_tag_groups`
+  (+ Indizes); Sammel-Index auf `hub_tags(type)`.
+- **Engine auf Tag-Typ statt Gruppe** (#275, PR #278): scoring/similarity/tagqueue/
+  recommend/digging/artists keyen statt auf group `kind`/`role` auf den Tag-Typ; der
+  Rumpelkiste-Ausschluss läuft über Typ `RUMPELKISTE`; Phasen als `PHASE_1..5`
+  (Energy 1..5); alle SQL-Joins auf `hub_tags.type` umgestellt.
+- **Gruppen-UI raus, Typ-Filter/Edit rein** (#276, PR #278): die Seiten `/groups`,
+  `/groups/{id}` samt Nav-Einträgen und Group-Handlern sind entfernt; die Tags-Seite
+  filtert nach Typ; Tag anlegen/bearbeiten wählt den Typ, die Tag-Detailseite zeigt ihn;
+  `groups.html`/`group.html` gelöscht.
+- **Künstler-/Track-Tags: Describe-only** (#277, PR #278): es werden nur die
+  beschreibenden Typen (MOOD/GENRE/VIBE/PHASE_*/MERKMAL) angezeigt; `SETLIST` und
+  `RUMPELKISTE` sind ausgeblendet.
+
 ## [0.18.0] — 2026-10-17
 
 **hub-tag-clusters** — Semantische Tag-Cluster als Schicht zwischen Gruppe und Tag
