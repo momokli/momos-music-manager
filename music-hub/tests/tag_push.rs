@@ -334,6 +334,41 @@ async fn keep_on_remove_archives_instead_of_removing() {
 }
 
 #[tokio::test]
+async fn second_add_is_idempotent() {
+    let fx = setup("playlist-modify-private", false).await;
+    let pl = owned_playlist(&fx.pool, fx.user_id, "rem").await;
+    let tag = synced_tag(&fx.pool, fx.user_id, pl, false).await;
+    let t = track(&fx.pool, "spTRK").await;
+
+    tags::tag_track(&fx.pool, &fx.cfg, fx.user_id, t, tag)
+        .await
+        .unwrap();
+    // Second add of the same track must not produce a second Spotify POST nor
+    // a duplicate hub mirror row.
+    tags::tag_track(&fx.pool, &fx.cfg, fx.user_id, t, tag)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fx.cap.added.lock().unwrap().len(),
+        1,
+        "no second POST for an already-mirrored track"
+    );
+    let linked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hub_playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+    )
+    .bind(pl)
+    .bind(t)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, 1, "hub mirror row not duplicated");
+    let (status, action, _) = push_status(&fx.pool, pl).await;
+    assert_eq!(status, "ok");
+    assert_eq!(action, "add");
+}
+
+#[tokio::test]
 async fn rate_limit_is_retried_once() {
     let fx = setup("playlist-modify-private", true).await;
     let pl = owned_playlist(&fx.pool, fx.user_id, "rem").await;
