@@ -4712,12 +4712,14 @@ async fn tags_page(
     let s_parents = crate::table::sort_head(rawq, "parents", "Parent-Tags", &sort, &dir);
     let s_tracks = crate::table::sort_head(rawq, "tracks", "Tracks", &sort, &dir);
     let s_sources = crate::table::sort_head(rawq, "sources", "Quellen", &sort, &dir);
-    let smart_tag_options: Vec<ParentOption> = crate::tags::list_user_tags(&st.pool, me)
-        .await
-        .into_iter()
-        .map(|(id, name)| ParentOption {
-            id,
-            name,
+    // Base-tag chips for the smart-tag form must mirror the *visible* tag set
+    // (q/types/owner/backpack-scope) — deriving from `list_user_tags` leaked
+    // out-of-scope tag names into the HTML (#298 regression / #331 scope leak).
+    let smart_tag_options: Vec<ParentOption> = tags
+        .iter()
+        .map(|t| ParentOption {
+            id: t.id,
+            name: t.name.clone(),
             icon: String::new(),
             selected: false,
         })
