@@ -39,6 +39,61 @@ content %}
         <button type="submit">Speichern</button>
     </form>
 </details>
+{% endif %} {% if is_owner && suggest_merge_id != 0 %}
+<section
+    aria-label="Merge-Vorschlag"
+    style="
+        margin: 0.4rem 0;
+        padding: 0.4rem;
+        border: 1px solid var(--pico-primary);
+        border-radius: 0.3rem;
+    "
+>
+    <p style="margin: 0 0 0.4rem">
+        „{{ suggest_merge_name }}“ existiert bereits — zusammenführen?
+    </p>
+    <form
+        method="post"
+        action="/tag/{{ id }}/merge"
+        style="display: inline-flex; gap: 0.3rem; align-items: center"
+    >
+        <input type="hidden" name="into" value="{{ suggest_merge_id }}" />
+        <button type="submit">In „{{ suggest_merge_name }}“ zusammenführen</button>
+    </form>
+</section>
+{% endif %} {% if is_owner && !similar.is_empty() %}
+<section aria-label="Ähnliche Tags" style="margin: 0.4rem 0">
+    <h2 style="font-size: 1rem; margin-bottom: 0.2rem">Ähnliche Tags</h2>
+    <ul
+        style="
+            list-style: none;
+            padding-left: 0;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem;
+        "
+    >
+        {% for s in similar %}
+        <li style="display: inline-flex; gap: 0.3rem; align-items: center">
+            <a href="/tag/{{ s.id }}" class="hub-chip">{{ s.name }}</a>
+            {% if !s.type_label.is_empty() %}
+            <span class="hub-muted" style="font-size: 0.8em">{{ s.type_label }}</span>
+            {% endif %}
+            <span class="hub-muted" style="font-size: 0.8em">{{ s.reason }}</span>
+            <form method="post" action="/tag/{{ id }}/merge" style="display: inline">
+                <input type="hidden" name="into" value="{{ s.id }}" />
+                <button
+                    type="submit"
+                    class="secondary"
+                    title="Mit „{{ s.name }}“ zusammenführen"
+                >
+                    Zusammenführen
+                </button>
+            </form>
+        </li>
+        {% endfor %}
+    </ul>
+</section>
 {% endif %}
 
 <section

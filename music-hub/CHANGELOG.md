@@ -10,6 +10,17 @@ Versioning: per-component tag line `hub-v<x.y.z>` (see
 
 ### Added
 
+- feat: **Tag hygiene — rename, merge similar tags, suggestions** (#456) — a tag
+  detail page (`/tag/{id}`) now surfaces owner-only **suggestions** for similar
+  own tags (`tags::similar_tags`; ranked by normalised-equal > small edit
+  distance > token/prefix share > fuzzy) and a **merge** action
+  (`tags::merge_tags`) that re-points every tag-referencing table onto the target
+  inside one transaction (idempotent: a missing source is a no-op; no duplicate
+  `hub_track_resolved_tags`; target keeps its type with a fallback to the source
+  and `sync_playlist` OR-ed). A **rename clash** (`tags::rename_tag_outcome`) no
+  longer errors: it proposes merging into the existing tag. New session-guarded
+  JSON route `GET /tags/{id}/similar?limit=` and form routes `POST /tag/{id}/merge`
+  and the extended `POST /tag/{id}/rename`. **No migration, no version bump.**
 - feat: **Smart-Tags / Dynamic Lenses** (#298) — a tag can store a filter
   definition (base tags, BPM/energy bounds, limit, sort) whose track set is resolved
   at **runtime** (never materialized), shown like a normal tag with a

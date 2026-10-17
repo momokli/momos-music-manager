@@ -34,10 +34,12 @@ pub fn router(state: AppState) -> Router {
         .route("/tags/create", post(tag_create))
         .route("/tags/smart/create", post(smart_tag_create))
         .route("/tags/search", get(tag_search))
+        .route("/tags/{id}/similar", get(tag_similar))
         .route("/tag-search", get(tag_search_page))
         .route("/revisit", get(revisit_page))
         .route("/tag/{id}", get(tag_detail_page))
         .route("/tag/{id}/rename", post(tag_rename))
+        .route("/tag/{id}/merge", post(tag_merge))
         .route("/tag/{id}/smart", post(smart_tag_update))
         .route("/tag/{id}/type", post(tag_set_type))
         .route("/tag/{id}/parent/add", post(tag_parent_add))
@@ -4106,6 +4108,8 @@ struct AdminMsg {
     /// Secondary table sort (pages with two tables, e.g. collective members).
     msort: Option<String>,
     mdir: Option<String>,
+    /// Tag-detail: id of an existing tag to suggest merging into (#456).
+    suggest_merge: Option<i64>,
 }
 
 #[derive(Template)]
@@ -5420,6 +5424,14 @@ struct TopArtist {
     artist_pct: String,
 }
 
+/// One similar-tag suggestion on the tag detail page (#456), owner-only.
+struct TagSimilar {
+    id: i64,
+    name: String,
+    type_label: String,
+    reason: String,
+}
+
 /// One row of the tag co-occurrence table (pre-formatted metric + links).
 struct CooccurRow {
     name: String,
@@ -5476,6 +5488,11 @@ struct TagDetailPage {
     music_api: bool,
     ready: usize,
     total: usize,
+    /// Owner-only similar-tag suggestions (#456).
+    similar: Vec<TagSimilar>,
+    /// Existing tag id to suggest merging into (0 = none), from a rename clash.
+    suggest_merge_id: i64,
+    suggest_merge_name: String,
 }
 
 async fn tag_detail_page(
@@ -5688,6 +5705,37 @@ async fn tag_detail_page(
         })
         .collect();
     let sort_options = smart_sort_options(&smart_sort);
+    // Owner-only similar-tag suggestions (#456); never offered for foreign tags.
+    let similar: Vec<TagSimilar> = if is_owner {
+        crate::tags::similar_tags(&st.pool, nav.id, id, 8)
+            .await
+            .into_iter()
+            .map(|s| TagSimilar {
+                id: s.id,
+                name: s.name,
+                type_label: s.type_label,
+                reason: s.reason,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // A rename clash (`?suggest_merge=<id>`) proposes merging into that tag.
+    let suggest_merge_id = msg.suggest_merge.filter(|v| *v != 0).unwrap_or(0);
+    let suggest_merge_name = if suggest_merge_id != 0 {
+        sqlx::query_scalar::<_, String>(
+            "SELECT name FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2",
+        )
+        .bind(suggest_merge_id)
+        .bind(nav.id)
+        .fetch_optional(&st.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    } else {
+        String::new()
+    };
     render(&TagDetailPage {
         nav,
         flash: msg.msg.unwrap_or_default(),
@@ -5731,6 +5779,9 @@ async fn tag_detail_page(
         ),
         top_artists,
         cooccur,
+        similar,
+        suggest_merge_id,
+        suggest_merge_name,
         music_api: st.cfg.music_api_token.is_some(),
         ready,
         total,
@@ -5758,11 +5809,66 @@ async fn tag_rename(
     let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
         return Redirect::to("/login").into_response();
     };
-    let msg = match crate::tags::rename_tag(&st.pool, uid, id, &f.name).await {
-        Ok(()) => "Tag umbenannt".to_string(),
-        Err(e) => format!("Fehler: {e}"),
+    use crate::tags::RenameOutcome;
+    match crate::tags::rename_tag_outcome(&st.pool, uid, id, &f.name).await {
+        Ok(RenameOutcome::Renamed) => flash_redirect(&format!("/tag/{id}"), "Tag umbenannt".into()),
+        // Name already taken by one of my tags: offer a merge instead of failing.
+        Ok(RenameOutcome::Clash { tag_id, name }) => flash_redirect(
+            &format!("/tag/{id}?suggest_merge={tag_id}"),
+            format!("\u{201a}{name}\u{2018} existiert bereits \u{2014} zusammenf\u{fc}hren?"),
+        ),
+        Err(e) => flash_redirect(&format!("/tag/{id}"), format!("Fehler: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct TagMergeForm {
+    /// Target tag id (form field `into`).
+    #[serde(rename = "into")]
+    into: i64,
+}
+
+/// Owner-only: merge this tag (the source) into another of the owner's tags.
+/// Success redirects to the target with a flash; errors flash back to the
+/// source page. Idempotent (already merged -> success).
+async fn tag_merge(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(f): Form<TagMergeForm>,
+) -> Response {
+    let Some((uid, _slug)) = crate::web::current_user(&st, &headers).await else {
+        return Redirect::to("/login").into_response();
     };
-    flash_redirect(&format!("/tag/{id}"), msg)
+    match crate::tags::merge_tags(&st.pool, uid, id, f.into).await {
+        Ok(s) if s.noop => flash_redirect(
+            &format!("/tag/{}", f.into),
+            "Tags bereits zusammengef\u{fc}hrt".into(),
+        ),
+        Ok(_) => flash_redirect(&format!("/tag/{}", f.into), "Tags zusammengef\u{fc}hrt".into()),
+        Err(e) => flash_redirect(&format!("/tag/{id}"), format!("Fehler: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct TagSimilarQuery {
+    limit: Option<usize>,
+}
+
+/// `GET /tags/{id}/similar?limit=` — the ranked tags of the caller that look
+/// like `{id}` (JSON fragment, mirrors `/tags/search`). Session-guarded.
+async fn tag_similar(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<TagSimilarQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(nav) = crate::ui::nav(&st, &headers, "tags").await else {
+        return Redirect::to("/login").into_response();
+    };
+    let limit = q.limit.unwrap_or(8).clamp(1, 25);
+    let tags = crate::tags::similar_tags(&st.pool, nav.id, id, limit).await;
+    axum::Json(serde_json::json!({ "tags": tags })).into_response()
 }
 
 #[derive(Deserialize)]
