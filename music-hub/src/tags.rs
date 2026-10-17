@@ -54,8 +54,15 @@ pub struct ResolveSummary {
 /// Rebuild the materialized `hub_track_resolved_tags` from the current tag
 /// sources. Idempotent; does **not** create tags.
 pub async fn rebuild(pool: &SqlitePool) -> Result<ResolveSummary> {
+    let mut conn = pool.acquire().await?;
+    rebuild_conn(&mut conn).await
+}
+
+/// The body of [`rebuild`], generic over an executor so it can also run inside an
+/// open [`sqlx::Transaction`] (the merge engine needs it in the same tx).
+async fn rebuild_conn(conn: &mut sqlx::SqliteConnection) -> Result<ResolveSummary> {
     sqlx::query("DELETE FROM hub_track_resolved_tags")
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
     sqlx::query(
         "INSERT INTO hub_track_resolved_tags (track_id, tag_id)
@@ -64,32 +71,32 @@ pub async fn rebuild(pool: &SqlitePool) -> Result<ResolveSummary> {
            JOIN hub_tag_sources ts ON ts.playlist_id = hpt.playlist_id
          ON CONFLICT(track_id, tag_id) DO NOTHING",
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     // Direct (manual) track↔tag links, independent of any playlist.
     sqlx::query(
         "INSERT OR IGNORE INTO hub_track_resolved_tags (track_id, tag_id)
          SELECT DISTINCT track_id, tag_id FROM hub_track_tag_manual",
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     // Archived (kept) links: tracks that left a keep_on_remove source playlist.
     sqlx::query(
         "INSERT OR IGNORE INTO hub_track_resolved_tags (track_id, tag_id)
          SELECT DISTINCT track_id, tag_id FROM hub_track_tag_archive",
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     let tags: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_tags")
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await
         .unwrap_or(0);
     let sources: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_tag_sources")
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await
         .unwrap_or(0);
     let resolved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_track_resolved_tags")
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await
         .unwrap_or(0);
     Ok(ResolveSummary {
@@ -731,13 +738,40 @@ pub async fn delete_tag(pool: &SqlitePool, owner_user_id: i64, tag_id: i64) -> R
     Ok(())
 }
 
+/// The result of a rename attempt (#456): either the tag was renamed, or the
+/// desired name already exists (owner-scoped) and should be offered as a merge
+/// target instead of failing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameOutcome {
+    Renamed,
+    /// Another tag of the same owner already uses this name/slug.
+    Clash { tag_id: i64, name: String },
+}
+
 /// Rename a tag (owner only). Sources are linked by id, so they stay intact.
+/// Keeps the low-level signature; `Clash` is surfaced as an error (see
+/// [`rename_tag_outcome`] for the merge-suggestion variant).
 pub async fn rename_tag(
     pool: &SqlitePool,
     owner_user_id: i64,
     tag_id: i64,
     name: &str,
 ) -> Result<()> {
+    match rename_tag_outcome(pool, owner_user_id, tag_id, name).await? {
+        RenameOutcome::Renamed => Ok(()),
+        RenameOutcome::Clash { .. } => bail!("es gibt schon einen Tag mit diesem Namen"),
+    }
+}
+
+/// Rename a tag (owner only), distinguishing a successful rename from a name
+/// clash with **another of the owner's tags**. A clash is returned instead of an
+/// error so the UI can propose merging into the existing tag (#456).
+pub async fn rename_tag_outcome(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    tag_id: i64,
+    name: &str,
+) -> Result<RenameOutcome> {
     let name = name.trim();
     if name.is_empty() {
         bail!("tag name required");
@@ -746,8 +780,8 @@ pub async fn rename_tag(
     if slug.is_empty() {
         bail!("tag name has no usable characters");
     }
-    let clash = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM hub_tags WHERE owner_user_id = ?1 AND slug = ?2 AND id <> ?3",
+    let clash = sqlx::query_as::<_, (i64, String)>(
+        "SELECT id, name FROM hub_tags WHERE owner_user_id = ?1 AND slug = ?2 AND id <> ?3",
     )
     .bind(owner_user_id)
     .bind(&slug)
@@ -756,8 +790,11 @@ pub async fn rename_tag(
     .await
     .ok()
     .flatten();
-    if clash.is_some() {
-        bail!("es gibt schon einen Tag mit diesem Namen");
+    if let Some((existing_id, existing_name)) = clash {
+        return Ok(RenameOutcome::Clash {
+            tag_id: existing_id,
+            name: existing_name,
+        });
     }
     let rows = sqlx::query(
         "UPDATE hub_tags SET name = ?1, slug = ?2 WHERE id = ?3 AND owner_user_id = ?4",
@@ -772,7 +809,399 @@ pub async fn rename_tag(
     if rows == 0 {
         bail!("tag not found or not yours");
     }
-    Ok(())
+    Ok(RenameOutcome::Renamed)
+}
+
+/// One ranked similar-tag suggestion (#456). Serialises like [`TagHit`] plus a
+/// `score`/`reason` for the UI.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimilarTag {
+    pub id: i64,
+    pub name: String,
+    pub type_name: Option<String>,
+    pub type_label: String,
+    pub icon: String,
+    pub score: i32,
+    /// Why this tag was suggested (German UI label).
+    pub reason: String,
+}
+
+/// Ranked tags that look like `tag_id` — restricted to the caller's **own**
+/// tags. Ranking: normalised-equal > small Levenshtein distance > token/prefix
+/// similarity ([`crate::clusters::similar`]) > fuzzy (`table::matches_typo`);
+/// ties break by name. Returns at most `limit` entries.
+pub async fn similar_tags(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    tag_id: i64,
+    limit: usize,
+) -> Vec<SimilarTag> {
+    let source_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2")
+            .bind(tag_id)
+            .bind(owner_user_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    let Some(source_name) = source_name else {
+        return Vec::new();
+    };
+    let base = crate::clusters::normalize(&source_name);
+    if base.is_empty() {
+        return Vec::new();
+    }
+    let base_slug = normalize_name(&source_name);
+    let rows = sqlx::query_as::<_, (i64, String, Option<String>, String)>(
+        "SELECT id, name, type, slug FROM hub_tags
+          WHERE owner_user_id = ?1 AND id <> ?2 ORDER BY name COLLATE NOCASE",
+    )
+    .bind(owner_user_id)
+    .bind(tag_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let mut scored: Vec<(i32, SimilarTag)> = rows
+        .into_iter()
+        .filter_map(|(id, name, ty, slug)| {
+            let n = crate::clusters::normalize(&name);
+            if n.is_empty() {
+                return None;
+            }
+            let (score, reason) = if n == base || (!base_slug.is_empty() && slug == base_slug) {
+                (100, "identisch")
+            } else {
+                let dist = crate::table::levenshtein(&base, &n, 3);
+                if dist <= 1 {
+                    (80 - dist as i32 * 5, "Tippfehler")
+                } else if crate::clusters::similar(&base, &n) {
+                    (60, "ähnlich")
+                } else if crate::table::matches_typo(&n, std::slice::from_ref(&base)) {
+                    (40, "unscharf")
+                } else {
+                    return None;
+                }
+            };
+            let parsed = ty.as_deref().and_then(crate::tagtypes::TagType::parse);
+            Some((
+                score,
+                SimilarTag {
+                    id,
+                    name,
+                    type_name: ty,
+                    type_label: parsed.map(|t| t.label().to_string()).unwrap_or_default(),
+                    icon: parsed.map(|t| t.icon().to_string()).unwrap_or_default(),
+                    score,
+                    reason: reason.to_string(),
+                },
+            ))
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()))
+    });
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, s)| s)
+        .collect()
+}
+
+/// Per-table row counts of one merge (#456) — for tests and the UI.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MergeSummary {
+    /// True when nothing was merged (source already gone, or source == target).
+    pub noop: bool,
+    pub sources: u64,
+    pub resolved: u64,
+    pub manual: u64,
+    pub history: u64,
+    pub parents: u64,
+    pub cluster_members: u64,
+    pub backpack_items: u64,
+    pub smart_tags: u64,
+    pub archived: u64,
+    pub curated: u64,
+}
+
+/// Merge `source_id` into `target_id` (both must be owned by `owner_user_id`).
+///
+/// Re-points **every** tag-referencing table onto the target, applies the
+/// target's attribute policy (D3: target wins, `type` falls back to the source,
+/// `sync_playlist` is OR-ed), deletes the source row and rebuilds
+/// `hub_track_resolved_tags` — all inside **one** transaction. Errors roll the
+/// transaction back.
+///
+/// **Idempotent:** if the source is already gone (or `source_id == target_id`)
+/// this is an `Ok` no-op.
+pub async fn merge_tags(
+    pool: &SqlitePool,
+    owner_user_id: i64,
+    source_id: i64,
+    target_id: i64,
+) -> Result<MergeSummary> {
+    if source_id == target_id {
+        return Ok(MergeSummary {
+            noop: true,
+            ..Default::default()
+        });
+    }
+    let mut tx = pool.begin().await?;
+
+    // Owner scope for the target first (it must exist and be ours).
+    let target_owned = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2",
+    )
+    .bind(target_id)
+    .bind(owner_user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .ok()
+    .flatten();
+    if target_owned.is_none() {
+        tx.rollback().await?;
+        bail!("Ziel-Tag gehört dir nicht");
+    }
+
+    // Source: gone -> idempotent no-op; present but foreign -> error.
+    let source_owned = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2",
+    )
+    .bind(source_id)
+    .bind(owner_user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .ok()
+    .flatten();
+    if source_owned.is_none() {
+        let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM hub_tags WHERE id = ?1")
+            .bind(source_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .ok()
+            .flatten();
+        tx.rollback().await?;
+        if exists.is_none() {
+            return Ok(MergeSummary {
+                noop: true,
+                ..Default::default()
+            });
+        }
+        bail!("Quell-Tag gehört dir nicht");
+    }
+
+    let mut sum = MergeSummary::default();
+
+    // hub_tag_sources — PK (tag_id, playlist_id).
+    sum.sources = sqlx::query("UPDATE OR IGNORE hub_tag_sources SET tag_id = ?1 WHERE tag_id = ?2")
+        .bind(target_id)
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    sqlx::query("DELETE FROM hub_tag_sources WHERE tag_id = ?1")
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // hub_track_resolved_tags — PK (track_id, tag_id): insert-or-ignore + delete,
+    // so a track carrying both tags never ends up duplicated.
+    sum.resolved = sqlx::query(
+        "INSERT OR IGNORE INTO hub_track_resolved_tags (track_id, tag_id)
+         SELECT track_id, ?1 FROM hub_track_resolved_tags WHERE tag_id = ?2",
+    )
+    .bind(target_id)
+    .bind(source_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    sqlx::query("DELETE FROM hub_track_resolved_tags WHERE tag_id = ?1")
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // hub_track_tag_manual — PK (track_id, tag_id, user_id).
+    sum.manual =
+        sqlx::query("UPDATE OR IGNORE hub_track_tag_manual SET tag_id = ?1 WHERE tag_id = ?2")
+            .bind(target_id)
+            .bind(source_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    sqlx::query("DELETE FROM hub_track_tag_manual WHERE tag_id = ?1")
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // hub_track_tag_archive — PK (tag_id, track_id). Kept links must survive the
+    // merge (otherwise the CASCADE would silently drop them).
+    sum.archived = sqlx::query(
+        "INSERT OR IGNORE INTO hub_track_tag_archive (tag_id, track_id, source_playlist_id, created_at)
+         SELECT ?1, track_id, source_playlist_id, created_at
+           FROM hub_track_tag_archive WHERE tag_id = ?2",
+    )
+    .bind(target_id)
+    .bind(source_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    sqlx::query("DELETE FROM hub_track_tag_archive WHERE tag_id = ?1")
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // hub_tag_membership_history — no PK; 1:1 re-point keeps the history.
+    sum.history = sqlx::query("UPDATE hub_tag_membership_history SET tag_id = ?1 WHERE tag_id = ?2")
+        .bind(target_id)
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // hub_tag_parents — PK (tag_id, parent_tag_id); both dims re-point, then
+    // leftover source rows and the resulting self-loop are removed.
+    let mut parents = 0u64;
+    parents += sqlx::query("UPDATE OR IGNORE hub_tag_parents SET tag_id = ?1 WHERE tag_id = ?2")
+        .bind(target_id)
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    parents +=
+        sqlx::query("UPDATE OR IGNORE hub_tag_parents SET parent_tag_id = ?1 WHERE parent_tag_id = ?2")
+            .bind(target_id)
+            .bind(source_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    sqlx::query("DELETE FROM hub_tag_parents WHERE tag_id = ?1 OR parent_tag_id = ?1")
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM hub_tag_parents WHERE tag_id = parent_tag_id AND tag_id = ?1")
+        .bind(target_id)
+        .execute(&mut *tx)
+        .await?;
+    sum.parents = parents;
+
+    // hub_tag_cluster_members — PK (cluster_id, tag_id).
+    sum.cluster_members = sqlx::query(
+        "UPDATE OR IGNORE hub_tag_cluster_members SET tag_id = ?1 WHERE tag_id = ?2",
+    )
+    .bind(target_id)
+    .bind(source_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    sqlx::query("DELETE FROM hub_tag_cluster_members WHERE tag_id = ?1")
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // hub_backpack_items.source_tag_id — plain nullable FK, no conflict.
+    sum.backpack_items =
+        sqlx::query("UPDATE hub_backpack_items SET source_tag_id = ?1 WHERE source_tag_id = ?2")
+            .bind(target_id)
+            .bind(source_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+
+    // hub_curated_playlists.fill_tag_id — plain nullable FK (ON DELETE SET NULL).
+    sum.curated = sqlx::query(
+        "UPDATE hub_curated_playlists SET fill_tag_id = ?1 WHERE fill_tag_id = ?2",
+    )
+    .bind(target_id)
+    .bind(source_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    // hub_smart_tags.filter_json — remap `tag_ids` (dedup) in every affected row.
+    sum.smart_tags = remap_smart_filters(&mut tx, source_id, target_id).await?;
+
+    // D3 attributes: target wins; type falls back to the source; sync OR-ed.
+    sqlx::query(
+        "UPDATE hub_tags SET
+             type = COALESCE(type, (SELECT type FROM hub_tags WHERE id = ?2)),
+             sync_playlist = CASE
+                 WHEN sync_playlist <> 0
+                   OR (SELECT sync_playlist FROM hub_tags WHERE id = ?2) <> 0
+                 THEN 1 ELSE 0 END
+           WHERE id = ?1",
+    )
+    .bind(target_id)
+    .bind(source_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("DELETE FROM hub_tags WHERE id = ?1 AND owner_user_id = ?2")
+        .bind(source_id)
+        .bind(owner_user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    rebuild_conn(&mut tx).await?;
+    tx.commit().await?;
+    Ok(sum)
+}
+
+/// Re-write `hub_smart_tags.filter_json` so every `tag_ids` entry equal to
+/// `source_id` becomes `target_id` (deduplicated). Returns the number of rows
+/// touched. Runs inside the caller's transaction.
+async fn remap_smart_filters(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    source_id: i64,
+    target_id: i64,
+) -> Result<u64> {
+    let rows: Vec<(i64, String)> =
+        sqlx::query_as("SELECT tag_id, filter_json FROM hub_smart_tags")
+            .fetch_all(&mut **tx)
+            .await?;
+    let mut touched = 0u64;
+    for (tag_id, json) in rows {
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&json) else {
+            continue;
+        };
+        let Some(arr) = v.get_mut("tag_ids").and_then(|a| a.as_array_mut()) else {
+            continue;
+        };
+        let mut changed = false;
+        let mut seen: HashSet<i64> = HashSet::new();
+        let mut out: Vec<serde_json::Value> = Vec::with_capacity(arr.len());
+        for item in arr.iter() {
+            let mapped = match item.as_i64() {
+                Some(id) if id == source_id => {
+                    changed = true;
+                    target_id
+                }
+                Some(id) => id,
+                None => {
+                    out.push(item.clone());
+                    continue;
+                }
+            };
+            if seen.insert(mapped) {
+                out.push(serde_json::json!(mapped));
+            } else {
+                changed = true;
+            }
+        }
+        if !changed {
+            continue;
+        }
+        *arr = out;
+        let rewritten = serde_json::to_string(&v).unwrap_or(json);
+        sqlx::query("UPDATE hub_smart_tags SET filter_json = ?1 WHERE tag_id = ?2")
+            .bind(rewritten)
+            .bind(tag_id)
+            .execute(&mut **tx)
+            .await?;
+        touched += 1;
+    }
+    Ok(touched)
 }
 
 pub async fn tag_for_playlist(
