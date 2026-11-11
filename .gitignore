@@ -26,3 +26,7 @@ legacy/mmm/scripts/keys/
 
 # Tool-/Editor-Backups neben Quelldateien (a9c64c8 hatte so eine versehentlich eingecheckt)
 *.dbgbak
+
+# Orchestrator-Scratch (Runner): Progress-/Handoff-Dateien gehören in den Checkout,
+# nicht in die Historie. Die Stage-Agenten lesen sie über `cwd`, nicht über git.
+/progress-*.md
